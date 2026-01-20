@@ -1,0 +1,138 @@
+---
+description: Core architectural constraints, MVP scope, and determinism rules for suparship
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# Core Project Rules — suparship
+
+## What This Repo Is
+
+- **GitOps-native platform runtime** built on ArgoCD + Kargo for Kubernetes
+- **CLI-first tool** (`suparship`) for bootstrapping environments, services, and preview environments
+- **Template-driven** manifest generation with deterministic, auditable Git output
+- **Developer-focused** with instant local demos via k3d requiring zero paid services
+- **Opinionated but extensible** — enforces env/project/service hierarchy with customizable profiles
+
+## MVP Non-Goals
+
+The following are explicitly **out of scope** for MVP:
+
+- ❌ Web UI or dashboard (CLI only)
+- ❌ Multi-cloud abstraction layer
+- ❌ Built-in CI/CD engine (defer to external CI; we do CD via ArgoCD)
+- ❌ Custom Kubernetes controllers beyond what ArgoCD/Kargo provide
+- ❌ Secret management backends (Vault, External Secrets) — reference-only in MVP
+- ❌ Multi-tenancy with RBAC isolation (single-tenant assumed)
+- ❌ Production-grade HA configurations
+- ❌ Cost optimization or resource quotas
+
+## Architectural Constraints
+
+### CLI-First
+
+- All operations MUST be executable via `suparship` CLI
+- No operation SHOULD require direct `kubectl` usage by end users
+- CLI MUST work in both interactive terminals and CI pipelines
+
+### Git as Source of Truth
+
+- All cluster state MUST be derivable from Git repositories
+- Manual `kubectl apply` outside of ArgoCD sync is PROHIBITED in production paths
+- Changes to cluster state MUST flow through Git commits
+
+### Minimal Controllers
+
+- MUST NOT introduce custom CRDs or controllers in MVP
+- Rely on ArgoCD Application/ApplicationSet and Kargo Stage/Freight
+- Any "watch" behavior MUST use existing ArgoCD/Kargo primitives
+
+## Determinism Rules
+
+Generated manifests MUST be **deterministic**:
+
+```
+Same input + same templates + same version => byte-identical output
+```
+
+### Requirements
+
+- Template rendering MUST NOT include timestamps, random IDs, or execution metadata
+- Resource ordering in multi-document YAML MUST be sorted (kind, namespace, name)
+- Helm template output MUST use `--include-crds` consistently
+- Map iteration in Go templates MUST use sorted keys
+- Generated comments SHOULD include generator version, NOT execution time
+
+### Example: Bad vs Good
+
+```yaml
+# BAD: Non-deterministic
+metadata:
+  annotations:
+    generated-at: "2024-01-15T10:30:00Z"  # Changes every run
+
+# GOOD: Deterministic
+metadata:
+  annotations:
+    suparship.io/generator-version: "v0.1.0"
+```
+
+## Version Pinning Policy
+
+### Installed Components
+
+| Component | Pinning Rule |
+|-----------|--------------|
+| ArgoCD | MUST pin to specific version (e.g., `v2.9.3`) |
+| Kargo | MUST pin to specific version (e.g., `v0.4.0`) |
+| Helm charts | MUST pin chart version AND appVersion |
+| Container images | SHOULD use digest when available, MUST use tag otherwise |
+| CRDs | MUST match component version exactly |
+
+### Version Source
+
+- Versions MUST be defined in `internal/versions/versions.go` or equivalent constants file
+- Demo profile MAY use `latest` for sample apps only (not infrastructure)
+- Version upgrades MUST be explicit commits, never automatic
+
+### Example
+
+```go
+// internal/versions/versions.go
+const (
+    ArgoCDVersion = "v2.9.3"
+    KargoVersion  = "v0.4.0"
+    K3dVersion    = "v5.6.0"
+)
+```
+
+## Directory Hierarchy Convention
+
+```
+environments/
+├── dev/
+│   ├── env.yaml           # Environment config
+│   └── services/
+│       └── api/
+│           └── service.yaml
+├── staging/
+└── prod/
+
+projects/
+├── myproject/
+│   └── project.yaml
+
+previews/
+└── pr-123/
+    └── preview.yaml
+```
+
+## Change Impact Classification
+
+When modifying core behavior, classify impact:
+
+- **P0 (Breaking)**: Changes install output, breaks existing clusters
+- **P1 (Additive)**: New features, new flags, new profiles
+- **P2 (Internal)**: Refactoring, tests, docs
+
+P0 changes MUST have migration path documented.

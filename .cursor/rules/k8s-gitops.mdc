@@ -1,0 +1,348 @@
+---
+description: Kubernetes, ArgoCD, Kargo conventions, install profiles, and template rendering rules
+globs: ["**/*.yaml", "**/*.yml", "**/templates/**", "**/internal/gitops/**/*.go"]
+alwaysApply: false
+---
+
+# Kubernetes & GitOps Rules — suparship
+
+## Installation Profiles
+
+### Profile Definitions
+
+| Profile | Components | Use Case |
+|---------|------------|----------|
+| `demo` | k3d + ArgoCD + Kargo + sample app + ingress | Local development, demos |
+| `core` | ArgoCD + Kargo + ingress controller | Minimal GitOps platform |
+| `full` | core + metrics + logging + additional tools | Feature-complete install |
+
+### MVP Scope Rules
+
+- `demo` and `core` profiles MUST NOT require paid services
+- `demo` MUST work offline after initial image pull
+- Heavy addons (Prometheus stack, ELK, Istio) MUST be `full` profile only
+- Each profile MUST complete install in < 5 minutes on reasonable hardware
+
+### Component Matrix
+
+```yaml
+# internal/profiles/profiles.yaml
+profiles:
+  demo:
+    cluster: k3d
+    components:
+      - argocd
+      - kargo
+      - traefik        # ingress
+      - sample-app
+  core:
+    components:
+      - argocd
+      - kargo
+      - traefik
+  full:
+    extends: core
+    components:
+      - prometheus
+      - grafana
+      - loki
+```
+
+## ArgoCD Conventions
+
+### Application Naming
+
+```
+{service}-{environment}
+```
+
+Examples:
+- `api-dev`
+- `frontend-staging`
+- `api-pr-123` (previews)
+
+### Required Labels
+
+```yaml
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: suparship
+    suparship.io/environment: dev
+    suparship.io/service: api
+    suparship.io/project: myproject
+```
+
+### Required Annotations
+
+```yaml
+metadata:
+  annotations:
+    suparship.io/generator-version: v0.1.0
+    suparship.io/source-template: service-v1
+    argocd.argoproj.io/sync-wave: "10"  # When ordering needed
+```
+
+### Namespace Conventions
+
+| Namespace | Purpose |
+|-----------|---------|
+| `argocd` | ArgoCD system |
+| `kargo` | Kargo system |
+| `suparship-system` | suparship controllers/jobs |
+| `env-{name}` | Environment workloads (e.g., `env-dev`, `env-staging`) |
+| `preview-{name}` | Preview environments (e.g., `preview-pr-123`) |
+
+### Application Spec Standards
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: api-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/managed-by: suparship
+    suparship.io/environment: dev
+    suparship.io/service: api
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default  # Or project-specific
+  source:
+    repoURL: https://github.com/org/repo
+    targetRevision: HEAD
+    path: environments/dev/services/api
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: env-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+## Kargo Conventions
+
+### Stage Naming
+
+```
+{environment}
+```
+
+Simple names matching environment: `dev`, `staging`, `prod`
+
+### Promotion Pipeline
+
+```yaml
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: dev
+  namespace: kargo-project
+spec:
+  subscriptions:
+    repos:
+      images:
+        - repoURL: ghcr.io/org/app
+          semverConstraint: ">=1.0.0"
+  promotionMechanisms:
+    gitRepoUpdates:
+      - repoURL: https://github.com/org/gitops
+        writeBranch: main
+        kustomize:
+          images:
+            - image: ghcr.io/org/app
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: staging
+spec:
+  subscriptions:
+    upstreamStages:
+      - name: dev
+  # ... promotion config
+```
+
+### Freight Naming
+
+Kargo auto-generates freight names. Do not override.
+
+## Ingress Host Conventions
+
+### URL Patterns
+
+| Type | Pattern | Example |
+|------|---------|---------|
+| Service in env | `{service}.{env}.localhost` | `api.dev.localhost` |
+| Preview | `{preview-name}.preview.localhost` | `pr-123.preview.localhost` |
+| ArgoCD | `argocd.localhost` | `argocd.localhost` |
+| Kargo | `kargo.localhost` | `kargo.localhost` |
+
+### Ingress Generation
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-dev
+  namespace: env-dev
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  rules:
+    - host: api.dev.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - api.dev.localhost
+```
+
+### Preview Name Sanitization
+
+Preview names MUST be DNS-safe:
+
+```go
+func SanitizePreviewName(input string) string {
+    // pr-123 -> pr-123 (unchanged)
+    // feature/my-thing -> feature-my-thing
+    // PR_123 -> pr-123
+    name := strings.ToLower(input)
+    name = regexp.MustCompile(`[^a-z0-9-]`).ReplaceAllString(name, "-")
+    name = regexp.MustCompile(`-+`).ReplaceAllString(name, "-")
+    name = strings.Trim(name, "-")
+    if len(name) > 53 {
+        name = name[:53]
+    }
+    return name
+}
+```
+
+## Template Rendering
+
+### Helm-First Strategy
+
+- Primary rendering: Helm charts with values injection
+- Overlays: Kustomize for environment-specific patches
+- Raw manifests: Only for simple static resources
+
+### Template Input Format
+
+```yaml
+# service.yaml (input to renderer)
+apiVersion: suparship.io/v1
+kind: ServiceTemplate
+metadata:
+  name: api
+spec:
+  template: service-v1       # Reference to templates/service-v1/
+  values:
+    image: ghcr.io/org/api
+    replicas: 2
+    env:
+      LOG_LEVEL: info
+      DATABASE_URL: ref:db-secret.url  # Secret reference
+```
+
+### Rendering Rules
+
+1. Load template from `templates/{name}/`
+2. Merge values from service.yaml + environment defaults
+3. Execute Helm template
+4. Apply Kustomize overlays if present
+5. Sort output by kind/namespace/name
+6. Write to output directory
+
+### Output Location
+
+```
+gitops-output/
+├── environments/
+│   ├── dev/
+│   │   └── services/
+│   │       └── api/
+│   │           ├── deployment.yaml
+│   │           ├── service.yaml
+│   │           └── ingress.yaml
+│   └── staging/
+└── previews/
+    └── pr-123/
+        └── api/
+```
+
+### Commit Generated Output
+
+- Generated output SHOULD be committed to Git
+- ArgoCD syncs from committed output (not from renderer)
+- Enables GitOps audit trail and easy diff review
+- CI can generate and commit, or local `suparship render --commit`
+
+## Namespace Isolation
+
+### Environment Isolation
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: env-dev
+  labels:
+    suparship.io/type: environment
+    suparship.io/environment: dev
+```
+
+### Preview Isolation
+
+Previews MUST be in isolated namespaces:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: preview-pr-123
+  labels:
+    suparship.io/type: preview
+    suparship.io/preview: pr-123
+  annotations:
+    suparship.io/ttl: "7d"  # Auto-cleanup hint
+```
+
+### Network Policy (Future)
+
+MVP does not enforce network policies. Production SHOULD add:
+- Deny all ingress by default
+- Allow only from ingress controller
+- Allow intra-namespace traffic
+
+## Resource Ordering
+
+When generating multi-resource manifests, sort by:
+
+1. Namespaces
+2. CRDs (if any)
+3. ConfigMaps, Secrets (references)
+4. Services
+5. Deployments/StatefulSets
+6. Ingresses
+7. ArgoCD Applications
+
+Use sync-waves in ArgoCD for deployment ordering:
+
+```yaml
+annotations:
+  argocd.argoproj.io/sync-wave: "0"   # Namespace
+  argocd.argoproj.io/sync-wave: "10"  # ConfigMaps
+  argocd.argoproj.io/sync-wave: "20"  # Deployments
+  argocd.argoproj.io/sync-wave: "30"  # Ingress
+```

@@ -1,0 +1,242 @@
+---
+description: Go coding standards, error handling, package layout, and dependency injection rules
+globs: ["**/*.go"]
+alwaysApply: false
+---
+
+# Go Coding Rules — suparship
+
+## Code Style & Linting
+
+### Required Linters
+
+The following MUST pass with zero warnings:
+
+```bash
+golangci-lint run --enable-all --disable=exhaustruct,gochecknoglobals
+```
+
+Key enabled linters:
+- `errcheck` — all errors MUST be handled
+- `govet` — static analysis
+- `staticcheck` — additional static analysis
+- `gofumpt` — stricter formatting than gofmt
+- `revive` — style enforcement
+- `gosec` — security scanning
+
+### Formatting
+
+- MUST use `gofumpt` (not just `gofmt`)
+- Imports MUST be grouped: stdlib, external, internal
+- Line length SHOULD stay under 120 characters
+
+```go
+import (
+    "context"
+    "fmt"
+    
+    "github.com/spf13/cobra"
+    "k8s.io/client-go/kubernetes"
+    
+    "github.com/suparcloud/suparship/internal/renderer"
+)
+```
+
+## Error Handling
+
+### Rules
+
+- MUST NOT use `panic()` except in `init()` for truly unrecoverable setup failures
+- MUST wrap errors with context using `fmt.Errorf("operation failed: %w", err)`
+- MUST NOT ignore errors (no `_ = someFunc()` without explicit comment)
+- SHOULD use sentinel errors for expected conditions
+
+### Error Wrapping Pattern
+
+```go
+// GOOD: Contextual wrapping
+func (r *Renderer) RenderService(ctx context.Context, svc *Service) error {
+    tmpl, err := r.loadTemplate(svc.Template)
+    if err != nil {
+        return fmt.Errorf("loading template %q: %w", svc.Template, err)
+    }
+    
+    if err := r.executeTemplate(tmpl, svc); err != nil {
+        return fmt.Errorf("executing template for service %q: %w", svc.Name, err)
+    }
+    return nil
+}
+```
+
+### Sentinel Errors
+
+```go
+var (
+    ErrProfileNotFound    = errors.New("install profile not found")
+    ErrClusterUnreachable = errors.New("cluster unreachable")
+)
+
+// Usage
+if errors.Is(err, ErrProfileNotFound) {
+    // handle specifically
+}
+```
+
+## Context & Timeouts
+
+### Context Rules
+
+- All I/O operations MUST accept `context.Context` as first parameter
+- CLI commands MUST create root context with signal handling
+- External calls (kubectl, helm, API) MUST have explicit timeouts
+- MUST NOT store contexts in structs
+
+### Timeout Defaults
+
+```go
+const (
+    DefaultKubectlTimeout = 30 * time.Second
+    DefaultHelmTimeout    = 5 * time.Minute
+    DefaultK3dTimeout     = 10 * time.Minute
+)
+```
+
+### Signal Handling
+
+```go
+func main() {
+    ctx, cancel := signal.NotifyContext(context.Background(), 
+        syscall.SIGINT, syscall.SIGTERM)
+    defer cancel()
+    
+    if err := rootCmd.ExecuteContext(ctx); err != nil {
+        os.Exit(1)
+    }
+}
+```
+
+## Package Layout
+
+```
+suparship/
+├── cmd/
+│   └── suparship/
+│       └── main.go              # Entry point only
+├── internal/
+│   ├── cli/                     # Cobra commands
+│   │   ├── demo.go
+│   │   ├── install.go
+│   │   └── root.go
+│   ├── renderer/                # Template rendering
+│   ├── gitops/                  # ArgoCD/Kargo manifest generation
+│   ├── cluster/                 # Kubernetes client operations
+│   ├── k3d/                     # k3d cluster management
+│   ├── versions/                # Pinned component versions
+│   └── testutil/                # Shared test utilities
+├── pkg/                         # Public API (if any, keep minimal)
+└── templates/                   # Embedded template files
+```
+
+### Package Rules
+
+- `internal/` for all non-public code (enforced by Go)
+- `cmd/` MUST only contain `main.go` with minimal logic
+- One package per concern; avoid mega-packages
+- `pkg/` only for genuinely reusable public APIs (rare in CLI tools)
+
+## Logging
+
+### Structured Logging
+
+MUST use `log/slog` (Go 1.21+):
+
+```go
+func (i *Installer) Install(ctx context.Context, profile string) error {
+    slog.Info("starting installation", 
+        "profile", profile,
+        "version", versions.SuparshipVersion)
+    
+    // ... work ...
+    
+    slog.Debug("helm chart applied",
+        "chart", chartName,
+        "release", releaseName,
+        "namespace", namespace)
+    
+    return nil
+}
+```
+
+### Verbosity Levels
+
+- Default: `slog.LevelInfo` — user-facing progress
+- `--verbose` / `-v`: `slog.LevelDebug` — detailed operations
+- Errors: Always logged at `slog.LevelError` with context
+
+### Log Output Rules
+
+- Logs go to stderr; structured output (JSON) goes to stdout
+- MUST NOT log secrets, tokens, or credentials
+- Progress messages SHOULD be actionable ("Installing ArgoCD..." not "Step 3 of 7")
+
+## Dependency Injection
+
+### No Global Mutable State
+
+```go
+// BAD: Global client
+var kubeClient *kubernetes.Clientset
+
+// GOOD: Injected dependency
+type Installer struct {
+    kubeClient kubernetes.Interface
+    helmClient helm.Client
+    logger     *slog.Logger
+}
+
+func NewInstaller(kube kubernetes.Interface, helm helm.Client, log *slog.Logger) *Installer {
+    return &Installer{kubeClient: kube, helmClient: helm, logger: log}
+}
+```
+
+### Interface-Based Dependencies
+
+```go
+// Define interface for what you need
+type KubeApplier interface {
+    Apply(ctx context.Context, manifests []byte) error
+    Delete(ctx context.Context, manifests []byte) error
+}
+
+// Accept interface, not concrete type
+func NewGitOpsManager(applier KubeApplier) *GitOpsManager {
+    return &GitOpsManager{applier: applier}
+}
+```
+
+### Test Doubles
+
+- Use interfaces to enable mock injection in tests
+- Prefer fakes over mocks for complex behavior
+- `internal/testutil/` for shared test doubles
+
+## Concurrency
+
+- MUST NOT use goroutines without explicit lifecycle management
+- Prefer `errgroup` for parallel operations with error handling
+- Channel usage MUST have clear ownership (who closes)
+
+```go
+g, ctx := errgroup.WithContext(ctx)
+
+for _, component := range components {
+    component := component // capture
+    g.Go(func() error {
+        return i.installComponent(ctx, component)
+    })
+}
+
+if err := g.Wait(); err != nil {
+    return fmt.Errorf("parallel install failed: %w", err)
+}
+```

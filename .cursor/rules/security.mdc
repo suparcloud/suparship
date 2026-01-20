@@ -1,0 +1,316 @@
+---
+description: Security policies for secrets handling, supply chain security, and RBAC rules
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# Security Rules — suparship
+
+## Secrets Handling
+
+### Golden Rule
+
+> **NEVER commit secret values to Git. Only commit references.**
+
+### Reference Format
+
+```yaml
+# CORRECT: Reference format
+env:
+  DATABASE_URL: ref:db-secret.url
+  API_KEY: ref:api-credentials.key
+
+# WRONG: Literal secret value
+env:
+  DATABASE_URL: "postgresql://user:password@host/db"  # PROHIBITED
+```
+
+### Reference Resolution
+
+References are resolved at runtime by the target cluster, not by suparship:
+
+```yaml
+# Rendered output (committed to Git)
+env:
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: db-secret
+        key: url
+```
+
+### Secret Detection in CI
+
+CI MUST run secret scanning:
+
+```bash
+# .github/workflows/ci.yaml
+- name: Scan for secrets
+  uses: trufflesecurity/trufflehog@main
+  with:
+    path: ./
+    fail: true
+```
+
+### Files That MUST NOT Contain Secrets
+
+- `*.yaml`, `*.yml` in gitops-output/
+- `*.yaml`, `*.yml` in templates/
+- `*.go` source files
+- `.env` files (must be in `.gitignore`)
+- `values.yaml` files
+
+## Demo Secret Policy
+
+### Demo-Only Exceptions
+
+For `--profile=demo`, dummy credentials are acceptable with clear marking:
+
+```yaml
+# ONLY for demo profile
+apiVersion: v1
+kind: Secret
+metadata:
+  name: demo-credentials
+  labels:
+    suparship.io/demo-only: "true"  # REQUIRED label
+  annotations:
+    suparship.io/warning: "DEMO ONLY - Do not use in production"
+stringData:
+  username: demo-user
+  password: demo-password-not-for-production
+```
+
+### Demo Secret Rules
+
+1. MUST have label `suparship.io/demo-only: "true"`
+2. MUST have warning annotation
+3. MUST NOT be generated for `core` or `full` profiles
+4. Values MUST be obviously fake (no realistic passwords)
+
+## Supply Chain Security
+
+### No Remote Script Execution
+
+```go
+// PROHIBITED
+exec.Command("bash", "-c", "curl https://example.com/install.sh | bash")
+
+// PROHIBITED in generated output
+kubectl apply -f https://raw.githubusercontent.com/...
+```
+
+### Allowed Remote Resources
+
+Remote resources are allowed ONLY with verification:
+
+```go
+// REQUIRED: Checksum verification for downloads
+func downloadWithChecksum(url, expectedSHA256 string) ([]byte, error) {
+    data, err := download(url)
+    if err != nil {
+        return nil, err
+    }
+    
+    actualHash := sha256.Sum256(data)
+    if hex.EncodeToString(actualHash[:]) != expectedSHA256 {
+        return nil, fmt.Errorf("checksum mismatch for %s", url)
+    }
+    return data, nil
+}
+```
+
+### Helm Chart Pinning
+
+```go
+// internal/versions/charts.go
+var HelmCharts = map[string]ChartVersion{
+    "argocd": {
+        Repo:    "https://argoproj.github.io/argo-helm",
+        Chart:   "argo-cd",
+        Version: "5.51.6",
+        AppVersion: "v2.9.3",
+    },
+    "kargo": {
+        Repo:    "https://charts.kargo.io",
+        Chart:   "kargo",
+        Version: "0.4.0",
+        AppVersion: "v0.4.0",
+    },
+}
+```
+
+### Container Image Policy
+
+```yaml
+# REQUIRED: Specific tag or digest
+image: ghcr.io/argoproj/argocd:v2.9.3
+
+# BETTER: Digest for immutability
+image: ghcr.io/argoproj/argocd@sha256:abc123...
+
+# PROHIBITED: Latest or mutable tags in non-demo
+image: ghcr.io/argoproj/argocd:latest
+image: ghcr.io/argoproj/argocd:stable
+```
+
+## RBAC Policy
+
+### Least Privilege Principle
+
+suparship-created ServiceAccounts MUST have minimal permissions:
+
+```yaml
+# GOOD: Specific permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: suparship-deployer
+  namespace: env-dev
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+# PROHIBITED: Cluster admin or wildcards
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+```
+
+### Namespace-Scoped by Default
+
+- Use `Role` + `RoleBinding` (namespace-scoped) by default
+- Use `ClusterRole` + `ClusterRoleBinding` only when required
+- Document why cluster-level access is needed
+
+### ArgoCD RBAC
+
+ArgoCD Application access SHOULD be project-scoped:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: myproject
+  namespace: argocd
+spec:
+  destinations:
+    - namespace: env-*
+      server: https://kubernetes.default.svc
+  sourceRepos:
+    - https://github.com/org/gitops
+  # Deny cluster-scoped resources by default
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+```
+
+## Prohibited Patterns
+
+### In Production Code Paths
+
+```go
+// PROHIBITED: Remote apply
+kubectl apply -f https://...
+
+// PROHIBITED: Unverified exec
+exec.Command("bash", "-c", userInput)
+
+// PROHIBITED: Hardcoded credentials
+const apiKey = "sk-..."
+
+// PROHIBITED: Disabled TLS verification
+client := &http.Client{
+    Transport: &http.Transport{
+        TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // NO
+    },
+}
+```
+
+### In Templates
+
+```yaml
+# PROHIBITED: Privileged containers (except where required)
+securityContext:
+  privileged: true
+
+# PROHIBITED: Host networking (except ingress controller)
+hostNetwork: true
+
+# PROHIBITED: Running as root without justification
+securityContext:
+  runAsUser: 0
+```
+
+## Audit Requirements
+
+### What Must Be Auditable
+
+1. All changes to cluster state (via Git commits)
+2. Who approved changes (via PR approvals)
+3. What was deployed (via ArgoCD sync history)
+4. When changes happened (via Git timestamps)
+
+### Git Commit Signing (Recommended)
+
+```bash
+# For production deployments
+git config commit.gpgsign true
+```
+
+## Vulnerability Scanning
+
+### Required Scans
+
+| Tool | Purpose | When |
+|------|---------|------|
+| `trufflehog` | Secret detection | Every PR |
+| `trivy` | Container CVE scan | Before release |
+| `gosec` | Go security lint | Every PR |
+| `helm lint` | Chart validation | Every PR |
+
+### Example CI Integration
+
+```yaml
+security-scan:
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+    
+    - name: Go security scan
+      run: gosec ./...
+    
+    - name: Secret scan
+      uses: trufflesecurity/trufflehog@main
+    
+    - name: Container scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: fs
+        scan-ref: .
+```
+
+## Incident Response
+
+### If Secrets Are Committed
+
+1. **Immediately** rotate the exposed credential
+2. Force-push to remove from Git history (or use BFG)
+3. Notify affected parties
+4. Add to `.gitignore` and scanning rules
+5. Post-incident review
+
+### Credential Rotation Checklist
+
+- [ ] Identify all locations where credential is used
+- [ ] Generate new credential
+- [ ] Update in secret management system
+- [ ] Verify services restart with new credential
+- [ ] Invalidate old credential
+- [ ] Document in incident log
