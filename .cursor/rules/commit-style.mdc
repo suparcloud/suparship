@@ -1,0 +1,259 @@
+---
+alwaysApply: false
+---
+
+---
+description: Conventional Commits format and scope guidelines for git commit messages
+globs: []
+alwaysApply: false
+---
+
+# Commit Style Rules — suparship
+
+## Conventional Commits
+
+All commits MUST follow [Conventional Commits](https://www.conventionalcommits.org/) format:
+
+```
+<type>(<scope>): <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+## Types
+
+| Type | When to Use | Example |
+|------|-------------|---------|
+| `feat` | New feature | `feat(cli): add preview create command` |
+| `fix` | Bug fix | `fix(renderer): handle empty values in templates` |
+| `docs` | Documentation only | `docs: update installation guide` |
+| `style` | Formatting, no logic change | `style: run gofumpt on all files` |
+| `refactor` | Code change, no new feature/fix | `refactor(gitops): extract ArgoCD client` |
+| `test` | Adding/fixing tests | `test(renderer): add golden tests for service template` |
+| `chore` | Maintenance, deps, CI | `chore: update golangci-lint to v1.55` |
+| `perf` | Performance improvement | `perf(renderer): cache parsed templates` |
+| `ci` | CI/CD changes | `ci: add security scanning workflow` |
+| `build` | Build system changes | `build: update Go to 1.22` |
+| `revert` | Revert previous commit | `revert: feat(cli): add preview create command` |
+
+## Scopes
+
+Use these scopes to indicate the affected area:
+
+| Scope | Area |
+|-------|------|
+| `demo` | Demo command and sample app |
+| `install` | Install command and profiles |
+| `preview` | Preview environment functionality |
+| `promote` | Promotion functionality |
+| `cli` | General CLI (flags, output, UX) |
+| `renderer` | Template rendering engine |
+| `templates` | Template files |
+| `gitops` | ArgoCD/Kargo integration |
+| `k3d` | k3d cluster management |
+| `security` | Security-related changes |
+| `deps` | Dependency updates |
+
+Scope is optional but recommended for non-trivial changes.
+
+## Description Rules
+
+### Format
+- Start with lowercase verb
+- No period at end
+- Max 72 characters
+- Imperative mood ("add" not "added" or "adds")
+
+### Good Examples
+
+```
+feat(demo): add automatic port-forward for ArgoCD
+fix(renderer): prevent duplicate resource names in output
+docs(install): document --profile flag options
+refactor(cli): extract common flag definitions
+test(preview): add integration test for name sanitization
+chore(deps): bump ArgoCD to v2.9.3
+```
+
+### Bad Examples
+
+```
+# Too vague
+fix: fixed bug
+
+# Past tense
+feat(demo): added new feature
+
+# Too long
+feat(cli): add the ability for users to specify custom kubeconfig paths when running the install command
+
+# No scope when one applies
+feat: add preview command  # Should be feat(cli) or feat(preview)
+
+# Capitalized
+Feat(demo): Add new feature
+```
+
+## Body
+
+Use body for:
+- Explaining **why** (not what — the diff shows what)
+- Providing context for complex changes
+- Noting breaking changes
+
+```
+feat(install)!: change default namespace to suparship-system
+
+The previous default namespace "suparship" conflicted with common
+naming patterns. Moving to "suparship-system" follows Kubernetes
+conventions for system components.
+
+BREAKING CHANGE: Users upgrading must migrate resources from
+"suparship" namespace or use --namespace flag explicitly.
+
+Migration:
+  kubectl get all -n suparship -o yaml > backup.yaml
+  suparship install --reset --yes
+```
+
+## Footer
+
+### Breaking Changes
+
+Mark breaking changes with `!` after type/scope AND include `BREAKING CHANGE:` footer:
+
+```
+feat(cli)!: rename --env flag to --environment
+
+BREAKING CHANGE: The --env flag is now --environment for clarity.
+Update any scripts using --env to use --environment instead.
+```
+
+### Issue References
+
+Reference issues in footer:
+
+```
+fix(renderer): handle nil pointer in template execution
+
+The renderer would panic when a template referenced an undefined
+variable. Now returns a clear error message.
+
+Fixes #123
+Closes #124
+Related to #100
+```
+
+## Commit Granularity
+
+### One Logical Change Per Commit
+
+```
+# GOOD: Separate commits
+feat(cli): add --dry-run flag to install command
+test(cli): add tests for install --dry-run
+docs(cli): document --dry-run flag
+
+# BAD: Mixed concerns
+feat(cli): add --dry-run flag, fix typo in help, update deps
+```
+
+### When to Squash
+
+Squash when:
+- Multiple "fixup" commits during PR review
+- WIP commits that don't stand alone
+- Commits that break the build individually
+
+Keep separate when:
+- Each commit is a logical, atomic change
+- Commits could be reverted independently
+- History is useful for understanding evolution
+
+## Examples by Area
+
+### Demo Changes
+
+```
+feat(demo): add sample todo application
+feat(demo): enable automatic browser open after setup
+fix(demo): handle existing k3d cluster gracefully
+chore(demo): update sample app image to v1.2.0
+```
+
+### Install Changes
+
+```
+feat(install): add --profile=full with monitoring stack
+fix(install): wait for CRDs before creating resources
+perf(install): parallelize component installation
+refactor(install): extract helm operations to separate package
+```
+
+### Template Changes
+
+```
+feat(templates): add service-v2 template with HPA support
+fix(templates): ensure deterministic YAML key ordering
+test(templates): add golden tests for all templates
+docs(templates): document template input format
+```
+
+### GitOps Changes
+
+```
+feat(gitops): generate Kargo Stage resources
+fix(gitops): correct ArgoCD sync-wave annotations
+refactor(gitops): use typed clients for ArgoCD resources
+```
+
+## Changelog Generation
+
+Commits following this style enable automatic changelog generation:
+
+```bash
+# Generate changelog (example with git-cliff)
+git-cliff --unreleased --tag v0.2.0
+```
+
+### Changelog Categories
+
+| Commit Type | Changelog Section |
+|-------------|-------------------|
+| `feat` | ✨ Features |
+| `fix` | 🐛 Bug Fixes |
+| `perf` | ⚡ Performance |
+| `docs` | 📚 Documentation |
+| `refactor` | ♻️ Refactoring |
+| `test` | ✅ Tests |
+| `ci`, `chore`, `build` | 🔧 Maintenance |
+| Breaking changes | 💥 Breaking Changes |
+
+## Pre-Commit Validation
+
+Consider adding commit-msg hook:
+
+```bash
+#!/bin/sh
+# .git/hooks/commit-msg
+
+commit_msg=$(cat "$1")
+pattern='^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\([a-z-]+\))?!?: .{1,72}$'
+
+if ! echo "$commit_msg" | head -1 | grep -qE "$pattern"; then
+    echo "ERROR: Commit message doesn't follow Conventional Commits format"
+    echo "Expected: <type>(<scope>): <description>"
+    echo "Got: $(echo "$commit_msg" | head -1)"
+    exit 1
+fi
+```
+
+Or use [commitlint](https://commitlint.js.org/) in CI:
+
+```yaml
+# .github/workflows/ci.yaml
+- name: Lint commit messages
+  uses: wagoid/commitlint-github-action@v5
+```

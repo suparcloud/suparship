@@ -1,0 +1,255 @@
+---
+alwaysApply: false
+---
+
+---
+description: CLI command naming, flag conventions, output standards, and safety requirements
+globs: ["**/cmd/**/*.go", "**/internal/cli/**/*.go"]
+alwaysApply: false
+---
+
+# CLI UX Rules — suparship
+
+## Command Structure
+
+### Primary Commands
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| `demo` | One-command local setup with sample app | `suparship demo` |
+| `install` | Install suparship components to cluster | `suparship install --profile=core` |
+| `preview` | Create/manage preview environments | `suparship preview create pr-123` |
+| `promote` | Trigger Kargo promotion | `suparship promote staging --to=prod` |
+| `status` | Show installation/sync status | `suparship status` |
+| `open` | Open URLs in browser | `suparship open argocd` |
+| `render` | Render templates without applying | `suparship render service.yaml` |
+
+### Command Naming Rules
+
+- MUST use **verb** or **noun** as top-level command (not `suparship do-thing`)
+- Subcommands for CRUD: `preview create`, `preview delete`, `preview list`
+- MUST NOT nest more than 2 levels (`suparship preview create` ✓, `suparship env preview create foo` ✗)
+
+## Standard Flags
+
+### Global Flags (all commands)
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--verbose` | `-v` | Enable debug logging | `false` |
+| `--kubeconfig` | | Path to kubeconfig | `$KUBECONFIG` or `~/.kube/config` |
+| `--context` | | Kubernetes context to use | current-context |
+| `--namespace` | `-n` | Target namespace | `suparship-system` |
+
+### Operation Flags
+
+| Flag | Description | Commands |
+|------|-------------|----------|
+| `--dry-run` | Show what would be done without doing it | `install`, `preview create`, `render` |
+| `--yes` / `-y` | Skip confirmation prompts | `install --reset`, `preview delete` |
+| `--reset` | Destructive: remove existing installation first | `demo`, `install` |
+| `--profile` | Installation profile | `install` |
+| `--output` / `-o` | Output format (`table`, `json`, `yaml`) | `status`, `preview list` |
+
+### Profile Flag Values
+
+```bash
+suparship install --profile=demo   # Full demo with sample app
+suparship install --profile=core   # ArgoCD + Kargo only
+suparship install --profile=full   # All optional components
+```
+
+## Output Standards
+
+### Always Print Next Steps
+
+Every successful command MUST end with actionable next steps:
+
+```
+✓ Demo environment ready!
+
+  Access points:
+    ArgoCD:    https://argocd.localhost
+    Sample App: https://sample.dev.localhost
+
+  Next steps:
+    1. Open ArgoCD: suparship open argocd
+    2. Check status: suparship status
+    3. Create preview: suparship preview create my-feature
+
+  Credentials:
+    ArgoCD admin password: Run 'suparship open argocd --show-password'
+```
+
+### Progress Indicators
+
+- Use spinners for operations > 2 seconds
+- Show phase names: "Installing ArgoCD...", "Waiting for pods..."
+- MUST show elapsed time for long operations
+
+```
+⠋ Installing ArgoCD (v2.9.3)...
+✓ ArgoCD installed (45s)
+⠋ Installing Kargo (v0.4.0)...
+✓ Kargo installed (32s)
+```
+
+### Error Output
+
+Errors MUST include:
+1. What failed
+2. Why (if known)
+3. How to fix or get more info
+
+```
+✗ Installation failed: ArgoCD pods not ready
+
+  Reason: Timeout waiting for deployment/argocd-server
+
+  Troubleshooting:
+    1. Check pod status: kubectl get pods -n argocd
+    2. View logs: kubectl logs -n argocd -l app.kubernetes.io/name=argocd-server
+    3. Retry with: suparship install --profile=core --verbose
+```
+
+### Status Output
+
+```
+$ suparship status
+
+suparship Status
+================
+
+Cluster: k3d-suparship (Ready)
+Profile: demo
+Version: v0.1.0
+
+Components:
+  NAME      STATUS    VERSION   NAMESPACE
+  ArgoCD    Healthy   v2.9.3    argocd
+  Kargo     Healthy   v0.4.0    kargo
+
+Environments:
+  NAME      SYNC      HEALTH    SERVICES
+  dev       Synced    Healthy   2
+  staging   Synced    Healthy   2
+
+Previews:
+  NAME      AGE       STATUS    URL
+  pr-123    2h        Active    https://pr-123.preview.localhost
+```
+
+## Safety Requirements
+
+### Destructive Operations
+
+Operations that delete data or reset state:
+
+- MUST require `--reset` or `--yes` flag in non-interactive mode
+- MUST show confirmation prompt in interactive mode (detect via `isatty`)
+- MUST list what will be deleted before proceeding
+
+```go
+// Check for TTY
+if !term.IsTerminal(int(os.Stdin.Fd())) && !opts.Yes {
+    return errors.New("--yes required for non-interactive execution")
+}
+```
+
+### Confirmation Pattern
+
+```
+$ suparship demo --reset
+
+WARNING: This will delete the existing installation:
+  - Cluster: k3d-suparship
+  - All workloads and data in the cluster
+
+Type 'yes' to confirm: yes
+Proceeding with reset...
+```
+
+### Non-Interactive CI Mode
+
+```bash
+# CI-safe commands
+suparship install --profile=core --yes
+suparship preview create pr-$PR_NUMBER --yes
+suparship preview delete pr-$PR_NUMBER --yes
+```
+
+## JSON Output (Optional)
+
+For machine parsing, commands SHOULD support `--output=json`:
+
+```bash
+$ suparship status --output=json
+{
+  "cluster": {
+    "name": "k3d-suparship",
+    "ready": true
+  },
+  "components": [
+    {"name": "argocd", "status": "healthy", "version": "v2.9.3"}
+  ],
+  "environments": [
+    {"name": "dev", "sync": "synced", "health": "healthy"}
+  ]
+}
+```
+
+JSON output MUST:
+- Go to stdout (logs to stderr)
+- Be valid JSON (no extra text)
+- Include same info as human-readable output
+
+## Keyboard Shortcuts
+
+For interactive commands:
+- `Ctrl+C`: Graceful cancel (cleanup in-progress resources)
+- `q`: Quit watch/follow modes
+
+## Help Text Standards
+
+```
+$ suparship demo --help
+
+Create a local demo environment with k3d, ArgoCD, Kargo, and a sample app.
+
+Usage:
+  suparship demo [flags]
+
+Examples:
+  # Quick start with defaults
+  suparship demo
+
+  # Reset existing and start fresh
+  suparship demo --reset
+
+  # Verbose output for debugging
+  suparship demo --verbose
+
+Flags:
+  -h, --help      Show this help
+      --reset     Delete existing cluster before creating
+  -v, --verbose   Enable debug logging
+  -y, --yes       Skip confirmation prompts
+
+Global Flags:
+      --kubeconfig string   Path to kubeconfig (default "$HOME/.kube/config")
+
+Access Points (after completion):
+  ArgoCD:     https://argocd.localhost
+  Sample App: https://sample.dev.localhost
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | General error |
+| 2 | Invalid arguments/flags |
+| 3 | Cluster unreachable |
+| 4 | Timeout |
+| 130 | Interrupted (Ctrl+C) |

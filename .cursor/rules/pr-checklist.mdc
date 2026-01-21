@@ -1,0 +1,225 @@
+---
+description: Pull request template and review checklist for backwards compatibility, determinism, and security
+globs: ["**/.github/**", "**/PULL_REQUEST_TEMPLATE*"]
+alwaysApply: false
+---
+
+# Pull Request Checklist — suparship
+
+## PR Template
+
+Use this template for all pull requests. Copy to `.github/PULL_REQUEST_TEMPLATE.md`.
+
+```markdown
+## Summary
+
+<!-- One-line description of the change -->
+
+## What Changed
+
+<!-- Describe the changes in detail -->
+- 
+- 
+- 
+
+## Why
+
+<!-- Explain the motivation. Link to issue if applicable -->
+
+Fixes #
+
+## Type of Change
+
+- [ ] Bug fix (non-breaking change that fixes an issue)
+- [ ] New feature (non-breaking change that adds functionality)
+- [ ] Breaking change (fix or feature that changes existing behavior)
+- [ ] Documentation update
+- [ ] Refactoring (no functional changes)
+- [ ] CI/Build changes
+
+---
+
+## Checklist
+
+### Required for All PRs
+
+- [ ] Code follows project style guidelines (`golangci-lint` passes)
+- [ ] Self-review completed
+- [ ] Tests added/updated for changes
+- [ ] Documentation updated if needed
+
+### Backwards Compatibility
+
+- [ ] **No breaking changes** to CLI flags or commands
+- [ ] **No breaking changes** to generated manifest format
+- [ ] **No breaking changes** to template input format
+- [ ] If breaking: migration path documented in PR description
+
+### Determinism Check
+
+- [ ] Generated manifests produce **identical output** for same input
+- [ ] No timestamps, random values, or execution-time data in output
+- [ ] Template changes include updated golden test snapshots
+
+### Security Check
+
+- [ ] **No secrets, credentials, or API keys** in code or config
+- [ ] No `kubectl apply -f <remote-url>` patterns added
+- [ ] New dependencies reviewed for security
+- [ ] Secret references use `ref:secret.key` format only
+
+### Install Profile Impact
+
+- [ ] Verified `--profile=demo` still works end-to-end
+- [ ] Verified `--profile=core` still works if affected
+- [ ] New components added to correct profile (not `core` unless essential)
+- [ ] Component versions pinned in `internal/versions/`
+
+### CLI Changes (if applicable)
+
+- [ ] New flags follow naming conventions (`--verbose`, `--dry-run`, etc.)
+- [ ] Help text updated and includes examples
+- [ ] Error messages include remediation steps
+- [ ] Exit codes follow conventions
+
+### GitOps Changes (if applicable)
+
+- [ ] ArgoCD Application naming follows `{service}-{env}` pattern
+- [ ] Required labels and annotations present
+- [ ] Namespace follows `env-{name}` or `preview-{name}` pattern
+- [ ] Ingress hosts follow `{service}.{env}.localhost` pattern
+
+---
+
+## Testing
+
+### How to Test
+
+<!-- Provide steps for reviewers to verify the change -->
+
+1. 
+2. 
+3. 
+
+### Test Results
+
+<!-- Paste relevant test output -->
+
+```
+$ make test
+...
+```
+
+### Demo Verification (if applicable)
+
+```bash
+# Clean start
+suparship demo --reset --yes
+
+# Expected result:
+# - [ ] ArgoCD accessible at https://argocd.localhost
+# - [ ] Sample app accessible at https://sample.dev.localhost
+# - [ ] All pods healthy: kubectl get pods -A
+```
+
+---
+
+## Screenshots (if applicable)
+
+<!-- Add screenshots for UI/output changes -->
+
+---
+
+## Additional Notes
+
+<!-- Any other context for reviewers -->
+```
+
+## Review Guidelines
+
+### For Reviewers
+
+When reviewing PRs, verify:
+
+#### Code Quality
+- [ ] Logic is clear and well-structured
+- [ ] No unnecessary complexity
+- [ ] Error handling is comprehensive
+- [ ] Logging is appropriate (not too verbose, not silent)
+
+#### Tests
+- [ ] Tests cover happy path
+- [ ] Tests cover error cases
+- [ ] Tests are deterministic (no flakiness)
+- [ ] Golden tests updated if output changed
+
+#### Documentation
+- [ ] Public functions have doc comments
+- [ ] README updated if user-facing changes
+- [ ] CHANGELOG entry if notable
+
+### PR Size Guidelines
+
+| Size | Lines Changed | Review Expectation |
+|------|---------------|-------------------|
+| Small | < 100 | Quick review, single reviewer OK |
+| Medium | 100-500 | Thorough review, may need discussion |
+| Large | 500+ | Consider splitting; multiple reviewers |
+
+### Approval Requirements
+
+| Change Type | Required Approvals |
+|-------------|-------------------|
+| Documentation only | 1 |
+| Bug fix | 1 |
+| New feature | 1-2 |
+| Breaking change | 2 + maintainer |
+| Security-related | 2 + security review |
+
+## Commit Hygiene
+
+### Before Merging
+
+- [ ] Commits are atomic and well-described
+- [ ] No "WIP", "fixup", or "oops" commits (squash them)
+- [ ] Commit messages follow Conventional Commits style
+- [ ] Branch is rebased on latest main (no merge commits)
+
+### Squash vs Merge
+
+- **Squash merge**: For feature branches with messy history
+- **Rebase merge**: For clean, atomic commit history
+- **Never**: Regular merge commits (keeps cleaner history)
+
+## Common Rejection Reasons
+
+PRs will be rejected or require changes for:
+
+1. **Failing CI** — All checks must pass
+2. **Missing tests** — New code needs test coverage
+3. **Secrets in code** — Immediate rejection, must be cleaned from history
+4. **Breaking changes without migration** — Document upgrade path
+5. **Non-deterministic output** — Must be fixed before merge
+6. **Scope creep** — PR does more than described
+
+## Labels
+
+Use these labels for categorization:
+
+| Label | Meaning |
+|-------|---------|
+| `bug` | Bug fix |
+| `feature` | New feature |
+| `breaking` | Breaking change |
+| `docs` | Documentation only |
+| `ci` | CI/Build changes |
+| `security` | Security-related |
+| `good-first-issue` | Good for new contributors |
+| `needs-discussion` | Requires team input |
+| `do-not-merge` | Blocked for some reason |
+
+## Stale PR Policy
+
+- PRs with no activity for 14 days: pinged for update
+- PRs with no activity for 30 days: closed with comment
+- Closed PRs can be reopened when ready

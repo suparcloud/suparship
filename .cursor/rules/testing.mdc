@@ -1,0 +1,410 @@
+---
+description: Testing requirements, golden tests, smoke tests, and flaky test mitigation strategies
+globs: ["**/*_test.go", "**/test/**", "**/testdata/**"]
+alwaysApply: false
+---
+
+# Testing Rules — suparship
+
+## Test Categories
+
+| Category | Purpose | Speed | When to Run |
+|----------|---------|-------|-------------|
+| Unit | Test individual functions | Fast (< 1s) | Every commit, locally |
+| Golden | Snapshot output comparison | Fast (< 5s) | Every commit |
+| Integration | Test component interaction | Medium (< 1m) | Every PR |
+| Smoke | End-to-end demo validation | Slow (5-10m) | Nightly, releases |
+
+## Minimum Test Requirements
+
+### Demo (`suparship demo`)
+
+**Smoke test required:**
+
+```go
+// test/smoke/demo_test.go
+func TestDemoSmoke(t *testing.T) {
+    if testing.Short() {
+        t.Skip("skipping smoke test in short mode")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+    defer cancel()
+    
+    // 1. Create k3d cluster
+    require.NoError(t, k3d.CreateCluster(ctx, "smoke-test"))
+    defer k3d.DeleteCluster(ctx, "smoke-test")
+    
+    // 2. Run install
+    require.NoError(t, runSuparship(ctx, "install", "--profile=demo", "--yes"))
+    
+    // 3. Verify components are healthy
+    require.NoError(t, waitForDeployment(ctx, "argocd", "argocd-server", 2*time.Minute))
+    require.NoError(t, waitForDeployment(ctx, "kargo", "kargo-controller", 2*time.Minute))
+    
+    // 4. Verify sample app is accessible
+    require.NoError(t, waitForIngress(ctx, "https://sample.dev.localhost", 2*time.Minute))
+}
+```
+
+### Renderer
+
+**Golden tests required for every template:**
+
+```go
+// internal/renderer/renderer_test.go
+func TestRenderService(t *testing.T) {
+    tests := []struct {
+        name   string
+        input  string
+        golden string
+    }{
+        {"basic-service", "testdata/basic-service.yaml", "testdata/golden/basic-service"},
+        {"with-secrets", "testdata/with-secrets.yaml", "testdata/golden/with-secrets"},
+        {"with-ingress", "testdata/with-ingress.yaml", "testdata/golden/with-ingress"},
+    }
+    
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            input, err := os.ReadFile(tt.input)
+            require.NoError(t, err)
+            
+            renderer := NewRenderer()
+            output, err := renderer.Render(context.Background(), input)
+            require.NoError(t, err)
+            
+            // Update golden files with: go test -update-golden
+            if *updateGolden {
+                writeGoldenFiles(t, tt.golden, output)
+                return
+            }
+            
+            assertMatchesGolden(t, tt.golden, output)
+        })
+    }
+}
+```
+
+**Golden file structure:**
+
+```
+internal/renderer/testdata/
+├── basic-service.yaml           # Input
+├── with-secrets.yaml
+├── golden/
+│   ├── basic-service/
+│   │   ├── deployment.yaml      # Expected output
+│   │   ├── service.yaml
+│   │   └── ingress.yaml
+│   └── with-secrets/
+│       └── ...
+```
+
+### CLI
+
+**Unit tests for parsing and validation:**
+
+```go
+// internal/cli/preview_test.go
+func TestSanitizePreviewName(t *testing.T) {
+    tests := []struct {
+        input    string
+        expected string
+    }{
+        {"pr-123", "pr-123"},
+        {"feature/my-thing", "feature-my-thing"},
+        {"PR_123", "pr-123"},
+        {"UPPER-CASE", "upper-case"},
+        {"with--double--dashes", "with-double-dashes"},
+        {"-leading-dash", "leading-dash"},
+        {"trailing-dash-", "trailing-dash"},
+        {"special!@#chars", "special-chars"},
+        {strings.Repeat("a", 100), strings.Repeat("a", 53)}, // Truncation
+    }
+    
+    for _, tt := range tests {
+        t.Run(tt.input, func(t *testing.T) {
+            result := SanitizePreviewName(tt.input)
+            assert.Equal(t, tt.expected, result)
+        })
+    }
+}
+
+func TestParseSecretRef(t *testing.T) {
+    tests := []struct {
+        input       string
+        wantSecret  string
+        wantKey     string
+        wantErr     bool
+    }{
+        {"ref:my-secret.key", "my-secret", "key", false},
+        {"ref:db-credentials.password", "db-credentials", "password", false},
+        {"literal-value", "", "", true},
+        {"ref:invalid", "", "", true},
+        {"ref:.missing-name", "", "", true},
+    }
+    
+    for _, tt := range tests {
+        t.Run(tt.input, func(t *testing.T) {
+            secret, key, err := ParseSecretRef(tt.input)
+            if tt.wantErr {
+                assert.Error(t, err)
+                return
+            }
+            assert.NoError(t, err)
+            assert.Equal(t, tt.wantSecret, secret)
+            assert.Equal(t, tt.wantKey, key)
+        })
+    }
+}
+```
+
+**Flag parsing tests:**
+
+```go
+func TestInstallFlags(t *testing.T) {
+    tests := []struct {
+        args     []string
+        expected InstallOptions
+        wantErr  bool
+    }{
+        {
+            args:     []string{"--profile=demo"},
+            expected: InstallOptions{Profile: "demo"},
+        },
+        {
+            args:     []string{"--profile=core", "--dry-run"},
+            expected: InstallOptions{Profile: "core", DryRun: true},
+        },
+        {
+            args:    []string{"--profile=invalid"},
+            wantErr: true,
+        },
+    }
+    
+    for _, tt := range tests {
+        t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+            cmd := NewInstallCmd()
+            cmd.SetArgs(tt.args)
+            // ... parse and verify
+        })
+    }
+}
+```
+
+## Test Commands
+
+### Local Development
+
+```bash
+# Run all unit tests (fast)
+make test
+# or: go test -short ./...
+
+# Run unit tests with coverage
+make test-coverage
+# or: go test -short -coverprofile=coverage.out ./...
+
+# Run golden tests (update snapshots)
+go test ./internal/renderer/... -update-golden
+
+# Run integration tests (requires kind/k3d)
+make test-integration
+# or: go test -tags=integration ./test/integration/...
+
+# Run specific test
+go test -run TestSanitizePreviewName ./internal/cli/...
+```
+
+### CI Commands
+
+```yaml
+# .github/workflows/ci.yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      
+      - name: Unit tests
+        run: go test -short -race -coverprofile=coverage.out ./...
+      
+      - name: Golden test verification
+        run: |
+          go test ./internal/renderer/... -update-golden
+          git diff --exit-code testdata/golden/
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create k3d cluster
+        uses: AbsaOSS/k3d-action@v2
+        with:
+          cluster-name: test
+      
+      - name: Integration tests
+        run: go test -tags=integration -timeout=10m ./test/integration/...
+
+  smoke:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Smoke test
+        run: |
+          go build -o suparship ./cmd/suparship
+          ./suparship demo --yes
+          # Verification steps...
+```
+
+## Timeouts
+
+### Default Timeouts
+
+| Operation | Timeout |
+|-----------|---------|
+| Unit test | 30s |
+| Integration test | 5m |
+| Smoke test | 15m |
+| k3d cluster creation | 3m |
+| ArgoCD ready | 2m |
+| Deployment rollout | 2m |
+
+### Setting Timeouts
+
+```go
+func TestWithTimeout(t *testing.T) {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+    defer cancel()
+    
+    // Use ctx for all operations
+    result, err := longOperation(ctx)
+    require.NoError(t, err)
+}
+```
+
+## Flaky Test Mitigation
+
+### Common Causes & Solutions
+
+| Cause | Solution |
+|-------|----------|
+| Timing-dependent | Use explicit waits with polling |
+| Port conflicts | Use random available ports |
+| Cluster state | Clean up before AND after tests |
+| Network issues | Retry with backoff |
+
+### Wait Pattern
+
+```go
+func waitForCondition(ctx context.Context, check func() bool, interval, timeout time.Duration) error {
+    ticker := time.NewTicker(interval)
+    defer ticker.Stop()
+    
+    timeoutCh := time.After(timeout)
+    
+    for {
+        if check() {
+            return nil
+        }
+        
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-timeoutCh:
+            return errors.New("timeout waiting for condition")
+        case <-ticker.C:
+            continue
+        }
+    }
+}
+```
+
+### Retry Pattern
+
+```go
+func retry(ctx context.Context, attempts int, delay time.Duration, fn func() error) error {
+    var lastErr error
+    for i := 0; i < attempts; i++ {
+        if err := fn(); err == nil {
+            return nil
+        } else {
+            lastErr = err
+            slog.Debug("retry attempt failed", "attempt", i+1, "error", err)
+        }
+        
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-time.After(delay):
+            delay *= 2 // Exponential backoff
+        }
+    }
+    return fmt.Errorf("all %d attempts failed: %w", attempts, lastErr)
+}
+```
+
+### Isolation
+
+```go
+func TestIsolated(t *testing.T) {
+    // Unique namespace per test
+    namespace := fmt.Sprintf("test-%s-%d", t.Name(), time.Now().UnixNano())
+    
+    // Cleanup on both success and failure
+    t.Cleanup(func() {
+        deleteNamespace(context.Background(), namespace)
+    })
+    
+    // Create isolated resources
+    createNamespace(t, namespace)
+    // ... test logic
+}
+```
+
+## Test Organization
+
+```
+suparship/
+├── internal/
+│   ├── cli/
+│   │   ├── install.go
+│   │   └── install_test.go      # Unit tests next to code
+│   ├── renderer/
+│   │   ├── renderer.go
+│   │   ├── renderer_test.go
+│   │   └── testdata/            # Test fixtures
+│   │       ├── input/
+│   │       └── golden/
+│   └── testutil/                # Shared test utilities
+│       ├── k8s.go
+│       └── fixtures.go
+└── test/
+    ├── integration/             # Integration tests (build tag)
+    │   └── install_test.go
+    └── smoke/                   # Smoke tests (build tag)
+        └── demo_test.go
+```
+
+## Coverage Requirements
+
+| Package | Minimum Coverage |
+|---------|-----------------|
+| `internal/cli` | 70% |
+| `internal/renderer` | 80% |
+| `internal/gitops` | 70% |
+| Overall | 60% |
+
+Coverage is informative, not blocking. Focus on meaningful tests over percentage.

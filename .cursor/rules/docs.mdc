@@ -1,0 +1,436 @@
+---
+description: Documentation standards, README-driven development, and copy-paste command requirements
+globs: ["**/*.md", "**/README*", "**/docs/**"]
+alwaysApply: false
+---
+
+# Documentation Rules — suparship
+
+## README-Driven Development
+
+The README is the **source of truth** for user-facing behavior:
+
+1. Write README documentation BEFORE implementing features
+2. Update README with EVERY user-facing change
+3. README must always reflect current behavior, not aspirational features
+
+## README Structure
+
+The main `README.md` MUST include these sections:
+
+```markdown
+# suparship
+
+One-line description.
+
+## Quick Start
+
+Copy-paste commands to get running in < 5 minutes.
+
+## Installation
+
+How to install the CLI binary.
+
+## Usage
+
+### suparship demo
+### suparship install
+### suparship preview
+...
+
+## Install Profiles
+
+Table of profiles and what they include.
+
+## Architecture
+
+Brief explanation of how it works.
+
+## Configuration
+
+Environment variables, config files.
+
+## Security
+
+Security stance and recommendations.
+
+## Contributing
+
+How to contribute.
+
+## License
+```
+
+## Documentation Requirements
+
+### Copy-Paste Commands
+
+All commands MUST be copy-pasteable. Include full context:
+
+```markdown
+## Quick Start
+
+```bash
+# Install suparship
+curl -sSL https://get.suparship.io | bash
+
+# Create a local demo environment
+suparship demo
+
+# Open ArgoCD dashboard
+suparship open argocd
+```
+
+After running these commands, you'll have:
+- A local k3d cluster named `suparship`
+- ArgoCD at https://argocd.localhost
+- Kargo at https://kargo.localhost
+- Sample app at https://sample.dev.localhost
+```
+
+### Expected Output
+
+Show expected output for commands:
+
+```markdown
+## suparship status
+
+Shows the current state of your suparship installation.
+
+```bash
+$ suparship status
+
+suparship Status
+================
+
+Cluster: k3d-suparship (Ready)
+Profile: demo
+Version: v0.1.0
+
+Components:
+  NAME      STATUS    VERSION   NAMESPACE
+  ArgoCD    Healthy   v2.9.3    argocd
+  Kargo     Healthy   v0.4.0    kargo
+
+Environments:
+  NAME      SYNC      HEALTH    SERVICES
+  dev       Synced    Healthy   2
+```
+```
+
+### Flag Documentation
+
+Document all flags with examples:
+
+```markdown
+### Flags
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--profile` | | Installation profile (`demo`, `core`, `full`) | `core` |
+| `--dry-run` | | Show what would be installed without installing | `false` |
+| `--reset` | | Remove existing installation first | `false` |
+| `--yes` | `-y` | Skip confirmation prompts | `false` |
+| `--verbose` | `-v` | Enable debug logging | `false` |
+
+### Examples
+
+```bash
+# Install with demo profile
+suparship install --profile=demo
+
+# Preview what would be installed
+suparship install --profile=core --dry-run
+
+# Reset and reinstall
+suparship install --profile=demo --reset --yes
+```
+```
+
+## Install Profiles Documentation
+
+MUST document what each profile includes:
+
+```markdown
+## Install Profiles
+
+| Profile | Components | Use Case |
+|---------|------------|----------|
+| `demo` | k3d, ArgoCD, Kargo, Traefik, sample app | Local development, demos |
+| `core` | ArgoCD, Kargo, Traefik | Minimal GitOps platform |
+| `full` | core + Prometheus, Grafana, Loki | Production-like setup |
+
+### Component Versions
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| ArgoCD | v2.9.3 | |
+| Kargo | v0.4.0 | |
+| Traefik | v2.10.6 | Ingress controller |
+| k3d | v5.6.0 | Demo profile only |
+
+### Profile Details
+
+#### demo
+
+The demo profile creates a complete local environment:
+
+- Creates a k3d cluster named `suparship`
+- Installs ArgoCD with UI accessible at https://argocd.localhost
+- Installs Kargo with UI accessible at https://kargo.localhost
+- Deploys a sample todo application to demonstrate GitOps workflow
+- Configures automatic TLS for *.localhost domains
+
+Requirements:
+- Docker running
+- Ports 80, 443 available
+- ~4GB RAM available for the cluster
+
+#### core
+
+The core profile installs only the essential GitOps components:
+
+- ArgoCD for GitOps deployment
+- Kargo for progressive delivery
+- Traefik for ingress
+
+Use this when:
+- You already have a Kubernetes cluster
+- You want to add suparship to an existing environment
+- You're deploying to a cloud provider
+
+#### full
+
+The full profile includes everything in core plus:
+
+- Prometheus for metrics collection
+- Grafana for dashboards
+- Loki for log aggregation
+
+Use this when:
+- You need observability built-in
+- You're setting up a staging environment
+```
+
+## Security Documentation
+
+MUST document security stance clearly:
+
+```markdown
+## Security
+
+### MVP vs Production
+
+suparship MVP is designed for **development and demo purposes**. For production:
+
+| Aspect | MVP Behavior | Production Recommendation |
+|--------|--------------|---------------------------|
+| Secrets | Reference-only (`ref:secret.key`) | Use External Secrets Operator |
+| TLS | Self-signed for *.localhost | Use cert-manager with Let's Encrypt |
+| RBAC | Minimal isolation | Implement namespace-level RBAC |
+| Network | No network policies | Add network policies per namespace |
+| Auth | ArgoCD built-in | Integrate with SSO/OIDC |
+
+### Secrets
+
+suparship NEVER stores secret values in Git. Secrets are referenced by name:
+
+```yaml
+env:
+  DATABASE_URL: ref:db-credentials.url
+```
+
+This renders to:
+
+```yaml
+env:
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: db-credentials
+        key: url
+```
+
+You must create the actual Secret separately (manually or via sealed-secrets, external-secrets, etc.).
+
+### Demo Credentials
+
+The demo profile creates dummy credentials marked with `suparship.io/demo-only: true`.
+
+**DO NOT use demo credentials in production.**
+```
+
+## Architecture Documentation
+
+Explain how the system works:
+
+```markdown
+## Architecture
+
+### Overview
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Developer  │────▶│  suparship  │────▶│    Git      │
+│             │     │    CLI      │     │   Repo      │
+└─────────────┘     └─────────────┘     └──────┬──────┘
+                                               │
+                                               ▼
+┌─────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster                    │
+│  ┌─────────┐    ┌─────────┐    ┌─────────────────────┐  │
+│  │ ArgoCD  │───▶│  Kargo  │───▶│  Your Applications  │  │
+│  └─────────┘    └─────────┘    └─────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Components
+
+**suparship CLI**: Generates Kubernetes manifests from templates and pushes to Git.
+
+**ArgoCD**: Watches Git and syncs manifests to the cluster.
+
+**Kargo**: Manages progressive delivery (dev → staging → prod).
+
+### Flow
+
+1. Developer runs `suparship preview create pr-123`
+2. CLI renders templates to `gitops-output/previews/pr-123/`
+3. CLI commits and pushes to Git
+4. ArgoCD detects change and syncs to cluster
+5. Preview environment is available at `pr-123.preview.localhost`
+```
+
+## Inline Code Documentation
+
+### Go Doc Comments
+
+```go
+// Renderer generates Kubernetes manifests from service templates.
+// It supports Helm charts with values injection and optional Kustomize overlays.
+type Renderer struct {
+    templateDir string
+    logger      *slog.Logger
+}
+
+// Render processes a ServiceTemplate and returns the rendered manifests.
+// The output is deterministic: same input always produces identical output.
+//
+// Example:
+//
+//     r := NewRenderer("templates/")
+//     manifests, err := r.Render(ctx, serviceTemplate)
+//     if err != nil {
+//         return fmt.Errorf("rendering failed: %w", err)
+//     }
+func (r *Renderer) Render(ctx context.Context, svc *ServiceTemplate) ([]byte, error) {
+    // ...
+}
+```
+
+### CLI Help Text
+
+Help text is documentation. Make it useful:
+
+```go
+var installCmd = &cobra.Command{
+    Use:   "install",
+    Short: "Install suparship components to a Kubernetes cluster",
+    Long: `Install suparship components to a Kubernetes cluster.
+
+This command installs ArgoCD, Kargo, and supporting components based on
+the selected profile. The cluster must be accessible via kubectl.
+
+Profiles:
+  demo    Full local setup with k3d, sample apps (default for 'suparship demo')
+  core    Minimal: ArgoCD + Kargo + ingress
+  full    Everything: core + monitoring stack
+
+After installation, access points will be displayed.`,
+    Example: `  # Install core components
+  suparship install --profile=core
+
+  # Install to specific context
+  suparship install --profile=core --context=my-cluster
+
+  # Preview without installing
+  suparship install --profile=demo --dry-run`,
+}
+```
+
+## Keeping Docs Updated
+
+### PR Checklist Item
+
+Every PR with user-facing changes MUST update docs:
+
+- [ ] README updated if behavior changed
+- [ ] Help text updated if flags changed
+- [ ] Examples updated if commands changed
+
+### Automated Checks
+
+```yaml
+# .github/workflows/docs.yaml
+- name: Verify README examples work
+  run: |
+    # Extract code blocks from README and verify they're valid
+    ./scripts/verify-readme-examples.sh
+    
+- name: Check for outdated version references
+  run: |
+    # Ensure version numbers in docs match code
+    grep -r "v[0-9]\+\.[0-9]\+\.[0-9]\+" docs/ | \
+      grep -v "$(cat VERSION)" && exit 1 || true
+```
+
+## Changelog
+
+Maintain a `CHANGELOG.md` for notable changes:
+
+```markdown
+# Changelog
+
+All notable changes to suparship are documented here.
+
+## [Unreleased]
+
+### Added
+- Preview environment support (`suparship preview create`)
+
+### Changed
+- Default namespace changed to `suparship-system`
+
+### Fixed
+- Template rendering now produces deterministic output
+
+## [0.1.0] - 2024-01-15
+
+### Added
+- Initial release
+- `suparship demo` command
+- `suparship install` with profiles
+- ArgoCD and Kargo integration
+```
+
+## Error Messages as Documentation
+
+Error messages SHOULD be self-documenting:
+
+```go
+// BAD
+return errors.New("invalid profile")
+
+// GOOD
+return fmt.Errorf("invalid profile %q: must be one of: demo, core, full", profile)
+
+// BETTER
+return fmt.Errorf(`invalid profile %q
+
+Available profiles:
+  demo    Local development with sample app
+  core    Minimal GitOps (ArgoCD + Kargo)
+  full    Complete stack with monitoring
+
+Example: suparship install --profile=core`, profile)
+```
