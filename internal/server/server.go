@@ -64,8 +64,9 @@ func New(cfg Config) *Server {
 
 	if cfg.OrgProvider != nil && ah != nil {
 		rh := &rbacHandler{
-			auth:        ah,
-			orgProvider: cfg.OrgProvider,
+			auth:         ah,
+			orgProvider:  cfg.OrgProvider,
+			projectStore: cfg.ProjectStore,
 		}
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)

@@ -1,10 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/suparcloud/suparship/internal/project"
+	"github.com/suparcloud/suparship/internal/session"
 )
 
 // --- GET /api/v1/org ---
@@ -149,6 +154,58 @@ func TestGetProjectsExcludesWildcard(t *testing.T) {
 	for _, p := range resp.Projects {
 		if p.Name == "*" {
 			t.Fatal("wildcard should not appear as a project")
+		}
+	}
+}
+
+func TestGetProjectsMergesProjectStore(t *testing.T) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+		cookieSecure:  false,
+	}
+	ah.registerRoutes(mux)
+
+	store := newMemProjectStore()
+	_ = store.Save(context.Background(), &project.Project{
+		Metadata: project.ProjectMeta{Name: "api"},
+	})
+	_ = store.Save(context.Background(), &project.Project{
+		Metadata: project.ProjectMeta{Name: "web"},
+	})
+	_ = store.Save(context.Background(), &project.Project{
+		Metadata: project.ProjectMeta{Name: "billing"},
+	})
+
+	rh := &rbacHandler{
+		auth:         ah,
+		orgProvider:  &staticOrgProvider{org: testRBACOrg()},
+		projectStore: store,
+	}
+	rh.registerRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/api/v1/projects", nil)
+	req.AddCookie(sessionCookieFor(ah, "alice", "org_admin"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp ProjectsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	want := []string{"api", "billing", "web"}
+	if len(resp.Projects) != len(want) {
+		t.Fatalf("expected %d projects, got %d: %+v", len(want), len(resp.Projects), resp.Projects)
+	}
+	for i, p := range resp.Projects {
+		if p.Name != want[i] {
+			t.Fatalf("project[%d]: expected %q, got %q", i, want[i], p.Name)
 		}
 	}
 }

@@ -385,14 +385,29 @@ function EmptyState() {
           <path
             strokeLinecap="round"
             strokeLinejoin="round"
-            d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z"
+            d="M12 4.5v15m7.5-7.5h-15"
           />
         </svg>
       </div>
       <h3 className="text-sm font-medium text-gray-900">No projects yet</h3>
-      <p className="mt-1 text-sm text-gray-500">
-        Projects will appear here once they are configured in the cluster.
+      <p className="mx-auto mt-1 max-w-sm text-sm text-gray-500">
+        Get started by browsing available templates or running the onboarding
+        checklist to set up your first project and service.
       </p>
+      <div className="mt-6 flex items-center justify-center gap-3">
+        <Link
+          to="/templates"
+          className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
+        >
+          Browse templates
+        </Link>
+        <Link
+          to="/onboarding"
+          className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+        >
+          Onboarding checklist
+        </Link>
+      </div>
     </div>
   );
 }

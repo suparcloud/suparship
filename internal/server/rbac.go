@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
 
@@ -23,6 +24,7 @@ func ProjectFromPathValue(param string) ProjectExtractor {
 type rbacHandler struct {
 	auth             *authHandler
 	orgProvider      rbac.OrgProvider
+	projectStore     project.Store     // optional: merges project store into project listing
 	serviceHandler   *serviceHandler   // optional: enables POST .../services
 	inventoryHandler *inventoryHandler // optional: enables inventory endpoints
 }
