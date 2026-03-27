@@ -7,8 +7,10 @@ import { AuthSettings } from "./pages/AuthSettings";
 import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
 import { Onboarding } from "./pages/Onboarding";
+import { OrgSettings } from "./pages/OrgSettings";
 import { Previews } from "./pages/Previews";
 import { ServiceDetail } from "./pages/ServiceDetail";
+import { TeamSettings } from "./pages/TeamSettings";
 
 export function App() {
   return (
@@ -26,6 +28,8 @@ export function App() {
                 element={<ServiceDetail />}
               />
               <Route path="/previews" element={<Previews />} />
+              <Route path="/settings/org" element={<OrgSettings />} />
+              <Route path="/settings/teams" element={<TeamSettings />} />
               <Route path="/settings/auth" element={<AuthSettings />} />
             </Route>
           </Route>
