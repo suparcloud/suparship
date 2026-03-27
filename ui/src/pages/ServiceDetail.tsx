@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { fetchServiceDetail } from "../lib/services";
-import type { ServiceDetailInfo } from "../types";
+import type { ServiceDetailInfo, ServiceEnv, RuntimeInfo } from "../types";
 
-// --- Status helpers ---
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
 
 interface StatusStyle {
   dot: string;
@@ -18,7 +20,7 @@ const fallbackStatus: StatusStyle = {
   label: "Unknown",
 };
 
-const statusConfig: Record<string, StatusStyle> = {
+const statusStyles: Record<string, StatusStyle> = {
   healthy: {
     dot: "bg-emerald-500",
     bg: "bg-emerald-50 text-emerald-700",
@@ -41,19 +43,129 @@ const statusConfig: Record<string, StatusStyle> = {
   },
 };
 
-function StatusBadge({ status }: { status: string }) {
-  const cfg = statusConfig[status] ?? fallbackStatus;
+function StatusBadge({
+  status,
+  size = "sm",
+}: {
+  status: string;
+  size?: "sm" | "lg";
+}) {
+  const cfg = statusStyles[status] ?? fallbackStatus;
+  const cls =
+    size === "lg"
+      ? "px-3 py-1 text-sm font-medium"
+      : "px-2.5 py-0.5 text-xs font-medium";
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${cfg.bg}`}
+      className={`inline-flex items-center gap-1.5 rounded-full ${cls} ${cfg.bg}`}
     >
-      <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot}`} />
+      <span
+        className={`rounded-full ${cfg.dot} ${size === "lg" ? "h-2 w-2" : "h-1.5 w-1.5"}`}
+      />
       {cfg.label}
     </span>
   );
 }
 
-// --- Component ---
+function overallStatus(envs: ServiceEnv[]): string {
+  if (envs.length === 0) return "not_deployed";
+  const statuses = envs.map((e) => e.runtime.status);
+  if (statuses.every((s) => s === "healthy")) return "healthy";
+  if (statuses.some((s) => s === "degraded")) return "degraded";
+  if (statuses.some((s) => s === "progressing")) return "progressing";
+  if (statuses.every((s) => s === "not_deployed")) return "not_deployed";
+  return "degraded";
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatImage(image?: string): { short: string; tag: string } {
+  if (!image) return { short: "—", tag: "" };
+  const colonIdx = image.lastIndexOf(":");
+  const repo = colonIdx > 0 ? image.slice(0, colonIdx) : image;
+  const tag = colonIdx > 0 ? image.slice(colonIdx + 1) : "latest";
+  const shortRepo = repo.split("/").pop() ?? repo;
+  return { short: shortRepo, tag };
+}
+
+function formatTime(iso?: string): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function allIngressUrls(envs: ServiceEnv[]): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const env of envs) {
+    for (const url of env.runtime.ingressUrls) {
+      if (!seen.has(url)) {
+        seen.add(url);
+        urls.push(url);
+      }
+    }
+  }
+  return urls;
+}
+
+function latestImage(envs: ServiceEnv[]): RuntimeInfo | undefined {
+  for (const env of envs) {
+    if (env.runtime.image) return env.runtime;
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// SVG Icons
+// ---------------------------------------------------------------------------
+
+const icons = {
+  externalLink: (
+    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+    </svg>
+  ),
+  rocket: (
+    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.59 14.37a6 6 0 0 1-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 0 0 6.16-12.12A14.98 14.98 0 0 0 9.631 8.41m5.96 5.96a14.926 14.926 0 0 1-5.841 2.58m-.119-8.54a6 6 0 0 0-7.381 5.84h4.8m2.581-5.84a14.927 14.927 0 0 0-2.58 5.84m2.699 2.7c-.103.021-.207.041-.311.06a15.09 15.09 0 0 1-2.448-2.448 14.9 14.9 0 0 1 .06-.312m-2.24 2.39a4.493 4.493 0 0 0-1.757 4.306 4.493 4.493 0 0 0 4.306-1.758M16.5 9a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z" />
+    </svg>
+  ),
+  arrowUp: (
+    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 4.5h14.25M3 9h9.75M3 13.5h5.25m5.25-.75L17.25 9m0 0L21 12.75M17.25 9v12" />
+    </svg>
+  ),
+  terminal: (
+    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="m6.75 7.5 3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" />
+    </svg>
+  ),
+  branch: (
+    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.185 2.25 2.25 0 0 0-3.933 2.185Z" />
+    </svg>
+  ),
+  lock: (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+    </svg>
+  ),
+  clock: (
+    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+    </svg>
+  ),
+};
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export function ServiceDetail() {
   const { project, service } = useParams<{
@@ -99,13 +211,17 @@ export function ServiceDetail() {
 
   if (!data) return null;
 
+  const status = overallStatus(data.environments);
+  const current = latestImage(data.environments);
+  const img = formatImage(current?.image);
+  const urls = allIngressUrls(data.environments);
+  const primaryUrl = urls[0];
+
   return (
     <div className="space-y-6">
       {/* Breadcrumb */}
       <nav className="flex items-center gap-1.5 text-sm text-gray-400">
-        <Link to="/" className="hover:text-gray-600">
-          Dashboard
-        </Link>
+        <Link to="/" className="hover:text-gray-600">Dashboard</Link>
         <span>/</span>
         <Link to={`/projects/${project}`} className="hover:text-gray-600">
           {project}
@@ -114,39 +230,166 @@ export function ServiceDetail() {
         <span className="text-gray-600">{service}</span>
       </nav>
 
-      {/* Header */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-900">{data.name}</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Template:{" "}
+      {/* ---- Header + Actions ---- */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-3">
+            <h1 className="truncate text-2xl font-semibold text-gray-900">
+              {data.name}
+            </h1>
+            <StatusBadge status={status} size="lg" />
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-500">
             <Link
               to={`/templates/${data.template.name}`}
-              className="font-mono text-gray-600 hover:text-gray-900"
+              className="inline-flex items-center gap-1 font-mono text-gray-600 hover:text-gray-900"
             >
               {data.template.name}
+              {data.template.version && (
+                <span className="text-gray-400">v{data.template.version}</span>
+              )}
             </Link>
-            {data.template.version && (
-              <span className="text-gray-400">
-                {" "}
-                v{data.template.version}
+            {current?.image && (
+              <span className="inline-flex items-center gap-1 font-mono">
+                {img.short}
+                {img.tag && (
+                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">
+                    {img.tag}
+                  </span>
+                )}
               </span>
             )}
-          </p>
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="flex flex-shrink-0 flex-wrap gap-2">
+          {primaryUrl && (
+            <a
+              href={primaryUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
+            >
+              {icons.externalLink}
+              Open app
+            </a>
+          )}
+          <button
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
+            title="View logs (coming soon)"
+          >
+            {icons.terminal}
+            Logs
+          </button>
+          <button
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
+            title="Create preview environment (coming soon)"
+          >
+            {icons.branch}
+            Preview
+          </button>
+          <button
+            className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-700"
+            title="Promote to next environment (coming soon)"
+          >
+            {icons.arrowUp}
+            Promote
+          </button>
         </div>
       </div>
 
-      {/* Config */}
+      {/* ---- Quick stats row ---- */}
+      <div className="grid gap-4 sm:grid-cols-4">
+        <QuickStat label="Environments" value={String(data.environments.length)} />
+        <QuickStat
+          label="Replicas"
+          value={
+            current
+              ? `${current.available}/${current.replicas}`
+              : "—"
+          }
+        />
+        <QuickStat label="Image tag" value={img.tag || "—"} mono />
+        <QuickStat
+          label="Last deployed"
+          value={
+            current?.lastDeployed
+              ? formatTime(current.lastDeployed)
+              : "—"
+          }
+        />
+      </div>
+
+      {/* ---- URLs ---- */}
+      {urls.length > 0 && (
+        <div className="rounded-xl border border-gray-200 bg-white">
+          <div className="border-b border-gray-100 px-5 py-3">
+            <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+              Endpoints
+            </h2>
+          </div>
+          <div className="divide-y divide-gray-50">
+            {urls.map((url) => (
+              <div
+                key={url}
+                className="flex items-center justify-between px-5 py-2.5"
+              >
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-blue-600 hover:text-blue-800 hover:underline"
+                >
+                  {url}
+                </a>
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  {icons.externalLink}
+                </a>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ---- Environments ---- */}
+      <div className="rounded-xl border border-gray-200 bg-white">
+        <div className="border-b border-gray-100 px-5 py-3">
+          <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+            Environments
+          </h2>
+        </div>
+        {data.environments.length === 0 ? (
+          <div className="px-5 py-10 text-center">
+            <p className="text-sm text-gray-400">
+              No environments configured for this project.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-px bg-gray-100 sm:grid-cols-2 lg:grid-cols-3">
+            {data.environments.map((env) => (
+              <EnvCard key={env.environment} env={env} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ---- Configuration ---- */}
       {Object.keys(data.values).length > 0 && (
         <div className="rounded-xl border border-gray-200 bg-white">
-          <div className="border-b border-gray-100 px-5 py-3.5">
-            <h2 className="text-sm font-medium text-gray-500">
+          <div className="border-b border-gray-100 px-5 py-3">
+            <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
               Configuration
             </h2>
           </div>
-          <dl className="divide-y divide-gray-50 px-5">
+          <dl className="divide-y divide-gray-50">
             {Object.entries(data.values).map(([key, val]) => (
-              <div key={key} className="flex justify-between py-2.5">
+              <div key={key} className="flex items-center justify-between px-5 py-2.5">
                 <dt className="font-mono text-sm text-gray-500">{key}</dt>
                 <dd className="text-sm text-gray-900">{String(val)}</dd>
               </div>
@@ -155,32 +398,20 @@ export function ServiceDetail() {
         </div>
       )}
 
-      {/* Secret refs */}
+      {/* ---- Secrets ---- */}
       {data.secretRefs.length > 0 && (
         <div className="rounded-xl border border-gray-200 bg-white">
-          <div className="border-b border-gray-100 px-5 py-3.5">
-            <h2 className="text-sm font-medium text-gray-500">
-              Secret References
+          <div className="border-b border-gray-100 px-5 py-3">
+            <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+              Secrets
             </h2>
           </div>
-          <dl className="divide-y divide-gray-50 px-5">
+          <dl className="divide-y divide-gray-50">
             {data.secretRefs.map((ref) => (
-              <div key={ref.name} className="flex justify-between py-2.5">
+              <div key={ref.name} className="flex items-center justify-between px-5 py-2.5">
                 <dt className="font-mono text-sm text-gray-500">{ref.name}</dt>
-                <dd className="flex items-center gap-1.5 text-sm text-gray-900">
-                  <svg
-                    className="h-3.5 w-3.5 text-gray-400"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"
-                    />
-                  </svg>
+                <dd className="flex items-center gap-1.5 text-sm text-gray-600">
+                  {icons.lock}
                   <span className="font-mono">{ref.secretRef}</span>
                 </dd>
               </div>
@@ -189,125 +420,147 @@ export function ServiceDetail() {
         </div>
       )}
 
-      {/* Environments */}
+      {/* ---- Deployment History (placeholder) ---- */}
       <div className="rounded-xl border border-gray-200 bg-white">
-        <div className="border-b border-gray-100 px-5 py-3.5">
-          <h2 className="text-sm font-medium text-gray-500">
-            Environments
+        <div className="border-b border-gray-100 px-5 py-3">
+          <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+            Deployment history
           </h2>
         </div>
-        {data.environments.length === 0 ? (
-          <div className="px-5 py-10 text-center">
-            <p className="text-sm text-gray-400">
-              No environments configured.
-            </p>
+        <div className="px-5 py-10 text-center">
+          <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
+            {icons.clock}
           </div>
-        ) : (
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-400">
-                <th className="px-5 py-2.5">Environment</th>
-                <th className="px-5 py-2.5">Status</th>
-                <th className="px-5 py-2.5">Image</th>
-                <th className="px-5 py-2.5">Replicas</th>
-                <th className="px-5 py-2.5">Namespace</th>
-                <th className="px-5 py-2.5">URLs</th>
-                <th className="px-5 py-2.5">Last deployed</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {data.environments.map((env) => {
-                const rt = env.runtime;
-                const imageShort = rt.image
-                  ? rt.image.replace(/^[^/]*\/[^/]*\//, "")
-                  : "—";
-                const deployed = rt.lastDeployed
-                  ? new Date(rt.lastDeployed).toLocaleDateString(undefined, {
-                      month: "short",
-                      day: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })
-                  : "—";
-
-                return (
-                  <tr key={env.environment} className="hover:bg-gray-50">
-                    <td className="px-5 py-3 text-sm font-medium text-gray-900">
-                      {env.environment}
-                    </td>
-                    <td className="px-5 py-3">
-                      <StatusBadge status={rt.status} />
-                    </td>
-                    <td className="px-5 py-3">
-                      <span
-                        className="font-mono text-xs text-gray-500"
-                        title={rt.image}
-                      >
-                        {imageShort}
-                      </span>
-                    </td>
-                    <td className="px-5 py-3 text-sm text-gray-600">
-                      {rt.status === "not_deployed" ? (
-                        "—"
-                      ) : (
-                        <span>
-                          {rt.available}
-                          <span className="text-gray-400">
-                            /{rt.replicas}
-                          </span>
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-5 py-3">
-                      <span className="font-mono text-xs text-gray-500">
-                        {env.namespace}
-                      </span>
-                    </td>
-                    <td className="px-5 py-3">
-                      {rt.ingressUrls.length > 0 ? (
-                        <div className="flex flex-col gap-0.5">
-                          {rt.ingressUrls.map((url) => (
-                            <a
-                              key={url}
-                              href={url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
-                            >
-                              {url.replace(/^https?:\/\//, "")}
-                            </a>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-xs text-gray-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-5 py-3 text-xs text-gray-500">
-                      {deployed}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+          <p className="text-sm font-medium text-gray-500">
+            No deployment history available yet
+          </p>
+          <p className="mt-1 text-xs text-gray-400">
+            History will appear here once promotions are tracked via ArgoCD.
+          </p>
+        </div>
       </div>
     </div>
   );
 }
 
-// --- Skeleton ---
+// ---------------------------------------------------------------------------
+// Subcomponents
+// ---------------------------------------------------------------------------
+
+function QuickStat({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white px-4 py-3">
+      <p className="text-xs text-gray-400">{label}</p>
+      <p
+        className={`mt-0.5 text-lg font-semibold text-gray-900 ${mono ? "font-mono" : ""}`}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function EnvCard({ env }: { env: ServiceEnv }) {
+  const rt = env.runtime;
+  const img = formatImage(rt.image);
+  const deployed = formatTime(rt.lastDeployed);
+
+  return (
+    <div className="bg-white p-5">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-semibold capitalize text-gray-900">
+          {env.environment}
+        </span>
+        <StatusBadge status={rt.status} />
+      </div>
+
+      <dl className="mt-3 space-y-1.5 text-xs">
+        <div className="flex justify-between">
+          <dt className="text-gray-400">Image</dt>
+          <dd className="font-mono text-gray-600" title={rt.image}>
+            {img.short}
+            {img.tag && (
+              <span className="ml-1 rounded bg-gray-100 px-1 py-0.5 text-gray-500">
+                {img.tag}
+              </span>
+            )}
+          </dd>
+        </div>
+        {rt.status !== "not_deployed" && (
+          <div className="flex justify-between">
+            <dt className="text-gray-400">Instances</dt>
+            <dd className="text-gray-600">
+              {rt.available}
+              <span className="text-gray-400">/{rt.replicas}</span>
+            </dd>
+          </div>
+        )}
+        <div className="flex justify-between">
+          <dt className="text-gray-400">Namespace</dt>
+          <dd className="font-mono text-gray-600">{env.namespace}</dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-gray-400">Deployed</dt>
+          <dd className="text-gray-600">{deployed}</dd>
+        </div>
+      </dl>
+
+      {rt.ingressUrls.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {rt.ingressUrls.map((url) => (
+            <a
+              key={url}
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs text-blue-600 transition-colors hover:border-blue-300 hover:bg-blue-50"
+            >
+              {url.replace(/^https?:\/\//, "")}
+              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+              </svg>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Skeleton
+// ---------------------------------------------------------------------------
 
 function DetailSkeleton() {
   return (
     <div className="space-y-6">
       <div className="h-4 w-40 animate-pulse rounded bg-gray-100" />
-      <div className="space-y-2">
-        <div className="h-8 w-48 animate-pulse rounded bg-gray-100" />
-        <div className="h-5 w-64 animate-pulse rounded bg-gray-50" />
+      <div className="flex items-start justify-between">
+        <div className="space-y-2">
+          <div className="h-8 w-56 animate-pulse rounded bg-gray-100" />
+          <div className="h-5 w-72 animate-pulse rounded bg-gray-50" />
+        </div>
+        <div className="flex gap-2">
+          {[1, 2, 3, 4].map((n) => (
+            <div key={n} className="h-9 w-24 animate-pulse rounded-lg bg-gray-100" />
+          ))}
+        </div>
       </div>
+      <div className="grid gap-4 sm:grid-cols-4">
+        {[1, 2, 3, 4].map((n) => (
+          <div key={n} className="h-16 animate-pulse rounded-xl bg-gray-50" />
+        ))}
+      </div>
+      <div className="h-40 animate-pulse rounded-xl bg-gray-50" />
       <div className="h-32 animate-pulse rounded-xl bg-gray-50" />
-      <div className="h-48 animate-pulse rounded-xl bg-gray-50" />
     </div>
   );
 }
