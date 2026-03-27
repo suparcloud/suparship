@@ -52,7 +52,7 @@ func New(cfg Config) *Server {
 		cfg.Logger.Info("auth endpoints enabled")
 	}
 
-	if len(cfg.Templates) > 0 && ah != nil {
+	if ah != nil {
 		th := newTemplateHandler(ah, cfg.Templates)
 		th.registerRoutes(mux)
 		cfg.Logger.Info("template endpoints enabled", "count", len(cfg.Templates))
