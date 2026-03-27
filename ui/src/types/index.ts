@@ -109,6 +109,18 @@ export interface TemplateDetail {
   presets: TemplatePreset[];
 }
 
+// --- Onboarding types ---
+
+export interface OnboardingStatus {
+  clusterConnected: boolean;
+  authConfigured: boolean;
+  orgExists: boolean;
+  hasProjects: boolean;
+  hasEnvironments: boolean;
+  hasServices: boolean;
+  complete: boolean;
+}
+
 // --- Inventory / Runtime types ---
 
 export interface EnvironmentInfo {
