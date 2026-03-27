@@ -68,3 +68,23 @@ SREs define:
 
 ```bash
 curl -fsSL https://suparcloud.io/install/suparship.sh | sh
+```
+
+---
+
+## Running the API Server
+
+Start the built-in HTTP server:
+
+```bash
+suparship server              # listens on :8080
+suparship server --addr :9090 # custom address
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/healthz` | Liveness probe — returns `ok` |
+| GET | `/readyz` | Readiness probe — returns `ok` |
+| GET | `/api/v1/meta` | JSON build metadata (app, version, commit, date) |
