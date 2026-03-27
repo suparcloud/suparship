@@ -78,6 +78,13 @@ func New(cfg Config) *Server {
 		cfg.Logger.Info("RBAC-protected routes enabled")
 	}
 
+	oh := &onboardingHandler{
+		orgProvider:  cfg.OrgProvider,
+		projectStore: cfg.ProjectStore,
+		authEnabled:  cfg.Authenticator != nil,
+	}
+	mux.HandleFunc("GET /api/v1/onboarding/status", oh.handleStatus)
+
 	if cfg.UIDir != "" {
 		mux.Handle("/", spaHandler(cfg.UIDir))
 		cfg.Logger.Info("serving frontend", "dir", cfg.UIDir)

@@ -98,6 +98,7 @@ suparship server --addr :9090 # custom address
 | GET | `/healthz` | — | Liveness probe — returns `ok` |
 | GET | `/readyz` | — | Readiness probe — returns `ok` |
 | GET | `/api/v1/meta` | — | JSON build metadata (app, version, commit, date) |
+| GET | `/api/v1/onboarding/status` | — | Onboarding checklist (auth, org, projects, envs, services) |
 | POST | `/api/v1/auth/login` | — | Authenticate with username/password, returns session cookie |
 | POST | `/api/v1/auth/logout` | — | Destroy session and clear cookie |
 | GET | `/api/v1/auth/me` | session | Return current user identity and role |
