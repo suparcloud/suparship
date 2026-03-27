@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/server"
 )
 
@@ -59,11 +61,21 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	var authenticator auth.Authenticator
+	var orgProvider rbac.OrgProvider
 	client, err := k8s.NewClientset(kubeconfig, kubecontext)
 	if err != nil {
-		logger.Warn("kubernetes not available, auth endpoints disabled", "error", err)
+		logger.Warn("kubernetes not available, auth and RBAC endpoints disabled", "error", err)
 	} else {
 		authenticator = auth.NewK8sAuthenticator(client)
+
+		adminUser := "admin"
+		creds, err := auth.GetAdminSecret(context.Background(), client)
+		if err == nil && creds != nil {
+			adminUser = creds.Username
+		}
+
+		fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
+		orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
 	}
 
 	srv := server.New(server.Config{
@@ -71,6 +83,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		UIDir:         uiDir,
 		CORSOrigins:   origins,
 		Authenticator: authenticator,
+		OrgProvider:   orgProvider,
 		CookieSecure:  cookieSecure,
 		Logger:        logger,
 	})
