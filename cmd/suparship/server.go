@@ -13,6 +13,7 @@ import (
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -95,20 +96,23 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	var projectStore project.Store
+	var runtimeProvider runtime.Provider
 	if client != nil {
 		projectStore = project.NewK8sStore(client)
+		runtimeProvider = runtime.NewK8sProvider(client)
 	}
 
 	srv := server.New(server.Config{
-		Addr:          addr,
-		UIDir:         uiDir,
-		CORSOrigins:   origins,
-		Authenticator: authenticator,
-		OrgProvider:   orgProvider,
-		Templates:     templates,
-		ProjectStore:  projectStore,
-		CookieSecure:  cookieSecure,
-		Logger:        logger,
+		Addr:            addr,
+		UIDir:           uiDir,
+		CORSOrigins:     origins,
+		Authenticator:   authenticator,
+		OrgProvider:     orgProvider,
+		Templates:       templates,
+		ProjectStore:    projectStore,
+		RuntimeProvider: runtimeProvider,
+		CookieSecure:    cookieSecure,
+		Logger:          logger,
 	})
 
 	return srv.Run(cmd.Context())

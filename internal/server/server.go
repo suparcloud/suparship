@@ -13,6 +13,7 @@ import (
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -26,9 +27,10 @@ type Config struct {
 	CORSOrigins   []string            // optional: allowed CORS origins
 	Authenticator auth.Authenticator  // optional: enables auth endpoints when set
 	OrgProvider   rbac.OrgProvider    // optional: enables RBAC-protected routes when set
-	Templates     []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
-	ProjectStore  project.Store       // optional: enables service creation when set
-	CookieSecure  bool                // true for production (HTTPS)
+	Templates       []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
+	ProjectStore    project.Store       // optional: enables service creation when set
+	RuntimeProvider runtime.Provider    // optional: enables runtime inventory when set
+	CookieSecure    bool                // true for production (HTTPS)
 	Logger        *slog.Logger
 }
 
@@ -68,6 +70,9 @@ func New(cfg Config) *Server {
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
 			cfg.Logger.Info("service creation endpoint enabled")
+
+			rh.inventoryHandler = newInventoryHandler(cfg.ProjectStore, cfg.RuntimeProvider)
+			cfg.Logger.Info("inventory endpoints enabled")
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")

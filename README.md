@@ -108,6 +108,9 @@ suparship server --addr :9090 # custom address
 | GET | `/api/v1/projects/{project}/rbac` | viewer | List role bindings for a project |
 | PUT | `/api/v1/projects/{project}` | project_admin | Update project (placeholder) |
 | POST | `/api/v1/projects/{project}/services` | developer | Create service from template |
+| GET | `/api/v1/environments` | session | List all environments across projects |
+| GET | `/api/v1/projects/{project}/services` | viewer | List services with runtime state |
+| GET | `/api/v1/projects/{project}/services/{service}` | viewer | Service detail with per-env runtime state |
 | POST | `/api/v1/projects/{project}/previews` | developer | Create preview (placeholder) |
 | POST | `/api/v1/projects/{project}/services/{service}/promote` | developer | Promote service (placeholder) |
 | GET | `/api/v1/templates` | session | List all available templates |
@@ -275,6 +278,19 @@ spec:
 | `values` | no | Input values matching template inputs |
 | `secretRefs` | no | Secret references (name → K8s secret.key) |
 | `environmentOverrides` | no | Per-environment value and secret overrides |
+
+### Runtime inventory
+
+The inventory endpoints (`GET /api/v1/projects/{project}/services` and
+`GET .../services/{service}`) merge desired config from the project store
+with live state from Kubernetes Deployments and Ingresses.
+
+**Namespace convention**: each environment maps to `{project}-{environment}`,
+e.g. project `myapi` with environment `dev` → namespace `myapi-dev`.
+
+If the Kubernetes API is unreachable or a Deployment does not exist, the
+runtime status degrades gracefully to `not_deployed` without returning an
+error.
 
 ---
 
