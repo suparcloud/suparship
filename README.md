@@ -148,6 +148,56 @@ stringData:
 
 ---
 
+## Authorization Model
+
+suparShip uses a single-org RBAC model. The org configuration is stored in a
+Kubernetes ConfigMap (`suparship-system/suparship-org-config`).
+
+### Roles (highest → lowest privilege)
+
+| Role | Description |
+|------|-------------|
+| `org_admin` | Full access to all projects and settings |
+| `project_admin` | Full access within assigned projects |
+| `developer` | Deploy and manage services in assigned projects |
+| `viewer` | Read-only access to assigned projects |
+
+Higher roles implicitly satisfy lower role requirements.
+
+### Data structure
+
+```yaml
+# ConfigMap: suparship-system/suparship-org-config
+# Key: org.yaml
+name: default
+displayName: My Organization
+createdAt: "2026-03-27T00:00:00Z"
+teams:
+  - name: admins
+    displayName: Administrators
+    members: [admin]
+  - name: backend
+    displayName: Backend Team
+    members: [alice, bob]
+roleBindings:
+  - project: "*"        # wildcard = all projects
+    team: admins
+    role: org_admin
+  - project: api
+    team: backend
+    role: developer
+```
+
+### Role resolution
+
+For a given user and project:
+
+1. Find all teams the user belongs to.
+2. Collect role bindings that match the project (exact match or wildcard `*`).
+3. Return the highest-privilege role across all matching bindings.
+
+---
+
 ## Development
 
 ### Prerequisites
