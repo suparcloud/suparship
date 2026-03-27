@@ -99,6 +99,47 @@ suparship server --addr :9090 # custom address
 
 ---
 
+## Admin Auth
+
+suparShip uses a single bootstrap admin account stored as a Kubernetes Secret
+in the `suparship-system` namespace.
+
+### Bootstrap the admin user
+
+```bash
+suparship admin bootstrap                  # username defaults to "admin"
+suparship admin bootstrap --username ops   # custom username
+suparship admin bootstrap --force          # overwrite existing credentials
+```
+
+The generated password is printed once — save it immediately.
+
+### Reset the admin password
+
+```bash
+suparship admin reset-password
+```
+
+The username is preserved; only the password is regenerated.
+
+### Secret layout
+
+The credentials are stored in `suparship-system/suparship-admin-auth`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: suparship-admin-auth
+  namespace: suparship-system
+type: Opaque
+stringData:
+  username: admin
+  password-hash: $2a$12$...   # bcrypt hash — never plaintext
+```
+
+---
+
 ## Development
 
 ### Prerequisites

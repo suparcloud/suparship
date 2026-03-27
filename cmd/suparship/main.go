@@ -41,4 +41,7 @@ func init() {
 		"suparship %s (commit: %s, built: %s)\n",
 		version.Version, version.Commit, version.Date,
 	))
+
+	rootCmd.PersistentFlags().String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
+	rootCmd.PersistentFlags().String("context", "", "kubernetes context to use (default: current-context)")
 }
