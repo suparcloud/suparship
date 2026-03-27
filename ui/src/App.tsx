@@ -9,6 +9,7 @@ import { Login } from "./pages/Login";
 import { Onboarding } from "./pages/Onboarding";
 import { OrgSettings } from "./pages/OrgSettings";
 import { Previews } from "./pages/Previews";
+import { ProjectDetail } from "./pages/ProjectDetail";
 import { NewService } from "./pages/NewService";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { TeamSettings } from "./pages/TeamSettings";
@@ -26,6 +27,10 @@ export function App() {
             <Route path="/onboarding" element={<Onboarding />} />
             <Route element={<AppShell />}>
               <Route index element={<Dashboard />} />
+              <Route
+                path="/projects/:project"
+                element={<ProjectDetail />}
+              />
               <Route
                 path="/projects/:project/services/new"
                 element={<NewService />}

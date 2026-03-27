@@ -1,5 +1,32 @@
 import { api } from "./api";
-import type { CreateServiceRequest, CreateServiceResponse } from "../types";
+import type {
+  CreateServiceRequest,
+  CreateServiceResponse,
+  EnvironmentsResponse,
+  ProjectServicesResponse,
+  ServiceDetailInfo,
+} from "../types";
+
+export function fetchEnvironments(): Promise<EnvironmentsResponse> {
+  return api.get<EnvironmentsResponse>("/environments");
+}
+
+export function fetchProjectServices(
+  project: string,
+): Promise<ProjectServicesResponse> {
+  return api.get<ProjectServicesResponse>(
+    `/projects/${encodeURIComponent(project)}/services`,
+  );
+}
+
+export function fetchServiceDetail(
+  project: string,
+  service: string,
+): Promise<ServiceDetailInfo> {
+  return api.get<ServiceDetailInfo>(
+    `/projects/${encodeURIComponent(project)}/services/${encodeURIComponent(service)}`,
+  );
+}
 
 export function createService(
   project: string,

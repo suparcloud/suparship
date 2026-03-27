@@ -109,6 +109,58 @@ export interface TemplateDetail {
   presets: TemplatePreset[];
 }
 
+// --- Inventory / Runtime types ---
+
+export interface EnvironmentInfo {
+  name: string;
+  displayName?: string;
+  project: string;
+  namespace: string;
+  order: number;
+}
+
+export interface EnvironmentsResponse {
+  environments: EnvironmentInfo[];
+}
+
+export interface RuntimeInfo {
+  status: string;
+  image?: string;
+  replicas: number;
+  available: number;
+  ingressUrls: string[];
+  namespace: string;
+  lastDeployed?: string;
+}
+
+export interface ServiceRuntime {
+  name: string;
+  template: { name: string; version?: string };
+  runtime: RuntimeInfo;
+}
+
+export interface ProjectServicesResponse {
+  project: string;
+  services: ServiceRuntime[];
+}
+
+export interface ServiceEnv {
+  environment: string;
+  namespace: string;
+  runtime: RuntimeInfo;
+}
+
+export interface ServiceDetailInfo {
+  name: string;
+  project: string;
+  template: { name: string; version?: string };
+  values: Record<string, unknown>;
+  secretRefs: SecretRefInput[];
+  environments: ServiceEnv[];
+}
+
+// --- Service creation types ---
+
 export interface CreateServiceRequest {
   name: string;
   template: string;
