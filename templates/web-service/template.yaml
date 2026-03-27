@@ -1,0 +1,136 @@
+# suparShip Template: web-service
+#
+# A general-purpose template for deploying containerized HTTP services
+# to Kubernetes. Includes Deployment, Service, optional Ingress, and
+# optional HPA. Designed to cover 80% of web service deployments with
+# minimal configuration.
+#
+# Engine: Helm
+# Chart:  ./chart
+
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata:
+  name: web-service
+  version: "1.0.0"
+spec:
+  title: Web Service
+  description: >-
+    Deploy a containerized web service with a Service, optional Ingress,
+    and optional horizontal autoscaling. Suitable for APIs, frontends,
+    and general HTTP workloads.
+  category: web
+  engine:
+    type: helm
+    chart: ./chart
+
+  inputs:
+    - name: service_name
+      title: Service Name
+      type: string
+      required: true
+      description: >-
+        Name for this service. Used in Kubernetes resource names,
+        labels, and selectors. Must be DNS-compatible.
+      pattern: "^[a-z][a-z0-9-]{0,61}[a-z0-9]$"
+
+    - name: image_repository
+      title: Image Repository
+      type: string
+      required: true
+      description: >-
+        Container image repository, e.g. ghcr.io/org/app or nginx.
+
+    - name: image_tag
+      title: Image Tag
+      type: string
+      default: "latest"
+      description: >-
+        Container image tag. Pin to a specific version or SHA for
+        production deployments.
+
+    - name: port
+      title: Container Port
+      type: number
+      default: 8080
+      min: 1
+      max: 65535
+      description: >-
+        TCP port the container listens on.
+
+    - name: ingress_enabled
+      title: Enable Ingress
+      type: boolean
+      default: false
+      description: >-
+        Expose the service externally via an Ingress resource.
+
+    - name: size
+      title: Resource Size
+      type: enum
+      options:
+        - small
+        - medium
+        - large
+      default: small
+      description: >-
+        Resource profile for CPU and memory limits.
+        small: 250m CPU / 256Mi — development and low traffic.
+        medium: 500m CPU / 512Mi — moderate production workloads.
+        large: 1 CPU / 1Gi — high-throughput services.
+
+    - name: health_path
+      title: Health Check Path
+      type: string
+      default: "/healthz"
+      description: >-
+        HTTP path for liveness and readiness probes.
+
+  advancedInputs:
+    - name: replicas
+      title: Replica Count
+      type: number
+      default: 2
+      min: 1
+      max: 20
+      description: >-
+        Number of pod replicas. Ignored when autoscaling is enabled.
+
+  secretInputs:
+    - name: database_url
+      title: Database URL
+      description: >-
+        Connection string for the primary database. Injected as an
+        environment variable from a Kubernetes Secret.
+      secretRef: db-credentials.url
+
+  mappings:
+    fullnameOverride: "{{ .inputs.service_name }}"
+    image.repository: "{{ .inputs.image_repository }}"
+    image.tag: "{{ .inputs.image_tag }}"
+    replicaCount: "{{ .inputs.replicas }}"
+    port: "{{ .inputs.port }}"
+    ingress.enabled: "{{ .inputs.ingress_enabled }}"
+    healthCheck.path: "{{ .inputs.health_path }}"
+    size: "{{ .inputs.size }}"
+
+  presets:
+    - name: starter
+      title: Starter
+      description: >-
+        Minimal footprint for development and experimentation.
+        Single replica, small resources, no ingress.
+      values:
+        replicas: 1
+        size: small
+        ingress_enabled: false
+
+    - name: production
+      title: Production
+      description: >-
+        Production-ready defaults with multiple replicas, larger
+        resources, and external ingress enabled.
+      values:
+        replicas: 3
+        size: large
+        ingress_enabled: true

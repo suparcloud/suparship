@@ -2,6 +2,7 @@ import { NavLink } from "react-router-dom";
 
 const mainNav = [
   { to: "/", label: "Dashboard" },
+  { to: "/templates", label: "Templates" },
   { to: "/previews", label: "Previews" },
 ];
 

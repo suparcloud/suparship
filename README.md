@@ -88,6 +88,7 @@ suparship server --addr :9090 # custom address
 | `--addr` | `SUPARSHIP_ADDR` | `:8080` | Listen address |
 | `--ui-dir` | `SUPARSHIP_UI_DIR` | | Path to built frontend assets |
 | `--cors-origins` | `SUPARSHIP_CORS_ORIGINS` | | Comma-separated allowed origins |
+| `--templates-dir` | `SUPARSHIP_TEMPLATES_DIR` | | Path to templates directory |
 | `--cookie-secure` | `SUPARSHIP_COOKIE_SECURE` | `false` | Set `Secure` flag on session cookies (enable behind HTTPS) |
 
 ### Endpoints
@@ -108,6 +109,8 @@ suparship server --addr :9090 # custom address
 | PUT | `/api/v1/projects/{project}` | project_admin | Update project (placeholder) |
 | POST | `/api/v1/projects/{project}/previews` | developer | Create preview (placeholder) |
 | POST | `/api/v1/projects/{project}/services/{service}/promote` | developer | Promote service (placeholder) |
+| GET | `/api/v1/templates` | session | List all available templates |
+| GET | `/api/v1/templates/{name}` | session | Get full template detail for form generation |
 
 Auth endpoints are enabled automatically when a Kubernetes cluster is
 reachable (they validate against the `suparship-admin-auth` Secret).

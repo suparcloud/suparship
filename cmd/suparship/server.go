@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/server"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 var serverCmd = &cobra.Command{
@@ -29,6 +31,7 @@ Environment variables:
   SUPARSHIP_ADDR           listen address (default ":8080")
   SUPARSHIP_UI_DIR         path to frontend dist directory
   SUPARSHIP_CORS_ORIGINS   comma-separated allowed origins
+  SUPARSHIP_TEMPLATES_DIR  path to templates directory
   SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments`,
 	RunE: runServer,
 }
@@ -37,6 +40,7 @@ func init() {
 	serverCmd.Flags().String("addr", envOr("SUPARSHIP_ADDR", ":8080"), "listen address (host:port)")
 	serverCmd.Flags().String("ui-dir", envOr("SUPARSHIP_UI_DIR", ""), "path to frontend static files")
 	serverCmd.Flags().String("cors-origins", envOr("SUPARSHIP_CORS_ORIGINS", ""), "comma-separated allowed CORS origins")
+	serverCmd.Flags().String("templates-dir", envOr("SUPARSHIP_TEMPLATES_DIR", ""), "path to templates directory")
 	serverCmd.Flags().Bool("cookie-secure", envOr("SUPARSHIP_COOKIE_SECURE", "false") == "true", "set Secure flag on session cookies (enable behind HTTPS)")
 	rootCmd.AddCommand(serverCmd)
 }
@@ -45,6 +49,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	addr, _ := cmd.Flags().GetString("addr")
 	uiDir, _ := cmd.Flags().GetString("ui-dir")
 	corsRaw, _ := cmd.Flags().GetString("cors-origins")
+	templatesDir, _ := cmd.Flags().GetString("templates-dir")
 	cookieSecure, _ := cmd.Flags().GetBool("cookie-secure")
 	kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
 	kubecontext, _ := cmd.Root().PersistentFlags().GetString("context")
@@ -78,12 +83,23 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
 	}
 
+	var templates []*tpl.Template
+	if templatesDir != "" {
+		loaded, err := tpl.LoadDir(templatesDir)
+		if err != nil {
+			return fmt.Errorf("loading templates from %s: %w", templatesDir, err)
+		}
+		templates = loaded
+		logger.Info("templates loaded", "dir", templatesDir, "count", len(templates))
+	}
+
 	srv := server.New(server.Config{
 		Addr:          addr,
 		UIDir:         uiDir,
 		CORSOrigins:   origins,
 		Authenticator: authenticator,
 		OrgProvider:   orgProvider,
+		Templates:     templates,
 		CookieSecure:  cookieSecure,
 		Logger:        logger,
 	})

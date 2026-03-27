@@ -13,6 +13,7 @@ import (
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/session"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -24,6 +25,7 @@ type Config struct {
 	CORSOrigins   []string            // optional: allowed CORS origins
 	Authenticator auth.Authenticator  // optional: enables auth endpoints when set
 	OrgProvider   rbac.OrgProvider    // optional: enables RBAC-protected routes when set
+	Templates     []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
 	CookieSecure  bool                // true for production (HTTPS)
 	Logger        *slog.Logger
 }
@@ -48,6 +50,12 @@ func New(cfg Config) *Server {
 		}
 		ah.registerRoutes(mux)
 		cfg.Logger.Info("auth endpoints enabled")
+	}
+
+	if ah != nil {
+		th := newTemplateHandler(ah, cfg.Templates)
+		th.registerRoutes(mux)
+		cfg.Logger.Info("template endpoints enabled", "count", len(cfg.Templates))
 	}
 
 	if cfg.OrgProvider != nil && ah != nil {

@@ -11,6 +11,8 @@ import { OrgSettings } from "./pages/OrgSettings";
 import { Previews } from "./pages/Previews";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { TeamSettings } from "./pages/TeamSettings";
+import { TemplateDetail } from "./pages/TemplateDetail";
+import { Templates } from "./pages/Templates";
 
 export function App() {
   return (
@@ -27,6 +29,8 @@ export function App() {
                 path="/projects/:project/services/:service"
                 element={<ServiceDetail />}
               />
+              <Route path="/templates" element={<Templates />} />
+              <Route path="/templates/:name" element={<TemplateDetail />} />
               <Route path="/previews" element={<Previews />} />
               <Route path="/settings/org" element={<OrgSettings />} />
               <Route path="/settings/teams" element={<TeamSettings />} />

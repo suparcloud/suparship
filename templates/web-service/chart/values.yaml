@@ -1,0 +1,58 @@
+# Default values for the web-service template chart.
+#
+# These values are overridden by suparship template inputs via the
+# mappings defined in template.yaml. You can also use this chart
+# standalone with `helm install`.
+
+# -- Override the generated resource name.
+fullnameOverride: ""
+
+# -- Container image settings.
+image:
+  repository: nginx
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# -- Number of pod replicas. Ignored when autoscaling.enabled is true.
+replicaCount: 2
+
+# -- TCP port the container listens on.
+port: 8080
+
+# -- Resource size preset: small, medium, or large.
+# Maps to CPU/memory limits in the Deployment template.
+size: small
+
+# -- Ingress configuration.
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  annotations: {}
+  tls: []
+
+# -- HTTP health check path for liveness and readiness probes.
+healthCheck:
+  path: /healthz
+
+# -- Horizontal Pod Autoscaler settings.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilization: 80
+
+# -- ServiceAccount configuration.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -- Additional environment variables injected into the container.
+# Use this for secret references from template secretInputs.
+extraEnv: []
+#  - name: DATABASE_URL
+#    valueFrom:
+#      secretKeyRef:
+#        name: db-credentials
+#        key: url
