@@ -88,6 +88,7 @@ suparship server --addr :9090 # custom address
 | `--addr` | `SUPARSHIP_ADDR` | `:8080` | Listen address |
 | `--ui-dir` | `SUPARSHIP_UI_DIR` | | Path to built frontend assets |
 | `--cors-origins` | `SUPARSHIP_CORS_ORIGINS` | | Comma-separated allowed origins |
+| `--cookie-secure` | `SUPARSHIP_COOKIE_SECURE` | `false` | Set `Secure` flag on session cookies (enable behind HTTPS) |
 
 ### Endpoints
 
@@ -96,6 +97,13 @@ suparship server --addr :9090 # custom address
 | GET | `/healthz` | Liveness probe — returns `ok` |
 | GET | `/readyz` | Readiness probe — returns `ok` |
 | GET | `/api/v1/meta` | JSON build metadata (app, version, commit, date) |
+| POST | `/api/v1/auth/login` | Authenticate with username/password, returns session cookie |
+| POST | `/api/v1/auth/logout` | Destroy session and clear cookie |
+| GET | `/api/v1/auth/me` | Return current user identity and role |
+
+Auth endpoints are enabled automatically when a Kubernetes cluster is
+reachable (they validate against the `suparship-admin-auth` Secret).
+Session cookies are `HttpOnly` and `SameSite=Lax`.
 
 ---
 

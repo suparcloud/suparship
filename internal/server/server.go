@@ -9,16 +9,21 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/session"
 )
 
 const shutdownTimeout = 5 * time.Second
 
 // Config holds server configuration.
 type Config struct {
-	Addr        string
-	UIDir       string   // optional: path to built frontend assets
-	CORSOrigins []string // optional: allowed CORS origins
-	Logger      *slog.Logger
+	Addr          string
+	UIDir         string             // optional: path to built frontend assets
+	CORSOrigins   []string           // optional: allowed CORS origins
+	Authenticator auth.Authenticator // optional: enables auth endpoints when set
+	CookieSecure  bool               // true for production (HTTPS)
+	Logger        *slog.Logger
 }
 
 // Server is the suparship HTTP API server.
@@ -31,6 +36,16 @@ type Server struct {
 func New(cfg Config) *Server {
 	mux := http.NewServeMux()
 	registerRoutes(mux)
+
+	if cfg.Authenticator != nil {
+		ah := &authHandler{
+			authenticator: cfg.Authenticator,
+			sessions:      session.NewStore(sessionTTL),
+			cookieSecure:  cfg.CookieSecure,
+		}
+		ah.registerRoutes(mux)
+		cfg.Logger.Info("auth endpoints enabled")
+	}
 
 	if cfg.UIDir != "" {
 		mux.Handle("/", spaHandler(cfg.UIDir))
