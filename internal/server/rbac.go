@@ -21,8 +21,9 @@ func ProjectFromPathValue(param string) ProjectExtractor {
 // routes. It composes authentication (via authHandler) with authorization
 // (via rbac.OrgProvider).
 type rbacHandler struct {
-	auth        *authHandler
-	orgProvider rbac.OrgProvider
+	auth           *authHandler
+	orgProvider    rbac.OrgProvider
+	serviceHandler *serviceHandler // optional: enables POST .../services
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -67,6 +68,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(placeholderHandler))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
 	mux.HandleFunc("PUT /api/v1/projects/{project}", manageProject(placeholderHandler))
+	if rh.serviceHandler != nil {
+		mux.HandleFunc("POST /api/v1/projects/{project}/services", devProject(rh.serviceHandler.handleCreateService))
+	}
 	mux.HandleFunc("POST /api/v1/projects/{project}/previews", devProject(placeholderHandler))
 	mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", devProject(placeholderHandler))
 }

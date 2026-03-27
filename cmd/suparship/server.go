@@ -11,6 +11,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
@@ -93,6 +94,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger.Info("templates loaded", "dir", templatesDir, "count", len(templates))
 	}
 
+	var projectStore project.Store
+	if client != nil {
+		projectStore = project.NewK8sStore(client)
+	}
+
 	srv := server.New(server.Config{
 		Addr:          addr,
 		UIDir:         uiDir,
@@ -100,6 +106,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		Authenticator: authenticator,
 		OrgProvider:   orgProvider,
 		Templates:     templates,
+		ProjectStore:  projectStore,
 		CookieSecure:  cookieSecure,
 		Logger:        logger,
 	})

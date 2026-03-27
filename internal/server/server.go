@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
@@ -26,6 +27,7 @@ type Config struct {
 	Authenticator auth.Authenticator  // optional: enables auth endpoints when set
 	OrgProvider   rbac.OrgProvider    // optional: enables RBAC-protected routes when set
 	Templates     []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
+	ProjectStore  project.Store       // optional: enables service creation when set
 	CookieSecure  bool                // true for production (HTTPS)
 	Logger        *slog.Logger
 }
@@ -62,6 +64,10 @@ func New(cfg Config) *Server {
 		rh := &rbacHandler{
 			auth:        ah,
 			orgProvider: cfg.OrgProvider,
+		}
+		if cfg.ProjectStore != nil {
+			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
+			cfg.Logger.Info("service creation endpoint enabled")
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")

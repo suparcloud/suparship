@@ -107,6 +107,7 @@ suparship server --addr :9090 # custom address
 | GET | `/api/v1/projects/{project}` | viewer | Get project (placeholder) |
 | GET | `/api/v1/projects/{project}/rbac` | viewer | List role bindings for a project |
 | PUT | `/api/v1/projects/{project}` | project_admin | Update project (placeholder) |
+| POST | `/api/v1/projects/{project}/services` | developer | Create service from template |
 | POST | `/api/v1/projects/{project}/previews` | developer | Create preview (placeholder) |
 | POST | `/api/v1/projects/{project}/services/{service}/promote` | developer | Promote service (placeholder) |
 | GET | `/api/v1/templates` | session | List all available templates |
