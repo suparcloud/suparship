@@ -108,3 +108,25 @@ export interface TemplateDetail {
   secretInputs: TemplateSecretInput[];
   presets: TemplatePreset[];
 }
+
+export interface CreateServiceRequest {
+  name: string;
+  template: string;
+  values: Record<string, unknown>;
+  secretRefs: SecretRefInput[];
+}
+
+export interface SecretRefInput {
+  name: string;
+  secretRef: string;
+}
+
+export interface CreateServiceResponse {
+  service: {
+    name: string;
+    template: { name: string; version?: string };
+    values: Record<string, unknown>;
+    secretRefs: SecretRefInput[];
+  };
+  helmValues: Record<string, unknown>;
+}
