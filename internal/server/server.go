@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/session"
 )
 
@@ -19,10 +20,11 @@ const shutdownTimeout = 5 * time.Second
 // Config holds server configuration.
 type Config struct {
 	Addr          string
-	UIDir         string             // optional: path to built frontend assets
-	CORSOrigins   []string           // optional: allowed CORS origins
-	Authenticator auth.Authenticator // optional: enables auth endpoints when set
-	CookieSecure  bool               // true for production (HTTPS)
+	UIDir         string              // optional: path to built frontend assets
+	CORSOrigins   []string            // optional: allowed CORS origins
+	Authenticator auth.Authenticator  // optional: enables auth endpoints when set
+	OrgProvider   rbac.OrgProvider    // optional: enables RBAC-protected routes when set
+	CookieSecure  bool                // true for production (HTTPS)
 	Logger        *slog.Logger
 }
 
@@ -37,14 +39,24 @@ func New(cfg Config) *Server {
 	mux := http.NewServeMux()
 	registerRoutes(mux)
 
+	var ah *authHandler
 	if cfg.Authenticator != nil {
-		ah := &authHandler{
+		ah = &authHandler{
 			authenticator: cfg.Authenticator,
 			sessions:      session.NewStore(sessionTTL),
 			cookieSecure:  cfg.CookieSecure,
 		}
 		ah.registerRoutes(mux)
 		cfg.Logger.Info("auth endpoints enabled")
+	}
+
+	if cfg.OrgProvider != nil && ah != nil {
+		rh := &rbacHandler{
+			auth:        ah,
+			orgProvider: cfg.OrgProvider,
+		}
+		rh.registerRoutes(mux)
+		cfg.Logger.Info("RBAC-protected routes enabled")
 	}
 
 	if cfg.UIDir != "" {
