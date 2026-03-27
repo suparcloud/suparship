@@ -81,6 +81,14 @@ suparship server              # listens on :8080
 suparship server --addr :9090 # custom address
 ```
 
+### Server flags
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--addr` | `SUPARSHIP_ADDR` | `:8080` | Listen address |
+| `--ui-dir` | `SUPARSHIP_UI_DIR` | | Path to built frontend assets |
+| `--cors-origins` | `SUPARSHIP_CORS_ORIGINS` | | Comma-separated allowed origins |
+
 ### Endpoints
 
 | Method | Path | Description |
@@ -91,28 +99,46 @@ suparship server --addr :9090 # custom address
 
 ---
 
-## Web UI (Development)
+## Development
 
-The frontend lives under `ui/` and uses Vite + React + TypeScript + Tailwind CSS.
+### Prerequisites
 
-```bash
-cd ui
-npm install
-npm run dev       # starts dev server on http://localhost:5173
-```
+- Go 1.23+
+- Node.js 20+ and npm
 
-The dev server proxies `/api` requests to `http://localhost:8080`, so run the
-backend alongside it:
+### Quick start (two terminals)
 
 ```bash
-# terminal 1
-suparship server
+# Terminal 1 — backend API (with CORS for the Vite dev server)
+make dev-api
 
-# terminal 2
-cd ui && npm run dev
+# Terminal 2 — frontend with HMR
+make dev-ui
 ```
 
-### Available scripts
+Open http://localhost:5173 in your browser. The Vite dev server proxies
+`/api` requests to the Go backend on `:8080`.
+
+### Serving the built frontend from the backend
+
+```bash
+cd ui && npm run build        # produces ui/dist/
+suparship server --ui-dir ui/dist
+```
+
+### Make targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build the `suparship` binary |
+| `make test` | Run all Go tests |
+| `make dev-api` | Build and run backend with CORS enabled for `localhost:5173` |
+| `make dev-ui` | Run the Vite dev server |
+| `make lint` | Run Go linters |
+| `make fmt` | Format Go code |
+| `make clean` | Remove build artifacts |
+
+### Frontend scripts (run from `ui/`)
 
 | Script | Description |
 |--------|-------------|

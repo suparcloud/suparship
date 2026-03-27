@@ -13,24 +13,43 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 
+// Config holds server configuration.
+type Config struct {
+	Addr        string
+	UIDir       string   // optional: path to built frontend assets
+	CORSOrigins []string // optional: allowed CORS origins
+	Logger      *slog.Logger
+}
+
 // Server is the suparship HTTP API server.
 type Server struct {
 	httpServer *http.Server
 	logger     *slog.Logger
 }
 
-// New creates a Server that listens on addr.
-func New(addr string, logger *slog.Logger) *Server {
+// New creates a Server from the given Config.
+func New(cfg Config) *Server {
 	mux := http.NewServeMux()
 	registerRoutes(mux)
 
+	if cfg.UIDir != "" {
+		mux.Handle("/", spaHandler(cfg.UIDir))
+		cfg.Logger.Info("serving frontend", "dir", cfg.UIDir)
+	}
+
+	var handler http.Handler = mux
+	if len(cfg.CORSOrigins) > 0 {
+		handler = corsMiddleware(cfg.CORSOrigins, handler)
+		cfg.Logger.Info("CORS enabled", "origins", cfg.CORSOrigins)
+	}
+
 	return &Server{
 		httpServer: &http.Server{
-			Addr:              addr,
-			Handler:           mux,
+			Addr:              cfg.Addr,
+			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		logger: logger,
+		logger: cfg.Logger,
 	}
 }
 
