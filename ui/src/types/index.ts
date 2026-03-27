@@ -1,3 +1,8 @@
+export interface AuthUser {
+  username: string;
+  role: string;
+}
+
 export interface MetaInfo {
   app: string;
   version: string;
