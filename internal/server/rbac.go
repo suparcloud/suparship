@@ -58,7 +58,14 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	manageProject := rh.requireRole(rbac.RoleProjectAdmin, byProject)
 	devProject := rh.requireRole(rbac.RoleDeveloper, byProject)
 
+	// Org-level read endpoints — authenticated users only.
+	mux.HandleFunc("GET /api/v1/org", rh.auth.requireAuth(rh.handleGetOrg))
+	mux.HandleFunc("GET /api/v1/teams", rh.auth.requireAuth(rh.handleGetTeams))
+	mux.HandleFunc("GET /api/v1/projects", rh.auth.requireAuth(rh.handleGetProjects))
+
+	// Project-scoped endpoints — role-based access.
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(placeholderHandler))
+	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
 	mux.HandleFunc("PUT /api/v1/projects/{project}", manageProject(placeholderHandler))
 	mux.HandleFunc("POST /api/v1/projects/{project}/previews", devProject(placeholderHandler))
 	mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", devProject(placeholderHandler))

@@ -92,17 +92,26 @@ suparship server --addr :9090 # custom address
 
 ### Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/healthz` | Liveness probe — returns `ok` |
-| GET | `/readyz` | Readiness probe — returns `ok` |
-| GET | `/api/v1/meta` | JSON build metadata (app, version, commit, date) |
-| POST | `/api/v1/auth/login` | Authenticate with username/password, returns session cookie |
-| POST | `/api/v1/auth/logout` | Destroy session and clear cookie |
-| GET | `/api/v1/auth/me` | Return current user identity and role |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/healthz` | — | Liveness probe — returns `ok` |
+| GET | `/readyz` | — | Readiness probe — returns `ok` |
+| GET | `/api/v1/meta` | — | JSON build metadata (app, version, commit, date) |
+| POST | `/api/v1/auth/login` | — | Authenticate with username/password, returns session cookie |
+| POST | `/api/v1/auth/logout` | — | Destroy session and clear cookie |
+| GET | `/api/v1/auth/me` | session | Return current user identity and role |
+| GET | `/api/v1/org` | session | Return org name, display name, created at |
+| GET | `/api/v1/teams` | session | List all teams with members |
+| GET | `/api/v1/projects` | session | List all projects |
+| GET | `/api/v1/projects/{project}` | viewer | Get project (placeholder) |
+| GET | `/api/v1/projects/{project}/rbac` | viewer | List role bindings for a project |
+| PUT | `/api/v1/projects/{project}` | project_admin | Update project (placeholder) |
+| POST | `/api/v1/projects/{project}/previews` | developer | Create preview (placeholder) |
+| POST | `/api/v1/projects/{project}/services/{service}/promote` | developer | Promote service (placeholder) |
 
 Auth endpoints are enabled automatically when a Kubernetes cluster is
 reachable (they validate against the `suparship-admin-auth` Secret).
+RBAC-protected routes require both auth and an org config provider.
 Session cookies are `HttpOnly` and `SameSite=Lax`.
 
 ---

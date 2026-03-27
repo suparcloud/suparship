@@ -22,7 +22,9 @@ func (s *staticOrgProvider) GetOrg(_ context.Context) (*rbac.Org, error) {
 
 func testRBACOrg() *rbac.Org {
 	return &rbac.Org{
-		Name: "test",
+		Name:        "test",
+		DisplayName: "Test Org",
+		CreatedAt:   "2026-01-01T00:00:00Z",
 		Teams: []rbac.Team{
 			{Name: "admins", DisplayName: "Admins", Members: []string{"alice"}},
 			{Name: "devs", DisplayName: "Devs", Members: []string{"bob"}},
