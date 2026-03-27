@@ -55,3 +55,56 @@ export interface ProjectRBACResponse {
   project: string;
   roleBindings: RoleBinding[];
 }
+
+export interface TemplateSummary {
+  name: string;
+  version: string;
+  title: string;
+  description?: string;
+  category: string;
+  engine: string;
+}
+
+export interface TemplatesResponse {
+  templates: TemplateSummary[];
+}
+
+export interface TemplateInput {
+  name: string;
+  title: string;
+  type: "string" | "number" | "boolean" | "enum";
+  description?: string;
+  required: boolean;
+  default?: string | number | boolean;
+  options: string[];
+  min?: number;
+  max?: number;
+  pattern?: string;
+}
+
+export interface TemplateSecretInput {
+  name: string;
+  title: string;
+  description?: string;
+  secretRef: string;
+}
+
+export interface TemplatePreset {
+  name: string;
+  title: string;
+  description?: string;
+  values: Record<string, unknown>;
+}
+
+export interface TemplateDetail {
+  name: string;
+  version: string;
+  title: string;
+  description?: string;
+  category: string;
+  engine: string;
+  inputs: TemplateInput[];
+  advancedInputs: TemplateInput[];
+  secretInputs: TemplateSecretInput[];
+  presets: TemplatePreset[];
+}

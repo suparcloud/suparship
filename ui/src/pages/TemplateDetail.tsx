@@ -1,0 +1,298 @@
+import { useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+
+import { fetchTemplate } from "../lib/templates";
+import type {
+  TemplateDetail as TemplateDetailType,
+  TemplateInput,
+  TemplateSecretInput,
+  TemplatePreset,
+} from "../types";
+
+const inputTypeBadge: Record<string, string> = {
+  string: "bg-blue-50 text-blue-700",
+  number: "bg-emerald-50 text-emerald-700",
+  boolean: "bg-violet-50 text-violet-700",
+  enum: "bg-amber-50 text-amber-700",
+};
+
+function TypeBadge({ type }: { type: string }) {
+  const cls = inputTypeBadge[type] ?? "bg-gray-100 text-gray-600";
+  return (
+    <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
+      {type}
+    </span>
+  );
+}
+
+function InputCard({ input }: { input: TemplateInput }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <h4 className="text-sm font-semibold text-gray-900">{input.title}</h4>
+          {input.required && (
+            <span className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600">
+              Required
+            </span>
+          )}
+        </div>
+        <TypeBadge type={input.type} />
+      </div>
+
+      {input.description && (
+        <p className="mt-1.5 text-sm text-gray-500">{input.description}</p>
+      )}
+
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
+        <span className="font-mono">{input.name}</span>
+        {input.default !== undefined && input.default !== null && (
+          <span>
+            Default: <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-gray-600">{String(input.default)}</code>
+          </span>
+        )}
+        {input.type === "enum" && input.options.length > 0 && (
+          <span>
+            Options: {input.options.map((o) => (
+              <code key={o} className="mr-1 rounded bg-gray-100 px-1 py-0.5 font-mono text-gray-600">{o}</code>
+            ))}
+          </span>
+        )}
+        {input.min !== undefined && <span>Min: {input.min}</span>}
+        {input.max !== undefined && <span>Max: {input.max}</span>}
+        {input.pattern && <span>Pattern: <code className="font-mono">{input.pattern}</code></span>}
+      </div>
+    </div>
+  );
+}
+
+function SecretInputCard({ input }: { input: TemplateSecretInput }) {
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-4">
+      <div className="flex items-center gap-2">
+        <svg className="h-4 w-4 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+        </svg>
+        <h4 className="text-sm font-semibold text-gray-900">{input.title}</h4>
+      </div>
+      {input.description && (
+        <p className="mt-1.5 text-sm text-gray-500">{input.description}</p>
+      )}
+      <div className="mt-2 text-xs text-gray-400">
+        <span className="font-mono">{input.name}</span>
+        <span className="mx-2">&middot;</span>
+        <span>
+          Ref: <code className="rounded bg-white px-1 py-0.5 font-mono text-gray-600">{input.secretRef}</code>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function PresetCard({ preset }: { preset: TemplatePreset }) {
+  const entries = Object.entries(preset.values);
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <h4 className="text-sm font-semibold text-gray-900">{preset.title}</h4>
+      {preset.description && (
+        <p className="mt-1 text-sm text-gray-500">{preset.description}</p>
+      )}
+      {entries.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {entries.map(([key, val]) => (
+            <span
+              key={key}
+              className="inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-0.5 text-xs font-mono text-gray-600"
+            >
+              <span className="text-gray-400">{key}:</span> {String(val)}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function TemplateDetail() {
+  const { name } = useParams<{ name: string }>();
+  const [template, setTemplate] = useState<TemplateDetailType | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!name) return;
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const data = await fetchTemplate(name!);
+        if (cancelled) return;
+        setTemplate(data);
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Failed to load");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [name]);
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div className="h-5 w-32 animate-pulse rounded bg-gray-100" />
+        <div className="space-y-2">
+          <div className="h-8 w-64 animate-pulse rounded bg-gray-100" />
+          <div className="h-5 w-96 animate-pulse rounded bg-gray-50" />
+        </div>
+        <div className="space-y-3">
+          {[1, 2, 3].map((n) => (
+            <div key={n} className="h-24 animate-pulse rounded-lg bg-gray-50" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !template) {
+    return (
+      <div className="space-y-4">
+        <Link
+          to="/templates"
+          className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700"
+        >
+          &larr; Back to templates
+        </Link>
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+          <p className="text-sm text-red-700">
+            {error ?? "Template not found"}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const totalInputs =
+    template.inputs.length +
+    template.advancedInputs.length +
+    template.secretInputs.length;
+
+  return (
+    <div className="space-y-8">
+      {/* Breadcrumb */}
+      <Link
+        to="/templates"
+        className="inline-flex items-center gap-1 text-sm text-gray-500 transition-colors hover:text-gray-700"
+      >
+        &larr; Back to templates
+      </Link>
+
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-semibold text-gray-900">
+              {template.title}
+            </h1>
+            <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-500">
+              v{template.version}
+            </span>
+          </div>
+          {template.description && (
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-gray-500">
+              {template.description}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Quick stats */}
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <StatCard label="Category" value={template.category} />
+        <StatCard label="Engine" value={template.engine} />
+        <StatCard label="Inputs" value={String(totalInputs)} />
+        <StatCard label="Presets" value={String(template.presets.length)} />
+      </div>
+
+      {/* Inputs */}
+      {template.inputs.length > 0 && (
+        <Section title="Inputs" subtitle="Configuration parameters for this template.">
+          <div className="space-y-3">
+            {template.inputs.map((inp) => (
+              <InputCard key={inp.name} input={inp} />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* Advanced inputs */}
+      {template.advancedInputs.length > 0 && (
+        <Section title="Advanced inputs" subtitle="Additional tuning parameters.">
+          <div className="space-y-3">
+            {template.advancedInputs.map((inp) => (
+              <InputCard key={inp.name} input={inp} />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* Secret inputs */}
+      {template.secretInputs.length > 0 && (
+        <Section title="Secrets" subtitle="References to Kubernetes Secrets — values are never stored in Git.">
+          <div className="space-y-3">
+            {template.secretInputs.map((si) => (
+              <SecretInputCard key={si.name} input={si} />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* Presets */}
+      {template.presets.length > 0 && (
+        <Section title="Presets" subtitle="Pre-configured sets of defaults to get started quickly.">
+          <div className="grid gap-4 sm:grid-cols-2">
+            {template.presets.map((p) => (
+              <PresetCard key={p.name} preset={p} />
+            ))}
+          </div>
+        </Section>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white px-4 py-3">
+      <p className="text-xs font-medium uppercase tracking-wider text-gray-400">
+        {label}
+      </p>
+      <p className="mt-0.5 text-lg font-semibold capitalize text-gray-900">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function Section({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
+      <p className="mt-0.5 mb-4 text-sm text-gray-500">{subtitle}</p>
+      {children}
+    </div>
+  );
+}
