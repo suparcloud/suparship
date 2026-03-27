@@ -12,7 +12,7 @@ LDFLAGS := -X github.com/suparcloud/suparship/internal/version.Version=$(VERSION
 # Go settings
 GOBIN := $(shell go env GOPATH)/bin
 
-.PHONY: all build test lint fmt clean help
+.PHONY: all build test lint fmt clean dev-api dev-ui help
 
 all: build
 
@@ -45,6 +45,14 @@ fmt:
 clean:
 	rm -rf bin/
 	rm -f coverage.out
+
+## dev-api: Run backend with CORS for Vite dev server
+dev-api: build
+	SUPARSHIP_CORS_ORIGINS=http://localhost:5173 ./bin/$(BINARY_NAME) server
+
+## dev-ui: Run frontend Vite dev server
+dev-ui:
+	cd ui && npm run dev
 
 ## help: Show this help message
 help:
