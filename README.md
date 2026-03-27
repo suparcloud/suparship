@@ -210,6 +210,73 @@ For a given user and project:
 
 ---
 
+## Project & Service Model
+
+Projects and services are stored as Kubernetes ConfigMaps in the
+`suparship-system` namespace (one ConfigMap per project, named
+`suparship-project-{name}`).
+
+### Project spec
+
+```yaml
+apiVersion: suparship.io/v1alpha1
+kind: Project
+metadata:
+  name: myapi
+spec:
+  displayName: My API
+  description: The main API project
+  environments:
+    - name: dev
+      displayName: Development
+      order: 1
+    - name: staging
+      order: 2
+    - name: prod
+      displayName: Production
+      order: 3
+  services:
+    - name: api
+      template:
+        name: web-service
+        version: "1.0.0"
+      values:
+        image_repository: ghcr.io/org/api
+        size: small
+      secretRefs:
+        - name: database_url
+          secretRef: api-db.url
+      environmentOverrides:
+        prod:
+          values:
+            size: large
+          secretRefs:
+            - name: database_url
+              secretRef: api-db-prod.url
+```
+
+### Hierarchy
+
+| Level | Description |
+|-------|-------------|
+| Org | Single organization (from RBAC model) |
+| Project | Logical grouping with its own environments |
+| Environment | Ordered deployment target (dev → staging → prod) |
+| Service | Deployable workload referencing a template |
+
+### Service fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | DNS-compatible service name |
+| `template.name` | yes | Template to use for rendering |
+| `template.version` | no | Pin to a specific template version |
+| `values` | no | Input values matching template inputs |
+| `secretRefs` | no | Secret references (name → K8s secret.key) |
+| `environmentOverrides` | no | Per-environment value and secret overrides |
+
+---
+
 ## Development
 
 ### Prerequisites
