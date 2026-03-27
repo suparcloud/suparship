@@ -88,3 +88,35 @@ suparship server --addr :9090 # custom address
 | GET | `/healthz` | Liveness probe — returns `ok` |
 | GET | `/readyz` | Readiness probe — returns `ok` |
 | GET | `/api/v1/meta` | JSON build metadata (app, version, commit, date) |
+
+---
+
+## Web UI (Development)
+
+The frontend lives under `ui/` and uses Vite + React + TypeScript + Tailwind CSS.
+
+```bash
+cd ui
+npm install
+npm run dev       # starts dev server on http://localhost:5173
+```
+
+The dev server proxies `/api` requests to `http://localhost:8080`, so run the
+backend alongside it:
+
+```bash
+# terminal 1
+suparship server
+
+# terminal 2
+cd ui && npm run dev
+```
+
+### Available scripts
+
+| Script | Description |
+|--------|-------------|
+| `npm run dev` | Start Vite dev server with HMR |
+| `npm run build` | Type-check and build for production |
+| `npm run preview` | Preview the production build locally |
+| `npm run typecheck` | Run TypeScript type checking only |

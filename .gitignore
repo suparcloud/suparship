@@ -37,3 +37,7 @@ bin/
 # Local development artifacts
 tmp/
 *.log
+
+# Node / frontend
+node_modules/
+ui/dist/
