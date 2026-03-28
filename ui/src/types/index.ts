@@ -214,6 +214,16 @@ export interface PromoteResponse {
   message: string;
 }
 
+// --- Logs types ---
+
+export interface LogsResponse {
+  project: string;
+  service: string;
+  pod: string;
+  container: string;
+  logs: string;
+}
+
 export interface CreateServiceResponse {
   service: {
     name: string;

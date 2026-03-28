@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
+import { LogsDrawer } from "../components/LogsDrawer";
 import { createPreview } from "../lib/previews";
 import { fetchServiceDetail, promoteService } from "../lib/services";
 import type {
@@ -196,6 +197,8 @@ export function ServiceDetail() {
     null,
   );
 
+  const [showLogs, setShowLogs] = useState(false);
+
   useEffect(() => {
     if (!project || !service) return;
     let cancelled = false;
@@ -296,8 +299,9 @@ export function ServiceDetail() {
             </a>
           )}
           <button
+            onClick={() => setShowLogs(true)}
             className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
-            title="View logs (coming soon)"
+            title="View container logs"
           >
             {icons.terminal}
             Logs
@@ -680,6 +684,17 @@ export function ServiceDetail() {
           </p>
         </div>
       </div>
+
+      {/* ---- Logs Drawer ---- */}
+      {project && service && (
+        <LogsDrawer
+          open={showLogs}
+          onClose={() => setShowLogs(false)}
+          project={project}
+          service={service}
+          environments={data.environments}
+        />
+      )}
     </div>
   );
 }
