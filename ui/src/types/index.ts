@@ -21,8 +21,22 @@ export interface Service {
 
 export interface PreviewEnvironment {
   name: string;
+  project: string;
+  service: string;
+  namespace: string;
   status: string;
   url?: string;
+  createdAt: string;
+}
+
+export interface PreviewsResponse {
+  previews: PreviewEnvironment[];
+}
+
+export interface CreatePreviewRequest {
+  name: string;
+  project: string;
+  service: string;
 }
 
 export interface OrgInfo {

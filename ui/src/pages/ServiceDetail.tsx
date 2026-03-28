@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
+import { createPreview } from "../lib/previews";
 import { fetchServiceDetail } from "../lib/services";
 import type { ServiceDetailInfo, ServiceEnv, RuntimeInfo } from "../types";
 
@@ -172,9 +173,15 @@ export function ServiceDetail() {
     project: string;
     service: string;
   }>();
+  const navigate = useNavigate();
   const [data, setData] = useState<ServiceDetailInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [showPreviewForm, setShowPreviewForm] = useState(false);
+  const [previewName, setPreviewName] = useState("");
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewSubmitting, setPreviewSubmitting] = useState(false);
 
   useEffect(() => {
     if (!project || !service) return;
@@ -283,8 +290,13 @@ export function ServiceDetail() {
             Logs
           </button>
           <button
+            onClick={() => {
+              setShowPreviewForm(true);
+              setPreviewName("");
+              setPreviewError(null);
+            }}
             className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
-            title="Create preview environment (coming soon)"
+            title="Create preview environment"
           >
             {icons.branch}
             Preview
@@ -298,6 +310,86 @@ export function ServiceDetail() {
           </button>
         </div>
       </div>
+
+      {/* ---- Create Preview Form ---- */}
+      {showPreviewForm && (
+        <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-indigo-100 text-indigo-600">
+              {icons.branch}
+            </div>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-sm font-medium text-gray-900">
+                Create preview environment
+              </h3>
+              <p className="mt-0.5 text-xs text-gray-500">
+                Deploy <span className="font-medium">{service}</span> to an
+                isolated preview namespace.
+              </p>
+              <form
+                className="mt-3 flex items-end gap-2"
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!previewName.trim() || !project || !service) return;
+                  setPreviewSubmitting(true);
+                  setPreviewError(null);
+                  try {
+                    await createPreview({
+                      name: previewName.trim(),
+                      project,
+                      service,
+                    });
+                    setShowPreviewForm(false);
+                    navigate("/previews");
+                  } catch (err) {
+                    setPreviewError(
+                      err instanceof Error ? err.message : "Failed to create",
+                    );
+                  } finally {
+                    setPreviewSubmitting(false);
+                  }
+                }}
+              >
+                <div className="flex-1">
+                  <label
+                    htmlFor="preview-name"
+                    className="mb-1 block text-xs font-medium text-gray-700"
+                  >
+                    Preview name
+                  </label>
+                  <input
+                    id="preview-name"
+                    type="text"
+                    value={previewName}
+                    onChange={(e) => setPreviewName(e.target.value)}
+                    placeholder="pr-42"
+                    pattern="[a-z][a-z0-9-]*[a-z0-9]"
+                    required
+                    className="w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder-gray-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={previewSubmitting || !previewName.trim()}
+                  className="rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {previewSubmitting ? "Creating…" : "Create"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPreviewForm(false)}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </form>
+              {previewError && (
+                <p className="mt-2 text-xs text-red-600">{previewError}</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ---- Quick stats row ---- */}
       <div className="grid gap-4 sm:grid-cols-4">
