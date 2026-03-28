@@ -116,6 +116,7 @@ suparship server --addr :9090 # custom address
 | POST | `/api/v1/previews` | developer | Create a preview environment |
 | DELETE | `/api/v1/previews/{name}` | developer | Delete a preview environment |
 | POST | `/api/v1/projects/{project}/services/{service}/promote` | project_admin | Promote service to target environment |
+| GET | `/api/v1/projects/{project}/services/{service}/logs` | viewer | Fetch pod logs for a service |
 | GET | `/api/v1/templates` | session | List all available templates |
 | GET | `/api/v1/templates/{name}` | session | Get full template detail for form generation |
 
@@ -329,6 +330,28 @@ target in the ordering.
 In MVP, the endpoint returns a structured result confirming the promotion
 intent. When Kargo is integrated, this will trigger a Kargo Stage
 promotion.
+
+### Container logs
+
+The `GET /api/v1/projects/{project}/services/{service}/logs` endpoint
+proxies Kubernetes pod logs for a service.
+
+**Query parameters**:
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `environment` | yes | Target environment (determines namespace) |
+| `pod` | no | Specific pod name; auto-selects first matching pod if omitted |
+| `container` | no | Specific container; uses default if omitted |
+| `tailLines` | no | Number of lines from the end of the log to return |
+
+Pods are discovered by label `app.kubernetes.io/name={service}` (with
+`app={service}` as fallback). When no pods are found, a 404 is returned
+with a descriptive message.
+
+**Authorization**: requires `viewer` role or above on the project. Log
+output is capped at 1 MiB per request to prevent memory issues. Streaming
+(`follow=true`) is reserved for a future commit.
 
 ---
 

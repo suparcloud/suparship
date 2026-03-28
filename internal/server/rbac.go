@@ -29,6 +29,7 @@ type rbacHandler struct {
 	inventoryHandler *inventoryHandler // optional: enables inventory endpoints
 	previewHandler   *previewHandler   // optional: enables preview endpoints
 	promoteHandler   *promoteHandler   // optional: enables promote endpoint
+	logsHandler      *logsHandler      // optional: enables logs endpoint
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -88,6 +89,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	}
 	if rh.promoteHandler != nil {
 		mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", manageProject(rh.promoteHandler.handlePromote))
+	}
+	if rh.logsHandler != nil {
+		mux.HandleFunc("GET /api/v1/projects/{project}/services/{service}/logs", viewProject(rh.logsHandler.handleGetLogs))
 	}
 }
 

@@ -99,10 +99,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	var projectStore project.Store
 	var previewStore preview.Store
 	var runtimeProvider runtime.Provider
+	var logsProvider runtime.LogsProvider
 	if client != nil {
 		projectStore = project.NewK8sStore(client)
 		previewStore = preview.NewK8sStore(client)
 		runtimeProvider = runtime.NewK8sProvider(client)
+		logsProvider = runtime.NewK8sLogsProvider(client)
 	}
 
 	srv := server.New(server.Config{
@@ -114,6 +116,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		Templates:       templates,
 		ProjectStore:    projectStore,
 		RuntimeProvider: runtimeProvider,
+		LogsProvider:    logsProvider,
 		PreviewStore:    previewStore,
 		CookieSecure:    cookieSecure,
 		Logger:          logger,

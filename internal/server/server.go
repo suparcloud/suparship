@@ -31,6 +31,7 @@ type Config struct {
 	Templates       []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
 	ProjectStore    project.Store       // optional: enables service creation when set
 	RuntimeProvider runtime.Provider    // optional: enables runtime inventory when set
+	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
 	PreviewStore    preview.Store       // optional: enables preview endpoints when set
 	CookieSecure    bool                // true for production (HTTPS)
 	Logger        *slog.Logger
@@ -84,6 +85,11 @@ func New(cfg Config) *Server {
 
 			rh.promoteHandler = newPromoteHandler(cfg.ProjectStore)
 			cfg.Logger.Info("promote endpoint enabled")
+
+			if cfg.LogsProvider != nil {
+				rh.logsHandler = newLogsHandler(cfg.ProjectStore, cfg.LogsProvider)
+				cfg.Logger.Info("logs endpoint enabled")
+			}
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")
