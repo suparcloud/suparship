@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
 
@@ -21,8 +22,14 @@ func ProjectFromPathValue(param string) ProjectExtractor {
 // routes. It composes authentication (via authHandler) with authorization
 // (via rbac.OrgProvider).
 type rbacHandler struct {
-	auth        *authHandler
-	orgProvider rbac.OrgProvider
+	auth             *authHandler
+	orgProvider      rbac.OrgProvider
+	projectStore     project.Store     // optional: merges project store into project listing
+	serviceHandler   *serviceHandler   // optional: enables POST .../services
+	inventoryHandler *inventoryHandler // optional: enables inventory endpoints
+	previewHandler   *previewHandler   // optional: enables preview endpoints
+	promoteHandler   *promoteHandler   // optional: enables promote endpoint
+	logsHandler      *logsHandler      // optional: enables logs endpoint
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -67,8 +74,25 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(placeholderHandler))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
 	mux.HandleFunc("PUT /api/v1/projects/{project}", manageProject(placeholderHandler))
-	mux.HandleFunc("POST /api/v1/projects/{project}/previews", devProject(placeholderHandler))
-	mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", devProject(placeholderHandler))
+	if rh.serviceHandler != nil {
+		mux.HandleFunc("POST /api/v1/projects/{project}/services", devProject(rh.serviceHandler.handleCreateService))
+	}
+	if rh.inventoryHandler != nil {
+		mux.HandleFunc("GET /api/v1/environments", rh.auth.requireAuth(rh.inventoryHandler.handleListEnvironments))
+		mux.HandleFunc("GET /api/v1/projects/{project}/services", viewProject(rh.inventoryHandler.handleListServices))
+		mux.HandleFunc("GET /api/v1/projects/{project}/services/{service}", viewProject(rh.inventoryHandler.handleGetService))
+	}
+	if rh.previewHandler != nil {
+		mux.HandleFunc("GET /api/v1/previews", rh.auth.requireAuth(rh.previewHandler.handleListPreviews))
+		mux.HandleFunc("POST /api/v1/previews", rh.auth.requireAuth(rh.previewHandler.handleCreatePreview))
+		mux.HandleFunc("DELETE /api/v1/previews/{name}", rh.auth.requireAuth(rh.previewHandler.handleDeletePreview))
+	}
+	if rh.promoteHandler != nil {
+		mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", manageProject(rh.promoteHandler.handlePromote))
+	}
+	if rh.logsHandler != nil {
+		mux.HandleFunc("GET /api/v1/projects/{project}/services/{service}/logs", viewProject(rh.logsHandler.handleGetLogs))
+	}
 }
 
 // placeholderHandler returns 200 with a stub JSON body. It will be replaced

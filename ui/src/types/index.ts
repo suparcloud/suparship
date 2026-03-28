@@ -21,8 +21,22 @@ export interface Service {
 
 export interface PreviewEnvironment {
   name: string;
+  project: string;
+  service: string;
+  namespace: string;
   status: string;
   url?: string;
+  createdAt: string;
+}
+
+export interface PreviewsResponse {
+  previews: PreviewEnvironment[];
+}
+
+export interface CreatePreviewRequest {
+  name: string;
+  project: string;
+  service: string;
 }
 
 export interface OrgInfo {
@@ -107,4 +121,115 @@ export interface TemplateDetail {
   advancedInputs: TemplateInput[];
   secretInputs: TemplateSecretInput[];
   presets: TemplatePreset[];
+}
+
+// --- Onboarding types ---
+
+export interface OnboardingStatus {
+  clusterConnected: boolean;
+  authConfigured: boolean;
+  orgExists: boolean;
+  hasProjects: boolean;
+  hasEnvironments: boolean;
+  hasServices: boolean;
+  complete: boolean;
+}
+
+// --- Inventory / Runtime types ---
+
+export interface EnvironmentInfo {
+  name: string;
+  displayName?: string;
+  project: string;
+  namespace: string;
+  order: number;
+}
+
+export interface EnvironmentsResponse {
+  environments: EnvironmentInfo[];
+}
+
+export interface RuntimeInfo {
+  status: string;
+  image?: string;
+  replicas: number;
+  available: number;
+  ingressUrls: string[];
+  namespace: string;
+  lastDeployed?: string;
+}
+
+export interface ServiceRuntime {
+  name: string;
+  template: { name: string; version?: string };
+  runtime: RuntimeInfo;
+}
+
+export interface ProjectServicesResponse {
+  project: string;
+  services: ServiceRuntime[];
+}
+
+export interface ServiceEnv {
+  environment: string;
+  namespace: string;
+  runtime: RuntimeInfo;
+}
+
+export interface ServiceDetailInfo {
+  name: string;
+  project: string;
+  template: { name: string; version?: string };
+  values: Record<string, unknown>;
+  secretRefs: SecretRefInput[];
+  environments: ServiceEnv[];
+}
+
+// --- Service creation types ---
+
+export interface CreateServiceRequest {
+  name: string;
+  template: string;
+  values: Record<string, unknown>;
+  secretRefs: SecretRefInput[];
+}
+
+export interface SecretRefInput {
+  name: string;
+  secretRef: string;
+}
+
+// --- Promotion types ---
+
+export interface PromoteRequest {
+  targetEnvironment: string;
+}
+
+export interface PromoteResponse {
+  project: string;
+  service: string;
+  source: string;
+  destination: string;
+  namespace: string;
+  message: string;
+}
+
+// --- Logs types ---
+
+export interface LogsResponse {
+  project: string;
+  service: string;
+  pod: string;
+  container: string;
+  logs: string;
+}
+
+export interface CreateServiceResponse {
+  service: {
+    name: string;
+    template: { name: string; version?: string };
+    values: Record<string, unknown>;
+    secretRefs: SecretRefInput[];
+  };
+  helmValues: Record<string, unknown>;
 }

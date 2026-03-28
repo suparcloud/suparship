@@ -98,6 +98,7 @@ suparship server --addr :9090 # custom address
 | GET | `/healthz` | — | Liveness probe — returns `ok` |
 | GET | `/readyz` | — | Readiness probe — returns `ok` |
 | GET | `/api/v1/meta` | — | JSON build metadata (app, version, commit, date) |
+| GET | `/api/v1/onboarding/status` | — | Onboarding checklist (auth, org, projects, envs, services) |
 | POST | `/api/v1/auth/login` | — | Authenticate with username/password, returns session cookie |
 | POST | `/api/v1/auth/logout` | — | Destroy session and clear cookie |
 | GET | `/api/v1/auth/me` | session | Return current user identity and role |
@@ -107,8 +108,15 @@ suparship server --addr :9090 # custom address
 | GET | `/api/v1/projects/{project}` | viewer | Get project (placeholder) |
 | GET | `/api/v1/projects/{project}/rbac` | viewer | List role bindings for a project |
 | PUT | `/api/v1/projects/{project}` | project_admin | Update project (placeholder) |
-| POST | `/api/v1/projects/{project}/previews` | developer | Create preview (placeholder) |
-| POST | `/api/v1/projects/{project}/services/{service}/promote` | developer | Promote service (placeholder) |
+| POST | `/api/v1/projects/{project}/services` | developer | Create service from template |
+| GET | `/api/v1/environments` | session | List all environments across projects |
+| GET | `/api/v1/projects/{project}/services` | viewer | List services with runtime state |
+| GET | `/api/v1/projects/{project}/services/{service}` | viewer | Service detail with per-env runtime state |
+| GET | `/api/v1/previews` | session | List all preview environments |
+| POST | `/api/v1/previews` | developer | Create a preview environment |
+| DELETE | `/api/v1/previews/{name}` | developer | Delete a preview environment |
+| POST | `/api/v1/projects/{project}/services/{service}/promote` | project_admin | Promote service to target environment |
+| GET | `/api/v1/projects/{project}/services/{service}/logs` | viewer | Fetch pod logs for a service |
 | GET | `/api/v1/templates` | session | List all available templates |
 | GET | `/api/v1/templates/{name}` | session | Get full template detail for form generation |
 
@@ -207,6 +215,143 @@ For a given user and project:
 1. Find all teams the user belongs to.
 2. Collect role bindings that match the project (exact match or wildcard `*`).
 3. Return the highest-privilege role across all matching bindings.
+
+---
+
+## Project & Service Model
+
+Projects and services are stored as Kubernetes ConfigMaps in the
+`suparship-system` namespace (one ConfigMap per project, named
+`suparship-project-{name}`).
+
+### Project spec
+
+```yaml
+apiVersion: suparship.io/v1alpha1
+kind: Project
+metadata:
+  name: myapi
+spec:
+  displayName: My API
+  description: The main API project
+  environments:
+    - name: dev
+      displayName: Development
+      order: 1
+    - name: staging
+      order: 2
+    - name: prod
+      displayName: Production
+      order: 3
+  services:
+    - name: api
+      template:
+        name: web-service
+        version: "1.0.0"
+      values:
+        image_repository: ghcr.io/org/api
+        size: small
+      secretRefs:
+        - name: database_url
+          secretRef: api-db.url
+      environmentOverrides:
+        prod:
+          values:
+            size: large
+          secretRefs:
+            - name: database_url
+              secretRef: api-db-prod.url
+```
+
+### Hierarchy
+
+| Level | Description |
+|-------|-------------|
+| Org | Single organization (from RBAC model) |
+| Project | Logical grouping with its own environments |
+| Environment | Ordered deployment target (dev → staging → prod) |
+| Service | Deployable workload referencing a template |
+
+### Service fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | DNS-compatible service name |
+| `template.name` | yes | Template to use for rendering |
+| `template.version` | no | Pin to a specific template version |
+| `values` | no | Input values matching template inputs |
+| `secretRefs` | no | Secret references (name → K8s secret.key) |
+| `environmentOverrides` | no | Per-environment value and secret overrides |
+
+### Runtime inventory
+
+The inventory endpoints (`GET /api/v1/projects/{project}/services` and
+`GET .../services/{service}`) merge desired config from the project store
+with live state from Kubernetes Deployments and Ingresses.
+
+**Namespace convention**: each environment maps to `{project}-{environment}`,
+e.g. project `myapi` with environment `dev` → namespace `myapi-dev`.
+
+If the Kubernetes API is unreachable or a Deployment does not exist, the
+runtime status degrades gracefully to `not_deployed` without returning an
+error.
+
+### Preview environments
+
+Previews are ephemeral, branch-scoped deployments of a service. Each
+preview is stored as a ConfigMap (`suparship-preview-{name}`) in
+`suparship-system`.
+
+**Namespace convention**: `{project}-preview-{name}`, e.g. project `api`
+with preview `pr-42` → namespace `api-preview-pr-42`.
+
+Preview status and ingress URL are read from the Kubernetes runtime when
+available, otherwise the status is `not_deployed`.
+
+Creating or deleting a preview requires at least `developer` role on the
+target project. Listing previews is available to any authenticated user.
+
+### Service promotion
+
+The `POST /api/v1/projects/{project}/services/{service}/promote` endpoint
+promotes a service from one environment to the next in the project's
+ordered environment chain (e.g. dev → staging → prod).
+
+**Request body**: `{ "targetEnvironment": "prod" }`
+
+The handler validates that both the project and service exist, the target
+environment is defined in the project, and it is not the lowest-order
+environment (there must be a source to promote from). The source is
+automatically determined as the environment immediately preceding the
+target in the ordering.
+
+**Authorization**: requires `project_admin` role or above on the project.
+
+In MVP, the endpoint returns a structured result confirming the promotion
+intent. When Kargo is integrated, this will trigger a Kargo Stage
+promotion.
+
+### Container logs
+
+The `GET /api/v1/projects/{project}/services/{service}/logs` endpoint
+proxies Kubernetes pod logs for a service.
+
+**Query parameters**:
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `environment` | yes | Target environment (determines namespace) |
+| `pod` | no | Specific pod name; auto-selects first matching pod if omitted |
+| `container` | no | Specific container; uses default if omitted |
+| `tailLines` | no | Number of lines from the end of the log to return |
+
+Pods are discovered by label `app.kubernetes.io/name={service}` (with
+`app={service}` as fallback). When no pods are found, a 404 is returned
+with a descriptive message.
+
+**Authorization**: requires `viewer` role or above on the project. Log
+output is capped at 1 MiB per request to prevent memory issues. Streaming
+(`follow=true`) is reserved for a future commit.
 
 ---
 

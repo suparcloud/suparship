@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/preview"
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -25,8 +28,12 @@ type Config struct {
 	CORSOrigins   []string            // optional: allowed CORS origins
 	Authenticator auth.Authenticator  // optional: enables auth endpoints when set
 	OrgProvider   rbac.OrgProvider    // optional: enables RBAC-protected routes when set
-	Templates     []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
-	CookieSecure  bool                // true for production (HTTPS)
+	Templates       []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
+	ProjectStore    project.Store       // optional: enables service creation when set
+	RuntimeProvider runtime.Provider    // optional: enables runtime inventory when set
+	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
+	PreviewStore    preview.Store       // optional: enables preview endpoints when set
+	CookieSecure    bool                // true for production (HTTPS)
 	Logger        *slog.Logger
 }
 
@@ -60,12 +67,40 @@ func New(cfg Config) *Server {
 
 	if cfg.OrgProvider != nil && ah != nil {
 		rh := &rbacHandler{
-			auth:        ah,
-			orgProvider: cfg.OrgProvider,
+			auth:         ah,
+			orgProvider:  cfg.OrgProvider,
+			projectStore: cfg.ProjectStore,
+		}
+		if cfg.ProjectStore != nil {
+			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
+			cfg.Logger.Info("service creation endpoint enabled")
+
+			rh.inventoryHandler = newInventoryHandler(cfg.ProjectStore, cfg.RuntimeProvider)
+			cfg.Logger.Info("inventory endpoints enabled")
+
+			if cfg.PreviewStore != nil {
+				rh.previewHandler = newPreviewHandler(cfg.PreviewStore, cfg.ProjectStore, cfg.RuntimeProvider, cfg.OrgProvider)
+				cfg.Logger.Info("preview endpoints enabled")
+			}
+
+			rh.promoteHandler = newPromoteHandler(cfg.ProjectStore)
+			cfg.Logger.Info("promote endpoint enabled")
+
+			if cfg.LogsProvider != nil {
+				rh.logsHandler = newLogsHandler(cfg.ProjectStore, cfg.LogsProvider)
+				cfg.Logger.Info("logs endpoint enabled")
+			}
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")
 	}
+
+	oh := &onboardingHandler{
+		orgProvider:  cfg.OrgProvider,
+		projectStore: cfg.ProjectStore,
+		authEnabled:  cfg.Authenticator != nil,
+	}
+	mux.HandleFunc("GET /api/v1/onboarding/status", oh.handleStatus)
 
 	if cfg.UIDir != "" {
 		mux.Handle("/", spaHandler(cfg.UIDir))

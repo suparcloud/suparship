@@ -31,7 +31,7 @@ func CanCreatePreview(org *Org, username, project string) bool {
 
 // CanPromoteService reports whether the user can promote a service to a
 // higher environment.
-// Minimum role: developer.
+// Minimum role: project_admin.
 func CanPromoteService(org *Org, username, project string) bool {
-	return org.HasPermission(username, project, RoleDeveloper)
+	return org.HasPermission(username, project, RoleProjectAdmin)
 }

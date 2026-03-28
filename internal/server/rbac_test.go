@@ -47,9 +47,12 @@ func newTestRBACMux() (*http.ServeMux, *authHandler) {
 	}
 	ah.registerRoutes(mux)
 
+	store := newMemProjectStore()
+
 	rh := &rbacHandler{
-		auth:        ah,
-		orgProvider: &staticOrgProvider{org: testRBACOrg()},
+		auth:           ah,
+		orgProvider:    &staticOrgProvider{org: testRBACOrg()},
+		promoteHandler: newPromoteHandler(store),
 	}
 	rh.registerRoutes(mux)
 
@@ -117,20 +120,7 @@ func TestRBACDeveloperCanViewProject(t *testing.T) {
 	}
 }
 
-func TestRBACDeveloperCanCreatePreview(t *testing.T) {
-	mux, ah := newTestRBACMux()
-
-	req := httptest.NewRequest("POST", "/api/v1/projects/api/previews", nil)
-	req.AddCookie(sessionCookieFor(ah, "bob", "developer"))
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("developer should create preview, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestRBACDeveloperCanPromoteService(t *testing.T) {
+func TestRBACDeveloperCannotPromote(t *testing.T) {
 	mux, ah := newTestRBACMux()
 
 	req := httptest.NewRequest("POST", "/api/v1/projects/api/services/backend/promote", nil)
@@ -138,8 +128,8 @@ func TestRBACDeveloperCanPromoteService(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("developer should promote service, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("developer should not promote (requires project_admin), got %d", rec.Code)
 	}
 }
 
@@ -165,7 +155,7 @@ func TestRBACDeveloperCannotManageProject(t *testing.T) {
 func TestRBACDeveloperCannotAccessOtherProject(t *testing.T) {
 	mux, ah := newTestRBACMux()
 
-	req := httptest.NewRequest("POST", "/api/v1/projects/web/previews", nil)
+	req := httptest.NewRequest("POST", "/api/v1/projects/web/services/svc/promote", nil)
 	req.AddCookie(sessionCookieFor(ah, "bob", "developer"))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -190,16 +180,16 @@ func TestRBACViewerCanView(t *testing.T) {
 	}
 }
 
-func TestRBACViewerCannotCreatePreview(t *testing.T) {
+func TestRBACViewerCannotPromoteService(t *testing.T) {
 	mux, ah := newTestRBACMux()
 
-	req := httptest.NewRequest("POST", "/api/v1/projects/api/previews", nil)
+	req := httptest.NewRequest("POST", "/api/v1/projects/api/services/svc/promote", nil)
 	req.AddCookie(sessionCookieFor(ah, "carol", "viewer"))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("viewer should not create preview, got %d", rec.Code)
+		t.Fatalf("viewer should not promote service, got %d", rec.Code)
 	}
 }
 

@@ -11,7 +11,10 @@ import (
 
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/preview"
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -93,15 +96,30 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger.Info("templates loaded", "dir", templatesDir, "count", len(templates))
 	}
 
+	var projectStore project.Store
+	var previewStore preview.Store
+	var runtimeProvider runtime.Provider
+	var logsProvider runtime.LogsProvider
+	if client != nil {
+		projectStore = project.NewK8sStore(client)
+		previewStore = preview.NewK8sStore(client)
+		runtimeProvider = runtime.NewK8sProvider(client)
+		logsProvider = runtime.NewK8sLogsProvider(client)
+	}
+
 	srv := server.New(server.Config{
-		Addr:          addr,
-		UIDir:         uiDir,
-		CORSOrigins:   origins,
-		Authenticator: authenticator,
-		OrgProvider:   orgProvider,
-		Templates:     templates,
-		CookieSecure:  cookieSecure,
-		Logger:        logger,
+		Addr:            addr,
+		UIDir:           uiDir,
+		CORSOrigins:     origins,
+		Authenticator:   authenticator,
+		OrgProvider:     orgProvider,
+		Templates:       templates,
+		ProjectStore:    projectStore,
+		RuntimeProvider: runtimeProvider,
+		LogsProvider:    logsProvider,
+		PreviewStore:    previewStore,
+		CookieSecure:    cookieSecure,
+		Logger:          logger,
 	})
 
 	return srv.Run(cmd.Context())

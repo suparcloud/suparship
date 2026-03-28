@@ -97,7 +97,26 @@ func (rh *rbacHandler) handleGetProjects(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	names := collectProjects(org.RoleBindings)
+	seen := make(map[string]bool)
+	for _, name := range collectProjects(org.RoleBindings) {
+		seen[name] = true
+	}
+
+	if rh.projectStore != nil {
+		stored, err := rh.projectStore.List(r.Context())
+		if err == nil {
+			for _, p := range stored {
+				seen[p.Metadata.Name] = true
+			}
+		}
+	}
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	projects := make([]ProjectDTO, len(names))
 	for i, n := range names {
 		projects[i] = ProjectDTO{Name: n}

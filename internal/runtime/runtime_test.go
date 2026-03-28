@@ -1,0 +1,298 @@
+package runtime
+
+import (
+	"context"
+	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+)
+
+func TestNamespace(t *testing.T) {
+	if got := Namespace("myapi", "dev"); got != "myapi-dev" {
+		t.Fatalf("expected myapi-dev, got %s", got)
+	}
+}
+
+func TestDeploymentStatus(t *testing.T) {
+	tests := []struct {
+		name      string
+		desired   int32
+		ready     int32
+		available int32
+		want      string
+	}{
+		{"zero replicas", 0, 0, 0, StatusNotDeployed},
+		{"all healthy", 3, 3, 3, StatusHealthy},
+		{"partially available", 3, 1, 1, StatusDegraded},
+		{"none available", 3, 0, 0, StatusProgressing},
+		{"ready but not all available", 3, 3, 2, StatusDegraded},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DeploymentStatus(tc.desired, tc.ready, tc.available)
+			if got != tc.want {
+				t.Fatalf("DeploymentStatus(%d,%d,%d) = %s, want %s",
+					tc.desired, tc.ready, tc.available, got, tc.want)
+			}
+		})
+	}
+}
+
+func int32p(v int32) *int32 { return &v }
+
+func TestK8sProviderNotDeployed(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	p := NewK8sProvider(client)
+
+	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusNotDeployed {
+		t.Fatalf("expected not_deployed, got %s", info.Status)
+	}
+	if info.Namespace != "myapi-dev" {
+		t.Fatalf("expected namespace myapi-dev, got %s", info.Namespace)
+	}
+	if len(info.IngressURLs) != 0 {
+		t.Fatalf("expected empty ingress URLs, got %v", info.IngressURLs)
+	}
+}
+
+func TestK8sProviderHealthy(t *testing.T) {
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "api",
+			Namespace:         "myapi-dev",
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32p(2),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Image: "ghcr.io/org/api:v1.2.3"},
+					},
+				},
+			},
+		},
+		Status: appsv1.DeploymentStatus{
+			Replicas:          2,
+			ReadyReplicas:     2,
+			AvailableReplicas: 2,
+		},
+	}
+
+	client := fake.NewSimpleClientset(dep)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusHealthy {
+		t.Fatalf("expected healthy, got %s", info.Status)
+	}
+	if info.Image != "ghcr.io/org/api:v1.2.3" {
+		t.Fatalf("expected image ghcr.io/org/api:v1.2.3, got %s", info.Image)
+	}
+	if info.Replicas != 2 {
+		t.Fatalf("expected 2 replicas, got %d", info.Replicas)
+	}
+	if info.Available != 2 {
+		t.Fatalf("expected 2 available, got %d", info.Available)
+	}
+}
+
+func TestK8sProviderDegraded(t *testing.T) {
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "api",
+			Namespace:         "myapi-dev",
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32p(3),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Image: "ghcr.io/org/api:v1.0.0"},
+					},
+				},
+			},
+		},
+		Status: appsv1.DeploymentStatus{
+			Replicas:          3,
+			ReadyReplicas:     1,
+			AvailableReplicas: 1,
+		},
+	}
+
+	client := fake.NewSimpleClientset(dep)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusDegraded {
+		t.Fatalf("expected degraded, got %s", info.Status)
+	}
+}
+
+func TestK8sProviderWithIngress(t *testing.T) {
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "web",
+			Namespace:         "myapi-dev",
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32p(1),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Image: "ghcr.io/org/web:latest"},
+					},
+				},
+			},
+		},
+		Status: appsv1.DeploymentStatus{
+			Replicas:          1,
+			ReadyReplicas:     1,
+			AvailableReplicas: 1,
+		},
+	}
+
+	pathType := networkingv1.PathTypePrefix
+	ing := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "web-ingress",
+			Namespace: "myapi-dev",
+		},
+		Spec: networkingv1.IngressSpec{
+			TLS: []networkingv1.IngressTLS{
+				{Hosts: []string{"web.example.com"}},
+			},
+			Rules: []networkingv1.IngressRule{
+				{
+					Host: "web.example.com",
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{Path: "/", PathType: &pathType, Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: "web",
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(dep, ing)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "web")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusHealthy {
+		t.Fatalf("expected healthy, got %s", info.Status)
+	}
+	if len(info.IngressURLs) != 1 {
+		t.Fatalf("expected 1 ingress URL, got %v", info.IngressURLs)
+	}
+	if info.IngressURLs[0] != "https://web.example.com" {
+		t.Fatalf("expected https://web.example.com, got %s", info.IngressURLs[0])
+	}
+}
+
+func TestK8sProviderUnrelatedIngress(t *testing.T) {
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "api",
+			Namespace:         "myapi-dev",
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32p(1),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Image: "ghcr.io/org/api:v1"},
+					},
+				},
+			},
+		},
+		Status: appsv1.DeploymentStatus{
+			Replicas:          1,
+			ReadyReplicas:     1,
+			AvailableReplicas: 1,
+		},
+	}
+
+	pathType := networkingv1.PathTypePrefix
+	ing := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-service",
+			Namespace: "myapi-dev",
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{
+				{
+					Host: "other.example.com",
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{Path: "/", PathType: &pathType, Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: "other",
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(dep, ing)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(info.IngressURLs) != 0 {
+		t.Fatalf("expected no ingress URLs for unrelated ingress, got %v", info.IngressURLs)
+	}
+}
+
+func TestIngressReferencesService(t *testing.T) {
+	tests := []struct {
+		ingress string
+		service string
+		want    bool
+	}{
+		{"api", "api", true},
+		{"api-ingress", "api", true},
+		{"web", "api", false},
+		{"web-ingress", "api", false},
+		{"api-v2", "api", true},
+	}
+	for _, tc := range tests {
+		if got := ingressReferencesService(tc.ingress, tc.service); got != tc.want {
+			t.Errorf("ingressReferencesService(%q, %q) = %v, want %v",
+				tc.ingress, tc.service, got, tc.want)
+		}
+	}
+}
