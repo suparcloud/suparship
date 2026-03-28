@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
@@ -30,6 +31,7 @@ type Config struct {
 	Templates       []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
 	ProjectStore    project.Store       // optional: enables service creation when set
 	RuntimeProvider runtime.Provider    // optional: enables runtime inventory when set
+	PreviewStore    preview.Store       // optional: enables preview endpoints when set
 	CookieSecure    bool                // true for production (HTTPS)
 	Logger        *slog.Logger
 }
@@ -74,6 +76,11 @@ func New(cfg Config) *Server {
 
 			rh.inventoryHandler = newInventoryHandler(cfg.ProjectStore, cfg.RuntimeProvider)
 			cfg.Logger.Info("inventory endpoints enabled")
+
+			if cfg.PreviewStore != nil {
+				rh.previewHandler = newPreviewHandler(cfg.PreviewStore, cfg.ProjectStore, cfg.RuntimeProvider, cfg.OrgProvider)
+				cfg.Logger.Info("preview endpoints enabled")
+			}
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")

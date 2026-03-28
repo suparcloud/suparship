@@ -112,7 +112,9 @@ suparship server --addr :9090 # custom address
 | GET | `/api/v1/environments` | session | List all environments across projects |
 | GET | `/api/v1/projects/{project}/services` | viewer | List services with runtime state |
 | GET | `/api/v1/projects/{project}/services/{service}` | viewer | Service detail with per-env runtime state |
-| POST | `/api/v1/projects/{project}/previews` | developer | Create preview (placeholder) |
+| GET | `/api/v1/previews` | session | List all preview environments |
+| POST | `/api/v1/previews` | developer | Create a preview environment |
+| DELETE | `/api/v1/previews/{name}` | developer | Delete a preview environment |
 | POST | `/api/v1/projects/{project}/services/{service}/promote` | developer | Promote service (placeholder) |
 | GET | `/api/v1/templates` | session | List all available templates |
 | GET | `/api/v1/templates/{name}` | session | Get full template detail for form generation |
@@ -292,6 +294,21 @@ e.g. project `myapi` with environment `dev` → namespace `myapi-dev`.
 If the Kubernetes API is unreachable or a Deployment does not exist, the
 runtime status degrades gracefully to `not_deployed` without returning an
 error.
+
+### Preview environments
+
+Previews are ephemeral, branch-scoped deployments of a service. Each
+preview is stored as a ConfigMap (`suparship-preview-{name}`) in
+`suparship-system`.
+
+**Namespace convention**: `{project}-preview-{name}`, e.g. project `api`
+with preview `pr-42` → namespace `api-preview-pr-42`.
+
+Preview status and ingress URL are read from the Kubernetes runtime when
+available, otherwise the status is `not_deployed`.
+
+Creating or deleting a preview requires at least `developer` role on the
+target project. Listing previews is available to any authenticated user.
 
 ---
 

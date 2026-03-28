@@ -27,6 +27,7 @@ type rbacHandler struct {
 	projectStore     project.Store     // optional: merges project store into project listing
 	serviceHandler   *serviceHandler   // optional: enables POST .../services
 	inventoryHandler *inventoryHandler // optional: enables inventory endpoints
+	previewHandler   *previewHandler   // optional: enables preview endpoints
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -79,7 +80,11 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/projects/{project}/services", viewProject(rh.inventoryHandler.handleListServices))
 		mux.HandleFunc("GET /api/v1/projects/{project}/services/{service}", viewProject(rh.inventoryHandler.handleGetService))
 	}
-	mux.HandleFunc("POST /api/v1/projects/{project}/previews", devProject(placeholderHandler))
+	if rh.previewHandler != nil {
+		mux.HandleFunc("GET /api/v1/previews", rh.auth.requireAuth(rh.previewHandler.handleListPreviews))
+		mux.HandleFunc("POST /api/v1/previews", rh.auth.requireAuth(rh.previewHandler.handleCreatePreview))
+		mux.HandleFunc("DELETE /api/v1/previews/{name}", rh.auth.requireAuth(rh.previewHandler.handleDeletePreview))
+	}
 	mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", devProject(placeholderHandler))
 }
 

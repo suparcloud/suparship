@@ -11,6 +11,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
@@ -96,9 +97,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	var projectStore project.Store
+	var previewStore preview.Store
 	var runtimeProvider runtime.Provider
 	if client != nil {
 		projectStore = project.NewK8sStore(client)
+		previewStore = preview.NewK8sStore(client)
 		runtimeProvider = runtime.NewK8sProvider(client)
 	}
 
@@ -111,6 +114,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		Templates:       templates,
 		ProjectStore:    projectStore,
 		RuntimeProvider: runtimeProvider,
+		PreviewStore:    previewStore,
 		CookieSecure:    cookieSecure,
 		Logger:          logger,
 	})
