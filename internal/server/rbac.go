@@ -28,6 +28,7 @@ type rbacHandler struct {
 	serviceHandler   *serviceHandler   // optional: enables POST .../services
 	inventoryHandler *inventoryHandler // optional: enables inventory endpoints
 	previewHandler   *previewHandler   // optional: enables preview endpoints
+	promoteHandler   *promoteHandler   // optional: enables promote endpoint
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -85,7 +86,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/previews", rh.auth.requireAuth(rh.previewHandler.handleCreatePreview))
 		mux.HandleFunc("DELETE /api/v1/previews/{name}", rh.auth.requireAuth(rh.previewHandler.handleDeletePreview))
 	}
-	mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", devProject(placeholderHandler))
+	if rh.promoteHandler != nil {
+		mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", manageProject(rh.promoteHandler.handlePromote))
+	}
 }
 
 // placeholderHandler returns 200 with a stub JSON body. It will be replaced

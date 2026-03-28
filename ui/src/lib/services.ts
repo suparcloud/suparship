@@ -4,6 +4,8 @@ import type {
   CreateServiceResponse,
   EnvironmentsResponse,
   ProjectServicesResponse,
+  PromoteRequest,
+  PromoteResponse,
   ServiceDetailInfo,
 } from "../types";
 
@@ -34,6 +36,17 @@ export function createService(
 ): Promise<CreateServiceResponse> {
   return api.post<CreateServiceResponse>(
     `/projects/${encodeURIComponent(project)}/services`,
+    req,
+  );
+}
+
+export function promoteService(
+  projectName: string,
+  serviceName: string,
+  req: PromoteRequest,
+): Promise<PromoteResponse> {
+  return api.post<PromoteResponse>(
+    `/projects/${encodeURIComponent(projectName)}/services/${encodeURIComponent(serviceName)}/promote`,
     req,
   );
 }

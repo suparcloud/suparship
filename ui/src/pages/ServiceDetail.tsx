@@ -2,8 +2,13 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { createPreview } from "../lib/previews";
-import { fetchServiceDetail } from "../lib/services";
-import type { ServiceDetailInfo, ServiceEnv, RuntimeInfo } from "../types";
+import { fetchServiceDetail, promoteService } from "../lib/services";
+import type {
+  ServiceDetailInfo,
+  ServiceEnv,
+  RuntimeInfo,
+  PromoteResponse,
+} from "../types";
 
 // ---------------------------------------------------------------------------
 // Status
@@ -183,6 +188,14 @@ export function ServiceDetail() {
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewSubmitting, setPreviewSubmitting] = useState(false);
 
+  const [showPromoteModal, setShowPromoteModal] = useState(false);
+  const [promoteTarget, setPromoteTarget] = useState("");
+  const [promoteSubmitting, setPromoteSubmitting] = useState(false);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
+  const [promoteResult, setPromoteResult] = useState<PromoteResponse | null>(
+    null,
+  );
+
   useEffect(() => {
     if (!project || !service) return;
     let cancelled = false;
@@ -302,8 +315,20 @@ export function ServiceDetail() {
             Preview
           </button>
           <button
+            onClick={() => {
+              if (!data) return;
+              const envs = data.environments
+                .slice()
+                .sort((a, b) => a.environment.localeCompare(b.environment));
+              const last = envs[envs.length - 1] as { environment: string } | undefined;
+              const highestEnv = last?.environment ?? "";
+              setPromoteTarget(highestEnv);
+              setPromoteError(null);
+              setPromoteResult(null);
+              setShowPromoteModal(true);
+            }}
             className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-700"
-            title="Promote to next environment (coming soon)"
+            title="Promote to next environment"
           >
             {icons.arrowUp}
             Promote
@@ -387,6 +412,130 @@ export function ServiceDetail() {
                 <p className="mt-2 text-xs text-red-600">{previewError}</p>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- Promote Modal ---- */}
+      {showPromoteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+            {promoteResult ? (
+              <>
+                <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100">
+                  <svg className="h-5 w-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900">
+                  Promotion initiated
+                </h3>
+                <p className="mt-1 text-sm text-gray-500">
+                  {promoteResult.message}
+                </p>
+                <dl className="mt-4 space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <dt className="text-gray-400">Source</dt>
+                    <dd className="font-medium text-gray-900">{promoteResult.source}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-gray-400">Destination</dt>
+                    <dd className="font-medium text-gray-900">{promoteResult.destination}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-gray-400">Namespace</dt>
+                    <dd className="font-mono text-gray-600">{promoteResult.namespace}</dd>
+                  </div>
+                </dl>
+                <button
+                  onClick={() => setShowPromoteModal(false)}
+                  className="mt-6 w-full rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
+                >
+                  Done
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-600">
+                  {icons.arrowUp}
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900">
+                  Promote {service}
+                </h3>
+                <p className="mt-1 text-sm text-gray-500">
+                  Promote this service to a higher environment. This will sync
+                  the configuration from the previous stage.
+                </p>
+
+                <div className="mt-4">
+                  <label
+                    htmlFor="promote-target"
+                    className="mb-1.5 block text-sm font-medium text-gray-700"
+                  >
+                    Target environment
+                  </label>
+                  <select
+                    id="promote-target"
+                    value={promoteTarget}
+                    onChange={(e) => setPromoteTarget(e.target.value)}
+                    className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
+                  >
+                    {data.environments
+                      .slice()
+                      .sort((a, b) => {
+                        const orderA = a.environment.localeCompare(b.environment);
+                        return orderA;
+                      })
+                      .map((env) => (
+                        <option key={env.environment} value={env.environment}>
+                          {env.environment}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                {promoteError && (
+                  <div className="mt-3 rounded-md bg-red-50 px-3 py-2">
+                    <p className="text-sm text-red-700">{promoteError}</p>
+                  </div>
+                )}
+
+                <div className="mt-6 flex gap-3">
+                  <button
+                    onClick={async () => {
+                      if (!project || !service || !promoteTarget) return;
+                      setPromoteSubmitting(true);
+                      setPromoteError(null);
+                      try {
+                        const result = await promoteService(project, service, {
+                          targetEnvironment: promoteTarget,
+                        });
+                        setPromoteResult(result);
+                      } catch (err) {
+                        setPromoteError(
+                          err instanceof Error
+                            ? err.message
+                            : "Promotion failed",
+                        );
+                      } finally {
+                        setPromoteSubmitting(false);
+                      }
+                    }}
+                    disabled={promoteSubmitting || !promoteTarget}
+                    className="flex-1 rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50"
+                  >
+                    {promoteSubmitting ? "Promoting…" : "Promote"}
+                  </button>
+                  <button
+                    onClick={() => setShowPromoteModal(false)}
+                    disabled={promoteSubmitting}
+                    className="flex-1 rounded-lg border border-gray-300 bg-white py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

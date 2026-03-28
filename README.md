@@ -115,7 +115,7 @@ suparship server --addr :9090 # custom address
 | GET | `/api/v1/previews` | session | List all preview environments |
 | POST | `/api/v1/previews` | developer | Create a preview environment |
 | DELETE | `/api/v1/previews/{name}` | developer | Delete a preview environment |
-| POST | `/api/v1/projects/{project}/services/{service}/promote` | developer | Promote service (placeholder) |
+| POST | `/api/v1/projects/{project}/services/{service}/promote` | project_admin | Promote service to target environment |
 | GET | `/api/v1/templates` | session | List all available templates |
 | GET | `/api/v1/templates/{name}` | session | Get full template detail for form generation |
 
@@ -309,6 +309,26 @@ available, otherwise the status is `not_deployed`.
 
 Creating or deleting a preview requires at least `developer` role on the
 target project. Listing previews is available to any authenticated user.
+
+### Service promotion
+
+The `POST /api/v1/projects/{project}/services/{service}/promote` endpoint
+promotes a service from one environment to the next in the project's
+ordered environment chain (e.g. dev → staging → prod).
+
+**Request body**: `{ "targetEnvironment": "prod" }`
+
+The handler validates that both the project and service exist, the target
+environment is defined in the project, and it is not the lowest-order
+environment (there must be a source to promote from). The source is
+automatically determined as the environment immediately preceding the
+target in the ordering.
+
+**Authorization**: requires `project_admin` role or above on the project.
+
+In MVP, the endpoint returns a structured result confirming the promotion
+intent. When Kargo is integrated, this will trigger a Kargo Stage
+promotion.
 
 ---
 

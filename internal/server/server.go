@@ -81,6 +81,9 @@ func New(cfg Config) *Server {
 				rh.previewHandler = newPreviewHandler(cfg.PreviewStore, cfg.ProjectStore, cfg.RuntimeProvider, cfg.OrgProvider)
 				cfg.Logger.Info("preview endpoints enabled")
 			}
+
+			rh.promoteHandler = newPromoteHandler(cfg.ProjectStore)
+			cfg.Logger.Info("promote endpoint enabled")
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")

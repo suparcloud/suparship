@@ -47,9 +47,12 @@ func newTestRBACMux() (*http.ServeMux, *authHandler) {
 	}
 	ah.registerRoutes(mux)
 
+	store := newMemProjectStore()
+
 	rh := &rbacHandler{
-		auth:        ah,
-		orgProvider: &staticOrgProvider{org: testRBACOrg()},
+		auth:           ah,
+		orgProvider:    &staticOrgProvider{org: testRBACOrg()},
+		promoteHandler: newPromoteHandler(store),
 	}
 	rh.registerRoutes(mux)
 
@@ -117,7 +120,7 @@ func TestRBACDeveloperCanViewProject(t *testing.T) {
 	}
 }
 
-func TestRBACDeveloperCanPromoteService(t *testing.T) {
+func TestRBACDeveloperCannotPromote(t *testing.T) {
 	mux, ah := newTestRBACMux()
 
 	req := httptest.NewRequest("POST", "/api/v1/projects/api/services/backend/promote", nil)
@@ -125,8 +128,8 @@ func TestRBACDeveloperCanPromoteService(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("developer should promote service, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("developer should not promote (requires project_admin), got %d", rec.Code)
 	}
 }
 

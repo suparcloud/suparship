@@ -199,6 +199,21 @@ export interface SecretRefInput {
   secretRef: string;
 }
 
+// --- Promotion types ---
+
+export interface PromoteRequest {
+  targetEnvironment: string;
+}
+
+export interface PromoteResponse {
+  project: string;
+  service: string;
+  source: string;
+  destination: string;
+  namespace: string;
+  message: string;
+}
+
 export interface CreateServiceResponse {
   service: {
     name: string;
