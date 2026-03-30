@@ -158,17 +158,38 @@ source .env && go run ./cmd/suparship server
 Expected startup output:
 
 ```
-level=INFO msg="runtime mode: fake — in-memory seed data, no cluster required" trigger=SUPARSHIP_DEV_MODE=local tip="login with admin / admin"
+level=INFO msg="runtime mode: fake — in-memory seed data, no cluster required" trigger=SUPARSHIP_DEV_MODE=local login=admin@local password_env=SUPARSHIP_ADMIN_PASSWORD
 level=INFO msg="auth endpoints enabled"
 ...
 level=INFO msg="server listening" addr=:8080
 ```
 
+### Login credentials
+
+| Field | Default | Override via |
+|-------|---------|--------------|
+| Username | `admin@local` | `SUPARSHIP_ADMIN_EMAIL` |
+| Password | `admin123` | `SUPARSHIP_ADMIN_PASSWORD` |
+
+These defaults match `.env.example`.  Override them in your local `.env` for a
+custom dev identity.
+
+**Auth endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/auth/login` | Login with `{"username": "...", "password": "..."}` — returns session cookie |
+| `POST` | `/api/v1/auth/logout` | Clear session cookie |
+| `GET` | `/api/v1/auth/me` | Return the authenticated user (`username`, `role`) |
+
+> **Warning:** fake mode credentials are plain-text and intentionally weak.
+> They are only for contributor local development.  Never use them in production.
+
 ### What you get out of the box
 
 | Resource | Value |
 |----------|-------|
-| Login | `admin` / `admin` |
+| Login | `admin@local` / `admin123` |
 | Org | `default` — My Organization |
 | Project | `demo` — Demo Project |
 | Environments | `staging`, `prod` |

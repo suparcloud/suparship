@@ -14,9 +14,9 @@ cp .env.example .env
 |----------|---------|-------------|
 | `SUPARSHIP_DEV_MODE` | `local` | Development mode. `local` disables real cluster integrations. |
 | `SUPARSHIP_AUTH_MODE` | `basic` | Auth strategy. `basic` uses the bootstrap admin account. |
-| `SUPARSHIP_ADMIN_EMAIL` | `admin@local` | Admin email for local login. |
-| `SUPARSHIP_ADMIN_PASSWORD` | `admin123` | Admin password for local login (**dev only**). |
-| `SUPARSHIP_BACKEND_ADDR` | `:8080` | HTTP listen address for the Go backend. |
+| `SUPARSHIP_ADMIN_EMAIL` | `admin@local` | Admin username for local login (read by fake mode authenticator). |
+| `SUPARSHIP_ADMIN_PASSWORD` | `admin123` | Admin password for local login — **dev only, never use in production**. |
+| `SUPARSHIP_ADDR` | `:8080` | HTTP listen address for the Go backend. |
 | `SUPARSHIP_FRONTEND_PORT` | `5173` | Port for the Vite dev server. |
 | `SUPARSHIP_CLUSTER_MODE` | `fake` | Cluster integration mode. `fake` stubs Kubernetes calls. |
 

@@ -34,6 +34,9 @@ func TestNewDevServerDeps_AllFieldsSet(t *testing.T) {
 	if deps.LogsProvider == nil {
 		t.Error("LogsProvider must not be nil")
 	}
+	if deps.AdminUsername == "" {
+		t.Error("AdminUsername must not be empty")
+	}
 }
 
 func TestNewDevServerDeps_Independent(t *testing.T) {
@@ -46,6 +49,53 @@ func TestNewDevServerDeps_Independent(t *testing.T) {
 	}
 	if _, err := d2.ProjectStore.Get(context.Background(), "demo"); err != nil {
 		t.Error("d2 should still have 'demo' after d1 mutation")
+	}
+}
+
+func TestNewDevServerDeps_DefaultCredentials(t *testing.T) {
+	// Ensure no env vars are set so we exercise the default path.
+	t.Setenv("SUPARSHIP_ADMIN_EMAIL", "")
+	t.Setenv("SUPARSHIP_ADMIN_PASSWORD", "")
+
+	deps := fake.NewDevServerDeps()
+
+	if deps.AdminUsername != fake.FakeAdminUsername {
+		t.Errorf("AdminUsername = %q, want %q", deps.AdminUsername, fake.FakeAdminUsername)
+	}
+
+	creds, err := deps.Authenticator.Authenticate(
+		context.Background(), fake.FakeAdminUsername, fake.FakeAdminPassword,
+	)
+	if err != nil {
+		t.Fatalf("default credentials should authenticate: %v", err)
+	}
+	if creds.Username != fake.FakeAdminUsername {
+		t.Errorf("creds.Username = %q, want %q", creds.Username, fake.FakeAdminUsername)
+	}
+}
+
+func TestNewDevServerDeps_EnvCredentials(t *testing.T) {
+	t.Setenv("SUPARSHIP_ADMIN_EMAIL", "dev@example.com")
+	t.Setenv("SUPARSHIP_ADMIN_PASSWORD", "devpass99")
+
+	deps := fake.NewDevServerDeps()
+
+	if deps.AdminUsername != "dev@example.com" {
+		t.Errorf("AdminUsername = %q, want %q", deps.AdminUsername, "dev@example.com")
+	}
+
+	// Env-configured credentials must work.
+	_, err := deps.Authenticator.Authenticate(context.Background(), "dev@example.com", "devpass99")
+	if err != nil {
+		t.Fatalf("env-configured credentials should authenticate: %v", err)
+	}
+
+	// Package-default credentials must NOT work when overridden via env.
+	_, err = deps.Authenticator.Authenticate(
+		context.Background(), fake.FakeAdminUsername, fake.FakeAdminPassword,
+	)
+	if err == nil {
+		t.Error("package defaults should not authenticate when env credentials are set")
 	}
 }
 
@@ -65,6 +115,23 @@ func TestFakeAuthenticator_Success(t *testing.T) {
 	}
 }
 
+func TestFakeAuthenticator_CustomCredentials(t *testing.T) {
+	a := &fake.FakeAuthenticator{Username: "tester", Password: "secret"}
+	creds, err := a.Authenticate(context.Background(), "tester", "secret")
+	if err != nil {
+		t.Fatalf("Authenticate with custom credentials: %v", err)
+	}
+	if creds.Username != "tester" {
+		t.Errorf("Username = %q, want %q", creds.Username, "tester")
+	}
+
+	// Default credentials must not work when custom ones are set.
+	_, err = a.Authenticate(context.Background(), fake.FakeAdminUsername, fake.FakeAdminPassword)
+	if err == nil {
+		t.Error("default credentials should not work when custom credentials are configured")
+	}
+}
+
 func TestFakeAuthenticator_WrongPassword(t *testing.T) {
 	a := &fake.FakeAuthenticator{}
 	_, err := a.Authenticate(context.Background(), fake.FakeAdminUsername, "wrong")
@@ -81,6 +148,16 @@ func TestFakeAuthenticator_WrongUsername(t *testing.T) {
 	_, err := a.Authenticate(context.Background(), "nobody", fake.FakeAdminPassword)
 	if err != auth.ErrInvalidCredentials {
 		t.Errorf("expected ErrInvalidCredentials, got %v", err)
+	}
+}
+
+func TestFakeAdminCredentialConstants(t *testing.T) {
+	// Constants must match .env.example to keep local dev frictionless.
+	if fake.FakeAdminUsername != "admin@local" {
+		t.Errorf("FakeAdminUsername = %q, want %q (must match .env.example)", fake.FakeAdminUsername, "admin@local")
+	}
+	if fake.FakeAdminPassword != "admin123" {
+		t.Errorf("FakeAdminPassword = %q, want %q (must match .env.example)", fake.FakeAdminPassword, "admin123")
 	}
 }
 

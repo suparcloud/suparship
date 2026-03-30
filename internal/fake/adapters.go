@@ -3,10 +3,13 @@
 // (project.Store, preview.Store, runtime.Provider, runtime.LogsProvider,
 // auth.Authenticator, rbac.OrgProvider).
 //
-// These adapters are intended ONLY for local development.  Activate them by
-// setting SUPARSHIP_CLUSTER_MODE=fake in your environment (see .env.example).
+// WARNING: this package is intended ONLY for local development.
+// Activate it by setting SUPARSHIP_DEV_MODE=local (or SUPARSHIP_CLUSTER_MODE=fake)
+// in your environment — see .env.example.
+//
 // No Kubernetes API calls are made; all state lives in process memory and
-// resets to seed defaults on every process restart.
+// resets to seed defaults on every process restart.  Credentials are
+// plain-text and intentionally weak.  Never use this package in production.
 //
 // Use NewDevServerDeps to obtain a fully-wired bundle ready to be passed
 // directly into server.Config.
@@ -15,6 +18,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -41,9 +45,17 @@ var (
 // suparship HTTP server without a Kubernetes cluster.  Pass each exported
 // field to the matching server.Config field.
 //
-// Default dev credentials: username "admin", password "admin".
+// The effective login credentials are sourced (in priority order) from:
+//  1. SUPARSHIP_ADMIN_EMAIL / SUPARSHIP_ADMIN_PASSWORD env vars
+//  2. FakeAdminUsername / FakeAdminPassword package constants
+//
 // All data is seeded deterministically; writes are transient.
+//
+// WARNING: for local development only — never deploy this in production.
 type DevServerDeps struct {
+	// AdminUsername is the effective login username for the dev admin account.
+	// Populated by NewDevServerDeps so callers can include it in startup logs.
+	AdminUsername   string
 	Authenticator   *FakeAuthenticator
 	OrgProvider     *FakeOrgProvider
 	ProjectStore    *FakeProjectStore
@@ -52,12 +64,24 @@ type DevServerDeps struct {
 	LogsProvider    *FakeLogsProvider
 }
 
-// NewDevServerDeps returns a DevServerDeps bundle pre-loaded with the same
-// demo seed data as NewSeededDevRuntime.  Each call returns an independent
-// in-memory instance; there is no shared state between instances.
+// NewDevServerDeps returns a DevServerDeps bundle pre-loaded with demo seed
+// data.  Credentials are read from SUPARSHIP_ADMIN_EMAIL and
+// SUPARSHIP_ADMIN_PASSWORD environment variables; when unset the package
+// defaults (FakeAdminUsername / FakeAdminPassword) are used.
+//
+// Each call returns an independent in-memory instance with no shared state.
 func NewDevServerDeps() *DevServerDeps {
+	username := os.Getenv("SUPARSHIP_ADMIN_EMAIL")
+	if username == "" {
+		username = FakeAdminUsername
+	}
+	password := os.Getenv("SUPARSHIP_ADMIN_PASSWORD")
+	if password == "" {
+		password = FakeAdminPassword
+	}
 	return &DevServerDeps{
-		Authenticator:   &FakeAuthenticator{},
+		AdminUsername:   username,
+		Authenticator:   &FakeAuthenticator{Username: username, Password: password},
 		OrgProvider:     &FakeOrgProvider{},
 		ProjectStore:    newFakeProjectStore(),
 		PreviewStore:    newFakePreviewStore(),
@@ -68,20 +92,39 @@ func NewDevServerDeps() *DevServerDeps {
 
 // ── FakeAuthenticator ────────────────────────────────────────────────────────
 
-// FakeAdminUsername and FakeAdminPassword are the hardcoded credentials
-// accepted by FakeAuthenticator.  They are intentionally obvious — never use
-// them outside local development.
+// FakeAdminUsername and FakeAdminPassword are the default dev credentials
+// used by FakeAuthenticator when no env-configured values are provided.
+// They match the defaults in .env.example.
+//
+// WARNING: these credentials are intentionally obvious and must never be
+// used outside local development.
 const (
-	FakeAdminUsername = "admin"
-	FakeAdminPassword = "admin"
+	FakeAdminUsername = "admin@local"
+	FakeAdminPassword = "admin123"
 )
 
-// FakeAuthenticator implements auth.Authenticator with a single hardcoded
+// FakeAuthenticator implements auth.Authenticator with a single configurable
 // dev credential.  Passwords are compared in plain text; no bcrypt is used.
-type FakeAuthenticator struct{}
+//
+// Zero-value fields fall back to FakeAdminUsername / FakeAdminPassword.
+// Construct via NewDevServerDeps to get env-configured credentials.
+//
+// WARNING: for local development only.
+type FakeAuthenticator struct {
+	Username string // if empty, uses FakeAdminUsername
+	Password string // if empty, uses FakeAdminPassword
+}
 
 func (a *FakeAuthenticator) Authenticate(_ context.Context, username, password string) (*auth.Credentials, error) {
-	if username == FakeAdminUsername && password == FakeAdminPassword {
+	wantUser := a.Username
+	if wantUser == "" {
+		wantUser = FakeAdminUsername
+	}
+	wantPass := a.Password
+	if wantPass == "" {
+		wantPass = FakeAdminPassword
+	}
+	if username == wantUser && password == wantPass {
 		return &auth.Credentials{Username: username}, nil
 	}
 	return nil, auth.ErrInvalidCredentials

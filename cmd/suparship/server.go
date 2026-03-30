@@ -88,11 +88,16 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// No Kubernetes cluster is required.  This is the default mode for
 		// local UI/API development.  Set SUPARSHIP_DEV_MODE=local (or
 		// SUPARSHIP_CLUSTER_MODE=fake) in your .env to activate.
+		//
+		// WARNING: fake mode uses plain-text credentials read from
+		// SUPARSHIP_ADMIN_EMAIL / SUPARSHIP_ADMIN_PASSWORD (defaults from
+		// .env.example: admin@local / admin123).  Never run in production.
+		deps := fake.NewDevServerDeps()
 		logger.Info("runtime mode: fake — in-memory seed data, no cluster required",
 			"trigger", cfg.RuntimeModeTrigger,
-			"tip", "login with admin / admin",
+			"login", deps.AdminUsername,
+			"password_env", "SUPARSHIP_ADMIN_PASSWORD",
 		)
-		deps := fake.NewDevServerDeps()
 		authenticator = deps.Authenticator
 		orgProvider = deps.OrgProvider
 		projectStore = deps.ProjectStore
