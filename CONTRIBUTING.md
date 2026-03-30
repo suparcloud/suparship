@@ -88,26 +88,64 @@ kubectl config current-context   # should be kind-suparship-dev
 task dev:cluster:delete    # delete the kind cluster
 ```
 
-#### After bootstrap
+#### ArgoCD (optional — for runtime integration work)
 
-ArgoCD and application installs are handled in subsequent steps (coming soon):
+> **You do not need ArgoCD for most contributions.**
+> `task dev` (fake/in-memory mode) is sufficient for UI work, API handlers,
+> template parsing, and anything that does not require a real Kubernetes runtime.
+>
+> Install ArgoCD only when you need to test features that read or drive real
+> ArgoCD Application resources: sync status, health checks, GitOps reconciliation.
 
 ```bash
-task dev:cluster:bootstrap   # create cluster + namespaces
-task seed                    # populate demo data (coming soon)
-task dev                     # start backend + frontend
+task dev:cluster:argocd   # install ArgoCD dev profile into the argocd namespace
+```
+
+This command (idempotent — safe to re-run):
+
+1. Adds the official argo Helm repository
+2. Installs `argo-cd` chart `7.7.0` (ArgoCD v2.13.x) with the dev values from
+   `config/argocd/values-dev.yaml` — single replica, no SSO, no TLS, no notifications
+3. Waits for `argocd-server` rollout to complete
+4. Prints the admin password and access instructions
+
+**Access the UI** after install:
+
+```bash
+kubectl port-forward svc/argocd-server -n argocd 8180:80
+# open http://localhost:8180
+# username: admin
+# password: printed by the install script, or retrieve with:
+kubectl get secret argocd-initial-admin-secret \
+  -n argocd -o jsonpath='{.data.password}' | base64 -d
+```
+
+**Verify ArgoCD is healthy:**
+
+```bash
+kubectl get pods -n argocd           # all pods should be Running
+kubectl get deployments -n argocd    # server, repo-server, applicationset-controller
+```
+
+#### Full cluster dev sequence
+
+```bash
+task dev:cluster:bootstrap   # 1. create kind cluster + namespaces
+task dev:cluster:argocd      # 2. install ArgoCD (optional, see above)
+task dev                     # 3. start backend + frontend
 ```
 
 ### 3. E2E / CI mode
 
-Full pipeline: create a disposable cluster, seed data, run the test suite,
-and tear everything down. Designed for CI and pre-merge validation.
+Full pipeline: create a disposable cluster, install components, run the test
+suite, and tear everything down. Designed for CI and pre-merge validation.
 
 ```bash
-task dev:cluster:bootstrap
-task seed
-task test
-task dev:cluster:delete
+task dev:cluster:bootstrap   # create cluster
+task dev:cluster:argocd      # install ArgoCD
+task seed                    # load demo data (coming soon)
+task test                    # run all tests
+task dev:cluster:delete      # clean up
 ```
 
 > All three modes share the same `Taskfile.yml` tasks. The difference is

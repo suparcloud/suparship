@@ -46,6 +46,11 @@ tasks:
     cmds:
       - hack/bootstrap-cluster.sh
 
+  dev:cluster:argocd:
+    desc: "Install minimal ArgoCD (dev profile) into the kind cluster"
+    cmds:
+      - hack/install-argocd.sh
+
   dev:cluster:delete:
     desc: "Delete the suparShip dev cluster"
     cmds:

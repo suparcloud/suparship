@@ -1,0 +1,37 @@
+# ArgoCD Helm values — suparShip local development profile.
+#
+# Installs a minimal, single-replica ArgoCD suitable for a kind cluster.
+# NOT suitable for staging or production.
+#
+# Used by: hack/install-argocd.sh
+# Chart:   argo-cd 7.7.0 (ArgoCD v2.13.x)
+# Repo:    https://argoproj.github.io/argo-helm
+
+# ── Disable components not needed in local dev ────────────────────────────
+
+# No SSO provider in local dev.
+dex:
+  enabled: false
+
+# No alert routing or notifications in local dev.
+notifications:
+  enabled: false
+
+# ── Single replicas everywhere ────────────────────────────────────────────
+# Reduces memory pressure on a single-node kind cluster.
+
+server:
+  replicas: 1
+
+repoServer:
+  replicas: 1
+
+applicationSet:
+  replicas: 1
+
+# ── Server: disable TLS termination ──────────────────────────────────────
+# Access is via kubectl port-forward (localhost) so HTTPS is unnecessary.
+# The UI and API are served over plain HTTP on port 80.
+configs:
+  params:
+    server.insecure: "true"
