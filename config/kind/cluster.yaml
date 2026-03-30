@@ -1,0 +1,30 @@
+# Kind cluster configuration for suparShip local development.
+#
+# Creates a single-node cluster named "suparship-dev".
+# Port mappings are pre-wired so that a future NGINX ingress controller
+# can be reached at http://localhost:8880 and https://localhost:8443
+# without requiring root privileges.
+#
+# Used by: hack/bootstrap-cluster.sh
+# Reference: https://kind.sigs.k8s.io/docs/user/configuration/
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: suparship-dev
+nodes:
+  - role: control-plane
+    # Label this node so an ingress controller can be scheduled here later.
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # HTTP — accessible at http://localhost:8880
+      - containerPort: 80
+        hostPort: 8880
+        protocol: TCP
+      # HTTPS — accessible at https://localhost:8443
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP

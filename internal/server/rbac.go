@@ -71,7 +71,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/projects", rh.auth.requireAuth(rh.handleGetProjects))
 
 	// Project-scoped endpoints — role-based access.
-	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(placeholderHandler))
+	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(rh.handleGetProject))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
 	mux.HandleFunc("PUT /api/v1/projects/{project}", manageProject(placeholderHandler))
 	if rh.serviceHandler != nil {
@@ -86,6 +86,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/previews", rh.auth.requireAuth(rh.previewHandler.handleListPreviews))
 		mux.HandleFunc("POST /api/v1/previews", rh.auth.requireAuth(rh.previewHandler.handleCreatePreview))
 		mux.HandleFunc("DELETE /api/v1/previews/{name}", rh.auth.requireAuth(rh.previewHandler.handleDeletePreview))
+		mux.HandleFunc("GET /api/v1/projects/{project}/services/{service}/previews", viewProject(rh.previewHandler.handleListServicePreviews))
 	}
 	if rh.promoteHandler != nil {
 		mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", manageProject(rh.promoteHandler.handlePromote))

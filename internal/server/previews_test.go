@@ -479,3 +479,125 @@ func TestDeletePreviewUnauthenticated(t *testing.T) {
 		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 }
+
+// --- Tests: GET /api/v1/projects/{project}/services/{service}/previews ---
+
+func TestListServicePreviews_Empty(t *testing.T) {
+	mux, ah, _, projStore := newTestPreviewMux(nil)
+	_ = projStore.Save(context.Background(), previewTestProject())
+
+	req := httptest.NewRequest("GET", "/api/v1/projects/api/services/backend/previews", nil)
+	req.AddCookie(sessionCookieFor(ah, "alice", "org_admin"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp PreviewsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Previews) != 0 {
+		t.Fatalf("expected 0 previews, got %d", len(resp.Previews))
+	}
+}
+
+func TestListServicePreviews_Filtered(t *testing.T) {
+	mux, ah, prevStore, projStore := newTestPreviewMux(nil)
+	_ = projStore.Save(context.Background(), previewTestProject())
+
+	// Two previews for the target service, one for a different service.
+	_ = prevStore.Save(context.Background(), preview.New("pr-10", "api", "backend"))
+	_ = prevStore.Save(context.Background(), preview.New("pr-11", "api", "backend"))
+	_ = prevStore.Save(context.Background(), preview.New("pr-20", "api", "frontend")) // different service
+
+	req := httptest.NewRequest("GET", "/api/v1/projects/api/services/backend/previews", nil)
+	req.AddCookie(sessionCookieFor(ah, "alice", "org_admin"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp PreviewsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Previews) != 2 {
+		t.Fatalf("expected 2 filtered previews, got %d: %+v", len(resp.Previews), resp.Previews)
+	}
+	for _, p := range resp.Previews {
+		if p.Service != "backend" {
+			t.Errorf("expected service 'backend', got %q in preview %q", p.Service, p.Name)
+		}
+		if p.Project != "api" {
+			t.Errorf("expected project 'api', got %q in preview %q", p.Project, p.Name)
+		}
+	}
+}
+
+func TestListServicePreviews_WithRuntime(t *testing.T) {
+	rp := &fakePreviewRuntimeProvider{
+		infos: map[string]*runtime.RuntimeInfo{
+			"api-preview-pr-10/backend": {
+				Status:      runtime.StatusHealthy,
+				IngressURLs: []string{"https://pr-10.preview.local"},
+				Namespace:   "api-preview-pr-10",
+			},
+		},
+	}
+
+	mux, ah, prevStore, projStore := newTestPreviewMux(rp)
+	_ = projStore.Save(context.Background(), previewTestProject())
+	_ = prevStore.Save(context.Background(), preview.New("pr-10", "api", "backend"))
+
+	req := httptest.NewRequest("GET", "/api/v1/projects/api/services/backend/previews", nil)
+	req.AddCookie(sessionCookieFor(ah, "alice", "org_admin"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp PreviewsResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if len(resp.Previews) != 1 {
+		t.Fatalf("expected 1 preview, got %d", len(resp.Previews))
+	}
+	if resp.Previews[0].Status != runtime.StatusHealthy {
+		t.Errorf("Status = %q, want %q", resp.Previews[0].Status, runtime.StatusHealthy)
+	}
+	if resp.Previews[0].URL != "https://pr-10.preview.local" {
+		t.Errorf("URL = %q, want %q", resp.Previews[0].URL, "https://pr-10.preview.local")
+	}
+}
+
+func TestListServicePreviews_Unauthenticated(t *testing.T) {
+	mux, _, _, _ := newTestPreviewMux(nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/projects/api/services/backend/previews", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestListServicePreviews_Forbidden(t *testing.T) {
+	mux, ah, _, _ := newTestPreviewMux(nil)
+
+	// "stranger" is not in any team for project "api".
+	req := httptest.NewRequest("GET", "/api/v1/projects/api/services/backend/previews", nil)
+	req.AddCookie(sessionCookieFor(ah, "stranger", "viewer"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+}

@@ -1,0 +1,22 @@
+# Seed: default org configuration.
+# Applied by: hack/seed.sh  (kubectl apply -f config/seed/)
+# Matches the fake/in-memory seed in internal/fake/seed.go so the UI looks
+# consistent across both development modes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-org-config
+  namespace: suparship-system
+data:
+  org.yaml: |
+    name: default
+    displayName: My Organization
+    createdAt: "2026-01-01T00:00:00Z"
+    teams:
+      - name: admins
+        displayName: Administrators
+        members: [admin]
+    roleBindings:
+      - project: "*"
+        team: admins
+        role: org_admin

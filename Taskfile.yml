@@ -1,0 +1,90 @@
+# https://taskfile.dev
+version: "3"
+
+# Load .env automatically when present so all tasks pick up local dev settings.
+dotenv: ['.env']
+
+vars:
+  BINARY_NAME: suparship
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  help:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  # ── Local development ──────────────────────────────────────────────────
+
+  dev:
+    desc: "Start local dev: backend (fake/in-memory) + frontend — one command"
+    cmds:
+      - hack/dev.sh
+
+  dev:api:
+    desc: "Build and start the backend API only (fake/local mode)"
+    cmds:
+      - go build -o bin/{{.BINARY_NAME}} ./cmd/suparship
+      - SUPARSHIP_CORS_ORIGINS=http://localhost:5173 ./bin/{{.BINARY_NAME}} server
+
+  dev:ui:
+    desc: "Start the frontend Vite dev server only"
+    cmds:
+      - cd ui && npm run dev
+
+  dev:cluster:
+    desc: "Cluster dev: bootstrap + ArgoCD + backend (cluster mode) + frontend — one command"
+    cmds:
+      - hack/dev-cluster.sh
+
+  dev:cluster:bootstrap:
+    desc: "Create kind cluster + namespaces — idempotent, safe to re-run"
+    cmds:
+      - hack/bootstrap-cluster.sh
+
+  dev:cluster:argocd:
+    desc: "Install minimal ArgoCD (dev profile) into the kind cluster"
+    cmds:
+      - hack/install-argocd.sh
+
+  dev:cluster:delete:
+    desc: "Delete the suparShip dev cluster"
+    cmds:
+      - |
+        kind delete cluster --name suparship-dev \
+          && echo "  Cluster deleted." \
+          || echo "  Cluster 'suparship-dev' not found — nothing to delete."
+
+  # ── Testing ────────────────────────────────────────────────────────────
+
+  test:
+    desc: Run all Go tests
+    cmds:
+      - go test -race ./...
+
+  # ── Data management ────────────────────────────────────────────────────
+
+  seed:
+    desc: "Seed demo data into the cluster (org, project, preview) — idempotent"
+    cmds:
+      - hack/seed.sh
+
+  dev:cluster:reset:
+    desc: "Remove seeded demo ConfigMaps from the cluster — safe, re-seedable"
+    cmds:
+      - hack/reset-cluster.sh
+
+  reset:
+    desc: "Clean local build artifacts (bin/, tmp/) — safe, does not touch the cluster"
+    cmds:
+      - |
+        rm -rf bin/ tmp/
+        echo "  Removed: bin/  tmp/"
+        echo ""
+        echo "  Fake mode state is in-memory — restart task dev to reset it."
+        echo "  To also clean the frontend build:  rm -rf ui/dist/"
+        echo "  To reset cluster seed data:        task dev:cluster:reset"

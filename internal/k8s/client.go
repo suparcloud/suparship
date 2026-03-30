@@ -9,12 +9,20 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// NewClientset builds a Kubernetes clientset from the given kubeconfig path
-// and context name. Empty strings use the default loading rules and current
-// context respectively.
+// NewClientset builds a Kubernetes clientset using the following resolution
+// order:
+//
+//  1. Explicit kubeconfig path (--kubeconfig flag / KUBECONFIG env var).
+//  2. Default kubeconfig discovery: KUBECONFIG env var, then ~/.kube/config.
+//  3. In-cluster config — used automatically when the binary runs inside a
+//     Kubernetes Pod and no kubeconfig is provided or found.
+//
+// An error is returned only when all three paths fail, and the message
+// describes what was tried so the caller can produce an actionable log.
 func NewClientset(kubeconfig, kubecontext string) (kubernetes.Interface, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfig != "" {
@@ -26,14 +34,30 @@ func NewClientset(kubeconfig, kubecontext string) (kubernetes.Interface, error) 
 		overrides.CurrentContext = kubecontext
 	}
 
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		rules, overrides,
 	).ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("building kubeconfig: %w", err)
+		// No kubeconfig found via the standard paths. If the caller did not
+		// specify an explicit file or context, try in-cluster config — this
+		// is the expected path when the server runs inside a Pod.
+		if kubeconfig == "" && kubecontext == "" {
+			inClusterCfg, inErr := rest.InClusterConfig()
+			if inErr == nil {
+				restConfig = inClusterCfg
+				err = nil
+			} else {
+				return nil, fmt.Errorf(
+					"no kubeconfig found (%v) and in-cluster config unavailable (%v)",
+					err, inErr,
+				)
+			}
+		} else {
+			return nil, fmt.Errorf("building kubeconfig: %w", err)
+		}
 	}
 
-	cs, err := kubernetes.NewForConfig(config)
+	cs, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("creating kubernetes client: %w", err)
 	}

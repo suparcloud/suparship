@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { fetchPreviews } from "../lib/previews";
 import { fetchOrg, fetchProjects } from "../lib/settings";
 import { fetchEnvironments, fetchProjectServices } from "../lib/services";
 import type {
@@ -83,13 +84,15 @@ interface DashboardData {
   projects: Project[];
   environments: EnvironmentInfo[];
   servicesByProject: Map<string, ServiceRuntime[]>;
+  previewCount: number;
 }
 
 async function loadDashboard(): Promise<DashboardData> {
-  const [orgData, projectsData, envsData] = await Promise.all([
+  const [orgData, projectsData, envsData, previewsData] = await Promise.all([
     fetchOrg().catch(() => null),
     fetchProjects().catch(() => ({ projects: [] as Project[] })),
     fetchEnvironments().catch(() => ({ environments: [] as EnvironmentInfo[] })),
+    fetchPreviews().catch(() => ({ previews: [] })),
   ]);
 
   const servicesByProject = new Map<string, ServiceRuntime[]>();
@@ -108,6 +111,7 @@ async function loadDashboard(): Promise<DashboardData> {
     projects: projectsData.projects,
     environments: envsData.environments,
     servicesByProject,
+    previewCount: previewsData.previews.length,
   };
 }
 
@@ -174,10 +178,11 @@ export function Dashboard() {
       </div>
 
       {/* Stats */}
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Projects" value={data.projects.length} />
         <StatCard label="Environments" value={uniqueEnvNames.length} />
         <StatCard label="Services" value={totalServices} />
+        <StatCard label="Previews" value={data.previewCount} />
       </div>
 
       {/* Environments */}
@@ -220,7 +225,7 @@ export function Dashboard() {
             return (
               <ProjectCard
                 key={p.name}
-                project={p.name}
+                project={p}
                 services={services}
               />
             );
@@ -237,24 +242,33 @@ function ProjectCard({
   project,
   services,
 }: {
-  project: string;
+  project: Project;
   services: ServiceRuntime[];
 }) {
+  const displayName = project.displayName ?? project.name;
+
   return (
     <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
       <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3.5">
-        <Link
-          to={`/projects/${project}`}
-          className="text-sm font-semibold text-gray-900 hover:text-gray-600"
-        >
-          {project}
-        </Link>
-        <div className="flex items-center gap-3">
+        <div className="min-w-0">
+          <Link
+            to={`/projects/${project.name}`}
+            className="text-sm font-semibold text-gray-900 hover:text-gray-600"
+          >
+            {displayName}
+          </Link>
+          {project.description && (
+            <p className="mt-0.5 truncate text-xs text-gray-400">
+              {project.description}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-shrink-0 items-center gap-3">
           <span className="text-xs text-gray-400">
             {services.length} {services.length === 1 ? "service" : "services"}
           </span>
           <Link
-            to={`/projects/${project}/services/new`}
+            to={`/projects/${project.name}/services/new`}
             className="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-gray-700"
           >
             Add service
@@ -264,9 +278,9 @@ function ProjectCard({
 
       {services.length === 0 ? (
         <div className="px-5 py-10 text-center">
-          <p className="text-sm text-gray-400">No services yet.</p>
+          <p className="text-sm text-gray-400">No services configured yet.</p>
           <Link
-            to={`/projects/${project}/services/new`}
+            to={`/projects/${project.name}/services/new`}
             className="mt-2 inline-block text-sm font-medium text-gray-600 hover:text-gray-900"
           >
             Create your first service &rarr;

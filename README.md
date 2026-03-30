@@ -104,17 +104,18 @@ suparship server --addr :9090 # custom address
 | GET | `/api/v1/auth/me` | session | Return current user identity and role |
 | GET | `/api/v1/org` | session | Return org name, display name, created at |
 | GET | `/api/v1/teams` | session | List all teams with members |
-| GET | `/api/v1/projects` | session | List all projects |
-| GET | `/api/v1/projects/{project}` | viewer | Get project (placeholder) |
+| GET | `/api/v1/projects` | session | List all projects with display name and description |
+| GET | `/api/v1/projects/{project}` | viewer | Get project detail — name, description, environments, services |
 | GET | `/api/v1/projects/{project}/rbac` | viewer | List role bindings for a project |
 | PUT | `/api/v1/projects/{project}` | project_admin | Update project (placeholder) |
 | POST | `/api/v1/projects/{project}/services` | developer | Create service from template |
 | GET | `/api/v1/environments` | session | List all environments across projects |
 | GET | `/api/v1/projects/{project}/services` | viewer | List services with runtime state |
 | GET | `/api/v1/projects/{project}/services/{service}` | viewer | Service detail with per-env runtime state |
-| GET | `/api/v1/previews` | session | List all preview environments |
+| GET | `/api/v1/previews` | session | List all preview environments (cross-project) |
 | POST | `/api/v1/previews` | developer | Create a preview environment |
 | DELETE | `/api/v1/previews/{name}` | developer | Delete a preview environment |
+| GET | `/api/v1/projects/{project}/services/{service}/previews` | viewer | List previews for a specific service |
 | POST | `/api/v1/projects/{project}/services/{service}/promote` | project_admin | Promote service to target environment |
 | GET | `/api/v1/projects/{project}/services/{service}/logs` | viewer | Fetch pod logs for a service |
 | GET | `/api/v1/templates` | session | List all available templates |
@@ -124,6 +125,119 @@ Auth endpoints are enabled automatically when a Kubernetes cluster is
 reachable (they validate against the `suparship-admin-auth` Secret).
 RBAC-protected routes require both auth and an org config provider.
 Session cookies are `HttpOnly` and `SameSite=Lax`.
+
+---
+
+## Local Fake Mode (contributor default)
+
+**Local fake mode** runs the entire backend in-process using seeded demo data.
+No Kubernetes cluster, no ArgoCD, no Kargo — nothing external is required.
+
+This is the **recommended starting point** for contributors working on UI or
+API features.
+
+### Activate
+
+Copy `.env.example` to `.env` (already done if you followed the quickstart):
+
+```bash
+cp .env.example .env
+```
+
+`.env.example` sets `SUPARSHIP_DEV_MODE=local` which activates fake mode
+automatically.  You can also set `SUPARSHIP_CLUSTER_MODE=fake` directly; both
+are equivalent.  `SUPARSHIP_DEV_MODE=local` takes precedence if both are set.
+
+### Start the server
+
+```bash
+# load .env then start the API
+source .env && go run ./cmd/suparship server
+```
+
+Expected startup output:
+
+```
+level=INFO msg="runtime mode: fake — in-memory seed data, no cluster required" trigger=SUPARSHIP_DEV_MODE=local login=admin@local password_env=SUPARSHIP_ADMIN_PASSWORD
+level=INFO msg="auth endpoints enabled"
+...
+level=INFO msg="server listening" addr=:8080
+```
+
+### Login credentials
+
+| Field | Default | Override via |
+|-------|---------|--------------|
+| Username | `admin@local` | `SUPARSHIP_ADMIN_EMAIL` |
+| Password | `admin123` | `SUPARSHIP_ADMIN_PASSWORD` |
+
+These defaults match `.env.example`.  Override them in your local `.env` for a
+custom dev identity.
+
+**Auth endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/auth/login` | Login with `{"username": "...", "password": "..."}` — returns session cookie |
+| `POST` | `/api/v1/auth/logout` | Clear session cookie |
+| `GET` | `/api/v1/auth/me` | Return the authenticated user (`username`, `role`) |
+
+> **Warning:** fake mode credentials are plain-text and intentionally weak.
+> They are only for contributor local development.  Never use them in production.
+
+### What you get out of the box
+
+| Resource | Value |
+|----------|-------|
+| Login | `admin@local` / `admin123` |
+| Org | `default` — My Organization |
+| Project | `demo` — Demo Project |
+| Environments | `staging`, `prod` |
+| Service | `hello` (web-service template) |
+| Preview | `pr-42` |
+| Runtime status | `healthy` with fake ingress URLs |
+| Logs | Sample log lines (deterministic) |
+
+All writes (new services, previews, etc.) are **in-memory only** and reset on
+the next restart.
+
+### Runtime mode reference
+
+| `SUPARSHIP_DEV_MODE` | `SUPARSHIP_CLUSTER_MODE` | Active mode |
+|----------------------|--------------------------|-------------|
+| `local` | any | fake |
+| _(unset)_ | `fake` | fake |
+| _(unset)_ | _(unset)_ | kubernetes |
+
+### Which mode should I use?
+
+| Situation | Recommended mode | How to activate |
+|-----------|-----------------|-----------------|
+| Working on UI or API features, no cluster needed | **fake** | `SUPARSHIP_DEV_MODE=local` in `.env` (already the default in `.env.example`) |
+| Testing real K8s integration locally | **kubernetes** | Unset `SUPARSHIP_DEV_MODE`; ensure `kubectl cluster-info` works |
+| Running inside a Kubernetes Pod (in-cluster) | **kubernetes** | Unset `SUPARSHIP_DEV_MODE`; no kubeconfig needed — in-cluster config is auto-detected |
+| CI / automated tests against a real cluster | **kubernetes** | Set `KUBECONFIG` to a valid kubeconfig path |
+
+**Kubernetes mode startup:** the server logs exactly which kubeconfig and
+context it will use before attempting to connect. If the cluster is
+unreachable the server exits immediately with an actionable error message
+rather than starting in a degraded state.
+
+```
+level=INFO msg="runtime mode: kubernetes" kubeconfig="auto (KUBECONFIG env → ~/.kube/config → in-cluster)" context="current context"
+level=INFO msg="kubernetes client ready"
+```
+
+If the connection fails you will see:
+
+```
+runtime mode is "kubernetes" but no Kubernetes cluster is reachable: …
+
+To fix:
+  • Local development (no cluster needed): set SUPARSHIP_DEV_MODE=local in .env
+  • Cluster access: ensure KUBECONFIG points to a valid kubeconfig file
+  • Diagnose connectivity: kubectl cluster-info
+```
 
 ---
 
@@ -355,25 +469,70 @@ output is capped at 1 MiB per request to prevent memory issues. Streaming
 
 ---
 
-## Development
+## Local Development
 
 ### Prerequisites
 
 - Go 1.23+
 - Node.js 20+ and npm
+- [Task](https://taskfile.dev/) — `brew install go-task` or see [taskfile.dev](https://taskfile.dev)
 
-### Quick start (two terminals)
+### Contributor quick start
+
+No cluster required. Everything runs in-memory with seeded demo data.
 
 ```bash
-# Terminal 1 — backend API (with CORS for the Vite dev server)
+cp .env.example .env   # configure local dev defaults (one time)
+task dev               # build backend + start frontend
+```
+
+Open **http://localhost:5173** and sign in:
+
+| Field    | Default       | Override via                |
+|----------|---------------|-----------------------------|
+| Username | `admin@local` | `SUPARSHIP_ADMIN_EMAIL`     |
+| Password | `admin123`    | `SUPARSHIP_ADMIN_PASSWORD`  |
+
+`task dev` starts the backend in **fake/in-memory mode** (no Kubernetes, no
+ArgoCD) and the Vite dev server with hot-reload. Press **Ctrl+C** to stop
+both.
+
+Expected output:
+
+```
+  suparShip — local dev  (fake / in-memory mode, no cluster required)
+  ────────────────────────────────────────────────────────────────────
+  Backend   →  http://localhost:8080
+  Frontend  →  http://localhost:5173
+  Login     →  admin@local  /  admin123
+
+  Ctrl+C to stop both servers.
+
+  [api] building... ok
+```
+
+### Individual task commands
+
+```bash
+task dev        # backend + frontend together (recommended)
+task dev:api    # backend only
+task dev:ui     # frontend only
+
+task test       # run all Go tests
+task help       # list all available tasks
+```
+
+### Running processes separately (alternative)
+
+If you prefer two terminals:
+
+```bash
+# Terminal 1 — backend (CORS pre-configured for Vite)
 make dev-api
 
 # Terminal 2 — frontend with HMR
 make dev-ui
 ```
-
-Open http://localhost:5173 in your browser. The Vite dev server proxies
-`/api` requests to the Go backend on `:8080`.
 
 ### Serving the built frontend from the backend
 

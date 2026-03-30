@@ -10,7 +10,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/config"
+	"github.com/suparcloud/suparship/internal/fake"
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -27,10 +30,13 @@ var serverCmd = &cobra.Command{
 The server exposes health-check endpoints (/healthz, /readyz) and a
 version metadata endpoint (/api/v1/meta).
 
-When a Kubernetes cluster is reachable, auth endpoints are enabled
-automatically (/api/v1/auth/*).
+Runtime modes:
+  fake       — in-memory seed data, no Kubernetes required (default for contributors)
+  kubernetes — connects to a real cluster via kubeconfig
 
 Environment variables:
+  SUPARSHIP_DEV_MODE       set to "local" to enable fake mode (recommended for contributors)
+  SUPARSHIP_CLUSTER_MODE   set to "fake" to enable fake mode (alternative override)
   SUPARSHIP_ADDR           listen address (default ":8080")
   SUPARSHIP_UI_DIR         path to frontend dist directory
   SUPARSHIP_CORS_ORIGINS   comma-separated allowed origins
@@ -68,12 +74,70 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	var authenticator auth.Authenticator
-	var orgProvider rbac.OrgProvider
-	client, err := k8s.NewClientset(kubeconfig, kubecontext)
-	if err != nil {
-		logger.Warn("kubernetes not available, auth and RBAC endpoints disabled", "error", err)
-	} else {
+	cfg := config.Load()
+
+	var (
+		authenticator   auth.Authenticator
+		orgProvider     rbac.OrgProvider
+		projectStore    project.Store
+		previewStore    preview.Store
+		runtimeProvider runtime.Provider
+		logsProvider    runtime.LogsProvider
+		templates       []*tpl.Template
+	)
+
+	switch cfg.RuntimeMode {
+	case config.ModeFake:
+		// Fake mode: entirely in-memory with deterministic seed data.
+		// No Kubernetes cluster is required.  This is the default mode for
+		// local UI/API development.  Set SUPARSHIP_DEV_MODE=local (or
+		// SUPARSHIP_CLUSTER_MODE=fake) in your .env to activate.
+		//
+		// WARNING: fake mode uses plain-text credentials read from
+		// SUPARSHIP_ADMIN_EMAIL / SUPARSHIP_ADMIN_PASSWORD (defaults from
+		// .env.example: admin@local / admin123).  Never run in production.
+		deps := fake.NewDevServerDeps()
+		logger.Info("runtime mode: fake — in-memory seed data, no cluster required",
+			"trigger", cfg.RuntimeModeTrigger,
+			"login", deps.AdminUsername,
+			"password_env", "SUPARSHIP_ADMIN_PASSWORD",
+		)
+		authenticator = deps.Authenticator
+		orgProvider = deps.OrgProvider
+		projectStore = deps.ProjectStore
+		previewStore = deps.PreviewStore
+		runtimeProvider = deps.RuntimeProvider
+		logsProvider = deps.LogsProvider
+
+	default: // config.ModeKubernetes
+		// Log what we will attempt before trying, so contributors see the
+		// intent even if the connection fails.
+		kubeconfigDesc := "auto (KUBECONFIG env → ~/.kube/config → in-cluster)"
+		if kubeconfig != "" {
+			kubeconfigDesc = kubeconfig
+		}
+		contextDesc := "current context"
+		if kubecontext != "" {
+			contextDesc = kubecontext
+		}
+		logger.Info("runtime mode: kubernetes",
+			"kubeconfig", kubeconfigDesc,
+			"context", contextDesc,
+		)
+
+		client, err := k8s.NewClientset(kubeconfig, kubecontext)
+		if err != nil {
+			return fmt.Errorf(
+				"runtime mode is %q but no Kubernetes cluster is reachable: %w\n\n"+
+					"To fix:\n"+
+					"  • Local development (no cluster needed): set SUPARSHIP_DEV_MODE=local in .env\n"+
+					"  • Cluster access: ensure KUBECONFIG points to a valid kubeconfig file\n"+
+					"  • Diagnose connectivity: kubectl cluster-info",
+				config.ModeKubernetes, err,
+			)
+		}
+		logger.Info("kubernetes client ready")
+
 		authenticator = auth.NewK8sAuthenticator(client)
 
 		adminUser := "admin"
@@ -84,9 +148,37 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 		fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
 		orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
+
+		// Wire all Kubernetes-backed store and runtime implementations
+		// through the consolidated kube.ServerDeps bundle.
+		kubeDeps := kube.NewServerDeps(client)
+		projectStore = kubeDeps.ProjectStore
+		previewStore = kubeDeps.PreviewStore
+		runtimeProvider = kubeDeps.RuntimeProvider
+		logsProvider = kubeDeps.LogsProvider
+
+		// When no local templates directory is provided, attempt to load
+		// templates stored as ConfigMaps in the cluster (label
+		// suparship.io/type=template, namespace suparship-system).
+		// Failure is non-fatal: the server starts without templates so
+		// existing services remain accessible and operators can diagnose
+		// the issue without a hard stop.
+		if templatesDir == "" {
+			clusterTemplates, err := kube.LoadTemplates(cmd.Context(), client)
+			if err != nil {
+				logger.Warn("could not load templates from cluster, starting without",
+					"error", err,
+				)
+			} else {
+				templates = clusterTemplates
+				logger.Info("templates loaded from cluster", "count", len(templates))
+			}
+		}
 	}
 
-	var templates []*tpl.Template
+	// Disk-based templates (--templates-dir / SUPARSHIP_TEMPLATES_DIR) always
+	// take precedence over cluster-loaded templates, so contributors can
+	// iterate on templates locally without pushing ConfigMaps to the cluster.
 	if templatesDir != "" {
 		loaded, err := tpl.LoadDir(templatesDir)
 		if err != nil {
@@ -94,17 +186,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 		templates = loaded
 		logger.Info("templates loaded", "dir", templatesDir, "count", len(templates))
-	}
-
-	var projectStore project.Store
-	var previewStore preview.Store
-	var runtimeProvider runtime.Provider
-	var logsProvider runtime.LogsProvider
-	if client != nil {
-		projectStore = project.NewK8sStore(client)
-		previewStore = preview.NewK8sStore(client)
-		runtimeProvider = runtime.NewK8sProvider(client)
-		logsProvider = runtime.NewK8sLogsProvider(client)
 	}
 
 	srv := server.New(server.Config{

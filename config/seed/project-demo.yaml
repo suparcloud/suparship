@@ -1,0 +1,35 @@
+# Seed: demo project with hello service and staging + prod environments.
+# Applied by: hack/seed.sh  (kubectl apply -f config/seed/)
+# Matches the fake/in-memory seed in internal/fake/seed.go.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-project-demo
+  namespace: suparship-system
+  labels:
+    suparship.io/type: project
+    suparship.io/project: demo
+data:
+  project.yaml: |
+    apiVersion: suparship.io/v1alpha1
+    kind: Project
+    metadata:
+      name: demo
+    spec:
+      displayName: Demo Project
+      description: Explore suparShip with a pre-seeded project.
+      environments:
+        - name: staging
+          displayName: Staging
+          order: 1
+        - name: prod
+          displayName: Production
+          order: 2
+      services:
+        - name: hello
+          template:
+            name: web-service
+            version: "1.0.0"
+          values:
+            image_repository: ghcr.io/suparcloud/hello
+            image_tag: v1.0.0

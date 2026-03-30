@@ -1,0 +1,505 @@
+package fake_test
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/fake"
+)
+
+var ctx = context.Background()
+
+// ── Org ───────────────────────────────────────────────────────────────────────
+
+func TestGetOrg(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	org := r.GetOrg()
+	if org == nil {
+		t.Fatal("GetOrg returned nil")
+	}
+	if org.Name != "default" {
+		t.Errorf("org.Name = %q, want %q", org.Name, "default")
+	}
+	if org.DisplayName == "" {
+		t.Error("org.DisplayName must not be empty")
+	}
+	if org.CreatedAt.IsZero() {
+		t.Error("org.CreatedAt must not be zero")
+	}
+}
+
+// ── ProjectStore ──────────────────────────────────────────────────────────────
+
+func TestListProjectsSeeded(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	projects, err := r.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if len(projects) == 0 {
+		t.Fatal("expected at least one seeded project")
+	}
+	names := projectNames(projects)
+	if !contains(names, "demo") {
+		t.Errorf("expected seeded project %q, got %v", "demo", names)
+	}
+}
+
+func TestGetProjectFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	p, err := r.GetProject(ctx, "demo")
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if p.Name != "demo" {
+		t.Errorf("p.Name = %q, want %q", p.Name, "demo")
+	}
+	if len(p.Environments) == 0 {
+		t.Error("demo project must have at least one environment")
+	}
+}
+
+func TestGetProjectNotFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	_, err := r.GetProject(ctx, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for missing project")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error should contain 'not found', got: %v", err)
+	}
+}
+
+func TestSaveAndGetProject(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	p := &domain.Project{
+		Name:        "newproj",
+		DisplayName: "New Project",
+		Environments: []domain.Environment{
+			{Name: "staging", Order: 1},
+		},
+	}
+	if err := r.SaveProject(ctx, p); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+	got, err := r.GetProject(ctx, "newproj")
+	if err != nil {
+		t.Fatalf("GetProject after Save: %v", err)
+	}
+	if got.DisplayName != "New Project" {
+		t.Errorf("DisplayName = %q, want %q", got.DisplayName, "New Project")
+	}
+}
+
+func TestSaveProjectUpdate(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	p, _ := r.GetProject(ctx, "demo")
+	p.DisplayName = "Updated Demo"
+	if err := r.SaveProject(ctx, p); err != nil {
+		t.Fatalf("SaveProject update: %v", err)
+	}
+	got, _ := r.GetProject(ctx, "demo")
+	if got.DisplayName != "Updated Demo" {
+		t.Errorf("DisplayName = %q, want %q", got.DisplayName, "Updated Demo")
+	}
+}
+
+func TestDeleteProjectFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	if err := r.DeleteProject(ctx, "demo"); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	_, err := r.GetProject(ctx, "demo")
+	if err == nil {
+		t.Fatal("expected error after deletion")
+	}
+}
+
+func TestDeleteProjectNotFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	err := r.DeleteProject(ctx, "ghost")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+// ── ServiceStore ──────────────────────────────────────────────────────────────
+
+func TestListServicesSeeded(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	services, err := r.ListServices(ctx, "demo")
+	if err != nil {
+		t.Fatalf("ListServices: %v", err)
+	}
+	if len(services) == 0 {
+		t.Fatal("expected at least one seeded service in demo")
+	}
+	names := serviceNames(services)
+	if !contains(names, "hello") {
+		t.Errorf("expected seeded service %q, got %v", "hello", names)
+	}
+}
+
+func TestListServicesUnknownProject(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	_, err := r.ListServices(ctx, "nope")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+func TestGetServiceFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	svc, err := r.GetService(ctx, "demo", "hello")
+	if err != nil {
+		t.Fatalf("GetService: %v", err)
+	}
+	if svc.TemplateName == "" {
+		t.Error("hello service should have a TemplateName")
+	}
+}
+
+func TestGetServiceNotFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	_, err := r.GetService(ctx, "demo", "ghost")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+func TestSaveAndDeleteService(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	svc := &domain.Service{
+		Name:         "backend",
+		ProjectName:  "demo",
+		TemplateName: "web-service",
+	}
+	if err := r.SaveService(ctx, "demo", svc); err != nil {
+		t.Fatalf("SaveService: %v", err)
+	}
+	got, err := r.GetService(ctx, "demo", "backend")
+	if err != nil {
+		t.Fatalf("GetService after Save: %v", err)
+	}
+	if got.Name != "backend" {
+		t.Errorf("Name = %q, want %q", got.Name, "backend")
+	}
+
+	if err := r.DeleteService(ctx, "demo", "backend"); err != nil {
+		t.Fatalf("DeleteService: %v", err)
+	}
+	_, err = r.GetService(ctx, "demo", "backend")
+	if err == nil {
+		t.Fatal("expected error after deletion")
+	}
+}
+
+func TestDeleteServiceNotFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	err := r.DeleteService(ctx, "demo", "ghost")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+// ── TemplateStore ─────────────────────────────────────────────────────────────
+
+func TestListTemplatesSeeded(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	templates, err := r.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	if len(templates) == 0 {
+		t.Fatal("expected at least one seeded template")
+	}
+	names := templateNames(templates)
+	for _, want := range []string{"web-service", "worker", "cron-job"} {
+		if !contains(names, want) {
+			t.Errorf("expected template %q in list, got %v", want, names)
+		}
+	}
+}
+
+func TestGetTemplateFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	tmpl, err := r.GetTemplate(ctx, "web-service")
+	if err != nil {
+		t.Fatalf("GetTemplate: %v", err)
+	}
+	if tmpl.Title == "" {
+		t.Error("web-service template should have a Title")
+	}
+}
+
+func TestGetTemplateNotFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	_, err := r.GetTemplate(ctx, "does-not-exist")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+// ── PreviewStore ──────────────────────────────────────────────────────────────
+
+func TestListPreviewsSeeded(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListPreviews(ctx)
+	if err != nil {
+		t.Fatalf("ListPreviews: %v", err)
+	}
+	if len(previews) == 0 {
+		t.Fatal("expected at least one seeded preview")
+	}
+	names := previewNames(previews)
+	if !contains(names, "pr-42") {
+		t.Errorf("expected seeded preview %q, got %v", "pr-42", names)
+	}
+}
+
+func TestGetPreviewFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	p, err := r.GetPreview(ctx, "pr-42")
+	if err != nil {
+		t.Fatalf("GetPreview: %v", err)
+	}
+	if p.ProjectName != "demo" {
+		t.Errorf("ProjectName = %q, want %q", p.ProjectName, "demo")
+	}
+	if p.URL == "" {
+		t.Error("seeded preview should have a URL")
+	}
+}
+
+func TestGetPreviewNotFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	_, err := r.GetPreview(ctx, "ghost")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+func TestCreatePreview(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	p := &domain.Preview{
+		Name:        "pr-99",
+		ProjectName: "demo",
+		ServiceName: "hello",
+		Namespace:   "demo-preview-pr-99",
+		Status:      domain.StatusNotDeployed,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := r.CreatePreview(ctx, p); err != nil {
+		t.Fatalf("CreatePreview: %v", err)
+	}
+	got, err := r.GetPreview(ctx, "pr-99")
+	if err != nil {
+		t.Fatalf("GetPreview after Create: %v", err)
+	}
+	if got.ServiceName != "hello" {
+		t.Errorf("ServiceName = %q, want %q", got.ServiceName, "hello")
+	}
+}
+
+func TestCreatePreviewDuplicate(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	p := &domain.Preview{Name: "pr-42", ProjectName: "demo", ServiceName: "hello", CreatedAt: time.Now().UTC()}
+	err := r.CreatePreview(ctx, p)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("expected 'already exists' error, got: %v", err)
+	}
+}
+
+func TestDeletePreview(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	if err := r.DeletePreview(ctx, "pr-42"); err != nil {
+		t.Fatalf("DeletePreview: %v", err)
+	}
+	_, err := r.GetPreview(ctx, "pr-42")
+	if err == nil {
+		t.Fatal("expected error after deletion")
+	}
+}
+
+func TestDeletePreviewNotFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	err := r.DeletePreview(ctx, "ghost")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+// ── RuntimeStatusReader ───────────────────────────────────────────────────────
+
+func TestGetServiceStatusSeeded(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	cases := []struct {
+		env    string
+		status string
+	}{
+		{"staging", domain.StatusHealthy},
+		{"prod", domain.StatusHealthy},
+	}
+	for _, tc := range cases {
+		t.Run(tc.env, func(t *testing.T) {
+			s, err := r.GetServiceStatus(ctx, "demo", "hello", tc.env)
+			if err != nil {
+				t.Fatalf("GetServiceStatus: %v", err)
+			}
+			if s.Status != tc.status {
+				t.Errorf("Status = %q, want %q", s.Status, tc.status)
+			}
+			if len(s.IngressURLs) == 0 {
+				t.Error("expected at least one ingress URL for seeded env")
+			}
+		})
+	}
+}
+
+func TestGetServiceStatusUnknown(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	s, err := r.GetServiceStatus(ctx, "demo", "hello", "unknown-env")
+	if err != nil {
+		t.Fatalf("GetServiceStatus: %v", err)
+	}
+	if s.Status != domain.StatusNotDeployed {
+		t.Errorf("Status = %q, want %q", s.Status, domain.StatusNotDeployed)
+	}
+}
+
+func TestGetServiceStatusUnknownProject(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	s, err := r.GetServiceStatus(ctx, "nope", "hello", "staging")
+	if err != nil {
+		t.Fatalf("GetServiceStatus should not error for unknown project: %v", err)
+	}
+	if s.Status != domain.StatusNotDeployed {
+		t.Errorf("Status = %q, want %q", s.Status, domain.StatusNotDeployed)
+	}
+}
+
+// ── LogReader ─────────────────────────────────────────────────────────────────
+
+func TestGetLogsAll(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	lines, err := r.GetLogs(ctx, "demo", "hello", "staging", 0)
+	if err != nil {
+		t.Fatalf("GetLogs: %v", err)
+	}
+	if len(lines) == 0 {
+		t.Fatal("expected at least one log line")
+	}
+	for i, l := range lines {
+		if l.Text == "" {
+			t.Errorf("line[%d].Text must not be empty", i)
+		}
+		if l.Pod == "" {
+			t.Errorf("line[%d].Pod must not be empty", i)
+		}
+	}
+}
+
+func TestGetLogsTailLines(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	all, _ := r.GetLogs(ctx, "demo", "hello", "staging", 0)
+
+	cases := []struct {
+		tail int
+		want int
+	}{
+		{3, 3},
+		{1, 1},
+		{999, len(all)}, // more than available → return all
+	}
+	for _, tc := range cases {
+		got, err := r.GetLogs(ctx, "demo", "hello", "staging", tc.tail)
+		if err != nil {
+			t.Fatalf("GetLogs(tail=%d): %v", tc.tail, err)
+		}
+		if len(got) != tc.want {
+			t.Errorf("tail=%d: got %d lines, want %d", tc.tail, len(got), tc.want)
+		}
+	}
+}
+
+func TestGetLogsIsolated(t *testing.T) {
+	// logs should be identical regardless of project/service/env arguments
+	// (the fake returns the same fixture for any service)
+	r := fake.NewSeededDevRuntime()
+	a, _ := r.GetLogs(ctx, "demo", "hello", "staging", 0)
+	b, _ := r.GetLogs(ctx, "other", "svc", "prod", 0)
+	if len(a) != len(b) {
+		t.Errorf("expected same log count for any service, got %d vs %d", len(a), len(b))
+	}
+}
+
+// ── Seed determinism ──────────────────────────────────────────────────────────
+
+func TestSeedIsDeterministic(t *testing.T) {
+	r1 := fake.NewSeededDevRuntime()
+	r2 := fake.NewSeededDevRuntime()
+
+	p1, _ := r1.GetProject(ctx, "demo")
+	p2, _ := r2.GetProject(ctx, "demo")
+	if p1.Name != p2.Name || p1.DisplayName != p2.DisplayName {
+		t.Error("seed data should be identical across runs")
+	}
+
+	s1, _ := r1.GetServiceStatus(ctx, "demo", "hello", "staging")
+	s2, _ := r2.GetServiceStatus(ctx, "demo", "hello", "staging")
+	if s1.Status != s2.Status || s1.Image != s2.Image {
+		t.Error("seeded status should be identical across runs")
+	}
+
+	o1 := r1.GetOrg()
+	o2 := r2.GetOrg()
+	if o1.Name != o2.Name || !o1.CreatedAt.Equal(o2.CreatedAt) {
+		t.Error("seeded org should be identical across runs")
+	}
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func projectNames(ps []*domain.Project) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = p.Name
+	}
+	return out
+}
+
+func serviceNames(ss []*domain.Service) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = s.Name
+	}
+	return out
+}
+
+func templateNames(ts []*domain.Template) []string {
+	out := make([]string, len(ts))
+	for i, t := range ts {
+		out[i] = t.Name
+	}
+	return out
+}
+
+func previewNames(ps []*domain.Preview) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = p.Name
+	}
+	return out
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
