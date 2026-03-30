@@ -394,6 +394,9 @@ task reset
 ### Quick start (two terminals)
 
 ```bash
+# Copy local dev config
+cp .env.example .env
+
 # Terminal 1 — backend API (with CORS for the Vite dev server)
 make dev-api
 
