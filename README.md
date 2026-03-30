@@ -441,61 +441,74 @@ output is capped at 1 MiB per request to prevent memory issues. Streaming
 
 ## Local Development
 
-We use [Task](https://taskfile.dev/) as the main developer entrypoint.
-
-```bash
-# See all available tasks
-task help
-
-# Start backend + frontend for local dev
-task dev
-
-# Create a local k3d cluster
-task dev:cluster
-
-# Run all tests
-task test
-
-# Seed demo data (org, project, service)
-task seed
-
-# Reset local environment
-task reset
-```
-
-> `make` targets remain available for lower-level operations. See below.
-
----
-
-## Development
-
 ### Prerequisites
 
 - Go 1.23+
 - Node.js 20+ and npm
-- [Task](https://taskfile.dev/) (recommended)
+- [Task](https://taskfile.dev/) — `brew install go-task` or see [taskfile.dev](https://taskfile.dev)
 
-### Quick start (two terminals)
+### Contributor quick start
+
+No cluster required. Everything runs in-memory with seeded demo data.
 
 ```bash
-# Copy local dev config
-cp .env.example .env
+cp .env.example .env   # configure local dev defaults (one time)
+task dev               # build backend + start frontend
+```
 
-# Terminal 1 — backend API (with CORS for the Vite dev server)
+Open **http://localhost:5173** and sign in:
+
+| Field    | Default       | Override via                |
+|----------|---------------|-----------------------------|
+| Username | `admin@local` | `SUPARSHIP_ADMIN_EMAIL`     |
+| Password | `admin123`    | `SUPARSHIP_ADMIN_PASSWORD`  |
+
+`task dev` starts the backend in **fake/in-memory mode** (no Kubernetes, no
+ArgoCD) and the Vite dev server with hot-reload. Press **Ctrl+C** to stop
+both.
+
+Expected output:
+
+```
+  suparShip — local dev  (fake / in-memory mode, no cluster required)
+  ────────────────────────────────────────────────────────────────────
+  Backend   →  http://localhost:8080
+  Frontend  →  http://localhost:5173
+  Login     →  admin@local  /  admin123
+
+  Ctrl+C to stop both servers.
+
+  [api] building... ok
+```
+
+### Individual task commands
+
+```bash
+task dev        # backend + frontend together (recommended)
+task dev:api    # backend only
+task dev:ui     # frontend only
+
+task test       # run all Go tests
+task help       # list all available tasks
+```
+
+### Running processes separately (alternative)
+
+If you prefer two terminals:
+
+```bash
+# Terminal 1 — backend (CORS pre-configured for Vite)
 make dev-api
 
 # Terminal 2 — frontend with HMR
 make dev-ui
 ```
 
-Open http://localhost:5173 in your browser. The Vite dev server proxies
-`/api` requests to the Go backend on `:8080`.
-
 ### Serving the built frontend from the backend
 
 ```bash
 cd ui && npm run build        # produces ui/dist/
-suparship server  --ui-dir ui/dist
+suparship server --ui-dir ui/dist
 ```
 
 ### Make targets
