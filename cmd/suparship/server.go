@@ -13,6 +13,7 @@ import (
 	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/fake"
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -75,12 +76,15 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	cfg := config.Load()
 
-	var authenticator auth.Authenticator
-	var orgProvider rbac.OrgProvider
-	var projectStore project.Store
-	var previewStore preview.Store
-	var runtimeProvider runtime.Provider
-	var logsProvider runtime.LogsProvider
+	var (
+		authenticator   auth.Authenticator
+		orgProvider     rbac.OrgProvider
+		projectStore    project.Store
+		previewStore    preview.Store
+		runtimeProvider runtime.Provider
+		logsProvider    runtime.LogsProvider
+		templates       []*tpl.Template
+	)
 
 	switch cfg.RuntimeMode {
 	case config.ModeFake:
@@ -122,14 +126,37 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
 			orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
 
-			projectStore = project.NewK8sStore(client)
-			previewStore = preview.NewK8sStore(client)
-			runtimeProvider = runtime.NewK8sProvider(client)
-			logsProvider = runtime.NewK8sLogsProvider(client)
+			// Wire all Kubernetes-backed store and runtime implementations
+			// through the consolidated kube.ServerDeps bundle.
+			kubeDeps := kube.NewServerDeps(client)
+			projectStore = kubeDeps.ProjectStore
+			previewStore = kubeDeps.PreviewStore
+			runtimeProvider = kubeDeps.RuntimeProvider
+			logsProvider = kubeDeps.LogsProvider
+
+			// When no local templates directory is provided, attempt to load
+			// templates stored as ConfigMaps in the cluster (label
+			// suparship.io/type=template, namespace suparship-system).
+			// Failure is non-fatal: the server starts without templates so
+			// existing services remain accessible and operators can diagnose
+			// the issue without a hard stop.
+			if templatesDir == "" {
+				clusterTemplates, err := kube.LoadTemplates(cmd.Context(), client)
+				if err != nil {
+					logger.Warn("could not load templates from cluster, starting without",
+						"error", err,
+					)
+				} else {
+					templates = clusterTemplates
+					logger.Info("templates loaded from cluster", "count", len(templates))
+				}
+			}
 		}
 	}
 
-	var templates []*tpl.Template
+	// Disk-based templates (--templates-dir / SUPARSHIP_TEMPLATES_DIR) always
+	// take precedence over cluster-loaded templates, so contributors can
+	// iterate on templates locally without pushing ConfigMaps to the cluster.
 	if templatesDir != "" {
 		loaded, err := tpl.LoadDir(templatesDir)
 		if err != nil {
