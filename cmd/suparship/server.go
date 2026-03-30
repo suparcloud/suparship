@@ -110,46 +110,68 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider = deps.LogsProvider
 
 	default: // config.ModeKubernetes
-		logger.Info("runtime mode: kubernetes — connecting to cluster")
+		// Log what we will attempt before trying, so contributors see the
+		// intent even if the connection fails.
+		kubeconfigDesc := "auto (KUBECONFIG env → ~/.kube/config → in-cluster)"
+		if kubeconfig != "" {
+			kubeconfigDesc = kubeconfig
+		}
+		contextDesc := "current context"
+		if kubecontext != "" {
+			contextDesc = kubecontext
+		}
+		logger.Info("runtime mode: kubernetes",
+			"kubeconfig", kubeconfigDesc,
+			"context", contextDesc,
+		)
+
 		client, err := k8s.NewClientset(kubeconfig, kubecontext)
 		if err != nil {
-			logger.Warn("kubernetes not available, auth and RBAC endpoints disabled", "error", err)
-		} else {
-			authenticator = auth.NewK8sAuthenticator(client)
+			return fmt.Errorf(
+				"runtime mode is %q but no Kubernetes cluster is reachable: %w\n\n"+
+					"To fix:\n"+
+					"  • Local development (no cluster needed): set SUPARSHIP_DEV_MODE=local in .env\n"+
+					"  • Cluster access: ensure KUBECONFIG points to a valid kubeconfig file\n"+
+					"  • Diagnose connectivity: kubectl cluster-info",
+				config.ModeKubernetes, err,
+			)
+		}
+		logger.Info("kubernetes client ready")
 
-			adminUser := "admin"
-			creds, err := auth.GetAdminSecret(context.Background(), client)
-			if err == nil && creds != nil {
-				adminUser = creds.Username
-			}
+		authenticator = auth.NewK8sAuthenticator(client)
 
-			fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
-			orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
+		adminUser := "admin"
+		creds, err := auth.GetAdminSecret(context.Background(), client)
+		if err == nil && creds != nil {
+			adminUser = creds.Username
+		}
 
-			// Wire all Kubernetes-backed store and runtime implementations
-			// through the consolidated kube.ServerDeps bundle.
-			kubeDeps := kube.NewServerDeps(client)
-			projectStore = kubeDeps.ProjectStore
-			previewStore = kubeDeps.PreviewStore
-			runtimeProvider = kubeDeps.RuntimeProvider
-			logsProvider = kubeDeps.LogsProvider
+		fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
+		orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
 
-			// When no local templates directory is provided, attempt to load
-			// templates stored as ConfigMaps in the cluster (label
-			// suparship.io/type=template, namespace suparship-system).
-			// Failure is non-fatal: the server starts without templates so
-			// existing services remain accessible and operators can diagnose
-			// the issue without a hard stop.
-			if templatesDir == "" {
-				clusterTemplates, err := kube.LoadTemplates(cmd.Context(), client)
-				if err != nil {
-					logger.Warn("could not load templates from cluster, starting without",
-						"error", err,
-					)
-				} else {
-					templates = clusterTemplates
-					logger.Info("templates loaded from cluster", "count", len(templates))
-				}
+		// Wire all Kubernetes-backed store and runtime implementations
+		// through the consolidated kube.ServerDeps bundle.
+		kubeDeps := kube.NewServerDeps(client)
+		projectStore = kubeDeps.ProjectStore
+		previewStore = kubeDeps.PreviewStore
+		runtimeProvider = kubeDeps.RuntimeProvider
+		logsProvider = kubeDeps.LogsProvider
+
+		// When no local templates directory is provided, attempt to load
+		// templates stored as ConfigMaps in the cluster (label
+		// suparship.io/type=template, namespace suparship-system).
+		// Failure is non-fatal: the server starts without templates so
+		// existing services remain accessible and operators can diagnose
+		// the issue without a hard stop.
+		if templatesDir == "" {
+			clusterTemplates, err := kube.LoadTemplates(cmd.Context(), client)
+			if err != nil {
+				logger.Warn("could not load templates from cluster, starting without",
+					"error", err,
+				)
+			} else {
+				templates = clusterTemplates
+				logger.Info("templates loaded from cluster", "count", len(templates))
 			}
 		}
 	}

@@ -209,6 +209,36 @@ the next restart.
 | _(unset)_ | `fake` | fake |
 | _(unset)_ | _(unset)_ | kubernetes |
 
+### Which mode should I use?
+
+| Situation | Recommended mode | How to activate |
+|-----------|-----------------|-----------------|
+| Working on UI or API features, no cluster needed | **fake** | `SUPARSHIP_DEV_MODE=local` in `.env` (already the default in `.env.example`) |
+| Testing real K8s integration locally | **kubernetes** | Unset `SUPARSHIP_DEV_MODE`; ensure `kubectl cluster-info` works |
+| Running inside a Kubernetes Pod (in-cluster) | **kubernetes** | Unset `SUPARSHIP_DEV_MODE`; no kubeconfig needed — in-cluster config is auto-detected |
+| CI / automated tests against a real cluster | **kubernetes** | Set `KUBECONFIG` to a valid kubeconfig path |
+
+**Kubernetes mode startup:** the server logs exactly which kubeconfig and
+context it will use before attempting to connect. If the cluster is
+unreachable the server exits immediately with an actionable error message
+rather than starting in a degraded state.
+
+```
+level=INFO msg="runtime mode: kubernetes" kubeconfig="auto (KUBECONFIG env → ~/.kube/config → in-cluster)" context="current context"
+level=INFO msg="kubernetes client ready"
+```
+
+If the connection fails you will see:
+
+```
+runtime mode is "kubernetes" but no Kubernetes cluster is reachable: …
+
+To fix:
+  • Local development (no cluster needed): set SUPARSHIP_DEV_MODE=local in .env
+  • Cluster access: ensure KUBECONFIG points to a valid kubeconfig file
+  • Diagnose connectivity: kubectl cluster-info
+```
+
 ---
 
 ## Admin Auth

@@ -37,9 +37,9 @@ tasks:
       - cd ui && npm run dev
 
   dev:cluster:
-    desc: "Bootstrap the suparShip dev cluster (alias for dev:cluster:bootstrap)"
+    desc: "Cluster dev: bootstrap + ArgoCD + backend (cluster mode) + frontend — one command"
     cmds:
-      - task: dev:cluster:bootstrap
+      - hack/dev-cluster.sh
 
   dev:cluster:bootstrap:
     desc: "Create kind cluster + namespaces — idempotent, safe to re-run"

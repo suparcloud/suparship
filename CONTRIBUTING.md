@@ -127,12 +127,41 @@ kubectl get pods -n argocd           # all pods should be Running
 kubectl get deployments -n argocd    # server, repo-server, applicationset-controller
 ```
 
-#### Full cluster dev sequence
+#### One-command cluster dev
+
+Once the cluster exists, `task dev:cluster` is the preferred daily workflow
+for integration work. It is idempotent — safe to re-run at any time:
 
 ```bash
-task dev:cluster:bootstrap   # 1. create kind cluster + namespaces
-task dev:cluster:argocd      # 2. install ArgoCD (optional, see above)
-task dev                     # 3. start backend + frontend
+task dev:cluster
+```
+
+Internally this:
+1. Runs `hack/bootstrap-cluster.sh` (creates the kind cluster if absent)
+2. Checks whether ArgoCD is installed; installs it if needed
+3. Builds the Go binary
+4. Starts the backend **in Kubernetes mode** (talks to the kind cluster)
+5. Starts the Vite frontend dev server
+
+Use `task dev:cluster` when you need a real Kubernetes runtime for:
+
+| Use case | Why cluster mode is needed |
+|----------|---------------------------|
+| Preview environment creation / deletion | Reads / writes namespaces and ConfigMaps in the cluster |
+| Service promotion (staging → prod) | Drives Kargo / ArgoCD promotions |
+| Runtime status against real workloads | Reads live Deployment replica counts and Ingress URLs |
+| Real pod log streaming | Proxies logs via the Kubernetes API |
+| ArgoCD sync and health integration | Queries ArgoCD Application resources |
+
+`task dev` (fake mode) remains the fastest path for UI work, API handler
+logic, and template parsing — no cluster required.
+
+#### First-time setup (one-off)
+
+```bash
+task dev:cluster:bootstrap   # create kind cluster + namespaces (~30 s)
+task dev:cluster:argocd      # install ArgoCD dev profile (~3–5 min)
+# Subsequent runs: just task dev:cluster
 ```
 
 ### 3. E2E / CI mode
