@@ -24,6 +24,9 @@ FRONTEND_PORT="${SUPARSHIP_FRONTEND_PORT:-5173}"
 LOGIN="${SUPARSHIP_ADMIN_EMAIL:-admin@local}"
 PASS="${SUPARSHIP_ADMIN_PASSWORD:-admin123}"
 
+# ── Preflight checks ─────────────────────────────────────────────────────
+hack/preflight.sh local
+
 # ── Banner ────────────────────────────────────────────────────────────────
 cat <<EOF
 

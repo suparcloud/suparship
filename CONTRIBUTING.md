@@ -9,6 +9,11 @@ Thanks for your interest in contributing! We welcome PRs of all sizes.
 3. Run `make build` to verify everything compiles
 4. Run `task dev` for instant local development (no cluster required)
 
+> **Preflight checks** — `task dev` and `task dev:cluster` run an automatic
+> tool check before doing anything else. If a required tool is missing you
+> will see an error with a direct install link rather than a cryptic build
+> failure. Cluster mode additionally checks for `kind`, `kubectl`, and `helm`.
+
 ## Development Workflow
 
 ```bash
@@ -201,6 +206,56 @@ task dev:cluster:delete      # clean up
 
 > All three modes share the same `Taskfile.yml` tasks. The difference is
 > which tasks you run and in what order.
+
+---
+
+## When things go wrong
+
+| Symptom | Fix |
+|---------|-----|
+| Binary is stale or build artifacts are cluttering the workspace | `task reset` |
+| Seeded demo data is corrupted or you want a clean slate | `task dev:cluster:reset` then `task seed` |
+| Cluster is in an unrecoverable state | `task dev:cluster:delete` then `task dev:cluster:bootstrap` |
+| Login fails in cluster mode (no admin Secret) | `go build -o bin/suparship ./cmd/suparship && ./bin/suparship admin bootstrap` |
+| Frontend refuses to start | `rm -rf ui/node_modules && cd ui && npm install` |
+
+### `task reset` — clean local artifacts
+
+Removes `bin/` and `tmp/`. Safe and reversible — does not touch the
+cluster, the database, or any Kubernetes resources.
+
+```bash
+task reset
+```
+
+Fake mode state is in-memory and resets automatically the next time
+`task dev` starts — no explicit cleanup needed.
+
+### `task dev:cluster:reset` — remove seeded demo data
+
+Removes only the three ConfigMaps that `task seed` creates:
+
+```
+suparship-system/suparship-org-config
+suparship-system/suparship-project-demo
+suparship-system/suparship-preview-pr-42
+```
+
+It does **not** delete the cluster, ArgoCD, namespaces, or admin credentials.
+Idempotent — safe to run if some resources are already gone.
+
+```bash
+task dev:cluster:reset   # delete the three seed ConfigMaps
+task seed                # restore them, or use task dev:cluster which seeds automatically
+```
+
+To wipe everything and start from scratch:
+
+```bash
+task dev:cluster:delete      # delete the kind cluster entirely
+task dev:cluster:bootstrap   # recreate it
+task dev:cluster             # install ArgoCD + seed + start servers
+```
 
 ---
 

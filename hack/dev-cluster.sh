@@ -44,6 +44,9 @@ ADDR="${SUPARSHIP_ADDR:-:8080}"
 BACKEND_PORT="${ADDR#:}"              # strip leading colon → "8080"
 FRONTEND_PORT="${SUPARSHIP_FRONTEND_PORT:-5173}"
 
+# ── Preflight checks ─────────────────────────────────────────────────────
+hack/preflight.sh cluster
+
 # ── 1. Bootstrap cluster (idempotent) ────────────────────────────────────
 echo ""
 echo "  suparShip — cluster dev  (pre-flight)"
