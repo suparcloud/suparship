@@ -355,12 +355,41 @@ output is capped at 1 MiB per request to prevent memory issues. Streaming
 
 ---
 
+## Local Development
+
+We use [Task](https://taskfile.dev/) as the main developer entrypoint.
+
+```bash
+# See all available tasks
+task help
+
+# Start backend + frontend for local dev
+task dev
+
+# Create a local k3d cluster
+task dev:cluster
+
+# Run all tests
+task test
+
+# Seed demo data (org, project, service)
+task seed
+
+# Reset local environment
+task reset
+```
+
+> `make` targets remain available for lower-level operations. See below.
+
+---
+
 ## Development
 
 ### Prerequisites
 
 - Go 1.23+
 - Node.js 20+ and npm
+- [Task](https://taskfile.dev/) (recommended)
 
 ### Quick start (two terminals)
 
@@ -379,7 +408,7 @@ Open http://localhost:5173 in your browser. The Vite dev server proxies
 
 ```bash
 cd ui && npm run build        # produces ui/dist/
-suparship server --ui-dir ui/dist
+suparship server  --ui-dir ui/dist
 ```
 
 ### Make targets

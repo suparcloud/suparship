@@ -1,0 +1,69 @@
+# https://taskfile.dev
+version: "3"
+
+vars:
+  BINARY_NAME: suparship
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  help:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  dev:
+    desc: Start local development (backend API + frontend UI)
+    cmds:
+      - echo "Starting local dev environment..."
+      - echo "  Backend API → http://localhost:8080"
+      - echo "  Frontend UI → http://localhost:5173"
+      - echo ""
+      - echo "Run 'make dev-api' and 'make dev-ui' in separate terminals for now."
+      - echo "This task will start both automatically in a future commit."
+
+  dev:cluster:
+    desc: Create a local k3d cluster for development
+    cmds:
+      - echo "Creating local k3d development cluster..."
+      - echo ""
+      - echo "Prerequisites:"
+      - echo "  - k3d (https://k3d.io)"
+      - echo "  - docker"
+      - echo ""
+      - echo "This task will provision a k3d cluster with ingress in a future commit."
+
+  test:
+    desc: Run all tests (Go + frontend)
+    cmds:
+      - echo "Running Go tests..."
+      - go test -race ./...
+      - echo ""
+      - echo "Frontend tests will be added in a future commit."
+
+  seed:
+    desc: Seed demo data (org, project, environments, service)
+    cmds:
+      - echo "Seeding demo data..."
+      - echo ""
+      - echo "This will create:"
+      - echo "  - Default org"
+      - echo "  - Demo project with dev/staging/prod environments"
+      - echo "  - Sample hello service"
+      - echo ""
+      - echo "Requires a running cluster. Implementation coming in a future commit."
+
+  reset:
+    desc: Reset local dev environment (cluster + data)
+    cmds:
+      - echo "Resetting local development environment..."
+      - echo ""
+      - echo "This will:"
+      - echo "  - Delete the k3d dev cluster (if running)"
+      - echo "  - Remove generated config"
+      - echo "  - Clean build artifacts"
+      - echo ""
+      - echo "Implementation coming in a future commit."
