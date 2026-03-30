@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/fake"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
@@ -35,7 +36,8 @@ Environment variables:
   SUPARSHIP_UI_DIR         path to frontend dist directory
   SUPARSHIP_CORS_ORIGINS   comma-separated allowed origins
   SUPARSHIP_TEMPLATES_DIR  path to templates directory
-  SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments`,
+  SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments
+  SUPARSHIP_CLUSTER_MODE   set to "fake" for offline development (no Kubernetes required)`,
 	RunE: runServer,
 }
 
@@ -70,20 +72,44 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	var authenticator auth.Authenticator
 	var orgProvider rbac.OrgProvider
-	client, err := k8s.NewClientset(kubeconfig, kubecontext)
-	if err != nil {
-		logger.Warn("kubernetes not available, auth and RBAC endpoints disabled", "error", err)
+	var projectStore project.Store
+	var previewStore preview.Store
+	var runtimeProvider runtime.Provider
+	var logsProvider runtime.LogsProvider
+
+	// When SUPARSHIP_CLUSTER_MODE=fake the server runs entirely in-memory with
+	// deterministic seed data.  No Kubernetes cluster is required.  This mode
+	// is intended for local UI/API development (see .env.example).
+	if os.Getenv("SUPARSHIP_CLUSTER_MODE") == "fake" {
+		logger.Info("cluster mode: fake — using in-memory seed data (no Kubernetes required)")
+		deps := fake.NewDevServerDeps()
+		authenticator = deps.Authenticator
+		orgProvider = deps.OrgProvider
+		projectStore = deps.ProjectStore
+		previewStore = deps.PreviewStore
+		runtimeProvider = deps.RuntimeProvider
+		logsProvider = deps.LogsProvider
 	} else {
-		authenticator = auth.NewK8sAuthenticator(client)
+		client, err := k8s.NewClientset(kubeconfig, kubecontext)
+		if err != nil {
+			logger.Warn("kubernetes not available, auth and RBAC endpoints disabled", "error", err)
+		} else {
+			authenticator = auth.NewK8sAuthenticator(client)
 
-		adminUser := "admin"
-		creds, err := auth.GetAdminSecret(context.Background(), client)
-		if err == nil && creds != nil {
-			adminUser = creds.Username
+			adminUser := "admin"
+			creds, err := auth.GetAdminSecret(context.Background(), client)
+			if err == nil && creds != nil {
+				adminUser = creds.Username
+			}
+
+			fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
+			orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
+
+			projectStore = project.NewK8sStore(client)
+			previewStore = preview.NewK8sStore(client)
+			runtimeProvider = runtime.NewK8sProvider(client)
+			logsProvider = runtime.NewK8sLogsProvider(client)
 		}
-
-		fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
-		orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
 	}
 
 	var templates []*tpl.Template
@@ -94,17 +120,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 		templates = loaded
 		logger.Info("templates loaded", "dir", templatesDir, "count", len(templates))
-	}
-
-	var projectStore project.Store
-	var previewStore preview.Store
-	var runtimeProvider runtime.Provider
-	var logsProvider runtime.LogsProvider
-	if client != nil {
-		projectStore = project.NewK8sStore(client)
-		previewStore = preview.NewK8sStore(client)
-		runtimeProvider = runtime.NewK8sProvider(client)
-		logsProvider = runtime.NewK8sLogsProvider(client)
 	}
 
 	srv := server.New(server.Config{
