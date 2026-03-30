@@ -8,13 +8,15 @@ export function Login() {
   const { user, login } = useAuth();
   const navigate = useNavigate();
 
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState(
+    import.meta.env.DEV ? "admin@local" : "",
+  );
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   if (user) {
-    return <Navigate to="/onboarding" replace />;
+    return <Navigate to="/" replace />;
   }
 
   const handleSubmit = async (e: FormEvent) => {
@@ -24,7 +26,7 @@ export function Login() {
 
     try {
       await login(username, password);
-      navigate("/onboarding");
+      navigate("/");
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 401) {
@@ -54,7 +56,25 @@ export function Login() {
           Sign in to your account
         </p>
 
-        <form onSubmit={handleSubmit} className="mt-8 space-y-4">
+        {import.meta.env.DEV && (
+          <div className="mt-6 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
+              Local dev mode
+            </p>
+            <div className="mt-1.5 space-y-0.5">
+              <p className="text-xs text-blue-700">
+                <span className="font-medium">Username</span>{" "}
+                <span className="font-mono">admin@local</span>
+              </p>
+              <p className="text-xs text-blue-700">
+                <span className="font-medium">Password</span>{" "}
+                <span className="font-mono">admin123</span>
+              </p>
+            </div>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
           <div>
             <label
               htmlFor="username"
