@@ -139,9 +139,10 @@ task dev:cluster
 Internally this:
 1. Runs `hack/bootstrap-cluster.sh` (creates the kind cluster if absent)
 2. Checks whether ArgoCD is installed; installs it if needed
-3. Builds the Go binary
-4. Starts the backend **in Kubernetes mode** (talks to the kind cluster)
-5. Starts the Vite frontend dev server
+3. Seeds demo data — org, project, preview — via `hack/seed.sh` (idempotent)
+4. Builds the Go binary
+5. Starts the backend **in Kubernetes mode** (talks to the kind cluster)
+6. Starts the Vite frontend dev server
 
 Use `task dev:cluster` when you need a real Kubernetes runtime for:
 
@@ -161,8 +162,29 @@ logic, and template parsing — no cluster required.
 ```bash
 task dev:cluster:bootstrap   # create kind cluster + namespaces (~30 s)
 task dev:cluster:argocd      # install ArgoCD dev profile (~3–5 min)
+task seed                    # seed demo org, project, preview into the cluster
+# Bootstrap admin credentials (printed once — save the password):
+go build -o bin/suparship ./cmd/suparship
+./bin/suparship admin bootstrap
 # Subsequent runs: just task dev:cluster
 ```
+
+#### What gets seeded
+
+`task seed` (also run automatically by `task dev:cluster`) applies three
+idempotent ConfigMaps to `suparship-system`:
+
+| Resource | ConfigMap | Contents |
+|----------|-----------|---------|
+| Org | `suparship-org-config` | `default` org, `admins` team, org_admin binding |
+| Project | `suparship-project-demo` | `demo` project, `hello` service, `staging` + `prod` envs |
+| Preview | `suparship-preview-pr-42` | preview `pr-42` for `demo/hello` |
+
+The seeded data matches `internal/fake/seed.go` so the UI looks the same
+in both fake mode and cluster mode.
+
+Admin credentials are **not** seeded — they require a bcrypt hash and are
+created by `suparship admin bootstrap` (run once per cluster).
 
 ### 3. E2E / CI mode
 

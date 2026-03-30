@@ -62,7 +62,23 @@ else
   hack/install-argocd.sh
 fi
 
-# ── 3. Banner ─────────────────────────────────────────────────────────────
+# ── 3. Seed demo data (idempotent) ───────────────────────────────────────
+hack/seed.sh
+
+# ── 4. Admin credentials check ───────────────────────────────────────────
+# Seed does not create auth credentials (they require a bcrypt hash).
+# Warn once if bootstrap has not been run; the server will start but login
+# will fail until the secret exists.
+if ! kubectl get secret suparship-admin-auth -n suparship-system >/dev/null 2>&1; then
+  echo ""
+  printf "  \033[0;33mWARNING:\033[0m No admin credentials found in the cluster.\n"
+  printf "  Run once to enable login:\n"
+  printf "    go build -o bin/suparship ./cmd/suparship\n"
+  printf "    ./bin/suparship admin bootstrap\n"
+  echo ""
+fi
+
+# ── 5. Banner ─────────────────────────────────────────────────────────────
 cat <<EOF
   ──────────────────────────────────────────────────────────────────
   suparShip — cluster dev  (backend → ${KUBE_CONTEXT})
@@ -86,18 +102,18 @@ cat <<EOF
 
 EOF
 
-# ── 4. Build Go binary ────────────────────────────────────────────────────
+# ── 6. Build Go binary ────────────────────────────────────────────────────
 printf "  [api] building... "
 go build -o bin/suparship ./cmd/suparship
 echo "ok"
 
-# ── 5. npm install (first run only) ──────────────────────────────────────
+# ── 7. npm install (first run only) ──────────────────────────────────────
 if [ ! -d ui/node_modules ]; then
   echo "  [ui]  installing npm packages (first time, may take a moment)..."
   (cd ui && npm install --silent)
 fi
 
-# ── 6. Start backend in cluster mode ─────────────────────────────────────
+# ── 8. Start backend in cluster mode ─────────────────────────────────────
 # SUPARSHIP_DEV_MODE is unset → internal/config.Load() returns ModeKubernetes.
 # The server reads KUBECONFIG (defaulting to ~/.kube/config), which was set
 # to the kind cluster context in step 1.
@@ -105,7 +121,7 @@ SUPARSHIP_CORS_ORIGINS="http://localhost:${FRONTEND_PORT}" \
   ./bin/suparship server &
 API_PID=$!
 
-# ── 7. Clean shutdown on Ctrl+C ──────────────────────────────────────────
+# ── 9. Clean shutdown on Ctrl+C ──────────────────────────────────────────
 cleanup() {
   printf "\n  Stopping backend...\n"
   kill "$API_PID" 2>/dev/null || true
@@ -115,5 +131,5 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ── 8. Start frontend in foreground (blocks until Ctrl+C) ─────────────────
+# ── 10. Start frontend in foreground (blocks until Ctrl+C) ────────────────
 (cd ui && npm run dev)

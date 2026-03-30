@@ -69,11 +69,9 @@ tasks:
   # ── Data management ────────────────────────────────────────────────────
 
   seed:
-    desc: Seed demo data (org, project, environments, service)
+    desc: "Seed demo data into the cluster (org, project, preview) — idempotent"
     cmds:
-      - |
-        echo "Seeding requires a running cluster."
-        echo "Implementation coming in a future commit."
+      - hack/seed.sh
 
   reset:
     desc: Reset local dev environment (cluster + data)
