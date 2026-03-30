@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/runtime"
 )
 
 // --- API DTO types ---
@@ -30,12 +32,23 @@ type TeamsResponse struct {
 
 // ProjectDTO represents a project in API responses.
 type ProjectDTO struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // ProjectsResponse is the JSON body for GET /api/v1/projects.
 type ProjectsResponse struct {
 	Projects []ProjectDTO `json:"projects"`
+}
+
+// ProjectDetailResponse is the JSON body for GET /api/v1/projects/{project}.
+type ProjectDetailResponse struct {
+	Name         string           `json:"name"`
+	DisplayName  string           `json:"displayName,omitempty"`
+	Description  string           `json:"description,omitempty"`
+	Environments []EnvironmentDTO `json:"environments"`
+	Services     []string         `json:"services"`
 }
 
 // RoleBindingDTO represents a role binding in API responses.
@@ -102,11 +115,14 @@ func (rh *rbacHandler) handleGetProjects(w http.ResponseWriter, r *http.Request)
 		seen[name] = true
 	}
 
+	// stored holds project metadata (display name, description) keyed by project name.
+	stored := make(map[string]*project.Project)
 	if rh.projectStore != nil {
-		stored, err := rh.projectStore.List(r.Context())
+		list, err := rh.projectStore.List(r.Context())
 		if err == nil {
-			for _, p := range stored {
+			for _, p := range list {
 				seen[p.Metadata.Name] = true
+				stored[p.Metadata.Name] = p
 			}
 		}
 	}
@@ -119,10 +135,68 @@ func (rh *rbacHandler) handleGetProjects(w http.ResponseWriter, r *http.Request)
 
 	projects := make([]ProjectDTO, len(names))
 	for i, n := range names {
-		projects[i] = ProjectDTO{Name: n}
+		dto := ProjectDTO{Name: n}
+		if p, ok := stored[n]; ok {
+			dto.DisplayName = p.Spec.DisplayName
+			dto.Description = p.Spec.Description
+		}
+		projects[i] = dto
 	}
 
 	writeJSON(w, http.StatusOK, ProjectsResponse{Projects: projects})
+}
+
+// handleGetProject returns full project detail for GET /api/v1/projects/{project}.
+// When a projectStore is wired and the project exists in it, the response
+// includes display name, description, environments, and service names.
+// When the project is unknown to the store it returns 404.
+// When no store is wired (e.g. unit tests that only check RBAC), a minimal
+// 200 response is returned so RBAC tests remain valid.
+func (rh *rbacHandler) handleGetProject(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+
+	if rh.projectStore != nil {
+		proj, err := rh.projectStore.Get(r.Context(), projectName)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, errorResponse{
+				Error: "project \"" + projectName + "\" not found",
+			})
+			return
+		}
+
+		envs := make([]EnvironmentDTO, len(proj.Spec.Environments))
+		for i, e := range proj.Spec.Environments {
+			envs[i] = EnvironmentDTO{
+				Name:        e.Name,
+				DisplayName: e.DisplayName,
+				Project:     proj.Metadata.Name,
+				Namespace:   runtime.Namespace(proj.Metadata.Name, e.Name),
+				Order:       e.Order,
+			}
+		}
+
+		svcNames := make([]string, len(proj.Spec.Services))
+		for i, svc := range proj.Spec.Services {
+			svcNames[i] = svc.Name
+		}
+
+		writeJSON(w, http.StatusOK, ProjectDetailResponse{
+			Name:         proj.Metadata.Name,
+			DisplayName:  proj.Spec.DisplayName,
+			Description:  proj.Spec.Description,
+			Environments: envs,
+			Services:     svcNames,
+		})
+		return
+	}
+
+	// No project store wired; project access already verified by RBAC middleware.
+	// Return a minimal response so callers always get valid JSON.
+	writeJSON(w, http.StatusOK, ProjectDetailResponse{
+		Name:         projectName,
+		Environments: []EnvironmentDTO{},
+		Services:     []string{},
+	})
 }
 
 func (rh *rbacHandler) handleGetProjectRBAC(w http.ResponseWriter, r *http.Request) {

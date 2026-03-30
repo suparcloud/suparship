@@ -56,6 +56,30 @@ func newPreviewHandler(ps preview.Store, projStore project.Store, rp runtime.Pro
 	}
 }
 
+// handleListServicePreviews returns previews filtered to a specific project and
+// service. It is registered at
+// GET /api/v1/projects/{project}/services/{service}/previews
+// and enforces viewer-level RBAC via the rbacHandler middleware.
+func (ph *previewHandler) handleListServicePreviews(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	serviceName := r.PathValue("service")
+
+	all, err := ph.previewStore.List(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list previews"})
+		return
+	}
+
+	dtos := make([]PreviewDTO, 0)
+	for _, p := range all {
+		if p.Spec.Project == projectName && p.Spec.Service == serviceName {
+			dtos = append(dtos, ph.toDTO(r, p))
+		}
+	}
+
+	writeJSON(w, http.StatusOK, PreviewsResponse{Previews: dtos})
+}
+
 // handleListPreviews returns all preview environments.
 func (ph *previewHandler) handleListPreviews(w http.ResponseWriter, r *http.Request) {
 	previews, err := ph.previewStore.List(r.Context())

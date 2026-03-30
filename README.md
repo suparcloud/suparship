@@ -104,17 +104,18 @@ suparship server --addr :9090 # custom address
 | GET | `/api/v1/auth/me` | session | Return current user identity and role |
 | GET | `/api/v1/org` | session | Return org name, display name, created at |
 | GET | `/api/v1/teams` | session | List all teams with members |
-| GET | `/api/v1/projects` | session | List all projects |
-| GET | `/api/v1/projects/{project}` | viewer | Get project (placeholder) |
+| GET | `/api/v1/projects` | session | List all projects with display name and description |
+| GET | `/api/v1/projects/{project}` | viewer | Get project detail — name, description, environments, services |
 | GET | `/api/v1/projects/{project}/rbac` | viewer | List role bindings for a project |
 | PUT | `/api/v1/projects/{project}` | project_admin | Update project (placeholder) |
 | POST | `/api/v1/projects/{project}/services` | developer | Create service from template |
 | GET | `/api/v1/environments` | session | List all environments across projects |
 | GET | `/api/v1/projects/{project}/services` | viewer | List services with runtime state |
 | GET | `/api/v1/projects/{project}/services/{service}` | viewer | Service detail with per-env runtime state |
-| GET | `/api/v1/previews` | session | List all preview environments |
+| GET | `/api/v1/previews` | session | List all preview environments (cross-project) |
 | POST | `/api/v1/previews` | developer | Create a preview environment |
 | DELETE | `/api/v1/previews/{name}` | developer | Delete a preview environment |
+| GET | `/api/v1/projects/{project}/services/{service}/previews` | viewer | List previews for a specific service |
 | POST | `/api/v1/projects/{project}/services/{service}/promote` | project_admin | Promote service to target environment |
 | GET | `/api/v1/projects/{project}/services/{service}/logs` | viewer | Fetch pod logs for a service |
 | GET | `/api/v1/templates` | session | List all available templates |
