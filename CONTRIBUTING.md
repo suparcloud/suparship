@@ -20,8 +20,11 @@ Thanks for your interest in contributing! We welcome PRs of all sizes.
 # Build the binary
 make build
 
-# Run tests
+# Run all tests
 make test
+
+# Run API smoke tests only (login + seeded data — no cluster required)
+make test-smoke
 
 # Format code (uses gofumpt if available, gofmt otherwise)
 make fmt
@@ -29,6 +32,10 @@ make fmt
 # Run linters (requires golangci-lint)
 make lint
 ```
+
+Smoke tests live in `test/smoke/` and exercise the fully assembled server
+backed by the same fake deps that `task dev` uses. They are included in
+`make test` and can be run independently with `make test-smoke`.
 
 ## Development Modes
 

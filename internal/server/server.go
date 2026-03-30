@@ -123,6 +123,12 @@ func New(cfg Config) *Server {
 	}
 }
 
+// Handler returns the HTTP handler used by the server. Useful for testing
+// with httptest.NewServer without starting a real TCP listener.
+func (s *Server) Handler() http.Handler {
+	return s.httpServer.Handler
+}
+
 // Run starts the server and blocks until ctx is cancelled, then shuts down
 // gracefully.
 func (s *Server) Run(ctx context.Context) error {

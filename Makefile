@@ -12,7 +12,7 @@ LDFLAGS := -X github.com/suparcloud/suparship/internal/version.Version=$(VERSION
 # Go settings
 GOBIN := $(shell go env GOPATH)/bin
 
-.PHONY: all build test lint fmt clean dev-api dev-ui help
+.PHONY: all build test test-smoke lint fmt clean dev-api dev-ui help
 
 all: build
 
@@ -23,6 +23,10 @@ build:
 ## test: Run all tests
 test:
 	go test -race -coverprofile=coverage.out ./...
+
+## test-smoke: Run API smoke tests only (no cluster required)
+test-smoke:
+	go test -race -v ./test/smoke/...
 
 ## lint: Run linters (requires golangci-lint)
 lint:
