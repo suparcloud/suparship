@@ -6,13 +6,61 @@ Thanks for your interest in contributing! We welcome PRs of all sizes.
 
 1. **Fork & clone** the repository
 2. **Install Go 1.23+** and **Node.js 20+**
-3. Run `make build` to verify everything compiles
-4. Run `task dev` for instant local development (no cluster required)
+3. Copy the example env file and start the stack:
 
-> **Preflight checks** — `task dev` and `task dev:cluster` run an automatic
-> tool check before doing anything else. If a required tool is missing you
-> will see an error with a direct install link rather than a cryptic build
-> failure. Cluster mode additionally checks for `kind`, `kubectl`, and `helm`.
+```bash
+cp .env.example .env   # sets SUPARSHIP_DEV_MODE=local (no cluster needed)
+task dev               # builds backend + starts Vite frontend
+```
+
+4. Open **http://localhost:5173** and log in:
+
+| Field    | Default       | Override via               |
+|----------|---------------|----------------------------|
+| Username | `admin@local` | `SUPARSHIP_ADMIN_EMAIL`    |
+| Password | `admin123`    | `SUPARSHIP_ADMIN_PASSWORD` |
+
+You should immediately see seeded demo data — no empty state:
+
+| What you'll see | Value |
+|-----------------|-------|
+| Org             | `default` — My Organization |
+| Project         | `demo` — Demo Project |
+| Environments    | `staging`, `prod` |
+| Service         | `hello` (web-service template) |
+| Preview         | `pr-42` |
+| Runtime status  | `healthy` with fake ingress URLs |
+| Logs            | Sample log lines |
+
+Press **Ctrl+C** to stop both servers. All writes are in-memory and reset on
+the next `task dev` — no cleanup needed.
+
+> **Preflight checks** — `task dev` and `task dev:cluster` verify required
+> tools before doing anything else. If a tool is missing you'll see a clear
+> error with an install link rather than a cryptic build failure.
+
+---
+
+## Which mode for which work?
+
+Pick your development mode based on what you're working on:
+
+| I'm working on…                         | Use          | Command              |
+|-----------------------------------------|--------------|----------------------|
+| UI components, frontend layout          | fake mode    | `task dev`           |
+| Backend API handlers, RBAC, auth        | fake mode    | `task dev`           |
+| Template parsing, service model logic   | fake mode    | `task dev`           |
+| Real K8s resource reads/writes          | cluster mode | `task dev:cluster`   |
+| Preview creation / deletion             | cluster mode | `task dev:cluster`   |
+| Service promotion (staging → prod)      | cluster mode | `task dev:cluster`   |
+| ArgoCD sync / health integration        | cluster mode | `task dev:cluster`   |
+| Real pod log streaming                  | cluster mode | `task dev:cluster`   |
+
+**Start with fake mode.** Most contributions — including all UI and API work —
+never need a cluster. Reach for cluster mode only when the feature you're
+building genuinely reads or writes Kubernetes resources.
+
+---
 
 ## Development Workflow
 
@@ -263,6 +311,36 @@ task dev:cluster:delete      # delete the kind cluster entirely
 task dev:cluster:bootstrap   # recreate it
 task dev:cluster             # install ArgoCD + seed + start servers
 ```
+
+---
+
+## Why these tools?
+
+### Fake / in-memory runtime
+
+Most features — UI, API handlers, RBAC, template logic — don't actually
+need a Kubernetes cluster. Running against a real cluster adds several
+minutes of bootstrap time, requires Docker, and makes tests flaky when
+the cluster is slow or unavailable.
+
+`internal/fake` provides an in-process, deterministic implementation of
+every store and runtime interface. It starts in milliseconds, resets on
+restart, and produces the same data every time — which makes it excellent
+for unit tests and rapid UI iteration. The seeded data intentionally
+matches what `task seed` puts into a real cluster, so the UI looks
+identical in both modes.
+
+### kind for real integration
+
+When you do need a real Kubernetes runtime — for preview lifecycle, actual
+pod log streaming, or ArgoCD integration — [kind](https://kind.sigs.k8s.io/)
+gives you a full Kubernetes API server on your laptop in under a minute.
+It's reproducible, free, doesn't require a cloud account, and is easy to
+throw away (`task dev:cluster:delete`) when something goes wrong.
+
+The backend always runs as a local process (not inside the cluster), so
+you get fast Go rebuild cycles even in cluster mode. Only the Kubernetes
+API calls go to the kind cluster.
 
 ---
 
