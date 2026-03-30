@@ -37,11 +37,22 @@ tasks:
       - cd ui && npm run dev
 
   dev:cluster:
-    desc: Create a local k3d cluster for development
+    desc: "Bootstrap the suparShip dev cluster (alias for dev:cluster:bootstrap)"
+    cmds:
+      - task: dev:cluster:bootstrap
+
+  dev:cluster:bootstrap:
+    desc: "Create kind cluster + namespaces — idempotent, safe to re-run"
+    cmds:
+      - hack/bootstrap-cluster.sh
+
+  dev:cluster:delete:
+    desc: "Delete the suparShip dev cluster"
     cmds:
       - |
-        echo "Prerequisites: k3d (https://k3d.io) + docker"
-        echo "This task will provision a k3d cluster with ingress in a future commit."
+        kind delete cluster --name suparship-dev \
+          && echo "  Cluster deleted." \
+          || echo "  Cluster 'suparship-dev' not found — nothing to delete."
 
   # ── Testing ────────────────────────────────────────────────────────────
 
