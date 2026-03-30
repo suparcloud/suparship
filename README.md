@@ -127,6 +127,68 @@ Session cookies are `HttpOnly` and `SameSite=Lax`.
 
 ---
 
+## Local Fake Mode (contributor default)
+
+**Local fake mode** runs the entire backend in-process using seeded demo data.
+No Kubernetes cluster, no ArgoCD, no Kargo — nothing external is required.
+
+This is the **recommended starting point** for contributors working on UI or
+API features.
+
+### Activate
+
+Copy `.env.example` to `.env` (already done if you followed the quickstart):
+
+```bash
+cp .env.example .env
+```
+
+`.env.example` sets `SUPARSHIP_DEV_MODE=local` which activates fake mode
+automatically.  You can also set `SUPARSHIP_CLUSTER_MODE=fake` directly; both
+are equivalent.  `SUPARSHIP_DEV_MODE=local` takes precedence if both are set.
+
+### Start the server
+
+```bash
+# load .env then start the API
+source .env && go run ./cmd/suparship server
+```
+
+Expected startup output:
+
+```
+level=INFO msg="runtime mode: fake — in-memory seed data, no cluster required" trigger=SUPARSHIP_DEV_MODE=local tip="login with admin / admin"
+level=INFO msg="auth endpoints enabled"
+...
+level=INFO msg="server listening" addr=:8080
+```
+
+### What you get out of the box
+
+| Resource | Value |
+|----------|-------|
+| Login | `admin` / `admin` |
+| Org | `default` — My Organization |
+| Project | `demo` — Demo Project |
+| Environments | `staging`, `prod` |
+| Service | `hello` (web-service template) |
+| Preview | `pr-42` |
+| Runtime status | `healthy` with fake ingress URLs |
+| Logs | Sample log lines (deterministic) |
+
+All writes (new services, previews, etc.) are **in-memory only** and reset on
+the next restart.
+
+### Runtime mode reference
+
+| `SUPARSHIP_DEV_MODE` | `SUPARSHIP_CLUSTER_MODE` | Active mode |
+|----------------------|--------------------------|-------------|
+| `local` | any | fake |
+| _(unset)_ | `fake` | fake |
+| _(unset)_ | _(unset)_ | kubernetes |
+
+---
+
 ## Admin Auth
 
 suparShip uses a single bootstrap admin account stored as a Kubernetes Secret

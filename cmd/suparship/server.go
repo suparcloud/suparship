@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/fake"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/preview"
@@ -28,16 +29,18 @@ var serverCmd = &cobra.Command{
 The server exposes health-check endpoints (/healthz, /readyz) and a
 version metadata endpoint (/api/v1/meta).
 
-When a Kubernetes cluster is reachable, auth endpoints are enabled
-automatically (/api/v1/auth/*).
+Runtime modes:
+  fake       — in-memory seed data, no Kubernetes required (default for contributors)
+  kubernetes — connects to a real cluster via kubeconfig
 
 Environment variables:
+  SUPARSHIP_DEV_MODE       set to "local" to enable fake mode (recommended for contributors)
+  SUPARSHIP_CLUSTER_MODE   set to "fake" to enable fake mode (alternative override)
   SUPARSHIP_ADDR           listen address (default ":8080")
   SUPARSHIP_UI_DIR         path to frontend dist directory
   SUPARSHIP_CORS_ORIGINS   comma-separated allowed origins
   SUPARSHIP_TEMPLATES_DIR  path to templates directory
-  SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments
-  SUPARSHIP_CLUSTER_MODE   set to "fake" for offline development (no Kubernetes required)`,
+  SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments`,
 	RunE: runServer,
 }
 
@@ -70,6 +73,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
+	cfg := config.Load()
+
 	var authenticator auth.Authenticator
 	var orgProvider rbac.OrgProvider
 	var projectStore project.Store
@@ -77,11 +82,16 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	var runtimeProvider runtime.Provider
 	var logsProvider runtime.LogsProvider
 
-	// When SUPARSHIP_CLUSTER_MODE=fake the server runs entirely in-memory with
-	// deterministic seed data.  No Kubernetes cluster is required.  This mode
-	// is intended for local UI/API development (see .env.example).
-	if os.Getenv("SUPARSHIP_CLUSTER_MODE") == "fake" {
-		logger.Info("cluster mode: fake — using in-memory seed data (no Kubernetes required)")
+	switch cfg.RuntimeMode {
+	case config.ModeFake:
+		// Fake mode: entirely in-memory with deterministic seed data.
+		// No Kubernetes cluster is required.  This is the default mode for
+		// local UI/API development.  Set SUPARSHIP_DEV_MODE=local (or
+		// SUPARSHIP_CLUSTER_MODE=fake) in your .env to activate.
+		logger.Info("runtime mode: fake — in-memory seed data, no cluster required",
+			"trigger", cfg.RuntimeModeTrigger,
+			"tip", "login with admin / admin",
+		)
 		deps := fake.NewDevServerDeps()
 		authenticator = deps.Authenticator
 		orgProvider = deps.OrgProvider
@@ -89,7 +99,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		previewStore = deps.PreviewStore
 		runtimeProvider = deps.RuntimeProvider
 		logsProvider = deps.LogsProvider
-	} else {
+
+	default: // config.ModeKubernetes
+		logger.Info("runtime mode: kubernetes — connecting to cluster")
 		client, err := k8s.NewClientset(kubeconfig, kubecontext)
 		if err != nil {
 			logger.Warn("kubernetes not available, auth and RBAC endpoints disabled", "error", err)
