@@ -9,6 +9,15 @@ export function fetchPreviews(): Promise<PreviewsResponse> {
   return api.get<PreviewsResponse>("/previews");
 }
 
+export function fetchServicePreviews(
+  project: string,
+  service: string,
+): Promise<PreviewsResponse> {
+  return api.get<PreviewsResponse>(
+    `/projects/${encodeURIComponent(project)}/services/${encodeURIComponent(service)}/previews`,
+  );
+}
+
 export function createPreview(
   req: CreatePreviewRequest,
 ): Promise<PreviewEnvironment> {

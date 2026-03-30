@@ -3,6 +3,7 @@ import type {
   OrgInfo,
   TeamsResponse,
   ProjectsResponse,
+  ProjectDetail,
   ProjectRBACResponse,
   RoleBinding,
 } from "../types";
@@ -19,10 +20,16 @@ export function fetchProjects(): Promise<ProjectsResponse> {
   return api.get<ProjectsResponse>("/projects");
 }
 
+export function fetchProjectDetail(project: string): Promise<ProjectDetail> {
+  return api.get<ProjectDetail>(`/projects/${encodeURIComponent(project)}`);
+}
+
 export function fetchProjectRBAC(
   project: string,
 ): Promise<ProjectRBACResponse> {
-  return api.get<ProjectRBACResponse>(`/projects/${project}/rbac`);
+  return api.get<ProjectRBACResponse>(
+    `/projects/${encodeURIComponent(project)}/rbac`,
+  );
 }
 
 export async function fetchAllRoleBindings(): Promise<RoleBinding[]> {

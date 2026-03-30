@@ -12,6 +12,16 @@ export interface MetaInfo {
 
 export interface Project {
   name: string;
+  displayName?: string;
+  description?: string;
+}
+
+export interface ProjectDetail {
+  name: string;
+  displayName?: string;
+  description?: string;
+  environments: EnvironmentInfo[];
+  services: string[];
 }
 
 export interface Service {
