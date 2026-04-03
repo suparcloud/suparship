@@ -1416,6 +1416,34 @@ function TrafficTab() {
 // Subcomponents
 // ---------------------------------------------------------------------------
 
+/**
+ * Derives whether a component type exposes an inbound network surface.
+ * web → exposed (receives traffic); worker / cron → internal (no inbound route).
+ */
+function componentVisibilityBadge(type: ComponentSummary["type"]) {
+  if (type === "web") {
+    return (
+      <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600">
+        exposed
+      </span>
+    );
+  }
+  return (
+    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">
+      internal
+    </span>
+  );
+}
+
+/**
+ * Advanced Runtime section.
+ *
+ * Visibility rules:
+ *  - 0 components → renders nothing (topology not yet derived).
+ *  - 1 component  → collapses by default; user can expand via "Advanced runtime".
+ *  - >1 components → expanded by default, clearly reinforcing that the app
+ *    owns multiple runtime units without making them top-level resources.
+ */
 function ComponentsTable({
   components,
   currentEnv,
@@ -1423,57 +1451,102 @@ function ComponentsTable({
   components: ComponentSummary[];
   currentEnv: AppEnvironmentSummary | null;
 }) {
+  const isMulti = components.length > 1;
+  const [expanded, setExpanded] = useState(isMulti);
+
+  if (components.length === 0) return null;
+
   const phase = currentEnv?.status.phase ?? "not_deployed";
   const totalReplicas = currentEnv?.status.replicas ?? 0;
   const availableReplicas = currentEnv?.status.available ?? 0;
 
-  // Replica counts only make sense for scalable component types (web / worker).
-  // When there is exactly one such component, we can attribute the env-level
-  // replica count to it without ambiguity.
-  const scalableCount = components.filter(
+  // Replica attribution: only unambiguous when exactly one scalable component
+  // (web / worker) exists. For multi-component apps we surface the aggregate
+  // in the section header and show "—" per row to avoid misleading fractions.
+  const scalableComponents = components.filter(
     (c) => c.type === "web" || c.type === "worker",
-  ).length;
-  const singleScalable = scalableCount === 1;
+  );
+  const singleScalable = scalableComponents.length === 1;
+
+  function replicaLabel(comp: ComponentSummary): string {
+    if (comp.type === "cron") return "—";
+    if (singleScalable && totalReplicas > 0) {
+      return `${availableReplicas}/${totalReplicas}`;
+    }
+    return "—";
+  }
+
+  const headerTitle = isMulti ? "Runtime components" : "Advanced runtime";
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
-      <div className="border-b border-gray-100 px-5 py-3">
+      {/* Header doubles as a toggle for compact/expand control */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="flex w-full items-center justify-between border-b border-gray-100 px-5 py-3 text-left"
+      >
         <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
-          Runtime units
+          {headerTitle}
         </h2>
-      </div>
-
-      {components.length === 0 ? (
-        <div className="px-5 py-8 text-center">
-          <p className="text-sm text-gray-400">No components configured</p>
-          <p className="mt-1 text-xs text-gray-400">
-            Component topology is derived from the template at deploy time.
-          </p>
+        <div className="flex items-center gap-2">
+          {isMulti && totalReplicas > 0 && (
+            <span
+              className="text-xs text-gray-400"
+              title="Aggregate replicas across all scalable components"
+            >
+              {availableReplicas}/{totalReplicas} replicas
+            </span>
+          )}
+          {isMulti && (
+            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">
+              {components.length}
+            </span>
+          )}
+          <svg
+            className={`h-3.5 w-3.5 text-gray-400 transition-transform ${expanded ? "rotate-90" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="m9 18 6-6-6-6"
+            />
+          </svg>
         </div>
-      ) : (
+      </button>
+
+      {expanded && (
         <div className="divide-y divide-gray-50">
           {components.map((comp) => {
-            const isScalable = comp.type === "web" || comp.type === "worker";
-            const showReplicas = isScalable && singleScalable && totalReplicas > 0;
-
+            const replicas = replicaLabel(comp);
             return (
               <div
                 key={comp.name}
                 className="flex items-center justify-between px-5 py-2.5"
               >
-                <div className="flex items-center gap-2.5">
+                {/* Left: name + type + visibility */}
+                <div className="flex min-w-0 items-center gap-2">
                   <span className="font-mono text-sm text-gray-900">
                     {comp.name}
                   </span>
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs capitalize text-gray-500">
                     {comp.type}
                   </span>
+                  {componentVisibilityBadge(comp.type)}
                 </div>
 
-                <div className="flex items-center gap-3">
-                  {showReplicas && (
+                {/* Right: replicas + status + preview eligibility */}
+                <div className="ml-4 flex flex-shrink-0 items-center gap-3">
+                  {replicas !== "—" && (
                     <span className="text-xs text-gray-400">
-                      {availableReplicas}/{totalReplicas} replicas
+                      {replicas}{" "}
+                      <span className="text-gray-300">replicas</span>
                     </span>
                   )}
                   <StatusBadge status={phase} />
