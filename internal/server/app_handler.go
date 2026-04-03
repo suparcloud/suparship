@@ -1,14 +1,25 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
+
+// appPromotionOrder defines the canonical MVP promotion chain.
+// preview → staging → prod; higher order = later in the chain.
+var appPromotionOrder = map[domain.AppEnvironmentType]int{
+	domain.AppEnvPreview: 0,
+	domain.AppEnvStaging: 1,
+	domain.AppEnvProd:    2,
+}
 
 // appHandler serves app-oriented API endpoints. It is wired into the
 // rbacHandler's route registration so that RBAC middleware is applied.
@@ -390,6 +401,116 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePromoteApp handles POST /api/v1/projects/{project}/apps/{app}/promote.
+//
+// For MVP the promotion path is preview → staging → prod. Promoting to a
+// preview environment is rejected. When Kargo integration is available it will
+// orchestrate the actual promotion; for now this validates the intent and
+// returns a structured acknowledgement so callers get a stable, app-scoped
+// response shape.
+//
+// Component versions within the app release bundle are kept aligned: the
+// promotion moves the entire app (all components) from the source environment
+// to the destination, not individual components.
+func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	var req AppPromoteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.TargetEnvironment == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "targetEnvironment is required"})
+		return
+	}
+
+	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	targetEnv, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, req.TargetEnvironment)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "environment \"" + req.TargetEnvironment + "\" not found for app \"" + appName + "\"",
+		})
+		return
+	}
+
+	if targetEnv.EnvType == domain.AppEnvPreview {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "cannot promote to a preview environment",
+		})
+		return
+	}
+
+	targetOrder, ok := appPromotionOrder[targetEnv.EnvType]
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "environment \"" + req.TargetEnvironment + "\" has an unrecognised type",
+		})
+		return
+	}
+
+	sourceEnv, err := ah.findPromotionSource(r.Context(), projectName, appName, targetOrder)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AppPromoteResponse{
+		Project:     projectName,
+		App:         appName,
+		Source:      sourceEnv.EnvName,
+		Destination: req.TargetEnvironment,
+		Namespace:   targetEnv.Namespace,
+		Message:     "Promotion of " + appName + " from " + sourceEnv.EnvName + " to " + req.TargetEnvironment + " initiated",
+	})
+}
+
+// findPromotionSource returns the best source environment for a promotion to
+// the given target order. It expects an environment of the immediately lower
+// tier in the MVP chain (preview < staging < prod). When multiple candidates
+// exist (e.g. several preview environments), the lexicographically first is
+// chosen for determinism.
+func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appName string, targetOrder int) (*domain.AppEnvironment, error) {
+	envs, err := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list app environments")
+	}
+
+	wantOrder := targetOrder - 1
+	var candidates []*domain.AppEnvironment
+	for _, env := range envs {
+		if order, ok := appPromotionOrder[env.EnvType]; ok && order == wantOrder {
+			candidates = append(candidates, env)
+		}
+	}
+
+	if len(candidates) == 0 {
+		var sourceTier string
+		for t, o := range appPromotionOrder {
+			if o == wantOrder {
+				sourceTier = string(t)
+				break
+			}
+		}
+		if sourceTier == "" {
+			sourceTier = "previous"
+		}
+		return nil, fmt.Errorf("no %s environment found to promote from", sourceTier)
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].EnvName < candidates[j].EnvName
+	})
+	return candidates[0], nil
 }
 
 // --- DTO mapping helpers ---
