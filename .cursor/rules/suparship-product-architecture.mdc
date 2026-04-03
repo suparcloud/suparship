@@ -16,7 +16,7 @@ suparShip exists to help small SRE / DevOps teams provide a simple self-service 
 Core user promise:
 - install with a simple shell command into the current Kubernetes cluster
 - get a working, developer-friendly platform
-- deploy services from reusable templates
+- deploy apps from reusable templates
 - create preview environments
 - promote safely to production
 - inspect status and logs from a clean web UI
@@ -48,9 +48,9 @@ The MVP must prove these outcomes:
 
 1. A user can install suparShip into an existing Kubernetes cluster from kubeconfig.
 2. A user can log into a simple web UI with bootstrap admin auth.
-3. A user can see a default org, demo project, demo service, and environments.
-4. A user can create a service from a template using a UI-generated form.
-5. A user can view service status, URLs, previews, promotions, and logs.
+3. A user can see a default org, demo project, demo app, and environments.
+4. A user can create an app from a template using a UI-generated form.
+5. A user can view app status, URLs, previews, promotions, and logs.
 6. A user can create preview environments and promote safely to prod.
 7. A user can use this inside a company POC with basic auth and basic RBAC.
 8. Demo / POC must require no paid services.
@@ -309,8 +309,8 @@ MVP UI pages:
 - /onboarding
 - /
 - /projects/:project
-- /projects/:project/services/:service
-- /projects/:project/services/new
+- /projects/:project/apps/:app
+- /projects/:project/apps/new
 - /templates
 - /templates/:name
 - /previews
@@ -321,10 +321,10 @@ MVP UI pages:
 Core UI features:
 - dashboard
 - onboarding
-- service detail
+- app detail
 - previews
 - logs viewer
-- create service from template
+- create app from template
 - basic settings/read-only org/team auth pages
 
 Do NOT build yet:
@@ -347,7 +347,7 @@ After first login, the user should quickly see:
 - default org exists
 - environments exist
 - demo project exists
-- demo service exists
+- demo app exists
 - staging/prod URLs
 - a clear action path:
   - explore
@@ -362,7 +362,7 @@ Seed defaults:
 - org: default
 - team: admins
 - project: demo
-- service: hello
+- app: hello
 
 Onboarding should be product-led, not docs-led.
 
@@ -433,98 +433,161 @@ Later templates may include:
 For MVP, at least implement web-service well.
 
 ================================================================================
-12. SERVICE CREATION MODEL
+12. APP / ENVIRONMENT / COMPONENT MODEL
 ================================================================================
 
-A service should be created from a template through a form-based UI.
+The primary UX object in suparShip is the **app**.
+
+Recommended user-facing hierarchy:
+- org
+- project
+- app
+- environment
+
+Recommended internal runtime hierarchy:
+- app
+- environment instance
+- component runtime
+
+This is intentional:
+
+- **project** is a team/workspace boundary
+- **app** is the thing a developer creates, previews, promotes, and owns
+- **environment** is where the app is running: staging, prod, or preview
+- **component** is an internal runtime unit inside the app such as web, worker, cron, or gateway
+
+The product must feel simple for small teams and still work for medium-sized product teams.
+
+Rules:
+- app is the default top-level deployment object in the UI
+- environment is selected within an app, not treated as the main navigation object
+- component is hidden by default unless the template or runtime requires advanced visibility
+- preview and promotion are app-scoped, not component-scoped
+
+Examples:
+- a simple frontend app may have one default component named `web`
+- a medium app may have `web`, `worker`, and `scheduler`
+- an advanced app may later expose traffic controls for stable/canary releases
+
+Do NOT force users to model tightly coupled units as many separate services when they ship and promote together.
+
+If existing code or routes still use the term `service` during early MVP implementation, treat it as a temporary implementation detail. The product direction and user-facing model should converge on **app**.
+================================================================================
+13. APP CREATION MODEL
+================================================================================
+
+An app should be created from a template through a form-based UI.
 
 The flow:
 - user chooses a template
 - UI renders fields from template metadata
 - user fills in values
 - backend validates input
-- backend persists a service spec
+- backend persists an app spec
 - backend generates rendered config inputs for deployment/GitOps
 
-Service spec should include:
+App spec should include:
 - project
 - template reference
 - values
 - secret refs
+- component definitions or component defaults derived from the template
 - environment overrides
 - maybe derived/generated metadata
 
 Keep model deterministic and serializable.
 
-Hierarchy to preserve:
-- org
-- environment
-- project
-- service
-
 Config precedence should be conceptually:
-- Global / org
-- environment
+- org
 - project
-- service
+- app
+- environment override
+
+App-level fields should generally include:
+- name
+- template
+- curated template values
+- component topology
+- preview policy
+- default route intent
+
+Environment-level fields should generally include:
+- deployed release/version
+- environment-specific URLs/hostnames
+- replica or resource overrides
+- traffic policy
+- runtime status
 
 Secret values must not be stored in Git.
 Secret inputs should default to secret reference mode.
 
 ================================================================================
-13. RUNTIME AND OPERATIONS FEATURES
+14. RUNTIME AND OPERATIONS FEATURES
 ================================================================================
 
 The MVP must surface these runtime experiences:
 
 1. Dashboard
 - projects
-- services
+- apps
 - environments
 - status
 - URLs
 
-2. Service detail
-- service info
+2. App detail
+- app info
 - template
-- environments
-- image/tag
+- environment switcher
+- current release/version
 - URLs
 - status
-- actions:
+- quick actions:
   - create preview
   - promote
   - open app
   - view logs
 
-3. Previews
+3. Environment view inside app detail
+- staging
+- prod
+- previews
+- component health summary
+- desired vs actual runtime status
+- release state
+- traffic state only when relevant
+
+4. Previews
 - list previews
 - preview status
 - preview URL
 - create/delete previews
+- preview includes all preview-enabled components of the app
 
-4. Logs
+5. Logs
 - simple recent logs viewer
 - environment/pod/container selection
+- component selection when applicable
 - refresh
 - no full observability suite
 
-5. Promotions
+6. Promotions
 - explicit action
-- staging -> prod in MVP
+- preview -> staging and staging -> prod in MVP
 - Kargo integration if available
 - deterministic fallback if needed
+- promotion is app-scoped and should move a coherent release bundle
 
-6. Status
+7. Status
 - desired config + runtime summary
 
 Avoid over-building:
 - no giant pod console
 - no terminal exec UI yet unless trivially safe
 - no giant observability stack embedded
+- no component-level release orchestration UI in MVP
 
 ================================================================================
-14. BACKEND API REQUIREMENTS
+15. BACKEND API REQUIREMENTS
 ================================================================================
 
 Build a lightweight HTTP API in Go.
@@ -555,13 +618,14 @@ Templates:
 - GET /api/v1/templates
 - GET /api/v1/templates/:name
 
-Services:
-- GET /api/v1/projects/:project/services
-- GET /api/v1/projects/:project/services/:service
-- POST /api/v1/projects/:project/services
+Apps:
+- GET /api/v1/projects/:project/apps
+- GET /api/v1/projects/:project/apps/:app
+- POST /api/v1/projects/:project/apps
 
-Environments:
-- GET /api/v1/environments
+App environments:
+- GET /api/v1/projects/:project/apps/:app/environments
+- GET /api/v1/projects/:project/apps/:app/environments/:environment
 
 Previews:
 - GET /api/v1/previews
@@ -569,10 +633,14 @@ Previews:
 - DELETE /api/v1/previews/:name
 
 Promotion:
-- POST /api/v1/projects/:project/services/:service/promote
+- POST /api/v1/projects/:project/apps/:app/promote
 
 Logs:
-- GET /api/v1/projects/:project/services/:service/logs
+- GET /api/v1/projects/:project/apps/:app/logs
+
+Optional implementation note:
+- early MVP code may keep internal `service` naming for a short period to reduce churn
+- new externally visible DTOs and routes should prefer `app`
 
 Use session auth and RBAC middleware.
 
@@ -582,7 +650,7 @@ Keep JSON responses stable and boring.
 Do not add random endpoints without clear product value.
 
 ================================================================================
-15. KUBERNETES / GITOPS INTEGRATION
+16. KUBERNETES / GITOPS INTEGRATION
 ================================================================================
 
 Use Kubernetes and OSS tools as the source of execution.
@@ -594,22 +662,42 @@ Expected integrations:
 
 Do not replace these tools.
 
+Runtime mapping guidance:
+- one app spec can produce multiple environment instances
+- each app environment instance should map cleanly to GitOps state
+- for MVP, one namespace per app environment instance is the simplest default
+  - examples:
+    - `hello-staging`
+    - `hello-prod`
+    - `hello-pr-182`
+
+Component guidance:
+- components belong to the app spec
+- component runtime state exists inside each environment instance
+- components should not become the primary top-level UX object in MVP
+
 Namespace strategy:
-- env isolation
-- preview isolation
-- e.g. preview-<name>
+- environment isolation by default
+- preview isolation by default
+- prefer deterministic app-environment namespace names
 
 Ingress hostname patterns:
-- service.env.localhost
-- previewName.preview.localhost
-- argocd.localhost
+- `app.staging.localhost`
+- `app.prod.localhost`
+- `pr-182.app.preview.localhost`
+- `argocd.localhost`
+
+Preview behavior:
+- preview is an ephemeral environment instance of an app
+- preview should include all preview-enabled components
+- heavy or nonessential components may opt out of preview at the template/component layer
 
 Keep preview name sanitization deterministic and tested.
 
 Do not invent a new deployment engine.
 
 ================================================================================
-16. SECRETS MODEL
+17. SECRETS MODEL
 ================================================================================
 
 MVP secret stance:
@@ -630,7 +718,7 @@ For MVP:
 - clear future path
 
 ================================================================================
-17. TESTING EXPECTATIONS
+18. TESTING EXPECTATIONS
 ================================================================================
 
 Every meaningful area should have tests.
@@ -642,7 +730,7 @@ Minimum tests:
 - RBAC permission checks
 - preview name sanitization
 - API handler tests
-- service creation validation
+- app creation validation
 - deterministic rendering transformations
 
 Frontend:
@@ -656,7 +744,7 @@ Backend:
 - avoid giant god functions
 
 ================================================================================
-18. DOCUMENTATION EXPECTATIONS
+19. DOCUMENTATION EXPECTATIONS
 ================================================================================
 
 README must remain accurate.
@@ -677,7 +765,7 @@ Docs must:
 - avoid overpromising
 
 ================================================================================
-19. IMPLEMENTATION STYLE RULES
+20. IMPLEMENTATION STYLE RULES
 ================================================================================
 
 Use these rules consistently:
@@ -703,7 +791,7 @@ Do NOT:
 - create hidden background magic that is hard to reason about
 
 ================================================================================
-20. HOW TO WORK IN THIS REPO
+21. HOW TO WORK IN THIS REPO
 ================================================================================
 
 When I ask you to implement something:
@@ -727,7 +815,7 @@ When adding new files, prefer these locations:
 - shared API DTOs under a clear backend package and mirrored frontend types if needed
 
 ================================================================================
-21. FIRST IMPLEMENTATION PRIORITY ORDER
+22. FIRST IMPLEMENTATION PRIORITY ORDER
 ================================================================================
 
 Unless I explicitly override it, prioritize work in this order:
@@ -738,9 +826,9 @@ Unless I explicitly override it, prioritize work in this order:
 4. default org/team/project seed model
 5. basic RBAC
 6. template metadata schema + built-in web-service template
-7. service creation API
-8. create-service UI
-9. dashboard and service detail UI
+7. app creation API
+8. create-app UI
+9. dashboard and app detail UI
 10. onboarding flow
 11. previews
 12. promotions
@@ -749,7 +837,7 @@ Unless I explicitly override it, prioritize work in this order:
 15. Google SSO config scaffolding
 
 ================================================================================
-22. OUTPUT FORMAT FOR TASKS
+23. OUTPUT FORMAT FOR TASKS
 ================================================================================
 
 When I ask for implementation help, respond with:
@@ -762,7 +850,7 @@ When I ask for implementation help, respond with:
 If I ask for a big step, break it into sub-steps automatically.
 
 ================================================================================
-23. REMEMBER THE PRODUCT NORTH STAR
+24. REMEMBER THE PRODUCT NORTH STAR
 ================================================================================
 
 The product should feel like:

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -32,8 +33,9 @@ type Config struct {
 	ProjectStore    project.Store       // optional: enables service creation when set
 	RuntimeProvider runtime.Provider    // optional: enables runtime inventory when set
 	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
-	PreviewStore    preview.Store       // optional: enables preview endpoints when set
-	CookieSecure    bool                // true for production (HTTPS)
+	PreviewStore    preview.Store        // optional: enables preview endpoints when set
+	AppStore        domain.AppStore      // optional: enables app read endpoints when set
+	CookieSecure    bool                 // true for production (HTTPS)
 	Logger        *slog.Logger
 }
 
@@ -90,6 +92,10 @@ func New(cfg Config) *Server {
 				rh.logsHandler = newLogsHandler(cfg.ProjectStore, cfg.LogsProvider)
 				cfg.Logger.Info("logs endpoint enabled")
 			}
+		}
+		if cfg.AppStore != nil {
+			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
+			cfg.Logger.Info("app endpoints enabled")
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")

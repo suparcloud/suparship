@@ -45,11 +45,11 @@ suparShip is built around a small set of primitives:
 
 - **Environment** – `staging`, `prod`, `preview`
 - **Project** – logical grouping (team / product)
-- **Service** – a deployable workload
-- **Template** – a golden path for deploying a service
+- **App** – a deployable workload (the primary developer-owned object; internally still called `service` in some API paths during migration — see [ADR-0001](docs/adr/0001-app-as-primary-deployment-object.md))
+- **Template** – a golden path for deploying an app
 
 Developers think in:
-> *service → environment → preview → promote*
+> *app → environment → preview → promote*
 
 SREs define:
 > *defaults, templates, and guardrails*
@@ -466,6 +466,16 @@ with a descriptive message.
 **Authorization**: requires `viewer` role or above on the project. Log
 output is capped at 1 MiB per request to prevent memory issues. Streaming
 (`follow=true`) is reserved for a future commit.
+
+---
+
+## Architecture Decisions
+
+Significant design decisions are recorded as Architecture Decision Records (ADRs) under [`docs/adr/`](docs/adr/README.md).
+
+| ADR | Title | Status |
+|-----|-------|--------|
+| [ADR-0001](docs/adr/0001-app-as-primary-deployment-object.md) | App as Primary User-Facing Deployment Object | Accepted |
 
 ---
 

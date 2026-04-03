@@ -17,6 +17,8 @@ func seed(r *DevRuntime) {
 	seedTemplates(r)
 	seedProjects(r)
 	seedServices(r)
+	seedApps(r)
+	seedAppEnvironments(r)
 	seedPreviews(r)
 	seedStatuses(r)
 	seedLogs(r)
@@ -81,6 +83,94 @@ func seedServices(r *DevRuntime) {
 		Description:  "A simple hello-world HTTP service.",
 	}
 	r.services["demo"][hello.Name] = hello
+}
+
+func seedApps(r *DevRuntime) {
+	hello := &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			DisplayName: "Hello App",
+			Description: "A simple hello-world web application.",
+			Template: domain.AppTemplateRef{
+				Name:    "web-service",
+				Version: "1.0.0",
+			},
+			Values: map[string]any{
+				"image_repository": "ghcr.io/suparcloud/hello",
+				"image_tag":        "v1.0.0",
+			},
+			Components: []domain.Component{
+				{
+					Name:             "web",
+					Type:             domain.ComponentWeb,
+					EnabledInPreview: true,
+				},
+			},
+		},
+	}
+	r.apps["demo"] = map[string]*domain.App{hello.Name: hello}
+}
+
+func seedAppEnvironments(r *DevRuntime) {
+	rel := &domain.AppReleaseRef{
+		Image: "ghcr.io/suparcloud/hello:v1.0.0",
+		Tag:   "v1.0.0",
+	}
+	lastDeployed := seedCreatedAt.Format("2006-01-02T15:04:05Z")
+
+	healthyFull := domain.AppRuntimeStatus{
+		Phase:        domain.StatusHealthy,
+		Replicas:     2,
+		Available:    2,
+		LastDeployed: lastDeployed,
+	}
+	healthyPreview := domain.AppRuntimeStatus{
+		Phase:        domain.StatusHealthy,
+		Replicas:     1,
+		Available:    1,
+		LastDeployed: lastDeployed,
+	}
+
+	envs := []*domain.AppEnvironment{
+		{
+			AppName:     "hello",
+			ProjectName: "demo",
+			EnvName:     "staging",
+			EnvType:     domain.AppEnvStaging,
+			Namespace:   "hello-staging",
+			Release:     rel,
+			URLs:        []string{"http://hello.staging.localhost"},
+			Status:      healthyFull,
+		},
+		{
+			AppName:     "hello",
+			ProjectName: "demo",
+			EnvName:     "prod",
+			EnvType:     domain.AppEnvProd,
+			Namespace:   "hello-prod",
+			Release:     rel,
+			URLs:        []string{"http://hello.prod.localhost"},
+			Status:      healthyFull,
+		},
+		{
+			AppName:     "hello",
+			ProjectName: "demo",
+			EnvName:     "pr-42",
+			EnvType:     domain.AppEnvPreview,
+			Namespace:   "hello-preview-pr-42",
+			Release:     rel,
+			URLs:        []string{"http://pr-42.hello.preview.localhost"},
+			Status:      healthyPreview,
+		},
+	}
+
+	r.appEnvs["demo"] = map[string]map[string]*domain.AppEnvironment{
+		"hello": {},
+	}
+	for _, e := range envs {
+		r.appEnvs["demo"]["hello"][e.EnvName] = e
+	}
 }
 
 func seedPreviews(r *DevRuntime) {

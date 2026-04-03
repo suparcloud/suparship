@@ -205,6 +205,253 @@ func TestDeleteServiceNotFound(t *testing.T) {
 	}
 }
 
+// ── AppStore ──────────────────────────────────────────────────────────────────
+
+func TestListAppsSeeded(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	apps, err := r.ListApps(ctx, "demo")
+	if err != nil {
+		t.Fatalf("ListApps: %v", err)
+	}
+	if len(apps) == 0 {
+		t.Fatal("expected at least one seeded app in demo")
+	}
+	names := appNames(apps)
+	if !contains(names, "hello") {
+		t.Errorf("expected seeded app %q, got %v", "hello", names)
+	}
+}
+
+func TestListAppsUnknownProject(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	_, err := r.ListApps(ctx, "nope")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+func TestGetAppFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	app, err := r.GetApp(ctx, "demo", "hello")
+	if err != nil {
+		t.Fatalf("GetApp: %v", err)
+	}
+	if app.Spec.Template.Name == "" {
+		t.Error("hello app should have a template name")
+	}
+	if len(app.Spec.Components) == 0 {
+		t.Error("hello app should have at least one component")
+	}
+	if app.Spec.Components[0].Type != domain.ComponentWeb {
+		t.Errorf("first component type = %q, want %q", app.Spec.Components[0].Type, domain.ComponentWeb)
+	}
+}
+
+func TestGetAppNotFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	_, err := r.GetApp(ctx, "demo", "ghost")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+func TestListAppEnvironmentsSeeded(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	envs, err := r.ListAppEnvironments(ctx, "demo", "hello")
+	if err != nil {
+		t.Fatalf("ListAppEnvironments: %v", err)
+	}
+	if len(envs) < 2 {
+		t.Fatalf("expected at least 2 seeded environments, got %d", len(envs))
+	}
+	envNames := make([]string, len(envs))
+	for i, e := range envs {
+		envNames[i] = e.EnvName
+	}
+	for _, want := range []string{"staging", "prod"} {
+		if !contains(envNames, want) {
+			t.Errorf("expected environment %q, got %v", want, envNames)
+		}
+	}
+}
+
+func TestListAppEnvironmentsUnknownApp(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	envs, err := r.ListAppEnvironments(ctx, "demo", "ghost")
+	if err != nil {
+		t.Fatalf("ListAppEnvironments for unknown app should not error: %v", err)
+	}
+	if len(envs) != 0 {
+		t.Errorf("expected empty slice for unknown app, got %d entries", len(envs))
+	}
+}
+
+func TestGetAppEnvironmentFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	for _, envName := range []string{"staging", "prod"} {
+		t.Run(envName, func(t *testing.T) {
+			env, err := r.GetAppEnvironment(ctx, "demo", "hello", envName)
+			if err != nil {
+				t.Fatalf("GetAppEnvironment(%q): %v", envName, err)
+			}
+			if env.Namespace == "" {
+				t.Error("Namespace must not be empty")
+			}
+			if len(env.URLs) == 0 {
+				t.Error("expected at least one URL for seeded app environment")
+			}
+			if env.Release == nil {
+				t.Error("Release must not be nil for seeded app environment")
+			}
+			if env.Status.Phase != domain.StatusHealthy {
+				t.Errorf("Status.Phase = %q, want %q", env.Status.Phase, domain.StatusHealthy)
+			}
+			if env.EnvType != domain.AppEnvironmentType(envName) {
+				t.Errorf("EnvType = %q, want %q", env.EnvType, envName)
+			}
+		})
+	}
+}
+
+func TestGetAppEnvironmentNotFound(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	_, err := r.GetAppEnvironment(ctx, "demo", "hello", "dev")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+func TestAppSeedIsDeterministic(t *testing.T) {
+	r1 := fake.NewSeededDevRuntime()
+	r2 := fake.NewSeededDevRuntime()
+
+	a1, _ := r1.GetApp(ctx, "demo", "hello")
+	a2, _ := r2.GetApp(ctx, "demo", "hello")
+	if a1.Spec.Template.Name != a2.Spec.Template.Name {
+		t.Error("app seed data should be identical across runs")
+	}
+
+	e1, _ := r1.GetAppEnvironment(ctx, "demo", "hello", "staging")
+	e2, _ := r2.GetAppEnvironment(ctx, "demo", "hello", "staging")
+	if e1.Namespace != e2.Namespace || e1.Status.Phase != e2.Status.Phase {
+		t.Error("app environment seed data should be identical across runs")
+	}
+}
+
+func TestListAppPreviewsAll(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "", "")
+	if err != nil {
+		t.Fatalf("ListAppPreviews: %v", err)
+	}
+	if len(previews) == 0 {
+		t.Fatal("expected at least one seeded preview environment")
+	}
+	for _, p := range previews {
+		if p.EnvType != domain.AppEnvPreview {
+			t.Errorf("expected EnvType %q, got %q", domain.AppEnvPreview, p.EnvType)
+		}
+	}
+}
+
+func TestListAppPreviewsByProject(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "demo", "")
+	if err != nil {
+		t.Fatalf("ListAppPreviews(demo, ''): %v", err)
+	}
+	for _, p := range previews {
+		if p.ProjectName != "demo" {
+			t.Errorf("expected ProjectName %q, got %q", "demo", p.ProjectName)
+		}
+		if p.EnvType != domain.AppEnvPreview {
+			t.Errorf("expected EnvType %q, got %q", domain.AppEnvPreview, p.EnvType)
+		}
+	}
+}
+
+func TestListAppPreviewsByApp(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "demo", "hello")
+	if err != nil {
+		t.Fatalf("ListAppPreviews(demo, hello): %v", err)
+	}
+	if len(previews) == 0 {
+		t.Fatal("expected at least one seeded preview for hello")
+	}
+	for _, p := range previews {
+		if p.AppName != "hello" {
+			t.Errorf("expected AppName %q, got %q", "hello", p.AppName)
+		}
+		if p.EnvType != domain.AppEnvPreview {
+			t.Errorf("expected EnvType %q, got %q", domain.AppEnvPreview, p.EnvType)
+		}
+	}
+}
+
+func TestListAppPreviewsNoMatchProject(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "nonexistent", "")
+	if err != nil {
+		t.Fatalf("ListAppPreviews should not error for unknown project: %v", err)
+	}
+	if len(previews) != 0 {
+		t.Errorf("expected empty slice for unknown project, got %d", len(previews))
+	}
+}
+
+func TestListAppPreviewsNoMatchApp(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "demo", "ghost")
+	if err != nil {
+		t.Fatalf("ListAppPreviews should not error for unknown app: %v", err)
+	}
+	if len(previews) != 0 {
+		t.Errorf("expected empty slice for unknown app, got %d", len(previews))
+	}
+}
+
+func TestListAppPreviewsIsDeterministic(t *testing.T) {
+	r1 := fake.NewSeededDevRuntime()
+	r2 := fake.NewSeededDevRuntime()
+
+	p1, err1 := r1.ListAppPreviews(ctx, "", "")
+	p2, err2 := r2.ListAppPreviews(ctx, "", "")
+	if err1 != nil || err2 != nil {
+		t.Fatalf("ListAppPreviews errors: %v / %v", err1, err2)
+	}
+	if len(p1) != len(p2) {
+		t.Fatalf("preview counts differ: %d vs %d", len(p1), len(p2))
+	}
+	for i := range p1 {
+		if p1[i].EnvName != p2[i].EnvName || p1[i].Namespace != p2[i].Namespace {
+			t.Errorf("preview[%d] differs: %+v vs %+v", i, p1[i], p2[i])
+		}
+	}
+}
+
+func TestListAppPreviewsOnlyPreviewType(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	all, _ := r.ListAppEnvironments(ctx, "demo", "hello")
+	var nonPreviews int
+	for _, e := range all {
+		if e.EnvType != domain.AppEnvPreview {
+			nonPreviews++
+		}
+	}
+	if nonPreviews == 0 {
+		t.Fatal("seed data must contain non-preview environments to make this test meaningful")
+	}
+
+	previews, err := r.ListAppPreviews(ctx, "demo", "hello")
+	if err != nil {
+		t.Fatalf("ListAppPreviews: %v", err)
+	}
+	if len(previews) >= len(all) {
+		t.Errorf("ListAppPreviews should return fewer entries than ListAppEnvironments (%d vs %d)", len(previews), len(all))
+	}
+}
+
 // ── TemplateStore ─────────────────────────────────────────────────────────────
 
 func TestListTemplatesSeeded(t *testing.T) {
@@ -467,6 +714,14 @@ func projectNames(ps []*domain.Project) []string {
 	out := make([]string, len(ps))
 	for i, p := range ps {
 		out[i] = p.Name
+	}
+	return out
+}
+
+func appNames(as []*domain.App) []string {
+	out := make([]string, len(as))
+	for i, a := range as {
+		out[i] = a.Name
 	}
 	return out
 }

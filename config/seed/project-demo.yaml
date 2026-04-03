@@ -33,3 +33,18 @@ data:
           values:
             image_repository: ghcr.io/suparcloud/hello
             image_tag: v1.0.0
+      apps:
+        - name: hello
+          spec:
+            displayName: Hello App
+            description: A simple hello-world web application.
+            template:
+              name: web-service
+              version: "1.0.0"
+            values:
+              image_repository: ghcr.io/suparcloud/hello
+              image_tag: v1.0.0
+            components:
+              - name: web
+                type: web
+                enabledInPreview: true

@@ -268,10 +268,10 @@ function ProjectCard({
             {services.length} {services.length === 1 ? "service" : "services"}
           </span>
           <Link
-            to={`/projects/${project.name}/services/new`}
+            to={`/projects/${project.name}/apps/new`}
             className="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-gray-700"
           >
-            Add service
+            Add app
           </Link>
         </div>
       </div>
@@ -280,10 +280,10 @@ function ProjectCard({
         <div className="px-5 py-10 text-center">
           <p className="text-sm text-gray-400">No services configured yet.</p>
           <Link
-            to={`/projects/${project.name}/services/new`}
+            to={`/projects/${project.name}/apps/new`}
             className="mt-2 inline-block text-sm font-medium text-gray-600 hover:text-gray-900"
           >
-            Create your first service &rarr;
+            Create your first app &rarr;
           </Link>
         </div>
       ) : (

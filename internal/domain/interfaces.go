@@ -48,6 +48,33 @@ type PreviewStore interface {
 	DeletePreview(ctx context.Context, name string) error
 }
 
+// AppStore reads and persists app definitions within a project.
+//
+// Apps are nested under projects; all operations are scoped by project name.
+// The fake implementation keeps apps in memory; a future K8s implementation
+// will store each app as part of the project ConfigMap or as its own resource.
+type AppStore interface {
+	ListApps(ctx context.Context, projectName string) ([]*App, error)
+	GetApp(ctx context.Context, projectName, appName string) (*App, error)
+	ListAppEnvironments(ctx context.Context, projectName, appName string) ([]*AppEnvironment, error)
+	// GetAppEnvironment resolves an environment by its name. For the well-known
+	// environments (staging, prod) the name equals the environment type string.
+	// Preview environments are resolved by their specific name (e.g. "pr-42").
+	GetAppEnvironment(ctx context.Context, projectName, appName, envName string) (*AppEnvironment, error)
+	// ListAppPreviews returns all preview AppEnvironments, optionally filtered
+	// by project and/or app. Pass an empty string to skip that filter.
+	ListAppPreviews(ctx context.Context, projectName, appName string) ([]*AppEnvironment, error)
+
+	// SaveApp upserts an app definition within a project. Implementations
+	// should return an error if the project does not exist. The ProjectName
+	// field on app is set by the implementation to projectName.
+	SaveApp(ctx context.Context, projectName string, app *App) error
+	// SaveAppEnvironment upserts an environment instance for an app. The
+	// caller is responsible for populating all fields; the implementation
+	// stores the record verbatim and sets env.ProjectName = projectName.
+	SaveAppEnvironment(ctx context.Context, projectName string, env *AppEnvironment) error
+}
+
 // RuntimeStatusReader reads the live cluster state of a service.
 //
 // The K8s implementation queries Deployments and Ingresses in the

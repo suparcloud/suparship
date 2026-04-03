@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { AuthGuard } from "./components/AuthGuard";
 import { AuthProvider } from "./lib/AuthContext";
+import { AppDetail } from "./pages/AppDetail";
 import { AuthSettings } from "./pages/AuthSettings";
 import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
@@ -32,9 +33,20 @@ export function App() {
                 element={<ProjectDetail />}
               />
               <Route
+                path="/projects/:project/apps/:app"
+                element={<AppDetail />}
+              />
+              {/* Primary app creation route */}
+              <Route
+                path="/projects/:project/apps/new"
+                element={<NewService />}
+              />
+              {/* Legacy route — kept for backward compatibility */}
+              <Route
                 path="/projects/:project/services/new"
                 element={<NewService />}
               />
+              {/* Legacy route preserved for backward compatibility */}
               <Route
                 path="/projects/:project/services/:service"
                 element={<ServiceDetail />}
