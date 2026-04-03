@@ -198,7 +198,7 @@ function AppCard({ project, app }: { project: string; app: AppWithEnvs }) {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <Link
-            to={`/projects/${project}/services/${app.name}`}
+            to={`/projects/${project}/apps/${app.name}`}
             className="text-sm font-semibold text-gray-900 hover:text-gray-600"
           >
             {app.displayName ?? app.name}
@@ -221,7 +221,7 @@ function AppCard({ project, app }: { project: string; app: AppWithEnvs }) {
             </a>
           )}
           <Link
-            to={`/projects/${project}/services/${app.name}`}
+            to={`/projects/${project}/apps/${app.name}`}
             className="rounded-md bg-gray-900 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-gray-700"
           >
             Details
