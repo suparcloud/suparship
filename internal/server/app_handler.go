@@ -10,6 +10,7 @@ import (
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
+	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
@@ -26,11 +27,13 @@ var appPromotionOrder = map[domain.AppEnvironmentType]int{
 //
 // Read-only routes (list, get, environments) are always registered when
 // appHandler is non-nil. The create route is additionally registered when
-// projectStore is non-nil.
+// projectStore is non-nil. The logs route is registered when logsProvider
+// is non-nil.
 type appHandler struct {
 	appStore     domain.AppStore
 	templateIdx  map[string]*tpl.Template
 	projectStore project.Store
+	logsProvider runtime.LogsProvider // optional: enables GET .../apps/{app}/logs
 }
 
 // newAppHandler creates an appHandler.

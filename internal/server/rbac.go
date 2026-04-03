@@ -104,6 +104,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/previews", devProject(rh.appHandler.handleCreateAppPreview))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/previews/{name}", devProject(rh.appHandler.handleDeleteAppPreview))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/promote", manageProject(rh.appHandler.handlePromoteApp))
+		if rh.appHandler.logsProvider != nil {
+			mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/logs", viewProject(rh.appHandler.handleGetAppLogs))
+		}
 		if rh.appHandler.projectStore != nil {
 			mux.HandleFunc("POST /api/v1/projects/{project}/apps", devProject(rh.appHandler.handleCreateApp))
 		}
