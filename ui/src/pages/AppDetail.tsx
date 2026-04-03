@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { getApp, getAppEnvironment } from "../lib/apps";
-import { createPreview } from "../lib/previews";
+import { createPreview, deletePreview } from "../lib/previews";
 import { promoteService } from "../lib/services";
 import type {
   AppDetail as AppDetailType,
@@ -296,6 +296,24 @@ export function AppDetail() {
       cancelled = true;
     };
   }, [project, appName, selectedEnvName]);
+
+  function handleDeletePreview(previewName: string) {
+    deletePreview(previewName)
+      .then(() => {
+        setData((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            environments: prev.environments.filter(
+              (e) => e.preview?.previewName !== previewName,
+            ),
+          };
+        });
+      })
+      .catch(() => {
+        // Silently ignored; the preview list will remain until next load.
+      });
+  }
 
   if (loading) return <DetailSkeleton />;
 
@@ -705,7 +723,10 @@ export function AppDetail() {
       )}
       {activeTab === "deployments" && <DeploymentsTab />}
       {activeTab === "previews" && (
-        <PreviewsTab previewEnvs={previewEnvs} />
+        <PreviewsTab
+          previewEnvs={previewEnvs}
+          onDeletePreview={handleDeletePreview}
+        />
       )}
       {activeTab === "logs" && <LogsTab />}
       {activeTab === "traffic" && <TrafficTab />}
@@ -920,9 +941,13 @@ function DeploymentsTab() {
 
 function PreviewsTab({
   previewEnvs,
+  onDeletePreview,
 }: {
   previewEnvs: AppEnvironmentSummary[];
+  onDeletePreview: (previewName: string) => void;
 }) {
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+
   if (previewEnvs.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-gray-200 bg-white px-6 py-12 text-center">
@@ -938,34 +963,86 @@ function PreviewsTab({
 
   return (
     <div className="divide-y divide-gray-50 rounded-xl border border-gray-200 bg-white">
-      {previewEnvs.map((env) => (
-        <div
-          key={env.envName}
-          className="flex items-center justify-between px-5 py-3"
-        >
-          <div>
-            <span className="text-sm font-medium text-gray-900">
-              {env.preview?.previewName ?? env.envName}
-            </span>
-            <span className="ml-2 font-mono text-xs text-gray-400">
-              {env.namespace}
-            </span>
+      {previewEnvs.map((env) => {
+        const previewName = env.preview?.previewName ?? env.envName;
+        const isConfirming = confirmingDelete === previewName;
+        return (
+          <div
+            key={env.envName}
+            className="flex items-center justify-between px-5 py-3"
+          >
+            <div className="min-w-0">
+              <span className="text-sm font-medium text-gray-900">
+                {previewName}
+              </span>
+              <span className="ml-2 font-mono text-xs text-gray-400">
+                {env.namespace}
+              </span>
+              {env.preview?.createdAt && (
+                <span className="ml-3 text-xs text-gray-400">
+                  {new Date(env.preview.createdAt).toLocaleDateString(
+                    undefined,
+                    { month: "short", day: "numeric" },
+                  )}
+                </span>
+              )}
+            </div>
+            <div className="ml-4 flex flex-shrink-0 items-center gap-3">
+              <StatusBadge status={env.status.phase} />
+              {env.urls[0] && (
+                <a
+                  href={env.urls[0]}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  Open ↗
+                </a>
+              )}
+              {isConfirming ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-gray-500">Delete?</span>
+                  <button
+                    onClick={() => {
+                      setConfirmingDelete(null);
+                      onDeletePreview(previewName);
+                    }}
+                    className="rounded-md bg-red-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-red-700"
+                  >
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmingDelete(null)}
+                    className="rounded-md border border-gray-200 px-2 py-0.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                  >
+                    No
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmingDelete(previewName)}
+                  className="rounded p-1 text-gray-300 transition-colors hover:bg-red-50 hover:text-red-500"
+                  title="Delete preview"
+                >
+                  <svg
+                    className="h-3.5 w-3.5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={1.5}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"
+                    />
+                  </svg>
+                </button>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <StatusBadge status={env.status.phase} />
-            {env.urls[0] && (
-              <a
-                href={env.urls[0]}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-600 hover:underline"
-              >
-                Open ↗
-              </a>
-            )}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
