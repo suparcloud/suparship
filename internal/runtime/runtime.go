@@ -1,10 +1,11 @@
-// Package runtime reads live Kubernetes state for suparship services.
+// Package runtime reads live Kubernetes state for suparship workloads (apps
+// and their components).
 //
-// The namespace convention is {project}-{environment}, e.g. "myapi-dev".
-// A Provider returns runtime information for a service in a given namespace,
-// including replica status, container image, and ingress URLs. If the
-// service has not been deployed, it returns a RuntimeInfo with Status
-// set to StatusNotDeployed.
+// The namespace convention is {project}-{environment}, e.g. "myapi-staging".
+// A Provider returns runtime information for a workload in a given namespace,
+// including replica status, container image, and ingress URLs. If the workload
+// has not been deployed, it returns a RuntimeInfo with Status set to
+// StatusNotDeployed.
 package runtime
 
 import "context"

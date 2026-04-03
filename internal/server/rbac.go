@@ -134,7 +134,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 }
 
 // placeholderHandler returns 200 with a stub JSON body. It will be replaced
-// once real project/service handlers are implemented.
+// once a real project-update handler is implemented (PUT /api/v1/projects/{project}).
 func placeholderHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

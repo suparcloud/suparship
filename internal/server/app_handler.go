@@ -91,13 +91,13 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		values = map[string]any{}
 	}
 
-	// Reuse project.ValidateServiceInputs for template-input validation.
-	// It requires []project.SecretRef; convert from the request DTO.
+	// Convert secret refs from DTO to the project type required by the
+	// template validator, then run input validation.
 	secretRefsForValidation := make([]project.SecretRef, len(req.SecretRefs))
 	for i, s := range req.SecretRefs {
 		secretRefsForValidation[i] = project.SecretRef{Name: s.Name, SecretRef: s.SecretRef}
 	}
-	if err := project.ValidateServiceInputs(values, secretRefsForValidation, tmpl); err != nil {
+	if err := project.ValidateAppInputs(values, secretRefsForValidation, tmpl); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
 	}

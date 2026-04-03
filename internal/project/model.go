@@ -1,8 +1,10 @@
-// Package project defines the data model for suparship projects and services.
+// Package project defines the persistence model for suparship projects.
 //
-// A project groups services that share environments and promotion pipelines.
-// Each project is stored as a Kubernetes ConfigMap in the suparship-system
-// namespace:
+// A project groups apps that share environments and a common promotion
+// pipeline. Each project is stored as a Kubernetes ConfigMap in the
+// suparship-system namespace. The "services" key in the YAML spec is a legacy
+// field that maps to apps; new code should prefer the domain.App model via
+// domain.AppStore. See docs/migration-app-model.md for the transition guide.
 //
 //	apiVersion: v1
 //	kind: ConfigMap
@@ -18,13 +20,11 @@
 //	    spec:
 //	      displayName: My API
 //	      environments:
-//	        - name: dev
-//	          order: 1
 //	        - name: staging
-//	          order: 2
+//	          order: 1
 //	        - name: prod
-//	          order: 3
-//	      services:
+//	          order: 2
+//	      services:   # legacy field — treated as apps
 //	        - name: api
 //	          template:
 //	            name: web-service

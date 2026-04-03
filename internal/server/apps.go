@@ -1,9 +1,9 @@
 package server
 
-// This file defines app-oriented API DTOs. These shapes are additive: existing
-// service-oriented DTOs in inventory.go, services.go, previews.go, and
-// promote.go are unchanged. Routes and handlers that serve these types will be
-// wired in a subsequent commit.
+// This file defines app-oriented API DTOs. Routes and handlers that serve
+// these types are registered in rbac.go via appHandler. Legacy service-oriented
+// DTOs in inventory.go, services.go, previews.go, and promote.go are retained
+// for backwards compatibility; see docs/migration-app-model.md.
 
 // --- Shared sub-DTOs ---
 
