@@ -10,6 +10,10 @@ ADRs document significant decisions that shaped the system's design, API surface
 |-----|-------|--------|
 | [ADR-0001](0001-app-as-primary-deployment-object.md) | App as Primary User-Facing Deployment Object | Accepted |
 
+## Related docs
+
+- [docs/templates.md](../templates.md) — Template authoring guide: app-first model, component topology, environment overrides, secrets.
+
 ## Format
 
 Each ADR follows the structure:

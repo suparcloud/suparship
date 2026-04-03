@@ -1,9 +1,9 @@
 # suparShip Template: web-service
 #
-# A general-purpose template for deploying containerized HTTP services
-# to Kubernetes. Includes Deployment, Service, optional Ingress, and
-# optional HPA. Designed to cover 80% of web service deployments with
-# minimal configuration.
+# A general-purpose template for creating containerized HTTP apps on
+# Kubernetes. Creates an app with a single web component (Deployment,
+# Service, optional Ingress, and optional HPA). Designed to cover 80%
+# of web app deployments with minimal configuration.
 #
 # Engine: Helm
 # Chart:  ./chart
@@ -14,11 +14,11 @@ metadata:
   name: web-service
   version: "1.0.0"
 spec:
-  title: Web Service
+  title: Web App
   description: >-
-    Deploy a containerized web service with a Service, optional Ingress,
-    and optional horizontal autoscaling. Suitable for APIs, frontends,
-    and general HTTP workloads.
+    Create a containerized web app with a single web component. Includes
+    a Kubernetes Service, optional Ingress, and optional horizontal
+    autoscaling. Suitable for APIs, frontends, and general HTTP workloads.
   category: web
   engine:
     type: helm
@@ -26,11 +26,11 @@ spec:
 
   inputs:
     - name: service_name
-      title: Service Name
+      title: App Name
       type: string
       required: true
       description: >-
-        Name for this service. Used in Kubernetes resource names,
+        Name for this app. Used in Kubernetes resource names,
         labels, and selectors. Must be DNS-compatible.
       pattern: "^[a-z][a-z0-9-]{0,61}[a-z0-9]$"
 
