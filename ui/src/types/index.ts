@@ -209,6 +209,96 @@ export interface SecretRefInput {
   secretRef: string;
 }
 
+// --- App-oriented types ---
+// These mirror the backend app DTOs (internal/server/apps.go) and are additive;
+// the service-oriented types above are unchanged.
+
+export interface AppTemplateRef {
+  name: string;
+  version?: string;
+}
+
+export interface AppSecretRef {
+  name: string;
+  secretRef: string;
+}
+
+export interface ComponentSummary {
+  name: string;
+  type: "web" | "worker" | "cron";
+  enabledInPreview: boolean;
+}
+
+export interface AppReleaseRef {
+  image?: string;
+  tag?: string;
+  commit?: string;
+}
+
+export interface AppStatusSummary {
+  phase: string;
+  replicas: number;
+  available: number;
+  lastDeployed?: string;
+}
+
+export interface PreviewMeta {
+  previewName: string;
+  createdAt?: string;
+}
+
+export interface AppEnvironmentSummary {
+  envName: string;
+  envType: "staging" | "prod" | "preview";
+  namespace: string;
+  urls: string[];
+  release?: AppReleaseRef;
+  status: AppStatusSummary;
+  preview?: PreviewMeta;
+}
+
+export interface AppSummary {
+  name: string;
+  project: string;
+  displayName?: string;
+  description?: string;
+  template: AppTemplateRef;
+  status: AppStatusSummary;
+  urls: string[];
+  components: ComponentSummary[];
+}
+
+export interface AppDetail {
+  name: string;
+  project: string;
+  displayName?: string;
+  description?: string;
+  template: AppTemplateRef;
+  values: Record<string, unknown>;
+  secretRefs: AppSecretRef[];
+  components: ComponentSummary[];
+  environments: AppEnvironmentSummary[];
+}
+
+export interface AppListResponse {
+  project: string;
+  apps: AppSummary[];
+}
+
+export interface AppDetailResponse {
+  app: AppDetail;
+}
+
+export interface AppEnvironmentsResponse {
+  project: string;
+  appName: string;
+  environments: AppEnvironmentSummary[];
+}
+
+export interface AppEnvironmentResponse {
+  environment: AppEnvironmentSummary;
+}
+
 // --- Promotion types ---
 
 export interface PromoteRequest {
