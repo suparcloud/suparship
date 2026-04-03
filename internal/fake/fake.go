@@ -337,6 +337,34 @@ func (r *DevRuntime) ListAppPreviews(_ context.Context, projectName, appName str
 	return out, nil
 }
 
+func (r *DevRuntime) SaveApp(_ context.Context, projectName string, app *domain.App) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.projects[projectName]; !ok {
+		return fmt.Errorf("project %q not found", projectName)
+	}
+	if r.apps[projectName] == nil {
+		r.apps[projectName] = make(map[string]*domain.App)
+	}
+	app.ProjectName = projectName
+	r.apps[projectName][app.Name] = app
+	return nil
+}
+
+func (r *DevRuntime) SaveAppEnvironment(_ context.Context, projectName string, env *domain.AppEnvironment) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.appEnvs[projectName] == nil {
+		r.appEnvs[projectName] = make(map[string]map[string]*domain.AppEnvironment)
+	}
+	if r.appEnvs[projectName][env.AppName] == nil {
+		r.appEnvs[projectName][env.AppName] = make(map[string]*domain.AppEnvironment)
+	}
+	env.ProjectName = projectName
+	r.appEnvs[projectName][env.AppName][env.EnvName] = env
+	return nil
+}
+
 // ── RuntimeStatusReader ──────────────────────────────────────────────────────
 
 // GetServiceStatus returns a pre-seeded ServiceStatus for known

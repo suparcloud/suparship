@@ -148,6 +148,51 @@ type AppEnvironmentResponse struct {
 	Environment AppEnvironmentSummaryDTO `json:"environment"`
 }
 
+// --- App creation request / response ---
+
+// ComponentCreateDTO allows callers to explicitly define a component when
+// creating an app. When the Components list is omitted from the request body,
+// the handler derives a default component from the template category.
+type ComponentCreateDTO struct {
+	// Name must be a valid DNS label (lowercase alphanumeric and hyphens).
+	Name string `json:"name"`
+	// Type must be one of "web", "worker", or "cron".
+	Type string `json:"type"`
+	// EnabledInPreview controls whether this component is deployed in preview
+	// environments. Defaults to true for web components, false for others.
+	EnabledInPreview bool `json:"enabledInPreview"`
+}
+
+// createAppRequest is the JSON body for POST /api/v1/projects/{project}/apps.
+// Template is required; all other fields are optional unless the referenced
+// template marks specific inputs as required.
+type createAppRequest struct {
+	// Name is the unique identifier for the app within the project.
+	// Must be a valid DNS label (lowercase alphanumeric and hyphens, 2–63 chars).
+	Name string `json:"name"`
+	// DisplayName is a human-friendly label shown in the UI.
+	DisplayName string `json:"displayName,omitempty"`
+	// Description provides optional context about the app's purpose.
+	Description string `json:"description,omitempty"`
+	// Template is the name of the golden-path template to create this app from.
+	Template string `json:"template"`
+	// Values holds curated template input values (no secrets).
+	Values map[string]any `json:"values"`
+	// SecretRefs maps secret input names to Kubernetes Secret references.
+	// Values are resolved at runtime; no plaintext secrets are accepted.
+	SecretRefs []AppSecretRefDTO `json:"secretRefs"`
+	// Components is optional. When absent, a single default component is
+	// derived from the template category (web → "web", worker → "worker", etc.).
+	Components []ComponentCreateDTO `json:"components,omitempty"`
+}
+
+// createAppResponse is the JSON body returned on a successful app creation.
+// The full app detail (including default environments) is included so the
+// caller does not need a subsequent GET.
+type createAppResponse struct {
+	App AppDetailDTO `json:"app"`
+}
+
 // --- App-scoped preview DTOs ---
 
 // AppPreviewSummaryDTO is the app-oriented view of a single preview environment.

@@ -1,20 +1,181 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 
+	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/project"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
-// appHandler serves read-only app-oriented API endpoints. It is wired into
-// the rbacHandler's route registration so that RBAC middleware is applied.
-// Write endpoints (app creation, updates) will be added in a later commit.
+// appHandler serves app-oriented API endpoints. It is wired into the
+// rbacHandler's route registration so that RBAC middleware is applied.
+//
+// Read-only routes (list, get, environments) are always registered when
+// appHandler is non-nil. The create route is additionally registered when
+// projectStore is non-nil.
 type appHandler struct {
-	appStore domain.AppStore
+	appStore     domain.AppStore
+	templateIdx  map[string]*tpl.Template
+	projectStore project.Store
 }
 
-func newAppHandler(store domain.AppStore) *appHandler {
-	return &appHandler{appStore: store}
+// newAppHandler creates an appHandler.
+//
+// templates and projectStore are optional. Passing non-nil values enables the
+// POST /api/v1/projects/{project}/apps creation endpoint; the caller is
+// responsible for registering the route only when both are present (see
+// rbacHandler.registerRoutes).
+func newAppHandler(store domain.AppStore, templates []*tpl.Template, projectStore project.Store) *appHandler {
+	idx := make(map[string]*tpl.Template, len(templates))
+	for _, t := range templates {
+		idx[t.Metadata.Name] = t
+	}
+	return &appHandler{
+		appStore:     store,
+		templateIdx:  idx,
+		projectStore: projectStore,
+	}
+}
+
+// handleCreateApp handles POST /api/v1/projects/{project}/apps.
+//
+// It validates the request body, resolves the referenced template, runs
+// template input validation, checks for duplicate app names, constructs
+// the App and its default staging+prod environments, persists them, and
+// returns 201 with the full app detail.
+func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+
+	var req createAppRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+
+	if err := domain.ValidateAppName(req.Name); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if req.Template == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name is required"})
+		return
+	}
+
+	tmpl, ok := ah.templateIdx[req.Template]
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "template \"" + req.Template + "\" not found",
+		})
+		return
+	}
+
+	values := req.Values
+	if values == nil {
+		values = map[string]any{}
+	}
+
+	// Reuse project.ValidateServiceInputs for template-input validation.
+	// It requires []project.SecretRef; convert from the request DTO.
+	secretRefsForValidation := make([]project.SecretRef, len(req.SecretRefs))
+	for i, s := range req.SecretRefs {
+		secretRefsForValidation[i] = project.SecretRef{Name: s.Name, SecretRef: s.SecretRef}
+	}
+	if err := project.ValidateServiceInputs(values, secretRefsForValidation, tmpl); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
+	// Verify the project exists before attempting any writes.
+	if _, err := ah.projectStore.Get(r.Context(), projectName); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "project \"" + projectName + "\" not found",
+		})
+		return
+	}
+
+	// Reject duplicate app names within the same project.
+	if _, err := ah.appStore.GetApp(r.Context(), projectName, req.Name); err == nil {
+		writeJSON(w, http.StatusConflict, errorResponse{
+			Error: "app \"" + req.Name + "\" already exists in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	// Convert and optionally validate explicit components.
+	var components []domain.Component
+	for i, c := range req.Components {
+		ct, err := domain.ParseComponentType(c.Type)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+				Error: "components[" + itoa(i) + "]: " + err.Error(),
+			})
+			return
+		}
+		components = append(components, domain.Component{
+			Name:             c.Name,
+			Type:             ct,
+			EnabledInPreview: c.EnabledInPreview,
+		})
+	}
+	if len(components) > 0 {
+		if err := domain.ValidateComponents(components); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+	}
+
+	// Convert secret refs from DTO to domain type.
+	domainSecretRefs := make([]domain.AppSecretRef, len(req.SecretRefs))
+	for i, s := range req.SecretRefs {
+		domainSecretRefs[i] = domain.AppSecretRef{Name: s.Name, SecretRef: s.SecretRef}
+	}
+
+	newApp, envs := domainapp.Build(
+		projectName,
+		req.Name,
+		req.DisplayName,
+		req.Description,
+		tmpl,
+		values,
+		domainSecretRefs,
+		components,
+	)
+
+	if err := ah.appStore.SaveApp(r.Context(), projectName, newApp); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
+		return
+	}
+	for _, env := range envs {
+		if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app environment"})
+			return
+		}
+	}
+
+	// Re-read from store to produce a canonical response.
+	saved, _ := ah.appStore.GetApp(r.Context(), projectName, req.Name)
+	savedEnvs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, req.Name)
+
+	writeJSON(w, http.StatusCreated, createAppResponse{
+		App: appToDetailDTO(saved, savedEnvs),
+	})
+}
+
+// itoa converts a small non-negative int to its decimal string representation
+// without importing strconv (avoids an import just for error messages).
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	digits := []byte{}
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	return string(digits)
 }
 
 // handleListApps handles GET /api/v1/projects/{project}/apps.

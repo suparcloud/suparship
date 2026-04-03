@@ -64,6 +64,15 @@ type AppStore interface {
 	// ListAppPreviews returns all preview AppEnvironments, optionally filtered
 	// by project and/or app. Pass an empty string to skip that filter.
 	ListAppPreviews(ctx context.Context, projectName, appName string) ([]*AppEnvironment, error)
+
+	// SaveApp upserts an app definition within a project. Implementations
+	// should return an error if the project does not exist. The ProjectName
+	// field on app is set by the implementation to projectName.
+	SaveApp(ctx context.Context, projectName string, app *App) error
+	// SaveAppEnvironment upserts an environment instance for an app. The
+	// caller is responsible for populating all fields; the implementation
+	// stores the record verbatim and sets env.ProjectName = projectName.
+	SaveAppEnvironment(ctx context.Context, projectName string, env *AppEnvironment) error
 }
 
 // RuntimeStatusReader reads the live cluster state of a service.

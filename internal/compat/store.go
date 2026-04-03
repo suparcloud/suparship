@@ -121,6 +121,17 @@ func (s *ServiceBackedAppStore) ListAppPreviews(ctx context.Context, projectName
 	return s.listPreviewsFromLegacy(ctx, projectName, appName)
 }
 
+// SaveApp delegates to the primary AppStore. The compat layer does not
+// perform any service-layer write; native app persistence is used directly.
+func (s *ServiceBackedAppStore) SaveApp(ctx context.Context, projectName string, app *domain.App) error {
+	return s.primary.SaveApp(ctx, projectName, app)
+}
+
+// SaveAppEnvironment delegates to the primary AppStore.
+func (s *ServiceBackedAppStore) SaveAppEnvironment(ctx context.Context, projectName string, env *domain.AppEnvironment) error {
+	return s.primary.SaveAppEnvironment(ctx, projectName, env)
+}
+
 // ── fallback helpers ──────────────────────────────────────────────────────────
 
 func (s *ServiceBackedAppStore) listAppsFromServices(ctx context.Context, projectName string) ([]*domain.App, error) {

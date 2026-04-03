@@ -37,6 +37,14 @@ func (s *stubEmptyAppStore) ListAppPreviews(_ context.Context, _, _ string) ([]*
 	return []*domain.AppEnvironment{}, nil
 }
 
+func (s *stubEmptyAppStore) SaveApp(_ context.Context, _ string, _ *domain.App) error {
+	return fmt.Errorf("stub: SaveApp not implemented")
+}
+
+func (s *stubEmptyAppStore) SaveAppEnvironment(_ context.Context, _ string, _ *domain.AppEnvironment) error {
+	return fmt.Errorf("stub: SaveAppEnvironment not implemented")
+}
+
 // ── store constructors ────────────────────────────────────────────────────────
 
 // newPrimaryStore returns a store whose primary AppStore holds native seed data

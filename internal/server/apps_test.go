@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +13,9 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/session"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 // --- In-memory AppStore for tests ---
@@ -139,6 +142,31 @@ func (m *memAppStore) ListAppPreviews(_ context.Context, projectName, appName st
 	return out, nil
 }
 
+func (m *memAppStore) SaveApp(_ context.Context, projectName string, app *domain.App) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.apps[projectName] == nil {
+		return fmt.Errorf("project %q not found", projectName)
+	}
+	app.ProjectName = projectName
+	m.apps[projectName][app.Name] = app
+	return nil
+}
+
+func (m *memAppStore) SaveAppEnvironment(_ context.Context, projectName string, env *domain.AppEnvironment) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.envs[projectName] == nil {
+		m.envs[projectName] = make(map[string]map[string]*domain.AppEnvironment)
+	}
+	if m.envs[projectName][env.AppName] == nil {
+		m.envs[projectName][env.AppName] = make(map[string]*domain.AppEnvironment)
+	}
+	env.ProjectName = projectName
+	m.envs[projectName][env.AppName][env.EnvName] = env
+	return nil
+}
+
 // --- Test helpers ---
 
 func newTestAppMux() (*http.ServeMux, *authHandler, *memAppStore) {
@@ -154,11 +182,89 @@ func newTestAppMux() (*http.ServeMux, *authHandler, *memAppStore) {
 	rh := &rbacHandler{
 		auth:        ah,
 		orgProvider: &staticOrgProvider{org: testRBACOrg()},
-		appHandler:  newAppHandler(store),
+		appHandler:  newAppHandler(store, nil, nil),
 	}
 	rh.registerRoutes(mux)
 
 	return mux, ah, store
+}
+
+// newTestAppCreateMux returns a mux wired with an appHandler that supports
+// app creation (templates + project store).  The returned memProjectStore
+// and memAppStore are pre-seeded with the demo project (apps map initialised).
+func newTestAppCreateMux() (*http.ServeMux, *authHandler, *memAppStore, *memProjectStore) {
+	mux := http.NewServeMux()
+
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	appStore := newMemAppStore()
+	// Pre-create the project bucket so SaveApp doesn't fail with "project not found".
+	appStore.mu.Lock()
+	appStore.apps["demo"] = make(map[string]*domain.App)
+	appStore.mu.Unlock()
+
+	projStore := newMemProjectStore()
+	_ = projStore.Save(context.Background(), appCreateTestProject())
+
+	rh := &rbacHandler{
+		auth:        ah,
+		orgProvider: &staticOrgProvider{org: testRBACOrg()},
+		appHandler:  newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, projStore),
+	}
+	rh.registerRoutes(mux)
+
+	return mux, ah, appStore, projStore
+}
+
+// --- Fixtures for app creation tests ---
+
+func appCreateTestTemplate() *tpl.Template {
+	return &tpl.Template{
+		APIVersion: tpl.CurrentAPIVersion,
+		Kind:       tpl.TemplateKind,
+		Metadata:   tpl.Metadata{Name: "web-service", Version: "1.0.0"},
+		Spec: tpl.TemplateSpec{
+			Title:    "Web Service",
+			Category: "web",
+			Engine:   tpl.Engine{Type: tpl.EngineHelm},
+			Inputs: []tpl.Input{
+				{Name: "image", Title: "Image", Type: tpl.InputTypeString, Required: true},
+			},
+			SecretInputs: []tpl.SecretInput{
+				{Name: "db_url", Title: "Database URL", SecretRef: "db.url"},
+			},
+		},
+	}
+}
+
+func appCreateTestProject() *project.Project {
+	return &project.Project{
+		APIVersion: project.CurrentAPIVersion,
+		Kind:       project.ProjectKind,
+		Metadata:   project.ProjectMeta{Name: "demo"},
+		Spec: project.ProjectSpec{
+			Environments: []project.Environment{
+				{Name: "staging", Order: 1},
+				{Name: "prod", Order: 2},
+			},
+		},
+	}
+}
+
+func postCreateAppJSON(mux *http.ServeMux, cookie *http.Cookie, projectName string, body any) *httptest.ResponseRecorder {
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectName+"/apps", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
 }
 
 func appTestApp() *domain.App {
@@ -541,6 +647,279 @@ func TestGetAppEnvironmentUnauthenticated(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+// --- POST /api/v1/projects/{project}/apps ---
+
+func TestCreateAppValid(t *testing.T) {
+	mux, ah, appStore, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:        "my-app",
+		DisplayName: "My App",
+		Template:    "web-service",
+		Values:      map[string]any{"image": "ghcr.io/org/app:v1"},
+	})
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp createAppResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.App.Name != "my-app" {
+		t.Errorf("expected app name %q, got %q", "my-app", resp.App.Name)
+	}
+	if resp.App.Project != "demo" {
+		t.Errorf("expected project %q, got %q", "demo", resp.App.Project)
+	}
+	if resp.App.Template.Name != "web-service" {
+		t.Errorf("expected template %q, got %q", "web-service", resp.App.Template.Name)
+	}
+	if resp.App.DisplayName != "My App" {
+		t.Errorf("expected displayName %q, got %q", "My App", resp.App.DisplayName)
+	}
+	if len(resp.App.Environments) != 2 {
+		t.Errorf("expected 2 default environments, got %d", len(resp.App.Environments))
+	}
+	if len(resp.App.Components) != 1 || resp.App.Components[0].Name != "web" {
+		t.Errorf("expected default web component, got %v", resp.App.Components)
+	}
+
+	// Verify persisted in store.
+	app, err := appStore.GetApp(context.Background(), "demo", "my-app")
+	if err != nil {
+		t.Fatalf("expected persisted app: %v", err)
+	}
+	if app.Name != "my-app" {
+		t.Errorf("persisted app name mismatch: %q", app.Name)
+	}
+}
+
+func TestCreateAppDefaultEnvironments(t *testing.T) {
+	mux, ah, appStore, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "env-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	envs, err := appStore.ListAppEnvironments(context.Background(), "demo", "env-app")
+	if err != nil {
+		t.Fatalf("list environments: %v", err)
+	}
+	if len(envs) != 2 {
+		t.Fatalf("expected 2 environments, got %d", len(envs))
+	}
+	names := map[string]bool{}
+	for _, e := range envs {
+		names[e.EnvName] = true
+		if e.Status.Phase != domain.StatusNotDeployed {
+			t.Errorf("env %q: expected not_deployed, got %q", e.EnvName, e.Status.Phase)
+		}
+	}
+	if !names["staging"] || !names["prod"] {
+		t.Errorf("expected staging and prod, got %v", names)
+	}
+}
+
+func TestCreateAppWithExplicitComponents(t *testing.T) {
+	mux, ah, appStore, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "multi-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+		Components: []ComponentCreateDTO{
+			{Name: "web", Type: "web", EnabledInPreview: true},
+			{Name: "worker", Type: "worker", EnabledInPreview: false},
+		},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	app, _ := appStore.GetApp(context.Background(), "demo", "multi-app")
+	if len(app.Spec.Components) != 2 {
+		t.Fatalf("expected 2 components persisted, got %d", len(app.Spec.Components))
+	}
+}
+
+func TestCreateAppWithSecretRef(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "secret-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+		SecretRefs: []AppSecretRefDTO{
+			{Name: "db_url", SecretRef: "my-secret.db_url"},
+		},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp createAppResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if len(resp.App.SecretRefs) != 1 || resp.App.SecretRefs[0].SecretRef != "my-secret.db_url" {
+		t.Errorf("unexpected secretRefs in response: %v", resp.App.SecretRefs)
+	}
+}
+
+func TestCreateAppMissingName(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppInvalidName(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "INVALID NAME",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppMissingTemplate(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:   "my-app",
+		Values: map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppUnknownTemplate(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "my-app",
+		Template: "nonexistent",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppValidationFailureMissingRequiredInput(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	// "image" is a required input in appCreateTestTemplate; omit it.
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "my-app",
+		Template: "web-service",
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppSecretAsPlaintext(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "my-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1", "db_url": "postgres://..."},
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppProjectNotFound(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "nonexistent", createAppRequest{
+		Name:     "my-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppDuplicate(t *testing.T) {
+	mux, ah, appStore, _ := newTestAppCreateMux()
+	appStore.addApp(appTestApp()) // "hello" in project "demo"
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "hello",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp errorResponse
+	_ = json.NewDecoder(rec.Body).Decode(&errResp)
+	if !contains(errResp.Error, "already exists") {
+		t.Errorf("expected 'already exists' error, got %q", errResp.Error)
+	}
+}
+
+func TestCreateAppInvalidComponentType(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "my-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+		Components: []ComponentCreateDTO{
+			{Name: "web", Type: "badtype", EnabledInPreview: true},
+		},
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppUnauthenticated(t *testing.T) {
+	mux, _, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, nil, "demo", createAppRequest{
+		Name:     "my-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestCreateAppInsufficientPermissions(t *testing.T) {
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	// "carol" is a viewer on "*"; creating requires developer or higher.
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "carol", "viewer"), "demo", createAppRequest{
+		Name:     "my-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

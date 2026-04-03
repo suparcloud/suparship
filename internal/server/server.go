@@ -94,7 +94,7 @@ func New(cfg Config) *Server {
 			}
 		}
 		if cfg.AppStore != nil {
-			rh.appHandler = newAppHandler(cfg.AppStore)
+			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
 			cfg.Logger.Info("app endpoints enabled")
 		}
 		rh.registerRoutes(mux)
