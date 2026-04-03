@@ -1,3 +1,23 @@
+// Package server — this file contains the legacy service-oriented inventory
+// endpoints:
+//
+//	GET /api/v1/environments
+//	GET /api/v1/projects/{project}/services
+//	GET /api/v1/projects/{project}/services/{service}
+//
+// # Deprecation notice
+//
+// These endpoints are retained for backwards compatibility. The primary
+// app-oriented equivalents are:
+//
+//	GET /api/v1/projects/{project}/apps
+//	GET /api/v1/projects/{project}/apps/{app}
+//	GET /api/v1/projects/{project}/apps/{app}/environments
+//
+// New integrations should use the app endpoints. Existing callers of the
+// service endpoints continue to work without modification and will receive a
+// Deprecation response header as a migration signal.
+// See docs/migration-app-model.md for the full transition guide.
 package server
 
 import (
@@ -10,6 +30,7 @@ import (
 // --- Inventory DTOs ---
 
 // EnvironmentDTO describes a project environment.
+// Used by GET /api/v1/environments (legacy) and GET /api/v1/projects/{project}/apps/{app}/environments.
 type EnvironmentDTO struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName,omitempty"`
@@ -19,18 +40,27 @@ type EnvironmentDTO struct {
 }
 
 // EnvironmentsResponse is the JSON body for GET /api/v1/environments.
+//
+// Deprecated: This aggregate endpoint is legacy. Environment state is now
+// surfaced per-app via GET /api/v1/projects/{project}/apps/{app}/environments.
+// See docs/migration-app-model.md.
 type EnvironmentsResponse struct {
 	Environments []EnvironmentDTO `json:"environments"`
 }
 
-// ServiceRuntimeDTO is the merged desired+runtime view of a service.
+// ServiceRuntimeDTO is the merged desired+runtime view of a service in the
+// list endpoint.
+//
+// Deprecated: Use AppSummaryDTO (from GET /api/v1/projects/{project}/apps)
+// for the app-oriented equivalent. See docs/migration-app-model.md.
 type ServiceRuntimeDTO struct {
 	Name     string         `json:"name"`
 	Template templateRefDTO `json:"template"`
 	Runtime  RuntimeDTO     `json:"runtime"`
 }
 
-// RuntimeDTO is the runtime portion of a service response.
+// RuntimeDTO is the runtime portion of a legacy service response.
+// The app-oriented equivalent is AppStatusSummaryDTO.
 type RuntimeDTO struct {
 	Status       string   `json:"status"`
 	Image        string   `json:"image,omitempty"`
@@ -41,23 +71,35 @@ type RuntimeDTO struct {
 	LastDeployed string   `json:"lastDeployed,omitempty"`
 }
 
-// ProjectServicesResponse is the JSON body for GET .../services.
+// ProjectServicesResponse is the JSON body for the legacy
+// GET /api/v1/projects/{project}/services endpoint.
+//
+// Deprecated: Use AppListResponse (GET /api/v1/projects/{project}/apps).
+// See docs/migration-app-model.md.
 type ProjectServicesResponse struct {
 	Project  string              `json:"project"`
 	Services []ServiceRuntimeDTO `json:"services"`
 }
 
-// ServiceDetailResponse is the JSON body for GET .../services/{service}.
+// ServiceDetailResponse is the JSON body for the legacy
+// GET /api/v1/projects/{project}/services/{service} endpoint.
+//
+// Deprecated: Use AppDetailResponse (GET /api/v1/projects/{project}/apps/{app}).
+// See docs/migration-app-model.md.
 type ServiceDetailResponse struct {
-	Name         string              `json:"name"`
-	Project      string              `json:"project"`
-	Template     templateRefDTO      `json:"template"`
-	Values       map[string]any      `json:"values"`
-	SecretRefs   []secretRefRequest  `json:"secretRefs"`
-	Environments []ServiceEnvDTO     `json:"environments"`
+	Name         string             `json:"name"`
+	Project      string             `json:"project"`
+	Template     templateRefDTO     `json:"template"`
+	Values       map[string]any     `json:"values"`
+	SecretRefs   []secretRefRequest `json:"secretRefs"`
+	Environments []ServiceEnvDTO    `json:"environments"`
 }
 
-// ServiceEnvDTO is the per-environment runtime state.
+// ServiceEnvDTO is the per-environment runtime state in the legacy service
+// detail response.
+//
+// Deprecated: Use AppEnvironmentSummaryDTO (from the app environments endpoint).
+// See docs/migration-app-model.md.
 type ServiceEnvDTO struct {
 	Environment string     `json:"environment"`
 	Namespace   string     `json:"namespace"`
@@ -66,8 +108,13 @@ type ServiceEnvDTO struct {
 
 // --- Inventory handler ---
 
-// inventoryHandler serves runtime inventory endpoints. It reads desired
-// config from the project store and runtime state from the runtime provider.
+// inventoryHandler serves the legacy service inventory endpoints. It reads
+// desired config from the project store and runtime state from the runtime
+// provider.
+//
+// Deprecated: inventoryHandler backs the service-oriented inventory routes.
+// The app-oriented equivalents are handled by appHandler.
+// See docs/migration-app-model.md.
 type inventoryHandler struct {
 	projectStore    project.Store
 	runtimeProvider runtime.Provider // may be nil
@@ -78,6 +125,10 @@ func newInventoryHandler(store project.Store, rp runtime.Provider) *inventoryHan
 }
 
 // handleListEnvironments returns all environments across all projects.
+//
+// Deprecated: Registered at the legacy GET /api/v1/environments route.
+// Environment state is now surfaced per-app via the app environments endpoint.
+// See docs/migration-app-model.md.
 func (ih *inventoryHandler) handleListEnvironments(w http.ResponseWriter, r *http.Request) {
 	projects, err := ih.projectStore.List(r.Context())
 	if err != nil {
@@ -105,6 +156,11 @@ func (ih *inventoryHandler) handleListEnvironments(w http.ResponseWriter, r *htt
 }
 
 // handleListServices returns the services for a project with runtime state.
+//
+// Deprecated: Registered at the legacy
+// GET /api/v1/projects/{project}/services route. Use
+// GET /api/v1/projects/{project}/apps for new integrations.
+// See docs/migration-app-model.md.
 func (ih *inventoryHandler) handleListServices(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 
@@ -136,6 +192,11 @@ func (ih *inventoryHandler) handleListServices(w http.ResponseWriter, r *http.Re
 }
 
 // handleGetService returns detailed config and per-environment runtime state.
+//
+// Deprecated: Registered at the legacy
+// GET /api/v1/projects/{project}/services/{service} route. Use
+// GET /api/v1/projects/{project}/apps/{app} for new integrations.
+// See docs/migration-app-model.md.
 func (ih *inventoryHandler) handleGetService(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	serviceName := r.PathValue("service")

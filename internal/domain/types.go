@@ -44,6 +44,11 @@ type Environment struct {
 }
 
 // Service is a deployable workload belonging to a project.
+//
+// Deprecated: Service is a legacy compatibility type retained for the
+// service-centric code paths that existed before the app model was introduced.
+// New code should use App and AppEnvironment instead.
+// See docs/migration-app-model.md for the transition guide.
 type Service struct {
 	Name         string `json:"name"`
 	ProjectName  string `json:"projectName"`
@@ -54,6 +59,10 @@ type Service struct {
 
 // ServiceStatus describes the live runtime state of a service in one
 // environment. Status is one of the Status* constants below.
+//
+// Deprecated: ServiceStatus is a legacy compatibility type. New code should
+// use AppRuntimeStatus (via AppEnvironment) instead.
+// See docs/migration-app-model.md for the transition guide.
 type ServiceStatus struct {
 	Status       string   `json:"status"`
 	Environment  string   `json:"environment"`
@@ -74,7 +83,7 @@ const (
 	StatusUnknown     = "unknown"
 )
 
-// Template describes a golden path for deploying a service.
+// Template describes a golden path for deploying an app.
 // The full template schema (inputs, presets, engine config) lives in
 // internal/tpl; Template here is the lightweight summary used by list
 // and status views.
@@ -86,11 +95,19 @@ type Template struct {
 	Category    string `json:"category,omitempty"`
 }
 
-// Preview is an ephemeral, branch-scoped deployment of a service.
+// Preview is an ephemeral, branch-scoped deployment of an app.
 // The namespace convention is {project}-preview-{name}.
+//
+// Deprecated: Preview is a legacy compatibility type. It is used by the
+// service-oriented preview endpoints and the internal/compat bridge. New code
+// should model previews as AppEnvironment values with EnvType=AppEnvPreview.
+// See docs/migration-app-model.md for the transition guide.
 type Preview struct {
 	Name        string    `json:"name"`
 	ProjectName string    `json:"projectName"`
+	// ServiceName identifies the service (i.e. app) that owns this preview.
+	// Deprecated: ServiceName will be renamed AppName once the service→app
+	// migration is complete. For now, treat ServiceName == AppName.
 	ServiceName string    `json:"serviceName"`
 	Namespace   string    `json:"namespace"`
 	Status      string    `json:"status"`

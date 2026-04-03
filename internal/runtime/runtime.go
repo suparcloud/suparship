@@ -18,7 +18,8 @@ const (
 	StatusUnknown     = "unknown"
 )
 
-// RuntimeInfo describes the live state of a single service.
+// RuntimeInfo describes the live state of a single workload (service or app
+// component) in a given namespace.
 type RuntimeInfo struct {
 	Status       string   `json:"status"`
 	Image        string   `json:"image,omitempty"`
@@ -30,6 +31,18 @@ type RuntimeInfo struct {
 }
 
 // Provider reads runtime state from the cluster.
+//
+// GetServiceRuntime is named for the legacy service model. It is reused by
+// the app-oriented preview and inventory code paths because the cluster query
+// is identical — a Deployment named after the workload in a given namespace.
+// The method signature is stable; "service" in the parameter name should be
+// read as "workload name" during the migration period.
+//
+// Deprecated (GetServiceRuntime): once app-native runtime queries are
+// implemented, this interface method will be superseded by one that uses
+// app/component coordinates. Callers outside internal/server/inventory.go
+// and internal/server/previews.go should prefer the app-scoped APIs.
+// See docs/migration-app-model.md for the transition guide.
 type Provider interface {
 	GetServiceRuntime(ctx context.Context, namespace, serviceName string) (*RuntimeInfo, error)
 }

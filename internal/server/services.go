@@ -1,3 +1,16 @@
+// Package server — this file contains the legacy service-oriented create
+// endpoint (POST /api/v1/projects/{project}/services).
+//
+// # Deprecation notice
+//
+// All types and handlers in this file are retained for backwards compatibility
+// only. The primary app creation endpoint is now:
+//
+//	POST /api/v1/projects/{project}/apps
+//
+// New integrations should use the app-oriented endpoint. Existing callers of
+// the service endpoint continue to work without modification.
+// See docs/migration-app-model.md for the full transition guide.
 package server
 
 import (
@@ -10,6 +23,11 @@ import (
 
 // --- Request / Response DTOs ---
 
+// createServiceRequest is the JSON body for the legacy
+// POST /api/v1/projects/{project}/services endpoint.
+//
+// Deprecated: Use createAppRequest (POST /api/v1/projects/{project}/apps)
+// for new integrations. See docs/migration-app-model.md.
 type createServiceRequest struct {
 	Name       string             `json:"name"`
 	Template   string             `json:"template"`
@@ -17,16 +35,27 @@ type createServiceRequest struct {
 	SecretRefs []secretRefRequest `json:"secretRefs"`
 }
 
+// secretRefRequest is shared between the legacy service API and the app API.
+// It is not itself deprecated, only its presence in service-oriented DTOs is.
 type secretRefRequest struct {
 	Name      string `json:"name"`
 	SecretRef string `json:"secretRef"`
 }
 
+// createServiceResponse is returned by the legacy
+// POST /api/v1/projects/{project}/services endpoint.
+//
+// Deprecated: See createAppResponse for the app-oriented equivalent.
+// See docs/migration-app-model.md.
 type createServiceResponse struct {
 	Service    serviceResponseDTO `json:"service"`
 	HelmValues map[string]any     `json:"helmValues"`
 }
 
+// serviceResponseDTO is the service representation in legacy create responses.
+//
+// Deprecated: See AppDetailDTO for the app-oriented equivalent.
+// See docs/migration-app-model.md.
 type serviceResponseDTO struct {
 	Name       string             `json:"name"`
 	Template   templateRefDTO     `json:"template"`
@@ -34,6 +63,8 @@ type serviceResponseDTO struct {
 	SecretRefs []secretRefRequest `json:"secretRefs"`
 }
 
+// templateRefDTO is a lightweight template reference used by both the legacy
+// service API and the inventory handler. It is not itself deprecated.
 type templateRefDTO struct {
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`
@@ -43,11 +74,19 @@ type templateRefDTO struct {
 
 // serviceHandler handles service creation within projects. It is wired into
 // the rbacHandler's route registration so that RBAC middleware is applied.
+//
+// Deprecated: serviceHandler backs the legacy
+// POST /api/v1/projects/{project}/services endpoint. New app creation is
+// handled by appHandler.handleCreateApp.
+// See docs/migration-app-model.md.
 type serviceHandler struct {
 	projectStore project.Store
 	templateIdx  map[string]*tpl.Template
 }
 
+// newServiceHandler constructs the legacy service creation handler.
+//
+// Deprecated: See newServiceHandler's type comment.
 func newServiceHandler(store project.Store, templates []*tpl.Template) *serviceHandler {
 	idx := make(map[string]*tpl.Template, len(templates))
 	for _, t := range templates {
@@ -56,6 +95,13 @@ func newServiceHandler(store project.Store, templates []*tpl.Template) *serviceH
 	return &serviceHandler{projectStore: store, templateIdx: idx}
 }
 
+// handleCreateService handles POST /api/v1/projects/{project}/services.
+//
+// Deprecated: This endpoint is superseded by
+// POST /api/v1/projects/{project}/apps.
+// It remains registered for backwards compatibility and emits a
+// Deprecation response header so API clients can detect the migration signal.
+// See docs/migration-app-model.md.
 func (sh *serviceHandler) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 

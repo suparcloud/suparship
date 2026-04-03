@@ -1,3 +1,18 @@
+// Package server — this file contains the legacy service-oriented promotion
+// endpoint:
+//
+//	POST /api/v1/projects/{project}/services/{service}/promote
+//
+// # Deprecation notice
+//
+// This handler is retained for backwards compatibility. The primary
+// app-oriented promotion endpoint is:
+//
+//	POST /api/v1/projects/{project}/apps/{app}/promote
+//
+// New integrations should use the app endpoint. Existing callers continue to
+// work without modification and will receive a Deprecation response header.
+// See docs/migration-app-model.md for the full transition guide.
 package server
 
 import (
@@ -10,14 +25,21 @@ import (
 
 // --- Promotion DTOs ---
 
-// PromoteRequest is the JSON body for POST .../promote.
+// PromoteRequest is the JSON body for POST .../promote (both legacy service
+// and new app promotion endpoints share this shape).
 type PromoteRequest struct {
 	TargetEnvironment string `json:"targetEnvironment"`
 }
 
-// PromoteResponse is the JSON body returned on successful promotion.
+// PromoteResponse is the JSON body returned by the legacy service promotion
+// endpoint on success.
+//
+// Deprecated: Use AppPromoteResponse (POST /api/v1/projects/{project}/apps/{app}/promote)
+// for the app-oriented equivalent. See docs/migration-app-model.md.
 type PromoteResponse struct {
 	Project     string `json:"project"`
+	// Service is the name of the service being promoted. Deprecated field name;
+	// the app-oriented response uses "app" instead.
 	Service     string `json:"service"`
 	Source      string `json:"source"`
 	Destination string `json:"destination"`
@@ -30,6 +52,11 @@ type PromoteResponse struct {
 // promoteHandler handles service promotion between environments.
 // For MVP, it validates the request and returns a structured result.
 // When Kargo is available, this will trigger a Kargo promotion.
+//
+// Deprecated: promoteHandler backs the legacy
+// POST /api/v1/projects/{project}/services/{service}/promote endpoint. App
+// promotion is handled by appHandler.handlePromoteApp.
+// See docs/migration-app-model.md.
 type promoteHandler struct {
 	projectStore project.Store
 }
@@ -38,6 +65,10 @@ func newPromoteHandler(store project.Store) *promoteHandler {
 	return &promoteHandler{projectStore: store}
 }
 
+// handlePromote handles POST /api/v1/projects/{project}/services/{service}/promote.
+//
+// Deprecated: Use POST /api/v1/projects/{project}/apps/{app}/promote instead.
+// See docs/migration-app-model.md.
 func (ph *promoteHandler) handlePromote(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	serviceName := r.PathValue("service")

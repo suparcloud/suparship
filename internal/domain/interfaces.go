@@ -19,6 +19,12 @@ type ProjectStore interface {
 // Services are nested under projects; all operations are scoped by project
 // name. The K8s implementation co-locates services inside the project's
 // ConfigMap. The fake implementation keeps services in memory.
+//
+// Deprecated: ServiceStore is a legacy interface retained for the
+// service-centric compatibility layer (internal/compat). New features should
+// use AppStore instead. ServiceStore will be removed once all service data has
+// been migrated to the app model.
+// See docs/migration-app-model.md for the transition guide.
 type ServiceStore interface {
 	ListServices(ctx context.Context, projectName string) ([]*Service, error)
 	GetService(ctx context.Context, projectName, serviceName string) (*Service, error)
@@ -84,6 +90,12 @@ type AppStore interface {
 // The K8s implementation queries Deployments and Ingresses in the
 // {project}-{environment} namespace. The fake implementation returns a
 // static ServiceStatus so the UI can be developed without a cluster.
+//
+// Deprecated: RuntimeStatusReader uses service-centric terminology. It is
+// consumed by the legacy HTTP endpoints under /api/v1/projects/{project}/services/.
+// New code should read runtime state through AppStore or a future
+// AppRuntimeReader that speaks app/environment coordinates.
+// See docs/migration-app-model.md for the transition guide.
 type RuntimeStatusReader interface {
 	GetServiceStatus(ctx context.Context, projectName, serviceName, environment string) (*ServiceStatus, error)
 }
@@ -93,6 +105,12 @@ type RuntimeStatusReader interface {
 // The K8s implementation proxies pod log streams via client-go. The fake
 // implementation returns a small set of static log lines for UI development
 // and testing.
+//
+// Deprecated: LogReader uses service-centric terminology and is consumed by the
+// legacy /api/v1/projects/{project}/services/{service}/logs endpoint. New code
+// should use the app-scoped logs endpoint
+// (GET /api/v1/projects/{project}/apps/{app}/logs) and its backing provider.
+// See docs/migration-app-model.md for the transition guide.
 type LogReader interface {
 	GetLogs(ctx context.Context, projectName, serviceName, environment string, tailLines int) ([]LogLine, error)
 }

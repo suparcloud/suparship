@@ -1,3 +1,18 @@
+// Package server — this file contains the legacy service-oriented logs
+// endpoint:
+//
+//	GET /api/v1/projects/{project}/services/{service}/logs
+//
+// # Deprecation notice
+//
+// This handler is retained for backwards compatibility. The primary
+// app-oriented logs endpoint is:
+//
+//	GET /api/v1/projects/{project}/apps/{app}/logs
+//
+// New integrations should use the app endpoint. Existing callers continue to
+// work without modification and will receive a Deprecation response header.
+// See docs/migration-app-model.md for the full transition guide.
 package server
 
 import (
@@ -10,9 +25,14 @@ import (
 
 // --- Logs DTOs ---
 
-// LogsResponse is the JSON body returned by the logs endpoint.
+// LogsResponse is the JSON body returned by the legacy service logs endpoint.
+//
+// Deprecated: Use AppLogsResponse (GET /api/v1/projects/{project}/apps/{app}/logs)
+// for the app-oriented equivalent. See docs/migration-app-model.md.
 type LogsResponse struct {
 	Project   string `json:"project"`
+	// Service is the name of the service whose logs are returned. Deprecated
+	// field name; the app-oriented response uses "app" instead.
 	Service   string `json:"service"`
 	Pod       string `json:"pod"`
 	Container string `json:"container"`
@@ -21,7 +41,12 @@ type LogsResponse struct {
 
 // --- Handler ---
 
-// logsHandler serves container log output for a service.
+// logsHandler serves container log output for a service (legacy endpoint).
+//
+// Deprecated: logsHandler backs the legacy
+// GET /api/v1/projects/{project}/services/{service}/logs endpoint. App logs
+// are handled by appHandler (app_logs.go).
+// See docs/migration-app-model.md.
 type logsHandler struct {
 	projectStore project.Store
 	logsProvider runtime.LogsProvider
@@ -104,6 +129,10 @@ func (lh *logsHandler) parseLogsQuery(w http.ResponseWriter, r *http.Request) (
 	return projectName, serviceName, req, true
 }
 
+// handleGetLogs handles GET /api/v1/projects/{project}/services/{service}/logs.
+//
+// Deprecated: Use GET /api/v1/projects/{project}/apps/{app}/logs instead.
+// See docs/migration-app-model.md.
 func (lh *logsHandler) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	projectName, serviceName, req, ok := lh.parseLogsQuery(w, r)
 	if !ok {
