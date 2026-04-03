@@ -57,7 +57,13 @@ type AppStore interface {
 	ListApps(ctx context.Context, projectName string) ([]*App, error)
 	GetApp(ctx context.Context, projectName, appName string) (*App, error)
 	ListAppEnvironments(ctx context.Context, projectName, appName string) ([]*AppEnvironment, error)
+	// GetAppEnvironment resolves an environment by its name. For the well-known
+	// environments (staging, prod) the name equals the environment type string.
+	// Preview environments are resolved by their specific name (e.g. "pr-42").
 	GetAppEnvironment(ctx context.Context, projectName, appName, envName string) (*AppEnvironment, error)
+	// ListAppPreviews returns all preview AppEnvironments, optionally filtered
+	// by project and/or app. Pass an empty string to skip that filter.
+	ListAppPreviews(ctx context.Context, projectName, appName string) ([]*AppEnvironment, error)
 }
 
 // RuntimeStatusReader reads the live cluster state of a service.

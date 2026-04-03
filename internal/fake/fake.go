@@ -302,6 +302,41 @@ func (r *DevRuntime) GetAppEnvironment(_ context.Context, projectName, appName, 
 	return env, nil
 }
 
+// ListAppPreviews returns all AppEnvironments with EnvType == preview, filtered
+// by projectName and/or appName when those arguments are non-empty.
+// An empty projectName or appName acts as a wildcard and matches every value.
+// Results are sorted by (projectName, appName, envName) for determinism.
+func (r *DevRuntime) ListAppPreviews(_ context.Context, projectName, appName string) ([]*domain.AppEnvironment, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*domain.AppEnvironment
+	for proj, appMap := range r.appEnvs {
+		if projectName != "" && proj != projectName {
+			continue
+		}
+		for app, envMap := range appMap {
+			if appName != "" && app != appName {
+				continue
+			}
+			for _, env := range envMap {
+				if env.EnvType == domain.AppEnvPreview {
+					out = append(out, env)
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ProjectName != out[j].ProjectName {
+			return out[i].ProjectName < out[j].ProjectName
+		}
+		if out[i].AppName != out[j].AppName {
+			return out[i].AppName < out[j].AppName
+		}
+		return out[i].EnvName < out[j].EnvName
+	})
+	return out, nil
+}
+
 // ── RuntimeStatusReader ──────────────────────────────────────────────────────
 
 // GetServiceStatus returns a pre-seeded ServiceStatus for known

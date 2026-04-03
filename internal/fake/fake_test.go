@@ -338,6 +338,120 @@ func TestAppSeedIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestListAppPreviewsAll(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "", "")
+	if err != nil {
+		t.Fatalf("ListAppPreviews: %v", err)
+	}
+	if len(previews) == 0 {
+		t.Fatal("expected at least one seeded preview environment")
+	}
+	for _, p := range previews {
+		if p.EnvType != domain.AppEnvPreview {
+			t.Errorf("expected EnvType %q, got %q", domain.AppEnvPreview, p.EnvType)
+		}
+	}
+}
+
+func TestListAppPreviewsByProject(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "demo", "")
+	if err != nil {
+		t.Fatalf("ListAppPreviews(demo, ''): %v", err)
+	}
+	for _, p := range previews {
+		if p.ProjectName != "demo" {
+			t.Errorf("expected ProjectName %q, got %q", "demo", p.ProjectName)
+		}
+		if p.EnvType != domain.AppEnvPreview {
+			t.Errorf("expected EnvType %q, got %q", domain.AppEnvPreview, p.EnvType)
+		}
+	}
+}
+
+func TestListAppPreviewsByApp(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "demo", "hello")
+	if err != nil {
+		t.Fatalf("ListAppPreviews(demo, hello): %v", err)
+	}
+	if len(previews) == 0 {
+		t.Fatal("expected at least one seeded preview for hello")
+	}
+	for _, p := range previews {
+		if p.AppName != "hello" {
+			t.Errorf("expected AppName %q, got %q", "hello", p.AppName)
+		}
+		if p.EnvType != domain.AppEnvPreview {
+			t.Errorf("expected EnvType %q, got %q", domain.AppEnvPreview, p.EnvType)
+		}
+	}
+}
+
+func TestListAppPreviewsNoMatchProject(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "nonexistent", "")
+	if err != nil {
+		t.Fatalf("ListAppPreviews should not error for unknown project: %v", err)
+	}
+	if len(previews) != 0 {
+		t.Errorf("expected empty slice for unknown project, got %d", len(previews))
+	}
+}
+
+func TestListAppPreviewsNoMatchApp(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	previews, err := r.ListAppPreviews(ctx, "demo", "ghost")
+	if err != nil {
+		t.Fatalf("ListAppPreviews should not error for unknown app: %v", err)
+	}
+	if len(previews) != 0 {
+		t.Errorf("expected empty slice for unknown app, got %d", len(previews))
+	}
+}
+
+func TestListAppPreviewsIsDeterministic(t *testing.T) {
+	r1 := fake.NewSeededDevRuntime()
+	r2 := fake.NewSeededDevRuntime()
+
+	p1, err1 := r1.ListAppPreviews(ctx, "", "")
+	p2, err2 := r2.ListAppPreviews(ctx, "", "")
+	if err1 != nil || err2 != nil {
+		t.Fatalf("ListAppPreviews errors: %v / %v", err1, err2)
+	}
+	if len(p1) != len(p2) {
+		t.Fatalf("preview counts differ: %d vs %d", len(p1), len(p2))
+	}
+	for i := range p1 {
+		if p1[i].EnvName != p2[i].EnvName || p1[i].Namespace != p2[i].Namespace {
+			t.Errorf("preview[%d] differs: %+v vs %+v", i, p1[i], p2[i])
+		}
+	}
+}
+
+func TestListAppPreviewsOnlyPreviewType(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	all, _ := r.ListAppEnvironments(ctx, "demo", "hello")
+	var nonPreviews int
+	for _, e := range all {
+		if e.EnvType != domain.AppEnvPreview {
+			nonPreviews++
+		}
+	}
+	if nonPreviews == 0 {
+		t.Fatal("seed data must contain non-preview environments to make this test meaningful")
+	}
+
+	previews, err := r.ListAppPreviews(ctx, "demo", "hello")
+	if err != nil {
+		t.Fatalf("ListAppPreviews: %v", err)
+	}
+	if len(previews) >= len(all) {
+		t.Errorf("ListAppPreviews should return fewer entries than ListAppEnvironments (%d vs %d)", len(previews), len(all))
+	}
+}
+
 // ── TemplateStore ─────────────────────────────────────────────────────────────
 
 func TestListTemplatesSeeded(t *testing.T) {
