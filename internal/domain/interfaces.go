@@ -73,6 +73,10 @@ type AppStore interface {
 	// caller is responsible for populating all fields; the implementation
 	// stores the record verbatim and sets env.ProjectName = projectName.
 	SaveAppEnvironment(ctx context.Context, projectName string, env *AppEnvironment) error
+	// DeleteAppEnvironment removes an environment instance (typically a
+	// preview) for the given app. Returns an error if the environment does
+	// not exist.
+	DeleteAppEnvironment(ctx context.Context, projectName, appName, envName string) error
 }
 
 // RuntimeStatusReader reads the live cluster state of a service.

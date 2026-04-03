@@ -275,6 +275,123 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 	})
 }
 
+// handleListAppPreviews handles GET /api/v1/projects/{project}/apps/{app}/previews.
+// Verifies the app exists before listing; returns 404 otherwise.
+func (ah *appHandler) handleListAppPreviews(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	previews, err := ah.appStore.ListAppPreviews(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list previews"})
+		return
+	}
+
+	dtos := make([]AppPreviewSummaryDTO, 0, len(previews))
+	for _, env := range previews {
+		dtos = append(dtos, appPreviewToDTO(env))
+	}
+
+	writeJSON(w, http.StatusOK, AppPreviewsResponse{
+		Project:  projectName,
+		AppName:  appName,
+		Previews: dtos,
+	})
+}
+
+// handleCreateAppPreview handles POST /api/v1/projects/{project}/apps/{app}/previews.
+//
+// The raw preview name from the request body is sanitized via
+// domain.SanitizePreviewName (deterministic, branch-name-friendly) before
+// validation and storage. Only apps with at least one preview-enabled component
+// may create previews; the handler returns 422 otherwise.
+func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	var req CreateAppPreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "preview name is required"})
+		return
+	}
+
+	sanitized := domain.SanitizePreviewName(req.Name)
+	if err := domain.ValidatePreviewName(sanitized); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid preview name: " + err.Error()})
+		return
+	}
+
+	a, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	env, err := domainapp.NewPreviewEnvironment(a, sanitized)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
+	// Reject duplicate preview names within the same app.
+	if _, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, sanitized); err == nil {
+		writeJSON(w, http.StatusConflict, errorResponse{
+			Error: "preview \"" + sanitized + "\" already exists for app \"" + appName + "\"",
+		})
+		return
+	}
+
+	if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save preview"})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, appPreviewToDTO(env))
+}
+
+// handleDeleteAppPreview handles DELETE /api/v1/projects/{project}/apps/{app}/previews/{name}.
+// Returns 404 when the preview does not exist and 400 if the named environment
+// is not a preview (guards against accidental deletion of stable environments).
+func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	previewName := r.PathValue("name")
+
+	env, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, previewName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "preview \"" + previewName + "\" not found for app \"" + appName + "\"",
+		})
+		return
+	}
+	if env.EnvType != domain.AppEnvPreview {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "environment \"" + previewName + "\" is not a preview environment",
+		})
+		return
+	}
+
+	if err := ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, previewName); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete preview"})
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- DTO mapping helpers ---
 
 func appToSummaryDTO(app *domain.App, envs []*domain.AppEnvironment) AppSummaryDTO {
@@ -394,4 +511,27 @@ func componentDTOs(components []domain.Component) []ComponentSummaryDTO {
 		})
 	}
 	return dtos
+}
+
+func appPreviewToDTO(env *domain.AppEnvironment) AppPreviewSummaryDTO {
+	urls := env.URLs
+	if urls == nil {
+		urls = []string{}
+	}
+	dto := AppPreviewSummaryDTO{
+		Name:      env.EnvName,
+		AppName:   env.AppName,
+		Project:   env.ProjectName,
+		Namespace: env.Namespace,
+		Status:    appRuntimeStatusDTO(env.Status),
+		URLs:      urls,
+	}
+	if env.Release != nil {
+		dto.Release = &AppReleaseRefDTO{
+			Image:  env.Release.Image,
+			Tag:    env.Release.Tag,
+			Commit: env.Release.Commit,
+		}
+	}
+	return dto
 }

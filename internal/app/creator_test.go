@@ -239,3 +239,140 @@ func TestBuildNilValuesNormalisedToEmptyMap(t *testing.T) {
 		t.Error("expected non-nil values map after normalisation")
 	}
 }
+
+// --- PreviewEnabledComponents ---
+
+func TestPreviewEnabledComponentsFiltersCorrectly(t *testing.T) {
+	components := []domain.Component{
+		{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
+		{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+		{Name: "cron", Type: domain.ComponentCron, EnabledInPreview: false},
+	}
+	got := PreviewEnabledComponents(components)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 preview-enabled component, got %d", len(got))
+	}
+	if got[0].Name != "web" {
+		t.Errorf("expected component %q, got %q", "web", got[0].Name)
+	}
+}
+
+func TestPreviewEnabledComponentsAllEnabled(t *testing.T) {
+	components := []domain.Component{
+		{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
+		{Name: "api", Type: domain.ComponentWeb, EnabledInPreview: true},
+	}
+	got := PreviewEnabledComponents(components)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 preview-enabled components, got %d", len(got))
+	}
+}
+
+func TestPreviewEnabledComponentsNoneEnabled(t *testing.T) {
+	components := []domain.Component{
+		{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+	}
+	got := PreviewEnabledComponents(components)
+	if len(got) != 0 {
+		t.Fatalf("expected 0 preview-enabled components, got %d", len(got))
+	}
+}
+
+func TestPreviewEnabledComponentsEmptyList(t *testing.T) {
+	got := PreviewEnabledComponents(nil)
+	if len(got) != 0 {
+		t.Fatalf("expected 0 components for nil input, got %d", len(got))
+	}
+}
+
+// --- NewPreviewEnvironment ---
+
+func TestNewPreviewEnvironmentSuccess(t *testing.T) {
+	a := &domain.App{
+		Name:        "my-app",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Components: []domain.Component{
+				{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
+				{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+			},
+		},
+	}
+
+	env, err := NewPreviewEnvironment(a, "pr-42")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if env.AppName != "my-app" {
+		t.Errorf("AppName = %q, want %q", env.AppName, "my-app")
+	}
+	if env.ProjectName != "demo" {
+		t.Errorf("ProjectName = %q, want %q", env.ProjectName, "demo")
+	}
+	if env.EnvName != "pr-42" {
+		t.Errorf("EnvName = %q, want %q", env.EnvName, "pr-42")
+	}
+	if env.EnvType != domain.AppEnvPreview {
+		t.Errorf("EnvType = %q, want %q", env.EnvType, domain.AppEnvPreview)
+	}
+	if env.Namespace != "my-app-preview-pr-42" {
+		t.Errorf("Namespace = %q, want %q", env.Namespace, "my-app-preview-pr-42")
+	}
+	if env.Status.Phase != domain.StatusNotDeployed {
+		t.Errorf("Status.Phase = %q, want %q", env.Status.Phase, domain.StatusNotDeployed)
+	}
+	if env.URLs == nil {
+		t.Error("URLs should be non-nil (empty slice)")
+	}
+}
+
+func TestNewPreviewEnvironmentNoPreviewComponents(t *testing.T) {
+	a := &domain.App{
+		Name:        "worker-app",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Components: []domain.Component{
+				{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+			},
+		},
+	}
+
+	_, err := NewPreviewEnvironment(a, "pr-42")
+	if err == nil {
+		t.Fatal("expected error when no preview-enabled components")
+	}
+}
+
+func TestNewPreviewEnvironmentNamespaceConvention(t *testing.T) {
+	tests := []struct {
+		appName     string
+		previewName string
+		wantNS      string
+	}{
+		{"hello", "pr-42", "hello-preview-pr-42"},
+		{"my-api", "feature-branch", "my-api-preview-feature-branch"},
+		{"svc", "pr-182", "svc-preview-pr-182"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.appName+"/"+tt.previewName, func(t *testing.T) {
+			a := &domain.App{
+				Name:        tt.appName,
+				ProjectName: "demo",
+				Spec: domain.AppSpec{
+					Components: []domain.Component{
+						{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
+					},
+				},
+			}
+			env, err := NewPreviewEnvironment(a, tt.previewName)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if env.Namespace != tt.wantNS {
+				t.Errorf("Namespace = %q, want %q", env.Namespace, tt.wantNS)
+			}
+		})
+	}
+}

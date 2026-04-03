@@ -7,6 +7,8 @@
 package app
 
 import (
+	"fmt"
+
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -62,6 +64,37 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 		},
 	}
+}
+
+// PreviewEnabledComponents returns the subset of components from the given
+// list that should be deployed in preview environments (EnabledInPreview == true).
+func PreviewEnabledComponents(components []domain.Component) []domain.Component {
+	out := make([]domain.Component, 0, len(components))
+	for _, c := range components {
+		if c.EnabledInPreview {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// NewPreviewEnvironment builds a preview AppEnvironment for the given app and
+// sanitized preview name. It uses domain.AppPreviewNamespace for the namespace
+// convention. Returns an error when the app has no preview-enabled components,
+// since deploying a preview with zero active components is meaningless.
+func NewPreviewEnvironment(a *domain.App, previewName string) (*domain.AppEnvironment, error) {
+	if len(PreviewEnabledComponents(a.Spec.Components)) == 0 {
+		return nil, fmt.Errorf("app %q has no preview-enabled components", a.Name)
+	}
+	return &domain.AppEnvironment{
+		AppName:     a.Name,
+		ProjectName: a.ProjectName,
+		EnvName:     previewName,
+		EnvType:     domain.AppEnvPreview,
+		Namespace:   domain.AppPreviewNamespace(a.Name, previewName),
+		URLs:        []string{},
+		Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
+	}, nil
 }
 
 // Build constructs a new App and its default staging+prod AppEnvironment

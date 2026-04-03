@@ -132,6 +132,12 @@ func (s *ServiceBackedAppStore) SaveAppEnvironment(ctx context.Context, projectN
 	return s.primary.SaveAppEnvironment(ctx, projectName, env)
 }
 
+// DeleteAppEnvironment delegates to the primary AppStore. No legacy fallback
+// is provided: deletion is not meaningful on the service-oriented store.
+func (s *ServiceBackedAppStore) DeleteAppEnvironment(ctx context.Context, projectName, appName, envName string) error {
+	return s.primary.DeleteAppEnvironment(ctx, projectName, appName, envName)
+}
+
 // ── fallback helpers ──────────────────────────────────────────────────────────
 
 func (s *ServiceBackedAppStore) listAppsFromServices(ctx context.Context, projectName string) ([]*domain.App, error) {
