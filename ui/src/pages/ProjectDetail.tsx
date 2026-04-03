@@ -155,9 +155,8 @@ export function ProjectDetail() {
               )}
             </p>
           </div>
-          {/* Route preserved for backward compat with the service creation flow */}
           <Link
-            to={`/projects/${project}/services/new`}
+            to={`/projects/${project}/apps/new`}
             className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
           >
             New app
@@ -305,7 +304,7 @@ function EmptyApps({ project }: { project: string }) {
         Deploy your first app to get started.
       </p>
       <Link
-        to={`/projects/${project}/services/new`}
+        to={`/projects/${project}/apps/new`}
         className="mt-4 inline-block rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
       >
         Create app

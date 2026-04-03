@@ -2,7 +2,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { ApiError } from "../lib/api";
-import { createService } from "../lib/services";
+import { createApp } from "../lib/apps";
 import { fetchTemplate, fetchTemplates } from "../lib/templates";
 import type {
   TemplateSummary,
@@ -72,7 +72,7 @@ export function NewService() {
     <div className="mx-auto max-w-3xl space-y-6">
       {/* Breadcrumb */}
       <Link
-        to={`/projects/${project}/services/overview`}
+        to={`/projects/${project}`}
         className="inline-flex items-center gap-1 text-sm text-gray-500 transition-colors hover:text-gray-700"
       >
         &larr; Back to {project}
@@ -81,10 +81,10 @@ export function NewService() {
       {/* Header */}
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">
-          Deploy a new service
+          Create a new app
         </h1>
         <p className="mt-1 text-sm text-gray-500">
-          Choose a template and configure your service for{" "}
+          Choose a template and configure your app for{" "}
           <span className="font-medium text-gray-700">{project}</span>.
         </p>
       </div>
@@ -127,7 +127,7 @@ export function NewService() {
 function StepIndicator({ current }: { current: Step }) {
   const steps = [
     { key: "template", label: "Choose template" },
-    { key: "configure", label: "Configure service" },
+    { key: "configure", label: "Configure app" },
   ] as const;
 
   return (
@@ -255,7 +255,7 @@ function TemplateStep({
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: Configure service
+// Step 2: Configure app
 // ---------------------------------------------------------------------------
 
 function ConfigureStep({
@@ -269,7 +269,7 @@ function ConfigureStep({
   onBack: () => void;
   navigate: ReturnType<typeof useNavigate>;
 }) {
-  const [serviceName, setServiceName] = useState("");
+  const [appName, setAppName] = useState("");
   const [values, setValues] = useState<Record<string, unknown>>(() =>
     buildDefaults(template),
   );
@@ -311,9 +311,9 @@ function ConfigureStep({
   function validate(): boolean {
     const errors: Record<string, string> = {};
 
-    if (!serviceName.trim()) {
-      errors._name = "Service name is required.";
-    } else if (!/^[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(serviceName)) {
+    if (!appName.trim()) {
+      errors._name = "App name is required.";
+    } else if (!/^[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(appName)) {
       errors._name =
         "Must be lowercase letters, numbers, and hyphens (2-63 chars).";
     }
@@ -342,13 +342,13 @@ function ConfigureStep({
     }
 
     try {
-      await createService(project, {
-        name: serviceName,
+      await createApp(project, {
+        name: appName,
         template: template.name,
         values,
         secretRefs: secretRefList,
       });
-      navigate(`/projects/${project}/services/${serviceName}`);
+      navigate(`/projects/${project}/apps/${appName}`);
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.message);
@@ -384,24 +384,34 @@ function ConfigureStep({
         </button>
       </div>
 
-      {/* Service name */}
+      {/* Component info note */}
+      <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+        <p className="text-xs text-blue-700">
+          Most apps start with one runtime component. Some templates include
+          multiple components such as <span className="font-medium">web</span>{" "}
+          and <span className="font-medium">worker</span>. Components are
+          configured automatically from the template — no manual setup needed.
+        </p>
+      </div>
+
+      {/* App name */}
       <div>
         <label
-          htmlFor="service-name"
+          htmlFor="app-name"
           className="block text-sm font-medium text-gray-700"
         >
-          Service name
+          App name
         </label>
         <p className="mt-0.5 text-xs text-gray-400">
-          A unique name for this service within the project. Used in Kubernetes resource names.
+          A unique name for this app within the project. Used in Kubernetes resource names.
         </p>
         <input
-          id="service-name"
+          id="app-name"
           type="text"
           placeholder="e.g. api, web, worker"
-          value={serviceName}
+          value={appName}
           onChange={(e) => {
-            setServiceName(e.target.value);
+            setAppName(e.target.value);
             setFieldErrors((prev) => {
               const next = { ...prev };
               delete next._name;
@@ -546,7 +556,7 @@ function ConfigureStep({
           disabled={submitting}
           className="rounded-md bg-gray-900 px-6 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {submitting ? "Creating…" : "Create service"}
+          {submitting ? "Creating…" : "Create app"}
         </button>
       </div>
     </form>

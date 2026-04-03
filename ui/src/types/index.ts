@@ -333,3 +333,18 @@ export interface CreateServiceResponse {
   };
   helmValues: Record<string, unknown>;
 }
+
+// --- App creation types ---
+
+export interface CreateAppRequest {
+  name: string;
+  displayName?: string;
+  description?: string;
+  template: string;
+  values: Record<string, unknown>;
+  secretRefs: SecretRefInput[];
+}
+
+export interface CreateAppResponse {
+  app: AppDetail;
+}

@@ -36,6 +36,12 @@ export function App() {
                 path="/projects/:project/apps/:app"
                 element={<AppDetail />}
               />
+              {/* Primary app creation route */}
+              <Route
+                path="/projects/:project/apps/new"
+                element={<NewService />}
+              />
+              {/* Legacy route — kept for backward compatibility */}
               <Route
                 path="/projects/:project/services/new"
                 element={<NewService />}

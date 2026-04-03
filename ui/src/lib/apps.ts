@@ -4,6 +4,8 @@ import type {
   AppEnvironmentResponse,
   AppEnvironmentsResponse,
   AppListResponse,
+  CreateAppRequest,
+  CreateAppResponse,
 } from "../types";
 
 export function listApps(project: string): Promise<AppListResponse> {
@@ -37,5 +39,15 @@ export function getAppEnvironment(
 ): Promise<AppEnvironmentResponse> {
   return api.get<AppEnvironmentResponse>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}`,
+  );
+}
+
+export function createApp(
+  project: string,
+  req: CreateAppRequest,
+): Promise<CreateAppResponse> {
+  return api.post<CreateAppResponse>(
+    `/projects/${encodeURIComponent(project)}/apps`,
+    req,
   );
 }
