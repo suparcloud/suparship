@@ -226,7 +226,7 @@ export function ServiceDetail() {
     return (
       <div className="rounded-lg border border-red-200 bg-red-50 p-4">
         <p className="text-sm text-red-700">
-          Failed to load service: {error}
+          Failed to load app: {error}
         </p>
       </div>
     );
@@ -467,7 +467,7 @@ export function ServiceDetail() {
                   Promote {service}
                 </h3>
                 <p className="mt-1 text-sm text-gray-500">
-                  Promote this service to a higher environment. This will sync
+                  Promote this app to a higher environment. This will sync
                   the configuration from the previous stage.
                 </p>
 
