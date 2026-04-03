@@ -6,6 +6,8 @@ import type {
   AppListResponse,
   CreateAppRequest,
   CreateAppResponse,
+  PromoteRequest,
+  PromoteResponse,
 } from "../types";
 
 export function listApps(project: string): Promise<AppListResponse> {
@@ -48,6 +50,17 @@ export function createApp(
 ): Promise<CreateAppResponse> {
   return api.post<CreateAppResponse>(
     `/projects/${encodeURIComponent(project)}/apps`,
+    req,
+  );
+}
+
+export function promoteApp(
+  project: string,
+  app: string,
+  req: PromoteRequest,
+): Promise<PromoteResponse> {
+  return api.post<PromoteResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/promote`,
     req,
   );
 }

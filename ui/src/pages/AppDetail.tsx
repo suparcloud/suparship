@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { getApp, getAppEnvironment } from "../lib/apps";
+import { getApp, getAppEnvironment, promoteApp } from "../lib/apps";
 import { createPreview, deletePreview } from "../lib/previews";
-import { promoteService } from "../lib/services";
 import type {
   AppDetail as AppDetailType,
   AppEnvironmentSummary,
@@ -111,6 +110,30 @@ function formatTime(iso?: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/**
+ * Returns the logical promotion source and target names for the currently
+ * selected environment, or null if no promotion is applicable (e.g. prod).
+ *
+ * Promotion path: preview → staging → prod
+ */
+function getPromoteTarget(
+  currentEnv: AppEnvironmentSummary | null,
+  environments: AppEnvironmentSummary[],
+): { source: string; target: string } | null {
+  if (!currentEnv) return null;
+  if (currentEnv.envType === "preview") {
+    const staging = environments.find((e) => e.envType === "staging");
+    return staging
+      ? { source: currentEnv.envName, target: staging.envName }
+      : null;
+  }
+  if (currentEnv.envType === "staging") {
+    const prod = environments.find((e) => e.envType === "prod");
+    return prod ? { source: currentEnv.envName, target: prod.envName } : null;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +263,7 @@ export function AppDetail() {
 
   // Promote modal
   const [showPromoteModal, setShowPromoteModal] = useState(false);
+  const [promoteSource, setPromoteSource] = useState("");
   const [promoteTarget, setPromoteTarget] = useState("");
   const [promoteSubmitting, setPromoteSubmitting] = useState(false);
   const [promoteError, setPromoteError] = useState<string | null>(null);
@@ -417,23 +441,26 @@ export function AppDetail() {
             {icons.branch}
             Preview
           </button>
-          <button
-            onClick={() => {
-              const envs = nonPreviewEnvs
-                .slice()
-                .sort((a, b) => a.envName.localeCompare(b.envName));
-              const last = envs[envs.length - 1];
-              setPromoteTarget(last?.envName ?? "");
-              setPromoteError(null);
-              setPromoteResult(null);
-              setShowPromoteModal(true);
-            }}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-700"
-            title="Promote to next environment"
-          >
-            {icons.rocket}
-            Promote
-          </button>
+          {(() => {
+            const promotion = getPromoteTarget(currentEnv, data.environments);
+            if (!promotion) return null;
+            return (
+              <button
+                onClick={() => {
+                  setPromoteSource(promotion.source);
+                  setPromoteTarget(promotion.target);
+                  setPromoteError(null);
+                  setPromoteResult(null);
+                  setShowPromoteModal(true);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-700"
+                title={`Promote from ${promotion.source} to ${promotion.target}`}
+              >
+                {icons.rocket}
+                Promote to {promotion.target}
+              </button>
+            );
+          })()}
         </div>
       </div>
 
@@ -547,14 +574,14 @@ export function AppDetail() {
                 </p>
                 <dl className="mt-4 space-y-2 text-sm">
                   <div className="flex justify-between">
-                    <dt className="text-gray-400">Source</dt>
-                    <dd className="font-medium text-gray-900">
+                    <dt className="text-gray-400">From</dt>
+                    <dd className="font-medium capitalize text-gray-900">
                       {promoteResult.source}
                     </dd>
                   </div>
                   <div className="flex justify-between">
-                    <dt className="text-gray-400">Destination</dt>
-                    <dd className="font-medium text-gray-900">
+                    <dt className="text-gray-400">To</dt>
+                    <dd className="font-medium capitalize text-gray-900">
                       {promoteResult.destination}
                     </dd>
                   </div>
@@ -566,7 +593,12 @@ export function AppDetail() {
                   </div>
                 </dl>
                 <button
-                  onClick={() => setShowPromoteModal(false)}
+                  onClick={() => {
+                    setShowPromoteModal(false);
+                    // Switch view to the target environment so the user can
+                    // see its updated state immediately.
+                    if (promoteTarget) setSelectedEnvName(promoteTarget);
+                  }}
                   className="mt-6 w-full rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
                 >
                   Done
@@ -581,31 +613,42 @@ export function AppDetail() {
                   Promote {appName}
                 </h3>
                 <p className="mt-1 text-sm text-gray-500">
-                  Promote this app to a higher environment.
+                  Promote this app from{" "}
+                  <span className="font-medium capitalize">{promoteSource}</span>{" "}
+                  to{" "}
+                  <span className="font-medium capitalize">{promoteTarget}</span>
+                  .
                 </p>
-                <div className="mt-4">
-                  <label
-                    htmlFor="promote-target"
-                    className="mb-1.5 block text-sm font-medium text-gray-700"
+
+                {/* Source → target visual */}
+                <div className="mt-4 flex items-center gap-3">
+                  <div className="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-center">
+                    <p className="text-xs text-gray-400">From</p>
+                    <p className="font-medium capitalize text-gray-900">
+                      {promoteSource}
+                    </p>
+                  </div>
+                  <svg
+                    className="h-4 w-4 flex-shrink-0 text-gray-400"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
                   >
-                    Target environment
-                  </label>
-                  <select
-                    id="promote-target"
-                    value={promoteTarget}
-                    onChange={(e) => setPromoteTarget(e.target.value)}
-                    className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
-                  >
-                    {nonPreviewEnvs
-                      .slice()
-                      .sort((a, b) => a.envName.localeCompare(b.envName))
-                      .map((env) => (
-                        <option key={env.envName} value={env.envName}>
-                          {env.envName}
-                        </option>
-                      ))}
-                  </select>
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"
+                    />
+                  </svg>
+                  <div className="flex-1 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-center">
+                    <p className="text-xs text-emerald-600">To</p>
+                    <p className="font-medium capitalize text-emerald-700">
+                      {promoteTarget}
+                    </p>
+                  </div>
                 </div>
+
                 {promoteError && (
                   <div className="mt-3 rounded-md bg-red-50 px-3 py-2">
                     <p className="text-sm text-red-700">{promoteError}</p>
@@ -618,11 +661,9 @@ export function AppDetail() {
                       setPromoteSubmitting(true);
                       setPromoteError(null);
                       try {
-                        const result = await promoteService(
-                          project,
-                          appName,
-                          { targetEnvironment: promoteTarget },
-                        );
+                        const result = await promoteApp(project, appName, {
+                          targetEnvironment: promoteTarget,
+                        });
                         setPromoteResult(result);
                       } catch (err) {
                         setPromoteError(
@@ -637,7 +678,7 @@ export function AppDetail() {
                     disabled={promoteSubmitting || !promoteTarget}
                     className="flex-1 rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50"
                   >
-                    {promoteSubmitting ? "Promoting…" : "Promote"}
+                    {promoteSubmitting ? "Promoting…" : `Promote to ${promoteTarget}`}
                   </button>
                   <button
                     onClick={() => setShowPromoteModal(false)}
