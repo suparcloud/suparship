@@ -328,6 +328,17 @@ export interface LogsResponse {
   logs: string;
 }
 
+export interface AppLogsResponse {
+  project: string;
+  app: string;
+  environment: string;
+  namespace: string;
+  component?: string;
+  pod: string;
+  container: string;
+  logs: string;
+}
+
 export interface CreateServiceResponse {
   service: {
     name: string;

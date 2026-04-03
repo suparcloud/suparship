@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { getApp, getAppEnvironment, promoteApp } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppEnvironment, promoteApp } from "../lib/apps";
 import { createPreview, deletePreview } from "../lib/previews";
 import type {
   AppDetail as AppDetailType,
   AppEnvironmentSummary,
+  AppLogsResponse,
   ComponentSummary,
   PromoteResponse,
 } from "../types";
@@ -769,7 +770,15 @@ export function AppDetail() {
           onDeletePreview={handleDeletePreview}
         />
       )}
-      {activeTab === "logs" && <LogsTab />}
+      {activeTab === "logs" && (
+        <LogsTab
+          project={project ?? ""}
+          appName={appName ?? ""}
+          selectedEnvName={selectedEnvName ?? ""}
+          components={data.components}
+          environments={data.environments}
+        />
+      )}
       {activeTab === "traffic" && <TrafficTab />}
     </div>
   );
@@ -1089,21 +1098,299 @@ function PreviewsTab({
 }
 
 // ---------------------------------------------------------------------------
-// Tab: Logs (shell placeholder)
+// Tab: Logs
 // ---------------------------------------------------------------------------
 
-function LogsTab() {
+const LOGS_TAIL_LINES = 200;
+const LOGS_POLL_INTERVAL_MS = 30_000;
+
+interface LogsTabProps {
+  project: string;
+  appName: string;
+  selectedEnvName: string;
+  components: ComponentSummary[];
+  environments: AppEnvironmentSummary[];
+}
+
+function LogsTab({
+  project,
+  appName,
+  selectedEnvName,
+  components,
+  environments,
+}: LogsTabProps) {
+  const [env, setEnv] = useState(
+    selectedEnvName || environments[0]?.envName || "",
+  );
+  const [component, setComponent] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [pod, setPod] = useState("");
+  const [container, setContainer] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<AppLogsResponse | null>(null);
+  const scrollRef = useRef<HTMLPreElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Keep local env in sync when the parent environment switcher changes.
+  useEffect(() => {
+    if (selectedEnvName) setEnv(selectedEnvName);
+  }, [selectedEnvName]);
+
+  const loadLogs = useCallback(async () => {
+    if (!env) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchAppLogs(project, appName, {
+        environment: env,
+        component: component || undefined,
+        pod: pod || undefined,
+        container: container || undefined,
+        tailLines: LOGS_TAIL_LINES,
+      });
+      setResult(data);
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch logs");
+      setResult(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [project, appName, env, component, pod, container]);
+
+  // Initial fetch + polling.
+  useEffect(() => {
+    loadLogs();
+    pollRef.current = setInterval(loadLogs, LOGS_POLL_INTERVAL_MS);
+    return () => {
+      if (pollRef.current !== null) clearInterval(pollRef.current);
+    };
+  }, [loadLogs]);
+
+  const multiComponent = components.length > 1;
+
   return (
-    <div className="rounded-xl border border-dashed border-gray-200 bg-white px-6 py-12 text-center">
-      <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
-        {icons.terminal}
+    <div className="flex flex-col gap-4">
+      {/* Primary selectors: environment (+ component when multiple) */}
+      <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-gray-500">
+            Environment
+          </label>
+          <select
+            value={env}
+            onChange={(e) => {
+              setEnv(e.target.value);
+              setPod("");
+              setContainer("");
+            }}
+            className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
+          >
+            {environments.map((e) => (
+              <option key={e.envName} value={e.envName}>
+                {e.envName}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {multiComponent && (
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-500">
+              Component
+            </label>
+            <select
+              value={component}
+              onChange={(e) => {
+                setComponent(e.target.value);
+                setPod("");
+                setContainer("");
+              }}
+              className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
+            >
+              <option value="">All components</option>
+              {components.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name} ({c.type})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <button
+          onClick={loadLogs}
+          disabled={loading || !env}
+          className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 disabled:opacity-50"
+          title="Refresh logs"
+        >
+          <svg
+            className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182"
+            />
+          </svg>
+          Refresh
+        </button>
       </div>
-      <p className="text-sm font-medium text-gray-500">
-        Log viewer coming soon
+
+      {/* Advanced: pod / container — collapsible */}
+      <div>
+        <button
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+        >
+          <svg
+            className={`h-3 w-3 transition-transform ${showAdvanced ? "rotate-90" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="m9 18 6-6-6-6"
+            />
+          </svg>
+          Advanced (pod / container)
+        </button>
+        {showAdvanced && (
+          <div className="mt-2 flex flex-wrap gap-3 rounded-lg border border-gray-100 bg-gray-50/60 px-4 py-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-500">
+                Pod
+              </label>
+              <input
+                type="text"
+                value={pod}
+                onChange={(e) => setPod(e.target.value)}
+                placeholder="auto-select"
+                className="w-40 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-500">
+                Container
+              </label>
+              <input
+                type="text"
+                value={container}
+                onChange={(e) => setContainer(e.target.value)}
+                placeholder="default"
+                className="w-36 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Resolved runtime unit info */}
+      {result && (
+        <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400">
+          <span>
+            pod:{" "}
+            <span className="font-mono text-gray-600">{result.pod}</span>
+          </span>
+          <span>
+            container:{" "}
+            <span className="font-mono text-gray-600">{result.container}</span>
+          </span>
+          {result.namespace && (
+            <span>
+              namespace:{" "}
+              <span className="font-mono text-gray-600">
+                {result.namespace}
+              </span>
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Log output */}
+      <div className="relative min-h-64 overflow-hidden rounded-xl border border-gray-200 bg-gray-950">
+        {loading && !result && <LogsTabSkeleton />}
+
+        {error && (
+          <div className="flex h-64 flex-col items-center justify-center px-6 text-center">
+            <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-red-900/30">
+              <svg
+                className="h-5 w-5 text-red-400"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={1.5}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z"
+                />
+              </svg>
+            </div>
+            <p className="text-sm font-medium text-gray-300">{error}</p>
+            <button
+              onClick={loadLogs}
+              className="mt-3 text-sm text-blue-400 hover:text-blue-300"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && result && result.logs.length === 0 && (
+          <div className="flex h-64 flex-col items-center justify-center px-6 text-center">
+            <p className="text-sm font-medium text-gray-500">No log output</p>
+            <p className="mt-1 text-xs text-gray-600">
+              The container has not produced any logs yet.
+            </p>
+          </div>
+        )}
+
+        {result && result.logs.length > 0 && (
+          <pre
+            ref={scrollRef}
+            className="max-h-[32rem] overflow-auto px-4 py-3 font-mono text-xs leading-5 text-gray-200"
+          >
+            {result.logs}
+          </pre>
+        )}
+
+        {loading && result && (
+          <div className="absolute right-4 top-3">
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-400 border-t-transparent" />
+          </div>
+        )}
+      </div>
+
+      <p className="text-right text-xs text-gray-400">
+        Showing last {LOGS_TAIL_LINES} lines &middot; auto-refreshes every{" "}
+        {LOGS_POLL_INTERVAL_MS / 1000}s
       </p>
-      <p className="mt-1 text-xs text-gray-400">
-        Full streaming logs will be available in a future release.
-      </p>
+    </div>
+  );
+}
+
+function LogsTabSkeleton() {
+  return (
+    <div className="space-y-2 px-4 py-3">
+      {Array.from({ length: 12 }).map((_, i) => (
+        <div
+          key={i}
+          className="h-3.5 animate-pulse rounded bg-gray-800"
+          style={{ width: `${40 + (i * 7) % 50}%` }}
+        />
+      ))}
     </div>
   );
 }

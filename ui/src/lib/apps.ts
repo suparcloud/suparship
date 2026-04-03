@@ -4,6 +4,7 @@ import type {
   AppEnvironmentResponse,
   AppEnvironmentsResponse,
   AppListResponse,
+  AppLogsResponse,
   CreateAppRequest,
   CreateAppResponse,
   PromoteRequest,
@@ -62,5 +63,27 @@ export function promoteApp(
   return api.post<PromoteResponse>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/promote`,
     req,
+  );
+}
+
+export function fetchAppLogs(
+  project: string,
+  app: string,
+  params: {
+    environment: string;
+    component?: string;
+    pod?: string;
+    container?: string;
+    tailLines?: number;
+  },
+): Promise<AppLogsResponse> {
+  const qs = new URLSearchParams({ environment: params.environment });
+  if (params.component) qs.set("component", params.component);
+  if (params.pod) qs.set("pod", params.pod);
+  if (params.container) qs.set("container", params.container);
+  if (params.tailLines !== undefined)
+    qs.set("tailLines", String(params.tailLines));
+  return api.get<AppLogsResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/logs?${qs.toString()}`,
   );
 }
