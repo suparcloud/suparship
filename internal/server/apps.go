@@ -134,6 +134,20 @@ type AppDetailResponse struct {
 	App AppDetailDTO `json:"app"`
 }
 
+// AppEnvironmentsResponse is the JSON body for
+// GET /api/v1/projects/{project}/apps/{app}/environments.
+type AppEnvironmentsResponse struct {
+	Project      string                     `json:"project"`
+	AppName      string                     `json:"appName"`
+	Environments []AppEnvironmentSummaryDTO `json:"environments"`
+}
+
+// AppEnvironmentResponse is the JSON body for
+// GET /api/v1/projects/{project}/apps/{app}/environments/{env}.
+type AppEnvironmentResponse struct {
+	Environment AppEnvironmentSummaryDTO `json:"environment"`
+}
+
 // --- App-scoped preview DTOs ---
 
 // AppPreviewSummaryDTO is the app-oriented view of a single preview environment.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/config"
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/fake"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
@@ -83,6 +84,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		previewStore    preview.Store
 		runtimeProvider runtime.Provider
 		logsProvider    runtime.LogsProvider
+		appStore        domain.AppStore
 		templates       []*tpl.Template
 	)
 
@@ -108,6 +110,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		previewStore = deps.PreviewStore
 		runtimeProvider = deps.RuntimeProvider
 		logsProvider = deps.LogsProvider
+		appStore = deps.AppStore
 
 	default: // config.ModeKubernetes
 		// Log what we will attempt before trying, so contributors see the
@@ -199,6 +202,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		RuntimeProvider: runtimeProvider,
 		LogsProvider:    logsProvider,
 		PreviewStore:    previewStore,
+		AppStore:        appStore,
 		CookieSecure:    cookieSecure,
 		Logger:          logger,
 	})

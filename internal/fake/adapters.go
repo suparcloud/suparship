@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -62,6 +63,9 @@ type DevServerDeps struct {
 	PreviewStore    *FakePreviewStore
 	RuntimeProvider *FakeRuntimeProvider
 	LogsProvider    *FakeLogsProvider
+	// AppStore provides in-memory app and environment data seeded with the demo
+	// hello app.  It implements domain.AppStore via DevRuntime.
+	AppStore domain.AppStore
 }
 
 // NewDevServerDeps returns a DevServerDeps bundle pre-loaded with demo seed
@@ -87,6 +91,7 @@ func NewDevServerDeps() *DevServerDeps {
 		PreviewStore:    newFakePreviewStore(),
 		RuntimeProvider: newFakeRuntimeProvider(),
 		LogsProvider:    &FakeLogsProvider{},
+		AppStore:        NewSeededDevRuntime(),
 	}
 }
 

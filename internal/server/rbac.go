@@ -30,6 +30,7 @@ type rbacHandler struct {
 	previewHandler   *previewHandler   // optional: enables preview endpoints
 	promoteHandler   *promoteHandler   // optional: enables promote endpoint
 	logsHandler      *logsHandler      // optional: enables logs endpoint
+	appHandler       *appHandler       // optional: enables app read endpoints
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -93,6 +94,12 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	}
 	if rh.logsHandler != nil {
 		mux.HandleFunc("GET /api/v1/projects/{project}/services/{service}/logs", viewProject(rh.logsHandler.handleGetLogs))
+	}
+	if rh.appHandler != nil {
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps", viewProject(rh.appHandler.handleListApps))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}", viewProject(rh.appHandler.handleGetApp))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments", viewProject(rh.appHandler.handleListAppEnvironments))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}", viewProject(rh.appHandler.handleGetAppEnvironment))
 	}
 }
 
