@@ -48,6 +48,18 @@ type PreviewStore interface {
 	DeletePreview(ctx context.Context, name string) error
 }
 
+// AppStore reads and persists app definitions within a project.
+//
+// Apps are nested under projects; all operations are scoped by project name.
+// The fake implementation keeps apps in memory; a future K8s implementation
+// will store each app as part of the project ConfigMap or as its own resource.
+type AppStore interface {
+	ListApps(ctx context.Context, projectName string) ([]*App, error)
+	GetApp(ctx context.Context, projectName, appName string) (*App, error)
+	ListAppEnvironments(ctx context.Context, projectName, appName string) ([]*AppEnvironment, error)
+	GetAppEnvironment(ctx context.Context, projectName, appName, envName string) (*AppEnvironment, error)
+}
+
 // RuntimeStatusReader reads the live cluster state of a service.
 //
 // The K8s implementation queries Deployments and Ingresses in the

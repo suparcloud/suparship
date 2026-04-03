@@ -12,6 +12,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -23,6 +24,7 @@ var (
 	_ domain.ServiceStore        = (*DevRuntime)(nil)
 	_ domain.TemplateStore       = (*DevRuntime)(nil)
 	_ domain.PreviewStore        = (*DevRuntime)(nil)
+	_ domain.AppStore            = (*DevRuntime)(nil)
 	_ domain.RuntimeStatusReader = (*DevRuntime)(nil)
 	_ domain.LogReader           = (*DevRuntime)(nil)
 )
@@ -38,6 +40,8 @@ type DevRuntime struct {
 	org       *domain.Org
 	projects  map[string]*domain.Project
 	services  map[string]map[string]*domain.Service // projectName → serviceName → Service
+	apps      map[string]map[string]*domain.App     // projectName → appName → App
+	appEnvs   map[string]map[string]map[string]*domain.AppEnvironment // projectName → appName → envName → AppEnvironment
 	templates map[string]*domain.Template
 	previews  map[string]*domain.Preview
 	statuses  map[string]*domain.ServiceStatus // "project/service/env" → status
@@ -50,6 +54,8 @@ func NewSeededDevRuntime() *DevRuntime {
 	r := &DevRuntime{
 		projects:  make(map[string]*domain.Project),
 		services:  make(map[string]map[string]*domain.Service),
+		apps:      make(map[string]map[string]*domain.App),
+		appEnvs:   make(map[string]map[string]map[string]*domain.AppEnvironment),
 		templates: make(map[string]*domain.Template),
 		previews:  make(map[string]*domain.Preview),
 		statuses:  make(map[string]*domain.ServiceStatus),
@@ -226,6 +232,74 @@ func (r *DevRuntime) DeletePreview(_ context.Context, name string) error {
 	}
 	delete(r.previews, name)
 	return nil
+}
+
+// ── AppStore ─────────────────────────────────────────────────────────────────
+
+func (r *DevRuntime) ListApps(_ context.Context, projectName string) ([]*domain.App, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	appMap, ok := r.apps[projectName]
+	if !ok {
+		return nil, fmt.Errorf("project %q not found", projectName)
+	}
+	out := make([]*domain.App, 0, len(appMap))
+	for _, a := range appMap {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (r *DevRuntime) GetApp(_ context.Context, projectName, appName string) (*domain.App, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	appMap, ok := r.apps[projectName]
+	if !ok {
+		return nil, fmt.Errorf("project %q not found", projectName)
+	}
+	a, ok := appMap[appName]
+	if !ok {
+		return nil, fmt.Errorf("app %q not found in project %q", appName, projectName)
+	}
+	return a, nil
+}
+
+func (r *DevRuntime) ListAppEnvironments(_ context.Context, projectName, appName string) ([]*domain.AppEnvironment, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	projectEnvs, ok := r.appEnvs[projectName]
+	if !ok {
+		return []*domain.AppEnvironment{}, nil
+	}
+	envMap, ok := projectEnvs[appName]
+	if !ok {
+		return []*domain.AppEnvironment{}, nil
+	}
+	out := make([]*domain.AppEnvironment, 0, len(envMap))
+	for _, e := range envMap {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].EnvName < out[j].EnvName })
+	return out, nil
+}
+
+func (r *DevRuntime) GetAppEnvironment(_ context.Context, projectName, appName, envName string) (*domain.AppEnvironment, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	projectEnvs, ok := r.appEnvs[projectName]
+	if !ok {
+		return nil, fmt.Errorf("app environment %q not found for app %q in project %q", envName, appName, projectName)
+	}
+	envMap, ok := projectEnvs[appName]
+	if !ok {
+		return nil, fmt.Errorf("app environment %q not found for app %q in project %q", envName, appName, projectName)
+	}
+	env, ok := envMap[envName]
+	if !ok {
+		return nil, fmt.Errorf("app environment %q not found for app %q in project %q", envName, appName, projectName)
+	}
+	return env, nil
 }
 
 // ── RuntimeStatusReader ──────────────────────────────────────────────────────
