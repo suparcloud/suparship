@@ -159,6 +159,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		previewStore = kubeDeps.PreviewStore
 		runtimeProvider = kubeDeps.RuntimeProvider
 		logsProvider = kubeDeps.LogsProvider
+		appStore = kubeDeps.AppStore
 
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
