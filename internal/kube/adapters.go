@@ -150,11 +150,14 @@ type k8sRuntimeStatusAdapter struct {
 	provider *runtime.K8sProvider
 }
 
-func (a *k8sRuntimeStatusAdapter) GetServiceStatus(ctx context.Context, projectName, serviceName, environment string) (*domain.ServiceStatus, error) {
-	ns := runtime.Namespace(projectName, environment)
+func (a *k8sRuntimeStatusAdapter) GetServiceStatus(ctx context.Context, _ string, serviceName, environment string) (*domain.ServiceStatus, error) {
+	// Namespace follows the domain convention: {appName}-{envName}
+	// (e.g. "hello-staging"), NOT the legacy {projectName}-{envName}.
+	// See domain.GenerateNamespace for the authoritative derivation.
+	ns := serviceName + "-" + environment
 	info, err := a.provider.GetServiceRuntime(ctx, ns, serviceName)
 	if err != nil {
-		return nil, fmt.Errorf("getting runtime status for %s/%s in %s: %w", projectName, serviceName, ns, err)
+		return nil, fmt.Errorf("getting runtime status for %s in %s: %w", serviceName, ns, err)
 	}
 	urls := info.IngressURLs
 	if urls == nil {
