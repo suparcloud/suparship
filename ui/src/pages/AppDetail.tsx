@@ -1436,13 +1436,12 @@ function componentVisibilityBadge(type: ComponentSummary["type"]) {
 }
 
 /**
- * Advanced Runtime section.
+ * Runtime components section.
  *
  * Visibility rules:
  *  - 0 components → renders nothing (topology not yet derived).
- *  - 1 component  → collapses by default; user can expand via "Advanced runtime".
- *  - >1 components → expanded by default, clearly reinforcing that the app
- *    owns multiple runtime units without making them top-level resources.
+ *  - 1+ components → expanded by default so the runtime topology is always
+ *    immediately visible without requiring extra interaction.
  */
 function ComponentsTable({
   components,
@@ -1452,7 +1451,7 @@ function ComponentsTable({
   currentEnv: AppEnvironmentSummary | null;
 }) {
   const isMulti = components.length > 1;
-  const [expanded, setExpanded] = useState(isMulti);
+  const [expanded, setExpanded] = useState(true);
 
   if (components.length === 0) return null;
 
@@ -1476,7 +1475,7 @@ function ComponentsTable({
     return "—";
   }
 
-  const headerTitle = isMulti ? "Runtime components" : "Advanced runtime";
+  const headerTitle = "Runtime components";
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
