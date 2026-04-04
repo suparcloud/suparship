@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -374,5 +375,410 @@ func TestNewPreviewEnvironmentNamespaceConvention(t *testing.T) {
 				t.Errorf("Namespace = %q, want %q", env.Namespace, tt.wantNS)
 			}
 		})
+	}
+}
+
+// --- ComponentsFromTemplate ---
+
+// templateWithComponents builds a template that has an explicit spec.components
+// section (web + worker) for testing ComponentsFromTemplate.
+func templateWithComponents() *tpl.Template {
+	defaultEnabledFalse := false
+	return &tpl.Template{
+		APIVersion: tpl.CurrentAPIVersion,
+		Kind:       tpl.TemplateKind,
+		Metadata:   tpl.Metadata{Name: "full-stack", Version: "1.0.0"},
+		Spec: tpl.TemplateSpec{
+			Title:    "Full Stack",
+			Category: "web",
+			Engine:   tpl.Engine{Type: tpl.EngineHelm},
+			Components: []tpl.TemplateComponent{
+				{
+					Name:           "web",
+					Type:           tpl.TemplateComponentWeb,
+					Required:       true,
+					PreviewEnabled: true,
+					Exposed:        true,
+				},
+				{
+					Name:           "worker",
+					Type:           tpl.TemplateComponentWorker,
+					Required:       false,
+					DefaultEnabled: &defaultEnabledFalse,
+					PreviewEnabled: false,
+					Exposed:        false,
+				},
+			},
+		},
+	}
+}
+
+func TestComponentsFromTemplate_FallbackWhenNoComponentsDefined(t *testing.T) {
+	comps := ComponentsFromTemplate(webTemplate(), nil)
+	if len(comps) != 1 {
+		t.Fatalf("expected 1 component, got %d", len(comps))
+	}
+	if comps[0].Name != "web" || comps[0].Type != domain.ComponentWeb {
+		t.Errorf("unexpected fallback component: %+v", comps[0])
+	}
+}
+
+func TestComponentsFromTemplate_RequiredAlwaysEnabled(t *testing.T) {
+	comps := ComponentsFromTemplate(templateWithComponents(), nil)
+	var web *domain.ComponentSpec
+	for i := range comps {
+		if comps[i].Name == "web" {
+			web = &comps[i]
+		}
+	}
+	if web == nil {
+		t.Fatal("expected web component")
+	}
+	if !web.Enabled {
+		t.Error("required component 'web' must always be enabled")
+	}
+}
+
+func TestComponentsFromTemplate_OptionalRespectsDefaultEnabled(t *testing.T) {
+	comps := ComponentsFromTemplate(templateWithComponents(), nil)
+	var worker *domain.ComponentSpec
+	for i := range comps {
+		if comps[i].Name == "worker" {
+			worker = &comps[i]
+		}
+	}
+	if worker == nil {
+		t.Fatal("expected worker component")
+	}
+	if worker.Enabled {
+		t.Error("optional component 'worker' with defaultEnabled=false should be disabled")
+	}
+}
+
+func TestComponentsFromTemplate_UserToggleEnablesOptional(t *testing.T) {
+	toggles := map[string]bool{"worker": true}
+	comps := ComponentsFromTemplate(templateWithComponents(), toggles)
+	for _, c := range comps {
+		if c.Name == "worker" && !c.Enabled {
+			t.Error("user toggle should enable the optional 'worker' component")
+		}
+	}
+}
+
+func TestComponentsFromTemplate_UserToggleCannotDisableRequired(t *testing.T) {
+	toggles := map[string]bool{"web": false, "worker": false}
+	comps := ComponentsFromTemplate(templateWithComponents(), toggles)
+	for _, c := range comps {
+		switch c.Name {
+		case "web":
+			if !c.Enabled {
+				t.Error("required component 'web' must stay enabled regardless of toggle")
+			}
+		case "worker":
+			if c.Enabled {
+				t.Error("optional 'worker' with toggle=false should be disabled")
+			}
+		}
+	}
+}
+
+func TestComponentsFromTemplate_FieldsFromTemplateComponent(t *testing.T) {
+	comps := ComponentsFromTemplate(templateWithComponents(), nil)
+	for _, c := range comps {
+		if c.Name == "web" {
+			if !c.Expose {
+				t.Error("web component should have Expose=true from template")
+			}
+			if !c.PreviewEnabled {
+				t.Error("web component should have PreviewEnabled=true from template")
+			}
+			if c.Type != domain.ComponentWeb {
+				t.Errorf("web component type = %q, want ComponentWeb", c.Type)
+			}
+		}
+		if c.Name == "worker" {
+			if c.Expose {
+				t.Error("worker component should have Expose=false from template")
+			}
+			if c.PreviewEnabled {
+				t.Error("worker component should have PreviewEnabled=false from template")
+			}
+			if c.Type != domain.ComponentWorker {
+				t.Errorf("worker component type = %q, want ComponentWorker", c.Type)
+			}
+		}
+	}
+}
+
+func TestComponentsFromTemplate_Deterministic(t *testing.T) {
+	tmpl := templateWithComponents()
+	got1 := ComponentsFromTemplate(tmpl, nil)
+	got2 := ComponentsFromTemplate(tmpl, nil)
+	if len(got1) != len(got2) {
+		t.Fatalf("non-deterministic length: %d vs %d", len(got1), len(got2))
+	}
+	for i := range got1 {
+		if got1[i].Name != got2[i].Name ||
+			got1[i].Type != got2[i].Type ||
+			got1[i].Enabled != got2[i].Enabled ||
+			got1[i].Expose != got2[i].Expose ||
+			got1[i].PreviewEnabled != got2[i].PreviewEnabled {
+			t.Errorf("non-deterministic output at index %d: %+v vs %+v", i, got1[i], got2[i])
+		}
+	}
+}
+
+func TestComponentsFromTemplate_SortedByName(t *testing.T) {
+	tmpl := templateWithComponents() // declares "web" first, "worker" second
+	comps := ComponentsFromTemplate(tmpl, nil)
+	if len(comps) < 2 {
+		t.Fatalf("expected ≥2 components, got %d", len(comps))
+	}
+	// "web" < "worker" alphabetically
+	if comps[0].Name > comps[1].Name {
+		t.Errorf("components not sorted: %q > %q", comps[0].Name, comps[1].Name)
+	}
+}
+
+// --- templateComponentTypeToDomain ---
+
+func TestTemplateComponentTypeToDomain(t *testing.T) {
+	tests := []struct {
+		input tpl.TemplateComponentType
+		want  domain.ComponentType
+	}{
+		{tpl.TemplateComponentWeb, domain.ComponentWeb},
+		{tpl.TemplateComponentWorker, domain.ComponentWorker},
+		{tpl.TemplateComponentCron, domain.ComponentCron},
+		{"unknown", domain.ComponentWeb},
+	}
+	for _, tt := range tests {
+		got := templateComponentTypeToDomain(tt.input)
+		if got != tt.want {
+			t.Errorf("templateComponentTypeToDomain(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// --- Create ---
+
+// minimalTemplateWithComponents returns a template with a required web
+// component and one required input, suitable for Create pipeline tests.
+func minimalTemplateWithComponents() *tpl.Template {
+	return &tpl.Template{
+		APIVersion: tpl.CurrentAPIVersion,
+		Kind:       tpl.TemplateKind,
+		Metadata:   tpl.Metadata{Name: "web-service", Version: "1.0.0"},
+		Spec: tpl.TemplateSpec{
+			Title:    "Web Service",
+			Category: "web",
+			Engine:   tpl.Engine{Type: tpl.EngineHelm},
+			Components: []tpl.TemplateComponent{
+				{Name: "web", Type: tpl.TemplateComponentWeb, Required: true, PreviewEnabled: true, Exposed: true},
+			},
+			Inputs: []tpl.Input{
+				{Name: "image", Title: "Image", Type: tpl.InputTypeString, Required: true},
+			},
+		},
+	}
+}
+
+func TestCreate_ReturnsAppAndEnvironments(t *testing.T) {
+	result, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		DisplayName: "My App",
+		Description: "test",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{"image": "ghcr.io/org/app:v1"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.App == nil {
+		t.Fatal("App must not be nil")
+	}
+	if result.App.Name != "my-app" {
+		t.Errorf("App.Name = %q, want %q", result.App.Name, "my-app")
+	}
+	if result.App.ProjectName != "demo" {
+		t.Errorf("App.ProjectName = %q, want %q", result.App.ProjectName, "demo")
+	}
+	if len(result.Environments) != 2 {
+		t.Errorf("expected 2 environments, got %d", len(result.Environments))
+	}
+}
+
+func TestCreate_ComponentsInitialisedFromTemplate(t *testing.T) {
+	result, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{"image": "ghcr.io/org/app:v1"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.App.Spec.Components) != 1 {
+		t.Fatalf("expected 1 component, got %d", len(result.App.Spec.Components))
+	}
+	c := result.App.Spec.Components[0]
+	if c.Name != "web" || !c.Enabled || !c.PreviewEnabled || !c.Expose {
+		t.Errorf("web component fields unexpected: %+v", c)
+	}
+}
+
+func TestCreate_GeneratesHelmValuesForAllEnvs(t *testing.T) {
+	result, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{"image": "ghcr.io/org/app:v1"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := result.HelmValues["staging"]; !ok {
+		t.Error("expected HelmValues for 'staging'")
+	}
+	if _, ok := result.HelmValues["prod"]; !ok {
+		t.Error("expected HelmValues for 'prod'")
+	}
+}
+
+func TestCreate_HelmValuesAreEnvironmentSpecific(t *testing.T) {
+	result, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{"image": "ghcr.io/org/app:v1"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	stagingHV := result.HelmValues["staging"]
+	prodHV := result.HelmValues["prod"]
+
+	if stagingHV.App.Env != "staging" {
+		t.Errorf("staging HelmValues.App.Env = %q, want %q", stagingHV.App.Env, "staging")
+	}
+	if prodHV.App.Env != "prod" {
+		t.Errorf("prod HelmValues.App.Env = %q, want %q", prodHV.App.Env, "prod")
+	}
+	if stagingHV.Routing.Host == prodHV.Routing.Host {
+		t.Errorf("staging and prod hosts must differ; both = %q", stagingHV.Routing.Host)
+	}
+}
+
+func TestCreate_ValidationRejectsInvalidAppName(t *testing.T) {
+	_, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "INVALID_NAME!",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{"image": "ghcr.io/org/app:v1"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid app name")
+	}
+}
+
+func TestCreate_ValidationRejectsMissingRequiredInput(t *testing.T) {
+	_, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{}, // "image" is required but absent
+	})
+	if err == nil {
+		t.Fatal("expected error for missing required input")
+	}
+	if !strings.Contains(err.Error(), "image") {
+		t.Errorf("error should mention missing input 'image', got: %v", err)
+	}
+}
+
+func TestCreate_ValidationRejectsNilTemplate(t *testing.T) {
+	_, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		Template:    nil,
+	})
+	if err == nil {
+		t.Fatal("expected error for nil template")
+	}
+}
+
+func TestCreate_ComponentTogglesApplied(t *testing.T) {
+	defaultEnabledFalse := false
+	tmpl := &tpl.Template{
+		APIVersion: tpl.CurrentAPIVersion,
+		Kind:       tpl.TemplateKind,
+		Metadata:   tpl.Metadata{Name: "full-stack", Version: "1.0.0"},
+		Spec: tpl.TemplateSpec{
+			Title:    "Full Stack",
+			Category: "web",
+			Engine:   tpl.Engine{Type: tpl.EngineHelm},
+			Components: []tpl.TemplateComponent{
+				{Name: "web", Type: tpl.TemplateComponentWeb, Required: true, PreviewEnabled: true, Exposed: true},
+				{Name: "worker", Type: tpl.TemplateComponentWorker, DefaultEnabled: &defaultEnabledFalse},
+			},
+		},
+	}
+	result, err := Create(CreateRequest{
+		ProjectName:      "demo",
+		AppName:          "my-app",
+		Template:         tmpl,
+		Values:           map[string]any{},
+		ComponentToggles: map[string]bool{"worker": true},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, c := range result.App.Spec.Components {
+		if c.Name == "worker" && !c.Enabled {
+			t.Error("worker should be enabled via ComponentToggles")
+		}
+	}
+}
+
+func TestCreate_ExplicitComponentsBypassTemplate(t *testing.T) {
+	explicit := []domain.ComponentSpec{
+		{Name: "custom", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
+	}
+	result, err := Create(CreateRequest{
+		ProjectName:        "demo",
+		AppName:            "my-app",
+		Template:           minimalTemplateWithComponents(),
+		Values:             map[string]any{"image": "ghcr.io/org/app:v1"},
+		ExplicitComponents: explicit,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.App.Spec.Components) != 1 || result.App.Spec.Components[0].Name != "custom" {
+		t.Errorf("expected explicit 'custom' component, got: %+v", result.App.Spec.Components)
+	}
+}
+
+func TestCreate_Deterministic(t *testing.T) {
+	req := CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{"image": "ghcr.io/org/app:v1"},
+	}
+	r1, _ := Create(req)
+	r2, _ := Create(req)
+
+	if r1.App.Name != r2.App.Name {
+		t.Error("non-deterministic App.Name")
+	}
+	if len(r1.App.Spec.Components) != len(r2.App.Spec.Components) {
+		t.Error("non-deterministic component count")
+	}
+	hv1 := r1.HelmValues["staging"]
+	hv2 := r2.HelmValues["staging"]
+	if hv1.App != hv2.App || hv1.Routing != hv2.Routing {
+		t.Error("non-deterministic HelmValues")
 	}
 }

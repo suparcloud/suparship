@@ -191,8 +191,16 @@ type createAppRequest struct {
 	// SecretRefs maps secret input names to Kubernetes Secret references.
 	// Values are resolved at runtime; no plaintext secrets are accepted.
 	SecretRefs []AppSecretRefDTO `json:"secretRefs"`
-	// Components is optional. When absent, a single default component is
-	// derived from the template category (web → "web", worker → "worker", etc.).
+	// ComponentToggles overrides the enabled state of optional (non-required)
+	// components declared in the template. Keys are component names; values
+	// are the desired enabled state. Required components ignore this field.
+	// When absent, the template's defaultEnabled value is used for each
+	// component. Has no effect when Components is also supplied.
+	ComponentToggles map[string]bool `json:"componentToggles,omitempty"`
+	// Components is optional and bypasses the template-derived component
+	// initialisation entirely when provided. Prefer ComponentToggles for
+	// templates that declare a spec.components section. When absent, the
+	// handler initialises components from the template via ComponentToggles.
 	Components []ComponentCreateDTO `json:"components,omitempty"`
 }
 

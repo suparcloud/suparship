@@ -56,10 +56,11 @@ func newAppHandler(store domain.AppStore, templates []*tpl.Template, projectStor
 
 // handleCreateApp handles POST /api/v1/projects/{project}/apps.
 //
-// It validates the request body, resolves the referenced template, runs
-// template input validation, checks for duplicate app names, constructs
-// the App and its default staging+prod environments, persists them, and
-// returns 201 with the full app detail.
+// It validates the request body, resolves the referenced template, checks for
+// duplicate app names, and delegates the full creation pipeline (input
+// validation, component initialisation, AppSpec assembly, Helm value
+// generation) to domainapp.Create. The generated Helm values are logged here
+// for audit purposes; GitOps commit integration is a follow-up step.
 func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 
@@ -86,22 +87,6 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	values := req.Values
-	if values == nil {
-		values = map[string]any{}
-	}
-
-	// Convert secret refs from DTO to the project type required by the
-	// template validator, then run input validation.
-	secretRefsForValidation := make([]project.SecretRef, len(req.SecretRefs))
-	for i, s := range req.SecretRefs {
-		secretRefsForValidation[i] = project.SecretRef{Name: s.Name, SecretRef: s.SecretRef}
-	}
-	if err := project.ValidateAppInputs(values, secretRefsForValidation, tmpl); err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
-		return
-	}
-
 	// Verify the project exists before attempting any writes.
 	if _, err := ah.projectStore.Get(r.Context(), projectName); err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{
@@ -118,8 +103,15 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert and optionally validate explicit components.
-	var components []domain.ComponentSpec
+	// Convert secret refs from DTO to domain type for the Create pipeline.
+	domainSecretRefs := make([]domain.AppSecretRef, len(req.SecretRefs))
+	for i, s := range req.SecretRefs {
+		domainSecretRefs[i] = domain.AppSecretRef{Name: s.Name, SecretRef: s.SecretRef}
+	}
+
+	// Build explicit component specs when the caller provides them (legacy
+	// path). When absent, Create initialises components from the template.
+	var explicitComponents []domain.ComponentSpec
 	for i, c := range req.Components {
 		ct, err := domain.ParseComponentType(c.Type)
 		if err != nil {
@@ -128,7 +120,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		components = append(components, domain.ComponentSpec{
+		explicitComponents = append(explicitComponents, domain.ComponentSpec{
 			Name:           c.Name,
 			Type:           ct,
 			Enabled:        c.Enabled,
@@ -136,35 +128,39 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			PreviewEnabled: c.PreviewEnabled,
 		})
 	}
-	if len(components) > 0 {
-		if err := domain.ValidateComponents(components); err != nil {
+	if len(explicitComponents) > 0 {
+		if err := domain.ValidateComponents(explicitComponents); err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 			return
 		}
 	}
 
-	// Convert secret refs from DTO to domain type.
-	domainSecretRefs := make([]domain.AppSecretRef, len(req.SecretRefs))
-	for i, s := range req.SecretRefs {
-		domainSecretRefs[i] = domain.AppSecretRef{Name: s.Name, SecretRef: s.SecretRef}
+	values := req.Values
+	if values == nil {
+		values = map[string]any{}
 	}
 
-	newApp, envs := domainapp.Build(
-		projectName,
-		req.Name,
-		req.DisplayName,
-		req.Description,
-		tmpl,
-		values,
-		domainSecretRefs,
-		components,
-	)
+	result, err := domainapp.Create(domainapp.CreateRequest{
+		ProjectName:        projectName,
+		AppName:            req.Name,
+		DisplayName:        req.DisplayName,
+		Description:        req.Description,
+		Template:           tmpl,
+		Values:             values,
+		SecretRefs:         domainSecretRefs,
+		ComponentToggles:   req.ComponentToggles,
+		ExplicitComponents: explicitComponents,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
 
-	if err := ah.appStore.SaveApp(r.Context(), projectName, newApp); err != nil {
+	if err := ah.appStore.SaveApp(r.Context(), projectName, result.App); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
 		return
 	}
-	for _, env := range envs {
+	for _, env := range result.Environments {
 		if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app environment"})
 			return
