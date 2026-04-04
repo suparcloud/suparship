@@ -58,7 +58,7 @@ func ValidateComponentName(name string) error {
 //   - each component name must be a valid DNS label
 //   - component names must be unique within the list
 //   - each component type must be one of the recognised MVP values
-func ValidateComponents(components []Component) error {
+func ValidateComponents(components []ComponentSpec) error {
 	if len(components) == 0 {
 		return fmt.Errorf("app must have at least one component")
 	}
@@ -86,7 +86,7 @@ func ValidateComponents(components []Component) error {
 // ValidateSingleExposedComponent checks that at most one component has type
 // ComponentWeb (the "primary exposed" component). Pass allowMultiple = true to
 // skip this check when a template explicitly permits multiple web endpoints.
-func ValidateSingleExposedComponent(components []Component, allowMultiple bool) error {
+func ValidateSingleExposedComponent(components []ComponentSpec, allowMultiple bool) error {
 	if allowMultiple {
 		return nil
 	}
@@ -101,6 +101,32 @@ func ValidateSingleExposedComponent(components []Component, allowMultiple bool) 
 			"app has %d web components; at most one is allowed unless explicitly permitted",
 			count,
 		)
+	}
+	return nil
+}
+
+// ValidateComponentSpec checks a single ComponentSpec for field-level
+// correctness beyond name and type:
+//   - Replicas must be non-negative
+//   - SizePreset, when set, must be one of small, medium, large
+//   - Replicas and SizePreset are mutually exclusive
+func ValidateComponentSpec(c ComponentSpec) error {
+	if err := ValidateComponentName(c.Name); err != nil {
+		return err
+	}
+	if !c.Type.Valid() {
+		return fmt.Errorf("component %q: unsupported type %q (must be one of web, worker, cron)", c.Name, c.Type)
+	}
+	if c.Replicas < 0 {
+		return fmt.Errorf("component %q: replicas must be non-negative, got %d", c.Name, c.Replicas)
+	}
+	if c.SizePreset != "" {
+		if _, err := ParseSizePreset(string(c.SizePreset)); err != nil {
+			return fmt.Errorf("component %q: %w", c.Name, err)
+		}
+	}
+	if c.Replicas > 0 && c.SizePreset != "" {
+		return fmt.Errorf("component %q: replicas and sizePreset are mutually exclusive", c.Name)
 	}
 	return nil
 }
@@ -169,12 +195,61 @@ func ValidatePreviewName(name string) error {
 	return nil
 }
 
-// AppPreviewNamespace returns the Kubernetes namespace for a preview instance
-// of an app. Convention: {appName}-preview-{previewName}.
+// SanitizeAppName converts an arbitrary string into a best-effort valid DNS
+// label for use as an app name. The transformation mirrors SanitizePreviewName
+// but uses an "app-" prefix when the result would otherwise start with a digit,
+// and falls back to "app" when the result is empty.
 //
-// This mirrors the project-scoped preview.PreviewNS helper in
-// internal/preview but operates on the app-centric model where the namespace
-// key is the app name rather than the project name.
+// Transformation steps:
+//  1. Lowercase the input.
+//  2. Replace every run of non-alphanumeric characters with a single hyphen.
+//  3. Strip leading and trailing hyphens.
+//  4. Prepend "app-" when the result starts with a digit.
+//  5. Truncate to 63 characters, stripping any trailing hyphen left by the cut.
+//
+// Callers should validate the result with ValidateAppName to confirm it is
+// usable (short or degenerate inputs may produce names that still fail the
+// minimum-length rule).
+func SanitizeAppName(raw string) string {
+	s := strings.ToLower(raw)
+
+	var b strings.Builder
+	prevHyphen := false
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			prevHyphen = false
+		} else if !prevHyphen {
+			b.WriteRune('-')
+			prevHyphen = true
+		}
+	}
+
+	result := strings.Trim(b.String(), "-")
+	if result == "" {
+		return "app"
+	}
+
+	if result[0] >= '0' && result[0] <= '9' {
+		result = "app-" + result
+	}
+
+	if len(result) > 63 {
+		result = strings.TrimRight(result[:63], "-")
+	}
+
+	if result == "" {
+		return "app"
+	}
+	return result
+}
+
+// AppPreviewNamespace returns the Kubernetes namespace for a preview instance
+// of an app. Convention: {appName}-{previewName}.
+//
+// Deprecated: Use GenerateNamespace(appName, previewName, AppEnvPreview)
+// instead. AppPreviewNamespace is retained for callers in the compat layer
+// that have not yet migrated to the app-centric model.
 func AppPreviewNamespace(appName, previewName string) string {
-	return appName + "-preview-" + previewName
+	return GenerateNamespace(appName, previewName, AppEnvPreview)
 }

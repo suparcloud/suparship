@@ -24,6 +24,14 @@ spec:
     type: helm
     chart: ./chart
 
+  components:
+    - name: web
+      type: web
+      required: true
+      defaultEnabled: true
+      previewEnabled: true
+      exposed: true
+
   inputs:
     - name: service_name
       title: App Name

@@ -23,9 +23,9 @@ func previewTestAppForProject(projectName string) *domain.App {
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "web-service"},
-			Components: []domain.Component{
-				{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
-				{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
+				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
 			},
 		},
 	}
@@ -38,8 +38,8 @@ func workerOnlyAppForProject(projectName string) *domain.App {
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "worker"},
-			Components: []domain.Component{
-				{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+			Components: []domain.ComponentSpec{
+				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
 			},
 		},
 	}
@@ -124,8 +124,8 @@ func TestCreateAppPreviewValid(t *testing.T) {
 	if dto.Project != testProject {
 		t.Errorf("Project = %q, want %q", dto.Project, testProject)
 	}
-	if dto.Namespace != "my-app-preview-pr-42" {
-		t.Errorf("Namespace = %q, want %q", dto.Namespace, "my-app-preview-pr-42")
+	if dto.Namespace != "my-app-pr-42" {
+		t.Errorf("Namespace = %q, want %q", dto.Namespace, "my-app-pr-42")
 	}
 	if dto.Status.Phase != domain.StatusNotDeployed {
 		t.Errorf("Status.Phase = %q, want %q", dto.Status.Phase, domain.StatusNotDeployed)
@@ -279,12 +279,12 @@ func TestListAppPreviewsPopulated(t *testing.T) {
 	ctx := context.Background()
 	_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
 		AppName: "my-app", EnvName: "pr-42", EnvType: domain.AppEnvPreview,
-		Namespace: "my-app-preview-pr-42", URLs: []string{},
+		Namespace: "my-app-pr-42", URLs: []string{},
 		Status: domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
 	_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
 		AppName: "my-app", EnvName: "pr-99", EnvType: domain.AppEnvPreview,
-		Namespace: "my-app-preview-pr-99", URLs: []string{},
+		Namespace: "my-app-pr-99", URLs: []string{},
 		Status: domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
 
@@ -362,7 +362,7 @@ func TestDeleteAppPreviewValid(t *testing.T) {
 	store.addApp(previewTestAppForProject(testProject))
 	_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
 		AppName: "my-app", EnvName: "pr-42", EnvType: domain.AppEnvPreview,
-		Namespace: "my-app-preview-pr-42", URLs: []string{},
+		Namespace: "my-app-pr-42", URLs: []string{},
 		Status: domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
 
@@ -383,7 +383,7 @@ func TestDeleteAppPreviewOrgAdmin(t *testing.T) {
 	store.addApp(previewTestAppForProject(testProject))
 	_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
 		AppName: "my-app", EnvName: "pr-42", EnvType: domain.AppEnvPreview,
-		Namespace: "my-app-preview-pr-42", URLs: []string{},
+		Namespace: "my-app-pr-42", URLs: []string{},
 		Status: domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
 
@@ -427,7 +427,7 @@ func TestDeleteAppPreviewViewerForbidden(t *testing.T) {
 	store.addApp(previewTestAppForProject(testProject))
 	_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
 		AppName: "my-app", EnvName: "pr-42", EnvType: domain.AppEnvPreview,
-		Namespace: "my-app-preview-pr-42", URLs: []string{},
+		Namespace: "my-app-pr-42", URLs: []string{},
 		Status: domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
 
@@ -443,7 +443,7 @@ func TestDeleteAppPreviewUnauthenticated(t *testing.T) {
 	store.addApp(previewTestAppForProject(testProject))
 	_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
 		AppName: "my-app", EnvName: "pr-42", EnvType: domain.AppEnvPreview,
-		Namespace: "my-app-preview-pr-42", URLs: []string{},
+		Namespace: "my-app-pr-42", URLs: []string{},
 		Status: domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
 
@@ -465,7 +465,7 @@ func TestListAppPreviewsDTOFields(t *testing.T) {
 		AppName:   "my-app",
 		EnvName:   "pr-10",
 		EnvType:   domain.AppEnvPreview,
-		Namespace: "my-app-preview-pr-10",
+		Namespace: "my-app-pr-10",
 		URLs:      []string{"https://pr-10.app.preview.localhost"},
 		Release:   &domain.AppReleaseRef{Image: "ghcr.io/org/app:pr-10", Tag: "pr-10"},
 		Status:    domain.AppRuntimeStatus{Phase: domain.StatusHealthy},
@@ -496,8 +496,8 @@ func TestListAppPreviewsDTOFields(t *testing.T) {
 	if p.Project != testProject {
 		t.Errorf("Project = %q, want %q", p.Project, testProject)
 	}
-	if p.Namespace != "my-app-preview-pr-10" {
-		t.Errorf("Namespace = %q, want %q", p.Namespace, "my-app-preview-pr-10")
+	if p.Namespace != "my-app-pr-10" {
+		t.Errorf("Namespace = %q, want %q", p.Namespace, "my-app-pr-10")
 	}
 	if p.Release == nil {
 		t.Fatal("expected non-nil Release in DTO")

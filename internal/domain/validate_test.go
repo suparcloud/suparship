@@ -122,31 +122,31 @@ func TestValidateComponentName(t *testing.T) {
 // ── ValidateComponents ────────────────────────────────────────────────────────
 
 func TestValidateComponents(t *testing.T) {
-	web := Component{Name: "web", Type: ComponentWeb, EnabledInPreview: true}
-	worker := Component{Name: "worker", Type: ComponentWorker}
-	cron := Component{Name: "cron", Type: ComponentCron}
+	web := ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, PreviewEnabled: true}
+	worker := ComponentSpec{Name: "worker", Type: ComponentWorker, Enabled: true}
+	cron := ComponentSpec{Name: "cron", Type: ComponentCron, Enabled: true}
 
 	tests := []struct {
 		name       string
-		components []Component
+		components []ComponentSpec
 		wantErr    bool
 		errFrag    string
 	}{
 		{
 			name:       "single web component",
-			components: []Component{web},
+			components: []ComponentSpec{web},
 		},
 		{
 			name:       "web and worker",
-			components: []Component{web, worker},
+			components: []ComponentSpec{web, worker},
 		},
 		{
 			name:       "all three types",
-			components: []Component{web, worker, cron},
+			components: []ComponentSpec{web, worker, cron},
 		},
 		{
 			name:       "empty list",
-			components: []Component{},
+			components: []ComponentSpec{},
 			wantErr:    true,
 			errFrag:    "at least one component",
 		},
@@ -158,47 +158,47 @@ func TestValidateComponents(t *testing.T) {
 		},
 		{
 			name:       "duplicate component name",
-			components: []Component{web, {Name: "web", Type: ComponentWorker}},
+			components: []ComponentSpec{web, {Name: "web", Type: ComponentWorker}},
 			wantErr:    true,
 			errFrag:    "duplicate component name",
 		},
 		{
 			name:       "invalid component name - empty",
-			components: []Component{{Name: "", Type: ComponentWeb}},
+			components: []ComponentSpec{{Name: "", Type: ComponentWeb}},
 			wantErr:    true,
 			errFrag:    "must not be empty",
 		},
 		{
 			name:       "invalid component name - uppercase",
-			components: []Component{{Name: "Web", Type: ComponentWeb}},
+			components: []ComponentSpec{{Name: "Web", Type: ComponentWeb}},
 			wantErr:    true,
 			errFrag:    "DNS label",
 		},
 		{
 			name:       "invalid component name - starts with digit",
-			components: []Component{{Name: "1web", Type: ComponentWeb}},
+			components: []ComponentSpec{{Name: "1web", Type: ComponentWeb}},
 			wantErr:    true,
 			errFrag:    "DNS label",
 		},
 		{
 			name:       "unsupported component type",
-			components: []Component{{Name: "gateway", Type: "gateway"}},
+			components: []ComponentSpec{{Name: "gateway", Type: "gateway"}},
 			wantErr:    true,
 			errFrag:    "unsupported type",
 		},
 		{
 			name:       "unsupported component type uppercase",
-			components: []Component{{Name: "ws", Type: "WEB"}},
+			components: []ComponentSpec{{Name: "ws", Type: "WEB"}},
 			wantErr:    true,
 			errFrag:    "unsupported type",
 		},
 		{
 			name:       "valid component names with hyphens",
-			components: []Component{{Name: "my-worker", Type: ComponentWorker}},
+			components: []ComponentSpec{{Name: "my-worker", Type: ComponentWorker}},
 		},
 		{
 			name: "many components all valid",
-			components: []Component{
+			components: []ComponentSpec{
 				{Name: "web", Type: ComponentWeb},
 				{Name: "bg-worker", Type: ComponentWorker},
 				{Name: "scheduled-job", Type: ComponentCron},
@@ -225,19 +225,19 @@ func TestValidateComponents(t *testing.T) {
 func TestValidateSingleExposedComponent(t *testing.T) {
 	tests := []struct {
 		name          string
-		components    []Component
+		components    []ComponentSpec
 		allowMultiple bool
 		wantErr       bool
 		errFrag       string
 	}{
 		{
 			name:          "one web component - allowed",
-			components:    []Component{{Name: "web", Type: ComponentWeb}},
+			components:    []ComponentSpec{{Name: "web", Type: ComponentWeb}},
 			allowMultiple: false,
 		},
 		{
 			name: "no web components - allowed",
-			components: []Component{
+			components: []ComponentSpec{
 				{Name: "worker", Type: ComponentWorker},
 				{Name: "cron", Type: ComponentCron},
 			},
@@ -245,7 +245,7 @@ func TestValidateSingleExposedComponent(t *testing.T) {
 		},
 		{
 			name: "two web components - not allowed",
-			components: []Component{
+			components: []ComponentSpec{
 				{Name: "frontend", Type: ComponentWeb},
 				{Name: "api", Type: ComponentWeb},
 			},
@@ -255,7 +255,7 @@ func TestValidateSingleExposedComponent(t *testing.T) {
 		},
 		{
 			name: "three web components - not allowed",
-			components: []Component{
+			components: []ComponentSpec{
 				{Name: "aa", Type: ComponentWeb},
 				{Name: "ab", Type: ComponentWeb},
 				{Name: "ac", Type: ComponentWeb},
@@ -266,7 +266,7 @@ func TestValidateSingleExposedComponent(t *testing.T) {
 		},
 		{
 			name: "two web components - explicitly allowed",
-			components: []Component{
+			components: []ComponentSpec{
 				{Name: "frontend", Type: ComponentWeb},
 				{Name: "api", Type: ComponentWeb},
 			},
@@ -274,7 +274,7 @@ func TestValidateSingleExposedComponent(t *testing.T) {
 		},
 		{
 			name:          "empty list - no error",
-			components:    []Component{},
+			components:    []ComponentSpec{},
 			allowMultiple: false,
 		},
 	}
@@ -398,6 +398,144 @@ func TestValidatePreviewName(t *testing.T) {
 	}
 }
 
+// ── ParseSizePreset ───────────────────────────────────────────────────────────
+
+func TestParseSizePreset(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    SizePreset
+		wantErr bool
+	}{
+		{input: "small", want: SizeSmall},
+		{input: "medium", want: SizeMedium},
+		{input: "large", want: SizeLarge},
+		{input: "", wantErr: true},
+		{input: "xl", wantErr: true},
+		{input: "SMALL", wantErr: true},
+		{input: "tiny", wantErr: true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseSizePreset(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseSizePreset(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParseSizePreset(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSizePresetValid(t *testing.T) {
+	tests := []struct {
+		input SizePreset
+		want  bool
+	}{
+		{SizeSmall, true},
+		{SizeMedium, true},
+		{SizeLarge, true},
+		{"", false},
+		{"XL", false},
+		{"SMALL", false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(string(tt.input), func(t *testing.T) {
+			if got := tt.input.Valid(); got != tt.want {
+				t.Errorf("SizePreset(%q).Valid() = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── ValidateComponentSpec ─────────────────────────────────────────────────────
+
+func TestValidateComponentSpec(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   ComponentSpec
+		wantErr bool
+		errFrag string
+	}{
+		{
+			name:  "valid web enabled exposed",
+			input: ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, Expose: true, PreviewEnabled: true},
+		},
+		{
+			name:  "valid worker with replicas",
+			input: ComponentSpec{Name: "worker", Type: ComponentWorker, Enabled: true, Replicas: 3},
+		},
+		{
+			name:  "valid cron with size preset",
+			input: ComponentSpec{Name: "cron", Type: ComponentCron, Enabled: true, SizePreset: SizeSmall},
+		},
+		{
+			name:  "valid with config map",
+			input: ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, Config: map[string]string{"KEY": "value"}},
+		},
+		{
+			name:    "invalid name - empty",
+			input:   ComponentSpec{Name: "", Type: ComponentWeb},
+			wantErr: true,
+			errFrag: "must not be empty",
+		},
+		{
+			name:    "invalid name - uppercase",
+			input:   ComponentSpec{Name: "Web", Type: ComponentWeb},
+			wantErr: true,
+			errFrag: "DNS label",
+		},
+		{
+			name:    "invalid type",
+			input:   ComponentSpec{Name: "svc", Type: "gateway"},
+			wantErr: true,
+			errFrag: "unsupported type",
+		},
+		{
+			name:    "negative replicas",
+			input:   ComponentSpec{Name: "web", Type: ComponentWeb, Replicas: -1},
+			wantErr: true,
+			errFrag: "replicas must be non-negative",
+		},
+		{
+			name:    "invalid size preset",
+			input:   ComponentSpec{Name: "web", Type: ComponentWeb, SizePreset: "xl"},
+			wantErr: true,
+			errFrag: "unknown size preset",
+		},
+		{
+			name:    "replicas and sizePreset both set",
+			input:   ComponentSpec{Name: "web", Type: ComponentWeb, Replicas: 2, SizePreset: SizeMedium},
+			wantErr: true,
+			errFrag: "mutually exclusive",
+		},
+		{
+			name:  "zero replicas with size preset is valid",
+			input: ComponentSpec{Name: "web", Type: ComponentWeb, SizePreset: SizeLarge},
+		},
+		{
+			name:  "replicas with no size preset is valid",
+			input: ComponentSpec{Name: "web", Type: ComponentWeb, Replicas: 5},
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateComponentSpec(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateComponentSpec() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr && tt.errFrag != "" && !strings.Contains(err.Error(), tt.errFrag) {
+				t.Errorf("ValidateComponentSpec() error = %q, want substring %q", err.Error(), tt.errFrag)
+			}
+		})
+	}
+}
+
 // ── AppPreviewNamespace ───────────────────────────────────────────────────────
 
 func TestAppPreviewNamespace(t *testing.T) {
@@ -406,9 +544,9 @@ func TestAppPreviewNamespace(t *testing.T) {
 		previewName string
 		want        string
 	}{
-		{"hello", "pr-42", "hello-preview-pr-42"},
-		{"my-app", "feature-branch", "my-app-preview-feature-branch"},
-		{"api", "pr-182", "api-preview-pr-182"},
+		{"hello", "pr-42", "hello-pr-42"},
+		{"my-app", "feature-branch", "my-app-feature-branch"},
+		{"api", "pr-182", "api-pr-182"},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -418,5 +556,79 @@ func TestAppPreviewNamespace(t *testing.T) {
 				t.Errorf("AppPreviewNamespace(%q, %q) = %q, want %q", tt.appName, tt.previewName, got, tt.want)
 			}
 		})
+	}
+}
+
+// ── SanitizeAppName ───────────────────────────────────────────────────────────
+
+func TestSanitizeAppName(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "simple lowercase", input: "my-app", want: "my-app"},
+		{name: "uppercase letters", input: "MyApp", want: "myapp"},
+		{name: "slashes and underscores", input: "my/app_name", want: "my-app-name"},
+		{name: "starts with digit", input: "42app", want: "app-42app"},
+		{name: "numeric only", input: "123", want: "app-123"},
+		{name: "all non-alphanumeric", input: "---///---", want: "app"},
+		{name: "empty string", input: "", want: "app"},
+		{name: "leading non-alphanumeric", input: "/myapp", want: "myapp"},
+		{name: "trailing non-alphanumeric", input: "myapp/", want: "myapp"},
+		{name: "multiple consecutive separators", input: "my//--app", want: "my-app"},
+		{name: "dot separator", input: "v1.2.3", want: "v1-2-3"},
+		{name: "mixed case with hyphens", input: "My-App", want: "my-app"},
+		{name: "valid two-char", input: "ab", want: "ab"},
+		{
+			name:  "long name truncated at 63",
+			input: strings.Repeat("a", 70),
+			want:  strings.Repeat("a", 63),
+		},
+		{
+			name:  "long name truncated, trailing hyphen stripped",
+			input: strings.Repeat("a", 62) + "--extra",
+			want:  strings.Repeat("a", 62),
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			got := SanitizeAppName(tt.input)
+			if got != tt.want {
+				t.Errorf("SanitizeAppName(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// SanitizeAppName produces output that, when valid per ValidateAppName, is
+// always a DNS label. Test the sanitizer+validator pipeline for representative inputs.
+func TestSanitizeAndValidateAppName(t *testing.T) {
+	valid := []string{
+		"MyApp",
+		"my/app_name",
+		"v1.2.3",
+		"My-App",
+		"hello-world",
+	}
+	for _, raw := range valid {
+		sanitized := SanitizeAppName(raw)
+		if err := ValidateAppName(sanitized); err != nil {
+			t.Errorf("SanitizeAppName(%q) = %q which failed ValidateAppName: %v", raw, sanitized, err)
+		}
+	}
+}
+
+func TestSanitizeAppNameIsDeterministic(t *testing.T) {
+	inputs := []string{"MyApp", "my/app_name", "42app", ""}
+	for _, input := range inputs {
+		first := SanitizeAppName(input)
+		for i := 0; i < 3; i++ {
+			got := SanitizeAppName(input)
+			if got != first {
+				t.Errorf("SanitizeAppName(%q) not deterministic: run %d got %q, first got %q", input, i, got, first)
+			}
+		}
 	}
 }

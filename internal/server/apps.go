@@ -26,9 +26,11 @@ type AppSecretRefDTO struct {
 // (e.g. "web", "worker", "cron"). It is a read-only view; mutations go through
 // the app spec update endpoint.
 type ComponentSummaryDTO struct {
-	Name             string `json:"name"`
-	Type             string `json:"type"`
-	EnabledInPreview bool   `json:"enabledInPreview"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	Enabled        bool   `json:"enabled"`
+	Expose         bool   `json:"expose"`
+	PreviewEnabled bool   `json:"previewEnabled"`
 }
 
 // AppReleaseRefDTO identifies the deployed release version for one environment
@@ -153,14 +155,22 @@ type AppEnvironmentResponse struct {
 // ComponentCreateDTO allows callers to explicitly define a component when
 // creating an app. When the Components list is omitted from the request body,
 // the handler derives a default component from the template category.
+// ComponentCreateDTO represents a component as specified in the create-app
+// request body. When absent from the request, the handler derives a default
+// component from the template category.
 type ComponentCreateDTO struct {
 	// Name must be a valid DNS label (lowercase alphanumeric and hyphens).
 	Name string `json:"name"`
 	// Type must be one of "web", "worker", or "cron".
 	Type string `json:"type"`
-	// EnabledInPreview controls whether this component is deployed in preview
+	// Enabled controls whether this component is active. Defaults to true.
+	Enabled bool `json:"enabled"`
+	// Expose indicates the component should be reachable via ingress.
+	// Defaults to true for web components, false for others.
+	Expose bool `json:"expose"`
+	// PreviewEnabled controls whether this component is deployed in preview
 	// environments. Defaults to true for web components, false for others.
-	EnabledInPreview bool `json:"enabledInPreview"`
+	PreviewEnabled bool `json:"previewEnabled"`
 }
 
 // createAppRequest is the JSON body for POST /api/v1/projects/{project}/apps.
@@ -181,8 +191,16 @@ type createAppRequest struct {
 	// SecretRefs maps secret input names to Kubernetes Secret references.
 	// Values are resolved at runtime; no plaintext secrets are accepted.
 	SecretRefs []AppSecretRefDTO `json:"secretRefs"`
-	// Components is optional. When absent, a single default component is
-	// derived from the template category (web → "web", worker → "worker", etc.).
+	// ComponentToggles overrides the enabled state of optional (non-required)
+	// components declared in the template. Keys are component names; values
+	// are the desired enabled state. Required components ignore this field.
+	// When absent, the template's defaultEnabled value is used for each
+	// component. Has no effect when Components is also supplied.
+	ComponentToggles map[string]bool `json:"componentToggles,omitempty"`
+	// Components is optional and bypasses the template-derived component
+	// initialisation entirely when provided. Prefer ComponentToggles for
+	// templates that declare a spec.components section. When absent, the
+	// handler initialises components from the template via ComponentToggles.
 	Components []ComponentCreateDTO `json:"components,omitempty"`
 }
 
@@ -240,14 +258,16 @@ type AppPromoteRequest struct {
 	TargetEnvironment string `json:"targetEnvironment"`
 }
 
-// AppPromoteResponse is the JSON body returned on a successful app promotion
-// acknowledgement. For MVP this confirms the intent; Kargo integration will
-// update this response when it is wired in.
+// AppPromoteResponse is the JSON body returned on a successful app promotion.
+// Release is populated with the release ref that was copied from source to
+// destination; it is nil only when no release information is available.
 type AppPromoteResponse struct {
-	Project     string `json:"project"`
-	App         string `json:"app"`
-	Source      string `json:"source"`
-	Destination string `json:"destination"`
-	Namespace   string `json:"namespace"`
-	Message     string `json:"message"`
+	Project     string            `json:"project"`
+	App         string            `json:"app"`
+	Source      string            `json:"source"`
+	Destination string            `json:"destination"`
+	Namespace   string            `json:"namespace"`
+	Message     string            `json:"message"`
+	// Release is the release bundle (all components) that was promoted.
+	Release     *AppReleaseRefDTO `json:"release,omitempty"`
 }

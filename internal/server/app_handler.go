@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -56,10 +57,11 @@ func newAppHandler(store domain.AppStore, templates []*tpl.Template, projectStor
 
 // handleCreateApp handles POST /api/v1/projects/{project}/apps.
 //
-// It validates the request body, resolves the referenced template, runs
-// template input validation, checks for duplicate app names, constructs
-// the App and its default staging+prod environments, persists them, and
-// returns 201 with the full app detail.
+// It validates the request body, resolves the referenced template, checks for
+// duplicate app names, and delegates the full creation pipeline (input
+// validation, component initialisation, AppSpec assembly, Helm value
+// generation) to domainapp.Create. The generated Helm values are logged here
+// for audit purposes; GitOps commit integration is a follow-up step.
 func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 
@@ -86,22 +88,6 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	values := req.Values
-	if values == nil {
-		values = map[string]any{}
-	}
-
-	// Convert secret refs from DTO to the project type required by the
-	// template validator, then run input validation.
-	secretRefsForValidation := make([]project.SecretRef, len(req.SecretRefs))
-	for i, s := range req.SecretRefs {
-		secretRefsForValidation[i] = project.SecretRef{Name: s.Name, SecretRef: s.SecretRef}
-	}
-	if err := project.ValidateAppInputs(values, secretRefsForValidation, tmpl); err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
-		return
-	}
-
 	// Verify the project exists before attempting any writes.
 	if _, err := ah.projectStore.Get(r.Context(), projectName); err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{
@@ -118,8 +104,15 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert and optionally validate explicit components.
-	var components []domain.Component
+	// Convert secret refs from DTO to domain type for the Create pipeline.
+	domainSecretRefs := make([]domain.AppSecretRef, len(req.SecretRefs))
+	for i, s := range req.SecretRefs {
+		domainSecretRefs[i] = domain.AppSecretRef{Name: s.Name, SecretRef: s.SecretRef}
+	}
+
+	// Build explicit component specs when the caller provides them (legacy
+	// path). When absent, Create initialises components from the template.
+	var explicitComponents []domain.ComponentSpec
 	for i, c := range req.Components {
 		ct, err := domain.ParseComponentType(c.Type)
 		if err != nil {
@@ -128,41 +121,47 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		components = append(components, domain.Component{
-			Name:             c.Name,
-			Type:             ct,
-			EnabledInPreview: c.EnabledInPreview,
+		explicitComponents = append(explicitComponents, domain.ComponentSpec{
+			Name:           c.Name,
+			Type:           ct,
+			Enabled:        c.Enabled,
+			Expose:         c.Expose,
+			PreviewEnabled: c.PreviewEnabled,
 		})
 	}
-	if len(components) > 0 {
-		if err := domain.ValidateComponents(components); err != nil {
+	if len(explicitComponents) > 0 {
+		if err := domain.ValidateComponents(explicitComponents); err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 			return
 		}
 	}
 
-	// Convert secret refs from DTO to domain type.
-	domainSecretRefs := make([]domain.AppSecretRef, len(req.SecretRefs))
-	for i, s := range req.SecretRefs {
-		domainSecretRefs[i] = domain.AppSecretRef{Name: s.Name, SecretRef: s.SecretRef}
+	values := req.Values
+	if values == nil {
+		values = map[string]any{}
 	}
 
-	newApp, envs := domainapp.Build(
-		projectName,
-		req.Name,
-		req.DisplayName,
-		req.Description,
-		tmpl,
-		values,
-		domainSecretRefs,
-		components,
-	)
+	result, err := domainapp.Create(domainapp.CreateRequest{
+		ProjectName:        projectName,
+		AppName:            req.Name,
+		DisplayName:        req.DisplayName,
+		Description:        req.Description,
+		Template:           tmpl,
+		Values:             values,
+		SecretRefs:         domainSecretRefs,
+		ComponentToggles:   req.ComponentToggles,
+		ExplicitComponents: explicitComponents,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
 
-	if err := ah.appStore.SaveApp(r.Context(), projectName, newApp); err != nil {
+	if err := ah.appStore.SaveApp(r.Context(), projectName, result.App); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
 		return
 	}
-	for _, env := range envs {
+	for _, env := range result.Environments {
 		if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app environment"})
 			return
@@ -326,6 +325,12 @@ func (ah *appHandler) handleListAppPreviews(w http.ResponseWriter, r *http.Reque
 // domain.SanitizePreviewName (deterministic, branch-name-friendly) before
 // validation and storage. Only apps with at least one preview-enabled component
 // may create previews; the handler returns 422 otherwise.
+//
+// Internally, the handler delegates to domainapp.CreatePreview which builds
+// the EnvironmentInstance, generates Helm values (respecting preview_enabled
+// components), and generates the ArgoCD Application manifest as a pure
+// function. Persistence to the AppStore is handled by projecting the
+// EnvironmentInstance back onto an AppEnvironment (compat layer).
 func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
@@ -354,7 +359,12 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	env, err := domainapp.NewPreviewEnvironment(a, sanitized)
+	// Run the full preview creation pipeline: EnvironmentInstance + Helm values
+	// + ArgoCD Application, respecting preview_enabled components.
+	previewResult, err := domainapp.CreatePreview(domainapp.PreviewRequest{
+		App:         a,
+		PreviewName: sanitized,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
@@ -366,6 +376,18 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 			Error: "preview \"" + sanitized + "\" already exists for app \"" + appName + "\"",
 		})
 		return
+	}
+
+	// Project the EnvironmentInstance onto AppEnvironment for the compat store.
+	inst := previewResult.Instance
+	env := &domain.AppEnvironment{
+		AppName:     inst.AppName,
+		ProjectName: inst.ProjectName,
+		EnvName:     inst.EnvName,
+		EnvType:     inst.EnvType,
+		Namespace:   inst.Namespace,
+		URLs:        []string{inst.URL},
+		Status:      inst.Status,
 	}
 
 	if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
@@ -408,15 +430,15 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 
 // handlePromoteApp handles POST /api/v1/projects/{project}/apps/{app}/promote.
 //
-// For MVP the promotion path is preview → staging → prod. Promoting to a
-// preview environment is rejected. When Kargo integration is available it will
-// orchestrate the actual promotion; for now this validates the intent and
-// returns a structured acknowledgement so callers get a stable, app-scoped
-// response shape.
+// Promotion path is preview → staging → prod. Promoting to a preview
+// environment is rejected. The handler resolves the source environment
+// deterministically (lexicographically first candidate at the tier immediately
+// below the target), then delegates the actual release-copy to
+// domainapp.Promote which performs the all-or-nothing write.
 //
-// Component versions within the app release bundle are kept aligned: the
-// promotion moves the entire app (all components) from the source environment
-// to the destination, not individual components.
+// All components in the app share a single AppReleaseRef, so there is no
+// possibility of partial component promotion: the entire release bundle moves
+// together or not at all.
 func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
@@ -461,20 +483,44 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the source: the lexicographically first environment at the tier
+	// immediately below the target in the promotion chain.
 	sourceEnv, err := ah.findPromotionSource(r.Context(), projectName, appName, targetOrder)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, AppPromoteResponse{
+	// Execute the promotion: copy the release bundle and persist the target.
+	result, err := domainapp.Promote(r.Context(), ah.appStore, domainapp.PromoteRequest{
+		ProjectName: projectName,
+		AppName:     appName,
+		FromEnv:     sourceEnv.EnvName,
+		ToEnv:       req.TargetEnvironment,
+	})
+	if err != nil {
+		if errors.Is(err, domainapp.ErrNoRelease) {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to promote app"})
+		return
+	}
+
+	resp := AppPromoteResponse{
 		Project:     projectName,
 		App:         appName,
 		Source:      sourceEnv.EnvName,
 		Destination: req.TargetEnvironment,
 		Namespace:   targetEnv.Namespace,
-		Message:     "Promotion of " + appName + " from " + sourceEnv.EnvName + " to " + req.TargetEnvironment + " initiated",
-	})
+		Message:     "Promotion of " + appName + " from " + sourceEnv.EnvName + " to " + req.TargetEnvironment + " succeeded",
+		Release: &AppReleaseRefDTO{
+			Image:  result.Release.Image,
+			Tag:    result.Release.Tag,
+			Commit: result.Release.Commit,
+		},
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // findPromotionSource returns the best source environment for a promotion to
@@ -625,13 +671,15 @@ func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
 	}
 }
 
-func componentDTOs(components []domain.Component) []ComponentSummaryDTO {
+func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 	dtos := make([]ComponentSummaryDTO, 0, len(components))
 	for _, c := range components {
 		dtos = append(dtos, ComponentSummaryDTO{
-			Name:             c.Name,
-			Type:             string(c.Type),
-			EnabledInPreview: c.EnabledInPreview,
+			Name:           c.Name,
+			Type:           string(c.Type),
+			Enabled:        c.Enabled,
+			Expose:         c.Expose,
+			PreviewEnabled: c.PreviewEnabled,
 		})
 	}
 	return dtos

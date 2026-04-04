@@ -62,4 +62,34 @@ func assertWebServiceTemplate(t *testing.T, tmpl *Template) {
 	if len(tmpl.Spec.Mappings) == 0 {
 		t.Error("expected at least one mapping")
 	}
+
+	// Component topology assertions.
+	if len(tmpl.Spec.Components) == 0 {
+		t.Fatal("expected at least one component in spec.components")
+	}
+	var webComp *TemplateComponent
+	for i := range tmpl.Spec.Components {
+		if tmpl.Spec.Components[i].Name == "web" {
+			webComp = &tmpl.Spec.Components[i]
+			break
+		}
+	}
+	if webComp == nil {
+		t.Fatal("expected a component named \"web\" in spec.components")
+	}
+	if webComp.Type != TemplateComponentWeb {
+		t.Errorf("web component type = %q, want %q", webComp.Type, TemplateComponentWeb)
+	}
+	if !webComp.Required {
+		t.Error("web component should be required")
+	}
+	if !webComp.Exposed {
+		t.Error("web component should be exposed")
+	}
+	if !webComp.PreviewEnabled {
+		t.Error("web component should be previewEnabled")
+	}
+	if !webComp.IsDefaultEnabled() {
+		t.Error("web component should be default-enabled")
+	}
 }

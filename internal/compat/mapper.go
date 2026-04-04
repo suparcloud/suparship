@@ -35,8 +35,8 @@ import "github.com/suparcloud/suparship/internal/domain"
 //   - DisplayName and Description are passed through unchanged.
 //   - Template.Name is taken from Service.TemplateName; Template.Version is
 //     left empty because domain.Service does not carry a version string.
-//   - A single Component named "web" with Type=ComponentWeb and
-//     EnabledInPreview=true is synthesised. This reflects the assumption that
+//   - A single ComponentSpec named "web" with Type=ComponentWeb and
+//     PreviewEnabled=true is synthesised. This reflects the assumption that
 //     every legacy service exposes an HTTP endpoint as its primary workload.
 //   - Values and SecretRefs are left empty: domain.Service does not carry
 //     input values (those live in project.Service and are not needed for the
@@ -54,12 +54,14 @@ func MapServiceToApp(svc *domain.Service) *domain.App {
 			},
 			// Default web component: every legacy service is treated as an
 			// HTTP-facing workload with a single deployable component named
-			// "web".  EnabledInPreview=true follows the platform default.
-			Components: []domain.Component{
+			// "web".  PreviewEnabled=true follows the platform default.
+			Components: []domain.ComponentSpec{
 				{
-					Name:             "web",
-					Type:             domain.ComponentWeb,
-					EnabledInPreview: true,
+					Name:           "web",
+					Type:           domain.ComponentWeb,
+					Enabled:        true,
+					Expose:         true,
+					PreviewEnabled: true,
 				},
 			},
 		},

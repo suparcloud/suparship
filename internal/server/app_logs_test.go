@@ -225,9 +225,9 @@ func TestAppLogsWithComponent(t *testing.T) {
 		ProjectName: "myproject",
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "web-service"},
-			Components: []domain.Component{
-				{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
-				{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
+				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
 			},
 		},
 	}
@@ -428,14 +428,14 @@ func TestAppLogsPreviewEnvironment(t *testing.T) {
 		ProjectName: "myproject",
 		EnvName:     "pr-42",
 		EnvType:     domain.AppEnvPreview,
-		Namespace:   "hello-preview-pr-42",
+		Namespace:   "hello-pr-42",
 	}
 	store.addEnv(previewEnv)
 
-	lp.pods["hello-preview-pr-42"] = []runtime.PodInfo{
+	lp.pods["hello-pr-42"] = []runtime.PodInfo{
 		{Name: "hello-pr42-pod", Containers: []string{"web"}},
 	}
-	lp.logs["hello-preview-pr-42/hello-pr42-pod/web"] = "preview log\n"
+	lp.logs["hello-pr-42/hello-pr42-pod/web"] = "preview log\n"
 
 	rec := getAppLogs(mux, sessionCookieFor(ah, "alice", "org_admin"),
 		"/api/v1/projects/myproject/apps/hello/logs?environment=pr-42")
