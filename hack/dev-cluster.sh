@@ -8,13 +8,17 @@
 #   - service promotion flows (staging → prod)
 #   - runtime status and logs against real workloads
 #   - ArgoCD sync and health integration
+#   - GitOps commits to Gitea, ArgoCD sync and deploy
 #
 # This script is idempotent. It:
 #   1. Runs cluster bootstrap (creates kind cluster + namespaces if needed)
-#   2. Installs ArgoCD if the argocd-server Deployment is absent
-#   3. Builds the Go binary
-#   4. Starts the backend in Kubernetes mode (SUPARSHIP_DEV_MODE is unset)
-#   5. Starts the Vite frontend dev server
+#   2. Installs NGINX ingress controller if absent
+#   3. Installs ArgoCD if the argocd-server Deployment is absent
+#   4. Installs Gitea + creates gitops repo + registers with ArgoCD if absent
+#   5. Seeds demo data
+#   6. Builds the Go binary
+#   7. Starts the backend in Kubernetes mode (SUPARSHIP_DEV_MODE is unset)
+#   8. Starts the Vite frontend dev server
 #
 # Ctrl+C stops backend + frontend. The kind cluster keeps running.
 #
@@ -54,7 +58,16 @@ echo "  ────────────────────────
 echo ""
 hack/bootstrap-cluster.sh
 
-# ── 2. Ensure ArgoCD is installed ────────────────────────────────────────
+# ── 2. Ensure NGINX ingress controller is installed ──────────────────────
+if kubectl get deployment ingress-nginx-controller \
+     -n ingress-nginx >/dev/null 2>&1; then
+  echo "  –  NGINX ingress controller already installed — skipping"
+  echo ""
+else
+  hack/install-ingress.sh
+fi
+
+# ── 3. Ensure ArgoCD is installed ────────────────────────────────────────
 # Check for the argocd-server Deployment as a quick proxy for "installed".
 # When absent, run the full install script (helm upgrade --install, ~3-5 min
 # on first run; near-instant on repeat runs once images are cached).
@@ -65,10 +78,18 @@ else
   hack/install-argocd.sh
 fi
 
-# ── 3. Seed demo data (idempotent) ───────────────────────────────────────
+# ── 4. Ensure Gitea is installed + gitops repo exists ────────────────────
+if helm status gitea -n gitea >/dev/null 2>&1; then
+  echo "  –  Gitea already installed — skipping"
+  echo ""
+else
+  hack/install-gitea.sh
+fi
+
+# ── 5. Seed demo data (idempotent) ───────────────────────────────────────
 hack/seed.sh
 
-# ── 4. Admin credentials check ───────────────────────────────────────────
+# ── 6. Admin credentials check ───────────────────────────────────────────
 # Seed does not create auth credentials (they require a bcrypt hash).
 # Warn once if bootstrap has not been run; the server will start but login
 # will fail until the secret exists.
@@ -81,7 +102,7 @@ if ! kubectl get secret suparship-admin-auth -n suparship-system >/dev/null 2>&1
   echo ""
 fi
 
-# ── 5. Banner ─────────────────────────────────────────────────────────────
+# ── 7. Banner ─────────────────────────────────────────────────────────────
 cat <<EOF
   ──────────────────────────────────────────────────────────────────
   suparShip — cluster dev  (backend → ${KUBE_CONTEXT})
@@ -91,32 +112,38 @@ cat <<EOF
   Frontend  →  http://localhost:${FRONTEND_PORT}
   ArgoCD    →  kubectl port-forward svc/argocd-server -n argocd 8180:80
                then open http://localhost:8180
+  Gitea     →  http://gitea.localhost:8880  (gitops / gitops-dev-only)
+               gitops repo: http://gitea.localhost:8880/gitops/gitops
 
   Good for:
     previews · promotions · runtime status · real pod logs · ArgoCD sync
+
+  /etc/hosts (must have):
+    127.0.0.1 gitea.localhost
 
   Handy checks:
     kubectl get nodes
     kubectl get ns
     kubectl get pods -n argocd
+    kubectl get pods -n gitea
 
   Ctrl+C stops backend + frontend. Cluster keeps running.
   To delete: task dev:cluster:delete
 
 EOF
 
-# ── 6. Build Go binary ────────────────────────────────────────────────────
+# ── 8. Build Go binary ────────────────────────────────────────────────────
 printf "  [api] building... "
 go build -o bin/suparship ./cmd/suparship
 echo "ok"
 
-# ── 7. npm install (first run only) ──────────────────────────────────────
+# ── 9. npm install (first run only) ──────────────────────────────────────
 if [ ! -d ui/node_modules ]; then
   echo "  [ui]  installing npm packages (first time, may take a moment)..."
   (cd ui && npm install --silent)
 fi
 
-# ── 8. Start backend in cluster mode ─────────────────────────────────────
+# ── 10. Start backend in cluster mode ────────────────────────────────────
 # SUPARSHIP_DEV_MODE is unset → internal/config.Load() returns ModeKubernetes.
 # The server reads KUBECONFIG (defaulting to ~/.kube/config), which was set
 # to the kind cluster context in step 1.
@@ -124,7 +151,7 @@ SUPARSHIP_CORS_ORIGINS="http://localhost:${FRONTEND_PORT}" \
   ./bin/suparship server &
 API_PID=$!
 
-# ── 9. Clean shutdown on Ctrl+C ──────────────────────────────────────────
+# ── 11. Clean shutdown on Ctrl+C ─────────────────────────────────────────
 cleanup() {
   printf "\n  Stopping backend...\n"
   kill "$API_PID" 2>/dev/null || true
@@ -134,5 +161,5 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ── 10. Start frontend in foreground (blocks until Ctrl+C) ────────────────
+# ── 12. Start frontend in foreground (blocks until Ctrl+C) ────────────────
 (cd ui && npm run dev)

@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# hack/init-gitops-repo.sh — bootstrap the gitops monorepo content in Gitea.
+#
+# Pushes the initial directory structure that suparship writes to and ArgoCD
+# syncs from. Safe to re-run: checks for existing content before pushing.
+#
+# Monorepo layout after this script:
+#
+#   charts/
+#     web-service/          ← Helm chart, copied from templates/web-service/chart/
+#       Chart.yaml
+#       values.yaml
+#       templates/
+#   gitops-output/
+#     .gitkeep              ← placeholder; suparship writes per-app dirs here
+#   README.md
+#
+# ArgoCD Application CRDs committed by suparship live at:
+#   gitops-output/<project>/<app>/<env>/argocd-app.yaml
+#
+# Those Applications reference the chart at:
+#   charts/<template-name>/
+# with inline Helm values for that environment.
+#
+# Environment variables (all required — set by install-gitea.sh):
+#   GITEA_HOST_URL       e.g. http://gitea.localhost:8880
+#   GITEA_ADMIN_USER     e.g. gitops
+#   GITEA_ADMIN_PASS     e.g. gitops-dev-only
+#   GITOPS_REPO_ORG      e.g. gitops
+#   GITOPS_REPO_NAME     e.g. gitops
+#   GITEA_CLUSTER_URL    e.g. http://gitea-http.gitea.svc.cluster.local:3000
+#   REPO_ROOT            absolute path to the suparship repo root
+#
+# Used by: hack/install-gitea.sh
+set -euo pipefail
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+info()  { printf "  \033[0;36m%s\033[0m\n" "$*"; }
+ok()    { printf "  \033[0;32m✓\033[0m  %s\n" "$*"; }
+skip()  { printf "  \033[0;33m–\033[0m  %s\n" "$*"; }
+die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
+
+# ── Validate required env vars ────────────────────────────────────────────
+: "${GITEA_HOST_URL:?GITEA_HOST_URL is required}"
+: "${GITEA_ADMIN_USER:?GITEA_ADMIN_USER is required}"
+: "${GITEA_ADMIN_PASS:?GITEA_ADMIN_PASS is required}"
+: "${GITOPS_REPO_ORG:?GITOPS_REPO_ORG is required}"
+: "${GITOPS_REPO_NAME:?GITOPS_REPO_NAME is required}"
+: "${GITEA_CLUSTER_URL:?GITEA_CLUSTER_URL is required}"
+: "${REPO_ROOT:?REPO_ROOT is required}"
+
+GITOPS_REPO_HOST_URL="${GITEA_HOST_URL}/${GITOPS_REPO_ORG}/${GITOPS_REPO_NAME}.git"
+
+# ── Check if already initialised ─────────────────────────────────────────
+info "Checking if gitops repo already has content..."
+
+TREE_COUNT=$(curl -sf \
+  "${GITEA_HOST_URL}/api/v1/repos/${GITOPS_REPO_ORG}/${GITOPS_REPO_NAME}/git/trees/main?recursive=false" \
+  -u "${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASS}" 2>/dev/null \
+  | grep -o '"path"' | wc -l | tr -d ' ' || echo "0")
+
+# If there are already 3+ tracked paths the repo is initialised.
+if [ "${TREE_COUNT}" -ge 3 ] 2>/dev/null; then
+  skip "gitops repo already has content (${TREE_COUNT} paths) — skipping init"
+  echo ""
+  exit 0
+fi
+
+echo ""
+
+# ── Clone into a temp dir ─────────────────────────────────────────────────
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "${TMPDIR}"' EXIT
+
+info "Cloning gitops repo into temp dir..."
+
+# Embed credentials in the URL so git doesn't prompt interactively.
+CLONE_URL="http://${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASS}@${GITEA_HOST_URL#http://}/${GITOPS_REPO_ORG}/${GITOPS_REPO_NAME}.git"
+
+git -c advice.detachedHead=false clone --quiet "${CLONE_URL}" "${TMPDIR}/gitops"
+ok "cloned to ${TMPDIR}/gitops"
+echo ""
+
+cd "${TMPDIR}/gitops"
+
+# Configure git identity for the commit (local to this clone only).
+git config user.email "suparship-dev@local"
+git config user.name  "suparShip Dev Bot"
+
+# ── Build the monorepo skeleton ───────────────────────────────────────────
+info "Creating gitops repo skeleton..."
+
+# 1. charts/web-service — copy from the suparship templates dir.
+mkdir -p charts
+cp -r "${REPO_ROOT}/templates/web-service/chart" charts/web-service
+ok "charts/web-service  (copied from templates/web-service/chart)"
+
+# 2. gitops-output placeholder — suparship writes per-app dirs here.
+mkdir -p gitops-output
+touch gitops-output/.gitkeep
+ok "gitops-output/.gitkeep"
+
+# 3. README.
+cat > README.md <<'EOF'
+# suparShip GitOps Repo
+
+This repository is the GitOps source of truth for suparShip.
+
+## Layout
+
+```
+charts/
+  <template-name>/          Helm charts referenced by ArgoCD Applications.
+                            Populated by: hack/init-gitops-repo.sh
+
+gitops-output/
+  <project>/<app>/<env>/
+    argocd-app.yaml         ArgoCD Application CRD for this app+env.
+                            Committed by: suparship server on app create/update.
+```
+
+## How it works
+
+1. `suparship` server commits `argocd-app.yaml` files under `gitops-output/`.
+2. The root ArgoCD Application (`suparship-apps`) watches `gitops-output/`
+   recursively for any `argocd-app.yaml` and applies them to the cluster.
+3. Each child Application syncs the Helm chart from `charts/<template>/`
+   with inline values specific to that environment.
+
+## Local dev
+
+- Gitea UI: http://gitea.localhost:8880  (user: gitops)
+- Source of credentials: `.env.cluster` (git-ignored)
+EOF
+ok "README.md"
+
+echo ""
+
+# ── Commit and push ───────────────────────────────────────────────────────
+info "Committing and pushing..."
+
+git add .
+git commit --quiet -m "chore: initialise gitops monorepo skeleton
+
+- charts/web-service copied from templates/web-service/chart
+- gitops-output/ placeholder for suparship-generated manifests
+- README documenting the layout and workflow"
+
+git push --quiet origin main
+ok "pushed to ${GITOPS_REPO_HOST_URL}"
+echo ""

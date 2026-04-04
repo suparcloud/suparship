@@ -51,6 +51,29 @@ tasks:
     cmds:
       - hack/install-argocd.sh
 
+  dev:cluster:ingress:
+    desc: "Install NGINX ingress controller into the kind cluster"
+    cmds:
+      - hack/install-ingress.sh
+
+  dev:cluster:gitea:
+    desc: "Install Gitea + create gitops repo + register with ArgoCD"
+    cmds:
+      - hack/install-gitea.sh
+
+  dev:cluster:gitops-init:
+    desc: "Re-push gitops repo skeleton to Gitea (charts + gitops-output)"
+    cmds:
+      - |
+        export GITEA_HOST_URL=http://gitea.localhost:8880
+        export GITEA_ADMIN_USER=gitops
+        export GITEA_ADMIN_PASS=gitops-dev-only
+        export GITOPS_REPO_ORG=gitops
+        export GITOPS_REPO_NAME=gitops
+        export GITEA_CLUSTER_URL=http://gitea-http.gitea.svc.cluster.local:3000
+        export REPO_ROOT=$(pwd)
+        hack/init-gitops-repo.sh
+
   dev:cluster:delete:
     desc: "Delete the suparShip dev cluster"
     cmds:
@@ -58,6 +81,13 @@ tasks:
         kind delete cluster --name suparship-dev \
           && echo "  Cluster deleted." \
           || echo "  Cluster 'suparship-dev' not found — nothing to delete."
+
+  # ── Demo ───────────────────────────────────────────────────────────────
+
+  demo:deploy:
+    desc: "Deploy the hello demo app (nginx) to the kind cluster via GitOps"
+    cmds:
+      - hack/deploy-demo-app.sh
 
   # ── Testing ────────────────────────────────────────────────────────────
 
