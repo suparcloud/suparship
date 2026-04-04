@@ -35,14 +35,14 @@ func TestGenerateNamespace(t *testing.T) {
 			appName: "hello",
 			envName: "pr-42",
 			envType: AppEnvPreview,
-			want:    "hello-preview-pr-42",
+			want:    "hello-pr-42",
 		},
 		{
 			name:    "preview feature branch",
 			appName: "my-api",
 			envName: "feature-branch",
 			envType: AppEnvPreview,
-			want:    "my-api-preview-feature-branch",
+			want:    "my-api-feature-branch",
 		},
 		{
 			name:    "staging hyphenated app",
@@ -63,7 +63,7 @@ func TestGenerateNamespace(t *testing.T) {
 			appName: "svc",
 			envName: "pr-182",
 			envType: AppEnvPreview,
-			want:    "svc-preview-pr-182",
+			want:    "svc-pr-182",
 		},
 	}
 
@@ -82,7 +82,7 @@ func TestGenerateNamespace(t *testing.T) {
 func TestGenerateNamespaceIsDeterministic(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		got := GenerateNamespace("hello", "pr-42", AppEnvPreview)
-		if got != "hello-preview-pr-42" {
+		if got != "hello-pr-42" {
 			t.Errorf("run %d: GenerateNamespace not deterministic, got %q", i, got)
 		}
 	}
@@ -310,8 +310,8 @@ func TestEnvironmentInstancePreviewFields(t *testing.T) {
 	if inst.EnvType != AppEnvPreview {
 		t.Errorf("EnvType = %q, want preview", inst.EnvType)
 	}
-	if inst.Namespace != "hello-preview-pr-42" {
-		t.Errorf("Namespace = %q, want %q", inst.Namespace, "hello-preview-pr-42")
+	if inst.Namespace != "hello-pr-42" {
+		t.Errorf("Namespace = %q, want %q", inst.Namespace, "hello-pr-42")
 	}
 	if inst.URL != "http://pr-42.hello.preview.localhost" {
 		t.Errorf("URL = %q, want %q", inst.URL, "http://pr-42.hello.preview.localhost")

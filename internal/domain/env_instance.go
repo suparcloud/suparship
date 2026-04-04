@@ -49,18 +49,21 @@ type EnvironmentInstance struct {
 // GenerateNamespace derives the Kubernetes namespace for an environment
 // instance from its app name, environment name, and environment type.
 //
-// Convention:
+// Convention (all env types):
 //
-//	staging/prod  →  {appName}-{envName}          e.g. "hello-staging"
-//	preview       →  {appName}-preview-{envName}  e.g. "hello-preview-pr-42"
+//	staging  →  {appName}-staging     e.g. "hello-staging"
+//	prod     →  {appName}-prod        e.g. "hello-prod"
+//	preview  →  {appName}-{envName}   e.g. "hello-pr-42"
+//
+// The preview envName is expected to carry a meaningful identifier such as
+// "pr-42" (PR number) or a sanitized branch name. Callers should pass a value
+// that has already been sanitized with SanitizePreviewName and validated with
+// ValidatePreviewName.
 //
 // Both appName and envName are expected to be valid DNS labels; callers should
 // validate them with ValidateAppName / ValidatePreviewName before calling this
 // function if the values are user-supplied.
-func GenerateNamespace(appName, envName string, envType AppEnvironmentType) string {
-	if envType == AppEnvPreview {
-		return appName + "-preview-" + envName
-	}
+func GenerateNamespace(appName, envName string, _ AppEnvironmentType) string {
 	return appName + "-" + envName
 }
 

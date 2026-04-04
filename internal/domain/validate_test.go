@@ -544,9 +544,9 @@ func TestAppPreviewNamespace(t *testing.T) {
 		previewName string
 		want        string
 	}{
-		{"hello", "pr-42", "hello-preview-pr-42"},
-		{"my-app", "feature-branch", "my-app-preview-feature-branch"},
-		{"api", "pr-182", "api-preview-pr-182"},
+		{"hello", "pr-42", "hello-pr-42"},
+		{"my-app", "feature-branch", "my-app-feature-branch"},
+		{"api", "pr-182", "api-pr-182"},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -556,5 +556,79 @@ func TestAppPreviewNamespace(t *testing.T) {
 				t.Errorf("AppPreviewNamespace(%q, %q) = %q, want %q", tt.appName, tt.previewName, got, tt.want)
 			}
 		})
+	}
+}
+
+// ── SanitizeAppName ───────────────────────────────────────────────────────────
+
+func TestSanitizeAppName(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "simple lowercase", input: "my-app", want: "my-app"},
+		{name: "uppercase letters", input: "MyApp", want: "myapp"},
+		{name: "slashes and underscores", input: "my/app_name", want: "my-app-name"},
+		{name: "starts with digit", input: "42app", want: "app-42app"},
+		{name: "numeric only", input: "123", want: "app-123"},
+		{name: "all non-alphanumeric", input: "---///---", want: "app"},
+		{name: "empty string", input: "", want: "app"},
+		{name: "leading non-alphanumeric", input: "/myapp", want: "myapp"},
+		{name: "trailing non-alphanumeric", input: "myapp/", want: "myapp"},
+		{name: "multiple consecutive separators", input: "my//--app", want: "my-app"},
+		{name: "dot separator", input: "v1.2.3", want: "v1-2-3"},
+		{name: "mixed case with hyphens", input: "My-App", want: "my-app"},
+		{name: "valid two-char", input: "ab", want: "ab"},
+		{
+			name:  "long name truncated at 63",
+			input: strings.Repeat("a", 70),
+			want:  strings.Repeat("a", 63),
+		},
+		{
+			name:  "long name truncated, trailing hyphen stripped",
+			input: strings.Repeat("a", 62) + "--extra",
+			want:  strings.Repeat("a", 62),
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			got := SanitizeAppName(tt.input)
+			if got != tt.want {
+				t.Errorf("SanitizeAppName(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// SanitizeAppName produces output that, when valid per ValidateAppName, is
+// always a DNS label. Test the sanitizer+validator pipeline for representative inputs.
+func TestSanitizeAndValidateAppName(t *testing.T) {
+	valid := []string{
+		"MyApp",
+		"my/app_name",
+		"v1.2.3",
+		"My-App",
+		"hello-world",
+	}
+	for _, raw := range valid {
+		sanitized := SanitizeAppName(raw)
+		if err := ValidateAppName(sanitized); err != nil {
+			t.Errorf("SanitizeAppName(%q) = %q which failed ValidateAppName: %v", raw, sanitized, err)
+		}
+	}
+}
+
+func TestSanitizeAppNameIsDeterministic(t *testing.T) {
+	inputs := []string{"MyApp", "my/app_name", "42app", ""}
+	for _, input := range inputs {
+		first := SanitizeAppName(input)
+		for i := 0; i < 3; i++ {
+			got := SanitizeAppName(input)
+			if got != first {
+				t.Errorf("SanitizeAppName(%q) not deterministic: run %d got %q, first got %q", input, i, got, first)
+			}
+		}
 	}
 }

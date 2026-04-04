@@ -330,7 +330,7 @@ func appTestPreviewEnv() *domain.AppEnvironment {
 		ProjectName: "demo",
 		EnvName:     "pr-1",
 		EnvType:     domain.AppEnvPreview,
-		Namespace:   "hello-preview-pr-1",
+		Namespace:   "hello-pr-1",
 		URLs:        []string{"http://pr-1.hello.preview.localhost"},
 		Status: domain.AppRuntimeStatus{
 			Phase:     domain.StatusHealthy,

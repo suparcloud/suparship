@@ -72,7 +72,7 @@ func seedFullPromotionChain(store *memAppStore, projectName string) {
 		AppName:   "my-app",
 		EnvName:   "pr-1",
 		EnvType:   domain.AppEnvPreview,
-		Namespace: "my-app-preview-pr-1",
+		Namespace: "my-app-pr-1",
 		Release:   &domain.AppReleaseRef{Tag: "pr-1-abc"},
 		Status:    domain.AppRuntimeStatus{Phase: domain.StatusHealthy},
 	})
@@ -175,7 +175,7 @@ func TestAppPromoteSourceDeterminismMultiplePreviews(t *testing.T) {
 			AppName:   "my-app",
 			EnvName:   name,
 			EnvType:   domain.AppEnvPreview,
-			Namespace: "my-app-preview-" + name,
+			Namespace: "my-app-" + name,
 			Status:    domain.AppRuntimeStatus{Phase: domain.StatusHealthy},
 		})
 	}

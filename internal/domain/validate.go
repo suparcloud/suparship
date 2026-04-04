@@ -195,8 +195,57 @@ func ValidatePreviewName(name string) error {
 	return nil
 }
 
+// SanitizeAppName converts an arbitrary string into a best-effort valid DNS
+// label for use as an app name. The transformation mirrors SanitizePreviewName
+// but uses an "app-" prefix when the result would otherwise start with a digit,
+// and falls back to "app" when the result is empty.
+//
+// Transformation steps:
+//  1. Lowercase the input.
+//  2. Replace every run of non-alphanumeric characters with a single hyphen.
+//  3. Strip leading and trailing hyphens.
+//  4. Prepend "app-" when the result starts with a digit.
+//  5. Truncate to 63 characters, stripping any trailing hyphen left by the cut.
+//
+// Callers should validate the result with ValidateAppName to confirm it is
+// usable (short or degenerate inputs may produce names that still fail the
+// minimum-length rule).
+func SanitizeAppName(raw string) string {
+	s := strings.ToLower(raw)
+
+	var b strings.Builder
+	prevHyphen := false
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			prevHyphen = false
+		} else if !prevHyphen {
+			b.WriteRune('-')
+			prevHyphen = true
+		}
+	}
+
+	result := strings.Trim(b.String(), "-")
+	if result == "" {
+		return "app"
+	}
+
+	if result[0] >= '0' && result[0] <= '9' {
+		result = "app-" + result
+	}
+
+	if len(result) > 63 {
+		result = strings.TrimRight(result[:63], "-")
+	}
+
+	if result == "" {
+		return "app"
+	}
+	return result
+}
+
 // AppPreviewNamespace returns the Kubernetes namespace for a preview instance
-// of an app. Convention: {appName}-preview-{previewName}.
+// of an app. Convention: {appName}-{previewName}.
 //
 // Deprecated: Use GenerateNamespace(appName, previewName, AppEnvPreview)
 // instead. AppPreviewNamespace is retained for callers in the compat layer

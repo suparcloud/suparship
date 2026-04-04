@@ -317,8 +317,8 @@ func TestNewPreviewEnvironmentSuccess(t *testing.T) {
 	if env.EnvType != domain.AppEnvPreview {
 		t.Errorf("EnvType = %q, want %q", env.EnvType, domain.AppEnvPreview)
 	}
-	if env.Namespace != "my-app-preview-pr-42" {
-		t.Errorf("Namespace = %q, want %q", env.Namespace, "my-app-preview-pr-42")
+	if env.Namespace != "my-app-pr-42" {
+		t.Errorf("Namespace = %q, want %q", env.Namespace, "my-app-pr-42")
 	}
 	if env.Status.Phase != domain.StatusNotDeployed {
 		t.Errorf("Status.Phase = %q, want %q", env.Status.Phase, domain.StatusNotDeployed)
@@ -351,9 +351,9 @@ func TestNewPreviewEnvironmentNamespaceConvention(t *testing.T) {
 		previewName string
 		wantNS      string
 	}{
-		{"hello", "pr-42", "hello-preview-pr-42"},
-		{"my-api", "feature-branch", "my-api-preview-feature-branch"},
-		{"svc", "pr-182", "svc-preview-pr-182"},
+		{"hello", "pr-42", "hello-pr-42"},
+		{"my-api", "feature-branch", "my-api-feature-branch"},
+		{"svc", "pr-182", "svc-pr-182"},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -373,6 +373,48 @@ func TestNewPreviewEnvironmentNamespaceConvention(t *testing.T) {
 			}
 			if env.Namespace != tt.wantNS {
 				t.Errorf("Namespace = %q, want %q", env.Namespace, tt.wantNS)
+			}
+		})
+	}
+}
+
+// --- DefaultEnvironments ---
+
+func TestDefaultEnvironmentsUsesGenerateNamespace(t *testing.T) {
+	a := &domain.App{Name: "my-app", ProjectName: "demo"}
+	envs := DefaultEnvironments(a)
+	if len(envs) != 2 {
+		t.Fatalf("expected 2 environments, got %d", len(envs))
+	}
+	for _, env := range envs {
+		want := domain.GenerateNamespace(env.AppName, env.EnvName, env.EnvType)
+		if env.Namespace != want {
+			t.Errorf("env %q: Namespace = %q, want %q (from GenerateNamespace)", env.EnvName, env.Namespace, want)
+		}
+	}
+}
+
+func TestDefaultEnvironmentsNamespacePatterns(t *testing.T) {
+	tests := []struct {
+		appName   string
+		wantNSs   []string
+	}{
+		{"hello", []string{"hello-staging", "hello-prod"}},
+		{"api-gateway", []string{"api-gateway-staging", "api-gateway-prod"}},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.appName, func(t *testing.T) {
+			a := &domain.App{Name: tt.appName, ProjectName: "demo"}
+			envs := DefaultEnvironments(a)
+			got := make([]string, len(envs))
+			for i, e := range envs {
+				got[i] = e.Namespace
+			}
+			for i, want := range tt.wantNSs {
+				if got[i] != want {
+					t.Errorf("env[%d] Namespace = %q, want %q", i, got[i], want)
+				}
 			}
 		})
 	}

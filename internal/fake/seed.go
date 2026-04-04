@@ -215,7 +215,7 @@ func seedAppEnvironments(r *DevRuntime) {
 			ProjectName: "demo",
 			EnvName:     "pr-42",
 			EnvType:     domain.AppEnvPreview,
-			Namespace:   "hello-preview-pr-42",
+			Namespace:   "hello-pr-42",
 			Release:     helloRel,
 			URLs:        []string{"http://pr-42.hello.preview.localhost"},
 			Status:      healthyPreview,

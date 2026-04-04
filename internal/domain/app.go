@@ -240,7 +240,8 @@ type AppEnvironment struct {
 	// EnvType classifies the environment as staging, prod, or preview.
 	EnvType AppEnvironmentType `json:"envType"`
 	// Namespace is the Kubernetes namespace for this environment instance.
-	// Convention: {app}-{env} for stable envs, {app}-preview-{name} for previews.
+	// Convention: {app}-{envName} for all environments, e.g. "hello-staging",
+	// "hello-prod", "hello-pr-42".
 	Namespace string `json:"namespace"`
 	// Release is the release currently targeted for this environment.
 	// Nil means no release has been promoted here yet.
