@@ -45,6 +45,10 @@ func (s *stubEmptyAppStore) SaveAppEnvironment(_ context.Context, _ string, _ *d
 	return fmt.Errorf("stub: SaveAppEnvironment not implemented")
 }
 
+func (s *stubEmptyAppStore) DeleteAppEnvironment(_ context.Context, _, _, _ string) error {
+	return fmt.Errorf("stub: DeleteAppEnvironment not implemented")
+}
+
 // ── store constructors ────────────────────────────────────────────────────────
 
 // newPrimaryStore returns a store whose primary AppStore holds native seed data

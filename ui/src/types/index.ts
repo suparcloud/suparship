@@ -37,6 +37,8 @@ export interface PreviewEnvironment {
   status: string;
   url?: string;
   createdAt: string;
+  /** Source branch or PR reference, e.g. "main" or "pr-42". Optional until API supports it. */
+  branch?: string;
 }
 
 export interface PreviewsResponse {
@@ -47,6 +49,8 @@ export interface CreatePreviewRequest {
   name: string;
   project: string;
   service: string;
+  /** Optional source branch or PR reference to associate with the preview. */
+  branch?: string;
 }
 
 export interface OrgInfo {
@@ -319,6 +323,17 @@ export interface PromoteResponse {
 export interface LogsResponse {
   project: string;
   service: string;
+  pod: string;
+  container: string;
+  logs: string;
+}
+
+export interface AppLogsResponse {
+  project: string;
+  app: string;
+  environment: string;
+  namespace: string;
+  component?: string;
   pod: string;
   container: string;
   logs: string;

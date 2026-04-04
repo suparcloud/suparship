@@ -136,7 +136,7 @@ export function Templates() {
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">Templates</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Golden paths for deploying services. Pick a template to see what it
+          Golden paths for deploying apps. Pick a template to see what it
           offers.
         </p>
       </div>

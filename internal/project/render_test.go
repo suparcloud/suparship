@@ -40,6 +40,32 @@ func testTemplate() *tpl.Template {
 	}
 }
 
+// --- ValidateAppInputs ---
+
+// TestValidateAppInputs_Valid exercises the primary (non-deprecated) entry
+// point to ensure it delegates correctly to the shared implementation.
+func TestValidateAppInputs_Valid(t *testing.T) {
+	err := ValidateAppInputs(
+		map[string]any{"service_name": "my-app", "size": "medium"},
+		[]SecretRef{{Name: "database_url", SecretRef: "db.url"}},
+		testTemplate(),
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+// TestValidateAppInputs_MissingRequired confirms that ValidateAppInputs
+// enforces required-input constraints identically to ValidateServiceInputs.
+func TestValidateAppInputs_MissingRequired(t *testing.T) {
+	err := ValidateAppInputs(
+		map[string]any{"size": "small"},
+		nil,
+		testTemplate(),
+	)
+	expectContains(t, err, "required input", "service_name")
+}
+
 // --- ValidateServiceInputs ---
 
 func TestValidateInputsValid(t *testing.T) {

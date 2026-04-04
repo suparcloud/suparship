@@ -12,10 +12,16 @@ import (
 
 // --- Preview DTOs ---
 
-// PreviewDTO is the JSON representation of a preview environment.
+// PreviewDTO is the JSON representation of a preview environment in the legacy
+// service-oriented preview endpoints.
+//
+// Deprecated: Use AppPreviewSummaryDTO (from the app-scoped preview endpoints)
+// for new integrations. See docs/migration-app-model.md.
 type PreviewDTO struct {
 	Name      string `json:"name"`
 	Project   string `json:"project"`
+	// Service is the name of the service (i.e. app) that owns this preview.
+	// Deprecated: use AppPreviewSummaryDTO.AppName for the app-oriented field.
 	Service   string `json:"service"`
 	Namespace string `json:"namespace"`
 	Status    string `json:"status"`
@@ -23,23 +29,42 @@ type PreviewDTO struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// PreviewsResponse is the JSON body for GET /api/v1/previews.
+// PreviewsResponse is the JSON body for the legacy GET /api/v1/previews
+// endpoint.
+//
+// Deprecated: The app-oriented equivalent is AppPreviewsResponse, returned by
+// GET /api/v1/projects/{project}/apps/{app}/previews.
+// See docs/migration-app-model.md.
 type PreviewsResponse struct {
 	Previews []PreviewDTO `json:"previews"`
 }
 
-// CreatePreviewRequest is the JSON body for POST /api/v1/previews.
+// CreatePreviewRequest is the JSON body for the legacy POST /api/v1/previews
+// endpoint.
+//
+// Deprecated: Use CreateAppPreviewRequest
+// (POST /api/v1/projects/{project}/apps/{app}/previews) for new integrations.
+// See docs/migration-app-model.md.
 type CreatePreviewRequest struct {
 	Name    string `json:"name"`
 	Project string `json:"project"`
+	// Service identifies the service (i.e. app) to create a preview for.
+	// Deprecated: use the app-scoped preview endpoint instead, where the app
+	// name is a URL path parameter rather than a request body field.
 	Service string `json:"service"`
 }
 
 // --- Handler ---
 
-// previewHandler serves preview environment endpoints. RBAC is enforced
-// inline because the project is taken from the request body (POST) or
+// previewHandler serves the legacy service-oriented preview endpoints. RBAC is
+// enforced inline because the project is taken from the request body (POST) or
 // from the stored preview (DELETE), not from a URL path parameter.
+//
+// Deprecated: previewHandler backs the legacy preview routes
+// (GET|POST /api/v1/previews, DELETE /api/v1/previews/{name}, and
+// GET /api/v1/projects/{project}/services/{service}/previews). New preview
+// management should use appHandler, which serves the app-scoped preview
+// routes. See docs/migration-app-model.md.
 type previewHandler struct {
 	previewStore    preview.Store
 	projectStore    project.Store
@@ -60,6 +85,9 @@ func newPreviewHandler(ps preview.Store, projStore project.Store, rp runtime.Pro
 // service. It is registered at
 // GET /api/v1/projects/{project}/services/{service}/previews
 // and enforces viewer-level RBAC via the rbacHandler middleware.
+//
+// Deprecated: Use GET /api/v1/projects/{project}/apps/{app}/previews instead.
+// See docs/migration-app-model.md.
 func (ph *previewHandler) handleListServicePreviews(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	serviceName := r.PathValue("service")
@@ -81,6 +109,10 @@ func (ph *previewHandler) handleListServicePreviews(w http.ResponseWriter, r *ht
 }
 
 // handleListPreviews returns all preview environments.
+//
+// Deprecated: Registered at the legacy GET /api/v1/previews route. Use the
+// app-scoped GET /api/v1/projects/{project}/apps/{app}/previews instead.
+// See docs/migration-app-model.md.
 func (ph *previewHandler) handleListPreviews(w http.ResponseWriter, r *http.Request) {
 	previews, err := ph.previewStore.List(r.Context())
 	if err != nil {
@@ -98,6 +130,10 @@ func (ph *previewHandler) handleListPreviews(w http.ResponseWriter, r *http.Requ
 
 // handleCreatePreview creates a new preview environment.
 // Requires developer role on the target project.
+//
+// Deprecated: Registered at the legacy POST /api/v1/previews route. Use
+// POST /api/v1/projects/{project}/apps/{app}/previews instead.
+// See docs/migration-app-model.md.
 func (ph *previewHandler) handleCreatePreview(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFromContext(r.Context())
 
@@ -176,6 +212,10 @@ func (ph *previewHandler) handleCreatePreview(w http.ResponseWriter, r *http.Req
 
 // handleDeletePreview deletes a preview environment.
 // Requires developer role on the preview's project.
+//
+// Deprecated: Registered at the legacy DELETE /api/v1/previews/{name} route.
+// Use DELETE /api/v1/projects/{project}/apps/{app}/previews/{name} instead.
+// See docs/migration-app-model.md.
 func (ph *previewHandler) handleDeletePreview(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFromContext(r.Context())
 	name := r.PathValue("name")

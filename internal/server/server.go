@@ -95,6 +95,10 @@ func New(cfg Config) *Server {
 		}
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
+			if cfg.LogsProvider != nil {
+				rh.appHandler.logsProvider = cfg.LogsProvider
+				cfg.Logger.Info("app logs endpoint enabled")
+			}
 			cfg.Logger.Info("app endpoints enabled")
 		}
 		rh.registerRoutes(mux)

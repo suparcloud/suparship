@@ -1,25 +1,39 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
+	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
+
+// appPromotionOrder defines the canonical MVP promotion chain.
+// preview → staging → prod; higher order = later in the chain.
+var appPromotionOrder = map[domain.AppEnvironmentType]int{
+	domain.AppEnvPreview: 0,
+	domain.AppEnvStaging: 1,
+	domain.AppEnvProd:    2,
+}
 
 // appHandler serves app-oriented API endpoints. It is wired into the
 // rbacHandler's route registration so that RBAC middleware is applied.
 //
 // Read-only routes (list, get, environments) are always registered when
 // appHandler is non-nil. The create route is additionally registered when
-// projectStore is non-nil.
+// projectStore is non-nil. The logs route is registered when logsProvider
+// is non-nil.
 type appHandler struct {
 	appStore     domain.AppStore
 	templateIdx  map[string]*tpl.Template
 	projectStore project.Store
+	logsProvider runtime.LogsProvider // optional: enables GET .../apps/{app}/logs
 }
 
 // newAppHandler creates an appHandler.
@@ -77,13 +91,13 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		values = map[string]any{}
 	}
 
-	// Reuse project.ValidateServiceInputs for template-input validation.
-	// It requires []project.SecretRef; convert from the request DTO.
+	// Convert secret refs from DTO to the project type required by the
+	// template validator, then run input validation.
 	secretRefsForValidation := make([]project.SecretRef, len(req.SecretRefs))
 	for i, s := range req.SecretRefs {
 		secretRefsForValidation[i] = project.SecretRef{Name: s.Name, SecretRef: s.SecretRef}
 	}
-	if err := project.ValidateServiceInputs(values, secretRefsForValidation, tmpl); err != nil {
+	if err := project.ValidateAppInputs(values, secretRefsForValidation, tmpl); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
 	}
@@ -275,6 +289,233 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 	})
 }
 
+// handleListAppPreviews handles GET /api/v1/projects/{project}/apps/{app}/previews.
+// Verifies the app exists before listing; returns 404 otherwise.
+func (ah *appHandler) handleListAppPreviews(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	previews, err := ah.appStore.ListAppPreviews(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list previews"})
+		return
+	}
+
+	dtos := make([]AppPreviewSummaryDTO, 0, len(previews))
+	for _, env := range previews {
+		dtos = append(dtos, appPreviewToDTO(env))
+	}
+
+	writeJSON(w, http.StatusOK, AppPreviewsResponse{
+		Project:  projectName,
+		AppName:  appName,
+		Previews: dtos,
+	})
+}
+
+// handleCreateAppPreview handles POST /api/v1/projects/{project}/apps/{app}/previews.
+//
+// The raw preview name from the request body is sanitized via
+// domain.SanitizePreviewName (deterministic, branch-name-friendly) before
+// validation and storage. Only apps with at least one preview-enabled component
+// may create previews; the handler returns 422 otherwise.
+func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	var req CreateAppPreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "preview name is required"})
+		return
+	}
+
+	sanitized := domain.SanitizePreviewName(req.Name)
+	if err := domain.ValidatePreviewName(sanitized); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid preview name: " + err.Error()})
+		return
+	}
+
+	a, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	env, err := domainapp.NewPreviewEnvironment(a, sanitized)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
+	// Reject duplicate preview names within the same app.
+	if _, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, sanitized); err == nil {
+		writeJSON(w, http.StatusConflict, errorResponse{
+			Error: "preview \"" + sanitized + "\" already exists for app \"" + appName + "\"",
+		})
+		return
+	}
+
+	if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save preview"})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, appPreviewToDTO(env))
+}
+
+// handleDeleteAppPreview handles DELETE /api/v1/projects/{project}/apps/{app}/previews/{name}.
+// Returns 404 when the preview does not exist and 400 if the named environment
+// is not a preview (guards against accidental deletion of stable environments).
+func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	previewName := r.PathValue("name")
+
+	env, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, previewName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "preview \"" + previewName + "\" not found for app \"" + appName + "\"",
+		})
+		return
+	}
+	if env.EnvType != domain.AppEnvPreview {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "environment \"" + previewName + "\" is not a preview environment",
+		})
+		return
+	}
+
+	if err := ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, previewName); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete preview"})
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePromoteApp handles POST /api/v1/projects/{project}/apps/{app}/promote.
+//
+// For MVP the promotion path is preview → staging → prod. Promoting to a
+// preview environment is rejected. When Kargo integration is available it will
+// orchestrate the actual promotion; for now this validates the intent and
+// returns a structured acknowledgement so callers get a stable, app-scoped
+// response shape.
+//
+// Component versions within the app release bundle are kept aligned: the
+// promotion moves the entire app (all components) from the source environment
+// to the destination, not individual components.
+func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	var req AppPromoteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.TargetEnvironment == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "targetEnvironment is required"})
+		return
+	}
+
+	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	targetEnv, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, req.TargetEnvironment)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "environment \"" + req.TargetEnvironment + "\" not found for app \"" + appName + "\"",
+		})
+		return
+	}
+
+	if targetEnv.EnvType == domain.AppEnvPreview {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "cannot promote to a preview environment",
+		})
+		return
+	}
+
+	targetOrder, ok := appPromotionOrder[targetEnv.EnvType]
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "environment \"" + req.TargetEnvironment + "\" has an unrecognised type",
+		})
+		return
+	}
+
+	sourceEnv, err := ah.findPromotionSource(r.Context(), projectName, appName, targetOrder)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AppPromoteResponse{
+		Project:     projectName,
+		App:         appName,
+		Source:      sourceEnv.EnvName,
+		Destination: req.TargetEnvironment,
+		Namespace:   targetEnv.Namespace,
+		Message:     "Promotion of " + appName + " from " + sourceEnv.EnvName + " to " + req.TargetEnvironment + " initiated",
+	})
+}
+
+// findPromotionSource returns the best source environment for a promotion to
+// the given target order. It expects an environment of the immediately lower
+// tier in the MVP chain (preview < staging < prod). When multiple candidates
+// exist (e.g. several preview environments), the lexicographically first is
+// chosen for determinism.
+func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appName string, targetOrder int) (*domain.AppEnvironment, error) {
+	envs, err := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list app environments")
+	}
+
+	wantOrder := targetOrder - 1
+	var candidates []*domain.AppEnvironment
+	for _, env := range envs {
+		if order, ok := appPromotionOrder[env.EnvType]; ok && order == wantOrder {
+			candidates = append(candidates, env)
+		}
+	}
+
+	if len(candidates) == 0 {
+		var sourceTier string
+		for t, o := range appPromotionOrder {
+			if o == wantOrder {
+				sourceTier = string(t)
+				break
+			}
+		}
+		if sourceTier == "" {
+			sourceTier = "previous"
+		}
+		return nil, fmt.Errorf("no %s environment found to promote from", sourceTier)
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].EnvName < candidates[j].EnvName
+	})
+	return candidates[0], nil
+}
+
 // --- DTO mapping helpers ---
 
 func appToSummaryDTO(app *domain.App, envs []*domain.AppEnvironment) AppSummaryDTO {
@@ -394,4 +635,27 @@ func componentDTOs(components []domain.Component) []ComponentSummaryDTO {
 		})
 	}
 	return dtos
+}
+
+func appPreviewToDTO(env *domain.AppEnvironment) AppPreviewSummaryDTO {
+	urls := env.URLs
+	if urls == nil {
+		urls = []string{}
+	}
+	dto := AppPreviewSummaryDTO{
+		Name:      env.EnvName,
+		AppName:   env.AppName,
+		Project:   env.ProjectName,
+		Namespace: env.Namespace,
+		Status:    appRuntimeStatusDTO(env.Status),
+		URLs:      urls,
+	}
+	if env.Release != nil {
+		dto.Release = &AppReleaseRefDTO{
+			Image:  env.Release.Image,
+			Tag:    env.Release.Tag,
+			Commit: env.Release.Commit,
+		}
+	}
+	return dto
 }

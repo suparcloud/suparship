@@ -167,6 +167,24 @@ func (m *memAppStore) SaveAppEnvironment(_ context.Context, projectName string, 
 	return nil
 }
 
+func (m *memAppStore) DeleteAppEnvironment(_ context.Context, projectName, appName, envName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	projectEnvs, ok := m.envs[projectName]
+	if !ok {
+		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+	}
+	envMap, ok := projectEnvs[appName]
+	if !ok {
+		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+	}
+	if _, ok := envMap[envName]; !ok {
+		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+	}
+	delete(envMap, envName)
+	return nil
+}
+
 // --- Test helpers ---
 
 func newTestAppMux() (*http.ServeMux, *authHandler, *memAppStore) {

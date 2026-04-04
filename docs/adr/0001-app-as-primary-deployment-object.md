@@ -140,11 +140,12 @@ This ADR defines the *target model* and *intent*. It does not require an immedia
 - Return `app`-keyed fields in JSON responses (`"app": {...}`) while keeping `"service"` as a deprecated alias if needed for a grace period.
 - Annotate legacy routes with a deprecation comment in code.
 
-### Phase 3 — UI migration (follow-up commit)
+### Phase 3 — UI migration ✅ (this commit)
 
-- Update all UI labels, page titles, and link text to "Apps".
-- Update frontend API client to call the new `/apps/` paths.
-- Remove references to "Service" from user-visible strings.
+- Updated all user-facing labels, headings, stat cards, table headers, empty states, and helper text from "service" to "app" across Dashboard, Onboarding, Templates, and ServiceDetail pages.
+- Onboarding checklist and CTA copy updated to explain that apps run across staging, prod, and previews, and may include multiple runtime components.
+- Internal variable names and route paths (e.g. `ServiceRow`, `/projects/:p/services/:s`) are preserved in this commit to avoid excess churn; they will be cleaned up in Phase 4.
+- Frontend API client still calls existing `/services/...` paths; the new `/apps/...` paths will be wired in a follow-up once Phase 2 API routes land.
 
 ### Phase 4 — Internal rename (follow-up commit)
 

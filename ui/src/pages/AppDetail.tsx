@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { getApp, getAppEnvironment } from "../lib/apps";
-import { createPreview } from "../lib/previews";
-import { promoteService } from "../lib/services";
+import { fetchAppLogs, getApp, getAppEnvironment, promoteApp } from "../lib/apps";
+import { createPreview, deletePreview } from "../lib/previews";
 import type {
   AppDetail as AppDetailType,
   AppEnvironmentSummary,
+  AppLogsResponse,
   ComponentSummary,
   PromoteResponse,
 } from "../types";
@@ -111,6 +111,30 @@ function formatTime(iso?: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/**
+ * Returns the logical promotion source and target names for the currently
+ * selected environment, or null if no promotion is applicable (e.g. prod).
+ *
+ * Promotion path: preview → staging → prod
+ */
+function getPromoteTarget(
+  currentEnv: AppEnvironmentSummary | null,
+  environments: AppEnvironmentSummary[],
+): { source: string; target: string } | null {
+  if (!currentEnv) return null;
+  if (currentEnv.envType === "preview") {
+    const staging = environments.find((e) => e.envType === "staging");
+    return staging
+      ? { source: currentEnv.envName, target: staging.envName }
+      : null;
+  }
+  if (currentEnv.envType === "staging") {
+    const prod = environments.find((e) => e.envType === "prod");
+    return prod ? { source: currentEnv.envName, target: prod.envName } : null;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +264,7 @@ export function AppDetail() {
 
   // Promote modal
   const [showPromoteModal, setShowPromoteModal] = useState(false);
+  const [promoteSource, setPromoteSource] = useState("");
   const [promoteTarget, setPromoteTarget] = useState("");
   const [promoteSubmitting, setPromoteSubmitting] = useState(false);
   const [promoteError, setPromoteError] = useState<string | null>(null);
@@ -296,6 +321,24 @@ export function AppDetail() {
       cancelled = true;
     };
   }, [project, appName, selectedEnvName]);
+
+  function handleDeletePreview(previewName: string) {
+    deletePreview(previewName)
+      .then(() => {
+        setData((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            environments: prev.environments.filter(
+              (e) => e.preview?.previewName !== previewName,
+            ),
+          };
+        });
+      })
+      .catch(() => {
+        // Silently ignored; the preview list will remain until next load.
+      });
+  }
 
   if (loading) return <DetailSkeleton />;
 
@@ -399,23 +442,26 @@ export function AppDetail() {
             {icons.branch}
             Preview
           </button>
-          <button
-            onClick={() => {
-              const envs = nonPreviewEnvs
-                .slice()
-                .sort((a, b) => a.envName.localeCompare(b.envName));
-              const last = envs[envs.length - 1];
-              setPromoteTarget(last?.envName ?? "");
-              setPromoteError(null);
-              setPromoteResult(null);
-              setShowPromoteModal(true);
-            }}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-700"
-            title="Promote to next environment"
-          >
-            {icons.rocket}
-            Promote
-          </button>
+          {(() => {
+            const promotion = getPromoteTarget(currentEnv, data.environments);
+            if (!promotion) return null;
+            return (
+              <button
+                onClick={() => {
+                  setPromoteSource(promotion.source);
+                  setPromoteTarget(promotion.target);
+                  setPromoteError(null);
+                  setPromoteResult(null);
+                  setShowPromoteModal(true);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-700"
+                title={`Promote from ${promotion.source} to ${promotion.target}`}
+              >
+                {icons.rocket}
+                Promote to {promotion.target}
+              </button>
+            );
+          })()}
         </div>
       </div>
 
@@ -529,14 +575,14 @@ export function AppDetail() {
                 </p>
                 <dl className="mt-4 space-y-2 text-sm">
                   <div className="flex justify-between">
-                    <dt className="text-gray-400">Source</dt>
-                    <dd className="font-medium text-gray-900">
+                    <dt className="text-gray-400">From</dt>
+                    <dd className="font-medium capitalize text-gray-900">
                       {promoteResult.source}
                     </dd>
                   </div>
                   <div className="flex justify-between">
-                    <dt className="text-gray-400">Destination</dt>
-                    <dd className="font-medium text-gray-900">
+                    <dt className="text-gray-400">To</dt>
+                    <dd className="font-medium capitalize text-gray-900">
                       {promoteResult.destination}
                     </dd>
                   </div>
@@ -548,7 +594,12 @@ export function AppDetail() {
                   </div>
                 </dl>
                 <button
-                  onClick={() => setShowPromoteModal(false)}
+                  onClick={() => {
+                    setShowPromoteModal(false);
+                    // Switch view to the target environment so the user can
+                    // see its updated state immediately.
+                    if (promoteTarget) setSelectedEnvName(promoteTarget);
+                  }}
                   className="mt-6 w-full rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
                 >
                   Done
@@ -563,31 +614,42 @@ export function AppDetail() {
                   Promote {appName}
                 </h3>
                 <p className="mt-1 text-sm text-gray-500">
-                  Promote this app to a higher environment.
+                  Promote this app from{" "}
+                  <span className="font-medium capitalize">{promoteSource}</span>{" "}
+                  to{" "}
+                  <span className="font-medium capitalize">{promoteTarget}</span>
+                  .
                 </p>
-                <div className="mt-4">
-                  <label
-                    htmlFor="promote-target"
-                    className="mb-1.5 block text-sm font-medium text-gray-700"
+
+                {/* Source → target visual */}
+                <div className="mt-4 flex items-center gap-3">
+                  <div className="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-center">
+                    <p className="text-xs text-gray-400">From</p>
+                    <p className="font-medium capitalize text-gray-900">
+                      {promoteSource}
+                    </p>
+                  </div>
+                  <svg
+                    className="h-4 w-4 flex-shrink-0 text-gray-400"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
                   >
-                    Target environment
-                  </label>
-                  <select
-                    id="promote-target"
-                    value={promoteTarget}
-                    onChange={(e) => setPromoteTarget(e.target.value)}
-                    className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
-                  >
-                    {nonPreviewEnvs
-                      .slice()
-                      .sort((a, b) => a.envName.localeCompare(b.envName))
-                      .map((env) => (
-                        <option key={env.envName} value={env.envName}>
-                          {env.envName}
-                        </option>
-                      ))}
-                  </select>
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"
+                    />
+                  </svg>
+                  <div className="flex-1 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-center">
+                    <p className="text-xs text-emerald-600">To</p>
+                    <p className="font-medium capitalize text-emerald-700">
+                      {promoteTarget}
+                    </p>
+                  </div>
                 </div>
+
                 {promoteError && (
                   <div className="mt-3 rounded-md bg-red-50 px-3 py-2">
                     <p className="text-sm text-red-700">{promoteError}</p>
@@ -600,11 +662,9 @@ export function AppDetail() {
                       setPromoteSubmitting(true);
                       setPromoteError(null);
                       try {
-                        const result = await promoteService(
-                          project,
-                          appName,
-                          { targetEnvironment: promoteTarget },
-                        );
+                        const result = await promoteApp(project, appName, {
+                          targetEnvironment: promoteTarget,
+                        });
                         setPromoteResult(result);
                       } catch (err) {
                         setPromoteError(
@@ -619,7 +679,7 @@ export function AppDetail() {
                     disabled={promoteSubmitting || !promoteTarget}
                     className="flex-1 rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50"
                   >
-                    {promoteSubmitting ? "Promoting…" : "Promote"}
+                    {promoteSubmitting ? "Promoting…" : `Promote to ${promoteTarget}`}
                   </button>
                   <button
                     onClick={() => setShowPromoteModal(false)}
@@ -705,9 +765,20 @@ export function AppDetail() {
       )}
       {activeTab === "deployments" && <DeploymentsTab />}
       {activeTab === "previews" && (
-        <PreviewsTab previewEnvs={previewEnvs} />
+        <PreviewsTab
+          previewEnvs={previewEnvs}
+          onDeletePreview={handleDeletePreview}
+        />
       )}
-      {activeTab === "logs" && <LogsTab />}
+      {activeTab === "logs" && (
+        <LogsTab
+          project={project ?? ""}
+          appName={appName ?? ""}
+          selectedEnvName={selectedEnvName ?? ""}
+          components={data.components}
+          environments={data.environments}
+        />
+      )}
       {activeTab === "traffic" && <TrafficTab />}
     </div>
   );
@@ -920,9 +991,13 @@ function DeploymentsTab() {
 
 function PreviewsTab({
   previewEnvs,
+  onDeletePreview,
 }: {
   previewEnvs: AppEnvironmentSummary[];
+  onDeletePreview: (previewName: string) => void;
 }) {
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+
   if (previewEnvs.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-gray-200 bg-white px-6 py-12 text-center">
@@ -938,54 +1013,384 @@ function PreviewsTab({
 
   return (
     <div className="divide-y divide-gray-50 rounded-xl border border-gray-200 bg-white">
-      {previewEnvs.map((env) => (
-        <div
-          key={env.envName}
-          className="flex items-center justify-between px-5 py-3"
-        >
-          <div>
-            <span className="text-sm font-medium text-gray-900">
-              {env.preview?.previewName ?? env.envName}
-            </span>
-            <span className="ml-2 font-mono text-xs text-gray-400">
-              {env.namespace}
-            </span>
+      {previewEnvs.map((env) => {
+        const previewName = env.preview?.previewName ?? env.envName;
+        const isConfirming = confirmingDelete === previewName;
+        return (
+          <div
+            key={env.envName}
+            className="flex items-center justify-between px-5 py-3"
+          >
+            <div className="min-w-0">
+              <span className="text-sm font-medium text-gray-900">
+                {previewName}
+              </span>
+              <span className="ml-2 font-mono text-xs text-gray-400">
+                {env.namespace}
+              </span>
+              {env.preview?.createdAt && (
+                <span className="ml-3 text-xs text-gray-400">
+                  {new Date(env.preview.createdAt).toLocaleDateString(
+                    undefined,
+                    { month: "short", day: "numeric" },
+                  )}
+                </span>
+              )}
+            </div>
+            <div className="ml-4 flex flex-shrink-0 items-center gap-3">
+              <StatusBadge status={env.status.phase} />
+              {env.urls[0] && (
+                <a
+                  href={env.urls[0]}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  Open ↗
+                </a>
+              )}
+              {isConfirming ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-gray-500">Delete?</span>
+                  <button
+                    onClick={() => {
+                      setConfirmingDelete(null);
+                      onDeletePreview(previewName);
+                    }}
+                    className="rounded-md bg-red-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-red-700"
+                  >
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmingDelete(null)}
+                    className="rounded-md border border-gray-200 px-2 py-0.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                  >
+                    No
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmingDelete(previewName)}
+                  className="rounded p-1 text-gray-300 transition-colors hover:bg-red-50 hover:text-red-500"
+                  title="Delete preview"
+                >
+                  <svg
+                    className="h-3.5 w-3.5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={1.5}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"
+                    />
+                  </svg>
+                </button>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <StatusBadge status={env.status.phase} />
-            {env.urls[0] && (
-              <a
-                href={env.urls[0]}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-600 hover:underline"
-              >
-                Open ↗
-              </a>
-            )}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Tab: Logs (shell placeholder)
+// Tab: Logs
 // ---------------------------------------------------------------------------
 
-function LogsTab() {
+const LOGS_TAIL_LINES = 200;
+const LOGS_POLL_INTERVAL_MS = 30_000;
+
+interface LogsTabProps {
+  project: string;
+  appName: string;
+  selectedEnvName: string;
+  components: ComponentSummary[];
+  environments: AppEnvironmentSummary[];
+}
+
+function LogsTab({
+  project,
+  appName,
+  selectedEnvName,
+  components,
+  environments,
+}: LogsTabProps) {
+  const [env, setEnv] = useState(
+    selectedEnvName || environments[0]?.envName || "",
+  );
+  const [component, setComponent] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [pod, setPod] = useState("");
+  const [container, setContainer] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<AppLogsResponse | null>(null);
+  const scrollRef = useRef<HTMLPreElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Keep local env in sync when the parent environment switcher changes.
+  useEffect(() => {
+    if (selectedEnvName) setEnv(selectedEnvName);
+  }, [selectedEnvName]);
+
+  const loadLogs = useCallback(async () => {
+    if (!env) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchAppLogs(project, appName, {
+        environment: env,
+        component: component || undefined,
+        pod: pod || undefined,
+        container: container || undefined,
+        tailLines: LOGS_TAIL_LINES,
+      });
+      setResult(data);
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch logs");
+      setResult(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [project, appName, env, component, pod, container]);
+
+  // Initial fetch + polling.
+  useEffect(() => {
+    loadLogs();
+    pollRef.current = setInterval(loadLogs, LOGS_POLL_INTERVAL_MS);
+    return () => {
+      if (pollRef.current !== null) clearInterval(pollRef.current);
+    };
+  }, [loadLogs]);
+
+  const multiComponent = components.length > 1;
+
   return (
-    <div className="rounded-xl border border-dashed border-gray-200 bg-white px-6 py-12 text-center">
-      <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
-        {icons.terminal}
+    <div className="flex flex-col gap-4">
+      {/* Primary selectors: environment (+ component when multiple) */}
+      <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-gray-500">
+            Environment
+          </label>
+          <select
+            value={env}
+            onChange={(e) => {
+              setEnv(e.target.value);
+              setPod("");
+              setContainer("");
+            }}
+            className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
+          >
+            {environments.map((e) => (
+              <option key={e.envName} value={e.envName}>
+                {e.envName}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {multiComponent && (
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-500">
+              Component
+            </label>
+            <select
+              value={component}
+              onChange={(e) => {
+                setComponent(e.target.value);
+                setPod("");
+                setContainer("");
+              }}
+              className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
+            >
+              <option value="">All components</option>
+              {components.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name} ({c.type})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <button
+          onClick={loadLogs}
+          disabled={loading || !env}
+          className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 disabled:opacity-50"
+          title="Refresh logs"
+        >
+          <svg
+            className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182"
+            />
+          </svg>
+          Refresh
+        </button>
       </div>
-      <p className="text-sm font-medium text-gray-500">
-        Log viewer coming soon
+
+      {/* Advanced: pod / container — collapsible */}
+      <div>
+        <button
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+        >
+          <svg
+            className={`h-3 w-3 transition-transform ${showAdvanced ? "rotate-90" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="m9 18 6-6-6-6"
+            />
+          </svg>
+          Advanced (pod / container)
+        </button>
+        {showAdvanced && (
+          <div className="mt-2 flex flex-wrap gap-3 rounded-lg border border-gray-100 bg-gray-50/60 px-4 py-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-500">
+                Pod
+              </label>
+              <input
+                type="text"
+                value={pod}
+                onChange={(e) => setPod(e.target.value)}
+                placeholder="auto-select"
+                className="w-40 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-500">
+                Container
+              </label>
+              <input
+                type="text"
+                value={container}
+                onChange={(e) => setContainer(e.target.value)}
+                placeholder="default"
+                className="w-36 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 placeholder-gray-400 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Resolved runtime unit info */}
+      {result && (
+        <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400">
+          <span>
+            pod:{" "}
+            <span className="font-mono text-gray-600">{result.pod}</span>
+          </span>
+          <span>
+            container:{" "}
+            <span className="font-mono text-gray-600">{result.container}</span>
+          </span>
+          {result.namespace && (
+            <span>
+              namespace:{" "}
+              <span className="font-mono text-gray-600">
+                {result.namespace}
+              </span>
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Log output */}
+      <div className="relative min-h-64 overflow-hidden rounded-xl border border-gray-200 bg-gray-950">
+        {loading && !result && <LogsTabSkeleton />}
+
+        {error && (
+          <div className="flex h-64 flex-col items-center justify-center px-6 text-center">
+            <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-red-900/30">
+              <svg
+                className="h-5 w-5 text-red-400"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={1.5}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z"
+                />
+              </svg>
+            </div>
+            <p className="text-sm font-medium text-gray-300">{error}</p>
+            <button
+              onClick={loadLogs}
+              className="mt-3 text-sm text-blue-400 hover:text-blue-300"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && result && result.logs.length === 0 && (
+          <div className="flex h-64 flex-col items-center justify-center px-6 text-center">
+            <p className="text-sm font-medium text-gray-500">No log output</p>
+            <p className="mt-1 text-xs text-gray-600">
+              The container has not produced any logs yet.
+            </p>
+          </div>
+        )}
+
+        {result && result.logs.length > 0 && (
+          <pre
+            ref={scrollRef}
+            className="max-h-[32rem] overflow-auto px-4 py-3 font-mono text-xs leading-5 text-gray-200"
+          >
+            {result.logs}
+          </pre>
+        )}
+
+        {loading && result && (
+          <div className="absolute right-4 top-3">
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-400 border-t-transparent" />
+          </div>
+        )}
+      </div>
+
+      <p className="text-right text-xs text-gray-400">
+        Showing last {LOGS_TAIL_LINES} lines &middot; auto-refreshes every{" "}
+        {LOGS_POLL_INTERVAL_MS / 1000}s
       </p>
-      <p className="mt-1 text-xs text-gray-400">
-        Full streaming logs will be available in a future release.
-      </p>
+    </div>
+  );
+}
+
+function LogsTabSkeleton() {
+  return (
+    <div className="space-y-2 px-4 py-3">
+      {Array.from({ length: 12 }).map((_, i) => (
+        <div
+          key={i}
+          className="h-3.5 animate-pulse rounded bg-gray-800"
+          style={{ width: `${40 + (i * 7) % 50}%` }}
+        />
+      ))}
     </div>
   );
 }
@@ -1011,6 +1416,33 @@ function TrafficTab() {
 // Subcomponents
 // ---------------------------------------------------------------------------
 
+/**
+ * Derives whether a component type exposes an inbound network surface.
+ * web → exposed (receives traffic); worker / cron → internal (no inbound route).
+ */
+function componentVisibilityBadge(type: ComponentSummary["type"]) {
+  if (type === "web") {
+    return (
+      <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600">
+        exposed
+      </span>
+    );
+  }
+  return (
+    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">
+      internal
+    </span>
+  );
+}
+
+/**
+ * Runtime components section.
+ *
+ * Visibility rules:
+ *  - 0 components → renders nothing (topology not yet derived).
+ *  - 1+ components → expanded by default so the runtime topology is always
+ *    immediately visible without requiring extra interaction.
+ */
 function ComponentsTable({
   components,
   currentEnv,
@@ -1018,57 +1450,102 @@ function ComponentsTable({
   components: ComponentSummary[];
   currentEnv: AppEnvironmentSummary | null;
 }) {
+  const isMulti = components.length > 1;
+  const [expanded, setExpanded] = useState(true);
+
+  if (components.length === 0) return null;
+
   const phase = currentEnv?.status.phase ?? "not_deployed";
   const totalReplicas = currentEnv?.status.replicas ?? 0;
   const availableReplicas = currentEnv?.status.available ?? 0;
 
-  // Replica counts only make sense for scalable component types (web / worker).
-  // When there is exactly one such component, we can attribute the env-level
-  // replica count to it without ambiguity.
-  const scalableCount = components.filter(
+  // Replica attribution: only unambiguous when exactly one scalable component
+  // (web / worker) exists. For multi-component apps we surface the aggregate
+  // in the section header and show "—" per row to avoid misleading fractions.
+  const scalableComponents = components.filter(
     (c) => c.type === "web" || c.type === "worker",
-  ).length;
-  const singleScalable = scalableCount === 1;
+  );
+  const singleScalable = scalableComponents.length === 1;
+
+  function replicaLabel(comp: ComponentSummary): string {
+    if (comp.type === "cron") return "—";
+    if (singleScalable && totalReplicas > 0) {
+      return `${availableReplicas}/${totalReplicas}`;
+    }
+    return "—";
+  }
+
+  const headerTitle = "Runtime components";
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
-      <div className="border-b border-gray-100 px-5 py-3">
+      {/* Header doubles as a toggle for compact/expand control */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="flex w-full items-center justify-between border-b border-gray-100 px-5 py-3 text-left"
+      >
         <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
-          Runtime units
+          {headerTitle}
         </h2>
-      </div>
-
-      {components.length === 0 ? (
-        <div className="px-5 py-8 text-center">
-          <p className="text-sm text-gray-400">No components configured</p>
-          <p className="mt-1 text-xs text-gray-400">
-            Component topology is derived from the template at deploy time.
-          </p>
+        <div className="flex items-center gap-2">
+          {isMulti && totalReplicas > 0 && (
+            <span
+              className="text-xs text-gray-400"
+              title="Aggregate replicas across all scalable components"
+            >
+              {availableReplicas}/{totalReplicas} replicas
+            </span>
+          )}
+          {isMulti && (
+            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">
+              {components.length}
+            </span>
+          )}
+          <svg
+            className={`h-3.5 w-3.5 text-gray-400 transition-transform ${expanded ? "rotate-90" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="m9 18 6-6-6-6"
+            />
+          </svg>
         </div>
-      ) : (
+      </button>
+
+      {expanded && (
         <div className="divide-y divide-gray-50">
           {components.map((comp) => {
-            const isScalable = comp.type === "web" || comp.type === "worker";
-            const showReplicas = isScalable && singleScalable && totalReplicas > 0;
-
+            const replicas = replicaLabel(comp);
             return (
               <div
                 key={comp.name}
                 className="flex items-center justify-between px-5 py-2.5"
               >
-                <div className="flex items-center gap-2.5">
+                {/* Left: name + type + visibility */}
+                <div className="flex min-w-0 items-center gap-2">
                   <span className="font-mono text-sm text-gray-900">
                     {comp.name}
                   </span>
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs capitalize text-gray-500">
                     {comp.type}
                   </span>
+                  {componentVisibilityBadge(comp.type)}
                 </div>
 
-                <div className="flex items-center gap-3">
-                  {showReplicas && (
+                {/* Right: replicas + status + preview eligibility */}
+                <div className="ml-4 flex flex-shrink-0 items-center gap-3">
+                  {replicas !== "—" && (
                     <span className="text-xs text-gray-400">
-                      {availableReplicas}/{totalReplicas} replicas
+                      {replicas}{" "}
+                      <span className="text-gray-300">replicas</span>
                     </span>
                   )}
                   <StatusBadge status={phase} />

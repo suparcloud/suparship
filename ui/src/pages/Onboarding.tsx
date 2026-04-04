@@ -43,8 +43,8 @@ const checklist: ChecklistItem[] = [
   },
   {
     key: "hasServices",
-    title: "First service deployed",
-    description: "A service has been created from a template.",
+    title: "First app deployed",
+    description: "An app has been created from a template and is running across its environments.",
     successText: "Deployed",
   },
 ];
@@ -64,14 +64,14 @@ interface CTA {
 const nextSteps: CTA[] = [
   {
     title: "Explore the platform",
-    description: "View your services, templates, and environments on the dashboard.",
+    description: "View your apps, templates, and environments on the dashboard.",
     to: "/",
     icon: "compass",
     primary: true,
   },
   {
     title: "Browse templates",
-    description: "See available golden paths for deploying services.",
+    description: "See available golden paths for deploying apps. Apps run across staging, prod, and preview environments and may include multiple runtime components.",
     to: "/templates",
     icon: "branch",
   },

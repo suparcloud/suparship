@@ -1,9 +1,9 @@
 package server
 
-// This file defines app-oriented API DTOs. These shapes are additive: existing
-// service-oriented DTOs in inventory.go, services.go, previews.go, and
-// promote.go are unchanged. Routes and handlers that serve these types will be
-// wired in a subsequent commit.
+// This file defines app-oriented API DTOs. Routes and handlers that serve
+// these types are registered in rbac.go via appHandler. Legacy service-oriented
+// DTOs in inventory.go, services.go, previews.go, and promote.go are retained
+// for backwards compatibility; see docs/migration-app-model.md.
 
 // --- Shared sub-DTOs ---
 
@@ -205,8 +205,11 @@ type AppPreviewSummaryDTO struct {
 	Namespace string              `json:"namespace"`
 	Status    AppStatusSummaryDTO `json:"status"`
 	// URLs are the ingress hostnames assigned to this preview instance.
-	URLs      []string            `json:"urls"`
-	CreatedAt string              `json:"createdAt,omitempty"`
+	// Always a non-nil slice; empty when no ingress has been provisioned.
+	URLs      []string          `json:"urls"`
+	// Release is the deployed release for this preview, when available.
+	Release   *AppReleaseRefDTO `json:"release,omitempty"`
+	CreatedAt string            `json:"createdAt,omitempty"`
 }
 
 // AppPreviewsResponse is the JSON body for app-scoped preview list responses
@@ -215,6 +218,16 @@ type AppPreviewsResponse struct {
 	Project  string                 `json:"project"`
 	AppName  string                 `json:"appName"`
 	Previews []AppPreviewSummaryDTO `json:"previews"`
+}
+
+// CreateAppPreviewRequest is the JSON body for
+// POST /api/v1/projects/{project}/apps/{app}/previews.
+//
+// Name accepts a raw identifier such as a Git branch name ("feature/my-branch")
+// or PR ref ("PR-42"). It is sanitized deterministically via
+// domain.SanitizePreviewName before validation and storage.
+type CreateAppPreviewRequest struct {
+	Name string `json:"name"`
 }
 
 // --- App-scoped promotion DTOs ---

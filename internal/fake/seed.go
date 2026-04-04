@@ -109,14 +109,50 @@ func seedApps(r *DevRuntime) {
 			},
 		},
 	}
-	r.apps["demo"] = map[string]*domain.App{hello.Name: hello}
+
+	// api-gateway demonstrates a multi-component app (web + worker + cron).
+	apiGateway := &domain.App{
+		Name:        "api-gateway",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			DisplayName: "API Gateway",
+			Description: "REST API with background worker and scheduled jobs.",
+			Template: domain.AppTemplateRef{
+				Name:    "web-service",
+				Version: "1.0.0",
+			},
+			Values: map[string]any{
+				"image_repository": "ghcr.io/suparcloud/api-gateway",
+				"image_tag":        "v2.3.1",
+				"port":             "3000",
+			},
+			Components: []domain.Component{
+				{
+					Name:             "web",
+					Type:             domain.ComponentWeb,
+					EnabledInPreview: true,
+				},
+				{
+					Name:             "worker",
+					Type:             domain.ComponentWorker,
+					EnabledInPreview: false,
+				},
+				{
+					Name:             "scheduler",
+					Type:             domain.ComponentCron,
+					EnabledInPreview: false,
+				},
+			},
+		},
+	}
+
+	r.apps["demo"] = map[string]*domain.App{
+		hello.Name:      hello,
+		apiGateway.Name: apiGateway,
+	}
 }
 
 func seedAppEnvironments(r *DevRuntime) {
-	rel := &domain.AppReleaseRef{
-		Image: "ghcr.io/suparcloud/hello:v1.0.0",
-		Tag:   "v1.0.0",
-	}
 	lastDeployed := seedCreatedAt.Format("2006-01-02T15:04:05Z")
 
 	healthyFull := domain.AppRuntimeStatus{
@@ -131,15 +167,30 @@ func seedAppEnvironments(r *DevRuntime) {
 		Available:    1,
 		LastDeployed: lastDeployed,
 	}
+	progressingStatus := domain.AppRuntimeStatus{
+		Phase:        domain.StatusProgressing,
+		Replicas:     3,
+		Available:    2,
+		LastDeployed: lastDeployed,
+	}
 
-	envs := []*domain.AppEnvironment{
+	helloRel := &domain.AppReleaseRef{
+		Image: "ghcr.io/suparcloud/hello:v1.0.0",
+		Tag:   "v1.0.0",
+	}
+	gwRel := &domain.AppReleaseRef{
+		Image: "ghcr.io/suparcloud/api-gateway:v2.3.1",
+		Tag:   "v2.3.1",
+	}
+
+	helloEnvs := []*domain.AppEnvironment{
 		{
 			AppName:     "hello",
 			ProjectName: "demo",
 			EnvName:     "staging",
 			EnvType:     domain.AppEnvStaging,
 			Namespace:   "hello-staging",
-			Release:     rel,
+			Release:     helloRel,
 			URLs:        []string{"http://hello.staging.localhost"},
 			Status:      healthyFull,
 		},
@@ -149,7 +200,7 @@ func seedAppEnvironments(r *DevRuntime) {
 			EnvName:     "prod",
 			EnvType:     domain.AppEnvProd,
 			Namespace:   "hello-prod",
-			Release:     rel,
+			Release:     helloRel,
 			URLs:        []string{"http://hello.prod.localhost"},
 			Status:      healthyFull,
 		},
@@ -159,17 +210,44 @@ func seedAppEnvironments(r *DevRuntime) {
 			EnvName:     "pr-42",
 			EnvType:     domain.AppEnvPreview,
 			Namespace:   "hello-preview-pr-42",
-			Release:     rel,
+			Release:     helloRel,
 			URLs:        []string{"http://pr-42.hello.preview.localhost"},
 			Status:      healthyPreview,
 		},
 	}
 
-	r.appEnvs["demo"] = map[string]map[string]*domain.AppEnvironment{
-		"hello": {},
+	gwEnvs := []*domain.AppEnvironment{
+		{
+			AppName:     "api-gateway",
+			ProjectName: "demo",
+			EnvName:     "staging",
+			EnvType:     domain.AppEnvStaging,
+			Namespace:   "api-gateway-staging",
+			Release:     gwRel,
+			URLs:        []string{"http://api-gateway.staging.localhost"},
+			Status:      progressingStatus,
+		},
+		{
+			AppName:     "api-gateway",
+			ProjectName: "demo",
+			EnvName:     "prod",
+			EnvType:     domain.AppEnvProd,
+			Namespace:   "api-gateway-prod",
+			Release:     gwRel,
+			URLs:        []string{"http://api-gateway.prod.localhost"},
+			Status:      healthyFull,
+		},
 	}
-	for _, e := range envs {
+
+	r.appEnvs["demo"] = map[string]map[string]*domain.AppEnvironment{
+		"hello":       {},
+		"api-gateway": {},
+	}
+	for _, e := range helloEnvs {
 		r.appEnvs["demo"]["hello"][e.EnvName] = e
+	}
+	for _, e := range gwEnvs {
+		r.appEnvs["demo"]["api-gateway"][e.EnvName] = e
 	}
 }
 

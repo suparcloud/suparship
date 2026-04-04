@@ -1,0 +1,124 @@
+package server
+
+import (
+	"net/http"
+	"strconv"
+
+	"github.com/suparcloud/suparship/internal/runtime"
+)
+
+// AppLogsResponse is the JSON body returned by the app-oriented logs endpoint.
+type AppLogsResponse struct {
+	Project     string `json:"project"`
+	App         string `json:"app"`
+	Environment string `json:"environment"`
+	Namespace   string `json:"namespace"`
+	Component   string `json:"component,omitempty"`
+	Pod         string `json:"pod"`
+	Container   string `json:"container"`
+	Logs        string `json:"logs"`
+}
+
+// handleGetAppLogs serves GET /api/v1/projects/{project}/apps/{app}/logs.
+//
+// Query parameters:
+//   - environment (required): the logical environment name (staging, prod, or preview name)
+//   - component   (optional): component/workload name; used as the pod selector label
+//   - pod         (optional): exact pod name; auto-selects first matching pod when absent
+//   - container   (optional): container name within the pod
+//   - tailLines   (optional): non-negative integer limiting output lines
+//
+// Resolution order:
+//  1. Verify the app exists via AppStore.
+//  2. Resolve the AppEnvironment record to obtain the Kubernetes namespace.
+//  3. List pods in that namespace, optionally filtered by component name.
+//  4. Stream/return logs for the selected pod and container.
+func (ah *appHandler) handleGetAppLogs(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	envName := r.URL.Query().Get("environment")
+	if envName == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "query parameter 'environment' is required"})
+		return
+	}
+
+	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	appEnv, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, envName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "environment \"" + envName + "\" not found for app \"" + appName + "\"",
+		})
+		return
+	}
+
+	namespace := appEnv.Namespace
+	component := r.URL.Query().Get("component")
+
+	req := runtime.LogsRequest{
+		Namespace: namespace,
+		Pod:       r.URL.Query().Get("pod"),
+		Container: r.URL.Query().Get("container"),
+	}
+
+	if tl := r.URL.Query().Get("tailLines"); tl != "" {
+		n, err := strconv.ParseInt(tl, 10, 64)
+		if err != nil || n < 0 {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "tailLines must be a non-negative integer"})
+			return
+		}
+		req.TailLines = &n
+	}
+
+	if req.Pod == "" {
+		// When a component is named, use it as the workload selector so that
+		// only pods belonging to that component are considered. Otherwise fall
+		// back to the app name which matches the default single-component case.
+		workload := component
+		if workload == "" {
+			workload = appName
+		}
+
+		pods, err := ah.logsProvider.ListPods(r.Context(), namespace, workload)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list pods"})
+			return
+		}
+		if len(pods) == 0 {
+			writeJSON(w, http.StatusNotFound, errorResponse{
+				Error: "no pods found for app \"" + appName + "\" in namespace \"" + namespace + "\"",
+			})
+			return
+		}
+		req.Pod = pods[0].Name
+
+		if req.Container == "" && len(pods[0].Containers) == 1 {
+			req.Container = pods[0].Containers[0]
+		}
+	}
+
+	result, err := ah.logsProvider.GetLogs(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{
+			Error: "failed to read logs: " + err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AppLogsResponse{
+		Project:     projectName,
+		App:         appName,
+		Environment: envName,
+		Namespace:   namespace,
+		Component:   component,
+		Pod:         result.Pod,
+		Container:   result.Container,
+		Logs:        result.Logs,
+	})
+}

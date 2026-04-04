@@ -1,7 +1,18 @@
 // Package tpl defines the suparship template metadata schema.
 //
-// Templates describe golden paths for deploying services. Each template
-// lives in its own directory and is defined by a template.yaml file:
+// Templates describe golden paths for creating apps. Each template
+// lives in its own directory and is defined by a template.yaml file.
+// When a user picks a template and submits the form, suparShip creates
+// an app — not a raw Kubernetes resource — that is then rendered into
+// GitOps manifests by the appropriate engine (Helm in MVP).
+//
+// A template implicitly defines the app's component topology via its
+// category field: a "web" template produces a single web component by
+// default; "worker" and "cron" templates produce their respective
+// components. More complex topologies (e.g. web + worker) are supported
+// by specifying components explicitly at app-creation time.
+//
+// See docs/templates.md for the full template authoring guide.
 //
 //	templates/
 //	├── web-service/
@@ -17,8 +28,8 @@
 //	  name: web-service
 //	  version: "1.0.0"
 //	spec:
-//	  title: Web Service
-//	  description: Deploy a containerized web service
+//	  title: Web App
+//	  description: Create a containerized web app
 //	  category: web
 //	  engine:
 //	    type: helm

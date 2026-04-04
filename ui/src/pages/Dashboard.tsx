@@ -173,7 +173,7 @@ export function Dashboard() {
           {data.org?.displayName ?? "Dashboard"}
         </h1>
         <p className="mt-1 text-sm text-gray-500">
-          Platform overview — environments, projects, and services at a glance.
+          Platform overview — environments, projects, and apps at a glance.
         </p>
       </div>
 
@@ -181,7 +181,7 @@ export function Dashboard() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Projects" value={data.projects.length} />
         <StatCard label="Environments" value={uniqueEnvNames.length} />
-        <StatCard label="Services" value={totalServices} />
+        <StatCard label="Apps" value={totalServices} />
         <StatCard label="Previews" value={data.previewCount} />
       </div>
 
@@ -212,7 +212,7 @@ export function Dashboard() {
         </div>
       )}
 
-      {/* Projects & Services */}
+      {/* Projects & Apps */}
       {data.projects.length === 0 ? (
         <EmptyState />
       ) : (
@@ -265,7 +265,7 @@ function ProjectCard({
         </div>
         <div className="flex flex-shrink-0 items-center gap-3">
           <span className="text-xs text-gray-400">
-            {services.length} {services.length === 1 ? "service" : "services"}
+            {services.length} {services.length === 1 ? "app" : "apps"}
           </span>
           <Link
             to={`/projects/${project.name}/apps/new`}
@@ -278,7 +278,7 @@ function ProjectCard({
 
       {services.length === 0 ? (
         <div className="px-5 py-10 text-center">
-          <p className="text-sm text-gray-400">No services configured yet.</p>
+          <p className="text-sm text-gray-400">No apps yet.</p>
           <Link
             to={`/projects/${project.name}/apps/new`}
             className="mt-2 inline-block text-sm font-medium text-gray-600 hover:text-gray-900"
@@ -290,7 +290,7 @@ function ProjectCard({
         <table className="w-full">
           <thead>
             <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-400">
-              <th className="px-5 py-2.5">Service</th>
+              <th className="px-5 py-2.5">App</th>
               <th className="px-5 py-2.5">Template</th>
               <th className="px-5 py-2.5">Status</th>
               <th className="px-5 py-2.5">Image</th>
@@ -406,7 +406,7 @@ function EmptyState() {
       <h3 className="text-sm font-medium text-gray-900">No projects yet</h3>
       <p className="mx-auto mt-1 max-w-sm text-sm text-gray-500">
         Get started by browsing available templates or running the onboarding
-        checklist to set up your first project and service.
+        checklist to set up your first project and app.
       </p>
       <div className="mt-6 flex items-center justify-center gap-3">
         <Link

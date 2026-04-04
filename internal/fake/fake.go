@@ -365,6 +365,24 @@ func (r *DevRuntime) SaveAppEnvironment(_ context.Context, projectName string, e
 	return nil
 }
 
+func (r *DevRuntime) DeleteAppEnvironment(_ context.Context, projectName, appName, envName string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	projectEnvs, ok := r.appEnvs[projectName]
+	if !ok {
+		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+	}
+	envMap, ok := projectEnvs[appName]
+	if !ok {
+		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+	}
+	if _, ok := envMap[envName]; !ok {
+		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+	}
+	delete(envMap, envName)
+	return nil
+}
+
 // ── RuntimeStatusReader ──────────────────────────────────────────────────────
 
 // GetServiceStatus returns a pre-seeded ServiceStatus for known

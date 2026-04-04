@@ -8,8 +8,8 @@ import (
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
-// ValidateServiceInputs checks that the provided values and secret refs
-// conform to the template's input schema. It enforces:
+// ValidateAppInputs checks that the provided values and secret refs conform to
+// the template's input schema. It enforces:
 //   - required inputs are present (unless they have a default)
 //   - provided values match known template inputs
 //   - values have the correct type (string, number, boolean, enum)
@@ -18,7 +18,23 @@ import (
 //   - strings match pattern if defined
 //   - secret inputs are only provided as refs, never as plaintext values
 //   - secret refs reference known secret inputs
+func ValidateAppInputs(values map[string]any, secretRefs []SecretRef, tmpl *tpl.Template) error {
+	return validateAppInputs(values, secretRefs, tmpl)
+}
+
+// ValidateServiceInputs is the legacy name for ValidateAppInputs.
+//
+// Deprecated: Call ValidateAppInputs for new code. ValidateServiceInputs is
+// retained for the legacy POST /api/v1/projects/{project}/services handler and
+// will be removed once that handler is deleted.
+// See docs/migration-app-model.md.
 func ValidateServiceInputs(values map[string]any, secretRefs []SecretRef, tmpl *tpl.Template) error {
+	return validateAppInputs(values, secretRefs, tmpl)
+}
+
+// validateAppInputs is the shared implementation used by both
+// ValidateAppInputs and ValidateServiceInputs.
+func validateAppInputs(values map[string]any, secretRefs []SecretRef, tmpl *tpl.Template) error {
 	allInputs := make([]tpl.Input, 0, len(tmpl.Spec.Inputs)+len(tmpl.Spec.AdvancedInputs))
 	allInputs = append(allInputs, tmpl.Spec.Inputs...)
 	allInputs = append(allInputs, tmpl.Spec.AdvancedInputs...)
