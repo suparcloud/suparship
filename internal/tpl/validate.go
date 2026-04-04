@@ -16,6 +16,12 @@ var validInputTypes = map[InputType]bool{
 	InputTypeEnum:    true,
 }
 
+var validTemplateComponentTypes = map[TemplateComponentType]bool{
+	TemplateComponentWeb:    true,
+	TemplateComponentWorker: true,
+	TemplateComponentCron:   true,
+}
+
 // Validate checks the Template for structural correctness.
 func (t *Template) Validate() error {
 	if t.APIVersion != CurrentAPIVersion {
@@ -41,10 +47,17 @@ func (t *Template) Validate() error {
 		return err
 	}
 
+	// Validate spec.components first so component names are available for
+	// cross-referencing from inputs below.
+	componentNames, err := validateComponents(t.Spec.Components)
+	if err != nil {
+		return err
+	}
+
 	inputNames := make(map[string]bool)
 
 	for i, inp := range t.Spec.Inputs {
-		if err := validateInput(inp, fmt.Sprintf("spec.inputs[%d]", i)); err != nil {
+		if err := validateInput(inp, fmt.Sprintf("spec.inputs[%d]", i), componentNames); err != nil {
 			return err
 		}
 		if inputNames[inp.Name] {
@@ -54,7 +67,7 @@ func (t *Template) Validate() error {
 	}
 
 	for i, inp := range t.Spec.AdvancedInputs {
-		if err := validateInput(inp, fmt.Sprintf("spec.advancedInputs[%d]", i)); err != nil {
+		if err := validateInput(inp, fmt.Sprintf("spec.advancedInputs[%d]", i), componentNames); err != nil {
 			return err
 		}
 		if inputNames[inp.Name] {
@@ -88,7 +101,39 @@ func validateEngine(e Engine) error {
 	return nil
 }
 
-func validateInput(inp Input, path string) error {
+// validateComponents validates the spec.components slice and returns the set
+// of declared component names so callers can cross-reference from inputs.
+func validateComponents(components []TemplateComponent) (map[string]bool, error) {
+	names := make(map[string]bool, len(components))
+	for i, c := range components {
+		path := fmt.Sprintf("spec.components[%d]", i)
+		if err := validateTemplateComponent(c, path); err != nil {
+			return nil, err
+		}
+		if names[c.Name] {
+			return nil, fmt.Errorf("duplicate component name %q in spec.components", c.Name)
+		}
+		names[c.Name] = true
+	}
+	return names, nil
+}
+
+// validateTemplateComponent checks structural correctness of one component entry.
+func validateTemplateComponent(c TemplateComponent, path string) error {
+	if c.Name == "" {
+		return fmt.Errorf("%s: name is required", path)
+	}
+	if c.Type == "" {
+		return fmt.Errorf("%s (%s): type is required", path, c.Name)
+	}
+	if !validTemplateComponentTypes[c.Type] {
+		return fmt.Errorf("%s (%s): unsupported type %q (must be one of web, worker, cron)",
+			path, c.Name, c.Type)
+	}
+	return nil
+}
+
+func validateInput(inp Input, path string, componentNames map[string]bool) error {
 	if inp.Name == "" {
 		return fmt.Errorf("%s: name is required", path)
 	}
@@ -111,6 +156,11 @@ func validateInput(inp Input, path string) error {
 		if err := validateDefault(inp); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
+	}
+
+	if inp.Component != "" && !componentNames[inp.Component] {
+		return fmt.Errorf("%s (%s): component %q is not defined in spec.components",
+			path, inp.Name, inp.Component)
 	}
 
 	return nil
