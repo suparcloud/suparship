@@ -22,6 +22,12 @@ notifications:
 
 server:
   replicas: 1
+  # ── Ingress — routed via NGINX on host port 8880 ───────────────────────
+  # Access at http://argocd.localhost:8880  (add to /etc/hosts: 127.0.0.1 argocd.localhost)
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hostname: argocd.localhost
 
 repoServer:
   replicas: 1
@@ -30,8 +36,7 @@ applicationSet:
   replicas: 1
 
 # ── Server: disable TLS termination ──────────────────────────────────────
-# Access is via kubectl port-forward (localhost) so HTTPS is unnecessary.
-# The UI and API are served over plain HTTP on port 80.
+# The UI and API are served over plain HTTP on port 80 via NGINX ingress.
 configs:
   params:
     server.insecure: "true"

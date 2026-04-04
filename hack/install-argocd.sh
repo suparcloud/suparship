@@ -120,7 +120,7 @@ fi
 
 # ── 6. Persist credentials to .env.cluster ───────────────────────────────
 info "Writing ArgoCD credentials to .env.cluster..."
-write_credential ARGOCD_URL       "http://localhost:8180"
+write_credential ARGOCD_URL       "http://argocd.localhost:8880"
 write_credential ARGOCD_USERNAME  "admin"
 write_credential ARGOCD_PASSWORD  "${ADMIN_PASSWORD}"
 ok ".env.cluster updated"
@@ -139,12 +139,12 @@ cat <<EOF
   Credentials saved to: .env.cluster
 
   Open the UI:
-    kubectl port-forward svc/argocd-server -n ${ARGOCD_NAMESPACE} 8180:80
-    open http://localhost:8180
+    open http://argocd.localhost:8880
+    (ensure 127.0.0.1 argocd.localhost is in /etc/hosts)
 
   Or use the argocd CLI:
-    argocd login localhost:8180 \\
-      --username admin --password '${ADMIN_PASSWORD}' --plaintext
+    argocd login argocd.localhost:8880 \\
+      --username admin --password '${ADMIN_PASSWORD}' --plaintext --grpc-web
 
   Verify pods:
     kubectl get pods -n ${ARGOCD_NAMESPACE}

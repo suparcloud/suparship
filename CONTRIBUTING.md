@@ -172,8 +172,9 @@ This command (idempotent — safe to re-run):
 **Access the UI** after install:
 
 ```bash
-kubectl port-forward svc/argocd-server -n argocd 8180:80
-# open http://localhost:8180
+# Ensure this is in /etc/hosts:
+# 127.0.0.1 argocd.localhost
+open http://argocd.localhost:8880
 # username: admin
 # password: printed by the install script, or retrieve with:
 kubectl get secret argocd-initial-admin-secret \

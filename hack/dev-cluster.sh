@@ -110,8 +110,7 @@ cat <<EOF
   Backend   →  http://localhost:${BACKEND_PORT}
                local process, talks to kind cluster via KUBECONFIG
   Frontend  →  http://localhost:${FRONTEND_PORT}
-  ArgoCD    →  kubectl port-forward svc/argocd-server -n argocd 8180:80
-               then open http://localhost:8180
+  ArgoCD    →  http://argocd.localhost:8880  (gitops / admin)
   Gitea     →  http://gitea.localhost:8880  (gitops / gitops-dev-only)
                gitops repo: http://gitea.localhost:8880/gitops/gitops
 
@@ -120,6 +119,7 @@ cat <<EOF
 
   /etc/hosts (must have):
     127.0.0.1 gitea.localhost
+    127.0.0.1 argocd.localhost
 
   Handy checks:
     kubectl get nodes
