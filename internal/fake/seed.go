@@ -100,11 +100,13 @@ func seedApps(r *DevRuntime) {
 				"image_repository": "ghcr.io/suparcloud/hello",
 				"image_tag":        "v1.0.0",
 			},
-			Components: []domain.Component{
+			Components: []domain.ComponentSpec{
 				{
-					Name:             "web",
-					Type:             domain.ComponentWeb,
-					EnabledInPreview: true,
+					Name:           "web",
+					Type:           domain.ComponentWeb,
+					Enabled:        true,
+					Expose:         true,
+					PreviewEnabled: true,
 				},
 			},
 		},
@@ -126,21 +128,25 @@ func seedApps(r *DevRuntime) {
 				"image_tag":        "v2.3.1",
 				"port":             "3000",
 			},
-			Components: []domain.Component{
+			Components: []domain.ComponentSpec{
 				{
-					Name:             "web",
-					Type:             domain.ComponentWeb,
-					EnabledInPreview: true,
+					Name:           "web",
+					Type:           domain.ComponentWeb,
+					Enabled:        true,
+					Expose:         true,
+					PreviewEnabled: true,
 				},
 				{
-					Name:             "worker",
-					Type:             domain.ComponentWorker,
-					EnabledInPreview: false,
+					Name:           "worker",
+					Type:           domain.ComponentWorker,
+					Enabled:        true,
+					PreviewEnabled: false,
 				},
 				{
-					Name:             "scheduler",
-					Type:             domain.ComponentCron,
-					EnabledInPreview: false,
+					Name:           "scheduler",
+					Type:           domain.ComponentCron,
+					Enabled:        true,
+					PreviewEnabled: false,
 				},
 			},
 		},

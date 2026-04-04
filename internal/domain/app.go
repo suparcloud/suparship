@@ -73,18 +73,90 @@ type AppSecretRef struct {
 	SecretRef string `json:"secretRef" yaml:"secretRef"`
 }
 
-// Component describes a single runtime unit within an app (e.g. web server,
-// background worker, or scheduled job). Component topology is derived from the
-// template by default; this struct allows explicit overrides and preview flags.
-type Component struct {
+// SizePreset is a coarse resource-sizing hint that abstracts CPU/memory
+// requests into a named t-shirt size. Mutually exclusive with an explicit
+// Replicas override on the same ComponentSpec.
+type SizePreset string
+
+const (
+	SizeSmall  SizePreset = "small"
+	SizeMedium SizePreset = "medium"
+	SizeLarge  SizePreset = "large"
+)
+
+// ParseSizePreset converts a raw string into a SizePreset, returning an error
+// if the value is not one of the known values.
+func ParseSizePreset(s string) (SizePreset, error) {
+	switch SizePreset(s) {
+	case SizeSmall, SizeMedium, SizeLarge:
+		return SizePreset(s), nil
+	default:
+		return "", fmt.Errorf("unknown size preset %q: must be one of small, medium, large", s)
+	}
+}
+
+// Valid reports whether p is a recognised SizePreset.
+func (p SizePreset) Valid() bool {
+	_, err := ParseSizePreset(string(p))
+	return err == nil
+}
+
+// ComponentSpec describes a single runtime unit within an app (e.g. web
+// server, background worker, or scheduled job). Component topology is derived
+// from the template by default; this struct allows explicit overrides.
+//
+// Replicas and SizePreset are mutually exclusive: set at most one.
+// Secret values MUST NOT appear in Config; use AppSpec.SecretRefs instead.
+type ComponentSpec struct {
 	// Name uniquely identifies the component within the app (e.g. "web", "worker").
 	Name string `json:"name" yaml:"name"`
 	// Type classifies the runtime role. One of web, worker, cron.
 	Type ComponentType `json:"type" yaml:"type"`
-	// EnabledInPreview controls whether this component is deployed in preview
-	// environments. Heavy or nonessential components can opt out by setting
+	// Enabled controls whether this component is active. Disabled components
+	// are not deployed to any environment.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Replicas is the desired replica count. Zero means use the platform
+	// default. Mutually exclusive with SizePreset.
+	Replicas int32 `json:"replicas,omitempty" yaml:"replicas,omitempty"`
+	// SizePreset selects a named resource tier (small, medium, large).
+	// Mutually exclusive with Replicas.
+	SizePreset SizePreset `json:"sizePreset,omitempty" yaml:"sizePreset,omitempty"`
+	// Expose indicates that this component should be reachable via an ingress
+	// or external service endpoint. Typically true for web components.
+	Expose bool `json:"expose" yaml:"expose"`
+	// PreviewEnabled controls whether this component is deployed in preview
+	// environments. Heavy or non-essential components can opt out by setting
 	// this to false.
-	EnabledInPreview bool `json:"enabledInPreview" yaml:"enabledInPreview"`
+	PreviewEnabled bool `json:"previewEnabled" yaml:"previewEnabled"`
+	// Config holds non-secret key/value configuration for the component
+	// (e.g. environment variable defaults, feature flags). Secret values
+	// MUST NOT appear here; use AppSpec.SecretRefs instead.
+	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
+}
+
+// AppMetadata carries optional labelling and annotation data attached to an
+// app spec. Both maps are optional; nil and empty are treated equivalently.
+type AppMetadata struct {
+	// Labels are arbitrary key/value pairs used for filtering and grouping.
+	Labels map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	// Annotations are arbitrary key/value pairs used for tooling and auditing.
+	Annotations map[string]string `json:"annotations,omitempty" yaml:"annotations,omitempty"`
+}
+
+// EnvironmentOverride holds per-environment tuning applied on top of the
+// app-level defaults. Only non-zero fields override the app-level value.
+//
+// Replicas and SizePreset are mutually exclusive: set at most one.
+type EnvironmentOverride struct {
+	// Replicas overrides the replica count for this environment.
+	// Zero means inherit the component or platform default.
+	Replicas int32 `json:"replicas,omitempty" yaml:"replicas,omitempty"`
+	// SizePreset overrides the resource tier for this environment.
+	SizePreset SizePreset `json:"sizePreset,omitempty" yaml:"sizePreset,omitempty"`
+	// Values overrides specific template input values for this environment.
+	Values map[string]any `json:"values,omitempty" yaml:"values,omitempty"`
+	// Config overrides non-secret key/value configuration for this environment.
+	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
 }
 
 // AppSpec is the desired configuration for an app. It is deterministic and
@@ -106,7 +178,12 @@ type AppSpec struct {
 	SecretRefs []AppSecretRef `json:"secretRefs,omitempty" yaml:"secretRefs,omitempty"`
 	// Components describes the runtime units that make up this app.
 	// When empty, the component topology is derived from the template defaults.
-	Components []Component `json:"components,omitempty" yaml:"components,omitempty"`
+	Components []ComponentSpec `json:"components,omitempty" yaml:"components,omitempty"`
+	// EnvironmentDefaults holds per-environment overrides keyed by environment
+	// name (e.g. "staging", "prod"). Only set fields override app-level values.
+	EnvironmentDefaults map[string]EnvironmentOverride `json:"environmentDefaults,omitempty" yaml:"environmentDefaults,omitempty"`
+	// Metadata carries optional labels and annotations for the app spec.
+	Metadata *AppMetadata `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 // App is a deployable unit owned by a project. It combines identity metadata

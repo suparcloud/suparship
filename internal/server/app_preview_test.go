@@ -23,9 +23,9 @@ func previewTestAppForProject(projectName string) *domain.App {
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "web-service"},
-			Components: []domain.Component{
-				{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
-				{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
+				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
 			},
 		},
 	}
@@ -38,8 +38,8 @@ func workerOnlyAppForProject(projectName string) *domain.App {
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "worker"},
-			Components: []domain.Component{
-				{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+			Components: []domain.ComponentSpec{
+				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
 			},
 		},
 	}

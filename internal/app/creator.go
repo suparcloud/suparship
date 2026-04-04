@@ -18,22 +18,22 @@ import (
 // ComponentType and a sensible default component name.
 //
 // Mapping:
-//   - "worker" → {Name: "worker", Type: ComponentWorker, EnabledInPreview: false}
-//   - "cron"   → {Name: "cron",   Type: ComponentCron,   EnabledInPreview: false}
-//   - any other → {Name: "web",  Type: ComponentWeb,    EnabledInPreview: true}
-func DefaultComponentsFromTemplate(tmpl *tpl.Template) []domain.Component {
+//   - "worker" → {Name: "worker", Type: ComponentWorker, Enabled: true, PreviewEnabled: false}
+//   - "cron"   → {Name: "cron",   Type: ComponentCron,   Enabled: true, PreviewEnabled: false}
+//   - any other → {Name: "web",  Type: ComponentWeb,    Enabled: true, Expose: true, PreviewEnabled: true}
+func DefaultComponentsFromTemplate(tmpl *tpl.Template) []domain.ComponentSpec {
 	switch tmpl.Spec.Category {
 	case "worker":
-		return []domain.Component{
-			{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+		return []domain.ComponentSpec{
+			{Name: "worker", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
 		}
 	case "cron":
-		return []domain.Component{
-			{Name: "cron", Type: domain.ComponentCron, EnabledInPreview: false},
+		return []domain.ComponentSpec{
+			{Name: "cron", Type: domain.ComponentCron, Enabled: true, PreviewEnabled: false},
 		}
 	default:
-		return []domain.Component{
-			{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
+		return []domain.ComponentSpec{
+			{Name: "web", Type: domain.ComponentWeb, Enabled: true, Expose: true, PreviewEnabled: true},
 		}
 	}
 }
@@ -67,11 +67,11 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 }
 
 // PreviewEnabledComponents returns the subset of components from the given
-// list that should be deployed in preview environments (EnabledInPreview == true).
-func PreviewEnabledComponents(components []domain.Component) []domain.Component {
-	out := make([]domain.Component, 0, len(components))
+// list that should be deployed in preview environments (PreviewEnabled == true).
+func PreviewEnabledComponents(components []domain.ComponentSpec) []domain.ComponentSpec {
+	out := make([]domain.ComponentSpec, 0, len(components))
 	for _, c := range components {
-		if c.EnabledInPreview {
+		if c.PreviewEnabled {
 			out = append(out, c)
 		}
 	}
@@ -111,7 +111,7 @@ func Build(
 	tmpl *tpl.Template,
 	values map[string]any,
 	secretRefs []domain.AppSecretRef,
-	components []domain.Component,
+	components []domain.ComponentSpec,
 ) (*domain.App, []*domain.AppEnvironment) {
 	comps := components
 	if len(comps) == 0 {

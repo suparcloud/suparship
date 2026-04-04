@@ -58,7 +58,7 @@ func ValidateComponentName(name string) error {
 //   - each component name must be a valid DNS label
 //   - component names must be unique within the list
 //   - each component type must be one of the recognised MVP values
-func ValidateComponents(components []Component) error {
+func ValidateComponents(components []ComponentSpec) error {
 	if len(components) == 0 {
 		return fmt.Errorf("app must have at least one component")
 	}
@@ -86,7 +86,7 @@ func ValidateComponents(components []Component) error {
 // ValidateSingleExposedComponent checks that at most one component has type
 // ComponentWeb (the "primary exposed" component). Pass allowMultiple = true to
 // skip this check when a template explicitly permits multiple web endpoints.
-func ValidateSingleExposedComponent(components []Component, allowMultiple bool) error {
+func ValidateSingleExposedComponent(components []ComponentSpec, allowMultiple bool) error {
 	if allowMultiple {
 		return nil
 	}
@@ -101,6 +101,32 @@ func ValidateSingleExposedComponent(components []Component, allowMultiple bool) 
 			"app has %d web components; at most one is allowed unless explicitly permitted",
 			count,
 		)
+	}
+	return nil
+}
+
+// ValidateComponentSpec checks a single ComponentSpec for field-level
+// correctness beyond name and type:
+//   - Replicas must be non-negative
+//   - SizePreset, when set, must be one of small, medium, large
+//   - Replicas and SizePreset are mutually exclusive
+func ValidateComponentSpec(c ComponentSpec) error {
+	if err := ValidateComponentName(c.Name); err != nil {
+		return err
+	}
+	if !c.Type.Valid() {
+		return fmt.Errorf("component %q: unsupported type %q (must be one of web, worker, cron)", c.Name, c.Type)
+	}
+	if c.Replicas < 0 {
+		return fmt.Errorf("component %q: replicas must be non-negative, got %d", c.Name, c.Replicas)
+	}
+	if c.SizePreset != "" {
+		if _, err := ParseSizePreset(string(c.SizePreset)); err != nil {
+			return fmt.Errorf("component %q: %w", c.Name, err)
+		}
+	}
+	if c.Replicas > 0 && c.SizePreset != "" {
+		return fmt.Errorf("component %q: replicas and sizePreset are mutually exclusive", c.Name)
 	}
 	return nil
 }

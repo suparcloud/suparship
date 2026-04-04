@@ -60,7 +60,7 @@ func promoteTestApp(projectName string) *domain.App {
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
 			Template:   domain.AppTemplateRef{Name: "web-service"},
-			Components: []domain.Component{{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true}},
+			Components: []domain.ComponentSpec{{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true}},
 		},
 	}
 }

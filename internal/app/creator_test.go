@@ -62,8 +62,8 @@ func TestDefaultComponentsWebCategory(t *testing.T) {
 	if c.Type != domain.ComponentWeb {
 		t.Errorf("expected type %q, got %q", domain.ComponentWeb, c.Type)
 	}
-	if !c.EnabledInPreview {
-		t.Error("expected EnabledInPreview=true for web component")
+	if !c.PreviewEnabled {
+		t.Error("expected PreviewEnabled=true for web component")
 	}
 }
 
@@ -79,8 +79,8 @@ func TestDefaultComponentsWorkerCategory(t *testing.T) {
 	if c.Type != domain.ComponentWorker {
 		t.Errorf("expected type %q, got %q", domain.ComponentWorker, c.Type)
 	}
-	if c.EnabledInPreview {
-		t.Error("expected EnabledInPreview=false for worker component")
+	if c.PreviewEnabled {
+		t.Error("expected PreviewEnabled=false for worker component")
 	}
 }
 
@@ -96,8 +96,8 @@ func TestDefaultComponentsCronCategory(t *testing.T) {
 	if c.Type != domain.ComponentCron {
 		t.Errorf("expected type %q, got %q", domain.ComponentCron, c.Type)
 	}
-	if c.EnabledInPreview {
-		t.Error("expected EnabledInPreview=false for cron component")
+	if c.PreviewEnabled {
+		t.Error("expected PreviewEnabled=false for cron component")
 	}
 }
 
@@ -223,9 +223,9 @@ func TestBuildUsesDefaultComponentsWhenNoneProvided(t *testing.T) {
 }
 
 func TestBuildRespectsExplicitComponents(t *testing.T) {
-	explicit := []domain.Component{
-		{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
-		{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+	explicit := []domain.ComponentSpec{
+		{Name: "web", Type: domain.ComponentWeb, Enabled: true, PreviewEnabled: true},
+		{Name: "worker", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
 	}
 	a, _ := Build("demo", "myapp", "", "", webTemplate(), nil, nil, explicit)
 	if len(a.Spec.Components) != 2 {
@@ -243,10 +243,10 @@ func TestBuildNilValuesNormalisedToEmptyMap(t *testing.T) {
 // --- PreviewEnabledComponents ---
 
 func TestPreviewEnabledComponentsFiltersCorrectly(t *testing.T) {
-	components := []domain.Component{
-		{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
-		{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
-		{Name: "cron", Type: domain.ComponentCron, EnabledInPreview: false},
+	components := []domain.ComponentSpec{
+		{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
+		{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
+		{Name: "cron", Type: domain.ComponentCron, PreviewEnabled: false},
 	}
 	got := PreviewEnabledComponents(components)
 	if len(got) != 1 {
@@ -258,9 +258,9 @@ func TestPreviewEnabledComponentsFiltersCorrectly(t *testing.T) {
 }
 
 func TestPreviewEnabledComponentsAllEnabled(t *testing.T) {
-	components := []domain.Component{
-		{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
-		{Name: "api", Type: domain.ComponentWeb, EnabledInPreview: true},
+	components := []domain.ComponentSpec{
+		{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
+		{Name: "api", Type: domain.ComponentWeb, PreviewEnabled: true},
 	}
 	got := PreviewEnabledComponents(components)
 	if len(got) != 2 {
@@ -269,8 +269,8 @@ func TestPreviewEnabledComponentsAllEnabled(t *testing.T) {
 }
 
 func TestPreviewEnabledComponentsNoneEnabled(t *testing.T) {
-	components := []domain.Component{
-		{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+	components := []domain.ComponentSpec{
+		{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
 	}
 	got := PreviewEnabledComponents(components)
 	if len(got) != 0 {
@@ -292,9 +292,9 @@ func TestNewPreviewEnvironmentSuccess(t *testing.T) {
 		Name:        "my-app",
 		ProjectName: "demo",
 		Spec: domain.AppSpec{
-			Components: []domain.Component{
-				{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
-				{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
+				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
 			},
 		},
 	}
@@ -332,8 +332,8 @@ func TestNewPreviewEnvironmentNoPreviewComponents(t *testing.T) {
 		Name:        "worker-app",
 		ProjectName: "demo",
 		Spec: domain.AppSpec{
-			Components: []domain.Component{
-				{Name: "worker", Type: domain.ComponentWorker, EnabledInPreview: false},
+			Components: []domain.ComponentSpec{
+				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
 			},
 		},
 	}
@@ -361,8 +361,8 @@ func TestNewPreviewEnvironmentNamespaceConvention(t *testing.T) {
 				Name:        tt.appName,
 				ProjectName: "demo",
 				Spec: domain.AppSpec{
-					Components: []domain.Component{
-						{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
+					Components: []domain.ComponentSpec{
+						{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
 					},
 				},
 			}

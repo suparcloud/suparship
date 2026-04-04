@@ -119,7 +119,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert and optionally validate explicit components.
-	var components []domain.Component
+	var components []domain.ComponentSpec
 	for i, c := range req.Components {
 		ct, err := domain.ParseComponentType(c.Type)
 		if err != nil {
@@ -128,10 +128,12 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		components = append(components, domain.Component{
-			Name:             c.Name,
-			Type:             ct,
-			EnabledInPreview: c.EnabledInPreview,
+		components = append(components, domain.ComponentSpec{
+			Name:           c.Name,
+			Type:           ct,
+			Enabled:        c.Enabled,
+			Expose:         c.Expose,
+			PreviewEnabled: c.PreviewEnabled,
 		})
 	}
 	if len(components) > 0 {
@@ -625,13 +627,15 @@ func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
 	}
 }
 
-func componentDTOs(components []domain.Component) []ComponentSummaryDTO {
+func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 	dtos := make([]ComponentSummaryDTO, 0, len(components))
 	for _, c := range components {
 		dtos = append(dtos, ComponentSummaryDTO{
-			Name:             c.Name,
-			Type:             string(c.Type),
-			EnabledInPreview: c.EnabledInPreview,
+			Name:           c.Name,
+			Type:           string(c.Type),
+			Enabled:        c.Enabled,
+			Expose:         c.Expose,
+			PreviewEnabled: c.PreviewEnabled,
 		})
 	}
 	return dtos

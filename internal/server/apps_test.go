@@ -297,8 +297,8 @@ func appTestApp() *domain.App {
 				Version: "1.0.0",
 			},
 			Values: map[string]any{"image_tag": "v1.0.0"},
-			Components: []domain.Component{
-				{Name: "web", Type: domain.ComponentWeb, EnabledInPreview: true},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
 			},
 		},
 	}
@@ -756,8 +756,8 @@ func TestCreateAppWithExplicitComponents(t *testing.T) {
 		Template: "web-service",
 		Values:   map[string]any{"image": "img:v1"},
 		Components: []ComponentCreateDTO{
-			{Name: "web", Type: "web", EnabledInPreview: true},
-			{Name: "worker", Type: "worker", EnabledInPreview: false},
+			{Name: "web", Type: "web", PreviewEnabled: true},
+			{Name: "worker", Type: "worker", PreviewEnabled: false},
 		},
 	})
 	if rec.Code != http.StatusCreated {
@@ -906,7 +906,7 @@ func TestCreateAppInvalidComponentType(t *testing.T) {
 		Template: "web-service",
 		Values:   map[string]any{"image": "img:v1"},
 		Components: []ComponentCreateDTO{
-			{Name: "web", Type: "badtype", EnabledInPreview: true},
+			{Name: "web", Type: "badtype", PreviewEnabled: true},
 		},
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
