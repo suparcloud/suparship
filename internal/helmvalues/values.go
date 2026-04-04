@@ -1,0 +1,118 @@
+// Package helmvalues defines the canonical Helm values structure for
+// suparShip app charts and the mapper that derives it from an AppSpec.
+//
+// # Design
+//
+// suparShip charts use a single, well-known values schema regardless of which
+// template the app was created from. The schema models apps as a set of named
+// components and a single routing declaration. Template-specific mappings
+// (template.yaml) are intentionally NOT leaked here: this package depends only
+// on domain types.
+//
+// # YAML shape
+//
+//	app:
+//	  name: hello
+//	  env: staging
+//
+//	components:
+//	  web:
+//	    enabled: true
+//	    image:
+//	      repository: ghcr.io/org/hello
+//	      tag: v1.0.0
+//	    replicas: 2
+//	    expose: true
+//	    env:
+//	      LOG_LEVEL: info
+//	    resources:        # omitted when no size preset is set
+//	      size: small
+//	  worker:
+//	    enabled: true
+//	    image:
+//	      repository: ghcr.io/org/hello
+//	      tag: v1.0.0
+//	    replicas: 1
+//	    expose: false
+//
+//	routing:
+//	  host: hello.staging.localhost
+//	  component: web
+//
+// # Determinism guarantee
+//
+// MapToHelmValues is a pure function: same App + envName + envType always
+// produces byte-identical output (maps are built with sorted keys when
+// serialized via encoding/json or gopkg.in/yaml.v3).
+package helmvalues
+
+// HelmValues is the root of the canonical Helm values document for a
+// suparShip app chart. All fields are exported with both JSON and YAML tags
+// so the struct can be serialized directly to either format.
+type HelmValues struct {
+	// App identifies which app and environment these values belong to.
+	App AppContext `json:"app" yaml:"app"`
+	// Components is a map from component name to its resolved configuration.
+	// Keys are always sorted alphabetically by the mapper to ensure
+	// deterministic output across Go runtime versions.
+	Components map[string]*ComponentValues `json:"components" yaml:"components"`
+	// Routing declares the primary ingress entry point for this deployment.
+	Routing RoutingValues `json:"routing" yaml:"routing"`
+}
+
+// AppContext carries top-level app identity injected into every chart.
+type AppContext struct {
+	// Name is the app's unique identifier (DNS label).
+	Name string `json:"name" yaml:"name"`
+	// Env is the target environment name (e.g. "staging", "prod", "pr-42").
+	Env string `json:"env" yaml:"env"`
+}
+
+// ComponentValues holds the resolved configuration for one component within
+// an app chart. The chart uses these values to render its Deployment (or
+// CronJob/Job for cron components), Service, and optional Ingress.
+type ComponentValues struct {
+	// Enabled controls whether the component's resources are rendered by
+	// the chart. Disabled components have all their manifests suppressed.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Image is the container image to deploy for this component.
+	Image ImageValues `json:"image" yaml:"image"`
+	// Replicas is the desired pod replica count. Always ≥ 1 in output.
+	Replicas int32 `json:"replicas" yaml:"replicas"`
+	// Expose indicates whether the chart should create an Ingress resource
+	// for this component.
+	Expose bool `json:"expose" yaml:"expose"`
+	// Env is a flat map of environment variable key/value pairs injected
+	// into the container at runtime. Secret values MUST NOT appear here;
+	// inject them via Kubernetes SecretKeyRef at the chart level.
+	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	// Resources is optional. When non-nil the chart uses the named size
+	// preset to select CPU/memory requests and limits.
+	Resources *ResourceValues `json:"resources,omitempty" yaml:"resources,omitempty"`
+}
+
+// ImageValues identifies the container image for a component.
+type ImageValues struct {
+	// Repository is the image repository (e.g. "ghcr.io/org/app" or "nginx").
+	Repository string `json:"repository" yaml:"repository"`
+	// Tag is the image tag or digest (e.g. "v1.2.3", "sha256:abc…").
+	Tag string `json:"tag" yaml:"tag"`
+}
+
+// ResourceValues selects a named resource tier for a component. The chart
+// maps the size string to concrete CPU/memory requests and limits.
+type ResourceValues struct {
+	// Size is one of "small", "medium", or "large".
+	Size string `json:"size" yaml:"size"`
+}
+
+// RoutingValues declares the primary public entry point for the deployment.
+// The chart uses this to configure the Ingress host and to annotate the
+// primary Service.
+type RoutingValues struct {
+	// Host is the ingress hostname without scheme (e.g. "hello.staging.localhost").
+	Host string `json:"host" yaml:"host"`
+	// Component is the name of the component that serves external traffic.
+	// Must match a key in HelmValues.Components.
+	Component string `json:"component" yaml:"component"`
+}
