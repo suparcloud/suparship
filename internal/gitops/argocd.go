@@ -280,6 +280,28 @@ func applyDefaults(opts BuildOptions, app *domain.App, env domain.AppEnvironment
 	return opts
 }
 
+// BuildArgoApplicationFromInstance maps a suparship App and an
+// EnvironmentInstance to an ArgoCD Application CRD object.
+//
+// It is the EnvironmentInstance-aware counterpart to BuildArgoApplication,
+// which accepts the transitional AppEnvironment type. New code should prefer
+// this function; BuildArgoApplication will be deprecated once the migration
+// from AppEnvironment is complete.
+//
+// The function delegates to BuildArgoApplication after projecting the relevant
+// fields from inst, so all naming conventions, label schemes, and default
+// application logic are identical between the two builders.
+func BuildArgoApplicationFromInstance(app *domain.App, inst *domain.EnvironmentInstance, opts BuildOptions) *Application {
+	env := domain.AppEnvironment{
+		AppName:     inst.AppName,
+		ProjectName: inst.ProjectName,
+		EnvName:     inst.EnvName,
+		EnvType:     inst.EnvType,
+		Namespace:   inst.Namespace,
+	}
+	return BuildArgoApplication(app, env, opts)
+}
+
 // defaultRepoPath returns the conventional gitops output path for an app env:
 //
 //	gitops-output/<project>/<app>/<env>

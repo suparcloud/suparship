@@ -324,6 +324,12 @@ func (ah *appHandler) handleListAppPreviews(w http.ResponseWriter, r *http.Reque
 // domain.SanitizePreviewName (deterministic, branch-name-friendly) before
 // validation and storage. Only apps with at least one preview-enabled component
 // may create previews; the handler returns 422 otherwise.
+//
+// Internally, the handler delegates to domainapp.CreatePreview which builds
+// the EnvironmentInstance, generates Helm values (respecting preview_enabled
+// components), and generates the ArgoCD Application manifest as a pure
+// function. Persistence to the AppStore is handled by projecting the
+// EnvironmentInstance back onto an AppEnvironment (compat layer).
 func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
@@ -352,7 +358,12 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	env, err := domainapp.NewPreviewEnvironment(a, sanitized)
+	// Run the full preview creation pipeline: EnvironmentInstance + Helm values
+	// + ArgoCD Application, respecting preview_enabled components.
+	previewResult, err := domainapp.CreatePreview(domainapp.PreviewRequest{
+		App:         a,
+		PreviewName: sanitized,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
@@ -364,6 +375,18 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 			Error: "preview \"" + sanitized + "\" already exists for app \"" + appName + "\"",
 		})
 		return
+	}
+
+	// Project the EnvironmentInstance onto AppEnvironment for the compat store.
+	inst := previewResult.Instance
+	env := &domain.AppEnvironment{
+		AppName:     inst.AppName,
+		ProjectName: inst.ProjectName,
+		EnvName:     inst.EnvName,
+		EnvType:     inst.EnvType,
+		Namespace:   inst.Namespace,
+		URLs:        []string{inst.URL},
+		Status:      inst.Status,
 	}
 
 	if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {

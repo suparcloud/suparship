@@ -364,3 +364,144 @@ func TestDefaultRepoPath(t *testing.T) {
 		t.Errorf("Source.Path = %q, want %q", got.Spec.Source.Path, wantPath)
 	}
 }
+
+// --- BuildArgoApplicationFromInstance ---
+
+// previewInst returns a minimal EnvironmentInstance for a preview environment.
+func previewInst(appName, projectName, previewName string) *domain.EnvironmentInstance {
+	ns := domain.GenerateNamespace(appName, previewName, domain.AppEnvPreview)
+	url := domain.GenerateURL(appName, previewName, domain.AppEnvPreview)
+	return &domain.EnvironmentInstance{
+		AppName:     appName,
+		ProjectName: projectName,
+		EnvType:     domain.AppEnvPreview,
+		EnvName:     previewName,
+		Namespace:   ns,
+		URL:         url,
+		Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
+	}
+}
+
+// TestBuildArgoApplicationFromInstance_MatchesBuildArgoApplication verifies
+// that BuildArgoApplicationFromInstance produces output that is structurally
+// identical to BuildArgoApplication when given an equivalent AppEnvironment.
+func TestBuildArgoApplicationFromInstance_MatchesBuildArgoApplication(t *testing.T) {
+	inst := previewInst("hello", "demo", "pr-42")
+
+	opts := gitops.BuildOptions{
+		RepoURL:       "https://github.com/org/gitops",
+		SyncAutomated: true,
+	}
+
+	fromInst := gitops.BuildArgoApplicationFromInstance(helloApp, inst, opts)
+
+	// Identical AppEnvironment projection of the instance.
+	env := domain.AppEnvironment{
+		AppName:     inst.AppName,
+		ProjectName: inst.ProjectName,
+		EnvName:     inst.EnvName,
+		EnvType:     inst.EnvType,
+		Namespace:   inst.Namespace,
+	}
+	fromEnv := gitops.BuildArgoApplication(helloApp, env, opts)
+
+	if fromInst.Metadata.Name != fromEnv.Metadata.Name {
+		t.Errorf("Name mismatch: fromInst=%q fromEnv=%q", fromInst.Metadata.Name, fromEnv.Metadata.Name)
+	}
+	if fromInst.Metadata.Namespace != fromEnv.Metadata.Namespace {
+		t.Errorf("Namespace mismatch: fromInst=%q fromEnv=%q", fromInst.Metadata.Namespace, fromEnv.Metadata.Namespace)
+	}
+	if fromInst.Spec.Destination.Namespace != fromEnv.Spec.Destination.Namespace {
+		t.Errorf("Destination.Namespace mismatch: fromInst=%q fromEnv=%q",
+			fromInst.Spec.Destination.Namespace, fromEnv.Spec.Destination.Namespace)
+	}
+	if fromInst.Spec.Source.Path != fromEnv.Spec.Source.Path {
+		t.Errorf("Source.Path mismatch: fromInst=%q fromEnv=%q", fromInst.Spec.Source.Path, fromEnv.Spec.Source.Path)
+	}
+}
+
+func TestBuildArgoApplicationFromInstance_PreviewNameConventions(t *testing.T) {
+	inst := previewInst("hello", "demo", "pr-42")
+	got := gitops.BuildArgoApplicationFromInstance(helloApp, inst, gitops.BuildOptions{
+		RepoURL: "https://github.com/org/gitops",
+	})
+
+	// Application name: <app>-<env>
+	if got.Metadata.Name != "hello-pr-42" {
+		t.Errorf("Name = %q, want hello-pr-42", got.Metadata.Name)
+	}
+	// Namespace routed to the preview Kubernetes namespace
+	if got.Spec.Destination.Namespace != "hello-pr-42" {
+		t.Errorf("Destination.Namespace = %q, want hello-pr-42", got.Spec.Destination.Namespace)
+	}
+	// Default gitops path includes the preview name
+	wantPath := "gitops-output/demo/hello/pr-42"
+	if got.Spec.Source.Path != wantPath {
+		t.Errorf("Source.Path = %q, want %q", got.Spec.Source.Path, wantPath)
+	}
+	// env-type label must be "preview"
+	if got.Metadata.Labels["suparship.io/env-type"] != "preview" {
+		t.Errorf("label env-type = %q, want preview", got.Metadata.Labels["suparship.io/env-type"])
+	}
+	// env label carries the preview name, not the type
+	if got.Metadata.Labels["suparship.io/env"] != "pr-42" {
+		t.Errorf("label env = %q, want pr-42", got.Metadata.Labels["suparship.io/env"])
+	}
+}
+
+func TestBuildArgoApplicationFromInstance_Labels(t *testing.T) {
+	inst := previewInst("api", "platform", "feature-foo")
+	got := gitops.BuildArgoApplicationFromInstance(&domain.App{
+		Name:        "api",
+		ProjectName: "platform",
+		Spec:        domain.AppSpec{Template: domain.AppTemplateRef{Name: "web-service"}},
+	}, inst, gitops.BuildOptions{RepoURL: "https://git.example.com/org/gitops"})
+
+	wantLabels := map[string]string{
+		"suparship.io/app":      "api",
+		"suparship.io/project":  "platform",
+		"suparship.io/env":      "feature-foo",
+		"suparship.io/env-type": "preview",
+	}
+	for k, v := range wantLabels {
+		if got.Metadata.Labels[k] != v {
+			t.Errorf("label %q = %q, want %q", k, got.Metadata.Labels[k], v)
+		}
+	}
+}
+
+func TestBuildArgoApplicationFromInstance_InlineValues(t *testing.T) {
+	inst := previewInst("hello", "demo", "pr-99")
+	inline := "app:\n  name: hello\n  env: pr-99\n"
+	got := gitops.BuildArgoApplicationFromInstance(helloApp, inst, gitops.BuildOptions{
+		RepoURL:      "https://github.com/org/gitops",
+		InlineValues: inline,
+	})
+
+	if got.Spec.Source.Helm == nil {
+		t.Fatal("Helm section is nil, want inline values propagated")
+	}
+	if got.Spec.Source.Helm.Values != inline {
+		t.Errorf("Helm.Values = %q, want %q", got.Spec.Source.Helm.Values, inline)
+	}
+}
+
+func TestBuildArgoApplicationFromInstance_Determinism(t *testing.T) {
+	inst := previewInst("hello", "demo", "pr-42")
+	opts := gitops.BuildOptions{
+		RepoURL:       "https://github.com/org/gitops",
+		SyncAutomated: true,
+	}
+	a := gitops.BuildArgoApplicationFromInstance(helloApp, inst, opts)
+	b := gitops.BuildArgoApplicationFromInstance(helloApp, inst, opts)
+
+	if a.Metadata.Name != b.Metadata.Name {
+		t.Error("BuildArgoApplicationFromInstance is non-deterministic: names differ")
+	}
+	if a.Spec.Source.Path != b.Spec.Source.Path {
+		t.Error("BuildArgoApplicationFromInstance is non-deterministic: paths differ")
+	}
+	if a.Spec.Destination.Namespace != b.Spec.Destination.Namespace {
+		t.Error("BuildArgoApplicationFromInstance is non-deterministic: namespaces differ")
+	}
+}
