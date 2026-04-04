@@ -170,12 +170,14 @@ func TestAppPromoteSourceDeterminismMultiplePreviews(t *testing.T) {
 
 	ctx := context.Background()
 	// Seed previews out of alphabetical order to test sorting.
+	// Each preview must have a release so Promote can copy it.
 	for _, name := range []string{"pr-99", "pr-1", "pr-42"} {
 		_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
 			AppName:   "my-app",
 			EnvName:   name,
 			EnvType:   domain.AppEnvPreview,
 			Namespace: "my-app-" + name,
+			Release:   &domain.AppReleaseRef{Tag: name + "-sha"},
 			Status:    domain.AppRuntimeStatus{Phase: domain.StatusHealthy},
 		})
 	}
@@ -397,5 +399,100 @@ func TestAppPromoteInvalidBody(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- Release propagation tests ---
+
+// TestAppPromoteReleaseCopiedToTarget verifies that after a successful
+// promotion the target environment's release in the store equals the source's.
+func TestAppPromoteReleaseCopiedToTarget(t *testing.T) {
+	mux, ah, store := newTestAppPromoteMux(testProject)
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	rec := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The response must include the promoted release.
+	var resp AppPromoteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Release == nil {
+		t.Fatal("expected Release in response, got nil")
+	}
+	if resp.Release.Tag != "v0.9.0" {
+		t.Errorf("Release.Tag = %q, want %q (staging tag)", resp.Release.Tag, "v0.9.0")
+	}
+
+	// Verify the store was updated.
+	prodEnv, err := store.GetAppEnvironment(context.Background(), testProject, "my-app", "prod")
+	if err != nil {
+		t.Fatalf("GetAppEnvironment: %v", err)
+	}
+	if prodEnv.Release == nil {
+		t.Fatal("prod environment Release is nil after promotion")
+	}
+	if prodEnv.Release.Tag != "v0.9.0" {
+		t.Errorf("stored prod Release.Tag = %q, want %q", prodEnv.Release.Tag, "v0.9.0")
+	}
+}
+
+// TestAppPromoteSourceReleaseUnchanged verifies that the source environment's
+// release is not mutated after promotion.
+func TestAppPromoteSourceReleaseUnchanged(t *testing.T) {
+	mux, ah, store := newTestAppPromoteMux(testProject)
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	rec := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	stagingEnv, _ := store.GetAppEnvironment(context.Background(), testProject, "my-app", "staging")
+	if stagingEnv.Release == nil || stagingEnv.Release.Tag != "v0.9.0" {
+		t.Errorf("staging release changed after promotion: %+v", stagingEnv.Release)
+	}
+}
+
+// TestAppPromoteNoReleaseFails verifies that promoting a source with no release
+// returns 400 with ErrNoRelease in the error message.
+func TestAppPromoteNoReleaseFails(t *testing.T) {
+	mux, ah, store := newTestAppPromoteMux(testProject)
+	store.addApp(promoteTestApp(testProject))
+
+	ctx := context.Background()
+	// Seed staging with no release.
+	_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
+		AppName:   "my-app",
+		EnvName:   "staging",
+		EnvType:   domain.AppEnvStaging,
+		Namespace: "my-app-staging",
+		// Release intentionally nil.
+	})
+	_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
+		AppName:   "my-app",
+		EnvName:   "prod",
+		EnvType:   domain.AppEnvProd,
+		Namespace: "my-app-prod",
+	})
+
+	rec := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for source with no release, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp errorResponse
+	_ = json.NewDecoder(rec.Body).Decode(&errResp)
+	if !contains(errResp.Error, "no release") {
+		t.Errorf("expected 'no release' in error, got %q", errResp.Error)
 	}
 }

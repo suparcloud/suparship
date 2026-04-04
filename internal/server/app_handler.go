@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -429,15 +430,15 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 
 // handlePromoteApp handles POST /api/v1/projects/{project}/apps/{app}/promote.
 //
-// For MVP the promotion path is preview → staging → prod. Promoting to a
-// preview environment is rejected. When Kargo integration is available it will
-// orchestrate the actual promotion; for now this validates the intent and
-// returns a structured acknowledgement so callers get a stable, app-scoped
-// response shape.
+// Promotion path is preview → staging → prod. Promoting to a preview
+// environment is rejected. The handler resolves the source environment
+// deterministically (lexicographically first candidate at the tier immediately
+// below the target), then delegates the actual release-copy to
+// domainapp.Promote which performs the all-or-nothing write.
 //
-// Component versions within the app release bundle are kept aligned: the
-// promotion moves the entire app (all components) from the source environment
-// to the destination, not individual components.
+// All components in the app share a single AppReleaseRef, so there is no
+// possibility of partial component promotion: the entire release bundle moves
+// together or not at all.
 func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
@@ -482,20 +483,44 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the source: the lexicographically first environment at the tier
+	// immediately below the target in the promotion chain.
 	sourceEnv, err := ah.findPromotionSource(r.Context(), projectName, appName, targetOrder)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, AppPromoteResponse{
+	// Execute the promotion: copy the release bundle and persist the target.
+	result, err := domainapp.Promote(r.Context(), ah.appStore, domainapp.PromoteRequest{
+		ProjectName: projectName,
+		AppName:     appName,
+		FromEnv:     sourceEnv.EnvName,
+		ToEnv:       req.TargetEnvironment,
+	})
+	if err != nil {
+		if errors.Is(err, domainapp.ErrNoRelease) {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to promote app"})
+		return
+	}
+
+	resp := AppPromoteResponse{
 		Project:     projectName,
 		App:         appName,
 		Source:      sourceEnv.EnvName,
 		Destination: req.TargetEnvironment,
 		Namespace:   targetEnv.Namespace,
-		Message:     "Promotion of " + appName + " from " + sourceEnv.EnvName + " to " + req.TargetEnvironment + " initiated",
-	})
+		Message:     "Promotion of " + appName + " from " + sourceEnv.EnvName + " to " + req.TargetEnvironment + " succeeded",
+		Release: &AppReleaseRefDTO{
+			Image:  result.Release.Image,
+			Tag:    result.Release.Tag,
+			Commit: result.Release.Commit,
+		},
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // findPromotionSource returns the best source environment for a promotion to

@@ -258,14 +258,16 @@ type AppPromoteRequest struct {
 	TargetEnvironment string `json:"targetEnvironment"`
 }
 
-// AppPromoteResponse is the JSON body returned on a successful app promotion
-// acknowledgement. For MVP this confirms the intent; Kargo integration will
-// update this response when it is wired in.
+// AppPromoteResponse is the JSON body returned on a successful app promotion.
+// Release is populated with the release ref that was copied from source to
+// destination; it is nil only when no release information is available.
 type AppPromoteResponse struct {
-	Project     string `json:"project"`
-	App         string `json:"app"`
-	Source      string `json:"source"`
-	Destination string `json:"destination"`
-	Namespace   string `json:"namespace"`
-	Message     string `json:"message"`
+	Project     string            `json:"project"`
+	App         string            `json:"app"`
+	Source      string            `json:"source"`
+	Destination string            `json:"destination"`
+	Namespace   string            `json:"namespace"`
+	Message     string            `json:"message"`
+	// Release is the release bundle (all components) that was promoted.
+	Release     *AppReleaseRefDTO `json:"release,omitempty"`
 }
