@@ -96,6 +96,9 @@ function overallPhase(envs: AppEnvironmentSummary[]): string {
   if (phases.some((p) => p === "degraded")) return "degraded";
   if (phases.some((p) => p === "progressing")) return "progressing";
   if (phases.every((p) => p === "not_deployed")) return "not_deployed";
+  // Mixed case: some envs healthy, rest not yet deployed (e.g. staging up,
+  // prod not promoted yet). This is expected — not a degraded state.
+  if (phases.some((p) => p === "healthy")) return "healthy";
   return "degraded";
 }
 
