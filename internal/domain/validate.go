@@ -198,9 +198,9 @@ func ValidatePreviewName(name string) error {
 // AppPreviewNamespace returns the Kubernetes namespace for a preview instance
 // of an app. Convention: {appName}-preview-{previewName}.
 //
-// This mirrors the project-scoped preview.PreviewNS helper in
-// internal/preview but operates on the app-centric model where the namespace
-// key is the app name rather than the project name.
+// Deprecated: Use GenerateNamespace(appName, previewName, AppEnvPreview)
+// instead. AppPreviewNamespace is retained for callers in the compat layer
+// that have not yet migrated to the app-centric model.
 func AppPreviewNamespace(appName, previewName string) string {
-	return appName + "-preview-" + previewName
+	return GenerateNamespace(appName, previewName, AppEnvPreview)
 }
