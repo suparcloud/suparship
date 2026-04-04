@@ -74,6 +74,11 @@ tasks:
         export REPO_ROOT=$(pwd)
         hack/init-gitops-repo.sh
 
+  dev:dns:setup:
+    desc: "Set up wildcard *.localhost DNS via dnsmasq (macOS) — run once per machine"
+    cmds:
+      - hack/setup-dns.sh
+
   dev:cluster:delete:
     desc: "Delete the suparShip dev cluster"
     cmds:

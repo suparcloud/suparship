@@ -117,9 +117,10 @@ cat <<EOF
   Good for:
     previews · promotions · runtime status · real pod logs · ArgoCD sync
 
-  /etc/hosts (must have):
-    127.0.0.1 gitea.localhost
-    127.0.0.1 argocd.localhost
+  DNS (run once per machine — no /etc/hosts needed after this):
+    task dev:dns:setup             wildcard *.localhost → 127.0.0.1
+    Without it: manually add to /etc/hosts →
+      127.0.0.1 gitea.localhost argocd.localhost
 
   Handy checks:
     kubectl get nodes

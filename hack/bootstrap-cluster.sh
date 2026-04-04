@@ -111,8 +111,9 @@ cat <<EOF
   Namespaces  $(IFS=, ; echo "${NAMESPACES[*]}")
 
   Next steps:
-    task dev          start backend + frontend (still uses fake mode)
-    kubectl get ns    verify namespaces
+    task dev:dns:setup     (once per machine) wildcard *.localhost DNS via dnsmasq
+    task dev               start backend + frontend (still uses fake mode)
+    kubectl get ns         verify namespaces
 
   To remove the cluster:
     task dev:cluster:delete
