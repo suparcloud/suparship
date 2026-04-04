@@ -131,7 +131,7 @@ spec:
     targetRevision: main
     path: charts/web-service
     helm:
-      releaseName: ${APP_NAME}-${ENV_NAME}
+      releaseName: ${APP_NAME}
       values: |
         replicaCount: 1
         image:
