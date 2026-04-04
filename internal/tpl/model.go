@@ -12,7 +12,14 @@
 // components. More complex topologies (e.g. web + worker) are supported
 // by specifying components explicitly at app-creation time.
 //
+// Component visibility: components are internal runtime units and are hidden
+// from the default UI. Only the app-level health is surfaced by default;
+// individual components appear in advanced views only. Templates control which
+// components participate in preview environments via PreviewEnabled.
+//
+// See docs/templates-components.md for how templates define component topology.
 // See docs/templates.md for the full template authoring guide.
+// See docs/app-model.md for the App / Environment / Component model.
 //
 //	templates/
 //	├── web-service/

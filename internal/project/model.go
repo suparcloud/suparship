@@ -68,12 +68,16 @@ type ProjectMeta struct {
 	Name string `yaml:"name"`
 }
 
-// ProjectSpec defines the project's environments and services.
+// ProjectSpec defines the project's environments and apps.
 type ProjectSpec struct {
 	DisplayName  string        `yaml:"displayName,omitempty"`
 	Description  string        `yaml:"description,omitempty"`
 	Environments []Environment `yaml:"environments"`
-	Services     []Service     `yaml:"services,omitempty"`
+	// Services is the legacy YAML key for apps. The field name is preserved for
+	// backward-compatible parsing of existing ConfigMaps. New code should use
+	// domain.App and domain.AppStore; do not add fields to this struct.
+	// See docs/app-model.md and docs/migration-app-model.md.
+	Services []Service `yaml:"services,omitempty"`
 }
 
 // Environment represents a deployment target in the promotion chain.
@@ -83,7 +87,12 @@ type Environment struct {
 	Order       int    `yaml:"order"`
 }
 
-// Service describes a deployable workload within a project.
+// Service describes a deployable workload (app) persisted in the legacy
+// services: YAML block. It is the on-disk representation only; at runtime this
+// maps to domain.App via the compatibility bridge in internal/compat.
+//
+// Do not extend this struct with new product fields. Add those to domain.App
+// and domain.AppSpec instead. See docs/app-model.md.
 type Service struct {
 	Name                 string                         `yaml:"name"`
 	Template             TemplateRef                    `yaml:"template"`

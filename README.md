@@ -41,18 +41,37 @@ But they:
 
 ## Key concepts
 
-suparShip is built around a small set of primitives:
+suparShip is built around a four-level hierarchy:
 
-- **Environment** – `staging`, `prod`, `preview`
-- **Project** – logical grouping (team / product)
-- **App** – a deployable workload (the primary developer-owned object; internally still called `service` in some API paths during migration — see [ADR-0001](docs/adr/0001-app-as-primary-deployment-object.md))
-- **Template** – a golden path for deploying an app
+```
+org
+└── project          (team / product boundary)
+    └── app          (primary developer-owned object)
+        ├── environment  (staging | prod | preview-*)
+        └── component    (internal; web | worker | cron — advanced view only)
+```
+
+- **App** – the unit of deployment. What a developer creates, configures,
+  previews, and promotes. Top-level navigation object within a project.
+- **Environment** – a runtime context for an app (`staging`, `prod`, or an
+  ephemeral `preview-*`). An environment is a lens on an app, not a top-level
+  container.
+- **Component** – an internal runtime process within an app (`web`, `worker`,
+  `cron`). Hidden from the default UI; surfaced in advanced views only.
+- **Project** – a team / product boundary that groups apps and defines the
+  ordered promotion chain (`dev → staging → prod`).
+- **Template** – a golden path (Helm chart + input schema) for creating apps.
 
 Developers think in:
 > *app → environment → preview → promote*
 
 SREs define:
 > *defaults, templates, and guardrails*
+
+> **Note:** some internal code paths and the legacy API still use the term
+> `service` during an ongoing migration. New external API routes use `app`.
+> See [ADR-0001](docs/adr/0001-app-as-primary-deployment-object.md) and
+> [docs/app-model.md](docs/app-model.md) for details.
 
 ---
 
@@ -332,9 +351,16 @@ For a given user and project:
 
 ---
 
-## Project & Service Model
+## Project & app model
 
-Projects and services are stored as Kubernetes ConfigMaps in the
+> **Current persistence format.** The YAML stored in Kubernetes ConfigMaps
+> still uses `services:` as the key for apps. This is a legacy field that the
+> backend maps to the canonical `App` model on read. New API routes use the
+> `app` terminology. See [`docs/app-model.md`](docs/app-model.md) for the
+> conceptual model and [`docs/migration-app-model.md`](docs/migration-app-model.md)
+> for the migration guide.
+
+Projects and apps are stored as Kubernetes ConfigMaps in the
 `suparship-system` namespace (one ConfigMap per project, named
 `suparship-project-{name}`).
 
@@ -384,9 +410,9 @@ spec:
 | Org | Single organization (from RBAC model) |
 | Project | Logical grouping with its own environments |
 | Environment | Ordered deployment target (dev → staging → prod) |
-| Service | Deployable workload referencing a template |
+| App | Deployable workload referencing a template (stored as `service` in legacy YAML) |
 
-### Service fields
+### App fields (stored as `service` in legacy YAML)
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -476,6 +502,15 @@ Significant design decisions are recorded as Architecture Decision Records (ADRs
 | ADR | Title | Status |
 |-----|-------|--------|
 | [ADR-0001](docs/adr/0001-app-as-primary-deployment-object.md) | App as Primary User-Facing Deployment Object | Accepted |
+
+### Key design documents
+
+| Document | Purpose |
+|----------|---------|
+| [`docs/app-model.md`](docs/app-model.md) | App, Environment, and Component concepts and guardrails |
+| [`docs/templates-components.md`](docs/templates-components.md) | How templates define component topology |
+| [`docs/templates.md`](docs/templates.md) | Full template authoring reference |
+| [`docs/migration-app-model.md`](docs/migration-app-model.md) | Service → app migration guide |
 
 ---
 

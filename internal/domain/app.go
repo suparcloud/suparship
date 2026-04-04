@@ -178,6 +178,9 @@ type AppSpec struct {
 	SecretRefs []AppSecretRef `json:"secretRefs,omitempty" yaml:"secretRefs,omitempty"`
 	// Components describes the runtime units that make up this app.
 	// When empty, the component topology is derived from the template defaults.
+	// Components are internal units: the default UI shows app-level health only;
+	// individual components are surfaced in advanced views. Hidden from top-level
+	// navigation. See docs/app-model.md — "Component — internal runtime unit".
 	Components []ComponentSpec `json:"components,omitempty" yaml:"components,omitempty"`
 	// EnvironmentDefaults holds per-environment overrides keyed by environment
 	// name (e.g. "staging", "prod"). Only set fields override app-level values.
@@ -229,7 +232,15 @@ type AppRuntimeStatus struct {
 // It combines the desired release intent (what should be running) with the
 // live runtime status observed from the cluster (what is actually running).
 //
-// Desired config lives in App/AppSpec. Runtime state lives here.
+// Key rules:
+//   - Desired config lives in App/AppSpec — it is stored in Git-backed
+//     ConfigMaps and describes *what should be deployed*.
+//   - Runtime state (Status, URLs) lives here — it is derived from live cluster
+//     observations and MUST NOT be stored back as desired config.
+//   - Environment is a runtime context for an app, not a top-level navigation
+//     object. Developers navigate to the app, then switch environment.
+//
+// See docs/app-model.md — "Environment — runtime context, not a navigation object".
 type AppEnvironment struct {
 	// AppName is the parent app this instance belongs to.
 	AppName string `json:"appName"`
