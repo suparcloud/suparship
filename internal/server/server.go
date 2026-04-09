@@ -24,19 +24,19 @@ const shutdownTimeout = 5 * time.Second
 
 // Config holds server configuration.
 type Config struct {
-	Addr          string
-	UIDir         string              // optional: path to built frontend assets
-	CORSOrigins   []string            // optional: allowed CORS origins
-	Authenticator auth.Authenticator  // optional: enables auth endpoints when set
-	OrgProvider   rbac.OrgProvider    // optional: enables RBAC-protected routes when set
-	Templates       []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
-	ProjectStore    project.Store       // optional: enables service creation when set
-	RuntimeProvider runtime.Provider    // optional: enables runtime inventory when set
+	Addr            string
+	UIDir           string               // optional: path to built frontend assets
+	CORSOrigins     []string             // optional: allowed CORS origins
+	Authenticator   auth.Authenticator   // optional: enables auth endpoints when set
+	OrgProvider     rbac.OrgProvider     // optional: enables RBAC-protected routes when set
+	Templates       []*tpl.Template      // optional: pre-loaded templates for /api/v1/templates
+	ProjectStore    project.Store        // optional: enables service creation when set
+	RuntimeProvider runtime.Provider     // optional: enables runtime inventory when set
 	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
 	PreviewStore    preview.Store        // optional: enables preview endpoints when set
 	AppStore        domain.AppStore      // optional: enables app read endpoints when set
 	CookieSecure    bool                 // true for production (HTTPS)
-	Logger        *slog.Logger
+	Logger          *slog.Logger
 }
 
 // Server is the suparship HTTP API server.

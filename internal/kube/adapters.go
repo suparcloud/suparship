@@ -29,7 +29,6 @@ var (
 	_ domain.ProjectStore        = (*k8sProjectDomainAdapter)(nil)
 	_ domain.RuntimeStatusReader = (*k8sRuntimeStatusAdapter)(nil)
 	_ domain.PreviewStore        = (*k8sPreviewDomainAdapter)(nil)
-	_ domain.AppStore            = (*nullAppStore)(nil)
 )
 
 // ── k8sServiceAdapter ────────────────────────────────────────────────────────
@@ -243,45 +242,4 @@ func domainToPreview(p *domain.Preview) *preview.Preview {
 			Service: p.ServiceName,
 		},
 	}
-}
-
-// ── nullAppStore ─────────────────────────────────────────────────────────────
-
-// nullAppStore implements domain.AppStore with empty/error returns.
-// It is used as the "primary" store inside compat.ServiceBackedAppStore so
-// that every call falls through to the legacy service path, which reads from
-// the project ConfigMap. Once a native K8s AppStore is implemented, replace
-// nullAppStore with it.
-type nullAppStore struct{}
-
-func (nullAppStore) ListApps(_ context.Context, _ string) ([]*domain.App, error) {
-	return nil, nil // empty → compat falls back to services
-}
-
-func (nullAppStore) GetApp(_ context.Context, _, _ string) (*domain.App, error) {
-	return nil, fmt.Errorf("no native app store: using compat fallback")
-}
-
-func (nullAppStore) ListAppEnvironments(_ context.Context, _, _ string) ([]*domain.AppEnvironment, error) {
-	return nil, nil // empty → compat falls back to services
-}
-
-func (nullAppStore) GetAppEnvironment(_ context.Context, _, _, _ string) (*domain.AppEnvironment, error) {
-	return nil, fmt.Errorf("no native app store: using compat fallback")
-}
-
-func (nullAppStore) ListAppPreviews(_ context.Context, _, _ string) ([]*domain.AppEnvironment, error) {
-	return nil, nil // empty → compat falls back to previews
-}
-
-func (nullAppStore) SaveApp(_ context.Context, _ string, _ *domain.App) error {
-	return fmt.Errorf("nullAppStore: SaveApp not implemented")
-}
-
-func (nullAppStore) SaveAppEnvironment(_ context.Context, _ string, _ *domain.AppEnvironment) error {
-	return fmt.Errorf("nullAppStore: SaveAppEnvironment not implemented")
-}
-
-func (nullAppStore) DeleteAppEnvironment(_ context.Context, _, _, _ string) error {
-	return fmt.Errorf("nullAppStore: DeleteAppEnvironment not implemented")
 }

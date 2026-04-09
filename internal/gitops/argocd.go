@@ -76,11 +76,11 @@ type ObjectMeta struct {
 type ApplicationSpec struct {
 	// Project is the ArgoCD AppProject that scopes this Application.
 	// Defaults to the suparship project name.
-	Project     string                  `json:"project"     yaml:"project"`
-	Source      ApplicationSource       `json:"source"      yaml:"source"`
-	Destination ApplicationDestination  `json:"destination" yaml:"destination"`
+	Project     string                 `json:"project"     yaml:"project"`
+	Source      ApplicationSource      `json:"source"      yaml:"source"`
+	Destination ApplicationDestination `json:"destination" yaml:"destination"`
 	// SyncPolicy is optional. When nil, sync must be triggered manually.
-	SyncPolicy  *SyncPolicy             `json:"syncPolicy,omitempty" yaml:"syncPolicy,omitempty"`
+	SyncPolicy *SyncPolicy `json:"syncPolicy,omitempty" yaml:"syncPolicy,omitempty"`
 }
 
 // ApplicationSource describes the Git repository and path that ArgoCD
@@ -248,8 +248,8 @@ func BuildArgoApplication(app *domain.App, env domain.AppEnvironment, opts Build
 			Annotations: annotations,
 		},
 		Spec: ApplicationSpec{
-			Project:     opts.ArgoCDProject,
-			Source:      source,
+			Project: opts.ArgoCDProject,
+			Source:  source,
 			Destination: ApplicationDestination{
 				Server:    opts.DestinationServer,
 				Namespace: env.Namespace,

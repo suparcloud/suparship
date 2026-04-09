@@ -50,6 +50,7 @@ var (
 	_ preview.Store        = (*preview.K8sStore)(nil)
 	_ runtime.Provider     = (*runtime.K8sProvider)(nil)
 	_ runtime.LogsProvider = (*runtime.K8sLogsProvider)(nil)
+	_ domain.AppStore      = (*K8sAppStore)(nil)
 )
 
 // ServerDeps bundles all Kubernetes-backed implementations of the
@@ -104,8 +105,9 @@ func NewServerDeps(client kubernetes.Interface) *ServerDeps {
 	previewStore := preview.NewK8sStore(client)
 	runtimeProvider := runtime.NewK8sProvider(client)
 
+	nativeAppStore := NewK8sAppStore(client)
 	appStore := compat.NewServiceBackedAppStore(
-		nullAppStore{},
+		nativeAppStore,
 		&k8sServiceAdapter{projects: projectStore},
 		&k8sProjectDomainAdapter{projects: projectStore},
 		&k8sRuntimeStatusAdapter{provider: runtimeProvider},
