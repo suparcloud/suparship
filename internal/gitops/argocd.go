@@ -123,6 +123,10 @@ type ApplicationDestination struct {
 type SyncPolicy struct {
 	// Automated enables automatic sync. When nil, sync is manual.
 	Automated *AutomatedSyncPolicy `json:"automated,omitempty" yaml:"automated,omitempty"`
+	// SyncOptions is a list of ArgoCD sync option strings.
+	// The most commonly needed option is "CreateNamespace=true", which tells
+	// ArgoCD to create the destination namespace if it does not already exist.
+	SyncOptions []string `json:"syncOptions,omitempty" yaml:"syncOptions,omitempty"`
 }
 
 // AutomatedSyncPolicy configures automatic synchronisation behaviour.
@@ -235,6 +239,10 @@ func BuildArgoApplication(app *domain.App, env domain.AppEnvironment, opts Build
 				Prune:    true,
 				SelfHeal: true,
 			},
+			// CreateNamespace=true is required because suparship uses a
+			// dedicated namespace per app-environment (e.g. "hello-staging").
+			// Without it ArgoCD fails the first sync with "namespace not found".
+			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	}
 

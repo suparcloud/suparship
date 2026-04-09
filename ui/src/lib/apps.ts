@@ -66,6 +66,26 @@ export function promoteApp(
   );
 }
 
+export interface SyncAppResponse {
+  message: string;
+  project: string;
+  app: string;
+}
+
+/**
+ * Re-triggers the gitops publish pipeline for an existing app.
+ * Useful for apps created before the gitops publisher was configured,
+ * or that failed to push during creation.
+ */
+export function syncApp(
+  project: string,
+  app: string,
+): Promise<SyncAppResponse> {
+  return api.post<SyncAppResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/sync`,
+  );
+}
+
 export function fetchAppLogs(
   project: string,
   app: string,

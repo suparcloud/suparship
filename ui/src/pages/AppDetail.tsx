@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { fetchAppLogs, getApp, getAppEnvironment, promoteApp } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppEnvironment, promoteApp, syncApp } from "../lib/apps";
 import { createPreview, deletePreview } from "../lib/previews";
 import type {
   AppDetail as AppDetailType,
@@ -235,6 +235,42 @@ const icons = {
       />
     </svg>
   ),
+  cloudArrowUp: (
+    <svg
+      className="h-4 w-4"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={1.5}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.338-2.32 5.75 5.75 0 0 1 1.046 11.095"
+      />
+    </svg>
+  ),
+  spinner: (
+    <svg
+      className="h-4 w-4 animate-spin"
+      fill="none"
+      viewBox="0 0 24 24"
+    >
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+      />
+    </svg>
+  ),
 };
 
 // ---------------------------------------------------------------------------
@@ -274,6 +310,11 @@ export function AppDetail() {
   const [promoteResult, setPromoteResult] = useState<PromoteResponse | null>(
     null,
   );
+
+  // Sync to git
+  type SyncState = "idle" | "syncing" | "success" | "error";
+  const [syncState, setSyncState] = useState<SyncState>("idle");
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!project || !appName) return;
@@ -445,6 +486,41 @@ export function AppDetail() {
             {icons.branch}
             Preview
           </button>
+          <button
+            onClick={async () => {
+              if (!project || !appName || syncState === "syncing") return;
+              setSyncState("syncing");
+              setSyncError(null);
+              try {
+                await syncApp(project, appName);
+                setSyncState("success");
+                setTimeout(() => setSyncState("idle"), 3000);
+              } catch (err) {
+                setSyncError(
+                  err instanceof Error ? err.message : "Sync failed",
+                );
+                setSyncState("error");
+              }
+            }}
+            disabled={syncState === "syncing"}
+            className={`inline-flex items-center gap-1.5 rounded-lg border px-3.5 py-2 text-sm font-medium shadow-sm transition-colors disabled:opacity-60 ${
+              syncState === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : syncState === "error"
+                  ? "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
+                  : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+            }`}
+            title="Re-publish this app to the gitops repo so ArgoCD picks it up"
+          >
+            {syncState === "syncing"
+              ? icons.spinner
+              : icons.cloudArrowUp}
+            {syncState === "syncing"
+              ? "Syncing…"
+              : syncState === "success"
+                ? "Synced ✓"
+                : "Sync to Git"}
+          </button>
           {(() => {
             const promotion = getPromoteTarget(currentEnv, data.environments);
             if (!promotion) return null;
@@ -467,6 +543,38 @@ export function AppDetail() {
           })()}
         </div>
       </div>
+
+      {/* Sync error banner */}
+      {syncState === "error" && syncError && (
+        <div className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+          <svg
+            className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z"
+            />
+          </svg>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-red-700">Sync to Git failed</p>
+            <p className="mt-0.5 text-xs text-red-600">{syncError}</p>
+          </div>
+          <button
+            onClick={() => { setSyncState("idle"); setSyncError(null); }}
+            className="flex-shrink-0 text-red-400 hover:text-red-600"
+            aria-label="Dismiss"
+          >
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Preview form */}
       {showPreviewForm && (

@@ -246,7 +246,7 @@ spec:
     path: gitops-output
     directory:
       recurse: true
-      include: "**/*argocd-app.yaml"
+      include: "{**/*argocd-app.yaml,**/appproject.yaml}"
   destination:
     server: https://kubernetes.default.svc
     namespace: ${ARGOCD_NAMESPACE}
