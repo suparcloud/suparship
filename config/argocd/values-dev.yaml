@@ -40,3 +40,22 @@ applicationSet:
 configs:
   params:
     server.insecure: "true"
+
+  # ── RBAC ─────────────────────────────────────────────────────────────────
+  # Explicit policy so the built-in admin account has full access to all
+  # ArgoCD resources including applications in user-created AppProjects
+  # (e.g. the "demo" project created by suparship).
+  #
+  # policy.default grants every authenticated session at least read access
+  # so the ArgoCD UI loads without "permission denied" errors.
+  rbac:
+    policy.default: "role:admin"
+    policy.csv: |
+      p, role:admin, applications, *, */*, allow
+      p, role:admin, applicationsets, *, */*, allow
+      p, role:admin, clusters,      *, *, allow
+      p, role:admin, repositories,  *, *, allow
+      p, role:admin, projects,      *, *, allow
+      p, role:admin, logs,          get, *, allow
+      p, role:admin, exec,          *, */*, allow
+      g, admin, role:admin
