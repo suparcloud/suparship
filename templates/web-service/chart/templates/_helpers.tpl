@@ -22,11 +22,13 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- end }}
 
 {{/*
-Selector labels used in Deployment and Service.
+Selector labels — used by Deployment spec.selector.matchLabels and Service.
+Intentionally minimal: only the app name is included so that renaming the
+Helm release (which changes app.kubernetes.io/instance) does not require
+recreating Deployments. Kubernetes selectors are immutable after creation.
 */}}
 {{- define "web-service.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "web-service.fullname" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
