@@ -1,7 +1,7 @@
 # https://taskfile.dev
 version: "3"
 
-# Load .env automatically when present so all tasks pick up local dev settings.
+# Load .env automatically so all tasks pick up local dev settings.
 dotenv: ['.env']
 
 vars:
@@ -10,23 +10,20 @@ vars:
 tasks:
   default:
     desc: Show available tasks
+    silent: true
     cmds:
       - task --list
 
-  help:
-    desc: Show available tasks
-    cmds:
-      - task --list
-
-  # ── Local development ──────────────────────────────────────────────────
+  # ── Local (fake / in-memory) dev ───────────────────────────────────────
+  # No cluster required. Uses in-memory data and a fixed admin credential.
 
   dev:
-    desc: "Start local dev: backend (fake/in-memory) + frontend — one command"
+    desc: "Start local dev — backend (fake/in-memory) + frontend"
     cmds:
       - hack/dev.sh
 
   dev:api:
-    desc: "Build and start the backend API only (fake/local mode)"
+    desc: "Build and start the backend API only (fake mode)"
     cmds:
       - go build -o bin/{{.BINARY_NAME}} ./cmd/suparship
       - SUPARSHIP_CORS_ORIGINS=http://localhost:5173 ./bin/{{.BINARY_NAME}} server
@@ -36,25 +33,49 @@ tasks:
     cmds:
       - cd ui && npm run dev
 
+  # ── Cluster dev — main entry points ────────────────────────────────────
+  # Run dev:cluster once to provision the cluster, then dev:cluster:serve
+  # for every subsequent dev session (fast build + restart, no cluster touch).
+
   dev:cluster:
-    desc: "Cluster dev: bootstrap + ArgoCD + backend (cluster mode) + frontend — one command"
+    desc: "Set up dev cluster — DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed (idempotent)"
     cmds:
-      - hack/dev-cluster.sh
+      - hack/setup-cluster.sh
+
+  dev:cluster:serve:
+    desc: "Start backend (cluster mode) + frontend against the running dev cluster"
+    cmds:
+      - hack/serve-cluster.sh
+
+  dev:cluster:delete:
+    desc: "Tear down the suparShip dev cluster"
+    cmds:
+      - |
+        kind delete cluster --name suparship-dev \
+          && echo "  Cluster deleted." \
+          || echo "  Cluster 'suparship-dev' not found — nothing to delete."
+
+  # ── Cluster dev — individual component installs (targeted re-runs) ──────
+
+  dev:cluster:dns:
+    desc: "Set up wildcard *.localhost DNS via dnsmasq — macOS only, run once per machine"
+    cmds:
+      - hack/setup-dns.sh
 
   dev:cluster:bootstrap:
-    desc: "Create kind cluster + namespaces — idempotent, safe to re-run"
+    desc: "Create kind cluster + namespaces (idempotent)"
     cmds:
       - hack/bootstrap-cluster.sh
 
-  dev:cluster:argocd:
-    desc: "Install minimal ArgoCD (dev profile) into the kind cluster"
-    cmds:
-      - hack/install-argocd.sh
-
   dev:cluster:ingress:
-    desc: "Install NGINX ingress controller into the kind cluster"
+    desc: "Install NGINX ingress controller"
     cmds:
       - hack/install-ingress.sh
+
+  dev:cluster:argocd:
+    desc: "Install minimal ArgoCD (dev profile)"
+    cmds:
+      - hack/install-argocd.sh
 
   dev:cluster:gitea:
     desc: "Install Gitea + create gitops repo + register with ArgoCD"
@@ -63,29 +84,26 @@ tasks:
 
   dev:cluster:gitops-init:
     desc: "Re-push gitops repo skeleton to Gitea (charts + gitops-output)"
+    env:
+      GITEA_HOST_URL: '{{default "http://gitea.localhost:8880" .GITEA_HOST_URL}}'
+      GITEA_ADMIN_USER: '{{default "gitops" .GITEA_ADMIN_USER}}'
+      GITEA_ADMIN_PASS: '{{default "gitops-dev-only" .GITEA_ADMIN_PASS}}'
+      GITOPS_REPO_ORG: '{{default "gitops" .GITOPS_REPO_ORG}}'
+      GITOPS_REPO_NAME: '{{default "gitops" .GITOPS_REPO_NAME}}'
+      GITEA_CLUSTER_URL: '{{default "http://gitea-http.gitea.svc.cluster.local:3000" .GITEA_CLUSTER_URL}}'
+      REPO_ROOT: '{{.ROOT_DIR}}'
     cmds:
-      - |
-        export GITEA_HOST_URL=http://gitea.localhost:8880
-        export GITEA_ADMIN_USER=gitops
-        export GITEA_ADMIN_PASS=gitops-dev-only
-        export GITOPS_REPO_ORG=gitops
-        export GITOPS_REPO_NAME=gitops
-        export GITEA_CLUSTER_URL=http://gitea-http.gitea.svc.cluster.local:3000
-        export REPO_ROOT=$(pwd)
-        hack/init-gitops-repo.sh
+      - hack/init-gitops-repo.sh
 
-  dev:dns:setup:
-    desc: "Set up wildcard *.localhost DNS via dnsmasq (macOS) — run once per machine"
+  dev:cluster:seed:
+    desc: "Seed demo data into the cluster (org, project, preview) — idempotent"
     cmds:
-      - hack/setup-dns.sh
+      - hack/seed.sh
 
-  dev:cluster:delete:
-    desc: "Delete the suparShip dev cluster"
+  dev:cluster:reset:
+    desc: "Remove seeded demo ConfigMaps from the cluster (re-seedable)"
     cmds:
-      - |
-        kind delete cluster --name suparship-dev \
-          && echo "  Cluster deleted." \
-          || echo "  Cluster 'suparship-dev' not found — nothing to delete."
+      - hack/reset-cluster.sh
 
   # ── Demo ───────────────────────────────────────────────────────────────
 
@@ -94,32 +112,23 @@ tasks:
     cmds:
       - hack/deploy-demo-app.sh
 
-  # ── Testing ────────────────────────────────────────────────────────────
+  # ── Build & test ───────────────────────────────────────────────────────
+
+  build:
+    desc: "Build the suparship binary"
+    cmds:
+      - go build -o bin/{{.BINARY_NAME}} ./cmd/suparship
 
   test:
-    desc: Run all Go tests
+    desc: "Run all Go tests"
     cmds:
       - go test -race ./...
 
-  # ── Data management ────────────────────────────────────────────────────
-
-  seed:
-    desc: "Seed demo data into the cluster (org, project, preview) — idempotent"
-    cmds:
-      - hack/seed.sh
-
-  dev:cluster:reset:
-    desc: "Remove seeded demo ConfigMaps from the cluster — safe, re-seedable"
-    cmds:
-      - hack/reset-cluster.sh
-
   reset:
-    desc: "Clean local build artifacts (bin/, tmp/) — safe, does not touch the cluster"
+    desc: "Clean local build artifacts (bin/, tmp/)"
     cmds:
       - |
         rm -rf bin/ tmp/
         echo "  Removed: bin/  tmp/"
-        echo ""
-        echo "  Fake mode state is in-memory — restart task dev to reset it."
         echo "  To also clean the frontend build:  rm -rf ui/dist/"
         echo "  To reset cluster seed data:        task dev:cluster:reset"
