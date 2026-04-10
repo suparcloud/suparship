@@ -10,7 +10,7 @@ to `127.0.0.1`.
 ## macOS (automated)
 
 ```bash
-task dev:dns:setup
+task dev:cluster:dns
 ```
 
 This script (idempotent, safe to re-run):

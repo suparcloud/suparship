@@ -117,28 +117,40 @@ suparship server --addr :9090 # custom address
 | GET | `/healthz` | — | Liveness probe — returns `ok` |
 | GET | `/readyz` | — | Readiness probe — returns `ok` |
 | GET | `/api/v1/meta` | — | JSON build metadata (app, version, commit, date) |
-| GET | `/api/v1/onboarding/status` | — | Onboarding checklist (auth, org, projects, envs, services) |
+| GET | `/api/v1/onboarding/status` | — | Onboarding checklist (auth, org, projects, envs, apps) |
 | POST | `/api/v1/auth/login` | — | Authenticate with username/password, returns session cookie |
 | POST | `/api/v1/auth/logout` | — | Destroy session and clear cookie |
 | GET | `/api/v1/auth/me` | session | Return current user identity and role |
 | GET | `/api/v1/org` | session | Return org name, display name, created at |
 | GET | `/api/v1/teams` | session | List all teams with members |
 | GET | `/api/v1/projects` | session | List all projects with display name and description |
-| GET | `/api/v1/projects/{project}` | viewer | Get project detail — name, description, environments, services |
+| GET | `/api/v1/projects/{project}` | viewer | Get project detail — name, description, environments, apps |
 | GET | `/api/v1/projects/{project}/rbac` | viewer | List role bindings for a project |
 | PUT | `/api/v1/projects/{project}` | project_admin | Update project (placeholder) |
-| POST | `/api/v1/projects/{project}/services` | developer | Create service from template |
 | GET | `/api/v1/environments` | session | List all environments across projects |
-| GET | `/api/v1/projects/{project}/services` | viewer | List services with runtime state |
-| GET | `/api/v1/projects/{project}/services/{service}` | viewer | Service detail with per-env runtime state |
-| GET | `/api/v1/previews` | session | List all preview environments (cross-project) |
-| POST | `/api/v1/previews` | developer | Create a preview environment |
-| DELETE | `/api/v1/previews/{name}` | developer | Delete a preview environment |
-| GET | `/api/v1/projects/{project}/services/{service}/previews` | viewer | List previews for a specific service |
-| POST | `/api/v1/projects/{project}/services/{service}/promote` | project_admin | Promote service to target environment |
-| GET | `/api/v1/projects/{project}/services/{service}/logs` | viewer | Fetch pod logs for a service |
+| GET | `/api/v1/projects/{project}/environments` | viewer | List environments for a project |
+| POST | `/api/v1/projects/{project}/environments` | project_admin | Create a project environment |
+| GET | `/api/v1/projects/{project}/environments/{env}` | viewer | Get a project environment |
+| PUT | `/api/v1/projects/{project}/environments/{env}` | project_admin | Update a project environment |
+| DELETE | `/api/v1/projects/{project}/environments/{env}` | project_admin | Delete a project environment |
+| GET | `/api/v1/projects/{project}/apps` | viewer | List apps with runtime state |
+| POST | `/api/v1/projects/{project}/apps` | developer | Create app from template |
+| GET | `/api/v1/projects/{project}/apps/{app}` | viewer | App detail with per-env runtime state |
+| GET | `/api/v1/projects/{project}/apps/{app}/environments` | viewer | List app environment instances |
+| GET | `/api/v1/projects/{project}/apps/{app}/environments/{env}` | viewer | App environment detail |
+| GET | `/api/v1/projects/{project}/apps/{app}/previews` | viewer | List previews for a specific app |
+| POST | `/api/v1/projects/{project}/apps/{app}/previews` | developer | Create a preview environment |
+| DELETE | `/api/v1/projects/{project}/apps/{app}/previews/{name}` | developer | Delete a preview environment |
+| POST | `/api/v1/projects/{project}/apps/{app}/promote` | project_admin | Promote app to target environment |
+| GET | `/api/v1/projects/{project}/apps/{app}/logs` | viewer | Fetch pod logs for an app |
+| GET | `/api/v1/clusters` | session | List registered clusters |
+| POST | `/api/v1/clusters` | org_admin | Register a new cluster |
+| GET | `/api/v1/clusters/{name}` | session | Get cluster detail |
+| DELETE | `/api/v1/clusters/{name}` | org_admin | Remove a registered cluster |
 | GET | `/api/v1/templates` | session | List all available templates |
 | GET | `/api/v1/templates/{name}` | session | Get full template detail for form generation |
+
+> Legacy `/projects/{project}/services/...` paths remain registered for backward compatibility.
 
 Auth endpoints are enabled automatically when a Kubernetes cluster is
 reachable (they validate against the `suparship-admin-auth` Secret).
@@ -425,12 +437,15 @@ spec:
 
 ### Runtime inventory
 
-The inventory endpoints (`GET /api/v1/projects/{project}/services` and
-`GET .../services/{service}`) merge desired config from the project store
+The app endpoints (`GET /api/v1/projects/{project}/apps` and
+`GET .../apps/{app}`) merge desired config from the project store
 with live state from Kubernetes Deployments and Ingresses.
 
-**Namespace convention**: each environment maps to `{project}-{environment}`,
-e.g. project `myapi` with environment `dev` → namespace `myapi-dev`.
+**Namespace convention**: namespaces are derived from the environment's
+`namespacePattern` (default `{app}-{env}`),
+e.g. app `hello` in environment `staging` → namespace `hello-staging`.
+On dedicated clusters the pattern can be set to `{app}` for a clean
+single-namespace-per-app layout.
 
 If the Kubernetes API is unreachable or a Deployment does not exist, the
 runtime status degrades gracefully to `not_deployed` without returning an
@@ -438,12 +453,12 @@ error.
 
 ### Preview environments
 
-Previews are ephemeral, branch-scoped deployments of a service. Each
+Previews are ephemeral, branch-scoped deployments of an app. Each
 preview is stored as a ConfigMap (`suparship-preview-{name}`) in
 `suparship-system`.
 
-**Namespace convention**: `{project}-preview-{name}`, e.g. project `api`
-with preview `pr-42` → namespace `api-preview-pr-42`.
+**Namespace convention**: `{app}-{previewName}` (default pattern),
+e.g. app `hello` with preview `pr-42` → namespace `hello-pr-42`.
 
 Preview status and ingress URL are read from the Kubernetes runtime when
 available, otherwise the status is `not_deployed`.
@@ -451,15 +466,15 @@ available, otherwise the status is `not_deployed`.
 Creating or deleting a preview requires at least `developer` role on the
 target project. Listing previews is available to any authenticated user.
 
-### Service promotion
+### App promotion
 
-The `POST /api/v1/projects/{project}/services/{service}/promote` endpoint
-promotes a service from one environment to the next in the project's
-ordered environment chain (e.g. dev → staging → prod).
+The `POST /api/v1/projects/{project}/apps/{app}/promote` endpoint
+promotes an app from one environment to the next in the project's
+ordered environment chain (e.g. staging → prod).
 
 **Request body**: `{ "targetEnvironment": "prod" }`
 
-The handler validates that both the project and service exist, the target
+The handler validates that both the project and app exist, the target
 environment is defined in the project, and it is not the lowest-order
 environment (there must be a source to promote from). The source is
 automatically determined as the environment immediately preceding the

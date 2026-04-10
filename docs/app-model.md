@@ -64,7 +64,7 @@ An **environment** is a lens applied to an app, not a top-level container.
 A developer navigates to an app and then switches the environment view
 (`staging`, `prod`, `pr-42`).
 
-Each environment instance is modelled by `domain.AppEnvironment`:
+Each environment instance is modelled by `domain.EnvironmentInstance`:
 
 | Field | Purpose |
 |-------|---------|
@@ -72,19 +72,38 @@ Each environment instance is modelled by `domain.AppEnvironment`:
 | `envType` | Classified as `staging`, `prod`, or `preview` |
 | `namespace` | Kubernetes namespace for this instance |
 | `release` | The release currently targeted here |
-| `urls` | Ingress hostnames assigned to this instance |
+| `url` | Primary ingress hostname for this instance |
 | `status` | Live runtime health summary from the cluster |
+| `clusterName` | Name of the registered cluster this instance runs on |
+| `clusterServer` | Kubernetes API server URL for this instance's cluster |
+
+The per-environment configuration lives in `domain.Environment` (project store):
+
+| Field | Purpose |
+|-------|---------|
+| `name` | Logical name (`staging`, `prod`) |
+| `order` | Position in the promotion chain |
+| `clusterRef` | Name of the registered cluster apps in this env deploy to |
+| `baseDomain` | Root ingress domain (e.g. `acme.com`). Defaults to `localhost` |
+| `namespacePattern` | Template for Kubernetes namespace generation. Tokens: `{app}`, `{env}`, `{project}`. Defaults to `{app}-{env}` |
 
 ### Namespace convention
 
+Namespaces are derived by `GenerateNamespaceFromPattern` using the environment's
+`namespacePattern`. The default (`{app}-{env}`) works for both stable and preview
+environments on shared clusters:
+
 ```
-{app}-{envName}               →  standard environment
-{project}-preview-{name}      →  ephemeral preview instance
+{app}-{envName}    →  any environment (default pattern)
 ```
 
 Examples:
-- app `hello` in project `demo`, environment `staging` → namespace `hello-staging`
-- preview `pr-42` of app `hello` in project `demo` → namespace `demo-preview-pr-42`
+- app `hello`, environment `staging` → namespace `hello-staging`
+- app `hello`, preview `pr-42` → namespace `hello-pr-42`
+
+On dedicated clusters where a single namespace per app is preferred, set
+`namespacePattern: "{app}"` so all environments for an app share one namespace
+on that cluster.
 
 ### Environment types
 
@@ -184,8 +203,8 @@ POST   /api/v1/projects/{project}/apps/{app}/previews
 DELETE /api/v1/projects/{project}/apps/{app}/previews/{name}
 ```
 
-Namespace convention: `{project}-preview-{name}`
-(e.g. project `demo`, preview `pr-42` → `demo-preview-pr-42`)
+Namespace convention: `{app}-{previewName}` (default pattern)
+(e.g. app `hello`, preview `pr-42` → `hello-pr-42`)
 
 Components with `previewEnabled: false` are not deployed in preview instances.
 
@@ -220,6 +239,12 @@ The canonical API routes follow the object hierarchy:
 /api/v1/projects/{project}/apps/{app}/previews          list / create previews
 /api/v1/projects/{project}/apps/{app}/promote           promote
 /api/v1/projects/{project}/apps/{app}/logs              logs
+
+/api/v1/projects/{project}/environments                 list / create project environments
+/api/v1/projects/{project}/environments/{env}           get / update / delete a project environment
+
+/api/v1/clusters                                        list / register clusters
+/api/v1/clusters/{name}                                 get / remove a cluster
 ```
 
 Legacy `/projects/{project}/services/...` paths remain registered for backward
@@ -233,16 +258,24 @@ compatibility but emit `Deprecation: true` in every response. See
 | Concern | Location |
 |---------|----------|
 | Canonical app model types | `internal/domain/app.go` |
-| Deprecated service types | `internal/domain/types.go` (do not extend) |
+| Project / Environment / Cluster types | `internal/domain/types.go` |
+| Deprecated service types | `internal/domain/types.go` — `Service` (do not extend) |
 | App store interface | `internal/domain/interfaces.go` — `AppStore` |
+| Cluster store interface | `internal/domain/interfaces.go` — `ClusterStore` |
 | App creation use-case | `internal/app/creator.go` |
 | Preview use-case | `internal/app/preview.go` |
 | Promotion use-case | `internal/app/promotion.go` |
 | Service→App compat bridge | `internal/compat/` (temporary; will be deleted) |
-| HTTP handlers (canonical) | `internal/server/apps.go`, `app_handler.go` |
+| HTTP handlers — apps (canonical) | `internal/server/app_handler.go` |
+| HTTP handlers — clusters | `internal/server/cluster_handler.go` |
+| HTTP handlers — org environments | `internal/server/org_env_handler.go` |
+| HTTP handlers — project environments | `internal/server/project_env_handler.go` |
 | HTTP handlers (legacy) | `internal/server/services.go`, `inventory.go` |
 | Env instance helpers | `internal/domain/env_instance.go` |
+| Namespace / pattern generation | `internal/domain/env_instance.go` — `GenerateNamespaceFromPattern` |
 | Namespace validation | `internal/domain/validate.go` |
+| Kubernetes cluster store | `internal/kube/cluster_store.go` |
+| Per-cluster client pool | `internal/k8s/cluster_pool.go` |
 
 ---
 
