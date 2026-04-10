@@ -1,8 +1,13 @@
-# ArgoCD root "App of Apps" — suparShip dev cluster.
+# ArgoCD root "App of Apps" — suparShip dev cluster (Model B — env/cluster-centric).
 #
-# This Application watches gitops-output/ in the Gitea gitops repo recursively
-# for any file named argocd-app.yaml. Each such file is an ArgoCD Application
-# CRD committed by the suparship server when an app is created or updated.
+# This Application watches gitops-output/ in the Gitea gitops repo for:
+#
+#   - appproject.yaml   — ArgoCD AppProject per env/project (applied first via sync-wave)
+#   - appset.yaml       — ArgoCD ApplicationSet per environment (each targets one cluster)
+#
+# Each ApplicationSet discovers all apps for its environment via its Git File
+# generator and deploys them to the configured workload cluster. The preview
+# ApplicationSet watches gitops-output/previews/ for ephemeral environments.
 #
 # Applied once during cluster bootstrap by: hack/install-gitea.sh
 # To view live status:  kubectl get application suparship-apps -n argocd
@@ -22,7 +27,7 @@ metadata:
   labels:
     suparship.io/managed-by: suparship
     suparship.io/role: root-app
-  # Cascade-delete child Applications when this root app is deleted.
+  # Cascade-delete child ApplicationSets when this root app is deleted.
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -32,24 +37,23 @@ spec:
     targetRevision: main
     path: gitops-output
     directory:
-      # Recurse into project/app/env subdirectories.
+      # Recurse into env/project subdirectories.
       recurse: true
-      # Only pick up files suparship names argocd-app.yaml — avoids
-      # accidentally treating values.yaml or other files as Applications.
-      include: "**/*argocd-app.yaml"
+      # Pick up AppProjects (applied first via sync-wave: -1) and
+      # ApplicationSets (per-env + previews).
+      include: "{appproject,appset}.yaml"
   destination:
-    # Apply child Application objects into the argocd namespace on the
-    # local cluster.
+    # Apply AppProject and ApplicationSet objects into the argocd namespace
+    # on the tooling cluster. ApplicationSets then deploy apps to workload
+    # clusters according to their destination.server configuration.
     server: https://kubernetes.default.svc
     namespace: argocd
   syncPolicy:
     automated:
-      # Remove child Applications whose argocd-app.yaml has been deleted
-      # from the repo (e.g. after a preview is torn down).
+      # Remove ApplicationSets whose appset.yaml has been deleted
+      # from the repo (e.g. after an environment is decommissioned).
       prune: true
       # Re-sync automatically if live state drifts from Git.
       selfHeal: true
     syncOptions:
-      # Allow child Applications to create their target namespaces
-      # (e.g. hello-staging, hello-prod).
       - CreateNamespace=true

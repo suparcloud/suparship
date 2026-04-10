@@ -100,6 +100,28 @@ type RuntimeStatusReader interface {
 	GetServiceStatus(ctx context.Context, projectName, serviceName, environment string) (*ServiceStatus, error)
 }
 
+// ClusterStore manages the registry of Kubernetes clusters that suparShip
+// deploys to. The tooling cluster (where suparShip itself runs) is not
+// registered here — only workload clusters are.
+//
+// The K8s implementation stores cluster metadata as ConfigMaps and kubeconfigs
+// as Secrets in the suparship-system namespace, and registers each cluster with
+// ArgoCD by writing the corresponding ArgoCD cluster Secret. The fake
+// implementation keeps clusters in memory for local development.
+type ClusterStore interface {
+	// ListClusters returns all registered clusters.
+	ListClusters(ctx context.Context) ([]Cluster, error)
+	// GetCluster returns a single cluster by name.
+	GetCluster(ctx context.Context, name string) (*Cluster, error)
+	// CreateCluster registers a new cluster and stores its kubeconfig.
+	// The kubeconfig is used to build a k8s client for log streaming and to
+	// register the cluster with ArgoCD.
+	CreateCluster(ctx context.Context, cluster Cluster, kubeconfig []byte) error
+	// DeleteCluster removes a cluster registration. Returns an error if the
+	// cluster does not exist or has apps currently deployed.
+	DeleteCluster(ctx context.Context, name string) error
+}
+
 // LogReader retrieves recent log output from running service containers.
 //
 // The K8s implementation proxies pod log streams via client-go. The fake

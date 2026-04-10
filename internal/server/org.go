@@ -167,11 +167,14 @@ func (rh *rbacHandler) handleGetProject(w http.ResponseWriter, r *http.Request) 
 		envs := make([]EnvironmentDTO, len(proj.Spec.Environments))
 		for i, e := range proj.Spec.Environments {
 			envs[i] = EnvironmentDTO{
-				Name:        e.Name,
-				DisplayName: e.DisplayName,
-				Project:     proj.Metadata.Name,
-				Namespace:   runtime.Namespace(proj.Metadata.Name, e.Name),
-				Order:       e.Order,
+				Name:             e.Name,
+				DisplayName:      e.DisplayName,
+				Project:          proj.Metadata.Name,
+				Namespace:        runtime.Namespace(proj.Metadata.Name, e.Name),
+				Order:            e.Order,
+				ClusterRef:       e.ClusterRef,
+				BaseDomain:       e.BaseDomain,
+				NamespacePattern: e.NamespacePattern,
 			}
 		}
 

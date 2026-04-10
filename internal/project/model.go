@@ -85,6 +85,20 @@ type Environment struct {
 	Name        string `yaml:"name"`
 	DisplayName string `yaml:"displayName,omitempty"`
 	Order       int    `yaml:"order"`
+
+	// ClusterRef is the name of the registered Cluster this environment
+	// deploys to. When empty the environment is not yet bound to a cluster.
+	ClusterRef string `yaml:"clusterRef,omitempty"`
+
+	// BaseDomain is the ingress base domain for apps in this environment.
+	// App URLs are derived as: http://{app}.{baseDomain}
+	// Defaults to "localhost" when empty.
+	BaseDomain string `yaml:"baseDomain,omitempty"`
+
+	// NamespacePattern controls how Kubernetes namespaces are generated.
+	// Tokens: {app}, {env}, {project}.
+	// Default (empty string) falls back to "{app}-{env}".
+	NamespacePattern string `yaml:"namespacePattern,omitempty"`
 }
 
 // Service describes a deployable workload (app) persisted in the legacy

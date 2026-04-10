@@ -51,6 +51,7 @@ var (
 	_ runtime.Provider     = (*runtime.K8sProvider)(nil)
 	_ runtime.LogsProvider = (*runtime.K8sLogsProvider)(nil)
 	_ domain.AppStore      = (*K8sAppStore)(nil)
+	_ domain.ClusterStore  = (*K8sClusterStore)(nil)
 )
 
 // ServerDeps bundles all Kubernetes-backed implementations of the
@@ -94,6 +95,9 @@ type ServerDeps struct {
 	// them with live runtime status and preview data. Once a native K8s
 	// AppStore is available, replace this field with the native implementation.
 	AppStore domain.AppStore
+
+	// ClusterStore reads and persists registered cluster definitions.
+	ClusterStore *K8sClusterStore
 }
 
 // NewServerDeps creates a ServerDeps bundle backed by the given Kubernetes
@@ -120,5 +124,6 @@ func NewServerDeps(client kubernetes.Interface) *ServerDeps {
 		RuntimeProvider: runtimeProvider,
 		LogsProvider:    runtime.NewK8sLogsProvider(client),
 		AppStore:        appStore,
+		ClusterStore:    NewK8sClusterStore(client),
 	}
 }

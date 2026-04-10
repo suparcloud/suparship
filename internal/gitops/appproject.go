@@ -76,10 +76,17 @@ type AppProjectOptions struct {
 	// Defaults to "argocd".
 	ArgoCDNamespace string
 	// DestinationServer is the Kubernetes API server URL allowed for
-	// deployment.  Defaults to "https://kubernetes.default.svc".
+	// deployment. Used when Destinations is empty.
+	// Defaults to "https://kubernetes.default.svc".
+	// Deprecated: prefer Destinations for multi-cluster deployments.
 	DestinationServer string
+	// Destinations lists all cluster API servers and namespace globs that
+	// Applications in this project may deploy to. When non-empty this takes
+	// precedence over DestinationServer.
+	Destinations []AppProjectDestination
 	// NamespaceGlob is the namespace glob that Applications in this project
 	// may deploy to.  Defaults to "*" (all namespaces).
+	// Applied to each entry in Destinations when NamespaceGlob is not already set there.
 	NamespaceGlob string
 	// AllowClusterResources controls whether cluster-scoped resources (e.g.
 	// Namespace, ClusterRole) may be managed.  Default: true.
@@ -97,30 +104,52 @@ type AppProjectOptions struct {
 //
 // BuildArgoAppProject is a pure function — identical inputs always produce
 // identical output.
+// BuildArgoAppProject creates an ArgoCD AppProject for a suparship project.
+//
+// The generated object:
+//   - Is placed in opts.ArgoCDNamespace (default "argocd")
+//   - Allows any source repository ("*")
+//   - When opts.Destinations is non-empty, uses those destinations directly.
+//     Otherwise falls back to a single destination using opts.DestinationServer
+//     and opts.NamespaceGlob (defaults: in-cluster / "*").
+//   - Carries argocd.argoproj.io/sync-wave: "-1" so it is applied before
+//     any Application that references it in the same sync.
+//
+// BuildArgoAppProject is a pure function — identical inputs always produce
+// identical output.
 func BuildArgoAppProject(projectName string, opts AppProjectOptions) *AppProject {
 	if opts.ArgoCDNamespace == "" {
 		opts.ArgoCDNamespace = defaultArgoCDNS
-	}
-	if opts.DestinationServer == "" {
-		opts.DestinationServer = defaultDestination
 	}
 	if opts.NamespaceGlob == "" {
 		opts.NamespaceGlob = "*"
 	}
 
-	annotations := map[string]string{
-		syncWaveAnnotation: appProjectSyncWave,
-	}
-
-	spec := AppProjectSpec{
-		Description: opts.Description,
-		SourceRepos: []string{"*"},
-		Destinations: []AppProjectDestination{
+	var destinations []AppProjectDestination
+	if len(opts.Destinations) > 0 {
+		// Fill in NamespaceGlob for any destination that has no namespace set.
+		for _, d := range opts.Destinations {
+			if d.Namespace == "" {
+				d.Namespace = opts.NamespaceGlob
+			}
+			destinations = append(destinations, d)
+		}
+	} else {
+		if opts.DestinationServer == "" {
+			opts.DestinationServer = defaultDestination
+		}
+		destinations = []AppProjectDestination{
 			{
 				Server:    opts.DestinationServer,
 				Namespace: opts.NamespaceGlob,
 			},
-		},
+		}
+	}
+
+	spec := AppProjectSpec{
+		Description:  opts.Description,
+		SourceRepos:  []string{"*"},
+		Destinations: destinations,
 	}
 
 	if opts.AllowClusterResources {
@@ -133,9 +162,11 @@ func BuildArgoAppProject(projectName string, opts AppProjectOptions) *AppProject
 		APIVersion: argoAPIVersion,
 		Kind:       argoAppProjectKind,
 		Metadata: ObjectMeta{
-			Name:        projectName,
-			Namespace:   opts.ArgoCDNamespace,
-			Annotations: annotations,
+			Name:      projectName,
+			Namespace: opts.ArgoCDNamespace,
+			Annotations: map[string]string{
+				syncWaveAnnotation: appProjectSyncWave,
+			},
 		},
 		Spec: spec,
 	}

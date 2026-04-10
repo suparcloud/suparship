@@ -106,6 +106,100 @@ func TestGenerateNamespaceMatchesLegacyHelper(t *testing.T) {
 	}
 }
 
+// ── GenerateNamespaceFromPattern ──────────────────────────────────────────────
+
+func TestGenerateNamespaceFromPattern(t *testing.T) {
+	tests := []struct {
+		name        string
+		appName     string
+		envName     string
+		projectName string
+		pattern     string
+		want        string
+	}{
+		{
+			name:    "default empty pattern uses app-env",
+			appName: "hello", envName: "staging", projectName: "demo",
+			pattern: "",
+			want:    "hello-staging",
+		},
+		{
+			name:    "app-only pattern — dedicated cluster",
+			appName: "hello", envName: "staging", projectName: "demo",
+			pattern: "{app}",
+			want:    "hello",
+		},
+		{
+			name:    "app-env pattern — shared cluster",
+			appName: "hello", envName: "staging", projectName: "demo",
+			pattern: "{app}-{env}",
+			want:    "hello-staging",
+		},
+		{
+			name:    "project-app pattern",
+			appName: "hello", envName: "staging", projectName: "demo",
+			pattern: "{project}-{app}",
+			want:    "demo-hello",
+		},
+		{
+			name:    "all tokens",
+			appName: "hello", envName: "stg", projectName: "acme",
+			pattern: "{project}-{env}-{app}",
+			want:    "acme-stg-hello",
+		},
+		{
+			name:    "preview — app-env still works",
+			appName: "hello", envName: "pr-42", projectName: "demo",
+			pattern: "{app}-{env}",
+			want:    "hello-pr-42",
+		},
+		{
+			name:    "hyphenated app and project",
+			appName: "api-gateway", envName: "prod", projectName: "my-project",
+			pattern: "{app}",
+			want:    "api-gateway",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			got := GenerateNamespaceFromPattern(tt.appName, tt.envName, tt.projectName, tt.pattern)
+			if got != tt.want {
+				t.Errorf("GenerateNamespaceFromPattern(%q, %q, %q, %q) = %q, want %q",
+					tt.appName, tt.envName, tt.projectName, tt.pattern, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGenerateNamespaceFromPatternIsDeterministic(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		got := GenerateNamespaceFromPattern("hello", "staging", "demo", "{app}")
+		if got != "hello" {
+			t.Errorf("run %d: not deterministic, got %q", i, got)
+		}
+	}
+}
+
+// GenerateNamespace must equal GenerateNamespaceFromPattern with default pattern.
+func TestGenerateNamespaceEqualsFromPatternDefault(t *testing.T) {
+	cases := []struct{ app, env string }{
+		{"hello", "staging"},
+		{"hello", "prod"},
+		{"hello", "pr-42"},
+		{"api-gateway", "feature-branch"},
+	}
+	for _, c := range cases {
+		legacy := GenerateNamespace(c.app, c.env, AppEnvStaging)
+		fromPattern := GenerateNamespaceFromPattern(c.app, c.env, "", "")
+		if legacy != fromPattern {
+			t.Errorf("GenerateNamespace(%q, %q) = %q, GenerateNamespaceFromPattern default = %q",
+				c.app, c.env, legacy, fromPattern)
+		}
+	}
+}
+
 // ── GenerateURL ───────────────────────────────────────────────────────────────
 
 func TestGenerateURL(t *testing.T) {
@@ -333,9 +427,8 @@ func TestEnvironmentInstanceReleaseNilWhenNotDeployed(t *testing.T) {
 	}
 }
 
-// GenerateNamespace + GenerateURL round-trip: the generated namespace and URL
-// for each env type must contain the app name and env name.
-func TestGenerateHelpersContainAppAndEnvNames(t *testing.T) {
+// GenerateNamespace (default pattern) must contain both app name and env name.
+func TestGenerateNamespaceDefaultContainsAppAndEnv(t *testing.T) {
 	cases := []struct {
 		appName string
 		envName string
@@ -363,5 +456,16 @@ func TestGenerateHelpersContainAppAndEnvNames(t *testing.T) {
 			t.Errorf("GenerateURL(%q, %q, %q) = %q: missing app name",
 				c.appName, c.envName, c.envType, url)
 		}
+	}
+}
+
+// GenerateNamespaceFromPattern with {app}-only pattern must contain app name only.
+func TestGenerateNamespaceFromPatternAppOnly(t *testing.T) {
+	ns := GenerateNamespaceFromPattern("hello", "staging", "demo", "{app}")
+	if !strings.Contains(ns, "hello") {
+		t.Errorf("pattern {app}: namespace %q missing app name", ns)
+	}
+	if strings.Contains(ns, "staging") {
+		t.Errorf("pattern {app}: namespace %q unexpectedly contains env name", ns)
 	}
 }

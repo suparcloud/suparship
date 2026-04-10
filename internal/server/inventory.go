@@ -32,11 +32,14 @@ import (
 // EnvironmentDTO describes a project environment.
 // Used by GET /api/v1/environments (legacy) and GET /api/v1/projects/{project}/apps/{app}/environments.
 type EnvironmentDTO struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName,omitempty"`
-	Project     string `json:"project"`
-	Namespace   string `json:"namespace"`
-	Order       int    `json:"order"`
+	Name             string `json:"name"`
+	DisplayName      string `json:"displayName,omitempty"`
+	Project          string `json:"project"`
+	Namespace        string `json:"namespace"`
+	Order            int    `json:"order"`
+	ClusterRef       string `json:"clusterRef,omitempty"`
+	BaseDomain       string `json:"baseDomain,omitempty"`
+	NamespacePattern string `json:"namespacePattern,omitempty"`
 }
 
 // EnvironmentsResponse is the JSON body for GET /api/v1/environments.

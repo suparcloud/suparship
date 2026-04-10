@@ -75,6 +75,12 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(rh.handleGetProject))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
 	mux.HandleFunc("PUT /api/v1/projects/{project}", manageProject(placeholderHandler))
+
+	// Project environment management.
+	mux.HandleFunc("GET /api/v1/projects/{project}/environments", viewProject(rh.handleListProjectEnvironments))
+	mux.HandleFunc("POST /api/v1/projects/{project}/environments", manageProject(rh.handleCreateProjectEnvironment))
+	mux.HandleFunc("PUT /api/v1/projects/{project}/environments/{env}", manageProject(rh.handleUpdateProjectEnvironment))
+	mux.HandleFunc("DELETE /api/v1/projects/{project}/environments/{env}", manageProject(rh.handleDeleteProjectEnvironment))
 	// --- Legacy service-oriented routes (compatibility) ---
 	//
 	// The routes below are deprecated. They are retained for backwards

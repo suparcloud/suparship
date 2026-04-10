@@ -22,10 +22,15 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 
-// GitOpsPublisher commits ArgoCD Application manifests to the GitOps
-// repository. When nil, app creation only persists to the store and no git
-// commit is performed. Implementations must be safe for concurrent use.
+// GitOpsPublisher commits app manifests to the GitOps repository. When nil,
+// app creation only persists to the store and no git commit is performed.
+// Implementations must be safe for concurrent use.
 type GitOpsPublisher interface {
+	// PublishApp writes app.yaml and values.yaml for each environment to the
+	// GitOps repo. BaseDomain controls the routing.host value in values.yaml;
+	// it is taken from the environment's cluster registration (defaults to
+	// "localhost" when the environment has no cluster or when the cluster has
+	// no configured base domain).
 	PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error
 }
 
@@ -42,6 +47,7 @@ type Config struct {
 	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
 	PreviewStore    preview.Store        // optional: enables preview endpoints when set
 	AppStore        domain.AppStore      // optional: enables app read endpoints when set
+	ClusterStore    domain.ClusterStore  // optional: enables /api/v1/clusters endpoints when set
 	GitOpsPublisher GitOpsPublisher      // optional: commits app manifests to gitops repo on create
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
@@ -121,6 +127,12 @@ func New(cfg Config) *Server {
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")
+	}
+
+	if cfg.ClusterStore != nil && ah != nil {
+		ch := &clusterHandler{store: cfg.ClusterStore, auth: ah}
+		ch.registerRoutes(mux)
+		cfg.Logger.Info("cluster endpoints enabled")
 	}
 
 	oh := &onboardingHandler{

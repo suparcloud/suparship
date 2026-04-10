@@ -44,3 +44,6 @@ tmp/
 # Node / frontend
 node_modules/
 ui/dist/
+
+# macOS
+.DS_Store

@@ -66,6 +66,9 @@ type DevServerDeps struct {
 	// AppStore provides in-memory app and environment data seeded with the demo
 	// hello app.  It implements domain.AppStore via DevRuntime.
 	AppStore domain.AppStore
+	// ClusterStore provides in-memory cluster registry seeded with staging-cluster
+	// and prod-cluster. It implements domain.ClusterStore via DevRuntime.
+	ClusterStore domain.ClusterStore
 }
 
 // NewDevServerDeps returns a DevServerDeps bundle pre-loaded with demo seed
@@ -83,6 +86,7 @@ func NewDevServerDeps() *DevServerDeps {
 	if password == "" {
 		password = FakeAdminPassword
 	}
+	seeded := NewSeededDevRuntime()
 	return &DevServerDeps{
 		AdminUsername:   username,
 		Authenticator:   &FakeAuthenticator{Username: username, Password: password},
@@ -91,7 +95,8 @@ func NewDevServerDeps() *DevServerDeps {
 		PreviewStore:    newFakePreviewStore(),
 		RuntimeProvider: newFakeRuntimeProvider(),
 		LogsProvider:    &FakeLogsProvider{},
-		AppStore:        NewSeededDevRuntime(),
+		AppStore:        seeded,
+		ClusterStore:    seeded,
 	}
 }
 
@@ -181,8 +186,8 @@ func newFakeProjectStore() *FakeProjectStore {
 			DisplayName: "Demo Project",
 			Description: "Explore suparShip with a pre-seeded project.",
 			Environments: []project.Environment{
-				{Name: "staging", DisplayName: "Staging", Order: 1},
-				{Name: "prod", DisplayName: "Production", Order: 2},
+				{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRef: "staging-cluster", BaseDomain: "staging.localhost", NamespacePattern: "{app}"},
+				{Name: "prod", DisplayName: "Production", Order: 2, ClusterRef: "prod-cluster", BaseDomain: "prod.localhost", NamespacePattern: "{app}"},
 			},
 			Services: []project.Service{
 				{

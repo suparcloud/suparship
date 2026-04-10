@@ -253,3 +253,46 @@ func SanitizeAppName(raw string) string {
 func AppPreviewNamespace(appName, previewName string) string {
 	return GenerateNamespace(appName, previewName, AppEnvPreview)
 }
+
+// ValidateNamespacePattern returns an error if pattern is not a valid
+// namespace pattern. Rules:
+//   - Must contain the {app} token (ensures uniqueness per app).
+//   - Must only contain allowed tokens: {app}, {env}, {project}.
+//   - When resolved with realistic inputs (appName=a, envName=b, projectName=c),
+//     the result must be a valid DNS label (≤ 63 chars, lowercase alnum + hyphens).
+//
+// An empty pattern is valid and resolves to the default "{app}-{env}".
+func ValidateNamespacePattern(pattern string) error {
+	if pattern == "" {
+		return nil // empty → default "{app}-{env}"
+	}
+	if !strings.Contains(pattern, "{app}") {
+		return fmt.Errorf("namespace pattern %q must contain the {app} token", pattern)
+	}
+	// Check for unknown tokens: strip known ones and look for leftover braces.
+	cleaned := pattern
+	for _, tok := range []string{"{app}", "{env}", "{project}"} {
+		cleaned = strings.ReplaceAll(cleaned, tok, "")
+	}
+	if strings.ContainsAny(cleaned, "{}") {
+		return fmt.Errorf("namespace pattern %q contains unsupported tokens; allowed: {app}, {env}, {project}", pattern)
+	}
+	// Validate that a realistic resolution produces a valid DNS label.
+	resolved := GenerateNamespaceFromPattern("app", "env", "project", pattern)
+	if !dnsLabelRE.MatchString(resolved) {
+		return fmt.Errorf("namespace pattern %q resolves to %q which is not a valid DNS label", pattern, resolved)
+	}
+	return nil
+}
+
+// ValidateClusterName returns an error if name is not a valid cluster identifier.
+// Cluster names follow the same DNS-label rules as app names.
+func ValidateClusterName(name string) error {
+	if name == "" {
+		return fmt.Errorf("cluster name must not be empty")
+	}
+	if !dnsLabelRE.MatchString(name) {
+		return fmt.Errorf("cluster name %q must be a valid DNS label: lowercase letters, digits, and hyphens, 2–63 characters, starting with a letter", name)
+	}
+	return nil
+}

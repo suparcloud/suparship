@@ -188,14 +188,20 @@ export function Dashboard() {
       {/* Environments */}
       {data.environments.length > 0 && (
         <div>
-          <h2 className="mb-3 text-sm font-medium uppercase tracking-wider text-gray-400">
-            Environments
-          </h2>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-medium uppercase tracking-wider text-gray-400">
+              Environments
+            </h2>
+            <span className="text-xs text-gray-400">
+              Click an environment to manage it
+            </span>
+          </div>
           <div className="flex flex-wrap gap-2">
             {data.environments.map((env) => (
-              <div
+              <Link
                 key={`${env.project}-${env.name}`}
-                className="rounded-lg border border-gray-200 bg-white px-3.5 py-2"
+                to={`/projects/${env.project}/settings`}
+                className="rounded-lg border border-gray-200 bg-white px-3.5 py-2 transition-colors hover:border-indigo-300 hover:bg-indigo-50"
               >
                 <span className="text-sm font-medium text-gray-900">
                   {env.displayName || env.name}
@@ -206,7 +212,7 @@ export function Dashboard() {
                 <span className="ml-2 font-mono text-xs text-gray-400">
                   {env.namespace}
                 </span>
-              </div>
+              </Link>
             ))}
           </div>
         </div>
@@ -267,6 +273,12 @@ function ProjectCard({
           <span className="text-xs text-gray-400">
             {services.length} {services.length === 1 ? "app" : "apps"}
           </span>
+          <Link
+            to={`/projects/${project.name}/settings`}
+            className="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+          >
+            Settings
+          </Link>
           <Link
             to={`/projects/${project.name}/apps/new`}
             className="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-gray-700"

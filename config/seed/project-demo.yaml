@@ -22,9 +22,15 @@ data:
         - name: staging
           displayName: Staging
           order: 1
+          clusterRef: staging-cluster
+          baseDomain: staging.localhost
+          namespacePattern: "{app}"
         - name: prod
           displayName: Production
           order: 2
+          clusterRef: prod-cluster
+          baseDomain: prod.localhost
+          namespacePattern: "{app}"
       services:
         - name: hello
           template:

@@ -1,0 +1,45 @@
+# Seed: demo cluster registrations for local development.
+# Applied by: hack/seed.sh  (kubectl apply -f config/seed/)
+#
+# In the local demo setup, both environments share the single k3d cluster
+# (https://kubernetes.default.svc). In real deployments, each entry would
+# point to a separate workload cluster and a corresponding kubeconfig Secret
+# would exist at suparship-cluster-kubeconfig-{name}.
+#
+# Matches the fake/in-memory cluster seed in internal/fake/seed.go.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-cluster-staging-cluster
+  namespace: suparship-system
+  labels:
+    suparship.io/managed-by: suparship
+    suparship.io/type: cluster
+    suparship.io/cluster: staging-cluster
+data:
+  cluster.json: |
+    {
+      "name": "staging-cluster",
+      "displayName": "Staging",
+      "apiServer": "https://kubernetes.default.svc",
+      "status": "ready"
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-cluster-prod-cluster
+  namespace: suparship-system
+  labels:
+    suparship.io/managed-by: suparship
+    suparship.io/type: cluster
+    suparship.io/cluster: prod-cluster
+data:
+  cluster.json: |
+    {
+      "name": "prod-cluster",
+      "displayName": "Production",
+      "apiServer": "https://kubernetes.default.svc",
+      "status": "ready"
+    }

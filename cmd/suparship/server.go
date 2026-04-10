@@ -98,6 +98,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		runtimeProvider runtime.Provider
 		logsProvider    runtime.LogsProvider
 		appStore        domain.AppStore
+		clusterStore    domain.ClusterStore
 		templates       []*tpl.Template
 	)
 
@@ -124,6 +125,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		runtimeProvider = deps.RuntimeProvider
 		logsProvider = deps.LogsProvider
 		appStore = deps.AppStore
+		clusterStore = deps.ClusterStore
 
 	default: // config.ModeKubernetes
 		// Log what we will attempt before trying, so contributors see the
@@ -173,6 +175,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		runtimeProvider = kubeDeps.RuntimeProvider
 		logsProvider = kubeDeps.LogsProvider
 		appStore = kubeDeps.AppStore
+		clusterStore = kubeDeps.ClusterStore
 
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
@@ -214,11 +217,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			RepoUser:      cfg.GitOps.RepoUser,
 			RepoPassword:  cfg.GitOps.RepoPassword,
 			ArgoCDRepoURL: cfg.GitOps.ArgoCDRepoURL,
+			SyncAutomated: true,
 		})
 		if err != nil {
 			logger.Warn("gitops publisher disabled", "reason", err.Error())
 		} else {
-			gitOpsPublisher = pub
+			gitOpsPublisher = &gitOpsPublisherAdapter{inner: pub}
 			logger.Info("gitops publisher enabled",
 				"repo", cfg.GitOps.RepoURL,
 				"argocd_repo", cfg.GitOps.ArgoCDRepoURL,
@@ -240,6 +244,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		LogsProvider:    logsProvider,
 		PreviewStore:    previewStore,
 		AppStore:        appStore,
+		ClusterStore:    clusterStore,
 		GitOpsPublisher: gitOpsPublisher,
 		CookieSecure:    cookieSecure,
 		Logger:          logger,
@@ -257,4 +262,25 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// gitOpsPublisherAdapter bridges the server.GitOpsPublisher interface
+// (which uses []*domain.AppEnvironment) to the gitops.Publisher (which uses
+// []gitops.AppPublishEnv). BaseDomain defaults to "localhost" when the
+// environment has no cluster configuration; it will be resolved from the
+// ClusterStore in a future iteration.
+type gitOpsPublisherAdapter struct {
+	inner *gitops.Publisher
+}
+
+func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
+	pubEnvs := make([]gitops.AppPublishEnv, 0, len(envs))
+	for _, env := range envs {
+		pubEnvs = append(pubEnvs, gitops.AppPublishEnv{
+			EnvName:    env.EnvName,
+			EnvType:    env.EnvType,
+			BaseDomain: "localhost", // TODO: resolve from ClusterStore via project env config
+		})
+	}
+	return a.inner.PublishApp(ctx, app, pubEnvs)
 }

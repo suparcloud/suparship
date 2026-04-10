@@ -24,8 +24,11 @@ const (
 )
 
 // MapToHelmValues derives a deterministic HelmValues from an App and a
-// target environment. It is a pure function: same inputs always produce
-// the same output.
+// target environment using the default "localhost" base domain.
+// It is a pure function: same inputs always produce the same output.
+//
+// For environments with a custom baseDomain (e.g. "staging.acme.com"), use
+// MapToHelmValuesWithDomain so that routing.host reflects the real hostname.
 //
 // Mapping rules:
 //
@@ -44,13 +47,29 @@ const (
 //   - resources ← ComponentSpec.SizePreset → envOverride.SizePreset
 //     (omitted entirely when no preset is set)
 //
-//   - routing.host      ← domain.GenerateURL(app.Name, envName, envType)
+//   - routing.host      ← domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain)
 //   - routing.component ← first exposed component (alphabetical; falls back
 //     to first web component, then to first component overall)
 //
 // Environment overrides are taken from app.Spec.EnvironmentDefaults[envName].
 // They apply uniformly to all components in that environment.
 func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironmentType) HelmValues {
+	return MapToHelmValuesWithDomain(app, envName, envType, "localhost")
+}
+
+// MapToHelmValuesWithDomain is like MapToHelmValues but derives routing.host
+// from the provided baseDomain instead of the default "localhost".
+//
+// Use this when the environment has a registered cluster with a known
+// baseDomain (e.g. "staging.acme.com"), so that the Ingress host in the
+// generated chart values reflects the real cluster URL.
+//
+// When baseDomain is empty, "localhost" is used.
+func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
+	if baseDomain == "" {
+		baseDomain = "localhost"
+	}
+
 	envOverride := app.Spec.EnvironmentDefaults[envName] // zero value if absent
 
 	imageRepo, imageTag := extractImage(app.Spec.Values)
@@ -58,7 +77,7 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 	components := buildComponents(app.Spec.Components, envType, envOverride, imageRepo, imageTag)
 
 	routingComponent := resolveRoutingComponent(app.Spec.Components)
-	routingHost := stripScheme(domain.GenerateURL(app.Name, envName, envType))
+	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain))
 
 	return HelmValues{
 		App: AppContext{
