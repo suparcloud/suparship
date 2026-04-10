@@ -11,12 +11,42 @@ import {
 } from "../lib/projects";
 import type { ProjectEnvironment } from "../lib/projects";
 
+// ── Origin badge ──────────────────────────────────────────────────────────────
+
+function OriginBadge({ origin }: { origin?: string }) {
+  if (origin === "org") {
+    return (
+      <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+        inherited
+      </span>
+    );
+  }
+  if (origin === "override") {
+    return (
+      <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+        override
+      </span>
+    );
+  }
+  if (origin === "project") {
+    return (
+      <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+        project-only
+      </span>
+    );
+  }
+  return null;
+}
+
 // ── Environment form modal ────────────────────────────────────────────────────
 
 interface EnvFormProps {
   projectName: string;
   clusters: Cluster[];
+  /** When provided we are editing/overriding an existing env. */
   initial?: ProjectEnvironment;
+  /** True when initial is an org-inherited env with no current override. */
+  isFirstOverride?: boolean;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -25,6 +55,7 @@ function EnvForm({
   projectName,
   clusters,
   initial,
+  isFirstOverride = false,
   onClose,
   onSaved,
 }: EnvFormProps) {
@@ -48,7 +79,7 @@ function EnvForm({
     try {
       if (isEdit) {
         await updateProjectEnvironment(projectName, initial!.name, {
-          displayName,
+          displayName: displayName || undefined,
           clusterRef: clusterRef || undefined,
           baseDomain: baseDomain || undefined,
           namespacePattern: namespacePattern || undefined,
@@ -57,7 +88,7 @@ function EnvForm({
       } else {
         await createProjectEnvironment(projectName, {
           name,
-          displayName,
+          displayName: displayName || undefined,
           clusterRef: clusterRef || undefined,
           baseDomain: baseDomain || undefined,
           namespacePattern: namespacePattern || undefined,
@@ -73,145 +104,146 @@ function EnvForm({
     }
   }
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-      <div className="w-full max-w-lg rounded-xl bg-white p-8 shadow-xl">
-        <h2 className="text-lg font-semibold text-gray-900">
-          {isEdit ? `Edit "${initial!.name}"` : "Add environment"}
-        </h2>
-        <p className="mt-1 text-sm text-gray-500">
-          Environments define where apps are deployed (e.g. staging, prod).
-        </p>
+  const title = isFirstOverride
+    ? `Override "${initial!.displayName || initial!.name}" for this project`
+    : isEdit
+      ? `Edit "${initial!.displayName || initial!.name}"`
+      : "Add project environment";
 
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
+        <h3 className="mb-1 text-base font-semibold text-gray-900">{title}</h3>
+        {isFirstOverride && (
+          <p className="mb-4 text-xs text-gray-500">
+            Set project-specific values below. Leave a field blank to keep the
+            org default.
+          </p>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4 mt-4">
           {!isEdit && (
             <div>
-              <label className="block text-sm font-medium text-gray-700">
+              <label className="mb-1 block text-xs font-medium text-gray-700">
                 Name <span className="text-red-500">*</span>
               </label>
               <input
-                type="text"
+                required
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="e.g. canary"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="staging"
-                required
-                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
-              <p className="mt-1 text-xs text-gray-400">
-                Lowercase letters, digits, and hyphens. Cannot be changed.
-              </p>
             </div>
           )}
 
           <div>
-            <label className="block text-sm font-medium text-gray-700">
+            <label className="mb-1 block text-xs font-medium text-gray-700">
               Display name
             </label>
             <input
-              type="text"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder={isFirstOverride ? "(leave blank to keep org default)" : "e.g. Canary"}
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Staging"
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700">
+            <label className="mb-1 block text-xs font-medium text-gray-700">
               Cluster
             </label>
-            <select
-              value={clusterRef}
-              onChange={(e) => setClusterRef(e.target.value)}
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-            >
-              <option value="">— none (unbound) —</option>
-              {clusters.map((c) => (
-                <option key={c.name} value={c.name}>
-                  {c.displayName || c.name}
+            {clusters.length > 0 ? (
+              <select
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                value={clusterRef}
+                onChange={(e) => setClusterRef(e.target.value)}
+              >
+                <option value="">
+                  {isFirstOverride ? "(keep org default)" : "— none —"}
                 </option>
-              ))}
-            </select>
-            <p className="mt-1 text-xs text-gray-400">
-              The registered cluster this environment deploys to via ArgoCD.
-            </p>
+                {clusters.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.displayName || c.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder={isFirstOverride ? "(leave blank to keep org default)" : "cluster-name"}
+                value={clusterRef}
+                onChange={(e) => setClusterRef(e.target.value)}
+              />
+            )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700">
+            <label className="mb-1 block text-xs font-medium text-gray-700">
               Base domain
             </label>
             <input
-              type="text"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder={isFirstOverride ? "(leave blank to keep org default)" : "staging.example.com"}
               value={baseDomain}
               onChange={(e) => setBaseDomain(e.target.value)}
-              placeholder="staging.example.com"
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
-            <p className="mt-1 text-xs text-gray-400">
-              Ingress base domain. App URLs will be{" "}
-              <code>http://&#123;app&#125;.&lt;baseDomain&gt;</code>.
-            </p>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700">
+            <label className="mb-1 block text-xs font-medium text-gray-700">
               Namespace pattern
             </label>
             <input
-              type="text"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder={isFirstOverride ? "(leave blank to keep org default)" : "{app}  or  {app}-{env}"}
               value={namespacePattern}
               onChange={(e) => setNamespacePattern(e.target.value)}
-              placeholder="{app}-{env}"
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
             <p className="mt-1 text-xs text-gray-400">
-              Use <code>{"{"}</code>app<code>{"}"}</code>,{" "}
-              <code>{"{"}</code>env<code>{"}"}</code>,{" "}
-              <code>{"{"}</code>project<code>{"}"}</code>. Defaults to{" "}
-              <code>{"{app}-{env}"}</code> (safe for shared clusters). Use{" "}
-              <code>{"{app}"}</code> alone when each environment has a dedicated
-              cluster.
+              Tokens: {"{app}"}, {"{env}"}, {"{project}"}
             </p>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700">
+            <label className="mb-1 block text-xs font-medium text-gray-700">
               Order
             </label>
             <input
               type="number"
-              value={order || ""}
-              onChange={(e) => setOrder(parseInt(e.target.value, 10) || 0)}
-              placeholder="1"
-              min={1}
-              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              value={order}
+              onChange={(e) => setOrder(Number(e.target.value))}
             />
-            <p className="mt-1 text-xs text-gray-400">
-              Promotion order (lower = earlier in the pipeline).
-            </p>
           </div>
 
           {error && (
-            <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+            <p className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">
               {error}
             </p>
           )}
 
-          <div className="flex justify-end gap-3 pt-2">
+          <div className="flex justify-end gap-2 pt-2">
             <button
               type="button"
               onClick={onClose}
-              className="rounded-md px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              disabled={submitting}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={submitting}
-              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
             >
-              {submitting ? "Saving…" : isEdit ? "Save changes" : "Add environment"}
+              {submitting
+                ? "Saving…"
+                : isFirstOverride
+                  ? "Save override"
+                  : isEdit
+                    ? "Save changes"
+                    : "Add environment"}
             </button>
           </div>
         </form>
@@ -220,255 +252,278 @@ function EnvForm({
   );
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+// ── ProjectSettings page ──────────────────────────────────────────────────────
 
 export function ProjectSettings() {
-  const { project } = useParams<{ project: string }>();
-
+  const { project = "" } = useParams();
   const [envs, setEnvs] = useState<ProjectEnvironment[]>([]);
   const [clusters, setClusters] = useState<Cluster[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [editEnv, setEditEnv] = useState<ProjectEnvironment | null>(null);
-  const [deletingName, setDeletingName] = useState<string | null>(null);
+  const [isFirstOverride, setIsFirstOverride] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!project) return;
+  const reload = useCallback(async () => {
     try {
-      const [e, c] = await Promise.all([
+      const [envsData, clustersData] = await Promise.all([
         listProjectEnvironments(project),
         listClusters().catch(() => [] as Cluster[]),
       ]);
-      setEnvs(e);
-      setClusters(c);
-      setError(null);
+      setEnvs(envsData);
+      setClusters(clustersData);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load environments",
-      );
+      setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
       setLoading(false);
     }
   }, [project]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    reload();
+  }, [reload]);
 
-  async function handleDelete(envName: string) {
-    if (
-      !confirm(
-        `Remove environment "${envName}"? This does not delete running workloads.`,
-      )
-    )
+  async function handleDelete(env: ProjectEnvironment) {
+    const isInherited = env.origin === "org";
+    const isOverride = env.origin === "override";
+    const isProjectOnly = env.origin === "project";
+
+    let confirmMsg: string;
+    if (isInherited) {
+      // Shouldn't normally reach here since inherited has no delete action,
+      // but guard defensively.
       return;
-    setDeletingName(envName);
+    } else if (isOverride) {
+      confirmMsg = `Reset "${env.displayName || env.name}" to org defaults?\n\nYour project-level overrides will be removed and the org settings will apply again.`;
+    } else if (isProjectOnly) {
+      confirmMsg = `Remove environment "${env.displayName || env.name}"?\n\nThis environment is project-specific and will be fully deleted.`;
+    } else {
+      confirmMsg = `Remove environment "${env.displayName || env.name}"?`;
+    }
+
+    if (!confirm(confirmMsg)) return;
+
     try {
-      await deleteProjectEnvironment(project!, envName);
-      await load();
+      await deleteProjectEnvironment(project, env.name);
+      await reload();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to remove");
-    } finally {
-      setDeletingName(null);
+      alert(err instanceof Error ? err.message : "Failed to delete");
     }
   }
 
-  function clusterLabel(ref?: string) {
-    if (!ref) return <span className="text-gray-400">—</span>;
-    const c = clusters.find((c) => c.name === ref);
+  function openEdit(env: ProjectEnvironment) {
+    setIsFirstOverride(env.origin === "org");
+    setEditEnv(env);
+  }
+
+  if (loading) {
     return (
-      <span className="inline-flex items-center gap-1.5">
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${c?.status === "ready" ? "bg-green-500" : "bg-gray-400"}`}
-        />
-        <span className="font-mono text-xs">{c?.displayName || ref}</span>
-      </span>
+      <div className="mx-auto max-w-3xl space-y-4 p-6">
+        <div className="h-8 w-48 animate-pulse rounded bg-gray-100" />
+        <div className="h-64 animate-pulse rounded-lg bg-gray-50" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="mx-auto max-w-3xl p-6">
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+          <p className="text-sm text-red-700">{error}</p>
+        </div>
+      </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {(showAdd || editEnv) && (
-        <EnvForm
-          projectName={project!}
-          clusters={clusters}
-          initial={editEnv ?? undefined}
-          onClose={() => {
-            setShowAdd(false);
-            setEditEnv(null);
-          }}
-          onSaved={load}
-        />
-      )}
-
-      {/* Breadcrumb */}
-      <div>
-        <nav className="mb-2 flex items-center gap-1.5 text-sm text-gray-400">
-          <Link to="/" className="hover:text-gray-600">
-            Dashboard
-          </Link>
-          <span>/</span>
-          <Link
-            to={`/projects/${project}`}
-            className="hover:text-gray-600"
-          >
-            {project}
-          </Link>
-          <span>/</span>
-          <span className="text-gray-600">Settings</span>
-        </nav>
-        <div className="flex items-start justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-gray-900">
-              Project settings
-            </h1>
-            <p className="mt-1 text-sm text-gray-500">
-              Manage environments, cluster assignments, and routing for{" "}
-              <span className="font-medium text-gray-700">{project}</span>.
-            </p>
+    <div className="mx-auto max-w-3xl space-y-8 p-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-sm text-gray-500">
+            <Link to={`/projects/${project}`} className="hover:text-gray-700">
+              {project}
+            </Link>
+            <span>/</span>
+            <span>Settings</span>
           </div>
-          <Link
-            to={`/projects/${project}`}
-            className="text-sm text-gray-500 hover:text-gray-700"
-          >
-            ← Back to project
-          </Link>
+          <h1 className="mt-1 text-2xl font-semibold text-gray-900">
+            Project settings
+          </h1>
         </div>
+        <Link
+          to={`/projects/${project}`}
+          className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+        >
+          Back to project
+        </Link>
       </div>
 
-      {/* Environments section */}
-      <div>
-        <div className="mb-3 flex items-center justify-between">
+      {/* Environments */}
+      <div className="rounded-lg border border-gray-200 bg-white">
+        <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">
-              Environments
-            </h2>
-            <p className="text-sm text-gray-500">
-              Ordered deployment targets. Each environment can be bound to a
-              registered cluster.
+            <h2 className="text-sm font-medium text-gray-900">Environments</h2>
+            <p className="mt-0.5 text-xs text-gray-500">
+              Inherited from org defaults · Project-level overrides and additions shown below.
             </p>
           </div>
           <button
             onClick={() => setShowAdd(true)}
-            className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
+            className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700"
           >
             Add environment
           </button>
         </div>
 
-        {loading && (
-          <div className="space-y-2">
-            {[1, 2].map((i) => (
-              <div key={i} className="h-16 animate-pulse rounded-lg bg-gray-100" />
-            ))}
+        {envs.length === 0 ? (
+          <div className="px-6 py-10 text-center">
+            <p className="text-sm text-gray-400">No environments configured.</p>
+            <p className="mt-1 text-xs text-gray-400">
+              Add org-level environments in{" "}
+              <Link to="/settings/org" className="text-indigo-600 hover:underline">
+                Organization settings
+              </Link>
+              .
+            </p>
           </div>
-        )}
-
-        {!loading && error && (
-          <div className="rounded-lg border border-red-200 bg-red-50 p-4">
-            <p className="text-sm text-red-700">{error}</p>
-          </div>
-        )}
-
-        {!loading && !error && envs.length === 0 && (
-          <div className="rounded-lg border border-dashed border-gray-300 py-12 text-center">
-            <p className="text-sm text-gray-500">No environments yet.</p>
-            <button
-              onClick={() => setShowAdd(true)}
-              className="mt-3 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-            >
-              Add your first environment
-            </button>
-          </div>
-        )}
-
-        {!loading && !error && envs.length > 0 && (
-          <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
-                  <th className="px-5 py-3">Environment</th>
-                  <th className="px-5 py-3">Cluster</th>
-                  <th className="px-5 py-3">Base domain</th>
-                  <th className="px-5 py-3">Namespace pattern</th>
-                  <th className="px-5 py-3" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {envs.map((env) => (
-                  <tr key={env.name} className="hover:bg-gray-50">
-                    <td className="px-5 py-3">
-                      <p className="text-sm font-medium text-gray-900">
+        ) : (
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                <th className="px-6 py-3">Environment</th>
+                <th className="px-6 py-3">Cluster</th>
+                <th className="px-6 py-3">Base domain</th>
+                <th className="px-6 py-3">Namespace</th>
+                <th className="px-6 py-3" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {envs.map((env) => (
+                <tr
+                  key={env.name}
+                  className={
+                    env.origin === "org"
+                      ? "bg-gray-50/60 hover:bg-gray-50"
+                      : "hover:bg-gray-50"
+                  }
+                >
+                  <td className="px-6 py-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-900">
                         {env.displayName || env.name}
-                      </p>
+                      </span>
                       {env.displayName && (
-                        <p className="text-xs text-gray-400">{env.name}</p>
+                        <span className="font-mono text-xs text-gray-400">
+                          {env.name}
+                        </span>
                       )}
-                    </td>
-                    <td className="px-5 py-3">{clusterLabel(env.clusterRef)}</td>
-                    <td className="px-5 py-3 font-mono text-xs text-gray-600">
-                      {env.baseDomain || <span className="text-gray-400">localhost</span>}
-                    </td>
-                    <td className="px-5 py-3 font-mono text-xs text-gray-600">
-                      {env.namespacePattern || (
-                        <span className="text-gray-400">{"{app}-{env}"}</span>
-                      )}
-                    </td>
-                    <td className="px-5 py-3 text-right">
-                      <div className="flex items-center justify-end gap-3">
+                      <OriginBadge origin={env.origin} />
+                    </div>
+                  </td>
+                  <td className="px-6 py-3 font-mono text-xs text-gray-600">
+                    {env.clusterRef || <span className="text-gray-300">—</span>}
+                  </td>
+                  <td className="px-6 py-3 font-mono text-xs text-gray-600">
+                    {env.baseDomain || <span className="text-gray-300">—</span>}
+                  </td>
+                  <td className="px-6 py-3 font-mono text-xs text-gray-500">
+                    {env.namespace}
+                  </td>
+                  <td className="px-6 py-3 text-right text-xs">
+                    {env.origin === "org" ? (
+                      /* Inherited: offer to create a project override */
+                      <button
+                        onClick={() => openEdit(env)}
+                        className="text-indigo-600 hover:text-indigo-800"
+                      >
+                        Override
+                      </button>
+                    ) : env.origin === "override" ? (
+                      /* Override: edit or reset to org defaults */
+                      <span className="flex items-center justify-end gap-3">
                         <button
-                          onClick={() => setEditEnv(env)}
-                          className="text-sm text-indigo-600 hover:text-indigo-700"
+                          onClick={() => openEdit(env)}
+                          className="text-indigo-600 hover:text-indigo-800"
                         >
                           Edit
                         </button>
                         <button
-                          onClick={() => handleDelete(env.name)}
-                          disabled={deletingName === env.name}
-                          className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50"
+                          onClick={() => handleDelete(env)}
+                          className="text-amber-600 hover:text-amber-800"
                         >
-                          {deletingName === env.name ? "Removing…" : "Remove"}
+                          Reset
                         </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                      </span>
+                    ) : (
+                      /* Project-only: edit or remove */
+                      <span className="flex items-center justify-end gap-3">
+                        <button
+                          onClick={() => openEdit(env)}
+                          className="text-indigo-600 hover:text-indigo-800"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDelete(env)}
+                          className="text-red-500 hover:text-red-700"
+                        >
+                          Remove
+                        </button>
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
 
-      {/* Info banner */}
-      <div className="rounded-lg bg-blue-50 p-4">
-        <h3 className="text-sm font-medium text-blue-800">
-          Cluster assignment
-        </h3>
-        <ul className="mt-2 space-y-1 text-sm text-blue-700">
-          <li>
-            • Environments without a cluster assignment cannot be deployed to
-            until a cluster is registered and linked.
-          </li>
-          <li>
-            • Use <code className="font-mono text-xs">{"{app}"}</code> as the
-            namespace pattern when each environment has its own dedicated
-            cluster.
-          </li>
-          <li>
-            • Use{" "}
-            <code className="font-mono text-xs">{"{app}-{env}"}</code> (default)
-            when multiple environments share the same cluster.
-          </li>
-          <li>
-            • Register clusters in{" "}
-            <Link to="/settings/clusters" className="underline hover:text-blue-900">
-              Settings → Clusters
-            </Link>
-            .
-          </li>
-        </ul>
+      {/* Legend */}
+      <div className="flex items-center gap-4 text-xs text-gray-500">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block rounded-full bg-blue-50 px-2 py-0.5 font-medium text-blue-700">
+            inherited
+          </span>
+          from org defaults
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700">
+            override
+          </span>
+          project-level fields applied on top
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block rounded-full bg-gray-100 px-2 py-0.5 font-medium text-gray-600">
+            project-only
+          </span>
+          not in org defaults
+        </span>
       </div>
+
+      {/* Modals */}
+      {showAdd && (
+        <EnvForm
+          projectName={project}
+          clusters={clusters}
+          onClose={() => setShowAdd(false)}
+          onSaved={reload}
+        />
+      )}
+      {editEnv && (
+        <EnvForm
+          projectName={project}
+          clusters={clusters}
+          initial={editEnv}
+          isFirstOverride={isFirstOverride}
+          onClose={() => {
+            setEditEnv(null);
+            setIsFirstOverride(false);
+          }}
+          onSaved={reload}
+        />
+      )}
     </div>
   );
 }

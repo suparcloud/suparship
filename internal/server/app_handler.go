@@ -12,6 +12,7 @@ import (
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -35,6 +36,7 @@ type appHandler struct {
 	appStore        domain.AppStore
 	templateIdx     map[string]*tpl.Template
 	projectStore    project.Store
+	orgProvider     rbac.OrgProvider     // optional: provides org env fallback for sync
 	runtimeProvider runtime.Provider     // optional: enriches env responses with live K8s status
 	logsProvider    runtime.LogsProvider // optional: enables GET .../apps/{app}/logs
 	gitOpsPublisher GitOpsPublisher      // optional: commits argocd manifests to gitops repo on create
@@ -239,6 +241,9 @@ func (ah *appHandler) handleListApps(w http.ResponseWriter, r *http.Request) {
 	dtos := make([]AppSummaryDTO, 0, len(apps))
 	for _, app := range apps {
 		envs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, app.Name)
+		for _, env := range envs {
+			ah.enrichEnvWithLiveStatus(r.Context(), app.Name, env)
+		}
 		dtos = append(dtos, appToSummaryDTO(app, envs))
 	}
 
@@ -513,9 +518,14 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(stableEnvs) == 0 {
-		// Fall back to all envs if there are no stable ones (shouldn't happen
-		// in practice for a properly created app).
-		stableEnvs = allEnvs
+		// No stable environments found in the store. This happens for apps that
+		// were seeded from the legacy project.Service model (before the domain
+		// AppEnvironment model was introduced) or for apps whose environments
+		// have not been persisted yet.
+		//
+		// Fall back to synthesising environments from the org config so that
+		// the gitops publish step always writes at least staging and prod entries.
+		stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
 	}
 
 	slog.Info("syncing app to gitops repo",
@@ -544,6 +554,39 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 		"project": projectName,
 		"app":     appName,
 	})
+}
+
+// stableEnvsFromOrg synthesises a minimal set of stable AppEnvironments from
+// the org-level environment definitions. Used as a fallback in handleSyncApp
+// when the app's environments have not been persisted to the store (e.g. for
+// legacy apps seeded from the project.Service model).
+func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []*domain.AppEnvironment {
+	if ah.orgProvider == nil {
+		return domainapp.DefaultEnvironments(app)
+	}
+
+	org, err := ah.orgProvider.GetOrg(ctx)
+	if err != nil || org == nil || len(org.Environments) == 0 {
+		return domainapp.DefaultEnvironments(app)
+	}
+
+	envs := make([]*domain.AppEnvironment, 0, len(org.Environments))
+	for _, orgEnv := range org.Environments {
+		envType := domain.AppEnvStaging
+		if orgEnv.Name == "prod" || orgEnv.Name == "production" {
+			envType = domain.AppEnvProd
+		}
+		envs = append(envs, &domain.AppEnvironment{
+			AppName:     app.Name,
+			ProjectName: app.ProjectName,
+			EnvName:     orgEnv.Name,
+			EnvType:     envType,
+			Namespace:   domain.GenerateNamespace(app.Name, orgEnv.Name, envType),
+			URLs:        []string{},
+			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
+		})
+	}
+	return envs
 }
 
 // handlePromoteApp handles POST /api/v1/projects/{project}/apps/{app}/promote.

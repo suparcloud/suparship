@@ -55,10 +55,13 @@ type ApplicationSetGenerator struct {
 }
 
 // GitFileGenerator discovers parameterisation files in a Git repository.
+// Note: the ApplicationSet git generator uses "revision" (not "targetRevision"
+// which is used in Application source specs). Using the wrong field name causes
+// ArgoCD to reject the ApplicationSet with "revision: Required value".
 type GitFileGenerator struct {
-	RepoURL        string              `yaml:"repoURL"`
-	TargetRevision string              `yaml:"targetRevision"`
-	Files          []GitFilePathSpec   `yaml:"files"`
+	RepoURL  string            `yaml:"repoURL"`
+	Revision string            `yaml:"revision"`
+	Files    []GitFilePathSpec `yaml:"files"`
 }
 
 // GitFilePathSpec is one path glob for the Git File generator.
@@ -128,23 +131,26 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 
 	nsTemplate := resolveAppSetNamespace(env.NamespacePattern, env.EnvName)
 
-	// Source 1: values ref — provides values.yaml to source 2 via $appvalues.
+	// Source 1: values ref — checks out the ENTIRE gitops repo so $appvalues
+	// resolves to the repo root. No `path` is set intentionally: when `path` is
+	// set, ArgoCD 2.13 erroneously resolves $ref to the repo root anyway, so we
+	// make the intent explicit and use the full path in source 2's valueFiles.
 	valuesRefSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           "gitops-output/" + env.EnvName + "/{{project}}/{{name}}",
 		TargetRevision: opts.TargetRevision,
-		// The Ref field marks this as a ref-only source; ArgoCD does not sync
-		// it to the cluster but makes its files available via $appvalues/.
+		Ref:            "appvalues",
 	}
 
-	// Source 2: Helm chart with values loaded from source 1.
+	// Source 2: Helm chart; reads per-app values from the repo via $appvalues.
+	// The full path is used because $appvalues resolves to the repo root (see above).
+	valuesFilePath := "$appvalues/gitops-output/" + env.EnvName + "/{{project}}/{{name}}/values.yaml"
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
 		Path:           "charts/{{template}}",
 		TargetRevision: opts.TargetRevision,
 		Helm: &HelmSource{
 			ReleaseName: "{{name}}",
-			ValueFiles:  []string{"$appvalues/values.yaml"},
+			ValueFiles:  []string{valuesFilePath},
 		},
 	}
 
@@ -167,17 +173,17 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 			},
 		},
 		Spec: ApplicationSetSpec{
-			Generators: []ApplicationSetGenerator{
-				{
-					Git: &GitFileGenerator{
-						RepoURL:        repoURL,
-						TargetRevision: opts.TargetRevision,
-						Files: []GitFilePathSpec{
-							{Path: "gitops-output/" + env.EnvName + "/*/*/app.yaml"},
-						},
+		Generators: []ApplicationSetGenerator{
+			{
+				Git: &GitFileGenerator{
+					RepoURL:  repoURL,
+					Revision: opts.TargetRevision,
+					Files: []GitFilePathSpec{
+						{Path: "gitops-output/" + env.EnvName + "/*/*/app.yaml"},
 					},
 				},
 			},
+		},
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
 					Name:      "{{name}}-" + env.EnvName,
@@ -218,8 +224,8 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 
 	valuesRefSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           "gitops-output/previews/{{project}}/{{name}}",
 		TargetRevision: opts.TargetRevision,
+		Ref:            "previewvalues",
 	}
 
 	chartSource := ApplicationSource{
@@ -228,7 +234,7 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 		TargetRevision: opts.TargetRevision,
 		Helm: &HelmSource{
 			ReleaseName: "{{appName}}",
-			ValueFiles:  []string{"$previewvalues/values.yaml"},
+			ValueFiles:  []string{"$previewvalues/gitops-output/previews/{{project}}/{{name}}/values.yaml"},
 		},
 	}
 
@@ -251,17 +257,17 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 			},
 		},
 		Spec: ApplicationSetSpec{
-			Generators: []ApplicationSetGenerator{
-				{
-					Git: &GitFileGenerator{
-						RepoURL:        repoURL,
-						TargetRevision: opts.TargetRevision,
-						Files: []GitFilePathSpec{
-							{Path: "gitops-output/previews/*/*/app.yaml"},
-						},
+		Generators: []ApplicationSetGenerator{
+			{
+				Git: &GitFileGenerator{
+					RepoURL:  repoURL,
+					Revision: opts.TargetRevision,
+					Files: []GitFilePathSpec{
+						{Path: "gitops-output/previews/*/*/app.yaml"},
 					},
 				},
 			},
+		},
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
 					Name:      "{{appName}}-{{previewName}}",

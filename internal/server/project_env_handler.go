@@ -4,14 +4,19 @@ package server
 //
 // Endpoints:
 //
-//	GET    /api/v1/projects/{project}/environments
-//	POST   /api/v1/projects/{project}/environments
-//	PUT    /api/v1/projects/{project}/environments/{env}
-//	DELETE /api/v1/projects/{project}/environments/{env}
+//	GET    /api/v1/projects/{project}/environments   — merged (org defaults + project overrides)
+//	POST   /api/v1/projects/{project}/environments   — add project-specific env or store override
+//	PUT    /api/v1/projects/{project}/environments/{env}  — update project override
+//	DELETE /api/v1/projects/{project}/environments/{env}  — remove override (org env) or env (project-only)
 //
 // All endpoints require at minimum Viewer role; write operations require
-// ProjectAdmin. They are registered via rbacHandler.registerRoutes and rely
-// on the rbacHandler.projectStore field being non-nil.
+// ProjectAdmin. Registered via rbacHandler.registerRoutes.
+//
+// GET returns environments merged from org defaults + project overrides, each
+// annotated with an "origin" field:
+//   "org"      — fully inherited from org, no project customisation
+//   "override" — org environment with project-level overrides applied
+//   "project"  — project-specific environment not in org defaults
 
 import (
 	"encoding/json"
@@ -20,6 +25,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
 )
 
@@ -36,8 +42,19 @@ func (rh *rbacHandler) handleListProjectEnvironments(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "project not found"})
 		return
 	}
-	envs := projectEnvsToDTO(proj)
-	writeJSON(w, http.StatusOK, map[string]any{"environments": envs})
+
+	org, _ := rh.orgStore.GetOrg(r.Context())
+	var orgEnvs []rbac.OrgEnvironment
+	if org != nil {
+		orgEnvs = org.Environments
+	}
+	merged := rbac.MergeEnvironments(orgEnvs, proj.Spec.Environments)
+	dtos := make([]EnvironmentDTO, len(merged))
+	for i, m := range merged {
+		dtos[i] = envToDTO(proj.Metadata.Name, m.Environment)
+		dtos[i].Origin = m.Origin
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"environments": dtos})
 }
 
 // ── POST /api/v1/projects/{project}/environments ──────────────────────────────
@@ -142,13 +159,33 @@ func (rh *rbacHandler) handleUpdateProjectEnvironment(w http.ResponseWriter, r *
 		return
 	}
 
+	// Check if it's an org env (inherited or already overriding).
+	org, _ := rh.orgStore.GetOrg(r.Context())
+	isOrgEnv := false
+	if org != nil {
+		for _, e := range org.Environments {
+			if e.Name == envName {
+				isOrgEnv = true
+				break
+			}
+		}
+	}
+
 	found := false
 	for i, e := range proj.Spec.Environments {
 		if e.Name == envName {
-			proj.Spec.Environments[i].DisplayName = req.DisplayName
-			proj.Spec.Environments[i].ClusterRef = req.ClusterRef
-			proj.Spec.Environments[i].BaseDomain = req.BaseDomain
-			proj.Spec.Environments[i].NamespacePattern = req.NamespacePattern
+			if req.DisplayName != "" {
+				proj.Spec.Environments[i].DisplayName = req.DisplayName
+			}
+			if req.ClusterRef != "" {
+				proj.Spec.Environments[i].ClusterRef = req.ClusterRef
+			}
+			if req.BaseDomain != "" {
+				proj.Spec.Environments[i].BaseDomain = req.BaseDomain
+			}
+			if req.NamespacePattern != "" {
+				proj.Spec.Environments[i].NamespacePattern = req.NamespacePattern
+			}
 			if req.Order > 0 {
 				proj.Spec.Environments[i].Order = req.Order
 			}
@@ -156,10 +193,33 @@ func (rh *rbacHandler) handleUpdateProjectEnvironment(w http.ResponseWriter, r *
 			break
 		}
 	}
+
 	if !found {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "environment not found"})
-		return
+		if !isOrgEnv {
+			// Not in org and not in project — nothing to update.
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "environment not found"})
+			return
+		}
+		// First override for an inherited org env: create a sparse override entry.
+		override := project.Environment{Name: envName}
+		if req.DisplayName != "" {
+			override.DisplayName = req.DisplayName
+		}
+		if req.ClusterRef != "" {
+			override.ClusterRef = req.ClusterRef
+		}
+		if req.BaseDomain != "" {
+			override.BaseDomain = req.BaseDomain
+		}
+		if req.NamespacePattern != "" {
+			override.NamespacePattern = req.NamespacePattern
+		}
+		if req.Order > 0 {
+			override.Order = req.Order
+		}
+		proj.Spec.Environments = append(proj.Spec.Environments, override)
 	}
+
 	sortEnvs(proj.Spec.Environments)
 
 	if err := rh.projectStore.Save(r.Context(), proj); err != nil {
@@ -167,9 +227,17 @@ func (rh *rbacHandler) handleUpdateProjectEnvironment(w http.ResponseWriter, r *
 		return
 	}
 
-	for _, e := range proj.Spec.Environments {
-		if e.Name == envName {
-			writeJSON(w, http.StatusOK, envToDTO(projectName, e))
+	// Return merged effective environment.
+	var orgEnvs []rbac.OrgEnvironment
+	if org != nil {
+		orgEnvs = org.Environments
+	}
+	merged := rbac.MergeEnvironments(orgEnvs, proj.Spec.Environments)
+	for _, m := range merged {
+		if m.Name == envName {
+			dto := envToDTO(projectName, m.Environment)
+			dto.Origin = m.Origin
+			writeJSON(w, http.StatusOK, dto)
 			return
 		}
 	}
@@ -177,6 +245,11 @@ func (rh *rbacHandler) handleUpdateProjectEnvironment(w http.ResponseWriter, r *
 }
 
 // ── DELETE /api/v1/projects/{project}/environments/{env} ─────────────────────
+//
+// Behaviour depends on origin:
+//   - "project" env: fully removed.
+//   - "org" or "override" env: project override is cleared; env remains
+//     visible as inherited (HTTP 200 with the resulting inherited DTO).
 
 func (rh *rbacHandler) handleDeleteProjectEnvironment(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
@@ -192,6 +265,21 @@ func (rh *rbacHandler) handleDeleteProjectEnvironment(w http.ResponseWriter, r *
 		return
 	}
 
+	// Determine if the env is in org defaults.
+	org, _ := rh.orgStore.GetOrg(r.Context())
+	isOrgEnv := false
+	var orgEnv rbac.OrgEnvironment
+	if org != nil {
+		for _, e := range org.Environments {
+			if e.Name == envName {
+				isOrgEnv = true
+				orgEnv = e
+				break
+			}
+		}
+	}
+
+	// Remove from project overrides.
 	filtered := proj.Spec.Environments[:0]
 	found := false
 	for _, e := range proj.Spec.Environments {
@@ -201,7 +289,8 @@ func (rh *rbacHandler) handleDeleteProjectEnvironment(w http.ResponseWriter, r *
 			filtered = append(filtered, e)
 		}
 	}
-	if !found {
+
+	if !found && !isOrgEnv {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "environment not found"})
 		return
 	}
@@ -209,6 +298,22 @@ func (rh *rbacHandler) handleDeleteProjectEnvironment(w http.ResponseWriter, r *
 	proj.Spec.Environments = filtered
 	if err := rh.projectStore.Save(r.Context(), proj); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save project"})
+		return
+	}
+
+	if isOrgEnv {
+		// Return the now-inherited org env so the UI can update without a refetch.
+		writeJSON(w, http.StatusOK, EnvironmentDTO{
+			Name:             orgEnv.Name,
+			DisplayName:      orgEnv.DisplayName,
+			Project:          projectName,
+			Namespace:        runtime.Namespace(projectName, orgEnv.Name),
+			Order:            orgEnv.Order,
+			ClusterRef:       orgEnv.ClusterRef,
+			BaseDomain:       orgEnv.BaseDomain,
+			NamespacePattern: orgEnv.NamespacePattern,
+			Origin:           rbac.OriginOrg,
+		})
 		return
 	}
 

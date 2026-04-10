@@ -84,7 +84,7 @@ func newTestInventoryMux(rp runtime.Provider) (*http.ServeMux, *authHandler, *me
 
 	rh := &rbacHandler{
 		auth:             ah,
-		orgProvider:      &staticOrgProvider{org: testRBACOrg()},
+		orgStore:      &staticOrgProvider{org: testRBACOrg()},
 		inventoryHandler: newInventoryHandler(store, rp),
 	}
 	rh.registerRoutes(mux)

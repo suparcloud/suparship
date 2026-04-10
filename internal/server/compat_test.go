@@ -230,7 +230,7 @@ func newCompatTestMux(t *testing.T) (*http.ServeMux, *http.Cookie) {
 
 	rh := &rbacHandler{
 		auth:             ah,
-		orgProvider:      org,
+		orgStore:      org,
 		projectStore:     store,
 		serviceHandler:   newServiceHandler(store, []*tpl.Template{tmpl}),
 		inventoryHandler: newInventoryHandler(store, nil),

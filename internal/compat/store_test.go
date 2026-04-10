@@ -56,14 +56,14 @@ func (s *stubEmptyAppStore) DeleteAppEnvironment(_ context.Context, _, _, _ stri
 // the primary already has data.
 func newPrimaryStore() *compat.ServiceBackedAppStore {
 	r := fake.NewSeededDevRuntime()
-	return compat.NewServiceBackedAppStore(r, r, r, r, r)
+	return compat.NewServiceBackedAppStore(r, r, r, r, r, nil)
 }
 
 // newFallbackStore returns a store whose primary AppStore is stubbed to return
 // nothing, so every operation must fall back to the DevRuntime service stores.
 func newFallbackStore() *compat.ServiceBackedAppStore {
 	r := fake.NewSeededDevRuntime()
-	return compat.NewServiceBackedAppStore(&stubEmptyAppStore{}, r, r, r, r)
+	return compat.NewServiceBackedAppStore(&stubEmptyAppStore{}, r, r, r, r, nil)
 }
 
 var storeCtx = context.Background()

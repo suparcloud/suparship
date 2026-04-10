@@ -58,13 +58,39 @@ func IsValidRole(r Role) bool {
 	return false
 }
 
+// OrgEnvironment is the org-level canonical definition of a deployment
+// environment (e.g. staging, prod). All projects inherit these environments
+// by default; projects may store per-environment overrides in their own
+// ConfigMap without duplicating the full definition.
+type OrgEnvironment struct {
+	// Name is the unique identifier (e.g. "staging", "prod").
+	Name string `yaml:"name"`
+	// DisplayName is a human-readable label shown in the UI.
+	DisplayName string `yaml:"displayName,omitempty"`
+	// Order controls the promotion pipeline sequence (lower = earlier).
+	Order int `yaml:"order"`
+	// ClusterRef is the name of the registered Cluster this environment
+	// deploys to. When empty the environment is not yet bound to a cluster.
+	ClusterRef string `yaml:"clusterRef,omitempty"`
+	// BaseDomain is the ingress base domain for apps in this environment.
+	// App URLs are derived as: http://{app}.{baseDomain}
+	BaseDomain string `yaml:"baseDomain,omitempty"`
+	// NamespacePattern controls Kubernetes namespace naming.
+	// Tokens: {app}, {env}, {project}.
+	// Default (empty) falls back to "{app}-{env}".
+	NamespacePattern string `yaml:"namespacePattern,omitempty"`
+}
+
 // Org represents a single organization.
 type Org struct {
-	Name         string        `yaml:"name"`
-	DisplayName  string        `yaml:"displayName"`
-	CreatedAt    string        `yaml:"createdAt,omitempty"`
-	Teams        []Team        `yaml:"teams"`
-	RoleBindings []RoleBinding `yaml:"roleBindings"`
+	Name         string           `yaml:"name"`
+	DisplayName  string           `yaml:"displayName"`
+	CreatedAt    string           `yaml:"createdAt,omitempty"`
+	// Environments is the canonical deployment pipeline shared by all projects.
+	// Projects may store per-environment overrides but inherit these defaults.
+	Environments []OrgEnvironment `yaml:"environments,omitempty"`
+	Teams        []Team           `yaml:"teams"`
+	RoleBindings []RoleBinding    `yaml:"roleBindings"`
 }
 
 // Team represents a named group of users.
@@ -110,6 +136,17 @@ func NewDefaultOrg(orgName, displayName, adminUsername string) *Org {
 func (o *Org) Validate() error {
 	if o.Name == "" {
 		return fmt.Errorf("org name must not be empty")
+	}
+
+	envNames := make(map[string]bool, len(o.Environments))
+	for i, e := range o.Environments {
+		if e.Name == "" {
+			return fmt.Errorf("environments[%d]: name must not be empty", i)
+		}
+		if envNames[e.Name] {
+			return fmt.Errorf("duplicate environment name %q", e.Name)
+		}
+		envNames[e.Name] = true
 	}
 
 	teamNames := make(map[string]bool, len(o.Teams))

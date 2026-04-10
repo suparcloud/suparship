@@ -9,6 +9,13 @@ export interface ProjectEnvironment {
   clusterRef?: string;
   baseDomain?: string;
   namespacePattern?: string;
+  /**
+   * origin describes how this environment was resolved:
+   *   "org"      — inherited from org defaults, no project customisation
+   *   "override" — org environment with project-level field overrides applied
+   *   "project"  — project-specific environment not defined in org defaults
+   */
+  origin?: "org" | "override" | "project";
 }
 
 interface EnvironmentsResponse {

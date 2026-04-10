@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
+import { listApps } from "../lib/apps";
 import { fetchPreviews } from "../lib/previews";
-import { fetchOrg, fetchProjects } from "../lib/settings";
-import { fetchEnvironments, fetchProjectServices } from "../lib/services";
+import { createProject, fetchOrg, fetchProjects } from "../lib/settings";
+import { fetchEnvironments } from "../lib/services";
 import type {
+  AppSummary,
   OrgInfo,
   Project,
   EnvironmentInfo,
-  ServiceRuntime,
 } from "../types";
 
 // --- Status helpers ---
@@ -60,6 +61,113 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+// --- New project modal ---
+
+const projectNameRE = /^[a-z][a-z0-9-]{0,47}$/;
+
+function NewProjectModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (name: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [description, setDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!projectNameRE.test(name)) {
+      setError(
+        "Name must start with a lowercase letter and contain only lowercase letters, digits, or hyphens.",
+      );
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await createProject({ name, displayName: displayName || undefined, description: description || undefined });
+      onCreated(name);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create project");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+        <h3 className="mb-4 text-base font-semibold text-gray-900">New project</h3>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-700">
+              Name <span className="text-red-500">*</span>
+            </label>
+            <input
+              required
+              autoFocus
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+              placeholder="my-project"
+              value={name}
+              onChange={(e) => setName(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+            />
+            <p className="mt-1 text-xs text-gray-400">
+              Lowercase letters, digits, hyphens only. Used in namespaces and URLs.
+            </p>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-700">Display name</label>
+            <input
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+              placeholder="My Project"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-700">Description</label>
+            <textarea
+              rows={2}
+              className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+              placeholder="What does this project do?"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
+
+          {error && (
+            <p className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>
+          )}
+
+          <div className="flex justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving || !name}
+              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            >
+              {saving ? "Creating…" : "Create project"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // --- Stat card ---
 
 function StatCard({
@@ -83,7 +191,7 @@ interface DashboardData {
   org: OrgInfo | null;
   projects: Project[];
   environments: EnvironmentInfo[];
-  servicesByProject: Map<string, ServiceRuntime[]>;
+  appsByProject: Map<string, AppSummary[]>;
   previewCount: number;
 }
 
@@ -95,14 +203,14 @@ async function loadDashboard(): Promise<DashboardData> {
     fetchPreviews().catch(() => ({ previews: [] })),
   ]);
 
-  const servicesByProject = new Map<string, ServiceRuntime[]>();
+  const appsByProject = new Map<string, AppSummary[]>();
 
   const results = await Promise.allSettled(
-    projectsData.projects.map((p) => fetchProjectServices(p.name)),
+    projectsData.projects.map((p) => listApps(p.name)),
   );
   for (const result of results) {
     if (result.status === "fulfilled") {
-      servicesByProject.set(result.value.project, result.value.services);
+      appsByProject.set(result.value.project, result.value.apps);
     }
   }
 
@@ -110,7 +218,7 @@ async function loadDashboard(): Promise<DashboardData> {
     org: orgData,
     projects: projectsData.projects,
     environments: envsData.environments,
-    servicesByProject,
+    appsByProject,
     previewCount: previewsData.previews.length,
   };
 }
@@ -118,9 +226,24 @@ async function loadDashboard(): Promise<DashboardData> {
 // --- Component ---
 
 export function Dashboard() {
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showNewProject, setShowNewProject] = useState(
+    searchParams.get("newProject") === "1",
+  );
+
+  function refresh() {
+    setLoading(true);
+    loadDashboard()
+      .then((d) => setData(d))
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : "Failed to load"),
+      )
+      .finally(() => setLoading(false));
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -156,8 +279,8 @@ export function Dashboard() {
 
   if (!data) return null;
 
-  const totalServices = Array.from(data.servicesByProject.values()).reduce(
-    (sum, svcs) => sum + svcs.length,
+  const totalServices = Array.from(data.appsByProject.values()).reduce(
+    (sum, apps) => sum + apps.length,
     0,
   );
 
@@ -166,15 +289,38 @@ export function Dashboard() {
   ];
 
   return (
+    <>
+    {showNewProject && (
+      <NewProjectModal
+        onClose={() => {
+          setShowNewProject(false);
+          setSearchParams({});
+        }}
+        onCreated={(name) => {
+          setShowNewProject(false);
+          setSearchParams({});
+          refresh();
+          navigate(`/projects/${name}`);
+        }}
+      />
+    )}
     <div className="space-y-8">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-900">
-          {data.org?.displayName ?? "Dashboard"}
-        </h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Platform overview — environments, projects, and apps at a glance.
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">
+            {data.org?.displayName ?? "Dashboard"}
+          </h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Platform overview — environments, projects, and apps at a glance.
+          </p>
+        </div>
+        <button
+          onClick={() => setShowNewProject(true)}
+          className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
+        >
+          New project
+        </button>
       </div>
 
       {/* Stats */}
@@ -199,19 +345,18 @@ export function Dashboard() {
           <div className="flex flex-wrap gap-2">
             {data.environments.map((env) => (
               <Link
-                key={`${env.project}-${env.name}`}
-                to={`/projects/${env.project}/settings`}
+                key={`${env.project || "org"}-${env.name}`}
+                to={env.project ? `/projects/${env.project}/settings` : "/settings/org"}
                 className="rounded-lg border border-gray-200 bg-white px-3.5 py-2 transition-colors hover:border-indigo-300 hover:bg-indigo-50"
               >
                 <span className="text-sm font-medium text-gray-900">
                   {env.displayName || env.name}
                 </span>
-                <span className="ml-2 text-xs text-gray-400">
-                  {env.project}
-                </span>
-                <span className="ml-2 font-mono text-xs text-gray-400">
-                  {env.namespace}
-                </span>
+                {env.clusterRef && (
+                  <span className="ml-2 font-mono text-xs text-gray-400">
+                    {env.clusterRef}
+                  </span>
+                )}
               </Link>
             ))}
           </div>
@@ -220,25 +365,26 @@ export function Dashboard() {
 
       {/* Projects & Apps */}
       {data.projects.length === 0 ? (
-        <EmptyState />
+        <EmptyState onNewProject={() => setShowNewProject(true)} />
       ) : (
         <div className="space-y-6">
           <h2 className="text-sm font-medium uppercase tracking-wider text-gray-400">
             Projects
           </h2>
           {data.projects.map((p) => {
-            const services = data.servicesByProject.get(p.name) ?? [];
+            const apps = data.appsByProject.get(p.name) ?? [];
             return (
               <ProjectCard
                 key={p.name}
                 project={p}
-                services={services}
+                apps={apps}
               />
             );
           })}
         </div>
       )}
     </div>
+    </>
   );
 }
 
@@ -246,10 +392,10 @@ export function Dashboard() {
 
 function ProjectCard({
   project,
-  services,
+  apps,
 }: {
   project: Project;
-  services: ServiceRuntime[];
+  apps: AppSummary[];
 }) {
   const displayName = project.displayName ?? project.name;
 
@@ -271,7 +417,7 @@ function ProjectCard({
         </div>
         <div className="flex flex-shrink-0 items-center gap-3">
           <span className="text-xs text-gray-400">
-            {services.length} {services.length === 1 ? "app" : "apps"}
+            {apps.length} {apps.length === 1 ? "app" : "apps"}
           </span>
           <Link
             to={`/projects/${project.name}/settings`}
@@ -288,7 +434,7 @@ function ProjectCard({
         </div>
       </div>
 
-      {services.length === 0 ? (
+      {apps.length === 0 ? (
         <div className="px-5 py-10 text-center">
           <p className="text-sm text-gray-400">No apps yet.</p>
           <Link
@@ -305,17 +451,16 @@ function ProjectCard({
               <th className="px-5 py-2.5">App</th>
               <th className="px-5 py-2.5">Template</th>
               <th className="px-5 py-2.5">Status</th>
-              <th className="px-5 py-2.5">Image</th>
               <th className="px-5 py-2.5">Replicas</th>
               <th className="px-5 py-2.5">URLs</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
-            {services.map((svc) => (
-              <ServiceRow
-                key={svc.name}
-                project={project}
-                service={svc}
+            {apps.map((app) => (
+              <AppRow
+                key={app.name}
+                project={project.name}
+                app={app}
               />
             ))}
           </tbody>
@@ -325,57 +470,50 @@ function ProjectCard({
   );
 }
 
-// --- Service row ---
+// --- App row ---
 
-function ServiceRow({
+function AppRow({
   project,
-  service,
+  app,
 }: {
   project: string;
-  service: ServiceRuntime;
+  app: AppSummary;
 }) {
-  const rt = service.runtime;
-  const imageShort = rt.image
-    ? rt.image.replace(/^[^/]*\/[^/]*\//, "")
-    : "—";
+  const phase = app.status.phase;
+  const urls = app.urls ?? [];
 
   return (
     <tr className="transition-colors hover:bg-gray-50">
       <td className="px-5 py-3">
         <Link
-          to={`/projects/${project}/services/${service.name}`}
+          to={`/projects/${project}/apps/${app.name}`}
           className="text-sm font-medium text-gray-900 hover:text-gray-600"
         >
-          {service.name}
+          {app.displayName || app.name}
         </Link>
       </td>
       <td className="px-5 py-3">
         <span className="rounded bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-600">
-          {service.template.name}
+          {app.template.name}
         </span>
       </td>
       <td className="px-5 py-3">
-        <StatusBadge status={rt.status} />
-      </td>
-      <td className="px-5 py-3">
-        <span className="font-mono text-xs text-gray-500" title={rt.image}>
-          {imageShort}
-        </span>
+        <StatusBadge status={phase} />
       </td>
       <td className="px-5 py-3 text-sm text-gray-600">
-        {rt.status === "not_deployed" ? (
+        {phase === "not_deployed" ? (
           "—"
         ) : (
           <span>
-            {rt.available}
-            <span className="text-gray-400">/{rt.replicas}</span>
+            {app.status.available}
+            <span className="text-gray-400">/{app.status.replicas}</span>
           </span>
         )}
       </td>
       <td className="px-5 py-3">
-        {rt.ingressUrls.length > 0 ? (
+        {urls.length > 0 ? (
           <div className="flex flex-col gap-0.5">
-            {rt.ingressUrls.map((url) => (
+            {urls.map((url) => (
               <a
                 key={url}
                 href={url}
@@ -397,7 +535,7 @@ function ServiceRow({
 
 // --- Empty / skeleton states ---
 
-function EmptyState() {
+function EmptyState({ onNewProject }: { onNewProject: () => void }) {
   return (
     <div className="rounded-xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center">
       <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
@@ -417,21 +555,20 @@ function EmptyState() {
       </div>
       <h3 className="text-sm font-medium text-gray-900">No projects yet</h3>
       <p className="mx-auto mt-1 max-w-sm text-sm text-gray-500">
-        Get started by browsing available templates or running the onboarding
-        checklist to set up your first project and app.
+        Create a project, then deploy apps from templates into your environments.
       </p>
       <div className="mt-6 flex items-center justify-center gap-3">
-        <Link
-          to="/templates"
+        <button
+          onClick={onNewProject}
           className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
         >
-          Browse templates
-        </Link>
+          New project
+        </button>
         <Link
-          to="/onboarding"
+          to="/templates"
           className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
         >
-          Onboarding checklist
+          Browse templates
         </Link>
       </div>
     </div>

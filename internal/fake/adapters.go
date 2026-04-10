@@ -32,6 +32,9 @@ import (
 	"github.com/suparcloud/suparship/internal/runtime"
 )
 
+// compile-time check: FakeOrgProvider must satisfy rbac.OrgStore.
+var _ rbac.OrgStore = (*FakeOrgProvider)(nil)
+
 // compile-time interface compliance checks for adapters.
 var (
 	_ auth.Authenticator   = (*FakeAuthenticator)(nil)
@@ -56,10 +59,11 @@ var (
 type DevServerDeps struct {
 	// AdminUsername is the effective login username for the dev admin account.
 	// Populated by NewDevServerDeps so callers can include it in startup logs.
-	AdminUsername   string
-	Authenticator   *FakeAuthenticator
-	OrgProvider     *FakeOrgProvider
-	ProjectStore    *FakeProjectStore
+	AdminUsername string
+	Authenticator *FakeAuthenticator
+	// OrgProvider implements rbac.OrgStore (GetOrg + SaveOrg) with in-memory state.
+	OrgProvider  *FakeOrgProvider
+	ProjectStore *FakeProjectStore
 	PreviewStore    *FakePreviewStore
 	RuntimeProvider *FakeRuntimeProvider
 	LogsProvider    *FakeLogsProvider
@@ -90,7 +94,7 @@ func NewDevServerDeps() *DevServerDeps {
 	return &DevServerDeps{
 		AdminUsername:   username,
 		Authenticator:   &FakeAuthenticator{Username: username, Password: password},
-		OrgProvider:     &FakeOrgProvider{},
+		OrgProvider:     newFakeOrgProvider(),
 		ProjectStore:    newFakeProjectStore(),
 		PreviewStore:    newFakePreviewStore(),
 		RuntimeProvider: newFakeRuntimeProvider(),
@@ -142,15 +146,42 @@ func (a *FakeAuthenticator) Authenticate(_ context.Context, username, password s
 
 // ── FakeOrgProvider ──────────────────────────────────────────────────────────
 
-// FakeOrgProvider implements rbac.OrgProvider with a static default org that
-// gives the fake admin user org_admin on all projects.
-type FakeOrgProvider struct{}
+// FakeOrgProvider implements rbac.OrgStore (GetOrg + SaveOrg) with an
+// in-memory org seeded with the default org, canonical environments, and an
+// admins team. Mutations via SaveOrg are transient and reset on restart.
+type FakeOrgProvider struct {
+	mu  sync.RWMutex
+	org *rbac.Org
+}
 
-func (p *FakeOrgProvider) GetOrg(_ context.Context) (*rbac.Org, error) {
+// newFakeOrgProvider returns a FakeOrgProvider seeded with demo defaults.
+func newFakeOrgProvider() *FakeOrgProvider {
+	return &FakeOrgProvider{org: defaultFakeOrg()}
+}
+
+func defaultFakeOrg() *rbac.Org {
 	return &rbac.Org{
 		Name:        "default",
 		DisplayName: "My Organization",
 		CreatedAt:   seedCreatedAt.Format(time.RFC3339),
+		Environments: []rbac.OrgEnvironment{
+			{
+				Name:             "staging",
+				DisplayName:      "Staging",
+				Order:            1,
+				ClusterRef:       "staging-cluster",
+				BaseDomain:       "localhost",
+				NamespacePattern: "{app}-{env}",
+			},
+			{
+				Name:             "prod",
+				DisplayName:      "Production",
+				Order:            2,
+				ClusterRef:       "prod-cluster",
+				BaseDomain:       "localhost",
+				NamespacePattern: "{app}-{env}",
+			},
+		},
 		Teams: []rbac.Team{
 			{
 				Name:        "admins",
@@ -161,7 +192,20 @@ func (p *FakeOrgProvider) GetOrg(_ context.Context) (*rbac.Org, error) {
 		RoleBindings: []rbac.RoleBinding{
 			{Project: "*", Team: "admins", Role: rbac.RoleOrgAdmin},
 		},
-	}, nil
+	}
+}
+
+func (p *FakeOrgProvider) GetOrg(_ context.Context) (*rbac.Org, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.org, nil
+}
+
+func (p *FakeOrgProvider) SaveOrg(_ context.Context, org *rbac.Org) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.org = org
+	return nil
 }
 
 // ── FakeProjectStore ─────────────────────────────────────────────────────────
@@ -185,10 +229,9 @@ func newFakeProjectStore() *FakeProjectStore {
 		Spec: project.ProjectSpec{
 			DisplayName: "Demo Project",
 			Description: "Explore suparShip with a pre-seeded project.",
-			Environments: []project.Environment{
-				{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRef: "staging-cluster", BaseDomain: "staging.localhost", NamespacePattern: "{app}"},
-				{Name: "prod", DisplayName: "Production", Order: 2, ClusterRef: "prod-cluster", BaseDomain: "prod.localhost", NamespacePattern: "{app}"},
-			},
+			// Environments are inherited from the org defaults; no project-level
+		// overrides or project-specific environments for the demo project.
+		Environments: []project.Environment{},
 			Services: []project.Service{
 				{
 					Name:     "hello",

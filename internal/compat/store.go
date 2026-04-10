@@ -8,6 +8,15 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 )
 
+// OrgEnvsReader lets the compat store resolve org-level environment names when
+// a project's Environments list is empty (org-inherited model). Implemented by
+// rbac.OrgProvider; kept as a local interface to avoid a compat→rbac import.
+type OrgEnvsReader interface {
+	// OrgEnvironmentNames returns the canonical environment names defined at
+	// org level (e.g. ["staging","prod"]). Returns nil on error.
+	OrgEnvironmentNames(ctx context.Context) []string
+}
+
 // ServiceBackedAppStore implements domain.AppStore with a transparent fallback
 // to legacy service-oriented stores when native app data is absent.
 //
@@ -42,19 +51,26 @@ type ServiceBackedAppStore struct {
 	// previews provides legacy preview data used to build preview
 	// AppEnvironments during fallback.
 	previews domain.PreviewStore
+
+	// orgEnvs resolves org-level environment names when a project's own
+	// Environments list is empty (projects inherit from org by default).
+	// Optional: when nil the fallback only uses project-level environments.
+	orgEnvs OrgEnvsReader
 }
 
 // compile-time interface compliance check.
 var _ domain.AppStore = (*ServiceBackedAppStore)(nil)
 
 // NewServiceBackedAppStore returns a ServiceBackedAppStore ready for use.
-// All parameters are required; nil values will cause panics at runtime.
+// primary, services, projects, statuses, and previews are required.
+// orgEnvs is optional (pass nil to disable org-level environment fallback).
 func NewServiceBackedAppStore(
 	primary domain.AppStore,
 	services domain.ServiceStore,
 	projects domain.ProjectStore,
 	statuses domain.RuntimeStatusReader,
 	previews domain.PreviewStore,
+	orgEnvs OrgEnvsReader,
 ) *ServiceBackedAppStore {
 	return &ServiceBackedAppStore{
 		primary:  primary,
@@ -62,6 +78,7 @@ func NewServiceBackedAppStore(
 		projects: projects,
 		statuses: statuses,
 		previews: previews,
+		orgEnvs:  orgEnvs,
 	}
 }
 
@@ -172,18 +189,27 @@ func (s *ServiceBackedAppStore) listEnvsFromService(ctx context.Context, project
 		return nil, fmt.Errorf("compat: getting project %q: %w", projectName, err)
 	}
 
+	// Resolve environment names: use project-level environments first, then fall
+	// back to org-level when the project inherits (empty project env list).
+	envNames := make([]string, 0, len(proj.Environments))
+	for _, pe := range proj.Environments {
+		envNames = append(envNames, pe.Name)
+	}
+	if len(envNames) == 0 && s.orgEnvs != nil {
+		envNames = s.orgEnvs.OrgEnvironmentNames(ctx)
+	}
+
 	var envs []*domain.AppEnvironment
 
-	// Build one AppEnvironment per stable project environment by querying the
+	// Build one AppEnvironment per stable environment by querying the
 	// runtime status for that service+environment combination.
-	for _, projEnv := range proj.Environments {
-		status, statusErr := s.statuses.GetServiceStatus(ctx, projectName, svc.Name, projEnv.Name)
+	for _, envName := range envNames {
+		status, statusErr := s.statuses.GetServiceStatus(ctx, projectName, svc.Name, envName)
 		if statusErr != nil {
 			// Best-effort: skip this environment if status is unavailable.
-			// This avoids a partial failure blocking the entire list.
 			continue
 		}
-		envs = append(envs, MapServiceStatusToAppEnvironment(svc, projEnv.Name, status))
+		envs = append(envs, MapServiceStatusToAppEnvironment(svc, envName, status))
 	}
 
 	// Append preview environments sourced from the legacy PreviewStore.

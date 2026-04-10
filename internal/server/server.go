@@ -40,7 +40,7 @@ type Config struct {
 	UIDir           string               // optional: path to built frontend assets
 	CORSOrigins     []string             // optional: allowed CORS origins
 	Authenticator   auth.Authenticator   // optional: enables auth endpoints when set
-	OrgProvider     rbac.OrgProvider     // optional: enables RBAC-protected routes when set
+	OrgProvider     rbac.OrgStore        // optional: enables RBAC-protected routes when set (write ops also require OrgStore)
 	Templates       []*tpl.Template      // optional: pre-loaded templates for /api/v1/templates
 	ProjectStore    project.Store        // optional: enables service creation when set
 	RuntimeProvider runtime.Provider     // optional: enables runtime inventory when set
@@ -84,7 +84,7 @@ func New(cfg Config) *Server {
 	if cfg.OrgProvider != nil && ah != nil {
 		rh := &rbacHandler{
 			auth:         ah,
-			orgProvider:  cfg.OrgProvider,
+			orgStore:     cfg.OrgProvider,
 			projectStore: cfg.ProjectStore,
 		}
 		if cfg.ProjectStore != nil {
@@ -92,6 +92,7 @@ func New(cfg Config) *Server {
 			cfg.Logger.Info("service creation endpoint enabled")
 
 			rh.inventoryHandler = newInventoryHandler(cfg.ProjectStore, cfg.RuntimeProvider)
+			rh.inventoryHandler.orgProvider = cfg.OrgProvider
 			cfg.Logger.Info("inventory endpoints enabled")
 
 			if cfg.PreviewStore != nil {
@@ -109,6 +110,9 @@ func New(cfg Config) *Server {
 		}
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
+			if cfg.OrgProvider != nil {
+				rh.appHandler.orgProvider = cfg.OrgProvider
+			}
 			if cfg.RuntimeProvider != nil {
 				rh.appHandler.runtimeProvider = cfg.RuntimeProvider
 				cfg.Logger.Info("app live status enrichment enabled")
@@ -136,7 +140,7 @@ func New(cfg Config) *Server {
 	}
 
 	oh := &onboardingHandler{
-		orgProvider:  cfg.OrgProvider,
+		orgProvider:  cfg.OrgProvider, // OrgStore satisfies OrgProvider
 		projectStore: cfg.ProjectStore,
 		authEnabled:  cfg.Authenticator != nil,
 	}

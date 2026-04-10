@@ -86,7 +86,7 @@ func newTestLogsMux() (*http.ServeMux, *authHandler, *memProjectStore, *fakeLogs
 
 	rh := &rbacHandler{
 		auth:        ah,
-		orgProvider: &staticOrgProvider{org: testRBACOrg()},
+		orgStore: &staticOrgProvider{org: testRBACOrg()},
 		logsHandler: newLogsHandler(store, lp),
 	}
 	rh.registerRoutes(mux)

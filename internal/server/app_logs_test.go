@@ -31,7 +31,7 @@ func newTestAppLogsMux() (*http.ServeMux, *authHandler, *memAppStore, *fakeLogsP
 
 	rh := &rbacHandler{
 		auth:        ah,
-		orgProvider: &staticOrgProvider{org: testRBACOrg()},
+		orgStore: &staticOrgProvider{org: testRBACOrg()},
 		appHandler:  appH,
 	}
 	rh.registerRoutes(mux)
@@ -474,7 +474,7 @@ func TestAppLogsRouteNotRegisteredWithoutProvider(t *testing.T) {
 
 	rh := &rbacHandler{
 		auth:        ah,
-		orgProvider: &staticOrgProvider{org: testRBACOrg()},
+		orgStore: &staticOrgProvider{org: testRBACOrg()},
 		appHandler:  appH,
 	}
 	rh.registerRoutes(mux)

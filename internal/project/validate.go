@@ -36,8 +36,10 @@ func (p *Project) Validate() error {
 }
 
 func validateEnvironments(envs []Environment) error {
+	// Empty is valid — environments are inherited from the org config.
+	// Project-level entries are overrides or project-specific additions.
 	if len(envs) == 0 {
-		return fmt.Errorf("spec.environments must contain at least one environment")
+		return nil
 	}
 
 	names := make(map[string]bool, len(envs))
@@ -88,7 +90,9 @@ func validateServices(services []Service, envNames map[string]bool) error {
 		}
 
 		for envName, override := range svc.EnvironmentOverrides {
-			if !envNames[envName] {
+			// Skip cross-referencing when envNames is empty: environments may be
+			// fully inherited from org config and not present in the project spec.
+			if len(envNames) > 0 && !envNames[envName] {
 				return fmt.Errorf("services[%d] %q: environmentOverrides references unknown environment %q", i, svc.Name, envName)
 			}
 			if err := validateSecretRefs(override.SecretRefs, fmt.Sprintf("services[%d] %q env %q", i, svc.Name, envName)); err != nil {

@@ -112,7 +112,7 @@ func newTestPreviewMux(rp runtime.Provider) (*http.ServeMux, *authHandler, *memP
 
 	rh := &rbacHandler{
 		auth:           ah,
-		orgProvider:    &staticOrgProvider{org: testRBACOrg()},
+		orgStore:    &staticOrgProvider{org: testRBACOrg()},
 		projectStore:   projStore,
 		previewHandler: newPreviewHandler(prevStore, projStore, rp, &staticOrgProvider{org: testRBACOrg()}),
 	}

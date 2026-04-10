@@ -74,19 +74,33 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 	return &Publisher{cfg: cfg}, nil
 }
 
-// PublishEnvInfra writes the per-environment appset.yaml and per-project
-// appproject.yaml for a set of environments. Call this when a cluster is
-// registered or an environment's cluster mapping changes.
+// PublishEnvInfra writes the per-environment ApplicationSet and per-project
+// AppProject to the shared _infra directory so that the ArgoCD root "App of
+// Apps" can discover them with a simple non-filtered directory watch.
 //
 // Written files:
-//   - gitops-output/{envName}/appset.yaml         — ApplicationSet for the cluster
-//   - gitops-output/{envName}/{project}/appproject.yaml — AppProject with allowed destinations
+//   - gitops-output/_infra/{envName}-appset.yaml         — ApplicationSet for the cluster
+//   - gitops-output/_infra/{project}-appproject.yaml     — AppProject (one per project, all env destinations merged)
+//   - gitops-output/_infra/previews-appset.yaml          — Preview ApplicationSet (idempotent)
+//
+// Having all infra manifests under _infra/ avoids the problem of ArgoCD trying
+// to apply per-app data files (app.yaml, values.yaml) as Kubernetes manifests.
+// It also prevents AppProject duplication that occurs when one file is written
+// per-environment for the same project.
 //
 // PublishEnvInfra is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, envs []AppSetEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
+		// Collect destinations from all envs to build a single AppProject.
+		destinations := make([]AppProjectDestination, 0, len(envs))
+		// infra base path: all ArgoCD CRD manifests are written here so the
+		// root "App of Apps" can watch a single directory with no include/exclude
+		// filter required. Per-app data (app.yaml, values.yaml) stays in the
+		// env-specific paths where ApplicationSet git generators discover it.
+		infraDir := filepath.Join(repoDir, "gitops-output", "_infra")
+
 		for _, env := range envs {
-			// Write appset.yaml for this env.
+			// Write {envName}-appset.yaml for this env.
 			appSet := BuildArgoAppSet(env, p.cfg.ArgoCDRepoURL, AppSetOptions{
 				SyncAutomated: p.cfg.SyncAutomated,
 			})
@@ -94,32 +108,33 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 			if err != nil {
 				return fmt.Errorf("marshal appset for env %s: %w", env.EnvName, err)
 			}
-			appSetPath := filepath.Join(repoDir, "gitops-output", env.EnvName, "appset.yaml")
+			appSetPath := filepath.Join(infraDir, env.EnvName+"-appset.yaml")
 			if err := p.writeFile(appSetPath, appSetBytes); err != nil {
 				return err
 			}
-			slog.Debug("gitops: wrote appset.yaml", "path", appSetPath)
+			slog.Debug("gitops: wrote appset", "path", appSetPath)
 
-			// Write appproject.yaml for this project/env.
-			appProject := BuildArgoAppProject(projectName, AppProjectOptions{
-				Description:           "suparShip project: " + projectName,
-				AllowClusterResources: true,
-				Destinations: []AppProjectDestination{
-					{Server: env.ClusterServer, Namespace: "*"},
-				},
-			})
-			appProjectBytes, err := yaml.Marshal(appProject)
-			if err != nil {
-				return fmt.Errorf("marshal appproject for env %s: %w", env.EnvName, err)
-			}
-			appProjectPath := filepath.Join(repoDir, "gitops-output", env.EnvName, projectName, "appproject.yaml")
-			if err := p.writeFile(appProjectPath, appProjectBytes); err != nil {
-				return err
-			}
-			slog.Debug("gitops: wrote appproject.yaml", "path", appProjectPath)
+			destinations = append(destinations, AppProjectDestination{Server: env.ClusterServer, Namespace: "*"})
 		}
 
-		// Write preview AppSet (idempotent; only changes if not present).
+		// Write a SINGLE {project}-appproject.yaml per project (not one per env)
+		// to avoid ArgoCD rejecting the root app due to duplicate resource names.
+		appProject := BuildArgoAppProject(projectName, AppProjectOptions{
+			Description:           "suparShip project: " + projectName,
+			AllowClusterResources: true,
+			Destinations:          destinations,
+		})
+		appProjectBytes, err := yaml.Marshal(appProject)
+		if err != nil {
+			return fmt.Errorf("marshal appproject for project %s: %w", projectName, err)
+		}
+		appProjectPath := filepath.Join(infraDir, projectName+"-appproject.yaml")
+		if err := p.writeFile(appProjectPath, appProjectBytes); err != nil {
+			return err
+		}
+		slog.Debug("gitops: wrote appproject", "path", appProjectPath)
+
+		// Write previews-appset.yaml (idempotent; only changes if not present).
 		previewAppSet := BuildArgoPreviewAppSet(p.cfg.ArgoCDRepoURL, AppSetOptions{
 			SyncAutomated: p.cfg.SyncAutomated,
 		})
@@ -127,7 +142,7 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 		if err != nil {
 			return fmt.Errorf("marshal previews appset: %w", err)
 		}
-		previewAppSetPath := filepath.Join(repoDir, "gitops-output", "previews", "appset.yaml")
+		previewAppSetPath := filepath.Join(infraDir, "previews-appset.yaml")
 		if err := p.writeFile(previewAppSetPath, previewAppSetBytes); err != nil {
 			return err
 		}

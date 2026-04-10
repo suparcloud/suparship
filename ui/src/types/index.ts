@@ -154,9 +154,11 @@ export interface OnboardingStatus {
 export interface EnvironmentInfo {
   name: string;
   displayName?: string;
-  project: string;
-  namespace: string;
+  project?: string;  // empty for org-level environments
+  namespace?: string;
   order: number;
+  clusterRef?: string;
+  baseDomain?: string;
 }
 
 export interface EnvironmentsResponse {

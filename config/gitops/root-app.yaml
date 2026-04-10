@@ -35,13 +35,13 @@ spec:
   source:
     repoURL: "http://gitea-http.gitea.svc.cluster.local:3000/gitops/gitops.git"
     targetRevision: main
-    path: gitops-output
+    # _infra/ contains ONLY ArgoCD CRD manifests (ApplicationSet, AppProject).
+    # Per-app data files (app.yaml, values.yaml) live under env-specific paths
+    # where ApplicationSet git generators discover them — not applied here.
+    # This avoids brace-expansion glob issues and AppProject duplication.
+    path: gitops-output/_infra
     directory:
-      # Recurse into env/project subdirectories.
-      recurse: true
-      # Pick up AppProjects (applied first via sync-wave: -1) and
-      # ApplicationSets (per-env + previews).
-      include: "{appproject,appset}.yaml"
+      recurse: false
   destination:
     # Apply AppProject and ApplicationSet objects into the argocd namespace
     # on the tooling cluster. ApplicationSets then deploy apps to workload

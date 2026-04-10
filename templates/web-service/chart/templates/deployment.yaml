@@ -1,3 +1,5 @@
+{{- $web := .Values.components.web }}
+{{- if $web.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,7 +8,7 @@ metadata:
     {{- include "web-service.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ $web.replicas | default 2 }}
   {{- end }}
   selector:
     matchLabels:
@@ -21,15 +23,15 @@ spec:
       {{- end }}
       containers:
         - name: {{ include "web-service.fullname" . }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ $web.image.repository | default "nginx" }}:{{ $web.image.tag | default "stable" }}"
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: {{ .Values.port }}
+              containerPort: {{ $web.port | default 80 }}
               protocol: TCP
           livenessProbe:
             httpGet:
-              path: {{ .Values.healthCheck.path }}
+              path: {{ (($web.healthCheck).path) | default "/" }}
               port: http
             initialDelaySeconds: 10
             periodSeconds: 15
@@ -37,7 +39,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: {{ .Values.healthCheck.path }}
+              path: {{ (($web.healthCheck).path) | default "/" }}
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -45,7 +47,11 @@ spec:
             failureThreshold: 3
           resources:
             {{- include "web-service.resources" . | nindent 12 }}
-          {{- if .Values.extraEnv }}
+          {{- if $web.env }}
           env:
-            {{- toYaml .Values.extraEnv | nindent 12 }}
+            {{- range $k, $v := $web.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
           {{- end }}
+{{- end }}

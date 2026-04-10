@@ -18,13 +18,13 @@ func ProjectFromPathValue(param string) ProjectExtractor {
 	}
 }
 
-// rbacHandler provides RBAC enforcement middleware and placeholder project
-// routes. It composes authentication (via authHandler) with authorization
-// (via rbac.OrgProvider).
+// rbacHandler provides RBAC enforcement middleware and project/org routes.
+// It composes authentication (via authHandler) with authorization
+// (via rbac.OrgStore).
 type rbacHandler struct {
-	auth             *authHandler
-	orgProvider      rbac.OrgProvider
-	projectStore     project.Store     // optional: merges project store into project listing
+	auth         *authHandler
+	orgStore     rbac.OrgStore
+	projectStore project.Store // optional: merges project store into project listing
 	serviceHandler   *serviceHandler   // optional: enables POST .../services
 	inventoryHandler *inventoryHandler // optional: enables inventory endpoints
 	previewHandler   *previewHandler   // optional: enables preview endpoints
@@ -42,7 +42,7 @@ func (rh *rbacHandler) requireRole(role rbac.Role, extractProject ProjectExtract
 		return rh.auth.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 			sess := sessionFromContext(r.Context())
 
-			org, err := rh.orgProvider.GetOrg(r.Context())
+			org, err := rh.orgStore.GetOrg(r.Context())
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
 				return
@@ -66,10 +66,23 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	manageProject := rh.requireRole(rbac.RoleProjectAdmin, byProject)
 	devProject := rh.requireRole(rbac.RoleDeveloper, byProject)
 
+	requireOrgAdmin := rh.auth.requireAuth // further RBAC check inside handler
+
 	// Org-level read endpoints — authenticated users only.
 	mux.HandleFunc("GET /api/v1/org", rh.auth.requireAuth(rh.handleGetOrg))
 	mux.HandleFunc("GET /api/v1/teams", rh.auth.requireAuth(rh.handleGetTeams))
 	mux.HandleFunc("GET /api/v1/projects", rh.auth.requireAuth(rh.handleGetProjects))
+
+	// Project lifecycle — org_admin only.
+	mux.HandleFunc("POST /api/v1/projects", rh.auth.requireAuth(rh.orgAdminOnly(rh.handleCreateProject)))
+	mux.HandleFunc("DELETE /api/v1/projects/{project}", rh.auth.requireAuth(rh.orgAdminOnly(rh.handleDeleteProject)))
+
+	// Org-level environment management (canonical pipeline definition).
+	// Reads are open to all authenticated users; writes require org_admin.
+	mux.HandleFunc("GET /api/v1/org/environments", rh.auth.requireAuth(rh.handleListOrgEnvironments))
+	mux.HandleFunc("POST /api/v1/org/environments", requireOrgAdmin(rh.requireOrgAdmin(rh.handleCreateOrgEnvironment)))
+	mux.HandleFunc("PUT /api/v1/org/environments/{env}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleUpdateOrgEnvironment)))
+	mux.HandleFunc("DELETE /api/v1/org/environments/{env}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteOrgEnvironment)))
 
 	// Project-scoped endpoints — role-based access.
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(rh.handleGetProject))
@@ -140,6 +153,24 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		if rh.appHandler.projectStore != nil {
 			mux.HandleFunc("POST /api/v1/projects/{project}/apps", devProject(rh.appHandler.handleCreateApp))
 		}
+	}
+}
+
+// requireOrgAdmin wraps a handler and enforces that the session user holds the
+// org_admin role on the wildcard project ("*"). Used for org-level write operations.
+func (rh *rbacHandler) requireOrgAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFromContext(r.Context())
+		org, err := rh.orgStore.GetOrg(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
+			return
+		}
+		if !org.HasPermission(sess.Username, "*", rbac.RoleOrgAdmin) {
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
+			return
+		}
+		next(w, r)
 	}
 }
 

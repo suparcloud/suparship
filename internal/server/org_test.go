@@ -180,7 +180,7 @@ func TestGetProjectsMergesProjectStore(t *testing.T) {
 
 	rh := &rbacHandler{
 		auth:         ah,
-		orgProvider:  &staticOrgProvider{org: testRBACOrg()},
+		orgStore:  &staticOrgProvider{org: testRBACOrg()},
 		projectStore: store,
 	}
 	rh.registerRoutes(mux)
@@ -345,7 +345,7 @@ func newProjectDetailMux() (*http.ServeMux, *authHandler) {
 
 	rh := &rbacHandler{
 		auth:         ah,
-		orgProvider:  &staticOrgProvider{org: testRBACOrg()},
+		orgStore:  &staticOrgProvider{org: testRBACOrg()},
 		projectStore: store,
 	}
 	rh.registerRoutes(mux)
@@ -483,7 +483,7 @@ func TestGetProjectsIncludesDisplayName(t *testing.T) {
 
 	rh := &rbacHandler{
 		auth:         ah,
-		orgProvider:  &staticOrgProvider{org: testRBACOrg()},
+		orgStore:  &staticOrgProvider{org: testRBACOrg()},
 		projectStore: store,
 	}
 	rh.registerRoutes(mux)

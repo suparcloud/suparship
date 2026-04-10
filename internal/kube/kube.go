@@ -104,7 +104,11 @@ type ServerDeps struct {
 // client. Reads hit the cluster on every call; there is no in-process cache.
 // The caller is responsible for providing Authenticator and OrgProvider
 // separately (they require access to the admin bootstrap Secret).
-func NewServerDeps(client kubernetes.Interface) *ServerDeps {
+//
+// orgEnvs is optional (pass nil to skip org-level environment resolution).
+// When provided it is used by the compat layer to enumerate environments for
+// legacy apps whose project's Environments list is empty (org-inherited model).
+func NewServerDeps(client kubernetes.Interface, orgEnvs compat.OrgEnvsReader) *ServerDeps {
 	projectStore := project.NewK8sStore(client)
 	previewStore := preview.NewK8sStore(client)
 	runtimeProvider := runtime.NewK8sProvider(client)
@@ -116,6 +120,7 @@ func NewServerDeps(client kubernetes.Interface) *ServerDeps {
 		&k8sProjectDomainAdapter{projects: projectStore},
 		&k8sRuntimeStatusAdapter{provider: runtimeProvider},
 		&k8sPreviewDomainAdapter{store: previewStore},
+		orgEnvs,
 	)
 
 	return &ServerDeps{

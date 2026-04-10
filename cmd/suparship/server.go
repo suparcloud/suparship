@@ -92,7 +92,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	var (
 		authenticator   auth.Authenticator
-		orgProvider     rbac.OrgProvider
+		orgProvider     rbac.OrgStore
 		projectStore    project.Store
 		previewStore    preview.Store
 		runtimeProvider runtime.Provider
@@ -169,7 +169,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 		// Wire all Kubernetes-backed store and runtime implementations
 		// through the consolidated kube.ServerDeps bundle.
-		kubeDeps := kube.NewServerDeps(client)
+		kubeDeps := kube.NewServerDeps(client, rbac.NewOrgEnvNamesAdapter(orgProvider))
 		projectStore = kubeDeps.ProjectStore
 		previewStore = kubeDeps.PreviewStore
 		runtimeProvider = kubeDeps.RuntimeProvider
@@ -222,7 +222,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			logger.Warn("gitops publisher disabled", "reason", err.Error())
 		} else {
-			gitOpsPublisher = &gitOpsPublisherAdapter{inner: pub}
+			gitOpsPublisher = &gitOpsPublisherAdapter{
+				inner:        pub,
+				orgProvider:  orgProvider,
+				clusterStore: clusterStore,
+			}
 			logger.Info("gitops publisher enabled",
 				"repo", cfg.GitOps.RepoURL,
 				"argocd_repo", cfg.GitOps.ArgoCDRepoURL,
@@ -266,21 +270,101 @@ func envOr(key, fallback string) string {
 
 // gitOpsPublisherAdapter bridges the server.GitOpsPublisher interface
 // (which uses []*domain.AppEnvironment) to the gitops.Publisher (which uses
-// []gitops.AppPublishEnv). BaseDomain defaults to "localhost" when the
-// environment has no cluster configuration; it will be resolved from the
-// ClusterStore in a future iteration.
+// []gitops.AppPublishEnv and []gitops.AppSetEnv).
+//
+// On every PublishApp call the adapter:
+//  1. Looks up org-level environment definitions to resolve ClusterRef,
+//     BaseDomain and NamespacePattern for each environment.
+//  2. Looks up the registered Cluster to resolve ClusterServer (the K8s API
+//     server URL ArgoCD needs for ApplicationSet destinations).
+//  3. Calls PublishEnvInfra to write appset.yaml + appproject.yaml for each
+//     environment — ArgoCD discovers apps through these files.
+//  4. Calls PublishApp to write app.yaml + values.yaml for each environment.
 type gitOpsPublisherAdapter struct {
-	inner *gitops.Publisher
+	inner        *gitops.Publisher
+	orgProvider  rbac.OrgProvider
+	clusterStore domain.ClusterStore
+}
+
+// envResolved holds the resolved cluster and domain info for one environment.
+type envResolved struct {
+	clusterServer    string
+	baseDomain       string
+	namespacePattern string
+}
+
+// resolveEnvs builds a map of envName → resolved cluster info from org config
+// and the cluster store. Falls back to safe defaults when data is missing.
+func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]envResolved {
+	result := make(map[string]envResolved)
+
+	if a.orgProvider == nil {
+		return result
+	}
+
+	org, err := a.orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		return result
+	}
+
+	for _, orgEnv := range org.Environments {
+		res := envResolved{
+			clusterServer:    "https://kubernetes.default.svc", // safe default
+			baseDomain:       orgEnv.BaseDomain,
+			namespacePattern: orgEnv.NamespacePattern,
+		}
+		if res.baseDomain == "" {
+			res.baseDomain = "localhost"
+		}
+
+		// Resolve the cluster API server from the cluster store.
+		if orgEnv.ClusterRef != "" && a.clusterStore != nil {
+			if cluster, err := a.clusterStore.GetCluster(ctx, orgEnv.ClusterRef); err == nil && cluster.APIServer != "" {
+				res.clusterServer = cluster.APIServer
+			}
+		}
+
+		result[orgEnv.Name] = res
+	}
+
+	return result
 }
 
 func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
+	resolved := a.resolveEnvs(ctx)
+
+	appSetEnvs := make([]gitops.AppSetEnv, 0, len(envs))
 	pubEnvs := make([]gitops.AppPublishEnv, 0, len(envs))
+
 	for _, env := range envs {
+		res, ok := resolved[env.EnvName]
+		if !ok {
+			// Environment not in org config — use safe defaults.
+			res = envResolved{
+				clusterServer: "https://kubernetes.default.svc",
+				baseDomain:    "localhost",
+			}
+		}
+
+		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
+			EnvName:          env.EnvName,
+			ClusterServer:    res.clusterServer,
+			NamespacePattern: res.namespacePattern,
+			BaseDomain:       res.baseDomain,
+		})
 		pubEnvs = append(pubEnvs, gitops.AppPublishEnv{
 			EnvName:    env.EnvName,
 			EnvType:    env.EnvType,
-			BaseDomain: "localhost", // TODO: resolve from ClusterStore via project env config
+			BaseDomain: res.baseDomain,
 		})
 	}
+
+	// Write appset.yaml + appproject.yaml for each environment so ArgoCD can
+	// discover apps through its Git File generator. This is idempotent.
+	if err := a.inner.PublishEnvInfra(ctx, app.ProjectName, appSetEnvs); err != nil {
+		return fmt.Errorf("publish env infra: %w", err)
+	}
+
+	// Write app.yaml + values.yaml for each environment.
 	return a.inner.PublishApp(ctx, app, pubEnvs)
 }

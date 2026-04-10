@@ -199,7 +199,7 @@ func newTestAppMux() (*http.ServeMux, *authHandler, *memAppStore) {
 	store := newMemAppStore()
 	rh := &rbacHandler{
 		auth:        ah,
-		orgProvider: &staticOrgProvider{org: testRBACOrg()},
+		orgStore: &staticOrgProvider{org: testRBACOrg()},
 		appHandler:  newAppHandler(store, nil, nil),
 	}
 	rh.registerRoutes(mux)
@@ -230,7 +230,7 @@ func newTestAppCreateMux() (*http.ServeMux, *authHandler, *memAppStore, *memProj
 
 	rh := &rbacHandler{
 		auth:        ah,
-		orgProvider: &staticOrgProvider{org: testRBACOrg()},
+		orgStore: &staticOrgProvider{org: testRBACOrg()},
 		appHandler:  newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, projStore),
 	}
 	rh.registerRoutes(mux)

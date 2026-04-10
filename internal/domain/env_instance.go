@@ -126,6 +126,10 @@ func GenerateURL(appName, envName string, envType AppEnvironmentType) string {
 //	staging  →  http://{appName}.staging.{domain}
 //	prod     →  http://{appName}.prod.{domain}
 //	preview  →  http://{envName}.{appName}.preview.{domain}
+//
+// baseDomain is the ROOT domain (e.g. "localhost", "acme.com"). The
+// environment tier is always prepended so that staging and prod are
+// reachable at different hostnames within the same root domain.
 func GenerateURLWithDomain(appName, envName string, envType AppEnvironmentType, domain string) string {
 	switch envType {
 	case AppEnvPreview:

@@ -24,6 +24,7 @@ import (
 	"net/http"
 
 	"github.com/suparcloud/suparship/internal/project"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
 )
 
@@ -40,6 +41,12 @@ type EnvironmentDTO struct {
 	ClusterRef       string `json:"clusterRef,omitempty"`
 	BaseDomain       string `json:"baseDomain,omitempty"`
 	NamespacePattern string `json:"namespacePattern,omitempty"`
+	// Origin describes where this environment definition comes from:
+	//   "org"      — fully inherited from org defaults, no project customisation
+	//   "override" — org environment with project-level field overrides applied
+	//   "project"  — project-specific environment not present in org defaults
+	// Empty string means origin was not resolved (legacy/inventory endpoints).
+	Origin string `json:"origin,omitempty"`
 }
 
 // EnvironmentsResponse is the JSON body for GET /api/v1/environments.
@@ -120,7 +127,8 @@ type ServiceEnvDTO struct {
 // See docs/migration-app-model.md.
 type inventoryHandler struct {
 	projectStore    project.Store
-	runtimeProvider runtime.Provider // may be nil
+	runtimeProvider runtime.Provider  // may be nil
+	orgProvider     rbac.OrgProvider  // optional; used as fallback for org-level environments
 }
 
 func newInventoryHandler(store project.Store, rp runtime.Provider) *inventoryHandler {
@@ -139,6 +147,7 @@ func (ih *inventoryHandler) handleListEnvironments(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// Collect project-level environments (may be empty if projects inherit from org).
 	var envs []EnvironmentDTO
 	for _, p := range projects {
 		for _, e := range p.Spec.Environments {
@@ -151,6 +160,24 @@ func (ih *inventoryHandler) handleListEnvironments(w http.ResponseWriter, r *htt
 			})
 		}
 	}
+
+	// When no project-level environments exist, fall back to org-level definitions.
+	// Projects now inherit org environments by default; the project spec stores
+	// overrides only. This avoids the Environments stat showing 0 in the dashboard.
+	if len(envs) == 0 && ih.orgProvider != nil {
+		if org, orgErr := ih.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
+			for _, e := range org.Environments {
+				envs = append(envs, EnvironmentDTO{
+					Name:        e.Name,
+					DisplayName: e.DisplayName,
+					Order:       e.Order,
+					ClusterRef:  e.ClusterRef,
+					BaseDomain:  e.BaseDomain,
+				})
+			}
+		}
+	}
+
 	if envs == nil {
 		envs = []EnvironmentDTO{}
 	}
