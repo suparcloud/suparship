@@ -217,9 +217,11 @@ func TestBuildArgoApplication_WithValuesFiles(t *testing.T) {
 	if got.Spec.Source.Helm.ValueFiles[0] != "values.yaml" {
 		t.Errorf("ValueFiles[0] = %q, want values.yaml", got.Spec.Source.Helm.ValueFiles[0])
 	}
-	// ReleaseName matches the Application name
-	if got.Spec.Source.Helm.ReleaseName != "hello-staging" {
-		t.Errorf("Helm.ReleaseName = %q, want hello-staging", got.Spec.Source.Helm.ReleaseName)
+	// ReleaseName is the app name only — resources are already isolated in the
+	// per-environment namespace (e.g. hello-staging), so the env suffix is
+	// redundant and would break Deployment name lookups and pod label selectors.
+	if got.Spec.Source.Helm.ReleaseName != "hello" {
+		t.Errorf("Helm.ReleaseName = %q, want hello", got.Spec.Source.Helm.ReleaseName)
 	}
 }
 

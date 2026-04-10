@@ -226,7 +226,13 @@ func BuildArgoApplication(app *domain.App, env domain.AppEnvironment, opts Build
 	}
 	if len(opts.ValuesFiles) > 0 || opts.InlineValues != "" {
 		source.Helm = &HelmSource{
-			ReleaseName: name,
+			// Use the app name alone as the Helm release name. Resources are
+			// already isolated in the per-environment namespace (e.g.
+			// "hello-staging"), so appending the env suffix is redundant and
+			// causes Deployment names like "hello-staging" inside that
+			// namespace. Keeping it as "hello" makes label selectors, pod
+			// discovery, and runtime status lookups straightforward.
+			ReleaseName: app.Name,
 			ValueFiles:  opts.ValuesFiles,
 			Values:      opts.InlineValues,
 		}

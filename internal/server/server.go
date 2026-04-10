@@ -103,6 +103,10 @@ func New(cfg Config) *Server {
 		}
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
+			if cfg.RuntimeProvider != nil {
+				rh.appHandler.runtimeProvider = cfg.RuntimeProvider
+				cfg.Logger.Info("app live status enrichment enabled")
+			}
 			if cfg.LogsProvider != nil {
 				rh.appHandler.logsProvider = cfg.LogsProvider
 				cfg.Logger.Info("app logs endpoint enabled")

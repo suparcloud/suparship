@@ -35,6 +35,7 @@ type appHandler struct {
 	appStore        domain.AppStore
 	templateIdx     map[string]*tpl.Template
 	projectStore    project.Store
+	runtimeProvider runtime.Provider     // optional: enriches env responses with live K8s status
 	logsProvider    runtime.LogsProvider // optional: enables GET .../apps/{app}/logs
 	gitOpsPublisher GitOpsPublisher      // optional: commits argocd manifests to gitops repo on create
 }
@@ -262,6 +263,9 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	envs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
+	for _, env := range envs {
+		ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
+	}
 
 	writeJSON(w, http.StatusOK, AppDetailResponse{
 		App: appToDetailDTO(app, envs),
@@ -285,6 +289,10 @@ func (ah *appHandler) handleListAppEnvironments(w http.ResponseWriter, r *http.R
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list environments"})
 		return
+	}
+
+	for _, env := range envs {
+		ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
 	}
 
 	dtos := make([]AppEnvironmentSummaryDTO, 0, len(envs))
@@ -313,6 +321,8 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 		})
 		return
 	}
+
+	ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
 
 	writeJSON(w, http.StatusOK, AppEnvironmentResponse{
 		Environment: appEnvToDTO(env),
@@ -668,6 +678,34 @@ func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appN
 		return candidates[i].EnvName < candidates[j].EnvName
 	})
 	return candidates[0], nil
+}
+
+// enrichEnvWithLiveStatus overwrites the stored status fields in env with
+// freshly queried Kubernetes data. The Deployment is looked up by the app name
+// (workload) inside env.Namespace. On any error the stored values are kept so
+// callers always get a valid response. The method is a no-op when
+// runtimeProvider is nil (fake/local mode).
+func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName string, env *domain.AppEnvironment) {
+	if ah.runtimeProvider == nil {
+		return
+	}
+	info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName)
+	if err != nil {
+		return
+	}
+	env.Status = domain.AppRuntimeStatus{
+		Phase:        info.Status,
+		Replicas:     info.Replicas,
+		Available:    info.Available,
+		LastDeployed: info.LastDeployed,
+	}
+	if len(info.IngressURLs) > 0 {
+		env.URLs = info.IngressURLs
+	}
+	// Populate release image from the live Deployment when not already set.
+	if info.Image != "" && env.Release == nil {
+		env.Release = &domain.AppReleaseRef{Image: info.Image}
+	}
 }
 
 // --- DTO mapping helpers ---
