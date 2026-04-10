@@ -12,12 +12,19 @@ import (
 	"github.com/suparcloud/suparship/internal/session"
 )
 
+// staticOrgProvider implements rbac.OrgStore with a fixed in-memory org.
+// SaveOrg is a no-op for tests that don't need to observe mutations.
 type staticOrgProvider struct {
 	org *rbac.Org
 }
 
 func (s *staticOrgProvider) GetOrg(_ context.Context) (*rbac.Org, error) {
 	return s.org, nil
+}
+
+func (s *staticOrgProvider) SaveOrg(_ context.Context, org *rbac.Org) error {
+	s.org = org
+	return nil
 }
 
 func testRBACOrg() *rbac.Org {
@@ -51,7 +58,7 @@ func newTestRBACMux() (*http.ServeMux, *authHandler) {
 
 	rh := &rbacHandler{
 		auth:           ah,
-		orgProvider:    &staticOrgProvider{org: testRBACOrg()},
+		orgStore:       &staticOrgProvider{org: testRBACOrg()},
 		promoteHandler: newPromoteHandler(store),
 	}
 	rh.registerRoutes(mux)

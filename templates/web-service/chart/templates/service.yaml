@@ -1,3 +1,5 @@
+{{- $web := .Values.components.web }}
+{{- if $web.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -7,9 +9,10 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - port: {{ .Values.port }}
+    - port: {{ $web.port | default 80 }}
       targetPort: http
       protocol: TCP
       name: http
   selector:
     {{- include "web-service.selectorLabels" . | nindent 4 }}
+{{- end }}

@@ -22,10 +22,15 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 
-// GitOpsPublisher commits ArgoCD Application manifests to the GitOps
-// repository. When nil, app creation only persists to the store and no git
-// commit is performed. Implementations must be safe for concurrent use.
+// GitOpsPublisher commits app manifests to the GitOps repository. When nil,
+// app creation only persists to the store and no git commit is performed.
+// Implementations must be safe for concurrent use.
 type GitOpsPublisher interface {
+	// PublishApp writes app.yaml and values.yaml for each environment to the
+	// GitOps repo. BaseDomain controls the routing.host value in values.yaml;
+	// it is taken from the environment's cluster registration (defaults to
+	// "localhost" when the environment has no cluster or when the cluster has
+	// no configured base domain).
 	PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error
 }
 
@@ -35,13 +40,14 @@ type Config struct {
 	UIDir           string               // optional: path to built frontend assets
 	CORSOrigins     []string             // optional: allowed CORS origins
 	Authenticator   auth.Authenticator   // optional: enables auth endpoints when set
-	OrgProvider     rbac.OrgProvider     // optional: enables RBAC-protected routes when set
+	OrgProvider     rbac.OrgStore        // optional: enables RBAC-protected routes when set (write ops also require OrgStore)
 	Templates       []*tpl.Template      // optional: pre-loaded templates for /api/v1/templates
 	ProjectStore    project.Store        // optional: enables service creation when set
 	RuntimeProvider runtime.Provider     // optional: enables runtime inventory when set
 	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
 	PreviewStore    preview.Store        // optional: enables preview endpoints when set
 	AppStore        domain.AppStore      // optional: enables app read endpoints when set
+	ClusterStore    domain.ClusterStore  // optional: enables /api/v1/clusters endpoints when set
 	GitOpsPublisher GitOpsPublisher      // optional: commits app manifests to gitops repo on create
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
@@ -78,7 +84,7 @@ func New(cfg Config) *Server {
 	if cfg.OrgProvider != nil && ah != nil {
 		rh := &rbacHandler{
 			auth:         ah,
-			orgProvider:  cfg.OrgProvider,
+			orgStore:     cfg.OrgProvider,
 			projectStore: cfg.ProjectStore,
 		}
 		if cfg.ProjectStore != nil {
@@ -86,6 +92,7 @@ func New(cfg Config) *Server {
 			cfg.Logger.Info("service creation endpoint enabled")
 
 			rh.inventoryHandler = newInventoryHandler(cfg.ProjectStore, cfg.RuntimeProvider)
+			rh.inventoryHandler.orgProvider = cfg.OrgProvider
 			cfg.Logger.Info("inventory endpoints enabled")
 
 			if cfg.PreviewStore != nil {
@@ -103,6 +110,9 @@ func New(cfg Config) *Server {
 		}
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
+			if cfg.OrgProvider != nil {
+				rh.appHandler.orgProvider = cfg.OrgProvider
+			}
 			if cfg.RuntimeProvider != nil {
 				rh.appHandler.runtimeProvider = cfg.RuntimeProvider
 				cfg.Logger.Info("app live status enrichment enabled")
@@ -123,8 +133,14 @@ func New(cfg Config) *Server {
 		cfg.Logger.Info("RBAC-protected routes enabled")
 	}
 
+	if cfg.ClusterStore != nil && ah != nil {
+		ch := &clusterHandler{store: cfg.ClusterStore, auth: ah}
+		ch.registerRoutes(mux)
+		cfg.Logger.Info("cluster endpoints enabled")
+	}
+
 	oh := &onboardingHandler{
-		orgProvider:  cfg.OrgProvider,
+		orgProvider:  cfg.OrgProvider, // OrgStore satisfies OrgProvider
 		projectStore: cfg.ProjectStore,
 		authEnabled:  cfg.Authenticator != nil,
 	}

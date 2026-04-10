@@ -41,6 +41,42 @@ type Environment struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName,omitempty"`
 	Order       int    `json:"order"`
+
+	// ClusterRef is the name of the registered Cluster this environment
+	// deploys to. When empty the environment is not yet bound to a cluster.
+	ClusterRef string `json:"clusterRef,omitempty"`
+
+	// BaseDomain is the ingress base domain for apps in this environment.
+	// App URLs are derived as: http://{app}.{baseDomain}
+	// Defaults to "localhost" when empty.
+	BaseDomain string `json:"baseDomain,omitempty"`
+
+	// NamespacePattern controls how Kubernetes namespaces are generated for
+	// apps in this environment. Supported tokens: {app}, {env}, {project}.
+	//
+	// Examples:
+	//   "{app}"         — dedicated cluster, namespace = "hello"
+	//   "{app}-{env}"   — shared cluster,    namespace = "hello-staging"
+	//
+	// Default (empty): "{app}-{env}" — safe for shared clusters.
+	// Must always contain the {app} token.
+	NamespacePattern string `json:"namespacePattern,omitempty"`
+}
+
+// Cluster represents a Kubernetes cluster registered with suparShip.
+// suparShip itself runs on a tooling cluster; registered clusters are the
+// workload targets where apps are deployed via ArgoCD.
+type Cluster struct {
+	// Name is the unique identifier for this cluster (DNS label).
+	Name string `json:"name"`
+	// DisplayName is a human-readable label shown in the UI.
+	DisplayName string `json:"displayName,omitempty"`
+	// APIServer is the Kubernetes API server URL (e.g. "https://10.0.0.1:6443").
+	// This value is written into ArgoCD ApplicationSet destination.server.
+	APIServer string `json:"apiServer"`
+	// Status reflects the last known reachability of this cluster.
+	// Values: "ready" | "unknown".
+	Status string `json:"status,omitempty"`
 }
 
 // Service is a deployable workload belonging to a project.

@@ -25,6 +25,7 @@ var (
 	_ domain.TemplateStore       = (*DevRuntime)(nil)
 	_ domain.PreviewStore        = (*DevRuntime)(nil)
 	_ domain.AppStore            = (*DevRuntime)(nil)
+	_ domain.ClusterStore        = (*DevRuntime)(nil)
 	_ domain.RuntimeStatusReader = (*DevRuntime)(nil)
 	_ domain.LogReader           = (*DevRuntime)(nil)
 )
@@ -44,6 +45,7 @@ type DevRuntime struct {
 	appEnvs   map[string]map[string]map[string]*domain.AppEnvironment // projectName → appName → envName → AppEnvironment
 	templates map[string]*domain.Template
 	previews  map[string]*domain.Preview
+	clusters  map[string]*domain.Cluster // clusterName → Cluster
 	statuses  map[string]*domain.ServiceStatus // "project/service/env" → status
 	logLines  []domain.LogLine                 // shared fixture lines returned for any service
 }
@@ -58,6 +60,7 @@ func NewSeededDevRuntime() *DevRuntime {
 		appEnvs:   make(map[string]map[string]map[string]*domain.AppEnvironment),
 		templates: make(map[string]*domain.Template),
 		previews:  make(map[string]*domain.Preview),
+		clusters:  make(map[string]*domain.Cluster),
 		statuses:  make(map[string]*domain.ServiceStatus),
 	}
 	seed(r)
@@ -380,6 +383,51 @@ func (r *DevRuntime) DeleteAppEnvironment(_ context.Context, projectName, appNam
 		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
 	}
 	delete(envMap, envName)
+	return nil
+}
+
+// ── ClusterStore ─────────────────────────────────────────────────────────────
+
+func (r *DevRuntime) ListClusters(_ context.Context) ([]domain.Cluster, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]domain.Cluster, 0, len(r.clusters))
+	for _, c := range r.clusters {
+		out = append(out, *c)
+	}
+	return out, nil
+}
+
+func (r *DevRuntime) GetCluster(_ context.Context, name string) (*domain.Cluster, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	c, ok := r.clusters[name]
+	if !ok {
+		return nil, fmt.Errorf("cluster %q not found", name)
+	}
+	return c, nil
+}
+
+// CreateCluster adds a cluster to the in-memory store. The kubeconfig bytes
+// are accepted but not stored — the fake does not use them for anything.
+func (r *DevRuntime) CreateCluster(_ context.Context, cluster domain.Cluster, _ []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.clusters[cluster.Name]; exists {
+		return fmt.Errorf("cluster %q already exists", cluster.Name)
+	}
+	c := cluster
+	r.clusters[cluster.Name] = &c
+	return nil
+}
+
+func (r *DevRuntime) DeleteCluster(_ context.Context, name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.clusters[name]; !ok {
+		return fmt.Errorf("cluster %q not found", name)
+	}
+	delete(r.clusters, name)
 	return nil
 }
 

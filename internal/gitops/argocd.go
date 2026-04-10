@@ -93,6 +93,10 @@ type ApplicationSource struct {
 	Path string `json:"path" yaml:"path"`
 	// TargetRevision is the Git ref (branch, tag, or SHA) to deploy.
 	TargetRevision string `json:"targetRevision" yaml:"targetRevision"`
+	// Ref marks this source as a reference-only source. Other sources can then
+	// reference files from this source via "$ref-name/path" in their valueFiles.
+	// When set, ArgoCD does NOT sync this source to the cluster.
+	Ref string `json:"ref,omitempty" yaml:"ref,omitempty"`
 	// Helm holds Helm-specific configuration. Omitted when the source is
 	// plain manifests rather than a Helm chart.
 	Helm *HelmSource `json:"helm,omitempty" yaml:"helm,omitempty"`

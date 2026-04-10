@@ -7,6 +7,14 @@ type OrgProvider interface {
 	GetOrg(ctx context.Context) (*Org, error)
 }
 
+// OrgStore extends OrgProvider with a write operation for updating the org
+// configuration (e.g. managing org-level environments, teams, role bindings).
+// All write endpoints require OrgStore; read-only middleware accepts OrgProvider.
+type OrgStore interface {
+	OrgProvider
+	SaveOrg(ctx context.Context, org *Org) error
+}
+
 // Permission check functions map business actions to minimum required roles.
 // Each function is intentionally explicit so the authorization policy is
 // auditable in one place.

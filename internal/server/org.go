@@ -9,6 +9,9 @@ import (
 	"github.com/suparcloud/suparship/internal/runtime"
 )
 
+// ── org.go — read handlers for GET /api/v1/org, /teams, /projects, /projects/{project}
+// Write operations (org environment CRUD) are in org_env_handler.go.
+
 // --- API DTO types ---
 
 // OrgResponse is the JSON body for GET /api/v1/org.
@@ -67,7 +70,7 @@ type ProjectRBACResponse struct {
 // --- Handlers ---
 
 func (rh *rbacHandler) handleGetOrg(w http.ResponseWriter, r *http.Request) {
-	org, err := rh.orgProvider.GetOrg(r.Context())
+	org, err := rh.orgStore.GetOrg(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
 		return
@@ -81,7 +84,7 @@ func (rh *rbacHandler) handleGetOrg(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rh *rbacHandler) handleGetTeams(w http.ResponseWriter, r *http.Request) {
-	org, err := rh.orgProvider.GetOrg(r.Context())
+	org, err := rh.orgStore.GetOrg(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
 		return
@@ -104,7 +107,7 @@ func (rh *rbacHandler) handleGetTeams(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rh *rbacHandler) handleGetProjects(w http.ResponseWriter, r *http.Request) {
-	org, err := rh.orgProvider.GetOrg(r.Context())
+	org, err := rh.orgStore.GetOrg(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
 		return
@@ -164,14 +167,25 @@ func (rh *rbacHandler) handleGetProject(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		envs := make([]EnvironmentDTO, len(proj.Spec.Environments))
-		for i, e := range proj.Spec.Environments {
+		// Resolve effective environments by merging org defaults with project overrides.
+		org, _ := rh.orgStore.GetOrg(r.Context())
+		var orgEnvs []rbac.OrgEnvironment
+		if org != nil {
+			orgEnvs = org.Environments
+		}
+		merged := rbac.MergeEnvironments(orgEnvs, proj.Spec.Environments)
+		envs := make([]EnvironmentDTO, len(merged))
+		for i, m := range merged {
 			envs[i] = EnvironmentDTO{
-				Name:        e.Name,
-				DisplayName: e.DisplayName,
-				Project:     proj.Metadata.Name,
-				Namespace:   runtime.Namespace(proj.Metadata.Name, e.Name),
-				Order:       e.Order,
+				Name:             m.Name,
+				DisplayName:      m.DisplayName,
+				Project:          proj.Metadata.Name,
+				Namespace:        runtime.Namespace(proj.Metadata.Name, m.Name),
+				Order:            m.Order,
+				ClusterRef:       m.ClusterRef,
+				BaseDomain:       m.BaseDomain,
+				NamespacePattern: m.NamespacePattern,
+				Origin:           m.Origin,
 			}
 		}
 
@@ -200,7 +214,7 @@ func (rh *rbacHandler) handleGetProject(w http.ResponseWriter, r *http.Request) 
 }
 
 func (rh *rbacHandler) handleGetProjectRBAC(w http.ResponseWriter, r *http.Request) {
-	org, err := rh.orgProvider.GetOrg(r.Context())
+	org, err := rh.orgStore.GetOrg(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
 		return

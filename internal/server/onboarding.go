@@ -44,6 +44,11 @@ func ComputeStatus(
 		org, err := orgProvider.GetOrg(ctx)
 		if err == nil && org != nil && org.Name != "" {
 			resp.OrgExists = true
+			// Environments are now org-level; a non-empty org environments list
+			// means the deployment pipeline is defined.
+			if len(org.Environments) > 0 {
+				resp.HasEnvironments = true
+			}
 		}
 	}
 
@@ -53,7 +58,9 @@ func ComputeStatus(
 			resp.HasProjects = true
 
 			for _, p := range projects {
-				if len(p.Spec.Environments) > 0 {
+				// HasEnvironments is satisfied by org-level environments (checked
+				// above) OR by project-specific environments as a fallback.
+				if !resp.HasEnvironments && len(p.Spec.Environments) > 0 {
 					resp.HasEnvironments = true
 				}
 				if len(p.Spec.Services) > 0 {
@@ -69,8 +76,8 @@ func ComputeStatus(
 	resp.Complete = resp.ClusterConnected &&
 		resp.AuthConfigured &&
 		resp.OrgExists &&
-		resp.HasProjects &&
 		resp.HasEnvironments &&
+		resp.HasProjects &&
 		resp.HasServices
 
 	return resp

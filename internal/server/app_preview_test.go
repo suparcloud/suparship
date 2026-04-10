@@ -64,7 +64,7 @@ func newTestAppPreviewMux(projectName string) (*http.ServeMux, *authHandler, *me
 
 	rh := &rbacHandler{
 		auth:        ah,
-		orgProvider: &staticOrgProvider{org: testRBACOrg()},
+		orgStore: &staticOrgProvider{org: testRBACOrg()},
 		appHandler:  newAppHandler(store, nil, nil),
 	}
 	rh.registerRoutes(mux)

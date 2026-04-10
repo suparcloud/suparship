@@ -43,7 +43,7 @@ func newTestPromoteMux() (*http.ServeMux, *authHandler, *memProjectStore) {
 
 	rh := &rbacHandler{
 		auth:           ah,
-		orgProvider:    &staticOrgProvider{org: testRBACOrg()},
+		orgStore:    &staticOrgProvider{org: testRBACOrg()},
 		promoteHandler: newPromoteHandler(store),
 	}
 	rh.registerRoutes(mux)

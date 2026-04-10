@@ -1,4 +1,4 @@
-# Seed: demo project with hello service and staging + prod environments.
+# Seed: demo project (environments are inherited from org config — see org.yaml).
 # Applied by: hack/seed.sh  (kubectl apply -f config/seed/)
 # Matches the fake/in-memory seed in internal/fake/seed.go.
 apiVersion: v1
@@ -18,13 +18,10 @@ data:
     spec:
       displayName: Demo Project
       description: Explore suparShip with a pre-seeded project.
-      environments:
-        - name: staging
-          displayName: Staging
-          order: 1
-        - name: prod
-          displayName: Production
-          order: 2
+      # environments is intentionally empty — this project inherits the canonical
+      # pipeline (staging → prod) from the org config. Add entries here only when
+      # you need project-specific overrides or additional environments.
+      environments: []
       services:
         - name: hello
           template:

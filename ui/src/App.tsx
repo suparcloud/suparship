@@ -5,12 +5,14 @@ import { AuthGuard } from "./components/AuthGuard";
 import { AuthProvider } from "./lib/AuthContext";
 import { AppDetail } from "./pages/AppDetail";
 import { AuthSettings } from "./pages/AuthSettings";
+import { ClusterSettings } from "./pages/ClusterSettings";
 import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
 import { Onboarding } from "./pages/Onboarding";
 import { OrgSettings } from "./pages/OrgSettings";
 import { Previews } from "./pages/Previews";
 import { ProjectDetail } from "./pages/ProjectDetail";
+import { ProjectSettings } from "./pages/ProjectSettings";
 import { NewService } from "./pages/NewService";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { TeamSettings } from "./pages/TeamSettings";
@@ -31,6 +33,10 @@ export function App() {
               <Route
                 path="/projects/:project"
                 element={<ProjectDetail />}
+              />
+              <Route
+                path="/projects/:project/settings"
+                element={<ProjectSettings />}
               />
               <Route
                 path="/projects/:project/apps/:app"
@@ -57,6 +63,7 @@ export function App() {
               <Route path="/settings/org" element={<OrgSettings />} />
               <Route path="/settings/teams" element={<TeamSettings />} />
               <Route path="/settings/auth" element={<AuthSettings />} />
+              <Route path="/settings/clusters" element={<ClusterSettings />} />
             </Route>
           </Route>
         </Routes>

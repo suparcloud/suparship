@@ -1,0 +1,344 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import {
+  listClusters,
+  registerCluster,
+  removeCluster,
+} from "../lib/clusters";
+import type { Cluster } from "../lib/clusters";
+
+// ── Status badge ──────────────────────────────────────────────────────────────
+
+function StatusBadge({ status }: { status?: string }) {
+  const colors =
+    status === "ready"
+      ? "bg-green-50 text-green-700"
+      : "bg-gray-100 text-gray-500";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${colors}`}
+    >
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${status === "ready" ? "bg-green-500" : "bg-gray-400"}`}
+      />
+      {status ?? "unknown"}
+    </span>
+  );
+}
+
+// ── Register modal ────────────────────────────────────────────────────────────
+
+interface RegisterModalProps {
+  onClose: () => void;
+  onRegistered: () => void;
+}
+
+function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [name, setName] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [apiServer, setApiServer] = useState("");
+  const [kubeconfigB64, setKubeconfigB64] = useState("");
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const bytes = ev.target?.result as ArrayBuffer;
+      const arr = new Uint8Array(bytes);
+      let binary = "";
+      arr.forEach((b) => (binary += String.fromCharCode(b)));
+      setKubeconfigB64(btoa(binary));
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    if (!name || !apiServer || !kubeconfigB64) {
+      setError("Name, API server URL, and kubeconfig are required.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await registerCluster({
+        name,
+        displayName: displayName || undefined,
+        apiServer,
+        kubeconfig: kubeconfigB64,
+      });
+      onRegistered();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Registration failed");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-xl bg-white p-8 shadow-xl">
+        <h2 className="text-lg font-semibold text-gray-900">Register cluster</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Credentials are stored in Kubernetes Secrets and never written to Git.
+        </p>
+
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              Name <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="staging-cluster"
+              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+            <p className="mt-1 text-xs text-gray-400">
+              DNS label: lowercase letters, digits, and hyphens.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              Display name
+            </label>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Staging"
+              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              API server URL <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="url"
+              value={apiServer}
+              onChange={(e) => setApiServer(e.target.value)}
+              placeholder="https://10.0.0.1:6443"
+              className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              Kubeconfig <span className="text-red-500">*</span>
+            </label>
+            <div
+              className="mt-1 flex cursor-pointer items-center justify-center rounded-md border-2 border-dashed border-gray-300 px-4 py-6 text-center hover:border-indigo-400"
+              onClick={() => fileRef.current?.click()}
+            >
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".yaml,.yml,.kubeconfig"
+                className="hidden"
+                onChange={handleFileChange}
+              />
+              {fileName ? (
+                <p className="text-sm text-gray-700">{fileName}</p>
+              ) : (
+                <p className="text-sm text-gray-400">
+                  Click to upload kubeconfig file
+                </p>
+              )}
+            </div>
+          </div>
+
+          {error && (
+            <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+              {error}
+            </p>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {submitting ? "Registering…" : "Register cluster"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+export function ClusterSettings() {
+  const [clusters, setClusters] = useState<Cluster[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showRegister, setShowRegister] = useState(false);
+  const [removingName, setRemovingName] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const data = await listClusters();
+      setClusters(data);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load clusters");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function handleRemove(name: string) {
+    if (!confirm(`Remove cluster "${name}"? This cannot be undone.`)) return;
+    setRemovingName(name);
+    try {
+      await removeCluster(name);
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to remove cluster");
+    } finally {
+      setRemovingName(null);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {showRegister && (
+        <RegisterModal
+          onClose={() => setShowRegister(false)}
+          onRegistered={load}
+        />
+      )}
+
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">Clusters</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Workload clusters that suparShip deploys apps to via ArgoCD.
+          </p>
+        </div>
+        <button
+          onClick={() => setShowRegister(true)}
+          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+        >
+          Register cluster
+        </button>
+      </div>
+
+      {loading && (
+        <div className="space-y-3">
+          {[1, 2].map((i) => (
+            <div key={i} className="h-16 animate-pulse rounded-lg bg-gray-100" />
+          ))}
+        </div>
+      )}
+
+      {!loading && error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+          <p className="text-sm text-red-700">
+            Failed to load clusters: {error}
+          </p>
+        </div>
+      )}
+
+      {!loading && !error && clusters.length === 0 && (
+        <div className="rounded-lg border border-dashed border-gray-300 py-16 text-center">
+          <p className="text-sm font-medium text-gray-500">
+            No clusters registered yet.
+          </p>
+          <p className="mt-1 text-sm text-gray-400">
+            Register a cluster to start deploying apps to it.
+          </p>
+          <button
+            onClick={() => setShowRegister(true)}
+            className="mt-4 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+          >
+            Register your first cluster
+          </button>
+        </div>
+      )}
+
+      {!loading && !error && clusters.length > 0 && (
+        <div className="rounded-lg border border-gray-200 bg-white">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                <th className="px-6 py-3">Name</th>
+                <th className="px-6 py-3">API Server</th>
+                <th className="px-6 py-3">Status</th>
+                <th className="px-6 py-3" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {clusters.map((c) => (
+                <tr key={c.name} className="hover:bg-gray-50">
+                  <td className="px-6 py-4">
+                    <p className="text-sm font-medium text-gray-900">
+                      {c.displayName || c.name}
+                    </p>
+                    <p className="text-xs text-gray-400">{c.name}</p>
+                  </td>
+                  <td className="px-6 py-4 font-mono text-xs text-gray-600">
+                    {c.apiServer}
+                  </td>
+                  <td className="px-6 py-4">
+                    <StatusBadge status={c.status} />
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    <button
+                      onClick={() => handleRemove(c.name)}
+                      disabled={removingName === c.name}
+                      className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50"
+                    >
+                      {removingName === c.name ? "Removing…" : "Remove"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="rounded-lg bg-blue-50 p-4">
+        <h3 className="text-sm font-medium text-blue-800">How it works</h3>
+        <ul className="mt-2 space-y-1 text-sm text-blue-700">
+          <li>
+            • Each registered cluster gets a kubeconfig stored securely in
+            Kubernetes Secrets (never in Git).
+          </li>
+          <li>
+            • ArgoCD is notified automatically so it can deploy
+            ApplicationSets to the cluster.
+          </li>
+          <li>
+            • Assign a cluster to an environment in your project settings.
+          </li>
+        </ul>
+      </div>
+    </div>
+  );
+}

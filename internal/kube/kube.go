@@ -51,6 +51,7 @@ var (
 	_ runtime.Provider     = (*runtime.K8sProvider)(nil)
 	_ runtime.LogsProvider = (*runtime.K8sLogsProvider)(nil)
 	_ domain.AppStore      = (*K8sAppStore)(nil)
+	_ domain.ClusterStore  = (*K8sClusterStore)(nil)
 )
 
 // ServerDeps bundles all Kubernetes-backed implementations of the
@@ -94,13 +95,20 @@ type ServerDeps struct {
 	// them with live runtime status and preview data. Once a native K8s
 	// AppStore is available, replace this field with the native implementation.
 	AppStore domain.AppStore
+
+	// ClusterStore reads and persists registered cluster definitions.
+	ClusterStore *K8sClusterStore
 }
 
 // NewServerDeps creates a ServerDeps bundle backed by the given Kubernetes
 // client. Reads hit the cluster on every call; there is no in-process cache.
 // The caller is responsible for providing Authenticator and OrgProvider
 // separately (they require access to the admin bootstrap Secret).
-func NewServerDeps(client kubernetes.Interface) *ServerDeps {
+//
+// orgEnvs is optional (pass nil to skip org-level environment resolution).
+// When provided it is used by the compat layer to enumerate environments for
+// legacy apps whose project's Environments list is empty (org-inherited model).
+func NewServerDeps(client kubernetes.Interface, orgEnvs compat.OrgEnvsReader) *ServerDeps {
 	projectStore := project.NewK8sStore(client)
 	previewStore := preview.NewK8sStore(client)
 	runtimeProvider := runtime.NewK8sProvider(client)
@@ -112,6 +120,7 @@ func NewServerDeps(client kubernetes.Interface) *ServerDeps {
 		&k8sProjectDomainAdapter{projects: projectStore},
 		&k8sRuntimeStatusAdapter{provider: runtimeProvider},
 		&k8sPreviewDomainAdapter{store: previewStore},
+		orgEnvs,
 	)
 
 	return &ServerDeps{
@@ -120,5 +129,6 @@ func NewServerDeps(client kubernetes.Interface) *ServerDeps {
 		RuntimeProvider: runtimeProvider,
 		LogsProvider:    runtime.NewK8sLogsProvider(client),
 		AppStore:        appStore,
+		ClusterStore:    NewK8sClusterStore(client),
 	}
 }

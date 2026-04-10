@@ -141,9 +141,12 @@ func TestValidateInvalidDNSName(t *testing.T) {
 // --- Validate: environments ---
 
 func TestValidateNoEnvironments(t *testing.T) {
+	// Empty project environments are valid: the org config provides defaults.
 	p := validProject()
 	p.Spec.Environments = nil
-	expectValidationError(t, p, "at least one environment")
+	if err := p.Validate(); err != nil {
+		t.Errorf("expected nil error for empty environments, got: %v", err)
+	}
 }
 
 func TestValidateEmptyEnvName(t *testing.T) {

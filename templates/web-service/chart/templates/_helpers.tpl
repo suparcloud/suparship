@@ -1,10 +1,10 @@
 {{/*
 Generate the full resource name.
-Uses fullnameOverride if set, otherwise falls back to release name.
+Uses app.name if set (injected by suparShip), otherwise falls back to release name.
 */}}
 {{- define "web-service.fullname" -}}
-{{- if .Values.fullnameOverride }}
-{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- if .Values.app.name }}
+{{- .Values.app.name | trunc 63 | trimSuffix "-" }}
 {{- else }}
 {{- .Release.Name | trunc 63 | trimSuffix "-" }}
 {{- end }}
@@ -16,9 +16,12 @@ Common labels applied to all resources.
 {{- define "web-service.labels" -}}
 app.kubernetes.io/name: {{ include "web-service.fullname" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
+app.kubernetes.io/version: {{ (.Values.components.web.image.tag) | default .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
+{{- if .Values.app.env }}
+suparship.io/env: {{ .Values.app.env }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -43,18 +46,19 @@ ServiceAccount name — uses override or generated fullname.
 {{- end }}
 
 {{/*
-Resource limits based on the size preset.
-Template authors: add new sizes here when needed.
+Resource limits based on the size preset in components.web.resources.size.
+Defaults to "small" when not set.
 */}}
 {{- define "web-service.resources" -}}
-{{- if eq .Values.size "large" }}
+{{- $size := ((.Values.components.web.resources).size) | default "small" }}
+{{- if eq $size "large" }}
 limits:
   cpu: "1000m"
   memory: "1Gi"
 requests:
   cpu: "250m"
   memory: "512Mi"
-{{- else if eq .Values.size "medium" }}
+{{- else if eq $size "medium" }}
 limits:
   cpu: "500m"
   memory: "512Mi"

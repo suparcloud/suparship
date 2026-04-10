@@ -14,6 +14,10 @@ interface ChecklistItem {
   title: string;
   description: string;
   successText: string;
+  /** Route to navigate to when this item is still pending. */
+  actionTo?: string;
+  /** Label for the action link. */
+  actionLabel?: string;
 }
 
 const checklist: ChecklistItem[] = [
@@ -22,30 +26,46 @@ const checklist: ChecklistItem[] = [
     title: "Cluster connected",
     description: "suparShip can reach the Kubernetes API.",
     successText: "Connected",
+    // No UI action — requires infra-level fix (kubeconfig / cluster).
   },
   {
     key: "authConfigured",
     title: "Authentication ready",
     description: "Admin credentials are bootstrapped.",
     successText: "Configured",
+    // No UI action — run `suparship admin bootstrap` from the CLI.
   },
   {
     key: "orgExists",
     title: "Organization created",
     description: "Your default organization is set up.",
     successText: "Created",
+    actionTo: "/settings/org",
+    actionLabel: "View org",
   },
   {
     key: "hasEnvironments",
     title: "Environments defined",
     description: "At least one deployment environment exists.",
     successText: "Ready",
+    actionTo: "/settings/org",
+    actionLabel: "Add environment",
+  },
+  {
+    key: "hasProjects",
+    title: "First project created",
+    description: "A project groups your apps and inherits the org's deployment pipeline.",
+    successText: "Created",
+    actionTo: "/?newProject=1",
+    actionLabel: "Create project",
   },
   {
     key: "hasServices",
     title: "First app deployed",
     description: "An app has been created from a template and is running across its environments.",
     successText: "Deployed",
+    actionTo: "/projects/demo/apps/new",
+    actionLabel: "Create app",
   },
 ];
 
@@ -71,13 +91,13 @@ const nextSteps: CTA[] = [
   },
   {
     title: "Browse templates",
-    description: "See available golden paths for deploying apps. Apps run across staging, prod, and preview environments and may include multiple runtime components.",
+    description: "Pick a golden path and deploy your first app to staging and prod.",
     to: "/templates",
     icon: "branch",
   },
   {
-    title: "View settings",
-    description: "Review organization, teams, and role bindings.",
+    title: "Organization settings",
+    description: "Manage environments, teams, clusters, and role bindings.",
     to: "/settings/org",
     icon: "rocket",
   },
@@ -191,11 +211,18 @@ export function Onboarding() {
                       </p>
                     </div>
                     {done ? (
-                      <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
+                      <span className="flex-shrink-0 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
                         {item.successText}
                       </span>
+                    ) : item.actionTo ? (
+                      <Link
+                        to={item.actionTo}
+                        className="flex-shrink-0 rounded-full border border-gray-900 bg-white px-3 py-1 text-xs font-medium text-gray-900 transition-colors hover:bg-gray-900 hover:text-white"
+                      >
+                        {item.actionLabel ?? "Fix"}
+                      </Link>
                     ) : (
-                      <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-500">
+                      <span className="flex-shrink-0 rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-500">
                         Pending
                       </span>
                     )}

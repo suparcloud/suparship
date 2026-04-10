@@ -14,6 +14,7 @@ var seedCreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 // developer-friendly — they will appear in the UI during local development.
 func seed(r *DevRuntime) {
 	seedOrg(r)
+	seedClusters(r)
 	seedTemplates(r)
 	seedProjects(r)
 	seedServices(r)
@@ -29,6 +30,27 @@ func seedOrg(r *DevRuntime) {
 		Name:        "default",
 		DisplayName: "My Organization",
 		CreatedAt:   seedCreatedAt,
+	}
+}
+
+func seedClusters(r *DevRuntime) {
+	for _, c := range []*domain.Cluster{
+		{
+			Name:        "staging-cluster",
+			DisplayName: "Staging",
+			// In local dev both envs share the single kind/k3d cluster.
+			// The API server URL is placeholder only; the fake never dials it.
+			APIServer: "https://kubernetes.default.svc",
+			Status:    "ready",
+		},
+		{
+			Name:        "prod-cluster",
+			DisplayName: "Production",
+			APIServer:   "https://kubernetes.default.svc",
+			Status:      "ready",
+		},
+	} {
+		r.clusters[c.Name] = c
 	}
 }
 
@@ -66,8 +88,22 @@ func seedProjects(r *DevRuntime) {
 		DisplayName: "Demo Project",
 		Description: "Explore suparShip with a pre-seeded project.",
 		Environments: []domain.Environment{
-			{Name: "staging", DisplayName: "Staging", Order: 1},
-			{Name: "prod", DisplayName: "Production", Order: 2},
+			{
+				Name:             "staging",
+				DisplayName:      "Staging",
+				Order:            1,
+				ClusterRef:       "staging-cluster",
+				BaseDomain:       "localhost",
+				NamespacePattern: "{app}-{env}",
+			},
+			{
+				Name:             "prod",
+				DisplayName:      "Production",
+				Order:            2,
+				ClusterRef:       "prod-cluster",
+				BaseDomain:       "localhost",
+				NamespacePattern: "{app}-{env}",
+			},
 		},
 	}
 	r.projects[demo.Name] = demo

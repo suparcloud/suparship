@@ -9,6 +9,7 @@ const mainNav = [
 const settingsNav = [
   { to: "/settings/org", label: "Organization" },
   { to: "/settings/teams", label: "Teams" },
+  { to: "/settings/clusters", label: "Clusters" },
   { to: "/settings/auth", label: "Auth" },
 ];
 
