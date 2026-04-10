@@ -32,6 +32,10 @@ HELM_TIMEOUT="300s"   # 5 min — image pulls can be slow on first run
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# ── Credential writer ─────────────────────────────────────────────────────
+# shellcheck source=hack/write-dev-credentials.sh
+source hack/write-dev-credentials.sh
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 info()  { printf "  \033[0;36m%s\033[0m\n" "$*"; }
 ok()    { printf "  \033[0;32m✓\033[0m  %s\n" "$*"; }
@@ -114,6 +118,14 @@ else
   ADMIN_PASSWORD="(secret deleted — may have been rotated after first login)"
 fi
 
+# ── 6. Persist credentials to .env.cluster ───────────────────────────────
+info "Writing ArgoCD credentials to .env.cluster..."
+write_credential ARGOCD_URL       "http://argocd.localhost:8880"
+write_credential ARGOCD_USERNAME  "admin"
+write_credential ARGOCD_PASSWORD  "${ADMIN_PASSWORD}"
+ok ".env.cluster updated"
+echo ""
+
 # ── Done ──────────────────────────────────────────────────────────────────
 cat <<EOF
   ──────────────────────────────────────────────────────────────────
@@ -124,13 +136,15 @@ cat <<EOF
   Username    admin
   Password    ${ADMIN_PASSWORD}
 
+  Credentials saved to: .env.cluster
+
   Open the UI:
-    kubectl port-forward svc/argocd-server -n ${ARGOCD_NAMESPACE} 8180:80
-    open http://localhost:8180
+    open http://argocd.localhost:8880
+    (ensure 127.0.0.1 argocd.localhost is in /etc/hosts)
 
   Or use the argocd CLI:
-    argocd login localhost:8180 \\
-      --username admin --password '${ADMIN_PASSWORD}' --plaintext
+    argocd login argocd.localhost:8880 \\
+      --username admin --password '${ADMIN_PASSWORD}' --plaintext --grpc-web
 
   Verify pods:
     kubectl get pods -n ${ARGOCD_NAMESPACE}

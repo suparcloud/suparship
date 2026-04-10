@@ -34,6 +34,8 @@
 package kube
 
 import (
+	"github.com/suparcloud/suparship/internal/compat"
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/runtime"
@@ -48,6 +50,7 @@ var (
 	_ preview.Store        = (*preview.K8sStore)(nil)
 	_ runtime.Provider     = (*runtime.K8sProvider)(nil)
 	_ runtime.LogsProvider = (*runtime.K8sLogsProvider)(nil)
+	_ domain.AppStore      = (*K8sAppStore)(nil)
 )
 
 // ServerDeps bundles all Kubernetes-backed implementations of the
@@ -85,6 +88,12 @@ type ServerDeps struct {
 
 	// LogsProvider streams pod log output via the Kubernetes API.
 	LogsProvider *runtime.K8sLogsProvider
+
+	// AppStore implements domain.AppStore via the compat bridge.
+	// It reads app definitions from legacy service ConfigMaps and enriches
+	// them with live runtime status and preview data. Once a native K8s
+	// AppStore is available, replace this field with the native implementation.
+	AppStore domain.AppStore
 }
 
 // NewServerDeps creates a ServerDeps bundle backed by the given Kubernetes
@@ -92,10 +101,24 @@ type ServerDeps struct {
 // The caller is responsible for providing Authenticator and OrgProvider
 // separately (they require access to the admin bootstrap Secret).
 func NewServerDeps(client kubernetes.Interface) *ServerDeps {
+	projectStore := project.NewK8sStore(client)
+	previewStore := preview.NewK8sStore(client)
+	runtimeProvider := runtime.NewK8sProvider(client)
+
+	nativeAppStore := NewK8sAppStore(client)
+	appStore := compat.NewServiceBackedAppStore(
+		nativeAppStore,
+		&k8sServiceAdapter{projects: projectStore},
+		&k8sProjectDomainAdapter{projects: projectStore},
+		&k8sRuntimeStatusAdapter{provider: runtimeProvider},
+		&k8sPreviewDomainAdapter{store: previewStore},
+	)
+
 	return &ServerDeps{
-		ProjectStore:    project.NewK8sStore(client),
-		PreviewStore:    preview.NewK8sStore(client),
-		RuntimeProvider: runtime.NewK8sProvider(client),
+		ProjectStore:    projectStore,
+		PreviewStore:    previewStore,
+		RuntimeProvider: runtimeProvider,
 		LogsProvider:    runtime.NewK8sLogsProvider(client),
+		AppStore:        appStore,
 	}
 }

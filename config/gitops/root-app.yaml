@@ -1,0 +1,55 @@
+# ArgoCD root "App of Apps" — suparShip dev cluster.
+#
+# This Application watches gitops-output/ in the Gitea gitops repo recursively
+# for any file named argocd-app.yaml. Each such file is an ArgoCD Application
+# CRD committed by the suparship server when an app is created or updated.
+#
+# Applied once during cluster bootstrap by: hack/install-gitea.sh
+# To view live status:  kubectl get application suparship-apps -n argocd
+#
+# NOTE: repoURL below uses the in-cluster Gitea service DNS. Do not change
+# this to the host-accessible ingress URL — ArgoCD is inside the cluster.
+#
+# Template placeholders (replaced by install-gitea.sh at apply time):
+#   GITEA_CLUSTER_URL  →  http://gitea-http.gitea.svc.cluster.local:3000
+#   GITOPS_REPO_ORG    →  gitops
+#   GITOPS_REPO_NAME   →  gitops
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: suparship-apps
+  namespace: argocd
+  labels:
+    suparship.io/managed-by: suparship
+    suparship.io/role: root-app
+  # Cascade-delete child Applications when this root app is deleted.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: "http://gitea-http.gitea.svc.cluster.local:3000/gitops/gitops.git"
+    targetRevision: main
+    path: gitops-output
+    directory:
+      # Recurse into project/app/env subdirectories.
+      recurse: true
+      # Only pick up files suparship names argocd-app.yaml — avoids
+      # accidentally treating values.yaml or other files as Applications.
+      include: "**/*argocd-app.yaml"
+  destination:
+    # Apply child Application objects into the argocd namespace on the
+    # local cluster.
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # Remove child Applications whose argocd-app.yaml has been deleted
+      # from the repo (e.g. after a preview is torn down).
+      prune: true
+      # Re-sync automatically if live state drifts from Git.
+      selfHeal: true
+    syncOptions:
+      # Allow child Applications to create their target namespaces
+      # (e.g. hello-staging, hello-prod).
+      - CreateNamespace=true

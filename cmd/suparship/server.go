@@ -13,6 +13,7 @@ import (
 	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/fake"
+	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/preview"
@@ -42,7 +43,8 @@ Environment variables:
   SUPARSHIP_UI_DIR         path to frontend dist directory
   SUPARSHIP_CORS_ORIGINS   comma-separated allowed origins
   SUPARSHIP_TEMPLATES_DIR  path to templates directory
-  SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments`,
+  SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments
+  SUPARSHIP_LOG_LEVEL      log verbosity: debug, info, warn, error (default "info")`,
 	RunE: runServer,
 }
 
@@ -52,6 +54,7 @@ func init() {
 	serverCmd.Flags().String("cors-origins", envOr("SUPARSHIP_CORS_ORIGINS", ""), "comma-separated allowed CORS origins")
 	serverCmd.Flags().String("templates-dir", envOr("SUPARSHIP_TEMPLATES_DIR", ""), "path to templates directory")
 	serverCmd.Flags().Bool("cookie-secure", envOr("SUPARSHIP_COOKIE_SECURE", "false") == "true", "set Secure flag on session cookies (enable behind HTTPS)")
+	serverCmd.Flags().String("log-level", envOr("SUPARSHIP_LOG_LEVEL", "info"), "log verbosity: debug, info, warn, error")
 	rootCmd.AddCommand(serverCmd)
 }
 
@@ -61,6 +64,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	corsRaw, _ := cmd.Flags().GetString("cors-origins")
 	templatesDir, _ := cmd.Flags().GetString("templates-dir")
 	cookieSecure, _ := cmd.Flags().GetBool("cookie-secure")
+	logLevelStr, _ := cmd.Flags().GetString("log-level")
 	kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
 	kubecontext, _ := cmd.Root().PersistentFlags().GetString("context")
 
@@ -73,7 +77,16 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	var logLevel slog.Level
+	if err := logLevel.UnmarshalText([]byte(logLevelStr)); err != nil {
+		logLevel = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	// Set as the process-wide default so that slog package-level calls (e.g.
+	// slog.Error, slog.Debug) anywhere in the codebase use the same handler
+	// and level as the explicitly-constructed logger.
+	slog.SetDefault(logger)
+	logger.Debug("debug logging enabled")
 
 	cfg := config.Load()
 
@@ -159,6 +172,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		previewStore = kubeDeps.PreviewStore
 		runtimeProvider = kubeDeps.RuntimeProvider
 		logsProvider = kubeDeps.LogsProvider
+		appStore = kubeDeps.AppStore
 
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
@@ -191,6 +205,29 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger.Info("templates loaded", "dir", templatesDir, "count", len(templates))
 	}
 
+	// Wire the GitOps publisher when the gitops repo URL is configured.
+	// In fake/local dev mode this is optional; in cluster mode it is expected.
+	var gitOpsPublisher server.GitOpsPublisher
+	if cfg.GitOps.RepoURL != "" {
+		pub, err := gitops.NewPublisher(gitops.PublisherConfig{
+			RepoURL:       cfg.GitOps.RepoURL,
+			RepoUser:      cfg.GitOps.RepoUser,
+			RepoPassword:  cfg.GitOps.RepoPassword,
+			ArgoCDRepoURL: cfg.GitOps.ArgoCDRepoURL,
+		})
+		if err != nil {
+			logger.Warn("gitops publisher disabled", "reason", err.Error())
+		} else {
+			gitOpsPublisher = pub
+			logger.Info("gitops publisher enabled",
+				"repo", cfg.GitOps.RepoURL,
+				"argocd_repo", cfg.GitOps.ArgoCDRepoURL,
+			)
+		}
+	} else {
+		logger.Info("gitops publisher disabled — set SUPARSHIP_GITOPS_REPO_URL to enable")
+	}
+
 	srv := server.New(server.Config{
 		Addr:            addr,
 		UIDir:           uiDir,
@@ -203,11 +240,16 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		LogsProvider:    logsProvider,
 		PreviewStore:    previewStore,
 		AppStore:        appStore,
+		GitOpsPublisher: gitOpsPublisher,
 		CookieSecure:    cookieSecure,
 		Logger:          logger,
 	})
 
-	return srv.Run(cmd.Context())
+	if err := srv.Run(cmd.Context()); err != nil {
+		logger.Error("server exited with error", "error", err)
+		return err
+	}
+	return nil
 }
 
 func envOr(key, fallback string) string {

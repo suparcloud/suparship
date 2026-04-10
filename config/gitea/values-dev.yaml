@@ -1,0 +1,66 @@
+# Gitea Helm values — suparShip local development profile.
+#
+# Installs a minimal, single-replica Gitea suitable for a kind cluster.
+# NOT suitable for staging or production.
+#
+# Used by: hack/install-gitea.sh
+# Chart:   gitea 10.6.0 (Gitea v1.22.x)
+# Repo:    https://dl.gitea.com/charts/
+
+# ── Single replicas / minimal resources ──────────────────────────────────
+replicaCount: 1
+
+# ── Disable unused components ────────────────────────────────────────────
+redis-cluster:
+  enabled: false
+
+postgresql-ha:
+  enabled: false
+
+postgresql:
+  enabled: false
+
+# ── In-memory / sqlite backend (no external DB needed for local dev) ─────
+persistence:
+  enabled: true
+  size: 1Gi
+
+gitea:
+  config:
+    database:
+      DB_TYPE: sqlite3
+    session:
+      PROVIDER: memory
+    cache:
+      ADAPTER: memory
+    queue:
+      TYPE: level
+    indexer:
+      ISSUE_INDEXER_TYPE: bleve
+      REPO_INDEXER_ENABLED: false
+    server:
+      # Publicly reachable URL — matches the ingress host + kind port mapping.
+      ROOT_URL: "http://gitea.localhost:8880"
+      HTTP_PORT: 3000
+
+# ── Bootstrap admin account ──────────────────────────────────────────────
+# Dev-only credentials. Clearly fake — do NOT use in production.
+  admin:
+    username: gitops
+    password: gitops-dev-only
+    email: gitops@local
+
+# ── Ingress — routed via the NGINX ingress on host port 8880 ─────────────
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: gitea.localhost
+      paths:
+        - path: /
+          pathType: Prefix
+
+service:
+  http:
+    type: ClusterIP
+    port: 3000

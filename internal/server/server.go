@@ -22,21 +22,29 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 
+// GitOpsPublisher commits ArgoCD Application manifests to the GitOps
+// repository. When nil, app creation only persists to the store and no git
+// commit is performed. Implementations must be safe for concurrent use.
+type GitOpsPublisher interface {
+	PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error
+}
+
 // Config holds server configuration.
 type Config struct {
-	Addr          string
-	UIDir         string              // optional: path to built frontend assets
-	CORSOrigins   []string            // optional: allowed CORS origins
-	Authenticator auth.Authenticator  // optional: enables auth endpoints when set
-	OrgProvider   rbac.OrgProvider    // optional: enables RBAC-protected routes when set
-	Templates       []*tpl.Template     // optional: pre-loaded templates for /api/v1/templates
-	ProjectStore    project.Store       // optional: enables service creation when set
-	RuntimeProvider runtime.Provider    // optional: enables runtime inventory when set
+	Addr            string
+	UIDir           string               // optional: path to built frontend assets
+	CORSOrigins     []string             // optional: allowed CORS origins
+	Authenticator   auth.Authenticator   // optional: enables auth endpoints when set
+	OrgProvider     rbac.OrgProvider     // optional: enables RBAC-protected routes when set
+	Templates       []*tpl.Template      // optional: pre-loaded templates for /api/v1/templates
+	ProjectStore    project.Store        // optional: enables service creation when set
+	RuntimeProvider runtime.Provider     // optional: enables runtime inventory when set
 	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
 	PreviewStore    preview.Store        // optional: enables preview endpoints when set
 	AppStore        domain.AppStore      // optional: enables app read endpoints when set
+	GitOpsPublisher GitOpsPublisher      // optional: commits app manifests to gitops repo on create
 	CookieSecure    bool                 // true for production (HTTPS)
-	Logger        *slog.Logger
+	Logger          *slog.Logger
 }
 
 // Server is the suparship HTTP API server.
@@ -95,9 +103,19 @@ func New(cfg Config) *Server {
 		}
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
+			if cfg.RuntimeProvider != nil {
+				rh.appHandler.runtimeProvider = cfg.RuntimeProvider
+				cfg.Logger.Info("app live status enrichment enabled")
+			}
 			if cfg.LogsProvider != nil {
 				rh.appHandler.logsProvider = cfg.LogsProvider
 				cfg.Logger.Info("app logs endpoint enabled")
+			}
+			if cfg.GitOpsPublisher != nil {
+				rh.appHandler.gitOpsPublisher = cfg.GitOpsPublisher
+				cfg.Logger.Info("app gitops publisher enabled")
+			} else {
+				cfg.Logger.Info("app gitops publisher not configured — skipping git commits on app create")
 			}
 			cfg.Logger.Info("app endpoints enabled")
 		}
@@ -123,6 +141,12 @@ func New(cfg Config) *Server {
 		cfg.Logger.Info("CORS enabled", "origins", cfg.CORSOrigins)
 	}
 
+	// Request logging middleware wraps the outermost handler so every
+	// request — regardless of path — is logged at Debug level.
+	if cfg.Logger != nil {
+		handler = requestLogMiddleware(cfg.Logger, handler)
+	}
+
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              cfg.Addr,
@@ -137,6 +161,37 @@ func New(cfg Config) *Server {
 // with httptest.NewServer without starting a real TCP listener.
 func (s *Server) Handler() http.Handler {
 	return s.httpServer.Handler
+}
+
+// requestLogMiddleware logs every HTTP request at slog.LevelDebug.
+// It records method, path, status code, and elapsed time. Health-check
+// paths (/healthz, /readyz) are intentionally included so their polling
+// cadence is visible when debugging.
+func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r)
+		logger.Debug("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"remote", r.RemoteAddr,
+		)
+	})
+}
+
+// responseRecorder wraps http.ResponseWriter to capture the status code
+// written by the handler so it can be included in the access log.
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rr *responseRecorder) WriteHeader(code int) {
+	rr.status = code
+	rr.ResponseWriter.WriteHeader(code)
 }
 
 // Run starts the server and blocks until ctx is cancelled, then shuts down

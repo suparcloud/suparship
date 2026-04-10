@@ -50,13 +50,24 @@ clean:
 	rm -rf bin/
 	rm -f coverage.out
 
-## dev-api: Run backend with CORS for Vite dev server
+## dev-api: Run backend — sources .env then .env.cluster (if present) so gitops vars are loaded
 dev-api: build
-	SUPARSHIP_CORS_ORIGINS=http://localhost:5173 ./bin/$(BINARY_NAME) server
+	@bash -c '\
+		set -a; \
+		[ -f .env ] && . ./.env; \
+		[ -f .env.cluster ] && . ./.env.cluster; \
+		set +a; \
+		: "$${SUPARSHIP_CORS_ORIGINS:=http://localhost:5173}"; \
+		exec ./bin/$(BINARY_NAME) server'
 
-## dev-ui: Run frontend Vite dev server
+## dev-ui: Run frontend Vite dev server — sources .env so VITE_DEBUG etc. are picked up
 dev-ui:
-	cd ui && npm run dev
+	@bash -c '\
+		set -a; \
+		[ -f .env ] && . ./.env; \
+		[ -f .env.cluster ] && . ./.env.cluster; \
+		set +a; \
+		cd ui && npm run dev'
 
 ## help: Show this help message
 help:

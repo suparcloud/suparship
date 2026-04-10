@@ -76,11 +76,11 @@ type ObjectMeta struct {
 type ApplicationSpec struct {
 	// Project is the ArgoCD AppProject that scopes this Application.
 	// Defaults to the suparship project name.
-	Project     string                  `json:"project"     yaml:"project"`
-	Source      ApplicationSource       `json:"source"      yaml:"source"`
-	Destination ApplicationDestination  `json:"destination" yaml:"destination"`
+	Project     string                 `json:"project"     yaml:"project"`
+	Source      ApplicationSource      `json:"source"      yaml:"source"`
+	Destination ApplicationDestination `json:"destination" yaml:"destination"`
 	// SyncPolicy is optional. When nil, sync must be triggered manually.
-	SyncPolicy  *SyncPolicy             `json:"syncPolicy,omitempty" yaml:"syncPolicy,omitempty"`
+	SyncPolicy *SyncPolicy `json:"syncPolicy,omitempty" yaml:"syncPolicy,omitempty"`
 }
 
 // ApplicationSource describes the Git repository and path that ArgoCD
@@ -123,6 +123,10 @@ type ApplicationDestination struct {
 type SyncPolicy struct {
 	// Automated enables automatic sync. When nil, sync is manual.
 	Automated *AutomatedSyncPolicy `json:"automated,omitempty" yaml:"automated,omitempty"`
+	// SyncOptions is a list of ArgoCD sync option strings.
+	// The most commonly needed option is "CreateNamespace=true", which tells
+	// ArgoCD to create the destination namespace if it does not already exist.
+	SyncOptions []string `json:"syncOptions,omitempty" yaml:"syncOptions,omitempty"`
 }
 
 // AutomatedSyncPolicy configures automatic synchronisation behaviour.
@@ -222,7 +226,13 @@ func BuildArgoApplication(app *domain.App, env domain.AppEnvironment, opts Build
 	}
 	if len(opts.ValuesFiles) > 0 || opts.InlineValues != "" {
 		source.Helm = &HelmSource{
-			ReleaseName: name,
+			// Use the app name alone as the Helm release name. Resources are
+			// already isolated in the per-environment namespace (e.g.
+			// "hello-staging"), so appending the env suffix is redundant and
+			// causes Deployment names like "hello-staging" inside that
+			// namespace. Keeping it as "hello" makes label selectors, pod
+			// discovery, and runtime status lookups straightforward.
+			ReleaseName: app.Name,
 			ValueFiles:  opts.ValuesFiles,
 			Values:      opts.InlineValues,
 		}
@@ -235,6 +245,10 @@ func BuildArgoApplication(app *domain.App, env domain.AppEnvironment, opts Build
 				Prune:    true,
 				SelfHeal: true,
 			},
+			// CreateNamespace=true is required because suparship uses a
+			// dedicated namespace per app-environment (e.g. "hello-staging").
+			// Without it ArgoCD fails the first sync with "namespace not found".
+			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	}
 
@@ -248,8 +262,8 @@ func BuildArgoApplication(app *domain.App, env domain.AppEnvironment, opts Build
 			Annotations: annotations,
 		},
 		Spec: ApplicationSpec{
-			Project:     opts.ArgoCDProject,
-			Source:      source,
+			Project: opts.ArgoCDProject,
+			Source:  source,
 			Destination: ApplicationDestination{
 				Server:    opts.DestinationServer,
 				Namespace: env.Namespace,

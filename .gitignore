@@ -28,6 +28,7 @@ go.work.sum
 .env
 .env.local
 .env.*.local
+.env.cluster
 
 # Editor/IDE
 # .idea/

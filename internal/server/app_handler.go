@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 
@@ -31,10 +32,12 @@ var appPromotionOrder = map[domain.AppEnvironmentType]int{
 // projectStore is non-nil. The logs route is registered when logsProvider
 // is non-nil.
 type appHandler struct {
-	appStore     domain.AppStore
-	templateIdx  map[string]*tpl.Template
-	projectStore project.Store
-	logsProvider runtime.LogsProvider // optional: enables GET .../apps/{app}/logs
+	appStore        domain.AppStore
+	templateIdx     map[string]*tpl.Template
+	projectStore    project.Store
+	runtimeProvider runtime.Provider     // optional: enriches env responses with live K8s status
+	logsProvider    runtime.LogsProvider // optional: enables GET .../apps/{app}/logs
+	gitOpsPublisher GitOpsPublisher      // optional: commits argocd manifests to gitops repo on create
 }
 
 // newAppHandler creates an appHandler.
@@ -168,6 +171,35 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Commit ArgoCD Application manifests to the gitops repository so that
+	// ArgoCD picks up the new app automatically. This is a best-effort step:
+	// a failure here does not roll back the store writes — the app is already
+	// persisted and the operator can re-trigger the gitops publish separately.
+	if ah.gitOpsPublisher != nil {
+		slog.Info("publishing app to gitops repo",
+			"project", projectName,
+			"app", req.Name,
+			"envs", len(result.Environments),
+		)
+		if err := ah.gitOpsPublisher.PublishApp(r.Context(), result.App, result.Environments); err != nil {
+			slog.Error("gitops publish failed — app saved to store but not committed to git",
+				"project", projectName,
+				"app", req.Name,
+				"error", err,
+			)
+		} else {
+			slog.Info("app published to gitops repo — ArgoCD will sync shortly",
+				"project", projectName,
+				"app", req.Name,
+			)
+		}
+	} else {
+		slog.Debug("gitops publisher not configured — skipping git commit for app",
+			"project", projectName,
+			"app", req.Name,
+		)
+	}
+
 	// Re-read from store to produce a canonical response.
 	saved, _ := ah.appStore.GetApp(r.Context(), projectName, req.Name)
 	savedEnvs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, req.Name)
@@ -231,6 +263,9 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	envs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
+	for _, env := range envs {
+		ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
+	}
 
 	writeJSON(w, http.StatusOK, AppDetailResponse{
 		App: appToDetailDTO(app, envs),
@@ -254,6 +289,10 @@ func (ah *appHandler) handleListAppEnvironments(w http.ResponseWriter, r *http.R
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list environments"})
 		return
+	}
+
+	for _, env := range envs {
+		ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
 	}
 
 	dtos := make([]AppEnvironmentSummaryDTO, 0, len(envs))
@@ -282,6 +321,8 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 		})
 		return
 	}
+
+	ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
 
 	writeJSON(w, http.StatusOK, AppEnvironmentResponse{
 		Environment: appEnvToDTO(env),
@@ -428,6 +469,83 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleSyncApp handles POST /api/v1/projects/{project}/apps/{app}/sync.
+//
+// It re-runs the gitops publish pipeline for an existing app — useful to
+// recover apps that were created before the gitops publisher was configured,
+// or that failed to push during creation due to a transient error.
+//
+// Only stable environments (staging, prod) are synced; preview environments
+// are intentionally excluded since they have their own lifecycle.
+//
+// Returns 503 when the gitops publisher is not configured, 404 when the app
+// does not exist, and 500 when the publish step fails.
+func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	if ah.gitOpsPublisher == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{
+			Error: "gitops publisher is not configured on this server — set SUPARSHIP_GITOPS_REPO_URL to enable",
+		})
+		return
+	}
+
+	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	allEnvs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list app environments"})
+		return
+	}
+
+	// Only publish stable environments — preview envs have their own lifecycle.
+	var stableEnvs []*domain.AppEnvironment
+	for _, env := range allEnvs {
+		if env.EnvType != domain.AppEnvPreview {
+			stableEnvs = append(stableEnvs, env)
+		}
+	}
+	if len(stableEnvs) == 0 {
+		// Fall back to all envs if there are no stable ones (shouldn't happen
+		// in practice for a properly created app).
+		stableEnvs = allEnvs
+	}
+
+	slog.Info("syncing app to gitops repo",
+		"project", projectName,
+		"app", appName,
+		"envs", len(stableEnvs),
+	)
+	if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
+		slog.Error("gitops sync failed",
+			"project", projectName,
+			"app", appName,
+			"error", err,
+		)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{
+			Error: "gitops sync failed: " + err.Error(),
+		})
+		return
+	}
+
+	slog.Info("app synced to gitops repo — ArgoCD will sync shortly",
+		"project", projectName,
+		"app", appName,
+	)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "app synced to gitops repo — ArgoCD will pick it up shortly",
+		"project": projectName,
+		"app":     appName,
+	})
+}
+
 // handlePromoteApp handles POST /api/v1/projects/{project}/apps/{app}/promote.
 //
 // Promotion path is preview → staging → prod. Promoting to a preview
@@ -560,6 +678,34 @@ func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appN
 		return candidates[i].EnvName < candidates[j].EnvName
 	})
 	return candidates[0], nil
+}
+
+// enrichEnvWithLiveStatus overwrites the stored status fields in env with
+// freshly queried Kubernetes data. The Deployment is looked up by the app name
+// (workload) inside env.Namespace. On any error the stored values are kept so
+// callers always get a valid response. The method is a no-op when
+// runtimeProvider is nil (fake/local mode).
+func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName string, env *domain.AppEnvironment) {
+	if ah.runtimeProvider == nil {
+		return
+	}
+	info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName)
+	if err != nil {
+		return
+	}
+	env.Status = domain.AppRuntimeStatus{
+		Phase:        info.Status,
+		Replicas:     info.Replicas,
+		Available:    info.Available,
+		LastDeployed: info.LastDeployed,
+	}
+	if len(info.IngressURLs) > 0 {
+		env.URLs = info.IngressURLs
+	}
+	// Populate release image from the live Deployment when not already set.
+	if info.Image != "" && env.Release == nil {
+		env.Release = &domain.AppReleaseRef{Image: info.Image}
+	}
 }
 
 // --- DTO mapping helpers ---
