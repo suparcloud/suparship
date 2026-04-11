@@ -1,0 +1,196 @@
+package gitops_test
+
+import (
+	"testing"
+
+	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/gitops"
+)
+
+func TestBuildKargoWarehouse(t *testing.T) {
+	app := &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+	}
+
+	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{})
+
+	if wh.APIVersion != "kargo.akuity.io/v1alpha1" {
+		t.Errorf("APIVersion: got %q want %q", wh.APIVersion, "kargo.akuity.io/v1alpha1")
+	}
+	if wh.Kind != "Warehouse" {
+		t.Errorf("Kind: got %q want %q", wh.Kind, "Warehouse")
+	}
+	if wh.Metadata.Name != "hello" {
+		t.Errorf("Name: got %q want %q", wh.Metadata.Name, "hello")
+	}
+	if wh.Metadata.Namespace != "demo" {
+		t.Errorf("Namespace: got %q want %q", wh.Metadata.Namespace, "demo")
+	}
+	if len(wh.Spec.Subscriptions) != 1 {
+		t.Fatalf("Subscriptions: got %d want 1", len(wh.Spec.Subscriptions))
+	}
+	sub := wh.Spec.Subscriptions[0]
+	if sub.Image == nil {
+		t.Fatal("expected Image subscription, got nil")
+	}
+	if sub.Image.RepoURL != "ghcr.io/demo/hello" {
+		t.Errorf("RepoURL: got %q want %q", sub.Image.RepoURL, "ghcr.io/demo/hello")
+	}
+	if sub.Image.AllowTags == "" {
+		t.Error("AllowTags should be set to a default tag filter")
+	}
+	if wh.Spec.FreightCreationPolicy != "Automatic" {
+		t.Errorf("FreightCreationPolicy: got %q want %q", wh.Spec.FreightCreationPolicy, "Automatic")
+	}
+}
+
+func TestBuildKargoWarehouse_WithOverrides(t *testing.T) {
+	app := &domain.App{Name: "api", ProjectName: "myproject"}
+
+	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{
+		KargoNamespace: "kargo-myproject",
+		ImageRepoURL:   "registry.example.com/myproject/api",
+		ImageTagPattern: `^v\d+\.\d+\.\d+$`,
+	})
+
+	if wh.Metadata.Namespace != "kargo-myproject" {
+		t.Errorf("Namespace: got %q want %q", wh.Metadata.Namespace, "kargo-myproject")
+	}
+	if wh.Spec.Subscriptions[0].Image.RepoURL != "registry.example.com/myproject/api" {
+		t.Errorf("RepoURL override not applied")
+	}
+	if wh.Spec.Subscriptions[0].Image.AllowTags != `^v\d+\.\d+\.\d+$` {
+		t.Errorf("AllowTags override not applied: got %q", wh.Spec.Subscriptions[0].Image.AllowTags)
+	}
+}
+
+func TestBuildKargoWarehouse_Deterministic(t *testing.T) {
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	opts := gitops.KargoBuildOptions{}
+
+	w1 := gitops.BuildKargoWarehouse(app, opts)
+	w2 := gitops.BuildKargoWarehouse(app, opts)
+
+	if w1.Metadata.Name != w2.Metadata.Name ||
+		w1.Spec.Subscriptions[0].Image.RepoURL != w2.Spec.Subscriptions[0].Image.RepoURL {
+		t.Error("BuildKargoWarehouse is not deterministic")
+	}
+}
+
+func TestBuildKargoStage_DirectSource(t *testing.T) {
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	env := domain.AppEnvironment{
+		AppName:     "hello",
+		ProjectName: "demo",
+		EnvName:     "staging",
+		EnvType:     domain.AppEnvStaging,
+		Namespace:   "hello-staging",
+	}
+
+	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{})
+
+	if stage.Kind != "Stage" {
+		t.Errorf("Kind: got %q want %q", stage.Kind, "Stage")
+	}
+	if stage.Metadata.Name != "staging" {
+		t.Errorf("Name: got %q want %q", stage.Metadata.Name, "staging")
+	}
+	if stage.Metadata.Namespace != "demo" {
+		t.Errorf("Namespace: got %q want %q", stage.Metadata.Namespace, "demo")
+	}
+	if len(stage.Spec.RequestedFreight) != 1 {
+		t.Fatalf("RequestedFreight: got %d want 1", len(stage.Spec.RequestedFreight))
+	}
+	req := stage.Spec.RequestedFreight[0]
+	if req.Origin.Name != "hello" {
+		t.Errorf("Origin.Name: got %q want %q", req.Origin.Name, "hello")
+	}
+	if !req.Sources.Direct {
+		t.Error("expected Direct=true for first stage (no upstream stages)")
+	}
+	if len(req.Sources.Stages) != 0 {
+		t.Errorf("Sources.Stages: got %v want empty", req.Sources.Stages)
+	}
+}
+
+func TestBuildKargoStage_UpstreamStages(t *testing.T) {
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	env := domain.AppEnvironment{
+		AppName:     "hello",
+		ProjectName: "demo",
+		EnvName:     "prod",
+		EnvType:     domain.AppEnvProd,
+		Namespace:   "hello-prod",
+	}
+
+	stage := gitops.BuildKargoStage(app, env, []string{"staging"}, gitops.KargoBuildOptions{})
+
+	req := stage.Spec.RequestedFreight[0]
+	if req.Sources.Direct {
+		t.Error("expected Direct=false for stage with upstream")
+	}
+	if len(req.Sources.Stages) != 1 || req.Sources.Stages[0] != "staging" {
+		t.Errorf("Sources.Stages: got %v want [staging]", req.Sources.Stages)
+	}
+}
+
+func TestBuildKargoStage_PromotionMechanismsIncludesArgoApp(t *testing.T) {
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}
+
+	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{})
+
+	if stage.Spec.PromotionMechanisms == nil {
+		t.Fatal("PromotionMechanisms is nil")
+	}
+	updates := stage.Spec.PromotionMechanisms.ArgoCDAppUpdates
+	if len(updates) == 0 {
+		t.Fatal("PromotionMechanisms has no ArgoCDAppUpdates")
+	}
+	if updates[0].AppName != "hello-staging" {
+		t.Errorf("ArgoCDAppUpdates[0].AppName: got %q want %q", updates[0].AppName, "hello-staging")
+	}
+	if updates[0].AppNamespace != "argocd" {
+		t.Errorf("ArgoCDAppUpdates[0].AppNamespace: got %q want %q", updates[0].AppNamespace, "argocd")
+	}
+}
+
+func TestKargoNamespaceForProject(t *testing.T) {
+	got := gitops.KargoNamespaceForProject("demo")
+	if got != "demo" {
+		t.Errorf("got %q want %q", got, "demo")
+	}
+}
+
+func TestDefaultImageRepoURL(t *testing.T) {
+	got := gitops.DefaultImageRepoURL("demo", "hello")
+	if got != "ghcr.io/demo/hello" {
+		t.Errorf("got %q want %q", got, "ghcr.io/demo/hello")
+	}
+}
+
+func TestBuildKargoProjectNamespace(t *testing.T) {
+	ns := gitops.BuildKargoProjectNamespace("demo")
+
+	if ns.APIVersion != "v1" {
+		t.Errorf("APIVersion: got %q want %q", ns.APIVersion, "v1")
+	}
+	if ns.Kind != "Namespace" {
+		t.Errorf("Kind: got %q want %q", ns.Kind, "Namespace")
+	}
+	if ns.Metadata.Name != "demo" {
+		t.Errorf("Name: got %q want %q", ns.Metadata.Name, "demo")
+	}
+	if ns.Metadata.Labels["kargo.akuity.io/project"] != "true" {
+		t.Errorf("missing kargo.akuity.io/project label, labels: %v", ns.Metadata.Labels)
+	}
+}
+
+func TestBuildKargoProjectNamespace_Deterministic(t *testing.T) {
+	n1 := gitops.BuildKargoProjectNamespace("myproject")
+	n2 := gitops.BuildKargoProjectNamespace("myproject")
+	if n1.Metadata.Name != n2.Metadata.Name || n1.Metadata.Labels["kargo.akuity.io/project"] != n2.Metadata.Labels["kargo.akuity.io/project"] {
+		t.Error("BuildKargoProjectNamespace is not deterministic")
+	}
+}

@@ -91,15 +91,17 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	cfg := config.Load()
 
 	var (
-		authenticator   auth.Authenticator
-		orgProvider     rbac.OrgStore
-		projectStore    project.Store
-		previewStore    preview.Store
-		runtimeProvider runtime.Provider
-		logsProvider    runtime.LogsProvider
-		appStore        domain.AppStore
-		clusterStore    domain.ClusterStore
-		templates       []*tpl.Template
+		authenticator    auth.Authenticator
+		orgProvider      rbac.OrgStore
+		projectStore     project.Store
+		previewStore     preview.Store
+		runtimeProvider  runtime.Provider
+		logsProvider     runtime.LogsProvider
+		appStore         domain.AppStore
+		clusterStore     domain.ClusterStore
+		templates        []*tpl.Template
+		readinessProbers []server.ReadinessProber
+		kargoPromoter    server.KargoPromoter
 	)
 
 	switch cfg.RuntimeMode {
@@ -155,6 +157,22 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			)
 		}
 		logger.Info("kubernetes client ready")
+
+		// Build dynamic client for CRD interactions (ArgoCD, Kargo).
+		dynClient, dynErr := k8s.NewDynamicClient(kubeconfig, kubecontext)
+		if dynErr != nil {
+			logger.Warn("dynamic client unavailable — ArgoCD/Kargo features disabled", "error", dynErr)
+		} else {
+			// Register ArgoCD readiness probe.
+			readinessProbers = append(readinessProbers, server.ReadinessProber{
+				Name:  "argocd",
+				Check: kube.NewArgoCDReadinessProbe(dynClient, ""),
+			})
+			// Wire Kargo promoter.
+			kargoStore := kube.NewKargoStore(dynClient)
+			kargoPromoter = &kargoPromoterAdapter{store: kargoStore}
+			logger.Info("kargo promoter enabled via dynamic client")
+		}
 
 		authenticator = auth.NewK8sAuthenticator(client)
 
@@ -231,27 +249,40 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				"repo", cfg.GitOps.RepoURL,
 				"argocd_repo", cfg.GitOps.ArgoCDRepoURL,
 			)
+			// Register GitOps repo connectivity probe.
+			// Use ArgoCDRepoURL when set (internal cluster URL); fall back to
+			// the host-accessible RepoURL for the probe.
+			gitopsProbeURL := cfg.GitOps.ArgoCDRepoURL
+			if gitopsProbeURL == "" {
+				gitopsProbeURL = cfg.GitOps.RepoURL
+			}
+			readinessProbers = append(readinessProbers, server.ReadinessProber{
+				Name:  "gitops-repo",
+				Check: kube.NewGitOpsRepoReadinessProbe(gitopsProbeURL),
+			})
 		}
 	} else {
 		logger.Info("gitops publisher disabled — set SUPARSHIP_GITOPS_REPO_URL to enable")
 	}
 
 	srv := server.New(server.Config{
-		Addr:            addr,
-		UIDir:           uiDir,
-		CORSOrigins:     origins,
-		Authenticator:   authenticator,
-		OrgProvider:     orgProvider,
-		Templates:       templates,
-		ProjectStore:    projectStore,
-		RuntimeProvider: runtimeProvider,
-		LogsProvider:    logsProvider,
-		PreviewStore:    previewStore,
-		AppStore:        appStore,
-		ClusterStore:    clusterStore,
-		GitOpsPublisher: gitOpsPublisher,
-		CookieSecure:    cookieSecure,
-		Logger:          logger,
+		Addr:             addr,
+		UIDir:            uiDir,
+		CORSOrigins:      origins,
+		Authenticator:    authenticator,
+		OrgProvider:      orgProvider,
+		Templates:        templates,
+		ProjectStore:     projectStore,
+		RuntimeProvider:  runtimeProvider,
+		LogsProvider:     logsProvider,
+		PreviewStore:     previewStore,
+		AppStore:         appStore,
+		ClusterStore:     clusterStore,
+		GitOpsPublisher:  gitOpsPublisher,
+		KargoPromoter:    kargoPromoter,
+		ReadinessProbers: readinessProbers,
+		CookieSecure:     cookieSecure,
+		Logger:           logger,
 	})
 
 	if err := srv.Run(cmd.Context()); err != nil {
@@ -328,6 +359,25 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 	}
 
 	return result
+}
+
+// kargoPromoterAdapter bridges kube.KargoStore (which returns *kube.KargoPromotionInfo)
+// to the server.KargoPromoter interface (which returns server.KargoPromotionResult).
+type kargoPromoterAdapter struct {
+	store *kube.KargoStore
+}
+
+func (a *kargoPromoterAdapter) CreatePromotion(ctx context.Context, projectNS, appName, fromStage, toStage string) (server.KargoPromotionResult, error) {
+	info, err := a.store.CreatePromotion(ctx, projectNS, appName, fromStage, toStage)
+	if err != nil {
+		return server.KargoPromotionResult{}, err
+	}
+	return server.KargoPromotionResult{
+		Name:    info.Name,
+		Stage:   info.Stage,
+		Freight: info.Freight,
+		Phase:   info.Phase,
+	}, nil
 }
 
 func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {

@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs for the same branch/PR to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Go tests ───────────────────────────────────────────────────────────────
+  test:
+    name: Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test -race
+        run: go test -race -count=1 ./...
+
+  # ── Go lint ────────────────────────────────────────────────────────────────
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          # Pin to a specific version so the lint rules don't shift unexpectedly.
+          version: v1.64.8
+          args: --timeout=5m
+
+  # ── Secret scan ────────────────────────────────────────────────────────────
+  # Required by the security policy (security.mdc): every PR must pass
+  # trufflehog before merge. This job fails when any verified secret is found.
+  secret-scan:
+    name: trufflehog secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history lets trufflehog scan all commits in the PR, not only HEAD.
+          fetch-depth: 0
+
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          # Only fail on secrets that trufflehog has verified as active.
+          extra_args: --only-verified

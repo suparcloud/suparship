@@ -40,6 +40,7 @@ type appHandler struct {
 	runtimeProvider runtime.Provider     // optional: enriches env responses with live K8s status
 	logsProvider    runtime.LogsProvider // optional: enables GET .../apps/{app}/logs
 	gitOpsPublisher GitOpsPublisher      // optional: commits argocd manifests to gitops repo on create
+	kargoPromoter   KargoPromoter        // optional: creates Kargo Promotion CRs on promote
 }
 
 // newAppHandler creates an appHandler.
@@ -652,7 +653,51 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Execute the promotion: copy the release bundle and persist the target.
+	// When Kargo is configured, create a Kargo Promotion CR. The Promotion CR
+	// drives the actual release copy through the Kargo pipeline; suparship
+	// then returns the Promotion details rather than the local release copy.
+	if ah.kargoPromoter != nil {
+		kargoResult, err := ah.kargoPromoter.CreatePromotion(
+			r.Context(),
+			projectName, // Kargo namespace = suparship project name by convention
+			appName,
+			sourceEnv.EnvName,
+			req.TargetEnvironment,
+		)
+		if err != nil {
+			slog.Error("kargo promotion failed",
+				"project", projectName, "app", appName,
+				"from", sourceEnv.EnvName, "to", req.TargetEnvironment,
+				"error", err,
+			)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{
+				Error: "failed to create Kargo promotion: " + err.Error(),
+			})
+			return
+		}
+		slog.Info("kargo promotion created",
+			"promotion", kargoResult.Name,
+			"stage", kargoResult.Stage,
+			"freight", kargoResult.Freight,
+		)
+		writeJSON(w, http.StatusOK, AppPromoteResponse{
+			Project:     projectName,
+			App:         appName,
+			Source:      sourceEnv.EnvName,
+			Destination: req.TargetEnvironment,
+			Namespace:   targetEnv.Namespace,
+			Message:     fmt.Sprintf("Kargo promotion %q created — freight %q is being promoted to %s", kargoResult.Name, kargoResult.Freight, req.TargetEnvironment),
+			KargoPromotion: &KargoPromotionDTO{
+				Name:    kargoResult.Name,
+				Stage:   kargoResult.Stage,
+				Freight: kargoResult.Freight,
+				Phase:   kargoResult.Phase,
+			},
+		})
+		return
+	}
+
+	// Fallback: copy the release bundle in the local store (MVP stub, no Kargo).
 	result, err := domainapp.Promote(r.Context(), ah.appStore, domainapp.PromoteRequest{
 		ProjectName: projectName,
 		AppName:     appName,

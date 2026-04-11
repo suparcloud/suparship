@@ -151,11 +151,17 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 	})
 }
 
-// PublishApp writes the per-app app.yaml and values.yaml for each environment.
+// PublishApp writes the per-app app.yaml and values.yaml for each environment,
+// plus Kargo Warehouse and Stage CRs so promotions are wired automatically.
 //
 // Written files (per env):
 //   - gitops-output/{envName}/{project}/{app}/app.yaml
 //   - gitops-output/{envName}/{project}/{app}/values.yaml
+//
+// Written Kargo infrastructure files (all under _infra/kargo/):
+//   - gitops-output/_infra/kargo/{project}-project.yaml         ← Kargo Project CR (v0.9+)
+//   - gitops-output/_infra/kargo/{project}-{app}-warehouse.yaml
+//   - gitops-output/_infra/kargo/{project}-{app}-{env}-stage.yaml  (per stable env)
 //
 // PublishApp is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppPublishEnv) error {
@@ -189,9 +195,114 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 			slog.Debug("gitops: wrote app files", "env", env.EnvName, "app", app.Name)
 		}
 
+		// Write Kargo Warehouse + Stage CRs so promotion pipelines are created
+		// automatically when the app is first published.
+		if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
+			return fmt.Errorf("write kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
+		}
+
 		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s\n\nCreated by suparShip.", app.ProjectName, app.Name)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// publishKargoCRs writes the Kargo Namespace, Warehouse, and Stage manifests
+// for app into gitops-output/_infra/kargo/ so ArgoCD syncs them to the cluster.
+//
+// Only stable environments (staging, prod) get Stage CRs; preview environments
+// are skipped because previews don't participate in the Kargo promotion pipeline.
+//
+// The MVP promotion pipeline is: Warehouse → staging → prod.
+// If the envs list contains a staging environment its name is used as the
+// upstream for the prod Stage so Kargo enforces the gating.
+func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	projectNS := KargoNamespaceForProject(app.ProjectName)
+	kargoDir := filepath.Join(repoDir, "gitops-output", "_infra", "kargo")
+
+	// ── Project CR (Kargo v0.9+) ───────────────────────────────────────────────
+	// The Project CR replaces the Namespace-label approach and also holds
+	// PromotionPolicies so that the Kargo v0.9 admission webhook permits
+	// Promotion CR creation for each stable environment.
+	var projectEnvs []KargoProjectEnv
+	for _, env := range envs {
+		if env.EnvType == domain.AppEnvPreview {
+			continue
+		}
+		projectEnvs = append(projectEnvs, KargoProjectEnv{
+			EnvName:      env.EnvName,
+			IsFirstStage: env.EnvType == domain.AppEnvStaging,
+		})
+	}
+	proj := BuildKargoProject(projectNS, projectEnvs)
+	projBytes, err := yaml.Marshal(proj)
+	if err != nil {
+		return fmt.Errorf("marshal kargo project: %w", err)
+	}
+	if err := p.writeFile(filepath.Join(kargoDir, projectNS+"-project.yaml"), projBytes); err != nil {
+		return err
+	}
+	slog.Debug("gitops: wrote kargo project", "project", projectNS)
+
+	// ── Warehouse ──────────────────────────────────────────────────────────────
+	// Use the app's explicitly-set image repository when available.
+	// Falls back to the default ghcr.io/{project}/{app} placeholder.
+	whOpts := KargoBuildOptions{}
+	if repo, ok := app.Spec.Values["image_repository"].(string); ok && repo != "" {
+		whOpts.ImageRepoURL = repo
+		// When the app specifies a concrete image, accept any tag (the tag
+		// pattern can always be tightened via the Warehouse directly).
+		whOpts.ImageTagPattern = ".*"
+	}
+	warehouse := BuildKargoWarehouse(app, whOpts)
+	whBytes, err := yaml.Marshal(warehouse)
+	if err != nil {
+		return fmt.Errorf("marshal kargo warehouse for %s: %w", app.Name, err)
+	}
+	whPath := filepath.Join(kargoDir, projectNS+"-"+app.Name+"-warehouse.yaml")
+	if err := p.writeFile(whPath, whBytes); err != nil {
+		return err
+	}
+	slog.Debug("gitops: wrote kargo warehouse", "app", app.Name)
+
+	// ── Stages ─────────────────────────────────────────────────────────────────
+	// Find the staging env name so prod can declare it as an upstream gate.
+	var stagingEnvName string
+	for _, env := range envs {
+		if env.EnvType == domain.AppEnvStaging {
+			stagingEnvName = env.EnvName
+			break
+		}
+	}
+
+	for _, env := range envs {
+		if env.EnvType == domain.AppEnvPreview {
+			continue
+		}
+
+		var upstreams []string
+		if env.EnvType == domain.AppEnvProd && stagingEnvName != "" {
+			upstreams = []string{stagingEnvName}
+		}
+
+		appEnv := domain.AppEnvironment{
+			AppName:     app.Name,
+			ProjectName: app.ProjectName,
+			EnvName:     env.EnvName,
+			EnvType:     env.EnvType,
+		}
+		stage := BuildKargoStage(app, appEnv, upstreams, KargoBuildOptions{})
+		stageBytes, err := yaml.Marshal(stage)
+		if err != nil {
+			return fmt.Errorf("marshal kargo stage for %s/%s: %w", app.Name, env.EnvName, err)
+		}
+		stagePath := filepath.Join(kargoDir, projectNS+"-"+app.Name+"-"+env.EnvName+"-stage.yaml")
+		if err := p.writeFile(stagePath, stageBytes); err != nil {
+			return err
+		}
+		slog.Debug("gitops: wrote kargo stage", "app", app.Name, "env", env.EnvName)
+	}
+
+	return nil
 }
 
 // AppPublishEnv carries per-environment publish context for PublishApp.

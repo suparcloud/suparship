@@ -34,6 +34,39 @@ type GitOpsPublisher interface {
 	PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error
 }
 
+// KargoPromoter creates Kargo Promotion CRs to advance freight through the
+// promotion pipeline. When nil the app promotion endpoint falls back to the
+// in-store release copy (MVP stub). Implementations must be safe for concurrent use.
+type KargoPromoter interface {
+	// CreatePromotion creates a Kargo Promotion CR to advance the current
+	// freight from fromStage to toStage in projectNS (= Kargo project namespace).
+	//
+	// Returns kube.ErrKargoNoFreight when fromStage has no freight to promote.
+	CreatePromotion(ctx context.Context, projectNS, appName, fromStage, toStage string) (KargoPromotionResult, error)
+}
+
+// KargoPromotionResult is the DTO returned by KargoPromoter.CreatePromotion.
+type KargoPromotionResult struct {
+	// Name is the generated Kargo Promotion CR name.
+	Name string
+	// Stage is the target Stage (= target environment name).
+	Stage string
+	// Freight is the Freight name that was promoted.
+	Freight string
+	// Phase is the initial observed Promotion phase (e.g. "Pending").
+	Phase string
+}
+
+// ReadinessProber is a named readiness check injected into the server.
+// Each prober is called by GET /readyz; any non-nil error marks the
+// server as not ready.
+type ReadinessProber struct {
+	// Name is the human-readable check name included in the readyz JSON response.
+	Name string
+	// Check is the probe function. It should complete quickly (< 2 s).
+	Check func(ctx context.Context) error
+}
+
 // Config holds server configuration.
 type Config struct {
 	Addr            string
@@ -49,6 +82,8 @@ type Config struct {
 	AppStore        domain.AppStore      // optional: enables app read endpoints when set
 	ClusterStore    domain.ClusterStore  // optional: enables /api/v1/clusters endpoints when set
 	GitOpsPublisher GitOpsPublisher      // optional: commits app manifests to gitops repo on create
+	KargoPromoter   KargoPromoter        // optional: enables real Kargo-backed promotions
+	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
 }
@@ -62,7 +97,7 @@ type Server struct {
 // New creates a Server from the given Config.
 func New(cfg Config) *Server {
 	mux := http.NewServeMux()
-	registerRoutes(mux)
+	registerRoutes(mux, cfg.ReadinessProbers)
 
 	var ah *authHandler
 	if cfg.Authenticator != nil {
@@ -126,6 +161,12 @@ func New(cfg Config) *Server {
 				cfg.Logger.Info("app gitops publisher enabled")
 			} else {
 				cfg.Logger.Info("app gitops publisher not configured — skipping git commits on app create")
+			}
+			if cfg.KargoPromoter != nil {
+				rh.appHandler.kargoPromoter = cfg.KargoPromoter
+				cfg.Logger.Info("kargo promoter enabled — promotions will use Kargo Promotion CRs")
+			} else {
+				cfg.Logger.Info("kargo promoter not configured — using in-store release copy for promotions")
 			}
 			cfg.Logger.Info("app endpoints enabled")
 		}

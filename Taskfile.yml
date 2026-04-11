@@ -38,7 +38,7 @@ tasks:
   # for every subsequent dev session (fast build + restart, no cluster touch).
 
   dev:cluster:
-    desc: "Set up dev cluster — DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed (idempotent)"
+    desc: "Set up dev cluster — DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed + cert-manager + Argo Rollouts + Kargo (idempotent)"
     cmds:
       - hack/setup-cluster.sh
 
@@ -76,6 +76,22 @@ tasks:
     desc: "Install minimal ArgoCD (dev profile)"
     cmds:
       - hack/install-argocd.sh
+
+  dev:cluster:cert-manager:
+    desc: "Install cert-manager (dev profile) — required by Kargo for TLS certificates"
+    cmds:
+      - hack/install-cert-manager.sh
+
+  dev:cluster:argo-rollouts:
+    desc: "Install Argo Rollouts (dev profile) — required by Kargo for progressive delivery"
+    cmds:
+      - hack/install-argo-rollouts.sh
+
+  dev:cluster:kargo:
+    desc: "Install cert-manager + Argo Rollouts + Kargo via OCI chart (dev profile)"
+    deps: [dev:cluster:cert-manager, dev:cluster:argo-rollouts]
+    cmds:
+      - hack/install-kargo.sh
 
   dev:cluster:gitea:
     desc: "Install Gitea + create gitops repo + register with ArgoCD"

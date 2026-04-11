@@ -258,16 +258,32 @@ type AppPromoteRequest struct {
 	TargetEnvironment string `json:"targetEnvironment"`
 }
 
+// KargoPromotionDTO describes a Kargo Promotion CR created by the promote endpoint.
+// It is populated only when the server is configured with a KargoPromoter;
+// otherwise Release is populated instead (in-store fallback).
+type KargoPromotionDTO struct {
+	// Name is the Kargo Promotion CR name (deterministically generated).
+	Name string `json:"name"`
+	// Stage is the Kargo Stage (= target environment) being promoted to.
+	Stage string `json:"stage"`
+	// Freight is the Kargo Freight name being promoted.
+	Freight string `json:"freight"`
+	// Phase is the initial observed phase ("Pending", "Running", etc.).
+	Phase string `json:"phase,omitempty"`
+}
+
 // AppPromoteResponse is the JSON body returned on a successful app promotion.
-// Release is populated with the release ref that was copied from source to
-// destination; it is nil only when no release information is available.
+// When Kargo is configured, KargoPromotion is populated and Release is nil.
+// Without Kargo, Release is populated with the in-store release copy result.
 type AppPromoteResponse struct {
-	Project     string            `json:"project"`
-	App         string            `json:"app"`
-	Source      string            `json:"source"`
-	Destination string            `json:"destination"`
-	Namespace   string            `json:"namespace"`
-	Message     string            `json:"message"`
-	// Release is the release bundle (all components) that was promoted.
-	Release     *AppReleaseRefDTO `json:"release,omitempty"`
+	Project     string             `json:"project"`
+	App         string             `json:"app"`
+	Source      string             `json:"source"`
+	Destination string             `json:"destination"`
+	Namespace   string             `json:"namespace"`
+	Message     string             `json:"message"`
+	// Release is the release bundle copied in the store (no-Kargo fallback).
+	Release        *AppReleaseRefDTO  `json:"release,omitempty"`
+	// KargoPromotion is populated when a Kargo Promotion CR was created.
+	KargoPromotion *KargoPromotionDTO `json:"kargoPromotion,omitempty"`
 }

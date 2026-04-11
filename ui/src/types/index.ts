@@ -311,13 +311,35 @@ export interface PromoteRequest {
   targetEnvironment: string;
 }
 
+/**
+ * Describes a Kargo Promotion CR created by the promote endpoint.
+ * Populated only when the server is configured with a KargoPromoter.
+ */
+export interface KargoPromotion {
+  /** Kargo Promotion CR name, e.g. "hello-prod-1712774400" */
+  name: string;
+  /** Target Kargo Stage name (= target environment name) */
+  stage: string;
+  /** Kargo Freight being promoted */
+  freight: string;
+  /** Initial observed phase: "Pending" | "Running" | "Succeeded" | "Failed" */
+  phase?: string;
+}
+
 export interface PromoteResponse {
   project: string;
-  service: string;
+  /** App name (new field). Falls back to `service` for legacy responses. */
+  app?: string;
+  /** @deprecated Use `app` instead. Retained for legacy service-promote responses. */
+  service?: string;
   source: string;
   destination: string;
   namespace: string;
   message: string;
+  /** Populated when Kargo is configured — describes the created Promotion CR. */
+  kargoPromotion?: KargoPromotion;
+  /** Populated when Kargo is NOT configured — in-store release copy result. */
+  release?: AppReleaseRef;
 }
 
 // --- Logs types ---

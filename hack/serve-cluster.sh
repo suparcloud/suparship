@@ -85,6 +85,28 @@ SUPARSHIP_CORS_ORIGINS="http://localhost:${FRONTEND_PORT}" \
   ./bin/suparship server &
 API_PID=$!
 
+# ── Wait for backend to be ready before starting the frontend ─────────────
+# Poll /healthz so Vite doesn't fire proxy requests into a closed port.
+printf "  [api] waiting for backend... "
+HEALTHZ_URL="http://localhost:${BACKEND_PORT}/healthz"
+WAIT_TIMEOUT=30   # seconds
+WAIT_START=$(date +%s)
+until curl -sf "${HEALTHZ_URL}" >/dev/null 2>&1; do
+  # Abort if the backend process died.
+  if ! kill -0 "$API_PID" 2>/dev/null; then
+    printf "\n  \033[0;31mERROR:\033[0m backend process exited unexpectedly.\n"
+    exit 1
+  fi
+  NOW=$(date +%s)
+  if [ $((NOW - WAIT_START)) -ge ${WAIT_TIMEOUT} ]; then
+    printf "\n  \033[0;31mERROR:\033[0m backend did not become ready within %ds.\n" "${WAIT_TIMEOUT}"
+    kill "$API_PID" 2>/dev/null || true
+    exit 1
+  fi
+  sleep 0.2
+done
+printf "ready\n\n"
+
 # ── Clean shutdown on Ctrl+C ─────────────────────────────────────────────
 cleanup() {
   printf "\n  Stopping backend...\n"

@@ -35,13 +35,14 @@ spec:
   source:
     repoURL: "http://gitea-http.gitea.svc.cluster.local:3000/gitops/gitops.git"
     targetRevision: main
-    # _infra/ contains ONLY ArgoCD CRD manifests (ApplicationSet, AppProject).
+    # _infra/ contains platform CRD manifests applied by ArgoCD:
+    #   - AppProject, ApplicationSet  (directly under _infra/)
+    #   - Kargo Warehouse, Stage, Namespace  (under _infra/kargo/)
     # Per-app data files (app.yaml, values.yaml) live under env-specific paths
     # where ApplicationSet git generators discover them — not applied here.
-    # This avoids brace-expansion glob issues and AppProject duplication.
     path: gitops-output/_infra
     directory:
-      recurse: false
+      recurse: true
   destination:
     # Apply AppProject and ApplicationSet objects into the argocd namespace
     # on the tooling cluster. ApplicationSets then deploy apps to workload

@@ -240,7 +240,7 @@ func newTestOnboardingMux(
 	projectStore project.Store,
 ) *http.ServeMux {
 	mux := http.NewServeMux()
-	registerRoutes(mux)
+	registerRoutes(mux, nil)
 
 	if authEnabled {
 		ah := &authHandler{

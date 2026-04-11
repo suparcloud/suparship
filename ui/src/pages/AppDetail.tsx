@@ -8,6 +8,7 @@ import type {
   AppEnvironmentSummary,
   AppLogsResponse,
   ComponentSummary,
+  KargoPromotion,
   PromoteResponse,
 } from "../types";
 
@@ -272,6 +273,136 @@ const icons = {
     </svg>
   ),
 };
+
+// ---------------------------------------------------------------------------
+// Promotion success view (Kargo-aware)
+// ---------------------------------------------------------------------------
+
+const kargoPhaseBadge: Record<string, { bg: string; label: string }> = {
+  Pending: { bg: "bg-amber-50 text-amber-700", label: "Pending" },
+  Running: { bg: "bg-blue-50 text-blue-700", label: "Running" },
+  Succeeded: { bg: "bg-emerald-50 text-emerald-700", label: "Succeeded" },
+  Failed: { bg: "bg-red-50 text-red-700", label: "Failed" },
+};
+
+function KargoPromotionDetail({ kargo }: { kargo: KargoPromotion }) {
+  const phase = kargo.phase ?? "Pending";
+  const badge = kargoPhaseBadge[phase] ?? {
+    bg: "bg-gray-100 text-gray-500",
+    label: phase,
+  };
+  return (
+    <div className="mt-3 rounded-xl border border-violet-100 bg-violet-50 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="rounded-md bg-violet-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-violet-700">
+          Kargo
+        </span>
+        <span
+          className={`rounded-full px-2 py-0.5 text-xs font-medium ${badge.bg}`}
+        >
+          {badge.label}
+        </span>
+      </div>
+      <dl className="space-y-1.5 text-sm">
+        <div className="flex justify-between gap-4">
+          <dt className="shrink-0 text-violet-500">Promotion</dt>
+          <dd className="truncate font-mono text-violet-900">{kargo.name}</dd>
+        </div>
+        <div className="flex justify-between gap-4">
+          <dt className="shrink-0 text-violet-500">Stage</dt>
+          <dd className="font-medium capitalize text-violet-900">
+            {kargo.stage}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-4">
+          <dt className="shrink-0 text-violet-500">Freight</dt>
+          <dd className="truncate font-mono text-violet-900">
+            {kargo.freight}
+          </dd>
+        </div>
+      </dl>
+      <p className="mt-2 text-xs text-violet-500">
+        Track with:{" "}
+        <code className="rounded bg-violet-100 px-1 py-0.5 text-violet-700">
+          kubectl get promotions -n {kargo.stage}
+        </code>
+      </p>
+    </div>
+  );
+}
+
+function PromoteSuccessView({
+  result,
+  promoteTarget,
+  onDone,
+}: {
+  result: PromoteResponse;
+  promoteTarget: string;
+  onDone: () => void;
+}) {
+  return (
+    <>
+      <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100">
+        <svg
+          className="h-5 w-5 text-emerald-600"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="m4.5 12.75 6 6 9-13.5"
+          />
+        </svg>
+      </div>
+      <h3 className="text-lg font-semibold text-gray-900">
+        Promotion initiated
+      </h3>
+      <p className="mt-1 text-sm text-gray-500">{result.message}</p>
+
+      <dl className="mt-4 space-y-2 text-sm">
+        <div className="flex justify-between">
+          <dt className="text-gray-400">From</dt>
+          <dd className="font-medium capitalize text-gray-900">
+            {result.source}
+          </dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-gray-400">To</dt>
+          <dd className="font-medium capitalize text-gray-900">
+            {result.destination}
+          </dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-gray-400">Namespace</dt>
+          <dd className="font-mono text-gray-600">{result.namespace}</dd>
+        </div>
+        {result.release?.image && (
+          <div className="flex justify-between gap-4">
+            <dt className="shrink-0 text-gray-400">Image</dt>
+            <dd className="truncate font-mono text-gray-600">
+              {result.release.image}
+              {result.release.tag ? `:${result.release.tag}` : ""}
+            </dd>
+          </div>
+        )}
+      </dl>
+
+      {result.kargoPromotion && (
+        <KargoPromotionDetail kargo={result.kargoPromotion} />
+      )}
+
+      <button
+        onClick={onDone}
+        className="mt-6 w-full rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
+      >
+        {promoteTarget ? `View ${promoteTarget}` : "Done"}
+      </button>
+    </>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // AppDetail page
@@ -662,60 +793,14 @@ export function AppDetail() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
             {promoteResult ? (
-              <>
-                <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100">
-                  <svg
-                    className="h-5 w-5 text-emerald-600"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="m4.5 12.75 6 6 9-13.5"
-                    />
-                  </svg>
-                </div>
-                <h3 className="text-lg font-semibold text-gray-900">
-                  Promotion initiated
-                </h3>
-                <p className="mt-1 text-sm text-gray-500">
-                  {promoteResult.message}
-                </p>
-                <dl className="mt-4 space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <dt className="text-gray-400">From</dt>
-                    <dd className="font-medium capitalize text-gray-900">
-                      {promoteResult.source}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between">
-                    <dt className="text-gray-400">To</dt>
-                    <dd className="font-medium capitalize text-gray-900">
-                      {promoteResult.destination}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between">
-                    <dt className="text-gray-400">Namespace</dt>
-                    <dd className="font-mono text-gray-600">
-                      {promoteResult.namespace}
-                    </dd>
-                  </div>
-                </dl>
-                <button
-                  onClick={() => {
-                    setShowPromoteModal(false);
-                    // Switch view to the target environment so the user can
-                    // see its updated state immediately.
-                    if (promoteTarget) setSelectedEnvName(promoteTarget);
-                  }}
-                  className="mt-6 w-full rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
-                >
-                  Done
-                </button>
-              </>
+              <PromoteSuccessView
+                result={promoteResult}
+                promoteTarget={promoteTarget}
+                onDone={() => {
+                  setShowPromoteModal(false);
+                  if (promoteTarget) setSelectedEnvName(promoteTarget);
+                }}
+              />
             ) : (
               <>
                 <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-600">
