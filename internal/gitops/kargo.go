@@ -57,6 +57,10 @@ type ImageSubscription struct {
 	// SemverConstraint is an optional semver range (e.g. ">=1.0.0").
 	// Use instead of AllowTags when the image follows semantic versioning.
 	SemverConstraint string `yaml:"semverConstraint,omitempty"`
+	// InsecureSkipTLSVerify skips TLS certificate verification when
+	// connecting to the registry. Required for HTTP-only registries
+	// like the local kind-registry in dev mode.
+	InsecureSkipTLSVerify bool `yaml:"insecureSkipTLSVerify,omitempty"`
 }
 
 // ── Stage ─────────────────────────────────────────────────────────────────────
@@ -88,9 +92,34 @@ type StageSpec struct {
 // into a Stage. Deprecated in Kargo v0.8 in favour of promotionTemplate.spec.steps
 // but required by the v0.9.0 Promotion admission webhook.
 type PromotionMechanisms struct {
+	// GitRepoUpdates writes updated image tags or chart versions into a Git
+	// repo so the new state is committed before ArgoCD syncs.
+	GitRepoUpdates []GitRepoUpdate `yaml:"gitRepoUpdates,omitempty"`
 	// ArgoCDAppUpdates is the list of ArgoCD Applications Kargo should sync
 	// as part of the promotion.
 	ArgoCDAppUpdates []ArgoCDAppUpdate `yaml:"argoCDAppUpdates,omitempty"`
+}
+
+// GitRepoUpdate describes one Git repository to update during promotion.
+type GitRepoUpdate struct {
+	RepoURL               string          `yaml:"repoURL"`
+	ReadBranch            string          `yaml:"readBranch,omitempty"`
+	WriteBranch           string          `yaml:"writeBranch,omitempty"`
+	InsecureSkipTLSVerify bool            `yaml:"insecureSkipTLSVerify,omitempty"`
+	Helm                  *HelmPromUpdate `yaml:"helm,omitempty"`
+}
+
+// HelmPromUpdate describes how Helm values files should be updated.
+type HelmPromUpdate struct {
+	Images []HelmImageUpdate `yaml:"images,omitempty"`
+}
+
+// HelmImageUpdate maps a Freight image to a key in a Helm values file.
+type HelmImageUpdate struct {
+	Image          string `yaml:"image"`
+	ValuesFilePath string `yaml:"valuesFilePath"`
+	Key            string `yaml:"key"`
+	Value          string `yaml:"value"`
 }
 
 // ArgoCDAppUpdate describes one ArgoCD Application to update during promotion.
@@ -144,6 +173,18 @@ type KargoBuildOptions struct {
 	// Maps to the Kargo v1alpha1 "allowTags" field.
 	// Defaults to semver tags (^\d+\.\d+\.\d+$) when empty.
 	ImageTagPattern string
+
+	// InsecureSkipTLSVerify disables TLS verification for image registry
+	// access. Required for HTTP-only registries (e.g. local dev registries).
+	InsecureSkipTLSVerify bool
+
+	// GitOpsRepoURL is the Git URL of the gitops repo that Kargo should
+	// update during promotion (to write new image tags into values.yaml).
+	// When empty, gitRepoUpdates are omitted from the Stage.
+	GitOpsRepoURL string
+
+	// GitOpsRepoInsecure disables TLS verification for the gitops repo.
+	GitOpsRepoInsecure bool
 }
 
 // ── Builders ─────────────────────────────────────────────────────────────────
@@ -182,8 +223,9 @@ func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehous
 			Subscriptions: []WarehouseSubscription{
 				{
 					Image: &ImageSubscription{
-						RepoURL:   repoURL,
-						AllowTags: tagPattern,
+						RepoURL:               repoURL,
+						AllowTags:              tagPattern,
+						InsecureSkipTLSVerify:  opts.InsecureSkipTLSVerify,
 					},
 				},
 			},
@@ -202,13 +244,18 @@ func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehous
 func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages []string, opts KargoBuildOptions) *KargoStage {
 	opts = applyKargoDefaults(opts, app)
 
+	stageName := KargoStageName(app.Name, env.EnvName)
+
 	sources := FreightSources{}
 	if len(upstreamStages) == 0 {
 		sources.Direct = true
 	} else {
-		stages := make([]string, len(upstreamStages))
-		copy(stages, upstreamStages)
-		sources.Stages = stages
+		// Upstream references also use {app}-{env} naming.
+		qualifiedUpstreams := make([]string, len(upstreamStages))
+		for i, us := range upstreamStages {
+			qualifiedUpstreams[i] = KargoStageName(app.Name, us)
+		}
+		sources.Stages = qualifiedUpstreams
 	}
 
 	// PromotionMechanisms triggers an ArgoCD sync for the app+env Application.
@@ -220,11 +267,46 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 	// rejects Promotions for Stages that only declare steps.
 	argoAppName := ApplicationName(app.Name, env.EnvName)
 
+	// The values.yaml path within the gitops repo for this app+env.
+	valuesFilePath := fmt.Sprintf("gitops-output/%s/%s/%s/values.yaml", env.EnvName, app.ProjectName, app.Name)
+
+	pm := &PromotionMechanisms{
+		ArgoCDAppUpdates: []ArgoCDAppUpdate{
+			{
+				AppName:      argoAppName,
+				AppNamespace: defaultArgoCDNS,
+			},
+		},
+	}
+
+	// When the gitops repo URL is configured, add gitRepoUpdates so Kargo
+	// commits new image tags to values.yaml before triggering the ArgoCD sync.
+	if opts.GitOpsRepoURL != "" {
+		pm.GitRepoUpdates = []GitRepoUpdate{
+			{
+				RepoURL:               opts.GitOpsRepoURL,
+				ReadBranch:            "main",
+				WriteBranch:           "main",
+				InsecureSkipTLSVerify: opts.GitOpsRepoInsecure,
+				Helm: &HelmPromUpdate{
+					Images: []HelmImageUpdate{
+						{
+							Image:          opts.ImageRepoURL,
+							ValuesFilePath: valuesFilePath,
+							Key:            "components.web.image.tag",
+							Value:          "Tag",
+						},
+					},
+				},
+			},
+		}
+	}
+
 	return &KargoStage{
 		APIVersion: kargoAPIVersion,
 		Kind:       kargoKindStage,
 		Metadata: ObjectMeta{
-			Name:      env.EnvName,
+			Name:      stageName,
 			Namespace: opts.KargoNamespace,
 			Labels: map[string]string{
 				labelApp:          app.Name,
@@ -244,14 +326,7 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 					Sources: sources,
 				},
 			},
-			PromotionMechanisms: &PromotionMechanisms{
-				ArgoCDAppUpdates: []ArgoCDAppUpdate{
-					{
-						AppName:      argoAppName,
-						AppNamespace: defaultArgoCDNS,
-					},
-				},
-			},
+			PromotionMechanisms: pm,
 		},
 	}
 }
@@ -305,7 +380,7 @@ func BuildKargoProject(projectName string, envs []KargoProjectEnv) KargoProject 
 	var policies []KargoPromotionPolicy
 	for _, env := range envs {
 		policies = append(policies, KargoPromotionPolicy{
-			Stage:                env.EnvName,
+			Stage:                KargoStageName(env.AppName, env.EnvName),
 			AutoPromotionEnabled: env.IsFirstStage,
 		})
 	}
@@ -330,7 +405,10 @@ func BuildKargoProject(projectName string, envs []KargoProjectEnv) KargoProject 
 
 // KargoProjectEnv describes one environment for Kargo Project generation.
 type KargoProjectEnv struct {
-	// EnvName is the environment name (becomes the Stage name).
+	// AppName is the application name. Used together with EnvName to form
+	// the Stage name ("{app}-{env}") in PromotionPolicies.
+	AppName string
+	// EnvName is the environment name (e.g. "staging", "prod").
 	EnvName string
 	// IsFirstStage marks this as the first stage in the pipeline (receives
 	// Freight directly from the Warehouse). Auto-promotion is enabled for it.
@@ -371,10 +449,10 @@ func BuildKargoProjectNamespace(projectName string) KubernetesNamespace {
 	}
 }
 
-// KargoStageNameForEnv returns the Kargo Stage name for an app environment.
-// By convention the Stage name equals the environment name (e.g. "staging").
-func KargoStageNameForEnv(envName string) string {
-	return envName
+// KargoStageName returns the Kargo Stage name for an app environment.
+// Uses "{app}-{env}" to avoid collisions when multiple apps share a project.
+func KargoStageName(appName, envName string) string {
+	return appName + "-" + envName
 }
 
 // KargoNamespaceForProject returns the Kargo namespace for a suparship project.

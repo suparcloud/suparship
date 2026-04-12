@@ -100,6 +100,10 @@ func (s *KargoStore) ListStageStatuses(ctx context.Context, projectNS string) (m
 // fromStage to toStage within projectNS. It reads the current Freight from
 // fromStage and submits a Promotion CR targeting toStage.
 //
+// fromStage and toStage are suparship environment names (e.g. "staging", "prod").
+// CreatePromotion converts them to qualified Kargo Stage names using the
+// "{appName}-{envName}" convention (e.g. "color-app-staging").
+//
 // When the target Stage gates on an upstream stage (e.g. prod gates on staging),
 // Kargo requires the Freight to be either verified in the upstream stage or
 // explicitly approved for the target stage. Since suparship uses
@@ -110,9 +114,13 @@ func (s *KargoStore) ListStageStatuses(ctx context.Context, projectNS string) (m
 //
 // Returns ErrKargoNoFreight when fromStage has no current Freight to promote.
 func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fromStage, toStage string) (*KargoPromotionInfo, error) {
-	freight, err := s.getCurrentFreight(ctx, projectNS, fromStage)
+	// Kargo Stage names follow the "{appName}-{envName}" convention.
+	qualifiedFromStage := kargoStageName(appName, fromStage)
+	qualifiedToStage := kargoStageName(appName, toStage)
+
+	freight, err := s.getCurrentFreight(ctx, projectNS, qualifiedFromStage)
 	if err != nil {
-		return nil, fmt.Errorf("resolve freight from stage %q: %w", fromStage, err)
+		return nil, fmt.Errorf("resolve freight from stage %q: %w", qualifiedFromStage, err)
 	}
 	if freight == "" {
 		return nil, ErrKargoNoFreight
@@ -120,7 +128,7 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 
 	// Approve the Freight for the target Stage so Kargo allows the Promotion even
 	// when staging verification is absent (the case with pure argoCDAppUpdates).
-	if approveErr := s.approveFreightForStage(ctx, projectNS, freight, toStage); approveErr != nil {
+	if approveErr := s.approveFreightForStage(ctx, projectNS, freight, qualifiedToStage); approveErr != nil {
 		// Non-fatal: log and continue. If the Freight is already approved or
 		// the Stage accepts it from an upstream, this succeeds anyway.
 		_ = approveErr
@@ -136,14 +144,14 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 				"name":      promotionName,
 				"namespace": projectNS,
 				"labels": map[string]any{
-					"suparship.io/app":              appName,
-					"suparship.io/project":          projectNS,
-					"kargo.akuity.io/stage":         toStage,
+					"suparship.io/app":               appName,
+					"suparship.io/project":           projectNS,
+					"kargo.akuity.io/stage":          qualifiedToStage,
 					"suparship.io/generator-version": "v0.1.0",
 				},
 			},
 			"spec": map[string]any{
-				"stage":   toStage,
+				"stage":   qualifiedToStage,
 				"freight": freight,
 			},
 		},
@@ -156,7 +164,7 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 
 	info := &KargoPromotionInfo{
 		Name:    promotionName,
-		Stage:   toStage,
+		Stage:   qualifiedToStage,
 		Freight: freight,
 	}
 	if statusRaw, ok := created.Object["status"].(map[string]any); ok {
@@ -328,3 +336,10 @@ func (s *KargoStore) approveFreightForStage(ctx context.Context, projectNS, frei
 // current Freight to promote. The caller should surface this as a 400 Bad Request
 // (the user must trigger a delivery to the source stage before promoting).
 var ErrKargoNoFreight = fmt.Errorf("source stage has no current freight to promote")
+
+// kargoStageName returns the qualified Kargo Stage name for an app environment.
+// Kargo Stage names follow the "{appName}-{envName}" convention used throughout
+// suparship to avoid collisions when multiple apps share a project namespace.
+func kargoStageName(appName, envName string) string {
+	return appName + "-" + envName
+}

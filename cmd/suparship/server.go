@@ -231,11 +231,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	var gitOpsPublisher server.GitOpsPublisher
 	if cfg.GitOps.RepoURL != "" {
 		pub, err := gitops.NewPublisher(gitops.PublisherConfig{
-			RepoURL:       cfg.GitOps.RepoURL,
-			RepoUser:      cfg.GitOps.RepoUser,
-			RepoPassword:  cfg.GitOps.RepoPassword,
-			ArgoCDRepoURL: cfg.GitOps.ArgoCDRepoURL,
-			SyncAutomated: true,
+			RepoURL:          cfg.GitOps.RepoURL,
+			RepoUser:         cfg.GitOps.RepoUser,
+			RepoPassword:     cfg.GitOps.RepoPassword,
+			ArgoCDRepoURL:    cfg.GitOps.ArgoCDRepoURL,
+			KargoGitRepoURL:  cfg.GitOps.KargoGitRepoURL,
+			SyncAutomated:    true,
+			TemplatesDir:     templatesDir,
+			InsecureRegistry: cfg.GitOps.InsecureRegistry,
 		})
 		if err != nil {
 			logger.Warn("gitops publisher disabled", "reason", err.Error())

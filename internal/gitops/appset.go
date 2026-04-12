@@ -195,9 +195,10 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 				},
 				// Authorize the corresponding Kargo Stage to trigger ArgoCD syncs
 				// for this Application. The annotation value is "<namespace>:<stage>"
-				// where namespace = Kargo project namespace = suparship project name.
+				// where namespace = Kargo project namespace = suparship project name,
+				// and stage = "{app}-{env}" per KargoStageName convention.
 				Annotations: map[string]string{
-					"kargo.akuity.io/authorized-stage": "{{project}}:" + env.EnvName,
+					"kargo.akuity.io/authorized-stage": "{{project}}:{{name}}-" + env.EnvName,
 				},
 			},
 			Spec: ApplicationSetAppSpec{

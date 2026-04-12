@@ -3,6 +3,7 @@ package gitops
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -30,6 +31,18 @@ type PublisherConfig struct {
 	Branch string
 	// SyncAutomated enables automated sync (prune + selfHeal) on generated Applications.
 	SyncAutomated bool
+	// TemplatesDir is the local filesystem path to suparship templates.
+	// When set, PublishApp syncs the Helm chart from templates/{name}/chart/
+	// into charts/{name}/ in the gitops repo so ArgoCD can resolve them.
+	TemplatesDir string
+	// KargoGitRepoURL is the HTTPS Git URL Kargo uses for gitRepoUpdates.
+	// Kargo v0.9+ requires HTTPS for credential-based git operations.
+	// Falls back to ArgoCDRepoURL when empty.
+	KargoGitRepoURL string
+	// InsecureRegistry disables TLS verification for Kargo Warehouse image
+	// subscriptions. Required when using an HTTP-only registry (e.g. local
+	// kind-registry in dev mode).
+	InsecureRegistry bool
 }
 
 // Publisher writes GitOps manifests to the GitOps repository and commits +
@@ -72,6 +85,19 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 		cfg.Branch = "main"
 	}
 	return &Publisher{cfg: cfg}, nil
+}
+
+// argoCDRepoURL returns the gitops repo URL as ArgoCD sees it inside the cluster.
+func (p *Publisher) argoCDRepoURL() string {
+	return p.cfg.ArgoCDRepoURL
+}
+
+// kargoGitRepoURL returns the HTTPS gitops repo URL for Kargo gitRepoUpdates.
+func (p *Publisher) kargoGitRepoURL() string {
+	if p.cfg.KargoGitRepoURL != "" {
+		return p.cfg.KargoGitRepoURL
+	}
+	return p.cfg.ArgoCDRepoURL
 }
 
 // PublishEnvInfra writes the per-environment ApplicationSet and per-project
@@ -195,6 +221,12 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 			slog.Debug("gitops: wrote app files", "env", env.EnvName, "app", app.Name)
 		}
 
+		// Sync the Helm chart into charts/{template}/ so ArgoCD's
+		// ApplicationSet can resolve the chart path.
+		if err := p.syncChart(repoDir, app.Spec.Template.Name); err != nil {
+			return fmt.Errorf("sync chart for template %s: %w", app.Spec.Template.Name, err)
+		}
+
 		// Write Kargo Warehouse + Stage CRs so promotion pipelines are created
 		// automatically when the app is first published.
 		if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
@@ -203,6 +235,53 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 
 		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s\n\nCreated by suparShip.", app.ProjectName, app.Name)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
+// syncChart copies the Helm chart for templateName from the local templates
+// directory into charts/{templateName}/ inside the cloned gitops repo.
+// This ensures ArgoCD's ApplicationSet can resolve the chart path
+// ("charts/{{template}}") for every template that has been published.
+//
+// When TemplatesDir is not configured, syncChart is a no-op.
+// When the chart directory already exists with identical content, the
+// subsequent git commit will be a no-op (via stagedIsEmpty).
+func (p *Publisher) syncChart(repoDir, templateName string) error {
+	if p.cfg.TemplatesDir == "" {
+		return nil
+	}
+
+	srcDir := filepath.Join(p.cfg.TemplatesDir, templateName, "chart")
+	if _, err := os.Stat(srcDir); os.IsNotExist(err) {
+		slog.Debug("gitops: no chart directory for template, skipping sync", "template", templateName)
+		return nil
+	}
+
+	dstDir := filepath.Join(repoDir, "charts", templateName)
+
+	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(dstDir, rel)
+
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("reading chart file %s: %w", path, err)
+		}
+		if err := p.writeFile(dst, data); err != nil {
+			return err
+		}
+		return nil
 	})
 }
 
@@ -229,6 +308,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			continue
 		}
 		projectEnvs = append(projectEnvs, KargoProjectEnv{
+			AppName:      app.Name,
 			EnvName:      env.EnvName,
 			IsFirstStage: env.EnvType == domain.AppEnvStaging,
 		})
@@ -246,7 +326,9 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	// ── Warehouse ──────────────────────────────────────────────────────────────
 	// Use the app's explicitly-set image repository when available.
 	// Falls back to the default ghcr.io/{project}/{app} placeholder.
-	whOpts := KargoBuildOptions{}
+	whOpts := KargoBuildOptions{
+		InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
+	}
 	if repo, ok := app.Spec.Values["image_repository"].(string); ok && repo != "" {
 		whOpts.ImageRepoURL = repo
 		// When the app specifies a concrete image, accept any tag (the tag
@@ -290,7 +372,13 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			EnvName:     env.EnvName,
 			EnvType:     env.EnvType,
 		}
-		stage := BuildKargoStage(app, appEnv, upstreams, KargoBuildOptions{})
+		stageOpts := KargoBuildOptions{
+			InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
+			ImageRepoURL:          whOpts.ImageRepoURL,
+			GitOpsRepoURL:         p.kargoGitRepoURL(),
+			GitOpsRepoInsecure:    p.cfg.InsecureRegistry,
+		}
+		stage := BuildKargoStage(app, appEnv, upstreams, stageOpts)
 		stageBytes, err := yaml.Marshal(stage)
 		if err != nil {
 			return fmt.Errorf("marshal kargo stage for %s/%s: %w", app.Name, env.EnvName, err)

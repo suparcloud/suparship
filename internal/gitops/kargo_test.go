@@ -93,8 +93,8 @@ func TestBuildKargoStage_DirectSource(t *testing.T) {
 	if stage.Kind != "Stage" {
 		t.Errorf("Kind: got %q want %q", stage.Kind, "Stage")
 	}
-	if stage.Metadata.Name != "staging" {
-		t.Errorf("Name: got %q want %q", stage.Metadata.Name, "staging")
+	if stage.Metadata.Name != "hello-staging" {
+		t.Errorf("Name: got %q want %q", stage.Metadata.Name, "hello-staging")
 	}
 	if stage.Metadata.Namespace != "demo" {
 		t.Errorf("Namespace: got %q want %q", stage.Metadata.Namespace, "demo")
@@ -130,8 +130,8 @@ func TestBuildKargoStage_UpstreamStages(t *testing.T) {
 	if req.Sources.Direct {
 		t.Error("expected Direct=false for stage with upstream")
 	}
-	if len(req.Sources.Stages) != 1 || req.Sources.Stages[0] != "staging" {
-		t.Errorf("Sources.Stages: got %v want [staging]", req.Sources.Stages)
+	if len(req.Sources.Stages) != 1 || req.Sources.Stages[0] != "hello-staging" {
+		t.Errorf("Sources.Stages: got %v want [hello-staging]", req.Sources.Stages)
 	}
 }
 
@@ -153,6 +153,78 @@ func TestBuildKargoStage_PromotionMechanismsIncludesArgoApp(t *testing.T) {
 	}
 	if updates[0].AppNamespace != "argocd" {
 		t.Errorf("ArgoCDAppUpdates[0].AppNamespace: got %q want %q", updates[0].AppNamespace, "argocd")
+	}
+}
+
+func TestBuildKargoStage_GitRepoUpdates(t *testing.T) {
+	app := &domain.App{
+		Name:        "color-app",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Values: map[string]any{
+				"image_repository": "kind-registry:5000/demo/color-app",
+			},
+		},
+	}
+	env := domain.AppEnvironment{
+		AppName:     "color-app",
+		ProjectName: "demo",
+		EnvName:     "staging",
+		EnvType:     domain.AppEnvStaging,
+	}
+
+	opts := gitops.KargoBuildOptions{
+		ImageRepoURL:   "kind-registry:5000/demo/color-app",
+		GitOpsRepoURL:  "http://gitea-http.gitea.svc:3000/gitops/gitops.git",
+		GitOpsRepoInsecure: true,
+	}
+	stage := gitops.BuildKargoStage(app, env, nil, opts)
+
+	pm := stage.Spec.PromotionMechanisms
+	if pm == nil {
+		t.Fatal("PromotionMechanisms is nil")
+	}
+	if len(pm.GitRepoUpdates) != 1 {
+		t.Fatalf("GitRepoUpdates: got %d want 1", len(pm.GitRepoUpdates))
+	}
+	gru := pm.GitRepoUpdates[0]
+	if gru.RepoURL != "http://gitea-http.gitea.svc:3000/gitops/gitops.git" {
+		t.Errorf("RepoURL: got %q", gru.RepoURL)
+	}
+	if gru.ReadBranch != "main" {
+		t.Errorf("ReadBranch: got %q want %q", gru.ReadBranch, "main")
+	}
+	if gru.WriteBranch != "main" {
+		t.Errorf("WriteBranch: got %q want %q", gru.WriteBranch, "main")
+	}
+	if !gru.InsecureSkipTLSVerify {
+		t.Error("expected InsecureSkipTLSVerify=true")
+	}
+	if gru.Helm == nil || len(gru.Helm.Images) != 1 {
+		t.Fatal("expected 1 Helm image update")
+	}
+	img := gru.Helm.Images[0]
+	if img.Image != "kind-registry:5000/demo/color-app" {
+		t.Errorf("Image: got %q", img.Image)
+	}
+	if img.ValuesFilePath != "gitops-output/staging/demo/color-app/values.yaml" {
+		t.Errorf("ValuesFilePath: got %q", img.ValuesFilePath)
+	}
+	if img.Key != "components.web.image.tag" {
+		t.Errorf("Key: got %q", img.Key)
+	}
+	if img.Value != "Tag" {
+		t.Errorf("Value: got %q want %q", img.Value, "Tag")
+	}
+}
+
+func TestBuildKargoStage_NoGitRepoUpdatesWithoutRepoURL(t *testing.T) {
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}
+	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{})
+
+	if len(stage.Spec.PromotionMechanisms.GitRepoUpdates) != 0 {
+		t.Errorf("expected no GitRepoUpdates without GitOpsRepoURL, got %d", len(stage.Spec.PromotionMechanisms.GitRepoUpdates))
 	}
 }
 

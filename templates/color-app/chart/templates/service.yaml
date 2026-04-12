@@ -1,0 +1,18 @@
+{{- $web := .Values.components.web }}
+{{- if $web.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "color-app.fullname" . }}
+  labels:
+    {{- include "color-app.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ $web.port | default 8080 }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "color-app.selectorLabels" . | nindent 4 }}
+{{- end }}

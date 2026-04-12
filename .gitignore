@@ -40,6 +40,8 @@ bin/
 # Local development artifacts
 tmp/
 *.log
+config/kind/registry-certs/
+config/kind/gitea-certs/
 
 # Node / frontend
 node_modules/

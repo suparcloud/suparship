@@ -50,6 +50,9 @@ hack/setup-dns.sh
 # ── 1. Bootstrap cluster (creates kind cluster + namespaces if absent) ────
 hack/bootstrap-cluster.sh
 
+# ── 1b. Local container registry (kind-registry on localhost:5001) ─────────
+hack/install-registry.sh
+
 # ── 2. NGINX ingress controller ───────────────────────────────────────────
 if kubectl get deployment ingress-nginx-controller \
      -n ingress-nginx >/dev/null 2>&1; then
@@ -116,7 +119,10 @@ else
   hack/install-kargo.sh
 fi
 
-# ── 10. Admin credentials check ──────────────────────────────────────────
+# ── 10. Color-app source repo in Gitea (optional, for demo completeness) ──
+hack/init-color-app-repo.sh
+
+# ── 11. Admin credentials check ──────────────────────────────────────────
 if ! kubectl get secret suparship-admin-auth -n suparship-system >/dev/null 2>&1; then
   echo ""
   printf "  \033[0;33mWARNING:\033[0m No admin credentials found in the cluster.\n"

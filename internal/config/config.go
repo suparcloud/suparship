@@ -41,6 +41,16 @@ type GitOpsConfig struct {
 	// (may be an internal cluster URL). Falls back to RepoURL when empty.
 	// Read from SUPARSHIP_ARGOCD_REPO_URL.
 	ArgoCDRepoURL string
+	// KargoGitRepoURL is the HTTPS Git URL Kargo uses for gitRepoUpdates
+	// during promotion. Kargo v0.9+ requires HTTPS for credential-based
+	// git operations. Falls back to ArgoCDRepoURL when empty.
+	// Read from SUPARSHIP_KARGO_GIT_REPO_URL.
+	KargoGitRepoURL string
+	// InsecureRegistry disables TLS verification for Kargo Warehouse image
+	// subscriptions. Required when using an HTTP-only registry (e.g. local
+	// kind-registry in dev mode).
+	// Read from SUPARSHIP_INSECURE_REGISTRY ("true" to enable).
+	InsecureRegistry bool
 }
 
 // Config holds the resolved startup configuration for the suparship server.
@@ -74,10 +84,12 @@ type Config struct {
 //   - SUPARSHIP_ARGOCD_REPO_URL
 func Load() Config {
 	gitops := GitOpsConfig{
-		RepoURL:       os.Getenv("SUPARSHIP_GITOPS_REPO_URL"),
-		RepoUser:      os.Getenv("SUPARSHIP_GITOPS_REPO_USER"),
-		RepoPassword:  os.Getenv("SUPARSHIP_GITOPS_REPO_PASSWORD"),
-		ArgoCDRepoURL: os.Getenv("SUPARSHIP_ARGOCD_REPO_URL"),
+		RepoURL:          os.Getenv("SUPARSHIP_GITOPS_REPO_URL"),
+		RepoUser:         os.Getenv("SUPARSHIP_GITOPS_REPO_USER"),
+		RepoPassword:     os.Getenv("SUPARSHIP_GITOPS_REPO_PASSWORD"),
+		ArgoCDRepoURL:    os.Getenv("SUPARSHIP_ARGOCD_REPO_URL"),
+		KargoGitRepoURL:  os.Getenv("SUPARSHIP_KARGO_GIT_REPO_URL"),
+		InsecureRegistry: os.Getenv("SUPARSHIP_INSECURE_REGISTRY") == "true",
 	}
 
 	if os.Getenv("SUPARSHIP_DEV_MODE") == "local" {
