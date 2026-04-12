@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -102,6 +103,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		templates        []*tpl.Template
 		readinessProbers []server.ReadinessProber
 		kargoPromoter    server.KargoPromoter
+		kargoStatusReader server.KargoStatusReader
+		kargoPipelineReader server.KargoPipelineReader
 	)
 
 	switch cfg.RuntimeMode {
@@ -170,7 +173,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			})
 			// Wire Kargo promoter.
 			kargoStore := kube.NewKargoStore(dynClient)
-			kargoPromoter = &kargoPromoterAdapter{store: kargoStore}
+			kargoAdapter := &kargoPromoterAdapter{store: kargoStore}
+			kargoPromoter = kargoAdapter
+			kargoStatusReader = kargoAdapter
+			kargoPipelineReader = kargoAdapter
 			logger.Info("kargo promoter enabled via dynamic client")
 		}
 
@@ -281,8 +287,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		PreviewStore:     previewStore,
 		AppStore:         appStore,
 		ClusterStore:     clusterStore,
-		GitOpsPublisher:  gitOpsPublisher,
-		KargoPromoter:    kargoPromoter,
+		GitOpsPublisher:     gitOpsPublisher,
+		KargoPromoter:       kargoPromoter,
+		KargoStatusReader:   kargoStatusReader,
+		KargoPipelineReader: kargoPipelineReader,
 		ReadinessProbers: readinessProbers,
 		CookieSecure:     cookieSecure,
 		Logger:           logger,
@@ -381,6 +389,60 @@ func (a *kargoPromoterAdapter) CreatePromotion(ctx context.Context, projectNS, a
 		Freight: info.Freight,
 		Phase:   info.Phase,
 	}, nil
+}
+
+// GetPromotionStatus implements server.KargoStatusReader.
+func (a *kargoPromoterAdapter) GetPromotionStatus(ctx context.Context, projectNS, promotionName string) (server.KargoPromotionResult, error) {
+	info, err := a.store.GetPromotionStatus(ctx, projectNS, promotionName)
+	if err != nil {
+		return server.KargoPromotionResult{}, err
+	}
+	return server.KargoPromotionResult{
+		Name:    info.Name,
+		Stage:   info.Stage,
+		Freight: info.Freight,
+		Phase:   info.Phase,
+	}, nil
+}
+
+// ListAppStageStatuses implements server.KargoPipelineReader.
+// It lists all Kargo Stage CRs in projectNS and filters to those belonging to
+// appName (stage name starts with "{appName}-").
+func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, projectNS, appName string) ([]server.KargoStageStatusResult, error) {
+	all, err := a.store.ListStageStatuses(ctx, projectNS)
+	if err != nil {
+		return nil, err
+	}
+
+	prefix := appName + "-"
+	var results []server.KargoStageStatusResult
+	for stageName, s := range all {
+		if len(stageName) <= len(prefix) || stageName[:len(prefix)] != prefix {
+			continue
+		}
+		envName := stageName[len(prefix):]
+		results = append(results, server.KargoStageStatusResult{
+			StageName:             stageName,
+			EnvName:               envName,
+			Phase:                 s.Phase,
+			Health:                s.Health,
+			CurrentFreight:        s.CurrentFreight,
+			AvailableFreightCount: s.AvailableFreightCount,
+		})
+	}
+
+	slog.Debug("kargo pipeline adapter: filtered stages for app",
+		"namespace", projectNS,
+		"app", appName,
+		"totalStages", len(all),
+		"appStages", len(results),
+	)
+
+	// Order by envName for deterministic UI rendering: staging before prod.
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].EnvName < results[j].EnvName
+	})
+	return results, nil
 }
 
 func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {

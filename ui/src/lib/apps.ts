@@ -7,6 +7,8 @@ import type {
   AppLogsResponse,
   CreateAppRequest,
   CreateAppResponse,
+  KargoAppPipeline,
+  KargoPromotionStatus,
   PromoteRequest,
   PromoteResponse,
 } from "../types";
@@ -83,6 +85,34 @@ export function syncApp(
 ): Promise<SyncAppResponse> {
   return api.post<SyncAppResponse>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/sync`,
+  );
+}
+
+/**
+ * Polls the live status of a Kargo Promotion CR.
+ * Used to track phase transitions (Pending → Running → Succeeded/Failed)
+ * after triggering a promotion.
+ */
+export function getKargoPromotionStatus(
+  project: string,
+  app: string,
+  promotionName: string,
+): Promise<KargoPromotionStatus> {
+  return api.get<KargoPromotionStatus>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/promotions/${encodeURIComponent(promotionName)}`,
+  );
+}
+
+/**
+ * Returns the live Kargo Stage statuses for all stages belonging to an app.
+ * Each stage shows phase, health, current freight, and available freight count.
+ */
+export function getKargoAppPipeline(
+  project: string,
+  app: string,
+): Promise<KargoAppPipeline> {
+  return api.get<KargoAppPipeline>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/kargo/stages`,
   );
 }
 

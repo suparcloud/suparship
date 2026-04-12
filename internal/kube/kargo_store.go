@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +41,10 @@ type KargoStageStatus struct {
 	CurrentFreight string
 	// Health is the aggregated health status of the Stage ("Healthy", "Unhealthy", "Unknown").
 	Health string
+	// AvailableFreightCount is the number of Freight items that are available
+	// for promotion into this Stage but have not yet been promoted. A value > 0
+	// means Kargo has detected new images/commits that are ready to promote.
+	AvailableFreightCount int
 }
 
 // KargoPromotionInfo describes a Kargo Promotion CR that was created or observed.
@@ -77,7 +82,16 @@ func (s *KargoStore) GetStageStatus(ctx context.Context, projectNS, stageName st
 	if err != nil {
 		return nil, fmt.Errorf("get kargo stage %s/%s: %w", projectNS, stageName, err)
 	}
-	return parseKargoStageStatus(obj), nil
+	status := parseKargoStageStatus(obj)
+	slog.Debug("kargo stage status",
+		"namespace", projectNS,
+		"stage", stageName,
+		"phase", status.Phase,
+		"health", status.Health,
+		"currentFreight", status.CurrentFreight,
+		"availableFreightCount", status.AvailableFreightCount,
+	)
+	return status, nil
 }
 
 // ListStageStatuses returns the status of all Kargo Stages in projectNS,
@@ -91,8 +105,18 @@ func (s *KargoStore) ListStageStatuses(ctx context.Context, projectNS string) (m
 	result := make(map[string]*KargoStageStatus, len(list.Items))
 	for _, item := range list.Items {
 		name, _, _ := unstructuredString(item.Object, "metadata", "name")
-		result[name] = parseKargoStageStatus(&item)
+		st := parseKargoStageStatus(&item)
+		result[name] = st
+		slog.Debug("kargo stage listed",
+			"namespace", projectNS,
+			"stage", name,
+			"phase", st.Phase,
+			"health", st.Health,
+			"currentFreight", st.CurrentFreight,
+			"availableFreightCount", st.AvailableFreightCount,
+		)
 	}
+	slog.Debug("kargo stages listed", "namespace", projectNS, "count", len(result))
 	return result, nil
 }
 
@@ -118,23 +142,58 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 	qualifiedFromStage := kargoStageName(appName, fromStage)
 	qualifiedToStage := kargoStageName(appName, toStage)
 
+	slog.Debug("kargo create promotion: resolving freight",
+		"namespace", projectNS,
+		"app", appName,
+		"fromStage", qualifiedFromStage,
+		"toStage", qualifiedToStage,
+	)
+
 	freight, err := s.getCurrentFreight(ctx, projectNS, qualifiedFromStage)
 	if err != nil {
 		return nil, fmt.Errorf("resolve freight from stage %q: %w", qualifiedFromStage, err)
 	}
 	if freight == "" {
+		slog.Debug("kargo create promotion: no current freight in source stage",
+			"namespace", projectNS,
+			"fromStage", qualifiedFromStage,
+		)
 		return nil, ErrKargoNoFreight
 	}
+
+	slog.Debug("kargo create promotion: freight resolved",
+		"namespace", projectNS,
+		"fromStage", qualifiedFromStage,
+		"freight", freight,
+	)
 
 	// Approve the Freight for the target Stage so Kargo allows the Promotion even
 	// when staging verification is absent (the case with pure argoCDAppUpdates).
 	if approveErr := s.approveFreightForStage(ctx, projectNS, freight, qualifiedToStage); approveErr != nil {
 		// Non-fatal: log and continue. If the Freight is already approved or
 		// the Stage accepts it from an upstream, this succeeds anyway.
-		_ = approveErr
+		slog.Debug("kargo freight approval failed (non-fatal, continuing)",
+			"namespace", projectNS,
+			"freight", freight,
+			"stage", qualifiedToStage,
+			"error", approveErr,
+		)
+	} else {
+		slog.Debug("kargo freight approved for target stage",
+			"namespace", projectNS,
+			"freight", freight,
+			"stage", qualifiedToStage,
+		)
 	}
 
 	promotionName := fmt.Sprintf("%s-%s-%d", appName, toStage, time.Now().Unix())
+
+	slog.Debug("kargo create promotion: submitting Promotion CR",
+		"namespace", projectNS,
+		"promotion", promotionName,
+		"stage", qualifiedToStage,
+		"freight", freight,
+	)
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -170,6 +229,13 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 	if statusRaw, ok := created.Object["status"].(map[string]any); ok {
 		info.Phase, _, _ = unstructuredString(statusRaw, "phase")
 	}
+	slog.Debug("kargo promotion CR created",
+		"namespace", projectNS,
+		"promotion", promotionName,
+		"stage", qualifiedToStage,
+		"freight", freight,
+		"initialPhase", info.Phase,
+	)
 	return info, nil
 }
 
@@ -188,6 +254,13 @@ func (s *KargoStore) GetPromotionStatus(ctx context.Context, projectNS, promotio
 	if statusRaw, ok := obj.Object["status"].(map[string]any); ok {
 		info.Phase, _, _ = unstructuredString(statusRaw, "phase")
 	}
+	slog.Debug("kargo promotion status",
+		"namespace", projectNS,
+		"promotion", promotionName,
+		"stage", info.Stage,
+		"freight", info.Freight,
+		"phase", info.Phase,
+	)
 	return info, nil
 }
 
@@ -225,15 +298,21 @@ func (s *KargoStore) getCurrentFreight(ctx context.Context, projectNS, stageName
 		if cf, ok := statusRaw["currentFreight"].(map[string]any); ok {
 			name, found, _ := unstructuredString(cf, "name")
 			if found && name != "" {
+				slog.Debug("kargo current freight resolved (v0.8+ field)",
+					"namespace", projectNS, "stage", stageName, "freight", name)
 				return name, nil
 			}
 		}
 		// Kargo < v0.8: status.currentFreight was a plain string.
 		if cf, ok := statusRaw["currentFreight"].(string); ok && cf != "" {
+			slog.Debug("kargo current freight resolved (legacy string field)",
+				"namespace", projectNS, "stage", stageName, "freight", cf)
 			return cf, nil
 		}
 	}
 
+	slog.Debug("kargo current freight not in stage status — falling back to latest successful promotion",
+		"namespace", projectNS, "stage", stageName)
 	// Fallback: find the Freight from the most recent successful Promotion for
 	// this Stage. This handles the case where promotionMechanisms.argoCDAppUpdates
 	// is used without image substitution — Kargo marks the Promotion Succeeded
@@ -285,6 +364,19 @@ func (s *KargoStore) latestSuccessfulPromotionFreight(ctx context.Context, proje
 		latestTime = finishedAt
 		latestFreight = freight
 	}
+	if latestFreight != "" {
+		slog.Debug("kargo current freight resolved (fallback: latest successful promotion)",
+			"namespace", projectNS,
+			"stage", stageName,
+			"freight", latestFreight,
+			"finishedAt", latestTime,
+		)
+	} else {
+		slog.Debug("kargo current freight: no successful promotions found for stage",
+			"namespace", projectNS,
+			"stage", stageName,
+		)
+	}
 	return latestFreight, nil
 }
 
@@ -301,6 +393,13 @@ func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 	} else if cf, ok := statusRaw["currentFreight"].(string); ok {
 		s.CurrentFreight = cf
 	}
+
+	// Count available freights (freights detected by Kargo but not yet promoted).
+	// Kargo stores these in status.availableFreights as a list.
+	if available, ok := statusRaw["availableFreights"].([]any); ok {
+		s.AvailableFreightCount = len(available)
+	}
+
 	return s
 }
 

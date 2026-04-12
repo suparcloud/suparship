@@ -45,6 +45,42 @@ type KargoPromoter interface {
 	CreatePromotion(ctx context.Context, projectNS, appName, fromStage, toStage string) (KargoPromotionResult, error)
 }
 
+// KargoStatusReader reads the live status of Kargo Promotion CRs. When nil,
+// the GET promotion-status endpoint is disabled. Implementations must be safe
+// for concurrent use.
+type KargoStatusReader interface {
+	// GetPromotionStatus returns the current observed status of a Kargo
+	// Promotion CR identified by promotionName within projectNS.
+	GetPromotionStatus(ctx context.Context, projectNS, promotionName string) (KargoPromotionResult, error)
+}
+
+// KargoPipelineReader reads the live status of Kargo Stage CRs for pipeline
+// visibility (phase, health, available freight count). When nil, the pipeline
+// status endpoint is disabled. Implementations must be safe for concurrent use.
+type KargoPipelineReader interface {
+	// ListAppStageStatuses returns the Kargo Stage statuses that belong to
+	// appName within projectNS. Stage names follow the "{appName}-{envName}"
+	// convention; the returned slice is ordered by env name.
+	ListAppStageStatuses(ctx context.Context, projectNS, appName string) ([]KargoStageStatusResult, error)
+}
+
+// KargoStageStatusResult is the DTO returned by KargoPipelineReader.
+type KargoStageStatusResult struct {
+	// StageName is the full Kargo Stage name, e.g. "color-app-staging".
+	StageName string
+	// EnvName is the suparship environment name derived from the stage name.
+	EnvName string
+	// Phase is the current stage phase: "Steady", "Promoting", "NotReady".
+	Phase string
+	// Health is the aggregated health: "Healthy", "Unhealthy", "Unknown".
+	Health string
+	// CurrentFreight is the Freight name currently running in this stage.
+	CurrentFreight string
+	// AvailableFreightCount is how many new Freight items are waiting to be
+	// promoted into this stage. >0 means a new image/commit is available.
+	AvailableFreightCount int
+}
+
 // KargoPromotionResult is the DTO returned by KargoPromoter.CreatePromotion.
 type KargoPromotionResult struct {
 	// Name is the generated Kargo Promotion CR name.
@@ -83,6 +119,8 @@ type Config struct {
 	ClusterStore    domain.ClusterStore  // optional: enables /api/v1/clusters endpoints when set
 	GitOpsPublisher GitOpsPublisher      // optional: commits app manifests to gitops repo on create
 	KargoPromoter   KargoPromoter        // optional: enables real Kargo-backed promotions
+	KargoStatusReader KargoStatusReader  // optional: enables GET promotion-status endpoint
+	KargoPipelineReader KargoPipelineReader // optional: enables GET pipeline-stages endpoint
 	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
@@ -167,6 +205,14 @@ func New(cfg Config) *Server {
 				cfg.Logger.Info("kargo promoter enabled — promotions will use Kargo Promotion CRs")
 			} else {
 				cfg.Logger.Info("kargo promoter not configured — using in-store release copy for promotions")
+			}
+			if cfg.KargoStatusReader != nil {
+				rh.appHandler.kargoStatusReader = cfg.KargoStatusReader
+				cfg.Logger.Info("kargo status reader enabled — promotion status endpoint active")
+			}
+			if cfg.KargoPipelineReader != nil {
+				rh.appHandler.kargoPipelineReader = cfg.KargoPipelineReader
+				cfg.Logger.Info("kargo pipeline reader enabled — stage status endpoint active")
 			}
 			cfg.Logger.Info("app endpoints enabled")
 		}

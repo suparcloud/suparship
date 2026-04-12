@@ -326,6 +326,33 @@ export interface KargoPromotion {
   phase?: string;
 }
 
+/**
+ * Live status response for a Kargo Promotion CR.
+ * Returned by GET /api/v1/projects/:project/apps/:app/promotions/:name.
+ */
+export interface KargoPromotionStatus {
+  name: string;
+  stage: string;
+  freight: string;
+  /** Current observed phase: "Pending" | "Running" | "Succeeded" | "Failed" */
+  phase: string;
+}
+
+/** One stage's live status in the Kargo pipeline. */
+export interface KargoStageStatus {
+  stageName: string;
+  envName: string;
+  phase: string;
+  health: string;
+  currentFreight?: string;
+  availableFreightCount: number;
+}
+
+/** Response from GET .../kargo/stages */
+export interface KargoAppPipeline {
+  stages: KargoStageStatus[];
+}
+
 export interface PromoteResponse {
   project: string;
   /** App name (new field). Falls back to `service` for legacy responses. */

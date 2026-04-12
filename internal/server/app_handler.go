@@ -39,8 +39,10 @@ type appHandler struct {
 	orgProvider     rbac.OrgProvider     // optional: provides org env fallback for sync
 	runtimeProvider runtime.Provider     // optional: enriches env responses with live K8s status
 	logsProvider    runtime.LogsProvider // optional: enables GET .../apps/{app}/logs
-	gitOpsPublisher GitOpsPublisher      // optional: commits argocd manifests to gitops repo on create
-	kargoPromoter   KargoPromoter        // optional: creates Kargo Promotion CRs on promote
+	gitOpsPublisher   GitOpsPublisher      // optional: commits argocd manifests to gitops repo on create
+	kargoPromoter     KargoPromoter        // optional: creates Kargo Promotion CRs on promote
+	kargoStatusReader KargoStatusReader    // optional: reads live Kargo Promotion status
+	kargoPipelineReader KargoPipelineReader // optional: reads live Kargo Stage pipeline status
 }
 
 // newAppHandler creates an appHandler.
@@ -940,4 +942,112 @@ func appPreviewToDTO(env *domain.AppEnvironment) AppPreviewSummaryDTO {
 		}
 	}
 	return dto
+}
+
+// handleGetKargoPromotion handles GET /api/v1/projects/{project}/apps/{app}/promotions/{name}.
+// It returns the current observed phase of a Kargo Promotion CR so the UI can
+// poll for live status updates after triggering a promotion.
+//
+// The endpoint is only active when kargoStatusReader is configured; otherwise
+// it returns 501 Not Implemented.
+func (ah *appHandler) handleGetKargoPromotion(w http.ResponseWriter, r *http.Request) {
+	if ah.kargoStatusReader == nil {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "kargo status reader not configured"})
+		return
+	}
+
+	projectName := r.PathValue("project")
+	promotionName := r.PathValue("name")
+
+	if projectName == "" || promotionName == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "project and name are required"})
+		return
+	}
+
+	result, err := ah.kargoStatusReader.GetPromotionStatus(r.Context(), projectName, promotionName)
+	if err != nil {
+		slog.Error("failed to get kargo promotion status",
+			"project", projectName, "promotion", promotionName, "error", err,
+		)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to get promotion status"})
+		return
+	}
+
+	slog.Debug("kargo promotion status polled",
+		"project", projectName,
+		"promotion", promotionName,
+		"stage", result.Stage,
+		"freight", result.Freight,
+		"phase", result.Phase,
+	)
+
+	writeJSON(w, http.StatusOK, KargoPromotionStatusResponse{
+		Name:    result.Name,
+		Stage:   result.Stage,
+		Freight: result.Freight,
+		Phase:   result.Phase,
+	})
+}
+
+// handleGetKargoStages handles GET /api/v1/projects/{project}/apps/{app}/kargo/stages.
+// It returns the live Kargo Stage statuses for all stages belonging to the app
+// (using the "{appName}-{envName}" naming convention). The UI uses this to show
+// pipeline progress — stage phase, health, current freight, and how many new
+// freights are waiting to be promoted.
+//
+// Returns 501 when kargoPipelineReader is not configured.
+func (ah *appHandler) handleGetKargoStages(w http.ResponseWriter, r *http.Request) {
+	if ah.kargoPipelineReader == nil {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "kargo pipeline reader not configured"})
+		return
+	}
+
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	if projectName == "" || appName == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "project and app are required"})
+		return
+	}
+
+	stages, err := ah.kargoPipelineReader.ListAppStageStatuses(r.Context(), projectName, appName)
+	if err != nil {
+		slog.Error("failed to list kargo stage statuses",
+			"project", projectName, "app", appName, "error", err,
+		)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list kargo stage statuses"})
+		return
+	}
+
+	slog.Debug("kargo pipeline stages returned",
+		"project", projectName,
+		"app", appName,
+		"count", len(stages),
+	)
+	for _, s := range stages {
+		slog.Debug("kargo pipeline stage",
+			"project", projectName,
+			"app", appName,
+			"stage", s.StageName,
+			"env", s.EnvName,
+			"phase", s.Phase,
+			"health", s.Health,
+			"currentFreight", s.CurrentFreight,
+			"availableFreightCount", s.AvailableFreightCount,
+		)
+	}
+
+	dtos := make([]KargoStageStatusDTO, 0, len(stages))
+	for _, s := range stages {
+		dtos = append(dtos, KargoStageStatusDTO{
+			StageName:             s.StageName,
+			EnvName:               s.EnvName,
+			Phase:                 s.Phase,
+			Health:                s.Health,
+			CurrentFreight:        s.CurrentFreight,
+			AvailableFreightCount: s.AvailableFreightCount,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, KargoAppPipelineResponse{Stages: dtos})
 }

@@ -287,3 +287,43 @@ type AppPromoteResponse struct {
 	// KargoPromotion is populated when a Kargo Promotion CR was created.
 	KargoPromotion *KargoPromotionDTO `json:"kargoPromotion,omitempty"`
 }
+
+// KargoPromotionStatusResponse is the JSON body for
+// GET /api/v1/projects/{project}/apps/{app}/promotions/{name}.
+// It returns the current observed phase of a Kargo Promotion CR, enabling the
+// UI to poll for live status updates without subscribing to server-sent events.
+type KargoPromotionStatusResponse struct {
+	// Name is the Kargo Promotion CR name.
+	Name string `json:"name"`
+	// Stage is the target Kargo Stage (= target environment).
+	Stage string `json:"stage"`
+	// Freight is the Freight name being promoted.
+	Freight string `json:"freight"`
+	// Phase is the current observed phase: "Pending", "Running", "Succeeded", "Failed".
+	Phase string `json:"phase"`
+}
+
+// KargoStageStatusDTO is the per-stage view returned by the pipeline endpoint.
+type KargoStageStatusDTO struct {
+	// StageName is the full Kargo Stage name, e.g. "color-app-staging".
+	StageName string `json:"stageName"`
+	// EnvName is the suparship environment name (e.g. "staging").
+	EnvName string `json:"envName"`
+	// Phase is "Steady", "Promoting", or "NotReady".
+	Phase string `json:"phase"`
+	// Health is "Healthy", "Unhealthy", or "Unknown".
+	Health string `json:"health"`
+	// CurrentFreight is the abbreviated freight name currently running.
+	CurrentFreight string `json:"currentFreight,omitempty"`
+	// AvailableFreightCount is the number of new freights waiting to be
+	// promoted into this stage. A non-zero value means a new image/commit
+	// is available but has not yet been promoted.
+	AvailableFreightCount int `json:"availableFreightCount"`
+}
+
+// KargoAppPipelineResponse is the JSON body for
+// GET /api/v1/projects/{project}/apps/{app}/kargo/stages.
+type KargoAppPipelineResponse struct {
+	// Stages is ordered staging → prod (matches the promotion chain).
+	Stages []KargoStageStatusDTO `json:"stages"`
+}
