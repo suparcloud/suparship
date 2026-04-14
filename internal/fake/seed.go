@@ -77,6 +77,13 @@ func seedTemplates(r *DevRuntime) {
 			Description: "Run a containerized task on a cron schedule.",
 			Category:    "cron",
 		},
+		{
+			Name:        "color-app",
+			Version:     "1.0.0",
+			Title:       "Color App (Demo)",
+			Description: "A demo app that displays a color — for Kargo promotion demos.",
+			Category:    "demo",
+		},
 	} {
 		r.templates[t.Name] = t
 	}
@@ -188,9 +195,37 @@ func seedApps(r *DevRuntime) {
 		},
 	}
 
+	colorApp := &domain.App{
+		Name:        "color-app",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			DisplayName: "Color App",
+			Description: "Demo app that displays a color — for Kargo promotion demos.",
+			Template: domain.AppTemplateRef{
+				Name:    "color-app",
+				Version: "1.0.0",
+			},
+			Values: map[string]any{
+				"image_repository": "kind-registry:5000/demo/color-app",
+				"image_tag":        "0.1.0",
+				"color":            "blue",
+			},
+			Components: []domain.ComponentSpec{
+				{
+					Name:           "web",
+					Type:           domain.ComponentWeb,
+					Enabled:        true,
+					Expose:         true,
+					PreviewEnabled: true,
+				},
+			},
+		},
+	}
+
 	r.apps["demo"] = map[string]*domain.App{
 		hello.Name:      hello,
 		apiGateway.Name: apiGateway,
+		colorApp.Name:   colorApp,
 	}
 }
 
@@ -281,15 +316,46 @@ func seedAppEnvironments(r *DevRuntime) {
 		},
 	}
 
+	colorRel := &domain.AppReleaseRef{
+		Image: "kind-registry:5000/demo/color-app:0.1.0",
+		Tag:   "0.1.0",
+	}
+	colorEnvs := []*domain.AppEnvironment{
+		{
+			AppName:     "color-app",
+			ProjectName: "demo",
+			EnvName:     "staging",
+			EnvType:     domain.AppEnvStaging,
+			Namespace:   "color-app-staging",
+			Release:     colorRel,
+			URLs:        []string{"http://color-app.staging.localhost:8880"},
+			Status:      healthyFull,
+		},
+		{
+			AppName:     "color-app",
+			ProjectName: "demo",
+			EnvName:     "prod",
+			EnvType:     domain.AppEnvProd,
+			Namespace:   "color-app-prod",
+			Release:     colorRel,
+			URLs:        []string{"http://color-app.prod.localhost:8880"},
+			Status:      healthyFull,
+		},
+	}
+
 	r.appEnvs["demo"] = map[string]map[string]*domain.AppEnvironment{
 		"hello":       {},
 		"api-gateway": {},
+		"color-app":   {},
 	}
 	for _, e := range helloEnvs {
 		r.appEnvs["demo"]["hello"][e.EnvName] = e
 	}
 	for _, e := range gwEnvs {
 		r.appEnvs["demo"]["api-gateway"][e.EnvName] = e
+	}
+	for _, e := range colorEnvs {
+		r.appEnvs["demo"]["color-app"][e.EnvName] = e
 	}
 }
 

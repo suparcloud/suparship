@@ -1,0 +1,33 @@
+# Default values for the color-app template chart.
+#
+# Follows the suparShip canonical HelmValues schema. Keys under
+# `components.web.*` and `routing.*` are set by suparShip at publish time.
+
+app:
+  name: ""
+  env: ""
+
+components:
+  web:
+    enabled: true
+    image:
+      repository: kind-registry:5000/demo/color-app
+      tag: "0.1.0"
+    replicas: 1
+    expose: true
+    port: 8080
+    healthCheck:
+      path: /healthz
+    resources:
+      size: small
+    env:
+      COLOR: blue
+
+routing:
+  host: ""
+  component: web
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}

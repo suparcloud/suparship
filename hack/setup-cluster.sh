@@ -9,6 +9,9 @@
 #   4. Gitea + gitops repo registered with ArgoCD
 #   5. Gitops repo initialisation (charts + gitops-output skeleton)
 #   6. Demo data seed
+#   7. cert-manager (Kargo dependency — TLS certificate management)
+#   8. Argo Rollouts (Kargo dependency — progressive delivery primitives)
+#   9. Kargo (GitOps-native promotion engine)
 #
 # Credentials (ArgoCD, Gitea) are written to .env.cluster (git-ignored)
 # and printed as a summary at the end.
@@ -46,6 +49,9 @@ hack/setup-dns.sh
 
 # ── 1. Bootstrap cluster (creates kind cluster + namespaces if absent) ────
 hack/bootstrap-cluster.sh
+
+# ── 1b. Local container registry (kind-registry on localhost:5001) ─────────
+hack/install-registry.sh
 
 # ── 2. NGINX ingress controller ───────────────────────────────────────────
 if kubectl get deployment ingress-nginx-controller \
@@ -87,7 +93,36 @@ hack/init-gitops-repo.sh
 # ── 6. Seed demo data (idempotent) ───────────────────────────────────────
 hack/seed.sh
 
-# ── 7. Admin credentials check ───────────────────────────────────────────
+# ── 7. cert-manager (required by Kargo for TLS) ───────────────────────────
+if kubectl get deployment cert-manager \
+     -n cert-manager >/dev/null 2>&1; then
+  echo "  –  cert-manager already installed — skipping"
+  echo ""
+else
+  hack/install-cert-manager.sh
+fi
+
+# ── 8. Argo Rollouts (required by Kargo) ─────────────────────────────────
+if kubectl get deployment argo-rollouts \
+     -n argo-rollouts >/dev/null 2>&1; then
+  echo "  –  Argo Rollouts already installed — skipping"
+  echo ""
+else
+  hack/install-argo-rollouts.sh
+fi
+
+# ── 9. Kargo (GitOps-native promotion engine) ─────────────────────────────
+if helm status kargo -n kargo >/dev/null 2>&1; then
+  echo "  –  Kargo already installed — skipping"
+  echo ""
+else
+  hack/install-kargo.sh
+fi
+
+# ── 10. Color-app source repo in Gitea (optional, for demo completeness) ──
+hack/init-color-app-repo.sh
+
+# ── 11. Admin credentials check ──────────────────────────────────────────
 if ! kubectl get secret suparship-admin-auth -n suparship-system >/dev/null 2>&1; then
   echo ""
   printf "  \033[0;33mWARNING:\033[0m No admin credentials found in the cluster.\n"

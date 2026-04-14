@@ -258,16 +258,104 @@ type AppPromoteRequest struct {
 	TargetEnvironment string `json:"targetEnvironment"`
 }
 
+// KargoPromotionDTO describes a Kargo Promotion CR created by the promote endpoint.
+// It is populated only when the server is configured with a KargoPromoter;
+// otherwise Release is populated instead (in-store fallback).
+type KargoPromotionDTO struct {
+	// Name is the Kargo Promotion CR name (deterministically generated).
+	Name string `json:"name"`
+	// Stage is the Kargo Stage (= target environment) being promoted to.
+	Stage string `json:"stage"`
+	// Freight is the Kargo Freight name being promoted.
+	Freight string `json:"freight"`
+	// Phase is the initial observed phase ("Pending", "Running", etc.).
+	Phase string `json:"phase,omitempty"`
+}
+
 // AppPromoteResponse is the JSON body returned on a successful app promotion.
-// Release is populated with the release ref that was copied from source to
-// destination; it is nil only when no release information is available.
+// When Kargo is configured, KargoPromotion is populated and Release is nil.
+// Without Kargo, Release is populated with the in-store release copy result.
 type AppPromoteResponse struct {
-	Project     string            `json:"project"`
-	App         string            `json:"app"`
-	Source      string            `json:"source"`
-	Destination string            `json:"destination"`
-	Namespace   string            `json:"namespace"`
-	Message     string            `json:"message"`
-	// Release is the release bundle (all components) that was promoted.
-	Release     *AppReleaseRefDTO `json:"release,omitempty"`
+	Project     string             `json:"project"`
+	App         string             `json:"app"`
+	Source      string             `json:"source"`
+	Destination string             `json:"destination"`
+	Namespace   string             `json:"namespace"`
+	Message     string             `json:"message"`
+	// Release is the release bundle copied in the store (no-Kargo fallback).
+	Release        *AppReleaseRefDTO  `json:"release,omitempty"`
+	// KargoPromotion is populated when a Kargo Promotion CR was created.
+	KargoPromotion *KargoPromotionDTO `json:"kargoPromotion,omitempty"`
+}
+
+// KargoPromotionStatusResponse is the JSON body for
+// GET /api/v1/projects/{project}/apps/{app}/promotions/{name}.
+// It returns the current observed phase of a Kargo Promotion CR, enabling the
+// UI to poll for live status updates without subscribing to server-sent events.
+type KargoPromotionStatusResponse struct {
+	// Name is the Kargo Promotion CR name.
+	Name string `json:"name"`
+	// Stage is the target Kargo Stage (= target environment).
+	Stage string `json:"stage"`
+	// Freight is the Freight name being promoted.
+	Freight string `json:"freight"`
+	// Phase is the current observed phase: "Pending", "Running", "Succeeded", "Failed".
+	Phase string `json:"phase"`
+}
+
+// KargoStageStatusDTO is the per-stage view returned by the pipeline endpoint.
+type KargoStageStatusDTO struct {
+	// StageName is the full Kargo Stage name, e.g. "color-app-staging".
+	StageName string `json:"stageName"`
+	// EnvName is the suparship environment name (e.g. "staging").
+	EnvName string `json:"envName"`
+	// Phase is "Steady", "Promoting", or "NotReady".
+	Phase string `json:"phase"`
+	// Health is "Healthy", "Unhealthy", or "Unknown".
+	Health string `json:"health"`
+	// CurrentFreight is the abbreviated freight name currently running.
+	CurrentFreight string `json:"currentFreight,omitempty"`
+	// AvailableFreightCount is the number of new freights waiting to be
+	// promoted into this stage. A non-zero value means a new image/commit
+	// is available but has not yet been promoted.
+	AvailableFreightCount int `json:"availableFreightCount"`
+}
+
+// KargoAppPipelineResponse is the JSON body for
+// GET /api/v1/projects/{project}/apps/{app}/kargo/stages.
+type KargoAppPipelineResponse struct {
+	// Stages is ordered staging → prod (matches the promotion chain).
+	Stages []KargoStageStatusDTO `json:"stages"`
+}
+
+// --- Deployment history DTOs ---
+
+// AppDeploymentHistoryEntryDTO represents a single ArgoCD sync event in the
+// deployment history of one app environment.
+type AppDeploymentHistoryEntryDTO struct {
+	// ID is the ArgoCD-assigned sequence number; higher = more recent.
+	ID int64 `json:"id"`
+	// Revision is the Git commit SHA that was synced.
+	Revision string `json:"revision,omitempty"`
+	// DeployedAt is the RFC 3339 timestamp when the sync completed.
+	DeployedAt string `json:"deployedAt,omitempty"`
+	// DeployStartedAt is the RFC 3339 timestamp when the sync began (may be empty).
+	DeployStartedAt string `json:"deployStartedAt,omitempty"`
+	// RepoURL is the source Git repository URL.
+	RepoURL string `json:"repoURL,omitempty"`
+	// Path is the path within the repository that was synced.
+	Path string `json:"path,omitempty"`
+	// TargetRevision is the Git ref (branch/tag/commit) tracked by the Application.
+	TargetRevision string `json:"targetRevision,omitempty"`
+}
+
+// AppDeploymentHistoryResponse is the JSON body for
+// GET /api/v1/projects/{project}/apps/{app}/environments/{env}/history.
+type AppDeploymentHistoryResponse struct {
+	Project     string                         `json:"project"`
+	App         string                         `json:"app"`
+	Environment string                         `json:"environment"`
+	// History is in reverse-chronological order (most recent first).
+	// Empty slice when no syncs have occurred yet.
+	History     []AppDeploymentHistoryEntryDTO `json:"history"`
 }

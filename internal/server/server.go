@@ -34,6 +34,103 @@ type GitOpsPublisher interface {
 	PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error
 }
 
+// KargoPromoter creates Kargo Promotion CRs to advance freight through the
+// promotion pipeline. When nil the app promotion endpoint falls back to the
+// in-store release copy (MVP stub). Implementations must be safe for concurrent use.
+type KargoPromoter interface {
+	// CreatePromotion creates a Kargo Promotion CR to advance the current
+	// freight from fromStage to toStage in projectNS (= Kargo project namespace).
+	//
+	// Returns kube.ErrKargoNoFreight when fromStage has no freight to promote.
+	CreatePromotion(ctx context.Context, projectNS, appName, fromStage, toStage string) (KargoPromotionResult, error)
+}
+
+// KargoStatusReader reads the live status of Kargo Promotion CRs. When nil,
+// the GET promotion-status endpoint is disabled. Implementations must be safe
+// for concurrent use.
+type KargoStatusReader interface {
+	// GetPromotionStatus returns the current observed status of a Kargo
+	// Promotion CR identified by promotionName within projectNS.
+	GetPromotionStatus(ctx context.Context, projectNS, promotionName string) (KargoPromotionResult, error)
+}
+
+// KargoPipelineReader reads the live status of Kargo Stage CRs for pipeline
+// visibility (phase, health, available freight count). When nil, the pipeline
+// status endpoint is disabled. Implementations must be safe for concurrent use.
+type KargoPipelineReader interface {
+	// ListAppStageStatuses returns the Kargo Stage statuses that belong to
+	// appName within projectNS. Stage names follow the "{appName}-{envName}"
+	// convention; the returned slice is ordered by env name.
+	ListAppStageStatuses(ctx context.Context, projectNS, appName string) ([]KargoStageStatusResult, error)
+}
+
+// KargoStageStatusResult is the DTO returned by KargoPipelineReader.
+type KargoStageStatusResult struct {
+	// StageName is the full Kargo Stage name, e.g. "color-app-staging".
+	StageName string
+	// EnvName is the suparship environment name derived from the stage name.
+	EnvName string
+	// Phase is the current stage phase: "Steady", "Promoting", "NotReady".
+	Phase string
+	// Health is the aggregated health: "Healthy", "Unhealthy", "Unknown".
+	Health string
+	// CurrentFreight is the Freight name currently running in this stage.
+	CurrentFreight string
+	// AvailableFreightCount is how many new Freight items are waiting to be
+	// promoted into this stage. >0 means a new image/commit is available.
+	AvailableFreightCount int
+}
+
+// KargoPromotionResult is the DTO returned by KargoPromoter.CreatePromotion.
+type KargoPromotionResult struct {
+	// Name is the generated Kargo Promotion CR name.
+	Name string
+	// Stage is the target Stage (= target environment name).
+	Stage string
+	// Freight is the Freight name that was promoted.
+	Freight string
+	// Phase is the initial observed Promotion phase (e.g. "Pending").
+	Phase string
+}
+
+// DeploymentHistoryEntry is one sync event from the ArgoCD Application history.
+type DeploymentHistoryEntry struct {
+	// ID is the ArgoCD sequence number for this sync event.
+	ID int64
+	// Revision is the Git commit SHA that was synced.
+	Revision string
+	// DeployedAt is the RFC 3339 timestamp when the sync completed.
+	DeployedAt string
+	// DeployStartedAt is the RFC 3339 timestamp when the sync began (may be empty).
+	DeployStartedAt string
+	// RepoURL is the source Git repository URL.
+	RepoURL string
+	// Path is the path within the repository that was synced.
+	Path string
+	// TargetRevision is the Git ref (branch/tag/commit) tracked by the Application.
+	TargetRevision string
+}
+
+// DeploymentHistoryReader reads the ArgoCD sync history for an app/environment.
+// When nil, the deployment history endpoint returns 501. Implementations must
+// be safe for concurrent use.
+type DeploymentHistoryReader interface {
+	// GetAppDeploymentHistory returns the sync history for the ArgoCD Application
+	// "{appName}-{envName}" in reverse-chronological order (most recent first).
+	// Returns an empty slice (not an error) when no history is available.
+	GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]DeploymentHistoryEntry, error)
+}
+
+// ReadinessProber is a named readiness check injected into the server.
+// Each prober is called by GET /readyz; any non-nil error marks the
+// server as not ready.
+type ReadinessProber struct {
+	// Name is the human-readable check name included in the readyz JSON response.
+	Name string
+	// Check is the probe function. It should complete quickly (< 2 s).
+	Check func(ctx context.Context) error
+}
+
 // Config holds server configuration.
 type Config struct {
 	Addr            string
@@ -49,6 +146,11 @@ type Config struct {
 	AppStore        domain.AppStore      // optional: enables app read endpoints when set
 	ClusterStore    domain.ClusterStore  // optional: enables /api/v1/clusters endpoints when set
 	GitOpsPublisher GitOpsPublisher      // optional: commits app manifests to gitops repo on create
+	KargoPromoter   KargoPromoter        // optional: enables real Kargo-backed promotions
+	KargoStatusReader KargoStatusReader  // optional: enables GET promotion-status endpoint
+	KargoPipelineReader KargoPipelineReader // optional: enables GET pipeline-stages endpoint
+	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
+	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
 }
@@ -62,7 +164,7 @@ type Server struct {
 // New creates a Server from the given Config.
 func New(cfg Config) *Server {
 	mux := http.NewServeMux()
-	registerRoutes(mux)
+	registerRoutes(mux, cfg.ReadinessProbers)
 
 	var ah *authHandler
 	if cfg.Authenticator != nil {
@@ -126,6 +228,24 @@ func New(cfg Config) *Server {
 				cfg.Logger.Info("app gitops publisher enabled")
 			} else {
 				cfg.Logger.Info("app gitops publisher not configured — skipping git commits on app create")
+			}
+			if cfg.KargoPromoter != nil {
+				rh.appHandler.kargoPromoter = cfg.KargoPromoter
+				cfg.Logger.Info("kargo promoter enabled — promotions will use Kargo Promotion CRs")
+			} else {
+				cfg.Logger.Info("kargo promoter not configured — using in-store release copy for promotions")
+			}
+			if cfg.KargoStatusReader != nil {
+				rh.appHandler.kargoStatusReader = cfg.KargoStatusReader
+				cfg.Logger.Info("kargo status reader enabled — promotion status endpoint active")
+			}
+			if cfg.KargoPipelineReader != nil {
+				rh.appHandler.kargoPipelineReader = cfg.KargoPipelineReader
+				cfg.Logger.Info("kargo pipeline reader enabled — stage status endpoint active")
+			}
+			if cfg.DeploymentHistoryReader != nil {
+				rh.appHandler.deploymentHistoryReader = cfg.DeploymentHistoryReader
+				cfg.Logger.Info("deployment history reader enabled — history endpoint active")
 			}
 			cfg.Logger.Info("app endpoints enabled")
 		}

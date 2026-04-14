@@ -184,23 +184,30 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 				},
 			},
 		},
-			Template: ApplicationSetTemplate{
-				Metadata: ObjectMeta{
-					Name:      "{{name}}-" + env.EnvName,
-					Namespace: opts.ArgoCDNamespace,
-					Labels: map[string]string{
-						labelApp:     "{{name}}",
-						labelProject: "{{project}}",
-						labelEnv:     env.EnvName,
-					},
+		Template: ApplicationSetTemplate{
+			Metadata: ObjectMeta{
+				Name:      "{{name}}-" + env.EnvName,
+				Namespace: opts.ArgoCDNamespace,
+				Labels: map[string]string{
+					labelApp:     "{{name}}",
+					labelProject: "{{project}}",
+					labelEnv:     env.EnvName,
 				},
-				Spec: ApplicationSetAppSpec{
-					Project:     "{{project}}",
-					Sources:     []ApplicationSource{valuesRefSource, chartSource},
-					Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: nsTemplate},
-					SyncPolicy:  syncPolicy,
+				// Authorize the corresponding Kargo Stage to trigger ArgoCD syncs
+				// for this Application. The annotation value is "<namespace>:<stage>"
+				// where namespace = Kargo project namespace = suparship project name,
+				// and stage = "{app}-{env}" per KargoStageName convention.
+				Annotations: map[string]string{
+					"kargo.akuity.io/authorized-stage": "{{project}}:{{name}}-" + env.EnvName,
 				},
 			},
+			Spec: ApplicationSetAppSpec{
+				Project:     "{{project}}",
+				Sources:     []ApplicationSource{valuesRefSource, chartSource},
+				Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: nsTemplate},
+				SyncPolicy:  syncPolicy,
+			},
+		},
 		},
 	}
 }

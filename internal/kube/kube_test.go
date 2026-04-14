@@ -13,7 +13,7 @@ import (
 
 func TestNewServerDeps_FieldsAreNotNil(t *testing.T) {
 	client := k8sfake.NewClientset()
-	deps := kube.NewServerDeps(client)
+	deps := kube.NewServerDeps(client, nil)
 
 	if deps.ProjectStore == nil {
 		t.Error("ProjectStore is nil")
@@ -33,8 +33,8 @@ func TestNewServerDeps_FieldsAreNotNil(t *testing.T) {
 // return distinct objects (no shared state via package-level variables).
 func TestNewServerDeps_IndependentInstances(t *testing.T) {
 	client := k8sfake.NewClientset()
-	a := kube.NewServerDeps(client)
-	b := kube.NewServerDeps(client)
+	a := kube.NewServerDeps(client, nil)
+	b := kube.NewServerDeps(client, nil)
 
 	if a == b {
 		t.Error("NewServerDeps returned the same pointer on successive calls")
@@ -50,7 +50,7 @@ func TestNewServerDeps_IndependentInstances(t *testing.T) {
 // checks in kube.go to keep the intent explicit in the test suite.
 func TestInterfaceCompliance(t *testing.T) {
 	client := k8sfake.NewClientset()
-	deps := kube.NewServerDeps(client)
+	deps := kube.NewServerDeps(client, nil)
 
 	// Assign to interface variables — compile error if contract is broken.
 	var _ project.Store = deps.ProjectStore

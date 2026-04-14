@@ -5,11 +5,20 @@
 # can be reached at http://localhost:8880 and https://localhost:8443
 # without requiring root privileges.
 #
+# The local container registry ("kind-registry") uses a self-signed TLS cert.
+# containerd is configured to use the certs.d directory for per-registry
+# settings. The hosts.toml for kind-registry:5000 is written by
+# hack/install-registry.sh with skip_verify=true.
+#
 # Used by: hack/bootstrap-cluster.sh
 # Reference: https://kind.sigs.k8s.io/docs/user/configuration/
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: suparship-dev
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
 nodes:
   - role: control-plane
     # Label this node so an ingress controller can be scheduled here later.

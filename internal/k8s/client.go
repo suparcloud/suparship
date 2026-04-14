@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -63,6 +64,55 @@ func NewClientset(kubeconfig, kubecontext string) (kubernetes.Interface, error) 
 	}
 
 	return cs, nil
+}
+
+// NewRestConfig builds a *rest.Config from the given kubeconfig path and
+// context using the same resolution order as NewClientset. Use this when
+// you need to construct additional client types (e.g. dynamic.Interface)
+// from the same configuration.
+func NewRestConfig(kubeconfig, kubecontext string) (*rest.Config, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfig != "" {
+		rules.ExplicitPath = kubeconfig
+	}
+
+	overrides := &clientcmd.ConfigOverrides{}
+	if kubecontext != "" {
+		overrides.CurrentContext = kubecontext
+	}
+
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		rules, overrides,
+	).ClientConfig()
+	if err != nil {
+		if kubeconfig == "" && kubecontext == "" {
+			inClusterCfg, inErr := rest.InClusterConfig()
+			if inErr == nil {
+				return inClusterCfg, nil
+			}
+			return nil, fmt.Errorf(
+				"no kubeconfig found (%v) and in-cluster config unavailable (%v)",
+				err, inErr,
+			)
+		}
+		return nil, fmt.Errorf("building rest config: %w", err)
+	}
+	return cfg, nil
+}
+
+// NewDynamicClient builds a dynamic.Interface from the given kubeconfig path
+// and context. The dynamic client is required for interacting with CRDs such
+// as ArgoCD Application and Kargo Stage/Promotion.
+func NewDynamicClient(kubeconfig, kubecontext string) (dynamic.Interface, error) {
+	cfg, err := NewRestConfig(kubeconfig, kubecontext)
+	if err != nil {
+		return nil, err
+	}
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("creating dynamic client: %w", err)
+	}
+	return dyn, nil
 }
 
 // EnsureNamespace creates the namespace if it does not already exist.

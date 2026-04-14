@@ -139,10 +139,14 @@ git config user.name  "suparShip Dev Bot"
 # ── Build the monorepo skeleton ───────────────────────────────────────────
 info "Creating gitops repo skeleton..."
 
-# 1. charts/web-service — copy from the suparship templates dir.
+# 1. charts/ — copy Helm charts from the suparship templates dir.
 mkdir -p charts
 cp -r "${REPO_ROOT}/templates/web-service/chart" charts/web-service
 ok "charts/web-service  (copied from templates/web-service/chart)"
+if [ -d "${REPO_ROOT}/templates/color-app/chart" ]; then
+  cp -r "${REPO_ROOT}/templates/color-app/chart" charts/color-app
+  ok "charts/color-app    (copied from templates/color-app/chart)"
+fi
 
 # 2. gitops-output placeholder — suparship writes per-app dirs here.
 mkdir -p gitops-output

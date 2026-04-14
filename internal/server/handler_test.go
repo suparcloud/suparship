@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,7 +13,7 @@ import (
 
 func newTestMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	registerRoutes(mux)
+	registerRoutes(mux, nil)
 	return mux
 }
 
@@ -43,8 +45,42 @@ func TestHandleReadyz(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", rec.Code)
 	}
-	if body := rec.Body.String(); body != "ok" {
-		t.Fatalf("expected body %q, got %q", "ok", body)
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+	var resp readyzResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding readyz response: %v", err)
+	}
+	if !resp.Ready {
+		t.Errorf("expected ready=true (no probers configured), got false")
+	}
+}
+
+func TestHandleReadyz_WithFailingProber(t *testing.T) {
+	mux := http.NewServeMux()
+	registerRoutes(mux, []ReadinessProber{
+		{Name: "always-fail", Check: func(_ context.Context) error {
+			return fmt.Errorf("dependency unreachable")
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503, got %d", rec.Code)
+	}
+	var resp readyzResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding readyz response: %v", err)
+	}
+	if resp.Ready {
+		t.Error("expected ready=false")
+	}
+	if len(resp.Checks) != 1 || resp.Checks[0].Name != "always-fail" || resp.Checks[0].Healthy {
+		t.Errorf("unexpected checks: %+v", resp.Checks)
 	}
 }
 

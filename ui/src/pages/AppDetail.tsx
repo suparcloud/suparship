@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppEnvironment, promoteApp, syncApp } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp } from "../lib/apps";
 import { createPreview, deletePreview } from "../lib/previews";
 import type {
+  AppDeploymentHistoryResponse,
   AppDetail as AppDetailType,
   AppEnvironmentSummary,
   AppLogsResponse,
   ComponentSummary,
+  DeploymentHistoryEntry,
+  KargoAppPipeline,
+  KargoPromotion,
+  KargoStageStatus,
   PromoteResponse,
 } from "../types";
 
@@ -274,6 +280,438 @@ const icons = {
 };
 
 // ---------------------------------------------------------------------------
+// Promotion success view (Kargo-aware)
+// ---------------------------------------------------------------------------
+
+const kargoPhaseBadge: Record<string, { bg: string; label: string }> = {
+  Pending: { bg: "bg-amber-50 text-amber-700", label: "Pending" },
+  Running: { bg: "bg-blue-50 text-blue-700", label: "Running" },
+  Succeeded: { bg: "bg-emerald-50 text-emerald-700", label: "Succeeded" },
+  Failed: { bg: "bg-red-50 text-red-700", label: "Failed" },
+};
+
+function KargoPromotionDetail({
+  kargo,
+  project,
+  app,
+}: {
+  kargo: KargoPromotion;
+  project?: string;
+  app?: string;
+}) {
+  const [phase, setPhase] = useState(kargo.phase ?? "Pending");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Poll the promotion status every 3 s until it reaches a terminal state.
+  useEffect(() => {
+    const terminal = new Set(["Succeeded", "Failed", "Errored", "Aborted"]);
+
+    function stopPolling() {
+      if (pollRef.current !== null) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    }
+
+    if (!project || !app || terminal.has(phase)) return stopPolling;
+
+    async function fetchPhase() {
+      try {
+        const status = await getKargoPromotionStatus(project!, app!, kargo.name);
+        setPhase(status.phase);
+        if (terminal.has(status.phase)) {
+          stopPolling();
+          if (status.phase === "Succeeded") {
+            toast.success("Kargo promotion succeeded", {
+              description: `${kargo.stage} is now running the new freight.`,
+            });
+          } else {
+            toast.error("Kargo promotion failed", {
+              description: `Phase: ${status.phase}. Check Kargo for details.`,
+            });
+          }
+        }
+      } catch {
+        // Silently swallow; we keep the last known phase.
+      }
+    }
+
+    fetchPhase();
+    pollRef.current = setInterval(fetchPhase, 2000);
+    return stopPolling;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project, app, kargo.name]);
+
+  const badge = kargoPhaseBadge[phase] ?? {
+    bg: "bg-gray-100 text-gray-500",
+    label: phase,
+  };
+  const isActive = phase === "Pending" || phase === "Running";
+
+  return (
+    <div className="mt-3 rounded-xl border border-violet-100 bg-violet-50 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="rounded-md bg-violet-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-violet-700">
+          Kargo
+        </span>
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${badge.bg}`}
+        >
+          {isActive && (
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+          )}
+          {badge.label}
+        </span>
+        {isActive && (
+          <svg
+            className="h-3.5 w-3.5 animate-spin text-violet-500"
+            fill="none"
+            viewBox="0 0 24 24"
+          >
+            <circle
+              className="opacity-25"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="4"
+            />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+            />
+          </svg>
+        )}
+      </div>
+      <dl className="space-y-1.5 text-sm">
+        <div className="flex justify-between gap-4">
+          <dt className="shrink-0 text-violet-500">Promotion</dt>
+          <dd className="truncate font-mono text-violet-900">{kargo.name}</dd>
+        </div>
+        <div className="flex justify-between gap-4">
+          <dt className="shrink-0 text-violet-500">Stage</dt>
+          <dd className="font-medium capitalize text-violet-900">
+            {kargo.stage}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-4">
+          <dt className="shrink-0 text-violet-500">Freight</dt>
+          <dd className="truncate font-mono text-violet-900">
+            {kargo.freight}
+          </dd>
+        </div>
+      </dl>
+      <p className="mt-2 text-xs text-violet-500">
+        Track with:{" "}
+        <code className="rounded bg-violet-100 px-1 py-0.5 text-violet-700">
+          kubectl get promotions -n {kargo.stage}
+        </code>
+      </p>
+    </div>
+  );
+}
+
+function PromoteSuccessView({
+  result,
+  promoteTarget,
+  project,
+  app,
+  onDone,
+}: {
+  result: PromoteResponse;
+  promoteTarget: string;
+  project?: string;
+  app?: string;
+  onDone: () => void;
+}) {
+  return (
+    <>
+      <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100">
+        <svg
+          className="h-5 w-5 text-emerald-600"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="m4.5 12.75 6 6 9-13.5"
+          />
+        </svg>
+      </div>
+      <h3 className="text-lg font-semibold text-gray-900">
+        Promotion initiated
+      </h3>
+      <p className="mt-1 text-sm text-gray-500">{result.message}</p>
+
+      <dl className="mt-4 space-y-2 text-sm">
+        <div className="flex justify-between">
+          <dt className="text-gray-400">From</dt>
+          <dd className="font-medium capitalize text-gray-900">
+            {result.source}
+          </dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-gray-400">To</dt>
+          <dd className="font-medium capitalize text-gray-900">
+            {result.destination}
+          </dd>
+        </div>
+        <div className="flex justify-between">
+          <dt className="text-gray-400">Namespace</dt>
+          <dd className="font-mono text-gray-600">{result.namespace}</dd>
+        </div>
+        {result.release?.image && (
+          <div className="flex justify-between gap-4">
+            <dt className="shrink-0 text-gray-400">Image</dt>
+            <dd className="truncate font-mono text-gray-600">
+              {result.release.image}
+              {result.release.tag ? `:${result.release.tag}` : ""}
+            </dd>
+          </div>
+        )}
+      </dl>
+
+      {result.kargoPromotion && (
+        <KargoPromotionDetail kargo={result.kargoPromotion} project={project} app={app} />
+      )}
+
+      <button
+        onClick={onDone}
+        className="mt-6 w-full rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
+      >
+        {promoteTarget ? `View ${promoteTarget}` : "Done"}
+      </button>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Env pipeline bar — replaces the flat env switcher with a live pipeline view.
+// Each stable environment is a clickable node showing Kargo phase + freight.
+// Promotion arrows connect nodes to show the progression direction.
+// Preview envs remain as simple pills below the pipeline.
+// When Kargo is unavailable, nodes degrade to plain env selector buttons.
+// ---------------------------------------------------------------------------
+
+const stagePhaseCfg: Record<
+  string,
+  { dot: string; bg: string; border: string; label: string; spin?: boolean }
+> = {
+  Steady: {
+    dot: "bg-emerald-500",
+    bg: "bg-emerald-50",
+    border: "border-emerald-200",
+    label: "Steady",
+  },
+  Promoting: {
+    dot: "bg-blue-500",
+    bg: "bg-blue-50",
+    border: "border-blue-200",
+    label: "Promoting",
+    spin: true,
+  },
+  NotReady: {
+    dot: "bg-amber-500",
+    bg: "bg-amber-50",
+    border: "border-amber-200",
+    label: "Not Ready",
+  },
+};
+const fallbackStageCfg = {
+  dot: "bg-gray-300",
+  bg: "bg-white",
+  border: "border-gray-200",
+  label: "",
+  spin: false,
+};
+
+function EnvPipelineBar({
+  project,
+  appName,
+  nonPreviewEnvs,
+  previewEnvs,
+  selectedEnvName,
+  onSelect,
+}: {
+  project: string;
+  appName: string;
+  nonPreviewEnvs: AppEnvironmentSummary[];
+  previewEnvs: AppEnvironmentSummary[];
+  selectedEnvName: string | null;
+  onSelect: (envName: string) => void;
+}) {
+  const [pipeline, setPipeline] = useState<KargoAppPipeline | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchPipeline() {
+      try {
+        const data = await getKargoAppPipeline(project, appName);
+        if (!cancelled) setPipeline(data);
+      } catch {
+        // Kargo not configured — degrade to plain env switcher.
+      }
+    }
+
+    fetchPipeline();
+    pollRef.current = setInterval(fetchPipeline, 3000);
+    return () => {
+      cancelled = true;
+      if (pollRef.current !== null) clearInterval(pollRef.current);
+    };
+  }, [project, appName]);
+
+  const stageMap: Record<string, KargoStageStatus> = pipeline
+    ? Object.fromEntries(pipeline.stages.map((s) => [s.envName, s]))
+    : {};
+
+  return (
+    <div className="space-y-2">
+      {/* Pipeline row: stable envs connected by promotion arrows */}
+      <div className="flex flex-wrap items-stretch gap-0">
+        {nonPreviewEnvs.map((env, i) => {
+          const stage = stageMap[env.envName];
+          const isSelected = selectedEnvName === env.envName;
+          const phaseCfg = stage
+            ? (stagePhaseCfg[stage.phase] ?? fallbackStageCfg)
+            : fallbackStageCfg;
+          const runtimeCfg = statusStyles[env.status.phase] ?? fallbackStatus;
+
+          return (
+            <div key={env.envName} className="flex items-center">
+              <button
+                onClick={() => onSelect(env.envName)}
+                className={`flex min-w-[108px] flex-col gap-1.5 rounded-xl border px-3 py-2 text-left transition-all ${
+                  isSelected
+                    ? "border-gray-900 bg-gray-900 shadow-sm"
+                    : env.status.phase === "progressing"
+                      ? "border-blue-200 bg-blue-50"
+                      : `${phaseCfg.bg} ${phaseCfg.border} hover:brightness-95`
+                }`}
+              >
+                {/* Row 1: env name + runtime status dot */}
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${
+                      isSelected ? "bg-white/60" : runtimeCfg.dot
+                    } ${
+                      (stage?.phase === "Promoting" || env.status.phase === "progressing") && !isSelected
+                        ? "animate-pulse"
+                        : ""
+                    }`}
+                  />
+                  <span
+                    className={`text-xs font-semibold capitalize ${
+                      isSelected ? "text-white" : "text-gray-900"
+                    }`}
+                  >
+                    {env.envName}
+                  </span>
+                </div>
+
+                {/* Row 2: Kargo phase badge + ArgoCD runtime label — always shown */}
+                <div className="flex flex-wrap items-center gap-1">
+                  {/* ArgoCD runtime status */}
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                      isSelected
+                        ? "bg-white/10 text-white/80"
+                        : `${runtimeCfg.bg}`
+                    }`}
+                  >
+                    {env.status.phase === "progressing" && !isSelected && (
+                      <svg className="h-2 w-2 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    )}
+                    {runtimeCfg.label}
+                  </span>
+
+                  {/* Kargo phase badge (when data available) */}
+                  {stage && phaseCfg.label && (
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${
+                        isSelected
+                          ? "border-white/20 bg-white/10 text-white/70"
+                          : `${phaseCfg.bg} ${phaseCfg.border}`
+                      }`}
+                    >
+                      {phaseCfg.spin && (
+                        <svg className="h-2 w-2 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                      )}
+                      <span className={`h-1 w-1 rounded-full ${isSelected ? "bg-white/50" : phaseCfg.dot}`} />
+                      {phaseCfg.label}
+                    </span>
+                  )}
+
+                  {/* New freight badge */}
+                  {stage && stage.availableFreightCount > 0 && (
+                    <span className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${
+                      isSelected
+                        ? "border-amber-400/40 bg-amber-400/20 text-amber-200"
+                        : "border-amber-300 bg-amber-50 text-amber-700"
+                    }`}>
+                      {stage.availableFreightCount} new
+                    </span>
+                  )}
+                </div>
+              </button>
+
+              {/* Promotion arrow between nodes */}
+              {i < nonPreviewEnvs.length - 1 && (
+                <svg
+                  className="mx-1 h-3.5 w-3.5 flex-shrink-0 text-gray-300"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3"
+                  />
+                </svg>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Preview env pills — not part of the promotion pipeline */}
+      {previewEnvs.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-gray-400">Previews:</span>
+          {previewEnvs.map((env) => (
+            <button
+              key={env.envName}
+              onClick={() => onSelect(env.envName)}
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                selectedEnvName === env.envName
+                  ? "bg-purple-700 text-white"
+                  : "bg-purple-50 text-purple-700 hover:bg-purple-100"
+              }`}
+            >
+              {env.preview?.previewName ?? env.envName}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // AppDetail page
 // ---------------------------------------------------------------------------
 
@@ -378,9 +816,14 @@ export function AppDetail() {
             ),
           };
         });
+        toast.success("Preview deleted", {
+          description: `Preview "${previewName}" has been removed.`,
+        });
       })
-      .catch(() => {
-        // Silently ignored; the preview list will remain until next load.
+      .catch((err) => {
+        toast.error("Failed to delete preview", {
+          description: err instanceof Error ? err.message : "Unknown error",
+        });
       });
   }
 
@@ -396,9 +839,13 @@ export function AppDetail() {
 
   if (!data) return null;
 
-  const nonPreviewEnvs = data.environments.filter(
-    (e) => e.envType !== "preview",
-  );
+  const ENV_ORDER: Record<string, number> = { staging: 0, prod: 1 };
+  const nonPreviewEnvs = data.environments
+    .filter((e) => e.envType !== "preview")
+    .sort(
+      (a, b) =>
+        (ENV_ORDER[a.envName] ?? 99) - (ENV_ORDER[b.envName] ?? 99),
+    );
   const previewEnvs = data.environments.filter((e) => e.envType === "preview");
   // The embedded summary from the app response; used as a fallback.
   const currentEnvSummary =
@@ -494,12 +941,15 @@ export function AppDetail() {
               try {
                 await syncApp(project, appName);
                 setSyncState("success");
+                toast.success("Synced to Git", {
+                  description: "ArgoCD will pick up the latest changes shortly.",
+                });
                 setTimeout(() => setSyncState("idle"), 3000);
               } catch (err) {
-                setSyncError(
-                  err instanceof Error ? err.message : "Sync failed",
-                );
+                const msg = err instanceof Error ? err.message : "Sync failed";
+                setSyncError(msg);
                 setSyncState("error");
+                toast.error("Sync to Git failed", { description: msg });
               }
             }}
             disabled={syncState === "syncing"}
@@ -606,11 +1056,14 @@ export function AppDetail() {
                       service: appName,
                     });
                     setShowPreviewForm(false);
+                    toast.success("Preview created", {
+                      description: `Preview environment "${previewName.trim()}" is being provisioned.`,
+                    });
                     navigate("/previews");
                   } catch (err) {
-                    setPreviewError(
-                      err instanceof Error ? err.message : "Failed to create",
-                    );
+                    const msg = err instanceof Error ? err.message : "Failed to create";
+                    setPreviewError(msg);
+                    toast.error("Failed to create preview", { description: msg });
                   } finally {
                     setPreviewSubmitting(false);
                   }
@@ -662,60 +1115,16 @@ export function AppDetail() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
             {promoteResult ? (
-              <>
-                <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100">
-                  <svg
-                    className="h-5 w-5 text-emerald-600"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="m4.5 12.75 6 6 9-13.5"
-                    />
-                  </svg>
-                </div>
-                <h3 className="text-lg font-semibold text-gray-900">
-                  Promotion initiated
-                </h3>
-                <p className="mt-1 text-sm text-gray-500">
-                  {promoteResult.message}
-                </p>
-                <dl className="mt-4 space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <dt className="text-gray-400">From</dt>
-                    <dd className="font-medium capitalize text-gray-900">
-                      {promoteResult.source}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between">
-                    <dt className="text-gray-400">To</dt>
-                    <dd className="font-medium capitalize text-gray-900">
-                      {promoteResult.destination}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between">
-                    <dt className="text-gray-400">Namespace</dt>
-                    <dd className="font-mono text-gray-600">
-                      {promoteResult.namespace}
-                    </dd>
-                  </div>
-                </dl>
-                <button
-                  onClick={() => {
-                    setShowPromoteModal(false);
-                    // Switch view to the target environment so the user can
-                    // see its updated state immediately.
-                    if (promoteTarget) setSelectedEnvName(promoteTarget);
-                  }}
-                  className="mt-6 w-full rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700"
-                >
-                  Done
-                </button>
-              </>
+              <PromoteSuccessView
+                result={promoteResult}
+                promoteTarget={promoteTarget}
+                project={project}
+                app={appName}
+                onDone={() => {
+                  setShowPromoteModal(false);
+                  if (promoteTarget) setSelectedEnvName(promoteTarget);
+                }}
+              />
             ) : (
               <>
                 <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-600">
@@ -777,12 +1186,19 @@ export function AppDetail() {
                           targetEnvironment: promoteTarget,
                         });
                         setPromoteResult(result);
+                        if (result.kargoPromotion) {
+                          toast.info("Kargo promotion initiated", {
+                            description: `Promoting to ${promoteTarget} — tracking phase…`,
+                          });
+                        } else {
+                          toast.success("Promotion succeeded", {
+                            description: `${appName} promoted to ${promoteTarget}.`,
+                          });
+                        }
                       } catch (err) {
-                        setPromoteError(
-                          err instanceof Error
-                            ? err.message
-                            : "Promotion failed",
-                        );
+                        const msg = err instanceof Error ? err.message : "Promotion failed";
+                        setPromoteError(msg);
+                        toast.error("Promotion failed", { description: msg });
                       } finally {
                         setPromoteSubmitting(false);
                       }
@@ -806,50 +1222,15 @@ export function AppDetail() {
         </div>
       )}
 
-      {/* Environment switcher */}
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium uppercase tracking-wider text-gray-400">
-          Env
-        </span>
-        {nonPreviewEnvs.map((env) => (
-          <button
-            key={env.envName}
-            onClick={() => setSelectedEnvName(env.envName)}
-            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium capitalize transition-colors ${
-              selectedEnvName === env.envName
-                ? "bg-gray-900 text-white"
-                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-            }`}
-          >
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${
-                selectedEnvName === env.envName
-                  ? "bg-white/60"
-                  : (statusStyles[env.status.phase] ?? fallbackStatus).dot
-              }`}
-            />
-            {env.envName}
-          </button>
-        ))}
-        {previewEnvs.length > 0 && (
-          <>
-            <span className="text-xs text-gray-300">|</span>
-            {previewEnvs.map((env) => (
-              <button
-                key={env.envName}
-                onClick={() => setSelectedEnvName(env.envName)}
-                className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                  selectedEnvName === env.envName
-                    ? "bg-purple-700 text-white"
-                    : "bg-purple-50 text-purple-700 hover:bg-purple-100"
-                }`}
-              >
-                {env.preview?.previewName ?? env.envName}
-              </button>
-            ))}
-          </>
-        )}
-      </div>
+      {/* Environment pipeline bar: stable envs as pipeline nodes, previews as pills */}
+      <EnvPipelineBar
+        project={project ?? ""}
+        appName={appName ?? ""}
+        nonPreviewEnvs={nonPreviewEnvs}
+        previewEnvs={previewEnvs}
+        selectedEnvName={selectedEnvName}
+        onSelect={setSelectedEnvName}
+      />
 
       {/* Tab bar */}
       <div className="border-b border-gray-200">
@@ -874,7 +1255,13 @@ export function AppDetail() {
       {activeTab === "overview" && (
         <OverviewTab data={data} currentEnv={currentEnv} />
       )}
-      {activeTab === "deployments" && <DeploymentsTab />}
+      {activeTab === "deployments" && (
+        <DeploymentsTab
+          project={project ?? ""}
+          appName={appName ?? ""}
+          envName={selectedEnvName ?? data.environments.find((e) => e.envType !== "preview")?.envName ?? ""}
+        />
+      )}
       {activeTab === "previews" && (
         <PreviewsTab
           previewEnvs={previewEnvs}
@@ -916,9 +1303,6 @@ function OverviewTab({
       : "—");
   const lastDeployed = formatTime(currentEnv?.status.lastDeployed);
   const urls = currentEnv?.urls ?? [];
-  const nonPreviewCount = data.environments.filter(
-    (e) => e.envType !== "preview",
-  ).length;
 
   return (
     <div className="space-y-6">
@@ -927,17 +1311,6 @@ function OverviewTab({
         <div className="flex flex-wrap items-center justify-between gap-y-1.5 rounded-lg border border-gray-100 bg-gray-50/50 px-4 py-2.5">
           <div className="flex flex-wrap items-center gap-3">
             <StatusBadge status={currentEnv.status.phase} />
-            {currentEnv.urls[0] && (
-              <a
-                href={currentEnv.urls[0]}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-sm text-blue-600 hover:underline"
-              >
-                {currentEnv.urls[0]}
-                <span className="inline-flex">{icons.externalLink}</span>
-              </a>
-            )}
           </div>
           {/* Namespace shown subtly for advanced users; not the focus of the view */}
           <span
@@ -957,8 +1330,7 @@ function OverviewTab({
       )}
 
       {/* Quick stats */}
-      <div className="grid gap-4 sm:grid-cols-4">
-        <QuickStat label="Environments" value={String(nonPreviewCount)} />
+      <div className="grid gap-4 sm:grid-cols-3">
         <QuickStat label="Replicas" value={replicas} />
         <QuickStat
           label="Release"
@@ -1073,26 +1445,174 @@ function OverviewTab({
 // Tab: Deployments
 // ---------------------------------------------------------------------------
 
-function DeploymentsTab() {
+function DeploymentsTab({
+  project,
+  appName,
+  envName,
+}: {
+  project: string;
+  appName: string;
+  envName: string;
+}) {
+  const [historyData, setHistoryData] = useState<AppDeploymentHistoryResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+
+  useEffect(() => {
+    if (!project || !appName || !envName) return;
+    let cancelled = false;
+    setLoading(true);
+    setUnavailable(false);
+    setHistoryData(null);
+
+    getAppDeploymentHistory(project, appName, envName)
+      .then((res) => {
+        if (!cancelled) {
+          setHistoryData(res);
+          setLoading(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const status = (err as { status?: number })?.status;
+          setUnavailable(status === 501);
+          setHistoryData(null);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project, appName, envName]);
+
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
       <div className="border-b border-gray-100 px-5 py-3">
         <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
           Deployment history
+          {envName && (
+            <span className="ml-2 font-mono normal-case text-gray-300">
+              · {envName}
+            </span>
+          )}
         </h2>
       </div>
-      <div className="px-5 py-10 text-center">
-        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
-          {icons.clock}
+
+      {loading && (
+        <div className="px-5 py-10 text-center">
+          <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100">
+            {icons.spinner}
+          </div>
+          <p className="text-sm text-gray-400">Loading history…</p>
         </div>
-        <p className="text-sm font-medium text-gray-500">
-          No deployment history yet
-        </p>
-        <p className="mt-1 text-xs text-gray-400">
-          History will appear once promotions are tracked via ArgoCD.
-        </p>
-      </div>
+      )}
+
+      {!loading && unavailable && (
+        <div className="px-5 py-10 text-center">
+          <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
+            {icons.clock}
+          </div>
+          <p className="text-sm font-medium text-gray-500">
+            History unavailable
+          </p>
+          <p className="mt-1 text-xs text-gray-400">
+            ArgoCD integration is not configured on this server.
+          </p>
+        </div>
+      )}
+
+      {!loading && !unavailable && historyData?.history.length === 0 && (
+        <div className="px-5 py-10 text-center">
+          <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
+            {icons.clock}
+          </div>
+          <p className="text-sm font-medium text-gray-500">
+            No deployment history yet
+          </p>
+          <p className="mt-1 text-xs text-gray-400">
+            Syncs will appear here once ArgoCD deploys to{" "}
+            <span className="font-mono">{envName}</span>.
+          </p>
+        </div>
+      )}
+
+      {!loading && !unavailable && historyData && historyData.history.length > 0 && (
+        <ul className="divide-y divide-gray-50">
+          {historyData.history.map((entry) => (
+            <DeploymentHistoryRow key={entry.id} entry={entry} />
+          ))}
+        </ul>
+      )}
     </div>
+  );
+}
+
+function DeploymentHistoryRow({ entry }: { entry: DeploymentHistoryEntry }) {
+  const shortRev = entry.revision ? entry.revision.slice(0, 8) : null;
+  const deployedAtFmt = entry.deployedAt
+    ? new Date(entry.deployedAt).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+
+  let durationSec: number | null = null;
+  if (entry.deployedAt && entry.deployStartedAt) {
+    const diff =
+      new Date(entry.deployedAt).getTime() -
+      new Date(entry.deployStartedAt).getTime();
+    if (diff > 0) durationSec = Math.round(diff / 1000);
+  }
+
+  return (
+    <li className="flex items-start justify-between gap-4 px-5 py-3.5">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Sequence badge */}
+          <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-500">
+            #{entry.id}
+          </span>
+          {/* Commit SHA */}
+          {shortRev && (
+            <span className="font-mono text-xs font-medium text-gray-800">
+              {shortRev}
+            </span>
+          )}
+          {/* Duration */}
+          {durationSec !== null && (
+            <span className="text-xs text-gray-400">
+              {durationSec}s
+            </span>
+          )}
+        </div>
+        {/* Path */}
+        {entry.path && (
+          <p className="mt-1 truncate font-mono text-xs text-gray-400">
+            {entry.path}
+          </p>
+        )}
+      </div>
+      {/* Timestamp */}
+      <div className="shrink-0 text-right">
+        {deployedAtFmt && (
+          <time
+            dateTime={entry.deployedAt}
+            className="text-xs text-gray-400"
+            title={entry.deployedAt}
+          >
+            {deployedAtFmt}
+          </time>
+        )}
+        {entry.targetRevision && (
+          <p className="mt-0.5 font-mono text-xs text-gray-300">
+            {entry.targetRevision}
+          </p>
+        )}
+      </div>
+    </li>
   );
 }
 

@@ -178,7 +178,7 @@ func newCompatTestMux(t *testing.T) (*http.ServeMux, *http.Cookie) {
 	t.Helper()
 
 	mux := http.NewServeMux()
-	registerRoutes(mux)
+	registerRoutes(mux, nil)
 
 	ah := &authHandler{
 		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -91,15 +92,20 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	cfg := config.Load()
 
 	var (
-		authenticator   auth.Authenticator
-		orgProvider     rbac.OrgStore
-		projectStore    project.Store
-		previewStore    preview.Store
-		runtimeProvider runtime.Provider
-		logsProvider    runtime.LogsProvider
-		appStore        domain.AppStore
-		clusterStore    domain.ClusterStore
-		templates       []*tpl.Template
+		authenticator    auth.Authenticator
+		orgProvider      rbac.OrgStore
+		projectStore     project.Store
+		previewStore     preview.Store
+		runtimeProvider  runtime.Provider
+		logsProvider     runtime.LogsProvider
+		appStore         domain.AppStore
+		clusterStore     domain.ClusterStore
+		templates        []*tpl.Template
+		readinessProbers []server.ReadinessProber
+		kargoPromoter    server.KargoPromoter
+		kargoStatusReader server.KargoStatusReader
+		kargoPipelineReader server.KargoPipelineReader
+		deploymentHistoryReader server.DeploymentHistoryReader
 	)
 
 	switch cfg.RuntimeMode {
@@ -126,6 +132,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider = deps.LogsProvider
 		appStore = deps.AppStore
 		clusterStore = deps.ClusterStore
+		deploymentHistoryReader = &fakeHistoryAdapter{inner: &fake.FakeDeploymentHistoryReader{}}
 
 	default: // config.ModeKubernetes
 		// Log what we will attempt before trying, so contributors see the
@@ -155,6 +162,29 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			)
 		}
 		logger.Info("kubernetes client ready")
+
+		// Build dynamic client for CRD interactions (ArgoCD, Kargo).
+		dynClient, dynErr := k8s.NewDynamicClient(kubeconfig, kubecontext)
+		if dynErr != nil {
+			logger.Warn("dynamic client unavailable — ArgoCD/Kargo features disabled", "error", dynErr)
+		} else {
+			// Register ArgoCD readiness probe.
+			readinessProbers = append(readinessProbers, server.ReadinessProber{
+				Name:  "argocd",
+				Check: kube.NewArgoCDReadinessProbe(dynClient, ""),
+			})
+			// Wire Kargo promoter.
+			kargoStore := kube.NewKargoStore(dynClient)
+			kargoAdapter := &kargoPromoterAdapter{store: kargoStore}
+			kargoPromoter = kargoAdapter
+			kargoStatusReader = kargoAdapter
+			kargoPipelineReader = kargoAdapter
+			// Wire ArgoCD deployment history reader.
+			argoCDReader := kube.NewArgoCDStatusReaderFromDynamic(dynClient, "")
+			deploymentHistoryReader = &argoCDHistoryAdapter{reader: argoCDReader}
+			logger.Info("kargo promoter enabled via dynamic client")
+			logger.Info("argocd deployment history reader enabled")
+		}
 
 		authenticator = auth.NewK8sAuthenticator(client)
 
@@ -213,11 +243,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	var gitOpsPublisher server.GitOpsPublisher
 	if cfg.GitOps.RepoURL != "" {
 		pub, err := gitops.NewPublisher(gitops.PublisherConfig{
-			RepoURL:       cfg.GitOps.RepoURL,
-			RepoUser:      cfg.GitOps.RepoUser,
-			RepoPassword:  cfg.GitOps.RepoPassword,
-			ArgoCDRepoURL: cfg.GitOps.ArgoCDRepoURL,
-			SyncAutomated: true,
+			RepoURL:          cfg.GitOps.RepoURL,
+			RepoUser:         cfg.GitOps.RepoUser,
+			RepoPassword:     cfg.GitOps.RepoPassword,
+			ArgoCDRepoURL:    cfg.GitOps.ArgoCDRepoURL,
+			KargoGitRepoURL:  cfg.GitOps.KargoGitRepoURL,
+			SyncAutomated:    true,
+			TemplatesDir:     templatesDir,
+			InsecureRegistry: cfg.GitOps.InsecureRegistry,
 		})
 		if err != nil {
 			logger.Warn("gitops publisher disabled", "reason", err.Error())
@@ -231,27 +264,43 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				"repo", cfg.GitOps.RepoURL,
 				"argocd_repo", cfg.GitOps.ArgoCDRepoURL,
 			)
+			// Register GitOps repo connectivity probe.
+			// Use ArgoCDRepoURL when set (internal cluster URL); fall back to
+			// the host-accessible RepoURL for the probe.
+			gitopsProbeURL := cfg.GitOps.ArgoCDRepoURL
+			if gitopsProbeURL == "" {
+				gitopsProbeURL = cfg.GitOps.RepoURL
+			}
+			readinessProbers = append(readinessProbers, server.ReadinessProber{
+				Name:  "gitops-repo",
+				Check: kube.NewGitOpsRepoReadinessProbe(gitopsProbeURL),
+			})
 		}
 	} else {
 		logger.Info("gitops publisher disabled — set SUPARSHIP_GITOPS_REPO_URL to enable")
 	}
 
 	srv := server.New(server.Config{
-		Addr:            addr,
-		UIDir:           uiDir,
-		CORSOrigins:     origins,
-		Authenticator:   authenticator,
-		OrgProvider:     orgProvider,
-		Templates:       templates,
-		ProjectStore:    projectStore,
-		RuntimeProvider: runtimeProvider,
-		LogsProvider:    logsProvider,
-		PreviewStore:    previewStore,
-		AppStore:        appStore,
-		ClusterStore:    clusterStore,
-		GitOpsPublisher: gitOpsPublisher,
-		CookieSecure:    cookieSecure,
-		Logger:          logger,
+		Addr:             addr,
+		UIDir:            uiDir,
+		CORSOrigins:      origins,
+		Authenticator:    authenticator,
+		OrgProvider:      orgProvider,
+		Templates:        templates,
+		ProjectStore:     projectStore,
+		RuntimeProvider:  runtimeProvider,
+		LogsProvider:     logsProvider,
+		PreviewStore:     previewStore,
+		AppStore:         appStore,
+		ClusterStore:     clusterStore,
+		GitOpsPublisher:         gitOpsPublisher,
+		KargoPromoter:           kargoPromoter,
+		KargoStatusReader:       kargoStatusReader,
+		KargoPipelineReader:     kargoPipelineReader,
+		DeploymentHistoryReader: deploymentHistoryReader,
+		ReadinessProbers: readinessProbers,
+		CookieSecure:     cookieSecure,
+		Logger:           logger,
 	})
 
 	if err := srv.Run(cmd.Context()); err != nil {
@@ -330,6 +379,79 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 	return result
 }
 
+// kargoPromoterAdapter bridges kube.KargoStore (which returns *kube.KargoPromotionInfo)
+// to the server.KargoPromoter interface (which returns server.KargoPromotionResult).
+type kargoPromoterAdapter struct {
+	store *kube.KargoStore
+}
+
+func (a *kargoPromoterAdapter) CreatePromotion(ctx context.Context, projectNS, appName, fromStage, toStage string) (server.KargoPromotionResult, error) {
+	info, err := a.store.CreatePromotion(ctx, projectNS, appName, fromStage, toStage)
+	if err != nil {
+		return server.KargoPromotionResult{}, err
+	}
+	return server.KargoPromotionResult{
+		Name:    info.Name,
+		Stage:   info.Stage,
+		Freight: info.Freight,
+		Phase:   info.Phase,
+	}, nil
+}
+
+// GetPromotionStatus implements server.KargoStatusReader.
+func (a *kargoPromoterAdapter) GetPromotionStatus(ctx context.Context, projectNS, promotionName string) (server.KargoPromotionResult, error) {
+	info, err := a.store.GetPromotionStatus(ctx, projectNS, promotionName)
+	if err != nil {
+		return server.KargoPromotionResult{}, err
+	}
+	return server.KargoPromotionResult{
+		Name:    info.Name,
+		Stage:   info.Stage,
+		Freight: info.Freight,
+		Phase:   info.Phase,
+	}, nil
+}
+
+// ListAppStageStatuses implements server.KargoPipelineReader.
+// It lists all Kargo Stage CRs in projectNS and filters to those belonging to
+// appName (stage name starts with "{appName}-").
+func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, projectNS, appName string) ([]server.KargoStageStatusResult, error) {
+	all, err := a.store.ListStageStatuses(ctx, projectNS)
+	if err != nil {
+		return nil, err
+	}
+
+	prefix := appName + "-"
+	var results []server.KargoStageStatusResult
+	for stageName, s := range all {
+		if len(stageName) <= len(prefix) || stageName[:len(prefix)] != prefix {
+			continue
+		}
+		envName := stageName[len(prefix):]
+		results = append(results, server.KargoStageStatusResult{
+			StageName:             stageName,
+			EnvName:               envName,
+			Phase:                 s.Phase,
+			Health:                s.Health,
+			CurrentFreight:        s.CurrentFreight,
+			AvailableFreightCount: s.AvailableFreightCount,
+		})
+	}
+
+	slog.Debug("kargo pipeline adapter: filtered stages for app",
+		"namespace", projectNS,
+		"app", appName,
+		"totalStages", len(all),
+		"appStages", len(results),
+	)
+
+	// Order by envName for deterministic UI rendering: staging before prod.
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].EnvName < results[j].EnvName
+	})
+	return results, nil
+}
+
 func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
 	resolved := a.resolveEnvs(ctx)
 
@@ -367,4 +489,55 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 
 	// Write app.yaml + values.yaml for each environment.
 	return a.inner.PublishApp(ctx, app, pubEnvs)
+}
+
+// argoCDHistoryAdapter bridges kube.ArgoCDStatusReader.GetAppDeploymentHistory
+// to the server.DeploymentHistoryReader interface.
+type argoCDHistoryAdapter struct {
+	reader *kube.ArgoCDStatusReader
+}
+
+// GetAppDeploymentHistory implements server.DeploymentHistoryReader.
+func (a *argoCDHistoryAdapter) GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]server.DeploymentHistoryEntry, error) {
+	raw, err := a.reader.GetAppDeploymentHistory(ctx, appName, envName)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.DeploymentHistoryEntry, 0, len(raw))
+	for _, h := range raw {
+		out = append(out, server.DeploymentHistoryEntry{
+			ID:              h.ID,
+			Revision:        h.Revision,
+			DeployedAt:      h.DeployedAt,
+			DeployStartedAt: h.DeployStartedAt,
+			RepoURL:         h.RepoURL,
+			Path:            h.Path,
+			TargetRevision:  h.TargetRevision,
+		})
+	}
+	return out, nil
+}
+
+// fakeHistoryAdapter bridges fake.FakeDeploymentHistoryReader to the
+// server.DeploymentHistoryReader interface for use in fake/local dev mode.
+type fakeHistoryAdapter struct {
+	inner *fake.FakeDeploymentHistoryReader
+}
+
+// GetAppDeploymentHistory implements server.DeploymentHistoryReader.
+func (a *fakeHistoryAdapter) GetAppDeploymentHistory(_ context.Context, appName, envName string) ([]server.DeploymentHistoryEntry, error) {
+	raw := a.inner.GetFakeHistory(appName, envName)
+	out := make([]server.DeploymentHistoryEntry, 0, len(raw))
+	for _, h := range raw {
+		out = append(out, server.DeploymentHistoryEntry{
+			ID:              h.ID,
+			Revision:        h.Revision,
+			DeployedAt:      h.DeployedAt,
+			DeployStartedAt: h.DeployStartedAt,
+			RepoURL:         h.RepoURL,
+			Path:            h.Path,
+			TargetRevision:  h.TargetRevision,
+		})
+	}
+	return out, nil
 }

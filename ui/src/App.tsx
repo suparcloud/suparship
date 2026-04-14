@@ -1,4 +1,5 @@
 import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { Toaster } from "sonner";
 
 import { AppShell } from "./components/AppShell";
 import { AuthGuard } from "./components/AuthGuard";
@@ -23,6 +24,7 @@ export function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
+        <Toaster position="top-right" richColors closeButton />
         <Routes>
           <Route path="/login" element={<Login />} />
 

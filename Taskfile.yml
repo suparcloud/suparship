@@ -38,7 +38,7 @@ tasks:
   # for every subsequent dev session (fast build + restart, no cluster touch).
 
   dev:cluster:
-    desc: "Set up dev cluster — DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed (idempotent)"
+    desc: "Set up dev cluster — DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed + cert-manager + Argo Rollouts + Kargo (idempotent)"
     cmds:
       - hack/setup-cluster.sh
 
@@ -77,6 +77,27 @@ tasks:
     cmds:
       - hack/install-argocd.sh
 
+  dev:cluster:cert-manager:
+    desc: "Install cert-manager (dev profile) — required by Kargo for TLS certificates"
+    cmds:
+      - hack/install-cert-manager.sh
+
+  dev:cluster:argo-rollouts:
+    desc: "Install Argo Rollouts (dev profile) — required by Kargo for progressive delivery"
+    cmds:
+      - hack/install-argo-rollouts.sh
+
+  dev:cluster:kargo:
+    desc: "Install cert-manager + Argo Rollouts + Kargo via OCI chart (dev profile)"
+    deps: [dev:cluster:cert-manager, dev:cluster:argo-rollouts]
+    cmds:
+      - hack/install-kargo.sh
+
+  dev:cluster:registry:
+    desc: "Set up a local container registry (kind-registry on localhost:5001)"
+    cmds:
+      - hack/install-registry.sh
+
   dev:cluster:gitea:
     desc: "Install Gitea + create gitops repo + register with ArgoCD"
     cmds:
@@ -105,12 +126,56 @@ tasks:
     cmds:
       - hack/reset-cluster.sh
 
+  dev:cluster:seed-color-app:
+    desc: "Seed color-app demo via the suparShip API (requires running server)"
+    cmds:
+      - hack/seed-color-app.sh
+
+  dev:cluster:init-color-app-repo:
+    desc: "Push color-app source code to a Gitea repo (demo/color-app)"
+    cmds:
+      - hack/init-color-app-repo.sh
+
   # ── Demo ───────────────────────────────────────────────────────────────
 
   demo:deploy:
     desc: "Deploy the hello demo app (nginx) to the kind cluster via GitOps"
     cmds:
       - hack/deploy-demo-app.sh
+
+  demo:color-app:build:
+    desc: "Build the color-app demo image (VERSION=0.1.0, COLOR=blue)"
+    vars:
+      VERSION: '{{default "0.1.0" .VERSION}}'
+      COLOR: '{{default "blue" .COLOR}}'
+    cmds:
+      - |
+        docker build \
+          --build-arg VERSION={{.VERSION}} \
+          --build-arg COLOR={{.COLOR}} \
+          -t localhost:5001/demo/color-app:{{.VERSION}} \
+          demo/color-app
+        echo "  Built: localhost:5001/demo/color-app:{{.VERSION}} (color={{.COLOR}})"
+
+  demo:color-app:push:
+    desc: "Push the color-app image to the local registry (VERSION=0.1.0)"
+    vars:
+      VERSION: '{{default "0.1.0" .VERSION}}'
+    cmds:
+      - |
+        docker push localhost:5001/demo/color-app:{{.VERSION}}
+        echo "  Pushed: localhost:5001/demo/color-app:{{.VERSION}}"
+
+  demo:color-app:release:
+    desc: "Build + push color-app in one step (VERSION=0.1.0, COLOR=blue)"
+    vars:
+      VERSION: '{{default "0.1.0" .VERSION}}'
+      COLOR: '{{default "blue" .COLOR}}'
+    cmds:
+      - task: demo:color-app:build
+        vars: { VERSION: "{{.VERSION}}", COLOR: "{{.COLOR}}" }
+      - task: demo:color-app:push
+        vars: { VERSION: "{{.VERSION}}" }
 
   # ── Build & test ───────────────────────────────────────────────────────
 

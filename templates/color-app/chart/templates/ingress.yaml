@@ -1,0 +1,25 @@
+{{- $web := .Values.components.web }}
+{{- $host := .Values.routing.host }}
+{{- if and $web.enabled $web.expose $host }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "color-app.fullname" . }}
+  labels:
+    {{- include "color-app.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: {{ $host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "color-app.fullname" . }}
+                port:
+                  name: http
+{{- end }}

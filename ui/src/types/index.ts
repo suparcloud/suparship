@@ -311,13 +311,62 @@ export interface PromoteRequest {
   targetEnvironment: string;
 }
 
+/**
+ * Describes a Kargo Promotion CR created by the promote endpoint.
+ * Populated only when the server is configured with a KargoPromoter.
+ */
+export interface KargoPromotion {
+  /** Kargo Promotion CR name, e.g. "hello-prod-1712774400" */
+  name: string;
+  /** Target Kargo Stage name (= target environment name) */
+  stage: string;
+  /** Kargo Freight being promoted */
+  freight: string;
+  /** Initial observed phase: "Pending" | "Running" | "Succeeded" | "Failed" */
+  phase?: string;
+}
+
+/**
+ * Live status response for a Kargo Promotion CR.
+ * Returned by GET /api/v1/projects/:project/apps/:app/promotions/:name.
+ */
+export interface KargoPromotionStatus {
+  name: string;
+  stage: string;
+  freight: string;
+  /** Current observed phase: "Pending" | "Running" | "Succeeded" | "Failed" */
+  phase: string;
+}
+
+/** One stage's live status in the Kargo pipeline. */
+export interface KargoStageStatus {
+  stageName: string;
+  envName: string;
+  phase: string;
+  health: string;
+  currentFreight?: string;
+  availableFreightCount: number;
+}
+
+/** Response from GET .../kargo/stages */
+export interface KargoAppPipeline {
+  stages: KargoStageStatus[];
+}
+
 export interface PromoteResponse {
   project: string;
-  service: string;
+  /** App name (new field). Falls back to `service` for legacy responses. */
+  app?: string;
+  /** @deprecated Use `app` instead. Retained for legacy service-promote responses. */
+  service?: string;
   source: string;
   destination: string;
   namespace: string;
   message: string;
+  /** Populated when Kargo is configured — describes the created Promotion CR. */
+  kargoPromotion?: KargoPromotion;
+  /** Populated when Kargo is NOT configured — in-store release copy result. */
+  release?: AppReleaseRef;
 }
 
 // --- Logs types ---
@@ -364,4 +413,33 @@ export interface CreateAppRequest {
 
 export interface CreateAppResponse {
   app: AppDetail;
+}
+
+// --- Deployment history types ---
+
+/** One ArgoCD sync event in the deployment history of an app environment. */
+export interface DeploymentHistoryEntry {
+  /** ArgoCD-assigned sequence number; higher = more recent. */
+  id: number;
+  /** Git commit SHA that was synced. */
+  revision?: string;
+  /** RFC 3339 timestamp when the sync completed. */
+  deployedAt?: string;
+  /** RFC 3339 timestamp when the sync began (may be absent). */
+  deployStartedAt?: string;
+  /** Source Git repository URL. */
+  repoURL?: string;
+  /** Path within the repository that was synced. */
+  path?: string;
+  /** Git ref (branch/tag/commit) tracked by the ArgoCD Application. */
+  targetRevision?: string;
+}
+
+/** Response from GET .../environments/:env/history */
+export interface AppDeploymentHistoryResponse {
+  project: string;
+  app: string;
+  environment: string;
+  /** Reverse-chronological order (most recent first). Empty when not deployed. */
+  history: DeploymentHistoryEntry[];
 }
