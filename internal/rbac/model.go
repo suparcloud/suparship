@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/suparcloud/suparship/internal/envconfig"
 	"gopkg.in/yaml.v3"
 )
 
@@ -79,18 +80,24 @@ type OrgEnvironment struct {
 	// Tokens: {app}, {env}, {project}.
 	// Default (empty) falls back to "{app}-{env}".
 	NamespacePattern string `yaml:"namespacePattern,omitempty"`
+	// EnvConfig holds env vars and secret refs that apply to all apps
+	// deployed to this environment type (Environment level of the hierarchy).
+	EnvConfig envconfig.EnvConfig `yaml:"envConfig,omitempty"`
 }
 
 // Org represents a single organization.
 type Org struct {
-	Name         string           `yaml:"name"`
-	DisplayName  string           `yaml:"displayName"`
-	CreatedAt    string           `yaml:"createdAt,omitempty"`
+	Name        string           `yaml:"name"`
+	DisplayName string           `yaml:"displayName"`
+	CreatedAt   string           `yaml:"createdAt,omitempty"`
 	// Environments is the canonical deployment pipeline shared by all projects.
 	// Projects may store per-environment overrides but inherit these defaults.
 	Environments []OrgEnvironment `yaml:"environments,omitempty"`
 	Teams        []Team           `yaml:"teams"`
 	RoleBindings []RoleBinding    `yaml:"roleBindings"`
+	// EnvConfig holds env vars and secret refs that apply to ALL apps across
+	// ALL projects in the org (Org level of the hierarchy).
+	EnvConfig envconfig.EnvConfig `yaml:"envConfig,omitempty"`
 }
 
 // Team represents a named group of users.

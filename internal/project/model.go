@@ -44,6 +44,7 @@ package project
 import (
 	"fmt"
 
+	"github.com/suparcloud/suparship/internal/envconfig"
 	"gopkg.in/yaml.v3"
 )
 
@@ -78,6 +79,9 @@ type ProjectSpec struct {
 	// domain.App and domain.AppStore; do not add fields to this struct.
 	// See docs/app-model.md and docs/migration-app-model.md.
 	Services []Service `yaml:"services,omitempty"`
+	// EnvConfig holds env vars and secret refs that apply to all apps within
+	// this project (Project level of the hierarchy).
+	EnvConfig envconfig.EnvConfig `yaml:"envConfig,omitempty"`
 }
 
 // Environment represents a deployment target in the promotion chain.
