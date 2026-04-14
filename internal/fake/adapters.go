@@ -474,3 +474,58 @@ func fakeLogLines() []string {
 		"2026-01-01T00:00:09Z INFO  GET /api/items → 200 OK (6ms)",
 	}
 }
+
+// ── FakeDeploymentHistoryReader ───────────────────────────────────────────────
+
+// FakeDeploymentHistoryEntry mirrors server.DeploymentHistoryEntry but lives
+// in the fake package to avoid an import cycle (fake → server → fake).
+// The cmd/suparship/server.go adapter converts these to server.DeploymentHistoryEntry.
+type FakeDeploymentHistoryEntry struct {
+	ID              int64
+	Revision        string
+	DeployedAt      string
+	DeployStartedAt string
+	RepoURL         string
+	Path            string
+	TargetRevision  string
+}
+
+// FakeDeploymentHistoryReader implements a minimal deployment history reader
+// for local development. It returns deterministic seed entries for any app/env
+// so the Deployments tab is immediately populated in fake mode.
+type FakeDeploymentHistoryReader struct{}
+
+// GetFakeHistory returns seed deployment history entries for an app/env.
+// It returns 3 synthetic entries anchored to the seed timestamps, most recent first.
+func (r *FakeDeploymentHistoryReader) GetFakeHistory(appName, envName string) []FakeDeploymentHistoryEntry {
+	base := seedCreatedAt
+	return []FakeDeploymentHistoryEntry{
+		{
+			ID:              2,
+			Revision:        "d4f9e2a1b3c8f507",
+			DeployedAt:      base.Add(2 * 24 * time.Hour).UTC().Format(time.RFC3339),
+			DeployStartedAt: base.Add(2*24*time.Hour - 90*time.Second).UTC().Format(time.RFC3339),
+			RepoURL:         "https://github.com/suparcloud/gitops",
+			Path:            "gitops-output/" + envName + "/demo/" + appName,
+			TargetRevision:  "HEAD",
+		},
+		{
+			ID:              1,
+			Revision:        "a1b2c3d4e5f67890",
+			DeployedAt:      base.Add(24 * time.Hour).UTC().Format(time.RFC3339),
+			DeployStartedAt: base.Add(24*time.Hour - 75*time.Second).UTC().Format(time.RFC3339),
+			RepoURL:         "https://github.com/suparcloud/gitops",
+			Path:            "gitops-output/" + envName + "/demo/" + appName,
+			TargetRevision:  "HEAD",
+		},
+		{
+			ID:              0,
+			Revision:        "f0e1d2c3b4a59687",
+			DeployedAt:      base.UTC().Format(time.RFC3339),
+			DeployStartedAt: base.Add(-60 * time.Second).UTC().Format(time.RFC3339),
+			RepoURL:         "https://github.com/suparcloud/gitops",
+			Path:            "gitops-output/" + envName + "/demo/" + appName,
+			TargetRevision:  "HEAD",
+		},
+	}
+}

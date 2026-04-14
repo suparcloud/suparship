@@ -93,6 +93,34 @@ type KargoPromotionResult struct {
 	Phase string
 }
 
+// DeploymentHistoryEntry is one sync event from the ArgoCD Application history.
+type DeploymentHistoryEntry struct {
+	// ID is the ArgoCD sequence number for this sync event.
+	ID int64
+	// Revision is the Git commit SHA that was synced.
+	Revision string
+	// DeployedAt is the RFC 3339 timestamp when the sync completed.
+	DeployedAt string
+	// DeployStartedAt is the RFC 3339 timestamp when the sync began (may be empty).
+	DeployStartedAt string
+	// RepoURL is the source Git repository URL.
+	RepoURL string
+	// Path is the path within the repository that was synced.
+	Path string
+	// TargetRevision is the Git ref (branch/tag/commit) tracked by the Application.
+	TargetRevision string
+}
+
+// DeploymentHistoryReader reads the ArgoCD sync history for an app/environment.
+// When nil, the deployment history endpoint returns 501. Implementations must
+// be safe for concurrent use.
+type DeploymentHistoryReader interface {
+	// GetAppDeploymentHistory returns the sync history for the ArgoCD Application
+	// "{appName}-{envName}" in reverse-chronological order (most recent first).
+	// Returns an empty slice (not an error) when no history is available.
+	GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]DeploymentHistoryEntry, error)
+}
+
 // ReadinessProber is a named readiness check injected into the server.
 // Each prober is called by GET /readyz; any non-nil error marks the
 // server as not ready.
@@ -121,6 +149,7 @@ type Config struct {
 	KargoPromoter   KargoPromoter        // optional: enables real Kargo-backed promotions
 	KargoStatusReader KargoStatusReader  // optional: enables GET promotion-status endpoint
 	KargoPipelineReader KargoPipelineReader // optional: enables GET pipeline-stages endpoint
+	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
 	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
@@ -213,6 +242,10 @@ func New(cfg Config) *Server {
 			if cfg.KargoPipelineReader != nil {
 				rh.appHandler.kargoPipelineReader = cfg.KargoPipelineReader
 				cfg.Logger.Info("kargo pipeline reader enabled — stage status endpoint active")
+			}
+			if cfg.DeploymentHistoryReader != nil {
+				rh.appHandler.deploymentHistoryReader = cfg.DeploymentHistoryReader
+				cfg.Logger.Info("deployment history reader enabled — history endpoint active")
 			}
 			cfg.Logger.Info("app endpoints enabled")
 		}

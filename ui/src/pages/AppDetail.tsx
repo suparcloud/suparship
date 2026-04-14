@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp } from "../lib/apps";
 import { createPreview, deletePreview } from "../lib/previews";
 import type {
+  AppDeploymentHistoryResponse,
   AppDetail as AppDetailType,
   AppEnvironmentSummary,
   AppLogsResponse,
   ComponentSummary,
+  DeploymentHistoryEntry,
   KargoAppPipeline,
   KargoPromotion,
   KargoStageStatus,
@@ -1253,7 +1255,13 @@ export function AppDetail() {
       {activeTab === "overview" && (
         <OverviewTab data={data} currentEnv={currentEnv} />
       )}
-      {activeTab === "deployments" && <DeploymentsTab />}
+      {activeTab === "deployments" && (
+        <DeploymentsTab
+          project={project ?? ""}
+          appName={appName ?? ""}
+          envName={selectedEnvName ?? data.environments.find((e) => e.envType !== "preview")?.envName ?? ""}
+        />
+      )}
       {activeTab === "previews" && (
         <PreviewsTab
           previewEnvs={previewEnvs}
@@ -1437,26 +1445,174 @@ function OverviewTab({
 // Tab: Deployments
 // ---------------------------------------------------------------------------
 
-function DeploymentsTab() {
+function DeploymentsTab({
+  project,
+  appName,
+  envName,
+}: {
+  project: string;
+  appName: string;
+  envName: string;
+}) {
+  const [historyData, setHistoryData] = useState<AppDeploymentHistoryResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+
+  useEffect(() => {
+    if (!project || !appName || !envName) return;
+    let cancelled = false;
+    setLoading(true);
+    setUnavailable(false);
+    setHistoryData(null);
+
+    getAppDeploymentHistory(project, appName, envName)
+      .then((res) => {
+        if (!cancelled) {
+          setHistoryData(res);
+          setLoading(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const status = (err as { status?: number })?.status;
+          setUnavailable(status === 501);
+          setHistoryData(null);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project, appName, envName]);
+
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
       <div className="border-b border-gray-100 px-5 py-3">
         <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
           Deployment history
+          {envName && (
+            <span className="ml-2 font-mono normal-case text-gray-300">
+              · {envName}
+            </span>
+          )}
         </h2>
       </div>
-      <div className="px-5 py-10 text-center">
-        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
-          {icons.clock}
+
+      {loading && (
+        <div className="px-5 py-10 text-center">
+          <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100">
+            {icons.spinner}
+          </div>
+          <p className="text-sm text-gray-400">Loading history…</p>
         </div>
-        <p className="text-sm font-medium text-gray-500">
-          No deployment history yet
-        </p>
-        <p className="mt-1 text-xs text-gray-400">
-          History will appear once promotions are tracked via ArgoCD.
-        </p>
-      </div>
+      )}
+
+      {!loading && unavailable && (
+        <div className="px-5 py-10 text-center">
+          <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
+            {icons.clock}
+          </div>
+          <p className="text-sm font-medium text-gray-500">
+            History unavailable
+          </p>
+          <p className="mt-1 text-xs text-gray-400">
+            ArgoCD integration is not configured on this server.
+          </p>
+        </div>
+      )}
+
+      {!loading && !unavailable && historyData?.history.length === 0 && (
+        <div className="px-5 py-10 text-center">
+          <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-gray-100 text-gray-400">
+            {icons.clock}
+          </div>
+          <p className="text-sm font-medium text-gray-500">
+            No deployment history yet
+          </p>
+          <p className="mt-1 text-xs text-gray-400">
+            Syncs will appear here once ArgoCD deploys to{" "}
+            <span className="font-mono">{envName}</span>.
+          </p>
+        </div>
+      )}
+
+      {!loading && !unavailable && historyData && historyData.history.length > 0 && (
+        <ul className="divide-y divide-gray-50">
+          {historyData.history.map((entry) => (
+            <DeploymentHistoryRow key={entry.id} entry={entry} />
+          ))}
+        </ul>
+      )}
     </div>
+  );
+}
+
+function DeploymentHistoryRow({ entry }: { entry: DeploymentHistoryEntry }) {
+  const shortRev = entry.revision ? entry.revision.slice(0, 8) : null;
+  const deployedAtFmt = entry.deployedAt
+    ? new Date(entry.deployedAt).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+
+  let durationSec: number | null = null;
+  if (entry.deployedAt && entry.deployStartedAt) {
+    const diff =
+      new Date(entry.deployedAt).getTime() -
+      new Date(entry.deployStartedAt).getTime();
+    if (diff > 0) durationSec = Math.round(diff / 1000);
+  }
+
+  return (
+    <li className="flex items-start justify-between gap-4 px-5 py-3.5">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Sequence badge */}
+          <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-500">
+            #{entry.id}
+          </span>
+          {/* Commit SHA */}
+          {shortRev && (
+            <span className="font-mono text-xs font-medium text-gray-800">
+              {shortRev}
+            </span>
+          )}
+          {/* Duration */}
+          {durationSec !== null && (
+            <span className="text-xs text-gray-400">
+              {durationSec}s
+            </span>
+          )}
+        </div>
+        {/* Path */}
+        {entry.path && (
+          <p className="mt-1 truncate font-mono text-xs text-gray-400">
+            {entry.path}
+          </p>
+        )}
+      </div>
+      {/* Timestamp */}
+      <div className="shrink-0 text-right">
+        {deployedAtFmt && (
+          <time
+            dateTime={entry.deployedAt}
+            className="text-xs text-gray-400"
+            title={entry.deployedAt}
+          >
+            {deployedAtFmt}
+          </time>
+        )}
+        {entry.targetRevision && (
+          <p className="mt-0.5 font-mono text-xs text-gray-300">
+            {entry.targetRevision}
+          </p>
+        )}
+      </div>
+    </li>
   );
 }
 

@@ -1,5 +1,6 @@
 import { api } from "./api";
 import type {
+  AppDeploymentHistoryResponse,
   AppDetailResponse,
   AppEnvironmentResponse,
   AppEnvironmentsResponse,
@@ -113,6 +114,23 @@ export function getKargoAppPipeline(
 ): Promise<KargoAppPipeline> {
   return api.get<KargoAppPipeline>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/kargo/stages`,
+  );
+}
+
+/**
+ * Fetches the ArgoCD sync/deployment history for one app environment.
+ * Returns reverse-chronological entries (most recent first).
+ * Returns a response with an empty history array when not yet deployed.
+ * The server returns 501 when the deployment history reader is not configured
+ * (e.g. no ArgoCD integration); callers should handle this gracefully.
+ */
+export function getAppDeploymentHistory(
+  project: string,
+  app: string,
+  env: string,
+): Promise<AppDeploymentHistoryResponse> {
+  return api.get<AppDeploymentHistoryResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/history`,
   );
 }
 

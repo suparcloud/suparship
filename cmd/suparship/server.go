@@ -105,6 +105,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kargoPromoter    server.KargoPromoter
 		kargoStatusReader server.KargoStatusReader
 		kargoPipelineReader server.KargoPipelineReader
+		deploymentHistoryReader server.DeploymentHistoryReader
 	)
 
 	switch cfg.RuntimeMode {
@@ -131,6 +132,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider = deps.LogsProvider
 		appStore = deps.AppStore
 		clusterStore = deps.ClusterStore
+		deploymentHistoryReader = &fakeHistoryAdapter{inner: &fake.FakeDeploymentHistoryReader{}}
 
 	default: // config.ModeKubernetes
 		// Log what we will attempt before trying, so contributors see the
@@ -177,7 +179,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			kargoPromoter = kargoAdapter
 			kargoStatusReader = kargoAdapter
 			kargoPipelineReader = kargoAdapter
+			// Wire ArgoCD deployment history reader.
+			argoCDReader := kube.NewArgoCDStatusReaderFromDynamic(dynClient, "")
+			deploymentHistoryReader = &argoCDHistoryAdapter{reader: argoCDReader}
 			logger.Info("kargo promoter enabled via dynamic client")
+			logger.Info("argocd deployment history reader enabled")
 		}
 
 		authenticator = auth.NewK8sAuthenticator(client)
@@ -287,10 +293,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		PreviewStore:     previewStore,
 		AppStore:         appStore,
 		ClusterStore:     clusterStore,
-		GitOpsPublisher:     gitOpsPublisher,
-		KargoPromoter:       kargoPromoter,
-		KargoStatusReader:   kargoStatusReader,
-		KargoPipelineReader: kargoPipelineReader,
+		GitOpsPublisher:         gitOpsPublisher,
+		KargoPromoter:           kargoPromoter,
+		KargoStatusReader:       kargoStatusReader,
+		KargoPipelineReader:     kargoPipelineReader,
+		DeploymentHistoryReader: deploymentHistoryReader,
 		ReadinessProbers: readinessProbers,
 		CookieSecure:     cookieSecure,
 		Logger:           logger,
@@ -482,4 +489,55 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 
 	// Write app.yaml + values.yaml for each environment.
 	return a.inner.PublishApp(ctx, app, pubEnvs)
+}
+
+// argoCDHistoryAdapter bridges kube.ArgoCDStatusReader.GetAppDeploymentHistory
+// to the server.DeploymentHistoryReader interface.
+type argoCDHistoryAdapter struct {
+	reader *kube.ArgoCDStatusReader
+}
+
+// GetAppDeploymentHistory implements server.DeploymentHistoryReader.
+func (a *argoCDHistoryAdapter) GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]server.DeploymentHistoryEntry, error) {
+	raw, err := a.reader.GetAppDeploymentHistory(ctx, appName, envName)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.DeploymentHistoryEntry, 0, len(raw))
+	for _, h := range raw {
+		out = append(out, server.DeploymentHistoryEntry{
+			ID:              h.ID,
+			Revision:        h.Revision,
+			DeployedAt:      h.DeployedAt,
+			DeployStartedAt: h.DeployStartedAt,
+			RepoURL:         h.RepoURL,
+			Path:            h.Path,
+			TargetRevision:  h.TargetRevision,
+		})
+	}
+	return out, nil
+}
+
+// fakeHistoryAdapter bridges fake.FakeDeploymentHistoryReader to the
+// server.DeploymentHistoryReader interface for use in fake/local dev mode.
+type fakeHistoryAdapter struct {
+	inner *fake.FakeDeploymentHistoryReader
+}
+
+// GetAppDeploymentHistory implements server.DeploymentHistoryReader.
+func (a *fakeHistoryAdapter) GetAppDeploymentHistory(_ context.Context, appName, envName string) ([]server.DeploymentHistoryEntry, error) {
+	raw := a.inner.GetFakeHistory(appName, envName)
+	out := make([]server.DeploymentHistoryEntry, 0, len(raw))
+	for _, h := range raw {
+		out = append(out, server.DeploymentHistoryEntry{
+			ID:              h.ID,
+			Revision:        h.Revision,
+			DeployedAt:      h.DeployedAt,
+			DeployStartedAt: h.DeployStartedAt,
+			RepoURL:         h.RepoURL,
+			Path:            h.Path,
+			TargetRevision:  h.TargetRevision,
+		})
+	}
+	return out, nil
 }

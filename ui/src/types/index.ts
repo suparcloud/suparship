@@ -414,3 +414,32 @@ export interface CreateAppRequest {
 export interface CreateAppResponse {
   app: AppDetail;
 }
+
+// --- Deployment history types ---
+
+/** One ArgoCD sync event in the deployment history of an app environment. */
+export interface DeploymentHistoryEntry {
+  /** ArgoCD-assigned sequence number; higher = more recent. */
+  id: number;
+  /** Git commit SHA that was synced. */
+  revision?: string;
+  /** RFC 3339 timestamp when the sync completed. */
+  deployedAt?: string;
+  /** RFC 3339 timestamp when the sync began (may be absent). */
+  deployStartedAt?: string;
+  /** Source Git repository URL. */
+  repoURL?: string;
+  /** Path within the repository that was synced. */
+  path?: string;
+  /** Git ref (branch/tag/commit) tracked by the ArgoCD Application. */
+  targetRevision?: string;
+}
+
+/** Response from GET .../environments/:env/history */
+export interface AppDeploymentHistoryResponse {
+  project: string;
+  app: string;
+  environment: string;
+  /** Reverse-chronological order (most recent first). Empty when not deployed. */
+  history: DeploymentHistoryEntry[];
+}

@@ -327,3 +327,35 @@ type KargoAppPipelineResponse struct {
 	// Stages is ordered staging → prod (matches the promotion chain).
 	Stages []KargoStageStatusDTO `json:"stages"`
 }
+
+// --- Deployment history DTOs ---
+
+// AppDeploymentHistoryEntryDTO represents a single ArgoCD sync event in the
+// deployment history of one app environment.
+type AppDeploymentHistoryEntryDTO struct {
+	// ID is the ArgoCD-assigned sequence number; higher = more recent.
+	ID int64 `json:"id"`
+	// Revision is the Git commit SHA that was synced.
+	Revision string `json:"revision,omitempty"`
+	// DeployedAt is the RFC 3339 timestamp when the sync completed.
+	DeployedAt string `json:"deployedAt,omitempty"`
+	// DeployStartedAt is the RFC 3339 timestamp when the sync began (may be empty).
+	DeployStartedAt string `json:"deployStartedAt,omitempty"`
+	// RepoURL is the source Git repository URL.
+	RepoURL string `json:"repoURL,omitempty"`
+	// Path is the path within the repository that was synced.
+	Path string `json:"path,omitempty"`
+	// TargetRevision is the Git ref (branch/tag/commit) tracked by the Application.
+	TargetRevision string `json:"targetRevision,omitempty"`
+}
+
+// AppDeploymentHistoryResponse is the JSON body for
+// GET /api/v1/projects/{project}/apps/{app}/environments/{env}/history.
+type AppDeploymentHistoryResponse struct {
+	Project     string                         `json:"project"`
+	App         string                         `json:"app"`
+	Environment string                         `json:"environment"`
+	// History is in reverse-chronological order (most recent first).
+	// Empty slice when no syncs have occurred yet.
+	History     []AppDeploymentHistoryEntryDTO `json:"history"`
+}

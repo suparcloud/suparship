@@ -140,6 +140,123 @@ func NewArgoCDStatusReaderFromDynamic(dyn dynamic.Interface, argoCDNamespace str
 	return &ArgoCDStatusReader{dynamic: dyn, namespace: argoCDNamespace}
 }
 
+// DeploymentHistoryEntry represents a single ArgoCD sync event from
+// status.history on an Application CR.
+type DeploymentHistoryEntry struct {
+	// ID is the ArgoCD-assigned sequence number for this sync event.
+	ID int64
+	// Revision is the Git commit SHA that was synced.
+	Revision string
+	// DeployedAt is the RFC 3339 timestamp when the sync completed.
+	DeployedAt string
+	// DeployStartedAt is the RFC 3339 timestamp when the sync began (may be empty).
+	DeployStartedAt string
+	// RepoURL is the source Git repository URL.
+	RepoURL string
+	// Path is the path within the repository that was synced.
+	Path string
+	// TargetRevision is the Git ref (branch/tag/commit) tracked by this Application.
+	TargetRevision string
+}
+
+// GetAppDeploymentHistory reads the sync history of the ArgoCD Application
+// for a given app/env combination. The Application CR name follows the
+// "{appName}-{envName}" convention (Model B). Returns an empty slice (not an
+// error) when the Application CR does not exist or has no history yet.
+func (r *ArgoCDStatusReader) GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]DeploymentHistoryEntry, error) {
+	appCRName := appName + "-" + envName
+	raw, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).Get(ctx, appCRName, metav1.GetOptions{})
+	if err != nil {
+		// Not found is expected before the first deploy — return empty, not error.
+		return []DeploymentHistoryEntry{}, nil //nolint:nilerr
+	}
+
+	statusRaw, ok := raw.Object["status"].(map[string]any)
+	if !ok {
+		return []DeploymentHistoryEntry{}, nil
+	}
+
+	historyRaw, ok := statusRaw["history"].([]any)
+	if !ok {
+		return []DeploymentHistoryEntry{}, nil
+	}
+
+	entries := make([]DeploymentHistoryEntry, 0, len(historyRaw))
+	for _, item := range historyRaw {
+		h, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		entry := DeploymentHistoryEntry{}
+
+		// id is a JSON number
+		switch v := h["id"].(type) {
+		case json.Number:
+			i, _ := v.Int64()
+			entry.ID = i
+		case float64:
+			entry.ID = int64(v)
+		case int64:
+			entry.ID = v
+		}
+
+		entry.DeployedAt, _, _ = unstructuredString(h, "deployedAt")
+		entry.DeployStartedAt, _, _ = unstructuredString(h, "deployStartedAt")
+
+		// ArgoCD multi-source Applications (sources/revisions) take precedence
+		// over the legacy single-source fields (source/revision).
+		//
+		// Multi-source layout:
+		//   sources[]: array of {repoURL, path/ref, targetRevision, ...}
+		//   revisions[]: parallel array of commit SHAs, one per source
+		//
+		// We prefer the source that has a "path" set (the Helm chart source)
+		// over the "ref" source (the values ref), and use its corresponding revision.
+		if sources, ok := h["sources"].([]any); len(sources) > 0 && ok {
+			// Pick the commit SHA: all sources point to the same repo so all
+			// revisions are identical in practice; we take the first non-empty one.
+			if revisions, ok := h["revisions"].([]any); ok {
+				for _, rv := range revisions {
+					if s, ok := rv.(string); ok && s != "" {
+						entry.Revision = s
+						break
+					}
+				}
+			}
+			// Pick the "path" source (Helm chart) for display metadata.
+			for _, src := range sources {
+				s, ok := src.(map[string]any)
+				if !ok {
+					continue
+				}
+				path, _, _ := unstructuredString(s, "path")
+				if path == "" {
+					continue // skip ref-only sources (values sources)
+				}
+				entry.RepoURL, _, _ = unstructuredString(s, "repoURL")
+				entry.Path = path
+				entry.TargetRevision, _, _ = unstructuredString(s, "targetRevision")
+				break
+			}
+		} else {
+			// Legacy single-source Application.
+			entry.Revision, _, _ = unstructuredString(h, "revision")
+			entry.RepoURL, _, _ = unstructuredString(h, "source", "repoURL")
+			entry.Path, _, _ = unstructuredString(h, "source", "path")
+			entry.TargetRevision, _, _ = unstructuredString(h, "source", "targetRevision")
+		}
+
+		entries = append(entries, entry)
+	}
+
+	// Return in reverse-chronological order (most recent first).
+	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+		entries[i], entries[j] = entries[j], entries[i]
+	}
+
+	return entries, nil
+}
+
 // unstructuredString traverses a nested map path and returns the string value.
 func unstructuredString(obj map[string]any, keys ...string) (string, bool, error) {
 	cur := obj

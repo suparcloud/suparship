@@ -43,6 +43,7 @@ type appHandler struct {
 	kargoPromoter     KargoPromoter        // optional: creates Kargo Promotion CRs on promote
 	kargoStatusReader KargoStatusReader    // optional: reads live Kargo Promotion status
 	kargoPipelineReader KargoPipelineReader // optional: reads live Kargo Stage pipeline status
+	deploymentHistoryReader DeploymentHistoryReader // optional: reads ArgoCD sync history
 }
 
 // newAppHandler creates an appHandler.
@@ -1050,4 +1051,72 @@ func (ah *appHandler) handleGetKargoStages(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, KargoAppPipelineResponse{Stages: dtos})
+}
+
+// handleGetAppDeploymentHistory handles
+// GET /api/v1/projects/{project}/apps/{app}/environments/{env}/history.
+//
+// It returns the ArgoCD sync history for the Application CR named
+// "{appName}-{envName}", in reverse-chronological order (most recent first).
+// Returns 501 when the deploymentHistoryReader is not configured (e.g. in
+// fake/local dev mode without an ArgoCD integration).
+// Returns an empty history slice (not an error) when the Application exists
+// but has no sync events yet.
+func (ah *appHandler) handleGetAppDeploymentHistory(w http.ResponseWriter, r *http.Request) {
+	if ah.deploymentHistoryReader == nil {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "deployment history reader not configured"})
+		return
+	}
+
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	if projectName == "" || appName == "" || envName == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "project, app, and env are required"})
+		return
+	}
+
+	// Verify the app and environment exist before querying ArgoCD.
+	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+	if _, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, envName); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "environment \"" + envName + "\" not found for app \"" + appName + "\"",
+		})
+		return
+	}
+
+	history, err := ah.deploymentHistoryReader.GetAppDeploymentHistory(r.Context(), appName, envName)
+	if err != nil {
+		slog.Error("failed to get deployment history",
+			"project", projectName, "app", appName, "env", envName, "error", err,
+		)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to get deployment history"})
+		return
+	}
+
+	dtos := make([]AppDeploymentHistoryEntryDTO, 0, len(history))
+	for _, h := range history {
+		dtos = append(dtos, AppDeploymentHistoryEntryDTO{
+			ID:              h.ID,
+			Revision:        h.Revision,
+			DeployedAt:      h.DeployedAt,
+			DeployStartedAt: h.DeployStartedAt,
+			RepoURL:         h.RepoURL,
+			Path:            h.Path,
+			TargetRevision:  h.TargetRevision,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, AppDeploymentHistoryResponse{
+		Project:     projectName,
+		App:         appName,
+		Environment: envName,
+		History:     dtos,
+	})
 }
