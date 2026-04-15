@@ -12,6 +12,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -153,6 +154,10 @@ type Config struct {
 	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
+	// UpperLevelEnvWriter, when set, writes Org/Environment/Project runtime
+	// ConfigMaps in suparship-system alongside domain-store saves. Requires a
+	// live Kubernetes client; omit in unit tests.
+	UpperLevelEnvWriter *envconfig.UpperLevelEnvWriter
 }
 
 // Server is the suparship HTTP API server.
@@ -248,6 +253,18 @@ func New(cfg Config) *Server {
 				cfg.Logger.Info("deployment history reader enabled — history endpoint active")
 			}
 			cfg.Logger.Info("app endpoints enabled")
+		}
+		if cfg.AppStore != nil && cfg.ProjectStore != nil {
+			ech := &envConfigHandler{
+				orgStore:         cfg.OrgProvider,
+				projectStore:     cfg.ProjectStore,
+				appStore:         cfg.AppStore,
+				upperLevelWriter: cfg.UpperLevelEnvWriter,
+				publisher:        cfg.GitOpsPublisher,
+				logger:           cfg.Logger,
+			}
+			rh.envConfigHandler = ech
+			cfg.Logger.Info("env config endpoints enabled")
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")

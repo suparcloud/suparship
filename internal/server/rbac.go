@@ -31,6 +31,7 @@ type rbacHandler struct {
 	promoteHandler   *promoteHandler   // optional: enables promote endpoint
 	logsHandler      *logsHandler      // optional: enables logs endpoint
 	appHandler       *appHandler       // optional: enables app read endpoints
+	envConfigHandler *envConfigHandler // optional: enables env config endpoints
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -133,6 +134,26 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/projects/{project}/services/{service}/logs", viewProject(legacyServiceRoute(rh.logsHandler.handleGetLogs)))
 	}
 	// --- End legacy service-oriented routes ---
+
+	if rh.envConfigHandler != nil {
+		ec := rh.envConfigHandler
+		// Org and Environment levels — org_admin writes, any-auth reads.
+		mux.HandleFunc("GET /api/v1/org/envconfig", rh.auth.requireAuth(ec.handleGetOrgEnvConfig))
+		mux.HandleFunc("PUT /api/v1/org/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutOrgEnvConfig)))
+		mux.HandleFunc("GET /api/v1/org/envconfig/{envtype}", rh.auth.requireAuth(ec.handleGetEnvTypeEnvConfig))
+		mux.HandleFunc("PUT /api/v1/org/envconfig/{envtype}", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutEnvTypeEnvConfig)))
+		// Project level — project_admin writes, viewer reads.
+		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig", viewProject(ec.handleGetProjectEnvConfig))
+		mux.HandleFunc("PUT /api/v1/projects/{project}/envconfig", manageProject(ec.handlePutProjectEnvConfig))
+		// App level — developer writes (202 async), viewer reads.
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envconfig", viewProject(ec.handleGetAppEnvConfig))
+		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envconfig", devProject(ec.handlePutAppEnvConfig))
+		// App-Environment level — developer writes (202 async), viewer reads.
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig", viewProject(ec.handleGetAppEnvEnvConfig))
+		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig", devProject(ec.handlePutAppEnvEnvConfig))
+		// Resolved view — any viewer.
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig/resolved", viewProject(ec.handleGetResolvedEnvConfig))
+	}
 
 	if rh.appHandler != nil {
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps", viewProject(rh.appHandler.handleListApps))
