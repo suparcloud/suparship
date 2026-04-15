@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/envconfig"
 )
 
 // defaultReplicas is the replica count used when a ComponentSpec does not
@@ -89,6 +90,10 @@ func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.A
 			Host:      routingHost,
 			Component: routingComponent,
 		},
+		EnvLayers: envconfig.ToHelmEnvLayers(envconfig.EnvLayers{
+			App:    app.Spec.EnvConfig,
+			AppEnv: envOverride.EnvConfig,
+		}),
 	}
 }
 
