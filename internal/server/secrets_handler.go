@@ -16,7 +16,8 @@ import (
 
 // SecretBackendDTO is the JSON body for GET/PUT /api/v1/org/secrets-backend.
 type SecretBackendDTO struct {
-	Type string `json:"type"`
+	Type        string                    `json:"type"`
+	OnePassword *secrets.OnePasswordConfig `json:"onePassword,omitempty"`
 }
 
 // SecretKeyDTO is one entry in the key-only list returned by GET .../secrets.
@@ -65,9 +66,11 @@ func (h *secretsHandler) handleGetSecretsBackend(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
 		return
 	}
-	writeJSON(w, http.StatusOK, SecretBackendDTO{
-		Type: string(org.SecretBackend.Effective()),
-	})
+	dto := SecretBackendDTO{
+		Type:        string(org.SecretBackend.Effective()),
+		OnePassword: org.SecretBackend.OnePassword,
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.Request) {
@@ -83,19 +86,25 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 		return
 	}
 
+	newCfg := secrets.BackendConfig{Type: bt, OnePassword: dto.OnePassword}
+	if err := newCfg.Validate(); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
 	org, err := h.orgStore.GetOrg(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
 		return
 	}
 
-	org.SecretBackend = secrets.BackendConfig{Type: bt}
+	org.SecretBackend = newCfg
 	if err := h.orgStore.SaveOrg(r.Context(), org); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save org"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, SecretBackendDTO{Type: dto.Type})
+	writeJSON(w, http.StatusOK, SecretBackendDTO{Type: dto.Type, OnePassword: dto.OnePassword})
 }
 
 // ── Org-level secrets CRUD ──────────────────────────────────────────────────
