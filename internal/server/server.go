@@ -170,6 +170,9 @@ type Config struct {
 	// GitOpsConfigStore reads/writes the GitOps repo ConfigMap. Nil disables
 	// the /api/v1/gitops/* endpoints.
 	GitOpsConfigStore *gitops.ConfigStore
+	// TemplateRegistryStore reads/writes the template registry ConfigMap.
+	// Nil disables the /api/v1/templates/registry and /sources endpoints.
+	TemplateRegistryStore *tpl.RegistryStore
 }
 
 // Server is the suparship HTTP API server.
@@ -323,6 +326,16 @@ func New(cfg Config) *Server {
 		}
 		gh.registerRoutes(mux)
 		cfg.Logger.Info("gitops config endpoints enabled")
+	}
+
+	if cfg.TemplateRegistryStore != nil && ah != nil {
+		trh := &templateRegistryHandler{
+			store:  cfg.TemplateRegistryStore,
+			auth:   ah,
+			logger: cfg.Logger,
+		}
+		trh.registerRoutes(mux)
+		cfg.Logger.Info("template registry endpoints enabled")
 	}
 
 	if cfg.UIDir != "" {
