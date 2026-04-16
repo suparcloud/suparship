@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "suparship.fullname" . }}
+  namespace: {{ include "suparship.namespace" . }}
+  labels:
+    {{- include "suparship.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "suparship.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/org-config: {{ include (print $.Template.BasePath "/configmap-org.yaml") . | sha256sum }}
+        {{- if .Values.gitops.repoURL }}
+        checksum/gitops-config: {{ include (print $.Template.BasePath "/configmap-gitops.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "suparship.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "suparship.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: suparship
+          image: {{ include "suparship.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - server
+            - --addr=:8080
+            - --ui-dir=/app/ui
+            - --log-level={{ .Values.server.logLevel }}
+            {{- if .Values.server.cookieSecure }}
+            - --cookie-secure
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: SUPARSHIP_CLUSTER_MODE
+              value: kubernetes
+            {{- if .Values.gitops.repoURL }}
+            - name: SUPARSHIP_GITOPS_REPO_URL
+              value: {{ .Values.gitops.repoURL | quote }}
+            {{- if .Values.gitops.existingSecret }}
+            - name: SUPARSHIP_GITOPS_REPO_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gitops.existingSecret }}
+                  key: username
+                  optional: true
+            - name: SUPARSHIP_GITOPS_REPO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gitops.existingSecret }}
+                  key: {{ if eq .Values.gitops.provider "github" }}token{{ else if eq .Values.gitops.provider "gitlab" }}token{{ else if eq .Values.gitops.provider "gitea" }}token{{ else }}password{{ end }}
+                  optional: true
+            {{- end }}
+            {{- if .Values.gitops.argoCDRepoURL }}
+            - name: SUPARSHIP_ARGOCD_REPO_URL
+              value: {{ .Values.gitops.argoCDRepoURL | quote }}
+            {{- end }}
+            {{- if .Values.gitops.kargoGitRepoURL }}
+            - name: SUPARSHIP_KARGO_GIT_REPO_URL
+              value: {{ .Values.gitops.kargoGitRepoURL | quote }}
+            {{- end }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

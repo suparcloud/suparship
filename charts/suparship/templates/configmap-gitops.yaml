@@ -1,0 +1,45 @@
+{{- if .Values.gitops.repoURL }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-gitops-config
+  namespace: {{ include "suparship.namespace" . }}
+  labels:
+    {{- include "suparship.labels" . | nindent 4 }}
+    suparship.io/managed-by: suparship
+    suparship.io/type: gitops-config
+data:
+  gitops.yaml: |
+    provider: {{ .Values.gitops.provider | quote }}
+    repoURL: {{ .Values.gitops.repoURL | quote }}
+    branch: {{ default "main" .Values.gitops.branch | quote }}
+    {{- if .Values.gitops.subPath }}
+    subPath: {{ .Values.gitops.subPath | quote }}
+    {{- end }}
+    {{- if .Values.gitops.existingSecret }}
+    authSecretRef: {{ .Values.gitops.existingSecret | quote }}
+    {{- end }}
+    {{- if .Values.gitops.credentialExpiresAt }}
+    credentialExpiresAt: {{ .Values.gitops.credentialExpiresAt | quote }}
+    {{- end }}
+    {{- if .Values.gitops.argoCDRepoURL }}
+    argoCDRepoURL: {{ .Values.gitops.argoCDRepoURL | quote }}
+    {{- end }}
+    {{- if .Values.gitops.kargoGitRepoURL }}
+    kargoGitRepoURL: {{ .Values.gitops.kargoGitRepoURL | quote }}
+    {{- end }}
+    initializeRepo: {{ .Values.gitops.initializeRepo }}
+    {{- if eq .Values.gitops.provider "github" }}
+    {{- if .Values.gitops.github.appId }}
+    github:
+      appId: {{ .Values.gitops.github.appId | quote }}
+      installationId: {{ .Values.gitops.github.installationId | quote }}
+    {{- end }}
+    {{- end }}
+    {{- if eq .Values.gitops.provider "bitbucket" }}
+    {{- if .Values.gitops.bitbucket.workspace }}
+    bitbucket:
+      workspace: {{ .Values.gitops.bitbucket.workspace | quote }}
+    {{- end }}
+    {{- end }}
+{{- end }}

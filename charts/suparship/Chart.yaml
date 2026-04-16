@@ -1,0 +1,36 @@
+apiVersion: v2
+name: suparship
+description: >-
+  suparShip — GitOps-native platform runtime. Vercel-like developer experience
+  on Kubernetes, powered by ArgoCD and Kargo.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/suparcloud/suparship
+sources:
+  - https://github.com/suparcloud/suparship
+keywords:
+  - gitops
+  - argocd
+  - kargo
+  - platform
+  - developer-experience
+maintainers:
+  - name: suparCloud
+    url: https://github.com/suparcloud
+
+# Optional dependencies — uncomment and run `helm dependency build` to bundle.
+# All are disabled by default; production users install these independently.
+# dependencies:
+#   - name: argo-cd
+#     version: "7.7.5"
+#     repository: https://argoproj.github.io/argo-helm
+#     condition: dependencies.argocd.enabled
+#   - name: external-secrets
+#     version: "0.12.1"
+#     repository: https://charts.external-secrets.io
+#     condition: dependencies.eso.enabled
+#   - name: ingress-nginx
+#     version: "4.12.0"
+#     repository: https://kubernetes.github.io/ingress-nginx
+#     condition: dependencies.ingressNginx.enabled

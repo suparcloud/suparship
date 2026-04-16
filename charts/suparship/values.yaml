@@ -1,0 +1,245 @@
+# -- suparship Helm chart values
+# See https://github.com/suparcloud/suparship for documentation.
+
+# -- Container image settings
+image:
+  repository: ghcr.io/suparcloud/suparship
+  # -- Overrides the image tag. Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Number of replicas (suparship is stateless; >1 requires shared session store)
+replicaCount: 1
+
+serviceAccount:
+  # -- Whether to create a ServiceAccount
+  create: true
+  # -- Annotations for the ServiceAccount
+  annotations: {}
+  # -- Override the ServiceAccount name
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext: {}
+
+securityContext: {}
+
+# -- Server configuration
+server:
+  # -- Log level: debug, info, warn, error
+  logLevel: info
+  # -- Set Secure flag on session cookies (enable behind HTTPS)
+  cookieSecure: false
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: suparship.example.com
+  tls: []
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ---------------------------------------------------------------------------
+# Optional infrastructure dependencies (subcharts)
+# Set to true to install as part of this release. Production users should
+# install these independently and set to false.
+# ---------------------------------------------------------------------------
+dependencies:
+  argocd:
+    enabled: false
+  eso:
+    enabled: false
+  ingressNginx:
+    enabled: false
+
+# ---------------------------------------------------------------------------
+# Onboarding configuration
+# ---------------------------------------------------------------------------
+
+# -- Organization settings
+org:
+  name: default
+  displayName: "My Organization"
+
+# -- Admin credentials.
+# The chart does NOT create the Secret. Create it externally (manually,
+# via kubeseal, External Secrets, etc.) or include it in extraObjects below.
+admin:
+  # -- Name of an existing Secret containing the admin password
+  existingSecret: ""
+  # -- Key within the Secret that holds the bcrypt-hashed password
+  secretKey: password
+
+# -- GitOps repository connection
+gitops:
+  # -- Git provider: github, gitlab, bitbucket, gitea, generic
+  provider: ""
+  # -- Repository URL (HTTPS or SSH)
+  repoURL: ""
+  # -- Branch to use
+  branch: main
+  # -- Optional subpath within the repo for gitops content
+  subPath: ""
+  # -- Initialize repo structure on first boot when true
+  initializeRepo: true
+  # -- ISO 8601 timestamp when the credential expires (for health warnings)
+  credentialExpiresAt: ""
+  # -- Name of an existing Secret containing provider credentials.
+  # Required keys vary by provider:
+  #   github:    token (PAT) or appId + installationId + privateKey (App)
+  #   gitlab:    token
+  #   bitbucket: username + appPassword
+  #   gitea:     token
+  #   generic:   username + password
+  #   ssh:       privateKey
+  existingSecret: ""
+  # -- Provider-specific non-secret fields
+  github:
+    appId: ""
+    installationId: ""
+  bitbucket:
+    workspace: ""
+  # -- ArgoCD-facing repo URL (if different from repoURL, e.g. in-cluster URL)
+  argoCDRepoURL: ""
+  # -- Kargo HTTPS repo URL (if different from repoURL)
+  kargoGitRepoURL: ""
+
+# -- Environments define the promotion pipeline.
+# Each environment references a cluster by name via clusterRef.
+environments: []
+# Example:
+# - name: staging
+#   displayName: Staging
+#   order: 1
+#   clusterRef: in-cluster
+#   baseDomain: staging.example.com
+#   namespacePattern: "{app}-{env}"
+# - name: prod
+#   displayName: Production
+#   order: 2
+#   clusterRef: prod-cluster
+#   baseDomain: prod.example.com
+#   namespacePattern: "{app}-{env}"
+
+# -- Workload clusters to register.
+# Each entry references an existing Secret containing a kubeconfig,
+# or uses inCluster: true for the local cluster.
+clusters: []
+# Example:
+# - name: in-cluster
+#   displayName: "Local Cluster"
+#   apiServer: https://kubernetes.default.svc
+#   inCluster: true
+# - name: prod-cluster
+#   displayName: Production
+#   apiServer: https://prod-k8s.example.com
+#   existingSecret: suparship-cluster-prod   # Secret with key: kubeconfig
+
+# -- Secret backend configuration
+secrets:
+  # -- Backend type: k8s, 1password, vault, aws-sm
+  backend: k8s
+  onePassword:
+    # -- Mode: connect or service-account
+    mode: connect
+    # -- 1Password Connect server URL (connect mode only)
+    connectHost: ""
+    # -- Name of an existing Secret containing the 1Password token (key: token)
+    existingSecret: ""
+    # -- Per-environment vault UUID mapping
+    vaults: {}
+    # Example:
+    #   staging: "vault-uuid-staging"
+    #   prod: "vault-uuid-prod"
+
+# -- Container registry for private image pulls (optional)
+registry:
+  enabled: false
+  # -- Registry URL
+  url: ""
+  # -- Registry username (non-secret)
+  username: ""
+  # -- Name of an existing Secret containing registry credentials
+  # Expected key: password (or .dockerconfigjson for pre-built docker config)
+  existingSecret: ""
+  # -- Which environments need imagePullSecrets from this registry
+  environments: []
+
+# -- Template configuration
+templates:
+  # -- Built-in templates to seed into the gitops repo on initialization
+  builtIn:
+    - web-service
+    - color-app
+  # -- External template repositories, pinned to a version
+  external: []
+  # Example:
+  # - name: company-templates
+  #   repoURL: https://github.com/myorg/suparship-templates.git
+  #   ref: v1.2.0
+  #   path: templates/
+  #   existingSecret: company-tpl-credentials
+
+# ---------------------------------------------------------------------------
+# Extra objects
+# ---------------------------------------------------------------------------
+# Include arbitrary Kubernetes resources in this Helm release.
+# Use this to deploy SealedSecrets, ExternalSecrets, or plain Secrets
+# alongside suparship so credential Secrets exist before the server starts.
+#
+# Each entry is a complete Kubernetes resource manifest.
+extraObjects: []
+# Examples:
+#
+# # --- kubeseal example ---
+# - apiVersion: bitnami.com/v1alpha1
+#   kind: SealedSecret
+#   metadata:
+#     name: suparship-gitops-credentials
+#     namespace: suparship-system
+#   spec:
+#     encryptedData:
+#       token: AgBy3i...
+#
+# # --- External Secrets Operator example ---
+# - apiVersion: external-secrets.io/v1beta1
+#   kind: ExternalSecret
+#   metadata:
+#     name: suparship-gitops-credentials
+#     namespace: suparship-system
+#   spec:
+#     refreshInterval: 1h
+#     secretStoreRef:
+#       name: onepassword-store
+#       kind: ClusterSecretStore
+#     target:
+#       name: suparship-gitops-credentials
+#     data:
+#       - secretKey: token
+#         remoteRef:
+#           key: suparship-github-pat
+#           property: credential
+#
+# # --- Plain Secret (POC only — do NOT commit to Git) ---
+# - apiVersion: v1
+#   kind: Secret
+#   metadata:
+#     name: suparship-admin-auth
+#     namespace: suparship-system
+#   stringData:
+#     password: "$2a$10$..."   # bcrypt hash

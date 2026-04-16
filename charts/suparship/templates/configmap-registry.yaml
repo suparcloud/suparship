@@ -1,0 +1,26 @@
+{{- if .Values.registry.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-registry-config
+  namespace: {{ include "suparship.namespace" . }}
+  labels:
+    {{- include "suparship.labels" . | nindent 4 }}
+    suparship.io/managed-by: suparship
+    suparship.io/type: registry-config
+data:
+  registry.yaml: |
+    url: {{ .Values.registry.url | quote }}
+    {{- if .Values.registry.username }}
+    username: {{ .Values.registry.username | quote }}
+    {{- end }}
+    {{- if .Values.registry.existingSecret }}
+    authSecretRef: {{ .Values.registry.existingSecret | quote }}
+    {{- end }}
+    {{- if .Values.registry.environments }}
+    environments:
+      {{- range .Values.registry.environments }}
+      - {{ . | quote }}
+      {{- end }}
+    {{- end }}
+{{- end }}
