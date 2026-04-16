@@ -17,6 +17,7 @@ import (
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -151,6 +152,8 @@ type Config struct {
 	KargoStatusReader KargoStatusReader  // optional: enables GET promotion-status endpoint
 	KargoPipelineReader KargoPipelineReader // optional: enables GET pipeline-stages endpoint
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
+	SecretBackend        secrets.Backend           // optional: enables simple app-env secret CRUD
+	UpperLevelSecretWriter secrets.UpperLevelWriter // optional: enables org/envtype/project-level secret CRUD
 	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
@@ -265,6 +268,16 @@ func New(cfg Config) *Server {
 			}
 			rh.envConfigHandler = ech
 			cfg.Logger.Info("env config endpoints enabled")
+		}
+		if cfg.AppStore != nil && cfg.SecretBackend != nil {
+			rh.secretsHandler = &secretsHandler{
+				orgStore:    cfg.OrgProvider,
+				appStore:    cfg.AppStore,
+				backend:     cfg.SecretBackend,
+				upperWriter: cfg.UpperLevelSecretWriter,
+				logger:      cfg.Logger,
+			}
+			cfg.Logger.Info("secrets management endpoints enabled")
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")

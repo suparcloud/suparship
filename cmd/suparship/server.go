@@ -21,6 +21,7 @@ import (
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -100,6 +101,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider     runtime.LogsProvider
 		appStore         domain.AppStore
 		clusterStore     domain.ClusterStore
+		secretBackend    secrets.Backend
+		upperLevelSecretWriter secrets.UpperLevelWriter
 		templates        []*tpl.Template
 		readinessProbers []server.ReadinessProber
 		kargoPromoter    server.KargoPromoter
@@ -132,6 +135,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider = deps.LogsProvider
 		appStore = deps.AppStore
 		clusterStore = deps.ClusterStore
+		memBE := secrets.NewMemBackend()
+		secretBackend = memBE
+		upperLevelSecretWriter = secrets.NewMemUpperLevelWriter(memBE)
 		deploymentHistoryReader = &fakeHistoryAdapter{inner: &fake.FakeDeploymentHistoryReader{}}
 
 	default: // config.ModeKubernetes
@@ -206,6 +212,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider = kubeDeps.LogsProvider
 		appStore = kubeDeps.AppStore
 		clusterStore = kubeDeps.ClusterStore
+		secretBackend = secrets.NewK8sBackend(client)
+		upperLevelSecretWriter = secrets.NewUpperLevelSecretWriter(client)
 
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
@@ -293,6 +301,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		PreviewStore:     previewStore,
 		AppStore:         appStore,
 		ClusterStore:     clusterStore,
+		SecretBackend:            secretBackend,
+		UpperLevelSecretWriter:   upperLevelSecretWriter,
 		GitOpsPublisher:         gitOpsPublisher,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,

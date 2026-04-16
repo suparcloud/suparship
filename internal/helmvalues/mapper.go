@@ -6,6 +6,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
+	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // defaultReplicas is the replica count used when a ComponentSpec does not
@@ -94,6 +95,10 @@ func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.A
 			App:    app.Spec.EnvConfig,
 			AppEnv: envOverride.EnvConfig,
 		}),
+		Suparship: SuparshipValues{
+			SecretName: secrets.AppSecretName(app.ProjectName, app.Name, envName),
+			ConfigName: secrets.AppConfigName(app.ProjectName, app.Name, envName),
+		},
 	}
 }
 

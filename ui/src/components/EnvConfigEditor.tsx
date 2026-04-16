@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import type { EnvConfig, SecretRef } from "../lib/envconfig";
+import type { EnvConfig } from "../lib/envconfig";
 
 // ── Internal types ─────────────────────────────────────────────────────────────
 
@@ -20,10 +20,6 @@ interface KVRow {
   id: number;
   key: string;
   value: string;
-}
-
-interface SecretRow extends SecretRef {
-  id: number;
 }
 
 let _rowId = 0;
@@ -58,7 +54,6 @@ export function EnvConfigEditor({
 
   const [editing, setEditing] = useState(false);
   const [draftVars, setDraftVars] = useState<KVRow[]>([]);
-  const [draftSecrets, setDraftSecrets] = useState<SecretRow[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -85,9 +80,6 @@ export function EnvConfigEditor({
         value,
       })),
     );
-    setDraftSecrets(
-      (config.secretRefs ?? []).map((r) => ({ ...r, id: nextId() })),
-    );
     setSaveError(null);
     setEditing(true);
   }
@@ -107,16 +99,6 @@ export function EnvConfigEditor({
         return;
       }
     }
-    for (const row of draftSecrets) {
-      if (!row.envKey) continue;
-      if (!ENV_KEY_RE.test(row.envKey)) {
-        setSaveError(
-          `Invalid secret env key "${row.envKey}". Must match [A-Za-z_][A-Za-z0-9_]*.`,
-        );
-        return;
-      }
-    }
-
     setSaving(true);
     setSaveError(null);
     try {
@@ -124,11 +106,8 @@ export function EnvConfigEditor({
       for (const row of draftVars) {
         if (row.key.trim()) vars[row.key.trim()] = row.value;
       }
-      const secretRefs: SecretRef[] = draftSecrets
-        .filter((r) => r.envKey.trim() && r.secretName.trim())
-        .map(({ id: _id, ...r }) => r);
 
-      await saveFn({ vars, secretRefs });
+      await saveFn({ vars });
       // Reload to get the authoritative saved state (handles 202-async as well).
       load();
       setEditing(false);
@@ -140,8 +119,7 @@ export function EnvConfigEditor({
   }
 
   const varEntries = Object.entries(config.vars ?? {});
-  const secretEntries = config.secretRefs ?? [];
-  const totalCount = varEntries.length + secretEntries.length;
+  const totalCount = varEntries.length;
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white">
@@ -205,12 +183,10 @@ export function EnvConfigEditor({
           <EditView
             draftVars={draftVars}
             setDraftVars={setDraftVars}
-            draftSecrets={draftSecrets}
-            setDraftSecrets={setDraftSecrets}
             saveError={saveError}
           />
         ) : (
-          <ReadView varEntries={varEntries} secretEntries={secretEntries} />
+          <ReadView varEntries={varEntries} />
         )}
       </div>
     </div>
@@ -221,74 +197,34 @@ export function EnvConfigEditor({
 
 function ReadView({
   varEntries,
-  secretEntries,
 }: {
   varEntries: [string, string][];
-  secretEntries: SecretRef[];
 }) {
-  if (varEntries.length === 0 && secretEntries.length === 0) {
+  if (varEntries.length === 0) {
     return (
       <p className="text-sm text-gray-400 italic">No variables configured.</p>
     );
   }
 
   return (
-    <div className="space-y-4">
-      {varEntries.length > 0 && (
-        <div>
-          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-gray-400">
-            Variables
-          </p>
-          <table className="w-full text-sm">
-            <tbody className="divide-y divide-gray-50">
-              {varEntries.map(([key, value]) => (
-                <tr key={key}>
-                  <td className="py-1.5 pr-4 font-mono text-xs font-medium text-gray-900 w-48 align-top">
-                    {key}
-                  </td>
-                  <td className="py-1.5 font-mono text-xs text-gray-600 break-all">
-                    {value}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {secretEntries.length > 0 && (
-        <div>
-          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-gray-400">
-            Secret references
-          </p>
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-left text-gray-400 uppercase tracking-wider">
-                <th className="pb-1 pr-4 font-medium">Env key</th>
-                <th className="pb-1 pr-4 font-medium">Provider</th>
-                <th className="pb-1 pr-4 font-medium">Secret name</th>
-                <th className="pb-1 font-medium">Secret key</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {secretEntries.map((r) => (
-                <tr key={r.envKey}>
-                  <td className="py-1.5 pr-4 font-mono font-medium text-gray-900">
-                    {r.envKey}
-                  </td>
-                  <td className="py-1.5 pr-4 text-gray-500">{r.provider}</td>
-                  <td className="py-1.5 pr-4 font-mono text-gray-600">
-                    {r.secretName}
-                  </td>
-                  <td className="py-1.5 font-mono text-gray-600">
-                    {r.secretKey}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+    <div>
+      <p className="mb-2 text-xs font-medium uppercase tracking-wider text-gray-400">
+        Variables
+      </p>
+      <table className="w-full text-sm">
+        <tbody className="divide-y divide-gray-50">
+          {varEntries.map(([key, value]) => (
+            <tr key={key}>
+              <td className="py-1.5 pr-4 font-mono text-xs font-medium text-gray-900 w-48 align-top">
+                {key}
+              </td>
+              <td className="py-1.5 font-mono text-xs text-gray-600 break-all">
+                {value}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -298,14 +234,10 @@ function ReadView({
 function EditView({
   draftVars,
   setDraftVars,
-  draftSecrets,
-  setDraftSecrets,
   saveError,
 }: {
   draftVars: KVRow[];
   setDraftVars: React.Dispatch<React.SetStateAction<KVRow[]>>;
-  draftSecrets: SecretRow[];
-  setDraftSecrets: React.Dispatch<React.SetStateAction<SecretRow[]>>;
   saveError: string | null;
 }) {
   function addVar() {
@@ -322,44 +254,11 @@ function EditView({
     );
   }
 
-  function addSecret() {
-    setDraftSecrets((prev) => [
-      ...prev,
-      {
-        id: nextId(),
-        envKey: "",
-        provider: "kubernetes",
-        secretName: "",
-        secretKey: "",
-      },
-    ]);
-  }
-
-  function removeSecret(id: number) {
-    setDraftSecrets((prev) => prev.filter((r) => r.id !== id));
-  }
-
-  function updateSecret(
-    id: number,
-    field: keyof Omit<SecretRow, "id">,
-    val: string,
-  ) {
-    setDraftSecrets((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, [field]: val } : r)),
-    );
-  }
-
-  const inputCls =
-    "w-full rounded border border-gray-300 px-2 py-1 font-mono text-xs focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400";
-
-  // Inline variant without w-full — used in the flex k/v row where explicit
-  // widths (w-48 / flex-1) must not be overridden by Tailwind's w-full.
   const inlineCls =
     "rounded border border-gray-300 px-2 py-1 font-mono text-xs focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400";
 
   return (
     <div className="space-y-6">
-      {/* Variables section */}
       <div>
         <div className="mb-2 flex items-center justify-between">
           <p className="text-xs font-medium uppercase tracking-wider text-gray-400">
@@ -403,105 +302,6 @@ function EditView({
                 >
                   ✕
                 </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Secret references section */}
-      <div>
-        <div className="mb-2 flex items-center justify-between">
-          <p className="text-xs font-medium uppercase tracking-wider text-gray-400">
-            Secret references
-          </p>
-          <button
-            type="button"
-            onClick={addSecret}
-            className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
-          >
-            + Add secret ref
-          </button>
-        </div>
-
-        {draftSecrets.length === 0 ? (
-          <p className="text-xs italic text-gray-400">
-            No secret references. Click "+ Add secret ref" to reference an
-            external secret.
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {draftSecrets.map((row) => (
-              <div
-                key={row.id}
-                className="rounded-lg border border-gray-200 bg-gray-50 p-3"
-              >
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="mb-0.5 block text-xs text-gray-500">
-                      Env key
-                    </label>
-                    <input
-                      className={inputCls}
-                      placeholder="MY_SECRET"
-                      value={row.envKey}
-                      onChange={(e) =>
-                        updateSecret(row.id, "envKey", e.target.value)
-                      }
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-0.5 block text-xs text-gray-500">
-                      Provider
-                    </label>
-                    <select
-                      className="w-full rounded border border-gray-300 px-2 py-1 text-xs focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-                      value={row.provider}
-                      onChange={(e) =>
-                        updateSecret(row.id, "provider", e.target.value)
-                      }
-                    >
-                      <option value="kubernetes">kubernetes</option>
-                      <option value="vault">vault</option>
-                      <option value="aws-sm">aws-sm</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-0.5 block text-xs text-gray-500">
-                      Secret name
-                    </label>
-                    <input
-                      className={inputCls}
-                      placeholder="my-secret"
-                      value={row.secretName}
-                      onChange={(e) =>
-                        updateSecret(row.id, "secretName", e.target.value)
-                      }
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-0.5 block text-xs text-gray-500">
-                      Secret key
-                    </label>
-                    <input
-                      className={inputCls}
-                      placeholder="api-key"
-                      value={row.secretKey}
-                      onChange={(e) =>
-                        updateSecret(row.id, "secretKey", e.target.value)
-                      }
-                    />
-                  </div>
-                </div>
-                <div className="mt-2 flex justify-end">
-                  <button
-                    type="button"
-                    onClick={() => removeSecret(row.id)}
-                    className="text-xs text-red-500 hover:text-red-700"
-                  >
-                    Remove
-                  </button>
-                </div>
               </div>
             ))}
           </div>

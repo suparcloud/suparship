@@ -32,6 +32,7 @@ type rbacHandler struct {
 	logsHandler      *logsHandler      // optional: enables logs endpoint
 	appHandler       *appHandler       // optional: enables app read endpoints
 	envConfigHandler *envConfigHandler // optional: enables env config endpoints
+	secretsHandler   *secretsHandler   // optional: enables simple secret management
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -153,6 +154,35 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig", devProject(ec.handlePutAppEnvEnvConfig))
 		// Resolved view — any viewer.
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig/resolved", viewProject(ec.handleGetResolvedEnvConfig))
+	}
+
+	if rh.secretsHandler != nil {
+		sh := rh.secretsHandler
+		// Org-level secrets backend config — org_admin only.
+		mux.HandleFunc("GET /api/v1/org/secrets-backend", rh.auth.requireAuth(sh.handleGetSecretsBackend))
+		mux.HandleFunc("PUT /api/v1/org/secrets-backend", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePutSecretsBackend)))
+		// Org-level secrets CRUD — org_admin writes, any-auth reads.
+		mux.HandleFunc("GET /api/v1/org/secrets", rh.auth.requireAuth(sh.handleListOrgSecrets))
+		mux.HandleFunc("POST /api/v1/org/secrets", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertOrgSecrets)))
+		mux.HandleFunc("DELETE /api/v1/org/secrets/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteOrgSecret)))
+		// Env-type-level secrets CRUD — org_admin writes, any-auth reads.
+		mux.HandleFunc("GET /api/v1/org/secrets/envtype/{envtype}", rh.auth.requireAuth(sh.handleListEnvTypeSecrets))
+		mux.HandleFunc("POST /api/v1/org/secrets/envtype/{envtype}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertEnvTypeSecrets)))
+		mux.HandleFunc("DELETE /api/v1/org/secrets/envtype/{envtype}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteEnvTypeSecret)))
+		// Project-level secrets CRUD — project_admin writes, viewer reads.
+		mux.HandleFunc("GET /api/v1/projects/{project}/secrets", viewProject(sh.handleListProjectSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/secrets", manageProject(sh.handleUpsertProjectSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/secrets/{key}", manageProject(sh.handleDeleteProjectSecret))
+		// App-level secrets CRUD — developer writes, viewer reads.
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets", viewProject(sh.handleListAppSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets", devProject(sh.handleUpsertAppSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/{key}", devProject(sh.handleDeleteAppSecret))
+		// App-env secret key/value CRUD — developer writes, viewer reads.
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets", viewProject(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets", devProject(sh.handleUpsertSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets/{key}", devProject(sh.handleDeleteSecret))
+		// Resolved secrets — merged view across all 5 levels.
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets/resolved", viewProject(sh.handleGetResolvedSecrets))
 	}
 
 	if rh.appHandler != nil {
