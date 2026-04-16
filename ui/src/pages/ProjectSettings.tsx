@@ -12,6 +12,12 @@ import {
 import type { ProjectEnvironment } from "../lib/projects";
 import { getProjectEnvConfig, updateProjectEnvConfig } from "../lib/envconfig";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
+import { SecretEditor } from "../components/SecretEditor";
+import {
+  listProjectSecretKeys,
+  upsertProjectSecrets,
+  deleteProjectSecretKey,
+} from "../lib/secrets";
 
 // ── Origin badge ──────────────────────────────────────────────────────────────
 
@@ -520,6 +526,15 @@ export function ProjectSettings() {
         description="Applied to every app in this project. Overrides org defaults; overridden by app-level values."
         fetchFn={fetchProjectEnvConfig}
         saveFn={saveProjectEnvConfig}
+      />
+
+      {/* Project-level secrets */}
+      <SecretEditor
+        title="Project-level secrets"
+        description="Secrets shared across every app in this project. Overrides org defaults; overridden by app-level secrets."
+        fetchFn={() => listProjectSecretKeys(project)}
+        upsertFn={(entries) => upsertProjectSecrets(project, entries)}
+        deleteFn={(key) => deleteProjectSecretKey(project, key)}
       />
 
       {/* Modals */}

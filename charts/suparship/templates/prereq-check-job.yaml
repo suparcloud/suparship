@@ -1,0 +1,69 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "suparship.fullname" . }}-prereq-check
+  namespace: {{ include "suparship.namespace" . }}
+  labels:
+    {{- include "suparship.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "suparship.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "suparship.serviceAccountName" . }}
+      containers:
+        - name: prereq-check
+          image: bitnami/kubectl:latest
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              echo "=== suparship prerequisites check ==="
+              FAILED=0
+
+              {{- if not .Values.dependencies.argocd.enabled }}
+              echo -n "Checking ArgoCD... "
+              if kubectl get namespace argocd >/dev/null 2>&1 && \
+                 kubectl get deployment -n argocd argocd-server >/dev/null 2>&1; then
+                echo "OK"
+              else
+                echo "MISSING — ArgoCD not found. Install ArgoCD or set dependencies.argocd.enabled=true"
+                FAILED=1
+              fi
+              {{- else }}
+              echo "ArgoCD: will be installed as subchart"
+              {{- end }}
+
+              echo -n "Checking ingress controller... "
+              if kubectl get ingressclass >/dev/null 2>&1 && \
+                 [ "$(kubectl get ingressclass -o name 2>/dev/null | wc -l)" -gt 0 ]; then
+                echo "OK"
+              else
+                echo "WARNING — No IngressClass found. App URLs may not work."
+              fi
+
+              {{- if eq .Values.secrets.backend "1password" }}
+              echo -n "Checking External Secrets Operator... "
+              if kubectl get crd externalsecrets.external-secrets.io >/dev/null 2>&1; then
+                echo "OK"
+              else
+                echo "MISSING — ESO required for 1password backend. Install ESO or set dependencies.eso.enabled=true"
+                FAILED=1
+              fi
+              {{- end }}
+
+              if [ "$FAILED" -eq 1 ]; then
+                echo ""
+                echo "FAILED: Missing prerequisites. Fix the issues above and retry."
+                exit 1
+              fi
+
+              echo ""
+              echo "All prerequisites satisfied."

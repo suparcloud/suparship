@@ -1,0 +1,27 @@
+{{- range .Values.clusters }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-cluster-{{ .name }}
+  namespace: {{ include "suparship.namespace" $ }}
+  labels:
+    {{- include "suparship.labels" $ | nindent 4 }}
+    suparship.io/managed-by: suparship
+    suparship.io/type: cluster
+    suparship.io/cluster: {{ .name | quote }}
+data:
+  cluster.json: |
+    {
+      "name": {{ .name | quote }},
+      "displayName": {{ default .name .displayName | quote }},
+      "apiServer": {{ default "" .apiServer | quote }},
+      "status": "registered"
+      {{- if .inCluster }},
+      "inCluster": true
+      {{- end }}
+      {{- if .existingSecret }},
+      "kubeconfigSecretRef": {{ .existingSecret | quote }}
+      {{- end }}
+    }
+{{- end }}

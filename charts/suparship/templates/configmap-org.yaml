@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-org-config
+  namespace: {{ include "suparship.namespace" . }}
+  labels:
+    {{- include "suparship.labels" . | nindent 4 }}
+    suparship.io/managed-by: suparship
+data:
+  org.yaml: |
+    name: {{ .Values.org.name | quote }}
+    displayName: {{ .Values.org.displayName | quote }}
+    {{- if .Values.environments }}
+    environments:
+      {{- range $i, $env := .Values.environments }}
+      - name: {{ $env.name | quote }}
+        {{- if $env.displayName }}
+        displayName: {{ $env.displayName | quote }}
+        {{- end }}
+        order: {{ default $i $env.order }}
+        {{- if $env.clusterRef }}
+        clusterRef: {{ $env.clusterRef | quote }}
+        {{- end }}
+        {{- if $env.baseDomain }}
+        baseDomain: {{ $env.baseDomain | quote }}
+        {{- end }}
+        namespacePattern: {{ default "{app}-{env}" $env.namespacePattern | quote }}
+      {{- end }}
+    {{- end }}
+    {{- if ne .Values.secrets.backend "k8s" }}
+    secretBackend:
+      type: {{ .Values.secrets.backend | quote }}
+      {{- if eq .Values.secrets.backend "1password" }}
+      1password:
+        mode: {{ .Values.secrets.onePassword.mode | quote }}
+        {{- if .Values.secrets.onePassword.connectHost }}
+        connectHost: {{ .Values.secrets.onePassword.connectHost | quote }}
+        {{- end }}
+        {{- if .Values.secrets.onePassword.existingSecret }}
+        tokenSecretRef: {{ .Values.secrets.onePassword.existingSecret | quote }}
+        {{- end }}
+        {{- if .Values.secrets.onePassword.vaults }}
+        vaults:
+          {{- range $env, $vault := .Values.secrets.onePassword.vaults }}
+          {{ $env }}: {{ $vault | quote }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    teams:
+      - name: admins
+        displayName: Administrators
+        members: [admin]
+    roleBindings:
+      - project: "*"
+        team: admins
+        role: org_admin

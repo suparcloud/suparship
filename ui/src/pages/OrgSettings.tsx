@@ -14,7 +14,18 @@ import {
   getEnvTypeEnvConfig,
   updateEnvTypeEnvConfig,
 } from "../lib/envconfig";
+import {
+  getSecretsBackend,
+  updateSecretsBackend,
+  listOrgSecretKeys,
+  upsertOrgSecrets,
+  deleteOrgSecretKey,
+  listEnvTypeSecretKeys,
+  upsertEnvTypeSecrets,
+  deleteEnvTypeSecretKey,
+} from "../lib/secrets";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
+import { SecretEditor } from "../components/SecretEditor";
 import type { OrgInfo, RoleBinding } from "../types";
 import type { OrgEnvironment } from "../lib/settings";
 
@@ -443,14 +454,133 @@ function EnvironmentTypeEnvConfigSection({
       </div>
 
       {selectedEnvType && (
-        <EnvConfigEditor
-          key={selectedEnvType}
-          title={`Variables for "${selectedEnvType}" environments`}
-          description="Applied to every app running in this environment type across all projects."
-          fetchFn={fetchFn}
-          saveFn={saveFn}
-        />
+        <>
+          <EnvConfigEditor
+            key={selectedEnvType}
+            title={`Variables for "${selectedEnvType}" environments`}
+            description="Applied to every app running in this environment type across all projects."
+            fetchFn={fetchFn}
+            saveFn={saveFn}
+          />
+          <SecretEditor
+            key={`secrets-${selectedEnvType}`}
+            title={`Secrets for "${selectedEnvType}" environments`}
+            description="Secrets applied to every app in this environment type."
+            fetchFn={() => listEnvTypeSecretKeys(selectedEnvType)}
+            upsertFn={(entries) => upsertEnvTypeSecrets(selectedEnvType, entries)}
+            deleteFn={(key) => deleteEnvTypeSecretKey(selectedEnvType, key)}
+          />
+        </>
       )}
+    </div>
+  );
+}
+
+// ── Secrets backend section ────────────────────────────────────────────────────
+
+const BACKEND_OPTIONS = [
+  {
+    value: "k8s",
+    label: "Kubernetes Secrets",
+    description: "Native K8s Secrets in app namespaces (recommended for MVP)",
+  },
+  {
+    value: "vault",
+    label: "HashiCorp Vault",
+    description: "External Vault backend (future)",
+    disabled: true,
+  },
+  {
+    value: "aws-sm",
+    label: "AWS Secrets Manager",
+    description: "AWS Secrets Manager backend (future)",
+    disabled: true,
+  },
+];
+
+function SecretsBackendSection() {
+  const [backendType, setBackendType] = useState<string>("k8s");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getSecretsBackend()
+      .then((cfg) => {
+        if (!cancelled) setBackendType(cfg.type);
+      })
+      .catch((err) => {
+        if (!cancelled)
+          setError(err instanceof Error ? err.message : "Failed to load");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleChange(value: string) {
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await updateSecretsBackend({ type: value });
+      setBackendType(result.type);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-6 py-4">
+        <h2 className="text-sm font-medium text-gray-900">Secrets Backend</h2>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Choose how app-level secrets are stored. Developers only enter
+          key/value pairs — backend details are handled here.
+        </p>
+      </div>
+
+      <div className="px-6 py-4">
+        {loading ? (
+          <div className="h-10 animate-pulse rounded bg-gray-100" />
+        ) : error ? (
+          <p className="text-sm text-red-600">{error}</p>
+        ) : (
+          <div className="space-y-2">
+            {BACKEND_OPTIONS.map((opt) => (
+              <label
+                key={opt.value}
+                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
+                  backendType === opt.value
+                    ? "border-indigo-200 bg-indigo-50"
+                    : "border-gray-200 hover:bg-gray-50"
+                } ${opt.disabled ? "cursor-not-allowed opacity-50" : ""}`}
+              >
+                <input
+                  type="radio"
+                  name="secrets-backend"
+                  value={opt.value}
+                  checked={backendType === opt.value}
+                  disabled={opt.disabled || saving}
+                  onChange={() => handleChange(opt.value)}
+                  className="mt-0.5"
+                />
+                <div>
+                  <span className="text-sm font-medium text-gray-900">
+                    {opt.label}
+                  </span>
+                  <p className="text-xs text-gray-500">{opt.description}</p>
+                </div>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -560,6 +690,9 @@ export function OrgSettings() {
       {/* Canonical deployment pipeline — org-level environments */}
       <OrgEnvironmentsSection />
 
+      {/* Secrets backend configuration — org_admin only */}
+      <SecretsBackendSection />
+
       {/* Org-wide environment variables */}
       <EnvConfigEditor
         title="Org-wide variables"
@@ -568,7 +701,16 @@ export function OrgSettings() {
         saveFn={updateOrgEnvConfig}
       />
 
-      {/* Per-environment-type variables */}
+      {/* Org-wide secrets */}
+      <SecretEditor
+        title="Org-wide secrets"
+        description="Secrets shared across every app in the org. Lower hierarchy levels override these."
+        fetchFn={listOrgSecretKeys}
+        upsertFn={upsertOrgSecrets}
+        deleteFn={deleteOrgSecretKey}
+      />
+
+      {/* Per-environment-type variables and secrets */}
       <EnvironmentTypeEnvConfigSection environments={environments} />
 
       <div className="rounded-lg border border-gray-200 bg-white">

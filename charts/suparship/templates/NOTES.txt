@@ -1,0 +1,32 @@
+
+suparShip has been installed.
+
+{{- if .Values.ingress.enabled }}
+
+  Access the UI at: http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+
+  To access the UI, run:
+
+    kubectl port-forward -n {{ include "suparship.namespace" . }} svc/{{ include "suparship.fullname" . }} 8080:{{ .Values.service.port }}
+
+  Then open: http://localhost:8080
+{{- end }}
+
+{{- if not .Values.admin.existingSecret }}
+
+  WARNING: No admin secret configured (admin.existingSecret is empty).
+  Bootstrap admin credentials:
+
+    kubectl exec -n {{ include "suparship.namespace" . }} deploy/{{ include "suparship.fullname" . }} -- \
+      suparship admin bootstrap
+
+  The generated password is shown once. Store it securely.
+{{- end }}
+
+{{- if not .Values.gitops.repoURL }}
+
+  NOTE: No GitOps repository configured. App creation will only persist
+  to the cluster store (no Git commits). Configure gitops.repoURL to
+  enable full GitOps functionality.
+{{- end }}

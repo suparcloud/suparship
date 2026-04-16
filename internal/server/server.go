@@ -10,13 +10,18 @@ import (
 	"net/http"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
+	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/preview"
+	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -151,6 +156,8 @@ type Config struct {
 	KargoStatusReader KargoStatusReader  // optional: enables GET promotion-status endpoint
 	KargoPipelineReader KargoPipelineReader // optional: enables GET pipeline-stages endpoint
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
+	SecretBackend        secrets.Backend           // optional: enables simple app-env secret CRUD
+	UpperLevelSecretWriter secrets.UpperLevelWriter // optional: enables org/envtype/project-level secret CRUD
 	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
@@ -158,6 +165,18 @@ type Config struct {
 	// ConfigMaps in suparship-system alongside domain-store saves. Requires a
 	// live Kubernetes client; omit in unit tests.
 	UpperLevelEnvWriter *envconfig.UpperLevelEnvWriter
+	// KubeClient is the Kubernetes clientset for prerequisite detection.
+	// Nil in fake mode (placeholder data is returned instead).
+	KubeClient kubernetes.Interface
+	// GitOpsConfigStore reads/writes the GitOps repo ConfigMap. Nil disables
+	// the /api/v1/gitops/* endpoints.
+	GitOpsConfigStore *gitops.ConfigStore
+	// TemplateRegistryStore reads/writes the template registry ConfigMap.
+	// Nil disables the /api/v1/templates/registry and /sources endpoints.
+	TemplateRegistryStore *tpl.RegistryStore
+	// RegistryStore reads/writes the container registry ConfigMap.
+	// Nil disables the /api/v1/registry/* endpoints.
+	RegistryStore *registry.Store
 }
 
 // Server is the suparship HTTP API server.
@@ -266,6 +285,16 @@ func New(cfg Config) *Server {
 			rh.envConfigHandler = ech
 			cfg.Logger.Info("env config endpoints enabled")
 		}
+		if cfg.AppStore != nil && cfg.SecretBackend != nil {
+			rh.secretsHandler = &secretsHandler{
+				orgStore:    cfg.OrgProvider,
+				appStore:    cfg.AppStore,
+				backend:     cfg.SecretBackend,
+				upperWriter: cfg.UpperLevelSecretWriter,
+				logger:      cfg.Logger,
+			}
+			cfg.Logger.Info("secrets management endpoints enabled")
+		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")
 	}
@@ -282,6 +311,71 @@ func New(cfg Config) *Server {
 		authEnabled:  cfg.Authenticator != nil,
 	}
 	mux.HandleFunc("GET /api/v1/onboarding/status", oh.handleStatus)
+
+	if cfg.KubeClient != nil {
+		ph := &prerequisitesHandler{client: cfg.KubeClient}
+		ph.registerRoutes(mux)
+		cfg.Logger.Info("prerequisites detection endpoint enabled")
+	} else {
+		ph := &placeholderPrerequisitesHandler{}
+		ph.registerRoutes(mux)
+		cfg.Logger.Info("prerequisites detection endpoint enabled (fake mode)")
+	}
+
+	if cfg.GitOpsConfigStore != nil && ah != nil {
+		gh := &gitopsHandler{
+			store:  cfg.GitOpsConfigStore,
+			auth:   ah,
+			logger: cfg.Logger,
+		}
+		gh.registerRoutes(mux)
+		cfg.Logger.Info("gitops config endpoints enabled")
+	}
+
+	if cfg.TemplateRegistryStore != nil && ah != nil {
+		trh := &templateRegistryHandler{
+			store:  cfg.TemplateRegistryStore,
+			auth:   ah,
+			logger: cfg.Logger,
+		}
+		trh.registerRoutes(mux)
+		cfg.Logger.Info("template registry endpoints enabled")
+	}
+
+	if cfg.RegistryStore != nil && ah != nil {
+		rgh := &registryHandler{
+			store:  cfg.RegistryStore,
+			auth:   ah,
+			logger: cfg.Logger,
+		}
+		rgh.registerRoutes(mux)
+		cfg.Logger.Info("container registry config endpoints enabled")
+	}
+
+	if ah != nil {
+		eh := &exportHandler{
+			auth:                  ah,
+			orgProvider:           cfg.OrgProvider,
+			clusterStore:          cfg.ClusterStore,
+			gitopsConfigStore:     cfg.GitOpsConfigStore,
+			registryStore:         cfg.RegistryStore,
+			templateRegistryStore: cfg.TemplateRegistryStore,
+			logger:                cfg.Logger,
+		}
+		eh.registerRoutes(mux)
+		cfg.Logger.Info("config export endpoint enabled")
+
+		chh := &credentialHealthHandler{
+			auth:              ah,
+			kubeClient:        cfg.KubeClient,
+			orgProvider:       cfg.OrgProvider,
+			gitopsConfigStore: cfg.GitOpsConfigStore,
+			registryStore:     cfg.RegistryStore,
+			logger:            cfg.Logger,
+		}
+		chh.registerRoutes(mux)
+		cfg.Logger.Info("credential health endpoint enabled")
+	}
 
 	if cfg.UIDir != "" {
 		mux.Handle("/", spaHandler(cfg.UIDir))

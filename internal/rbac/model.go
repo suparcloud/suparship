@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/envconfig"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"gopkg.in/yaml.v3"
 )
 
@@ -98,6 +99,9 @@ type Org struct {
 	// EnvConfig holds env vars and secret refs that apply to ALL apps across
 	// ALL projects in the org (Org level of the hierarchy).
 	EnvConfig envconfig.EnvConfig `yaml:"envConfig,omitempty"`
+	// SecretBackend selects the backend used to store app-level secrets.
+	// Defaults to "k8s" (native Kubernetes Secrets) when absent.
+	SecretBackend secrets.BackendConfig `yaml:"secretBackend,omitempty"`
 }
 
 // Team represents a named group of users.

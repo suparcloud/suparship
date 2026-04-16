@@ -10,7 +10,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/bootstrap"
 	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/fake"
@@ -18,9 +21,11 @@ import (
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/preview"
+	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -100,12 +105,18 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider     runtime.LogsProvider
 		appStore         domain.AppStore
 		clusterStore     domain.ClusterStore
+		secretBackend    secrets.Backend
+		upperLevelSecretWriter secrets.UpperLevelWriter
 		templates        []*tpl.Template
 		readinessProbers []server.ReadinessProber
 		kargoPromoter    server.KargoPromoter
 		kargoStatusReader server.KargoStatusReader
 		kargoPipelineReader server.KargoPipelineReader
 		deploymentHistoryReader server.DeploymentHistoryReader
+		kubeClient             kubernetes.Interface
+		gitopsConfigStore      *gitops.ConfigStore
+		templateRegistryStore  *tpl.RegistryStore
+		registryStore          *registry.Store
 	)
 
 	switch cfg.RuntimeMode {
@@ -132,6 +143,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider = deps.LogsProvider
 		appStore = deps.AppStore
 		clusterStore = deps.ClusterStore
+		memBE := secrets.NewMemBackend()
+		secretBackend = memBE
+		upperLevelSecretWriter = secrets.NewMemUpperLevelWriter(memBE)
 		deploymentHistoryReader = &fakeHistoryAdapter{inner: &fake.FakeDeploymentHistoryReader{}}
 
 	default: // config.ModeKubernetes
@@ -162,6 +176,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			)
 		}
 		logger.Info("kubernetes client ready")
+		kubeClient = client
 
 		// Build dynamic client for CRD interactions (ArgoCD, Kargo).
 		dynClient, dynErr := k8s.NewDynamicClient(kubeconfig, kubecontext)
@@ -206,6 +221,15 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider = kubeDeps.LogsProvider
 		appStore = kubeDeps.AppStore
 		clusterStore = kubeDeps.ClusterStore
+		secretBackend = secrets.NewK8sBackend(client)
+		upperLevelSecretWriter = secrets.NewUpperLevelSecretWriter(client)
+		gitopsConfigStore = gitops.NewConfigStore(client)
+		templateRegistryStore = tpl.NewRegistryStore(client)
+		registryStore = registry.NewStore(client)
+
+		// Bootstrap: reconcile Helm-provided ConfigMaps and log what was found.
+		bootstrapResult := bootstrap.Reconcile(cmd.Context(), client, logger)
+		logger.Info("bootstrap complete", "summary", bootstrap.FormatSummary(bootstrapResult))
 
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
@@ -293,6 +317,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		PreviewStore:     previewStore,
 		AppStore:         appStore,
 		ClusterStore:     clusterStore,
+		SecretBackend:            secretBackend,
+		UpperLevelSecretWriter:   upperLevelSecretWriter,
 		GitOpsPublisher:         gitOpsPublisher,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,
@@ -301,6 +327,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		ReadinessProbers: readinessProbers,
 		CookieSecure:     cookieSecure,
 		Logger:           logger,
+		KubeClient:        kubeClient,
+		GitOpsConfigStore:     gitopsConfigStore,
+		TemplateRegistryStore: templateRegistryStore,
+		RegistryStore:         registryStore,
 	})
 
 	if err := srv.Run(cmd.Context()); err != nil {

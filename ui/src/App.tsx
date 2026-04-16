@@ -8,6 +8,9 @@ import { AppDetail } from "./pages/AppDetail";
 import { AuthSettings } from "./pages/AuthSettings";
 import { ClusterSettings } from "./pages/ClusterSettings";
 import { Dashboard } from "./pages/Dashboard";
+import { GitOpsSettings } from "./pages/GitOpsSettings";
+import { PlatformSettings } from "./pages/PlatformSettings";
+import { RegistrySettings } from "./pages/RegistrySettings";
 import { Login } from "./pages/Login";
 import { Onboarding } from "./pages/Onboarding";
 import { OrgSettings } from "./pages/OrgSettings";
@@ -66,6 +69,9 @@ export function App() {
               <Route path="/settings/teams" element={<TeamSettings />} />
               <Route path="/settings/auth" element={<AuthSettings />} />
               <Route path="/settings/clusters" element={<ClusterSettings />} />
+              <Route path="/settings/gitops" element={<GitOpsSettings />} />
+              <Route path="/settings/registry" element={<RegistrySettings />} />
+              <Route path="/settings/platform" element={<PlatformSettings />} />
             </Route>
           </Route>
         </Routes>

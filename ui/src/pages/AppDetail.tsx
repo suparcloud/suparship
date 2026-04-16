@@ -13,6 +13,17 @@ import {
 } from "../lib/envconfig";
 import type { EnvConfig, ResolvedEnvVar } from "../lib/envconfig";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
+import { SecretEditor } from "../components/SecretEditor";
+import {
+  listAppSecretKeys,
+  upsertAppSecrets,
+  deleteAppSecretKey,
+  listSecretKeys,
+  upsertSecrets,
+  deleteSecretKey,
+  getResolvedSecrets,
+} from "../lib/secrets";
+import type { ResolvedSecretEntry } from "../lib/secrets";
 import type {
   AppDeploymentHistoryResponse,
   AppDetail as AppDetailType,
@@ -2351,6 +2362,96 @@ function ResolvedEnvPanel({
   );
 }
 
+function ResolvedSecretsPanel({
+  project,
+  appName,
+  envName,
+}: {
+  project: string;
+  appName: string;
+  envName: string;
+}) {
+  const [secrets, setSecrets] = useState<ResolvedSecretEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    getResolvedSecrets(project, appName, envName)
+      .then((res) => setSecrets(res.secrets ?? []))
+      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load"))
+      .finally(() => setLoading(false));
+  }, [project, appName, envName]);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-medium text-gray-900">Resolved secrets</h3>
+            {!loading && secrets.length > 0 && (
+              <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+                {secrets.length}
+              </span>
+            )}
+          </div>
+          <p className="mt-0.5 text-xs text-gray-500">
+            Merged secret keys for <span className="font-mono font-medium">{envName}</span> — shows which hierarchy level provides each key. Values are never shown.
+          </p>
+        </div>
+        <button
+          onClick={load}
+          disabled={loading}
+          className="rounded border border-gray-200 px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {loading ? "Loading\u2026" : "Refresh"}
+        </button>
+      </div>
+      <div className="px-6 py-4">
+        {loading ? (
+          <div className="space-y-2">
+            {[0, 1].map((i) => (
+              <div key={i} className="h-7 animate-pulse rounded bg-gray-100" />
+            ))}
+          </div>
+        ) : error ? (
+          <p className="text-sm text-red-600">{error}</p>
+        ) : secrets.length === 0 ? (
+          <p className="text-sm italic text-gray-400">No secrets at this environment.</p>
+        ) : (
+          <table className="w-full">
+            <thead>
+              <tr className="text-left text-xs font-medium uppercase tracking-wider text-gray-400">
+                <th className="pb-2 pr-4">Key</th>
+                <th className="pb-2 pr-4">Value</th>
+                <th className="pb-2">Source</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {secrets.map((s) => (
+                <tr key={s.key} className="hover:bg-gray-50">
+                  <td className="py-1.5 pr-4 font-mono text-xs font-medium text-gray-900">
+                    {s.key}
+                  </td>
+                  <td className="py-1.5 pr-4 font-mono text-xs text-gray-400 italic">
+                    ••••••
+                  </td>
+                  <td className="py-1.5">
+                    <SourceBadge source={s.source} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function EnvVarsTab({
   project,
   appName,
@@ -2400,6 +2501,13 @@ function EnvVarsTab({
         fetchFn={fetchAppCfg}
         saveFn={saveAppCfg}
       />
+      <SecretEditor
+        title="App-level secrets"
+        description="Secrets shared across all environments of this app. Overrides org, environment-type, and project secrets."
+        fetchFn={() => listAppSecretKeys(project, appName)}
+        upsertFn={(entries) => upsertAppSecrets(project, appName, entries)}
+        deleteFn={(key) => deleteAppSecretKey(project, appName, key)}
+      />
 
       {/* Per-environment section */}
       <div className="space-y-3">
@@ -2431,8 +2539,22 @@ function EnvVarsTab({
               fetchFn={fetchEnvCfg}
               saveFn={saveEnvCfg}
             />
+            <SecretEditor
+              key={`secrets-${activeEnv}`}
+              title={`"${activeEnv}" secrets`}
+              description={`Secrets for this environment only. Overrides all upper levels.`}
+              fetchFn={() => listSecretKeys(project, appName, activeEnv)}
+              upsertFn={(entries) => upsertSecrets(project, appName, activeEnv, entries)}
+              deleteFn={(key) => deleteSecretKey(project, appName, activeEnv, key)}
+            />
             <ResolvedEnvPanel
               key={`resolved-${activeEnv}`}
+              project={project}
+              appName={appName}
+              envName={activeEnv}
+            />
+            <ResolvedSecretsPanel
+              key={`resolved-secrets-${activeEnv}`}
               project={project}
               appName={appName}
               envName={activeEnv}

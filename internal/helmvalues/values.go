@@ -66,6 +66,20 @@ type HelmValues struct {
 	// are not included here to avoid mass re-publish on upper-level changes.
 	// Omitted when both App and AppEnv layers are empty.
 	EnvLayers envconfig.HelmEnvLayers `json:"envLayers,omitempty" yaml:"envLayers,omitempty"`
+	// Suparship holds well-known resource names that templates can reference
+	// for secret and config injection via envFrom.
+	Suparship SuparshipValues `json:"suparship" yaml:"suparship"`
+}
+
+// SuparshipValues carries deterministic, well-known resource names so Helm
+// templates can reference them without knowing backend-specific details.
+type SuparshipValues struct {
+	// SecretName is the Kubernetes Secret name holding app-level secrets
+	// for this environment. Templates use it via envFrom.secretRef.name.
+	SecretName string `json:"secretName" yaml:"secretName"`
+	// ConfigName is the Kubernetes ConfigMap name holding app-level config
+	// for this environment. Templates use it via envFrom.configMapRef.name.
+	ConfigName string `json:"configName" yaml:"configName"`
 }
 
 // AppContext carries top-level app identity injected into every chart.
