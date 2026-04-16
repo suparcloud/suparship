@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
@@ -161,6 +163,9 @@ type Config struct {
 	// ConfigMaps in suparship-system alongside domain-store saves. Requires a
 	// live Kubernetes client; omit in unit tests.
 	UpperLevelEnvWriter *envconfig.UpperLevelEnvWriter
+	// KubeClient is the Kubernetes clientset for prerequisite detection.
+	// Nil in fake mode (placeholder data is returned instead).
+	KubeClient kubernetes.Interface
 }
 
 // Server is the suparship HTTP API server.
@@ -295,6 +300,16 @@ func New(cfg Config) *Server {
 		authEnabled:  cfg.Authenticator != nil,
 	}
 	mux.HandleFunc("GET /api/v1/onboarding/status", oh.handleStatus)
+
+	if cfg.KubeClient != nil {
+		ph := &prerequisitesHandler{client: cfg.KubeClient}
+		ph.registerRoutes(mux)
+		cfg.Logger.Info("prerequisites detection endpoint enabled")
+	} else {
+		ph := &placeholderPrerequisitesHandler{}
+		ph.registerRoutes(mux)
+		cfg.Logger.Info("prerequisites detection endpoint enabled (fake mode)")
+	}
 
 	if cfg.UIDir != "" {
 		mux.Handle("/", spaHandler(cfg.UIDir))

@@ -10,6 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/domain"
@@ -109,6 +111,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kargoStatusReader server.KargoStatusReader
 		kargoPipelineReader server.KargoPipelineReader
 		deploymentHistoryReader server.DeploymentHistoryReader
+		kubeClient       kubernetes.Interface
 	)
 
 	switch cfg.RuntimeMode {
@@ -168,6 +171,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			)
 		}
 		logger.Info("kubernetes client ready")
+		kubeClient = client
 
 		// Build dynamic client for CRD interactions (ArgoCD, Kargo).
 		dynClient, dynErr := k8s.NewDynamicClient(kubeconfig, kubecontext)
@@ -311,6 +315,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		ReadinessProbers: readinessProbers,
 		CookieSecure:     cookieSecure,
 		Logger:           logger,
+		KubeClient:       kubeClient,
 	})
 
 	if err := srv.Run(cmd.Context()); err != nil {
