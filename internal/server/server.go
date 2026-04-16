@@ -15,6 +15,7 @@ import (
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
+	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -166,6 +167,9 @@ type Config struct {
 	// KubeClient is the Kubernetes clientset for prerequisite detection.
 	// Nil in fake mode (placeholder data is returned instead).
 	KubeClient kubernetes.Interface
+	// GitOpsConfigStore reads/writes the GitOps repo ConfigMap. Nil disables
+	// the /api/v1/gitops/* endpoints.
+	GitOpsConfigStore *gitops.ConfigStore
 }
 
 // Server is the suparship HTTP API server.
@@ -309,6 +313,16 @@ func New(cfg Config) *Server {
 		ph := &placeholderPrerequisitesHandler{}
 		ph.registerRoutes(mux)
 		cfg.Logger.Info("prerequisites detection endpoint enabled (fake mode)")
+	}
+
+	if cfg.GitOpsConfigStore != nil && ah != nil {
+		gh := &gitopsHandler{
+			store:  cfg.GitOpsConfigStore,
+			auth:   ah,
+			logger: cfg.Logger,
+		}
+		gh.registerRoutes(mux)
+		cfg.Logger.Info("gitops config endpoints enabled")
 	}
 
 	if cfg.UIDir != "" {

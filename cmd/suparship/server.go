@@ -111,7 +111,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kargoStatusReader server.KargoStatusReader
 		kargoPipelineReader server.KargoPipelineReader
 		deploymentHistoryReader server.DeploymentHistoryReader
-		kubeClient       kubernetes.Interface
+		kubeClient             kubernetes.Interface
+		gitopsConfigStore      *gitops.ConfigStore
 	)
 
 	switch cfg.RuntimeMode {
@@ -218,6 +219,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		clusterStore = kubeDeps.ClusterStore
 		secretBackend = secrets.NewK8sBackend(client)
 		upperLevelSecretWriter = secrets.NewUpperLevelSecretWriter(client)
+		gitopsConfigStore = gitops.NewConfigStore(client)
 
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
@@ -315,7 +317,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		ReadinessProbers: readinessProbers,
 		CookieSecure:     cookieSecure,
 		Logger:           logger,
-		KubeClient:       kubeClient,
+		KubeClient:        kubeClient,
+		GitOpsConfigStore: gitopsConfigStore,
 	})
 
 	if err := srv.Run(cmd.Context()); err != nil {
