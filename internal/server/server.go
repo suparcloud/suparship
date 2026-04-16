@@ -352,6 +352,20 @@ func New(cfg Config) *Server {
 		cfg.Logger.Info("container registry config endpoints enabled")
 	}
 
+	if ah != nil {
+		eh := &exportHandler{
+			auth:                  ah,
+			orgProvider:           cfg.OrgProvider,
+			clusterStore:          cfg.ClusterStore,
+			gitopsConfigStore:     cfg.GitOpsConfigStore,
+			registryStore:         cfg.RegistryStore,
+			templateRegistryStore: cfg.TemplateRegistryStore,
+			logger:                cfg.Logger,
+		}
+		eh.registerRoutes(mux)
+		cfg.Logger.Info("config export endpoint enabled")
+	}
+
 	if cfg.UIDir != "" {
 		mux.Handle("/", spaHandler(cfg.UIDir))
 		cfg.Logger.Info("serving frontend", "dir", cfg.UIDir)

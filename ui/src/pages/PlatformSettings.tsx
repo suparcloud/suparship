@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import {
   fetchPrerequisites,
@@ -132,6 +133,73 @@ export function PlatformSettings() {
           </section>
         </>
       )}
+
+      <ExportConfig />
     </div>
+  );
+}
+
+function ExportConfig() {
+  const [exporting, setExporting] = useState(false);
+
+  async function handleExport(format: "json" | "yaml") {
+    setExporting(true);
+    try {
+      const suffix = format === "yaml" ? "?format=yaml" : "";
+      const res = await fetch(`/api/v1/org/export${suffix}`, {
+        credentials: "include",
+      });
+      if (!res.ok) {
+        throw new Error(`Export failed: ${res.status}`);
+      }
+      const blob = await res.blob();
+      const filename = format === "yaml" ? "values.yaml" : "values.json";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Configuration exported as ${filename}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  return (
+    <section className="space-y-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wider text-gray-500">
+        Export Configuration
+      </h2>
+      <div className="rounded-lg border border-gray-200 bg-white px-5 py-4">
+        <p className="text-sm text-gray-600">
+          Download the current platform configuration as a Helm{" "}
+          <code className="rounded bg-gray-100 px-1 py-0.5 text-xs font-mono">
+            values.yaml
+          </code>{" "}
+          file. Secret values are never included — only secret reference names.
+        </p>
+        <div className="mt-4 flex gap-3">
+          <button
+            onClick={() => handleExport("yaml")}
+            disabled={exporting}
+            className="inline-flex items-center rounded-md bg-indigo-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {exporting ? "Exporting..." : "Download values.yaml"}
+          </button>
+          <button
+            onClick={() => handleExport("json")}
+            disabled={exporting}
+            className="inline-flex items-center rounded-md bg-white px-3.5 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50"
+          >
+            Download JSON
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
