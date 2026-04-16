@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/bootstrap"
 	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/fake"
@@ -225,6 +226,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		gitopsConfigStore = gitops.NewConfigStore(client)
 		templateRegistryStore = tpl.NewRegistryStore(client)
 		registryStore = registry.NewStore(client)
+
+		// Bootstrap: reconcile Helm-provided ConfigMaps and log what was found.
+		bootstrapResult := bootstrap.Reconcile(cmd.Context(), client, logger)
+		logger.Info("bootstrap complete", "summary", bootstrap.FormatSummary(bootstrapResult))
 
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
