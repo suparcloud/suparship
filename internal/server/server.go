@@ -17,6 +17,7 @@ import (
 	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/preview"
+	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
@@ -173,6 +174,9 @@ type Config struct {
 	// TemplateRegistryStore reads/writes the template registry ConfigMap.
 	// Nil disables the /api/v1/templates/registry and /sources endpoints.
 	TemplateRegistryStore *tpl.RegistryStore
+	// RegistryStore reads/writes the container registry ConfigMap.
+	// Nil disables the /api/v1/registry/* endpoints.
+	RegistryStore *registry.Store
 }
 
 // Server is the suparship HTTP API server.
@@ -336,6 +340,16 @@ func New(cfg Config) *Server {
 		}
 		trh.registerRoutes(mux)
 		cfg.Logger.Info("template registry endpoints enabled")
+	}
+
+	if cfg.RegistryStore != nil && ah != nil {
+		rgh := &registryHandler{
+			store:  cfg.RegistryStore,
+			auth:   ah,
+			logger: cfg.Logger,
+		}
+		rgh.registerRoutes(mux)
+		cfg.Logger.Info("container registry config endpoints enabled")
 	}
 
 	if cfg.UIDir != "" {

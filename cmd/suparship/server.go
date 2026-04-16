@@ -20,6 +20,7 @@ import (
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/preview"
+	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
@@ -114,6 +115,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kubeClient             kubernetes.Interface
 		gitopsConfigStore      *gitops.ConfigStore
 		templateRegistryStore  *tpl.RegistryStore
+		registryStore          *registry.Store
 	)
 
 	switch cfg.RuntimeMode {
@@ -222,6 +224,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		upperLevelSecretWriter = secrets.NewUpperLevelSecretWriter(client)
 		gitopsConfigStore = gitops.NewConfigStore(client)
 		templateRegistryStore = tpl.NewRegistryStore(client)
+		registryStore = registry.NewStore(client)
 
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
@@ -322,6 +325,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		KubeClient:        kubeClient,
 		GitOpsConfigStore:     gitopsConfigStore,
 		TemplateRegistryStore: templateRegistryStore,
+		RegistryStore:         registryStore,
 	})
 
 	if err := srv.Run(cmd.Context()); err != nil {
