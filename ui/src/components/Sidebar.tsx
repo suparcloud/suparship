@@ -10,6 +10,9 @@ const settingsNav = [
   { to: "/settings/org", label: "Organization" },
   { to: "/settings/teams", label: "Teams" },
   { to: "/settings/clusters", label: "Clusters" },
+  { to: "/settings/gitops", label: "GitOps" },
+  { to: "/settings/registry", label: "Registry" },
+  { to: "/settings/platform", label: "Platform" },
   { to: "/settings/auth", label: "Auth" },
 ];
 
