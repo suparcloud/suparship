@@ -38,7 +38,7 @@ tasks:
   # for every subsequent dev session (fast build + restart, no cluster touch).
 
   dev:cluster:
-    desc: "Set up dev cluster — DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed + cert-manager + Argo Rollouts + Kargo (idempotent)"
+    desc: "Set up dev cluster — DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed + cert-manager + Argo Rollouts + Kargo + Replicator + Reloader (idempotent)"
     cmds:
       - hack/setup-cluster.sh
 
@@ -92,6 +92,16 @@ tasks:
     deps: [dev:cluster:cert-manager, dev:cluster:argo-rollouts]
     cmds:
       - hack/install-kargo.sh
+
+  dev:cluster:replicator:
+    desc: "Install Stakater Replicator — replicates upper-level env ConfigMaps/Secrets across namespaces"
+    cmds:
+      - hack/install-replicator.sh
+
+  dev:cluster:reloader:
+    desc: "Install Stakater Reloader — triggers rolling restarts when ConfigMaps or Secrets change"
+    cmds:
+      - hack/install-reloader.sh
 
   dev:cluster:registry:
     desc: "Set up a local container registry (kind-registry on localhost:5001)"

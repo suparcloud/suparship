@@ -12,6 +12,8 @@
 #   7. cert-manager (Kargo dependency — TLS certificate management)
 #   8. Argo Rollouts (Kargo dependency — progressive delivery primitives)
 #   9. Kargo (GitOps-native promotion engine)
+#  10. Stakater Replicator (replicates upper-level env ConfigMaps/Secrets)
+#  11. Stakater Reloader (auto-restarts pods on ConfigMap/Secret change)
 #
 # Credentials (ArgoCD, Gitea) are written to .env.cluster (git-ignored)
 # and printed as a summary at the end.
@@ -119,10 +121,33 @@ else
   hack/install-kargo.sh
 fi
 
-# ── 10. Color-app source repo in Gitea (optional, for demo completeness) ──
+# ── 10. Stakater Replicator ────────────────────────────────────────────────
+# Replicates upper-level (Org, Environment, Project) env-var ConfigMaps and
+# Secrets from suparship-system into each app namespace automatically.
+if kubectl get deployment kubernetes-replicator \
+     -n stakater-replicator >/dev/null 2>&1; then
+  echo "  –  Stakater Replicator already installed — skipping"
+  echo ""
+else
+  hack/install-replicator.sh
+fi
+
+# ── 11. Stakater Reloader ──────────────────────────────────────────────────
+# Triggers rolling restarts on Deployments annotated with
+# reloader.stakater.com/auto: "true" when a referenced ConfigMap or Secret
+# changes. Used for automatic pod restart on ESO secret rotation.
+if kubectl get deployment reloader-reloader \
+     -n stakater-reloader >/dev/null 2>&1; then
+  echo "  –  Stakater Reloader already installed — skipping"
+  echo ""
+else
+  hack/install-reloader.sh
+fi
+
+# ── 12. Color-app source repo in Gitea (optional, for demo completeness) ──
 hack/init-color-app-repo.sh
 
-# ── 11. Admin credentials check ──────────────────────────────────────────
+# ── 13. Admin credentials check ──────────────────────────────────────────
 if ! kubectl get secret suparship-admin-auth -n suparship-system >/dev/null 2>&1; then
   echo ""
   printf "  \033[0;33mWARNING:\033[0m No admin credentials found in the cluster.\n"
