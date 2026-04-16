@@ -10,6 +10,8 @@ import {
   updateProjectEnvironment,
 } from "../lib/projects";
 import type { ProjectEnvironment } from "../lib/projects";
+import { getProjectEnvConfig, updateProjectEnvConfig } from "../lib/envconfig";
+import { EnvConfigEditor } from "../components/EnvConfigEditor";
 
 // ── Origin badge ──────────────────────────────────────────────────────────────
 
@@ -264,6 +266,16 @@ export function ProjectSettings() {
   const [editEnv, setEditEnv] = useState<ProjectEnvironment | null>(null);
   const [isFirstOverride, setIsFirstOverride] = useState(false);
 
+  const fetchProjectEnvConfig = useCallback(
+    () => getProjectEnvConfig(project),
+    [project],
+  );
+  const saveProjectEnvConfig = useCallback(
+    (cfg: Parameters<typeof updateProjectEnvConfig>[1]) =>
+      updateProjectEnvConfig(project, cfg),
+    [project],
+  );
+
   const reload = useCallback(async () => {
     try {
       const [envsData, clustersData] = await Promise.all([
@@ -501,6 +513,14 @@ export function ProjectSettings() {
           not in org defaults
         </span>
       </div>
+
+      {/* Project-level environment variables */}
+      <EnvConfigEditor
+        title="Project-level variables"
+        description="Applied to every app in this project. Overrides org defaults; overridden by app-level values."
+        fetchFn={fetchProjectEnvConfig}
+        saveFn={saveProjectEnvConfig}
+      />
 
       {/* Modals */}
       {showAdd && (

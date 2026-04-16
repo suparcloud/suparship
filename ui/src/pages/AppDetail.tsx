@@ -4,6 +4,15 @@ import { toast } from "sonner";
 
 import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp } from "../lib/apps";
 import { createPreview, deletePreview } from "../lib/previews";
+import {
+  getAppEnvConfig,
+  getAppEnvEnvConfig,
+  getResolvedEnvConfig,
+  updateAppEnvConfig,
+  updateAppEnvEnvConfig,
+} from "../lib/envconfig";
+import type { EnvConfig, ResolvedEnvVar } from "../lib/envconfig";
+import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import type {
   AppDeploymentHistoryResponse,
   AppDetail as AppDetailType,
@@ -21,7 +30,7 @@ import type {
 // Tab types
 // ---------------------------------------------------------------------------
 
-type TabId = "overview" | "deployments" | "previews" | "logs" | "traffic";
+type TabId = "overview" | "deployments" | "previews" | "logs" | "traffic" | "envvars";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -29,6 +38,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "previews", label: "Previews" },
   { id: "logs", label: "Logs" },
   { id: "traffic", label: "Traffic" },
+  { id: "envvars", label: "Env Vars" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1278,6 +1288,15 @@ export function AppDetail() {
         />
       )}
       {activeTab === "traffic" && <TrafficTab />}
+      {activeTab === "envvars" && (
+        <EnvVarsTab
+          project={project ?? ""}
+          appName={appName ?? ""}
+          environments={data.environments}
+          selectedEnvName={selectedEnvName}
+          onSelectEnv={setSelectedEnvName}
+        />
+      )}
     </div>
   );
 }
@@ -2212,6 +2231,219 @@ function QuickStat({
       >
         {value}
       </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: Env Vars
+// ---------------------------------------------------------------------------
+
+// Source badge colours matching the hierarchy levels
+const sourceBadge: Record<string, { bg: string; label: string }> = {
+  org: { bg: "bg-blue-50 text-blue-700", label: "Org" },
+  environment: { bg: "bg-purple-50 text-purple-700", label: "Env-type" },
+  project: { bg: "bg-amber-50 text-amber-700", label: "Project" },
+  app: { bg: "bg-emerald-50 text-emerald-700", label: "App" },
+  "app-environment": { bg: "bg-gray-100 text-gray-700", label: "App-Env" },
+};
+
+function SourceBadge({ source }: { source: string }) {
+  const cfg = sourceBadge[source] ?? { bg: "bg-gray-100 text-gray-600", label: source };
+  return (
+    <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${cfg.bg}`}>
+      {cfg.label}
+    </span>
+  );
+}
+
+function ResolvedEnvPanel({
+  project,
+  appName,
+  envName,
+}: {
+  project: string;
+  appName: string;
+  envName: string;
+}) {
+  const [vars, setVars] = useState<ResolvedEnvVar[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    getResolvedEnvConfig(project, appName, envName)
+      .then((res) => setVars(res.vars ?? []))
+      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load"))
+      .finally(() => setLoading(false));
+  }, [project, appName, envName]);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-medium text-gray-900">Resolved variables</h3>
+            {!loading && vars.length > 0 && (
+              <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+                {vars.length}
+              </span>
+            )}
+          </div>
+          <p className="mt-0.5 text-xs text-gray-500">
+            Merged view for <span className="font-mono font-medium">{envName}</span> — shows which hierarchy level wins each key.
+          </p>
+        </div>
+        <button
+          onClick={load}
+          disabled={loading}
+          className="rounded border border-gray-200 px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {loading ? "Loading…" : "Refresh"}
+        </button>
+      </div>
+      <div className="px-6 py-4">
+        {loading ? (
+          <div className="space-y-2">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="h-7 animate-pulse rounded bg-gray-100" />
+            ))}
+          </div>
+        ) : error ? (
+          <p className="text-sm text-red-600">{error}</p>
+        ) : vars.length === 0 ? (
+          <p className="text-sm italic text-gray-400">No variables at this environment.</p>
+        ) : (
+          <table className="w-full">
+            <thead>
+              <tr className="text-left text-xs font-medium uppercase tracking-wider text-gray-400">
+                <th className="pb-2 pr-4">Key</th>
+                <th className="pb-2 pr-4">Value</th>
+                <th className="pb-2">Source</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {vars.map((v) => (
+                <tr key={v.key} className="hover:bg-gray-50">
+                  <td className="py-1.5 pr-4 font-mono text-xs font-medium text-gray-900">
+                    {v.key}
+                  </td>
+                  <td className="py-1.5 pr-4 font-mono text-xs text-gray-600 max-w-xs truncate">
+                    {v.isSecret ? (
+                      <span className="italic text-gray-400">••••••</span>
+                    ) : (
+                      v.value || <span className="italic text-gray-300">(empty)</span>
+                    )}
+                  </td>
+                  <td className="py-1.5">
+                    <SourceBadge source={v.source} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EnvVarsTab({
+  project,
+  appName,
+  environments,
+  selectedEnvName,
+  onSelectEnv,
+}: {
+  project: string;
+  appName: string;
+  environments: import("../types").AppEnvironmentSummary[];
+  selectedEnvName: string | null;
+  onSelectEnv: (name: string) => void;
+}) {
+  // Only non-preview environments are meaningful for per-env env-var overrides.
+  const stableEnvs = environments.filter((e) => e.envType !== "preview");
+  const activeEnv = selectedEnvName ?? stableEnvs[0]?.envName ?? null;
+
+  const fetchAppCfg = useCallback(
+    () => getAppEnvConfig(project, appName),
+    [project, appName],
+  );
+  const saveAppCfg = useCallback(
+    (cfg: EnvConfig) => updateAppEnvConfig(project, appName, cfg),
+    [project, appName],
+  );
+  const fetchEnvCfg = useCallback(
+    () =>
+      activeEnv
+        ? getAppEnvEnvConfig(project, appName, activeEnv)
+        : Promise.resolve<EnvConfig>({}),
+    [project, appName, activeEnv],
+  );
+  const saveEnvCfg = useCallback(
+    (cfg: EnvConfig) =>
+      activeEnv
+        ? updateAppEnvEnvConfig(project, appName, activeEnv, cfg)
+        : Promise.resolve(null),
+    [project, appName, activeEnv],
+  );
+
+  return (
+    <div className="space-y-6">
+      {/* App-level variables — always visible */}
+      <EnvConfigEditor
+        title="App-level variables"
+        description="Applied to this app in all environments. Overrides org, environment-type, and project defaults."
+        fetchFn={fetchAppCfg}
+        saveFn={saveAppCfg}
+      />
+
+      {/* Per-environment section */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-3">
+          <span className="text-sm font-medium text-gray-700">Environment</span>
+          <div className="flex gap-1.5">
+            {stableEnvs.map((env) => (
+              <button
+                key={env.envName}
+                onClick={() => onSelectEnv(env.envName)}
+                className={`rounded-full px-3 py-0.5 text-xs font-medium transition-colors ${
+                  activeEnv === env.envName
+                    ? "bg-gray-900 text-white"
+                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                {env.envName}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {activeEnv ? (
+          <>
+            <EnvConfigEditor
+              key={`appenv-${activeEnv}`}
+              title={`"${activeEnv}" overrides`}
+              description={`Variables that apply only when the app runs in ${activeEnv}. Overrides all upper levels.`}
+              fetchFn={fetchEnvCfg}
+              saveFn={saveEnvCfg}
+            />
+            <ResolvedEnvPanel
+              key={`resolved-${activeEnv}`}
+              project={project}
+              appName={appName}
+              envName={activeEnv}
+            />
+          </>
+        ) : (
+          <p className="text-sm text-gray-400 italic">
+            No stable environments found. Deploy the app first.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

@@ -6,6 +6,10 @@ metadata:
   name: {{ include "web-service.fullname" . }}
   labels:
     {{- include "web-service.labels" . | nindent 4 }}
+  annotations:
+    # Stakater Reloader: trigger rolling restart when any referenced
+    # ConfigMap or Secret changes (covers ESO secret rotation).
+    reloader.stakater.com/auto: "true"
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ $web.replicas | default 2 }}
@@ -47,7 +51,48 @@ spec:
             failureThreshold: 3
           resources:
             {{- include "web-service.resources" . | nindent 12 }}
+          # envFrom loads hierarchy levels in order; last entry wins for duplicates.
+          # Levels 1-3 (org, env, project) are replicated here from suparship-system
+          # by Stakater Replicator. Levels 4-5 (app, appenv) are created by this chart.
+          # All entries are optional so pods start even when a level has no config.
+          envFrom:
+            # Level 1 — Org
+            - configMapRef:
+                name: suparship-envvars-org
+                optional: true
+            - secretRef:
+                name: suparship-secrets-org-k8s
+                optional: true
+            # Level 2 — Environment (org-level per env type)
+            - configMapRef:
+                name: suparship-envvars-env-{{ .Values.app.env }}
+                optional: true
+            - secretRef:
+                name: suparship-secrets-env-{{ .Values.app.env }}-k8s
+                optional: true
+            # Level 3 — Project
+            - configMapRef:
+                name: suparship-envvars-project
+                optional: true
+            - secretRef:
+                name: suparship-secrets-project-k8s
+                optional: true
+            # Level 4 — App
+            - configMapRef:
+                name: suparship-envvars-app
+                optional: true
+            - secretRef:
+                name: suparship-secrets-app-k8s
+                optional: true
+            # Level 5 — App Environment (most specific, wins all)
+            - configMapRef:
+                name: suparship-envvars-appenv
+                optional: true
+            - secretRef:
+                name: suparship-secrets-appenv-k8s
+                optional: true
           {{- if $web.env }}
+          # ComponentSpec.Config: direct env entries — override all envFrom levels above.
           env:
             {{- range $k, $v := $web.env }}
             - name: {{ $k }}

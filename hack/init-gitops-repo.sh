@@ -153,6 +153,58 @@ mkdir -p gitops-output
 touch gitops-output/.gitkeep
 ok "gitops-output/.gitkeep"
 
+# 3. gitops-output/_infra/ — cluster-wide infra manifests (ESO stores etc).
+#    suparship writes ExternalSecret CRs here; the ClusterSecretStores are
+#    applied directly by install-eso.sh and also tracked here for auditability.
+mkdir -p gitops-output/_infra
+cat > gitops-output/_infra/eso-stores.yaml <<'EOYAML'
+# ClusterSecretStore definitions for the suparShip External Secrets Operator
+# integration. Applied once during cluster bootstrap by hack/install-eso.sh.
+#
+# suparship-k8s-store  — demo backend; reads Secrets from suparship-system.
+# suparship-vault-store  — stub; configure spec.provider.vault before use.
+# suparship-aws-sm-store — stub; configure spec.provider.aws before use.
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: suparship-k8s-store
+  labels:
+    suparship.io/managed-by: suparship
+  annotations:
+    suparship.io/description: "Kubernetes Secrets backend for demo/default use. Reads Secrets from suparship-system namespace."
+spec:
+  provider:
+    kubernetes:
+      remoteNamespace: suparship-system
+      auth:
+        serviceAccount:
+          name: suparship-eso-reader
+          namespace: suparship-system
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: suparship-vault-store
+  labels:
+    suparship.io/managed-by: suparship
+  annotations:
+    suparship.io/description: "HashiCorp Vault backend — configure spec.provider.vault before use."
+spec:
+  provider: {}
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: suparship-aws-sm-store
+  labels:
+    suparship.io/managed-by: suparship
+  annotations:
+    suparship.io/description: "AWS Secrets Manager backend — configure spec.provider.aws before use."
+spec:
+  provider: {}
+EOYAML
+ok "gitops-output/_infra/eso-stores.yaml"
+
 # 3. README.
 cat > README.md <<'EOF'
 # suparShip GitOps Repo
@@ -167,6 +219,13 @@ charts/
                             Populated by: hack/init-gitops-repo.sh
 
 gitops-output/
+  _infra/
+    eso-stores.yaml         ClusterSecretStore definitions for ESO backends.
+                            Applied directly by hack/install-eso.sh; tracked
+                            here for auditability.
+    eso-secrets-*.yaml      ExternalSecret CRs for upper-level secret refs.
+                            Committed by: suparship server on env config update.
+
   <project>/<app>/<env>/
     argocd-app.yaml         ArgoCD Application CRD for this app+env.
                             Committed by: suparship server on app create/update.
@@ -179,6 +238,10 @@ gitops-output/
    recursively for any `argocd-app.yaml` and applies them to the cluster.
 3. Each child Application syncs the Helm chart from `charts/<template>/`
    with inline values specific to that environment.
+4. Env vars are loaded from ConfigMaps via `envFrom` in hierarchy order:
+   Org < Environment < Project < App < App-Environment.
+5. Secrets are pulled by ESO from the configured ClusterSecretStore and
+   injected into pods as Kubernetes Secrets (also via `envFrom`).
 
 ## Local dev
 
@@ -196,6 +259,7 @@ git add .
 git commit --quiet -m "chore: initialise gitops monorepo skeleton
 
 - charts/web-service copied from templates/web-service/chart
+- gitops-output/_infra/eso-stores.yaml — ClusterSecretStore definitions
 - gitops-output/ placeholder for suparship-generated manifests
 - README documenting the layout and workflow"
 

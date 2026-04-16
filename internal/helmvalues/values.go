@@ -46,6 +46,8 @@
 // serialized via encoding/json or gopkg.in/yaml.v3).
 package helmvalues
 
+import "github.com/suparcloud/suparship/internal/envconfig"
+
 // HelmValues is the root of the canonical Helm values document for a
 // suparShip app chart. All fields are exported with both JSON and YAML tags
 // so the struct can be serialized directly to either format.
@@ -58,6 +60,12 @@ type HelmValues struct {
 	Components map[string]*ComponentValues `json:"components" yaml:"components"`
 	// Routing declares the primary ingress entry point for this deployment.
 	Routing RoutingValues `json:"routing" yaml:"routing"`
+	// EnvLayers holds the App and App Environment env config layers baked in
+	// at GitOps publish time. Upper levels (Org, Environment, Project) are
+	// replicated into app namespaces automatically via Stakater Replicator and
+	// are not included here to avoid mass re-publish on upper-level changes.
+	// Omitted when both App and AppEnv layers are empty.
+	EnvLayers envconfig.HelmEnvLayers `json:"envLayers,omitempty" yaml:"envLayers,omitempty"`
 }
 
 // AppContext carries top-level app identity injected into every chart.

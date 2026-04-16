@@ -1,6 +1,10 @@
 package domain
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/suparcloud/suparship/internal/envconfig"
+)
 
 // AppEnvironmentType classifies the kind of environment an app is running in.
 // Only the three values below are valid in MVP.
@@ -157,12 +161,15 @@ type EnvironmentOverride struct {
 	Values map[string]any `json:"values,omitempty" yaml:"values,omitempty"`
 	// Config overrides non-secret key/value configuration for this environment.
 	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
+	// EnvConfig holds env vars and secret refs specific to this app+environment
+	// combination (App Environment level of the hierarchy — wins all other levels).
+	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
 }
 
 // AppSpec is the desired configuration for an app. It is deterministic and
 // serializable: the same inputs always produce byte-identical output.
 //
-// Secret values MUST NOT appear here; use SecretRefs instead.
+// Secret values MUST NOT appear here; use SecretRefs or EnvConfig.SecretRefs instead.
 type AppSpec struct {
 	// DisplayName is a human-friendly label shown in the UI.
 	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty"`
@@ -187,6 +194,12 @@ type AppSpec struct {
 	EnvironmentDefaults map[string]EnvironmentOverride `json:"environmentDefaults,omitempty" yaml:"environmentDefaults,omitempty"`
 	// Metadata carries optional labels and annotations for the app spec.
 	Metadata *AppMetadata `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	// EnvConfig holds cross-cutting env vars and secret refs that apply to all
+	// environments of this app (App level of the hierarchy).
+	// These are loaded via envFrom and are overridden by App Environment level.
+	// Component-specific vars should use ComponentSpec.Config instead, which
+	// renders as direct env: entries and wins over all envFrom layers.
+	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
 }
 
 // App is a deployable unit owned by a project. It combines identity metadata

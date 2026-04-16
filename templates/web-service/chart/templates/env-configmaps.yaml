@@ -1,0 +1,40 @@
+{{/*
+  env-configmaps.yaml — creates ConfigMaps in the app namespace for the two
+  lower hierarchy levels (App and App Environment). These hold the env vars
+  baked into values.yaml at GitOps publish time.
+
+  Upper levels (Org, Environment, Project) are replicated into this namespace
+  automatically by Stakater Replicator from suparship-system and are NOT
+  created here.
+
+  ConfigMap names (fixed, referenced by envFrom in deployment.yaml):
+    suparship-envvars-app    ← App level
+    suparship-envvars-appenv ← App Environment level
+*/}}
+{{- if .Values.envLayers }}
+{{- if and .Values.envLayers.app .Values.envLayers.app.vars }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-envvars-app
+  labels:
+    {{- include "web-service.labels" . | nindent 4 }}
+    suparship.io/type: envvars
+    suparship.io/level: app
+data:
+  {{- toYaml .Values.envLayers.app.vars | nindent 2 }}
+---
+{{- end }}
+{{- if and .Values.envLayers.appEnv .Values.envLayers.appEnv.vars }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suparship-envvars-appenv
+  labels:
+    {{- include "web-service.labels" . | nindent 4 }}
+    suparship.io/type: envvars
+    suparship.io/level: app-environment
+data:
+  {{- toYaml .Values.envLayers.appEnv.vars | nindent 2 }}
+{{- end }}
+{{- end }}
