@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
   fetchOrg,
@@ -8,6 +8,13 @@ import {
   updateOrgEnvironment,
   deleteOrgEnvironment,
 } from "../lib/settings";
+import {
+  getOrgEnvConfig,
+  updateOrgEnvConfig,
+  getEnvTypeEnvConfig,
+  updateEnvTypeEnvConfig,
+} from "../lib/envconfig";
+import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import type { OrgInfo, RoleBinding } from "../types";
 import type { OrgEnvironment } from "../lib/settings";
 
@@ -383,11 +390,77 @@ function OrgEnvironmentsSection() {
   );
 }
 
+// ── Environment-type env config section ───────────────────────────────────────
+
+function EnvironmentTypeEnvConfigSection({
+  environments,
+}: {
+  environments: OrgEnvironment[];
+}) {
+  const [selectedEnvType, setSelectedEnvType] = useState<string>("");
+
+  // Initialise selector once environments load.
+  useEffect(() => {
+    if (environments.length > 0 && !selectedEnvType) {
+      setSelectedEnvType(environments[0].name);
+    }
+  }, [environments, selectedEnvType]);
+
+  const fetchFn = useCallback(
+    () => getEnvTypeEnvConfig(selectedEnvType),
+    [selectedEnvType],
+  );
+  const saveFn = useCallback(
+    (cfg: Parameters<typeof updateEnvTypeEnvConfig>[1]) =>
+      updateEnvTypeEnvConfig(selectedEnvType, cfg),
+    [selectedEnvType],
+  );
+
+  if (environments.length === 0) return null;
+
+  return (
+    <div className="space-y-3">
+      {/* Env-type selector */}
+      <div className="flex items-center gap-3">
+        <label className="text-sm font-medium text-gray-700">
+          Environment type
+        </label>
+        <div className="flex gap-1.5">
+          {environments.map((env) => (
+            <button
+              key={env.name}
+              onClick={() => setSelectedEnvType(env.name)}
+              className={`rounded-full px-3 py-0.5 text-xs font-medium transition-colors ${
+                selectedEnvType === env.name
+                  ? "bg-gray-900 text-white"
+                  : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              {env.displayName || env.name}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {selectedEnvType && (
+        <EnvConfigEditor
+          key={selectedEnvType}
+          title={`Variables for "${selectedEnvType}" environments`}
+          description="Applied to every app running in this environment type across all projects."
+          fetchFn={fetchFn}
+          saveFn={saveFn}
+        />
+      )}
+    </div>
+  );
+}
+
 // ── Main OrgSettings page ─────────────────────────────────────────────────────
 
 export function OrgSettings() {
   const [org, setOrg] = useState<OrgInfo | null>(null);
   const [bindings, setBindings] = useState<RoleBinding[]>([]);
+  const [environments, setEnvironments] = useState<OrgEnvironment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -396,13 +469,15 @@ export function OrgSettings() {
 
     async function load() {
       try {
-        const [orgData, bindingsData] = await Promise.all([
+        const [orgData, bindingsData, envsData] = await Promise.all([
           fetchOrg(),
           fetchAllRoleBindings(),
+          listOrgEnvironments(),
         ]);
         if (cancelled) return;
         setOrg(orgData);
         setBindings(bindingsData);
+        setEnvironments(envsData.environments);
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : "Failed to load");
@@ -484,6 +559,17 @@ export function OrgSettings() {
 
       {/* Canonical deployment pipeline — org-level environments */}
       <OrgEnvironmentsSection />
+
+      {/* Org-wide environment variables */}
+      <EnvConfigEditor
+        title="Org-wide variables"
+        description="Applied to every app in the org. Lower hierarchy levels override these."
+        fetchFn={getOrgEnvConfig}
+        saveFn={updateOrgEnvConfig}
+      />
+
+      {/* Per-environment-type variables */}
+      <EnvironmentTypeEnvConfigSection environments={environments} />
 
       <div className="rounded-lg border border-gray-200 bg-white">
         <div className="border-b border-gray-100 px-6 py-4">

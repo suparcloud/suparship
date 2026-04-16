@@ -169,6 +169,19 @@ EOF
 ok "ServiceAccount, Role, RoleBinding created/updated"
 echo ""
 
+# ── 6b. Wait for ClusterSecretStore CRD to be fully established ───────────
+# Helm --wait ensures the controller pods are running but the CRDs may still
+# be in the process of being registered with the API server.  Without this
+# wait the subsequent kubectl apply fails with "no matches for kind
+# ClusterSecretStore in version external-secrets.io/v1beta1".
+info "Waiting for ClusterSecretStore CRD to be established..."
+kubectl wait crd/clustersecretstores.external-secrets.io \
+  --for=condition=Established \
+  --timeout=60s \
+  && ok "ClusterSecretStore CRD is established" \
+  || die "Timed out waiting for ClusterSecretStore CRD to be established"
+echo ""
+
 # ── 7. Apply demo ClusterSecretStores ─────────────────────────────────────
 # The k8s store is fully configured for demo use.
 # Vault and aws-sm stores are stubs — configure spec.provider before activating.
