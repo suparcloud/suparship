@@ -234,6 +234,25 @@ export function GitOpsSettings() {
             </div>
           )}
 
+          <Field
+            label="Credential Expiry"
+            help="ISO 8601 date when the auth token/PAT expires (for health warnings)"
+          >
+            <input
+              type="date"
+              className={inputClass}
+              value={config.credentialExpiresAt ? config.credentialExpiresAt.split("T")[0] : ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                update({
+                  credentialExpiresAt: val
+                    ? new Date(val + "T23:59:59Z").toISOString()
+                    : undefined,
+                });
+              }}
+            />
+          </Field>
+
           <Field label="ArgoCD Repo URL" help="If ArgoCD uses a different URL (e.g. in-cluster)">
             <input
               className={inputClass}

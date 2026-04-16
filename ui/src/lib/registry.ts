@@ -5,6 +5,7 @@ export interface RegistryConfig {
   url: string;
   username?: string;
   authSecretRef?: string;
+  credentialExpiresAt?: string;
   environments?: string[];
 }
 

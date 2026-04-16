@@ -2,6 +2,11 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import {
+  fetchCredentialHealth,
+  type CredentialHealthResponse,
+  type CredentialStatus as CredStatus,
+} from "../lib/credentials";
+import {
   fetchPrerequisites,
   type PrerequisitesResponse,
   type ComponentStatus,
@@ -134,8 +139,113 @@ export function PlatformSettings() {
         </>
       )}
 
+      <CredentialHealth />
+
       <ExportConfig />
     </div>
+  );
+}
+
+const credStatusColors: Record<string, { bg: string; text: string; label: string }> = {
+  healthy: { bg: "bg-green-100", text: "text-green-800", label: "Healthy" },
+  warning: { bg: "bg-yellow-100", text: "text-yellow-800", label: "Warning" },
+  expired: { bg: "bg-red-100", text: "text-red-800", label: "Expired" },
+  missing: { bg: "bg-red-100", text: "text-red-800", label: "Missing" },
+  not_configured: { bg: "bg-gray-100", text: "text-gray-600", label: "Not configured" },
+};
+
+const credNameLabels: Record<string, string> = {
+  gitops: "GitOps Repository",
+  registry: "Container Registry",
+  "1password": "1Password",
+};
+
+function CredentialBadge({ status }: { status: string }) {
+  const s = credStatusColors[status] ?? credStatusColors.missing;
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${s.bg} ${s.text}`}
+    >
+      {s.label}
+    </span>
+  );
+}
+
+function CredentialRow({ cred }: { cred: CredStatus }) {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-5 py-4">
+      <div>
+        <p className="text-sm font-medium text-gray-900">
+          {credNameLabels[cred.name] ?? cred.name}
+        </p>
+        <div className="mt-0.5 space-x-3 text-xs text-gray-500">
+          {cred.secretRef && <span>Secret: {cred.secretRef}</span>}
+          {cred.daysUntilExpiry !== undefined && cred.daysUntilExpiry !== null && (
+            <span>
+              {cred.daysUntilExpiry < 0
+                ? `Expired ${Math.abs(cred.daysUntilExpiry)} days ago`
+                : `Expires in ${cred.daysUntilExpiry} days`}
+            </span>
+          )}
+          {cred.message && !cred.secretRef && <span>{cred.message}</span>}
+        </div>
+      </div>
+      <CredentialBadge status={cred.status} />
+    </div>
+  );
+}
+
+function CredentialHealth() {
+  const [data, setData] = useState<CredentialHealthResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetchCredentialHealth();
+        if (!cancelled) setData(res);
+      } catch {
+        // non-fatal
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (loading) {
+    return (
+      <section className="space-y-3">
+        <div className="h-5 w-40 animate-pulse rounded bg-gray-100" />
+        {[1, 2, 3].map((n) => (
+          <div key={n} className="h-14 animate-pulse rounded-lg bg-gray-50" />
+        ))}
+      </section>
+    );
+  }
+
+  if (!data) return null;
+
+  const overallColor = credStatusColors[data.overallStatus] ?? credStatusColors.missing;
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-gray-500">
+          Credential Health
+        </h2>
+        <span
+          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${overallColor.bg} ${overallColor.text}`}
+        >
+          {overallColor.label}
+        </span>
+      </div>
+      {data.credentials.map((c) => (
+        <CredentialRow key={c.name} cred={c} />
+      ))}
+    </section>
   );
 }
 

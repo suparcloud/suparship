@@ -100,11 +100,12 @@ type helmOnePassword struct {
 }
 
 type helmRegistry struct {
-	Enabled        bool     `json:"enabled"`
-	URL            string   `json:"url,omitempty"`
-	Username       string   `json:"username,omitempty"`
-	ExistingSecret string   `json:"existingSecret,omitempty"`
-	Environments   []string `json:"environments,omitempty"`
+	Enabled             bool     `json:"enabled"`
+	URL                 string   `json:"url,omitempty"`
+	Username            string   `json:"username,omitempty"`
+	ExistingSecret      string   `json:"existingSecret,omitempty"`
+	CredentialExpiresAt string   `json:"credentialExpiresAt,omitempty"`
+	Environments        []string `json:"environments,omitempty"`
 }
 
 type helmTemplates struct {
@@ -260,11 +261,12 @@ func (h *exportHandler) collectRegistry(ctx context.Context, vals *helmValues) {
 		return
 	}
 	vals.Registry = &helmRegistry{
-		Enabled:        cfg.Enabled,
-		URL:            cfg.URL,
-		Username:       cfg.Username,
-		ExistingSecret: cfg.AuthSecretRef,
-		Environments:   cfg.Environments,
+		Enabled:             cfg.Enabled,
+		URL:                 cfg.URL,
+		Username:            cfg.Username,
+		ExistingSecret:      cfg.AuthSecretRef,
+		CredentialExpiresAt: cfg.CredentialExpiresAt,
+		Environments:        cfg.Environments,
 	}
 }
 

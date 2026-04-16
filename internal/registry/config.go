@@ -22,6 +22,8 @@ type Config struct {
 	// AuthSecretRef is the name of an existing K8s Secret containing
 	// the registry password or .dockerconfigjson.
 	AuthSecretRef string `json:"authSecretRef,omitempty" yaml:"authSecretRef,omitempty"`
+	// CredentialExpiresAt is an ISO 8601 timestamp for credential health warnings.
+	CredentialExpiresAt string `json:"credentialExpiresAt,omitempty" yaml:"credentialExpiresAt,omitempty"`
 	// Environments lists which environments need imagePullSecrets
 	// from this registry. Empty means all environments.
 	Environments []string `json:"environments,omitempty" yaml:"environments,omitempty"`

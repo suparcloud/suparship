@@ -150,6 +150,25 @@ export function RegistrySettings() {
             </Field>
 
             <Field
+              label="Credential Expiry"
+              help="Date when the registry credential expires (for health warnings)"
+            >
+              <input
+                type="date"
+                className={inputClass}
+                value={config.credentialExpiresAt ? config.credentialExpiresAt.split("T")[0] : ""}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  update({
+                    credentialExpiresAt: val
+                      ? new Date(val + "T23:59:59Z").toISOString()
+                      : undefined,
+                  });
+                }}
+              />
+            </Field>
+
+            <Field
               label="Environments"
               help="Comma-separated list of environments needing imagePullSecrets. Leave empty for all."
             >
