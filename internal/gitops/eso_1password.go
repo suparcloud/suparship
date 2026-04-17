@@ -39,7 +39,7 @@ func build1PasswordConnectStore(cfg *secrets.OnePasswordConfig) string {
             namespace: suparship-system`, cfg.ExistingSecret)
 	}
 
-	return fmt.Sprintf(`apiVersion: external-secrets.io/v1beta1
+	return fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: %s
@@ -66,7 +66,7 @@ func build1PasswordServiceAccountStore(cfg *secrets.OnePasswordConfig) string {
             namespace: suparship-system`, cfg.ExistingSecret)
 	}
 
-	return fmt.Sprintf(`apiVersion: external-secrets.io/v1beta1
+	return fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: %s
@@ -93,7 +93,7 @@ func Build1PasswordExternalSecretYAML(name, namespace, vaultUUID string, keys []
 `, key, vaultUUID, key)
 	}
 
-	return fmt.Sprintf(`apiVersion: external-secrets.io/v1beta1
+	return fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: %s

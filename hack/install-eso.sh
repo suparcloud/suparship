@@ -173,7 +173,7 @@ echo ""
 # Helm --wait ensures the controller pods are running but the CRDs may still
 # be in the process of being registered with the API server.  Without this
 # wait the subsequent kubectl apply fails with "no matches for kind
-# ClusterSecretStore in version external-secrets.io/v1beta1".
+# ClusterSecretStore in version external-secrets.io/v1".
 info "Waiting for ClusterSecretStore CRD to be established..."
 kubectl wait crd/clustersecretstores.external-secrets.io \
   --for=condition=Established \
@@ -184,10 +184,11 @@ echo ""
 
 # ── 7. Apply demo ClusterSecretStores ─────────────────────────────────────
 # The k8s store is fully configured for demo use.
-# Vault and aws-sm stores are stubs — configure spec.provider before activating.
-info "Applying ClusterSecretStores..."
+# Vault and aws-sm stores are NOT created here — the v1 API requires a valid
+# provider config.  Users should create them manually when ready.
+info "Applying ClusterSecretStore (k8s backend)..."
 kubectl apply -f - <<EOF
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: suparship-k8s-store
@@ -203,30 +204,10 @@ spec:
         serviceAccount:
           name: ${ESO_SA_NAME}
           namespace: ${SYSTEM_NAMESPACE}
----
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: suparship-vault-store
-  labels:
-    suparship.io/managed-by: suparship
-  annotations:
-    suparship.io/description: "HashiCorp Vault backend — configure spec.provider.vault before use."
-spec:
-  provider: {}
----
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: suparship-aws-sm-store
-  labels:
-    suparship.io/managed-by: suparship
-  annotations:
-    suparship.io/description: "AWS Secrets Manager backend — configure spec.provider.aws before use."
-spec:
-  provider: {}
 EOF
-ok "ClusterSecretStores applied"
+ok "suparship-k8s-store applied"
+skip "suparship-vault-store  — create manually when Vault is configured"
+skip "suparship-aws-sm-store — create manually when AWS SM is configured"
 echo ""
 
 # ── Done ───────────────────────────────────────────────────────────────────

@@ -162,9 +162,10 @@ cat > gitops-output/_infra/eso-stores.yaml <<'EOYAML'
 # integration. Applied once during cluster bootstrap by hack/install-eso.sh.
 #
 # suparship-k8s-store  — demo backend; reads Secrets from suparship-system.
-# suparship-vault-store  — stub; configure spec.provider.vault before use.
-# suparship-aws-sm-store — stub; configure spec.provider.aws before use.
-apiVersion: external-secrets.io/v1beta1
+#
+# To add Vault or AWS Secrets Manager stores, create additional
+# ClusterSecretStore resources with a valid spec.provider section.
+apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: suparship-k8s-store
@@ -180,28 +181,6 @@ spec:
         serviceAccount:
           name: suparship-eso-reader
           namespace: suparship-system
----
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: suparship-vault-store
-  labels:
-    suparship.io/managed-by: suparship
-  annotations:
-    suparship.io/description: "HashiCorp Vault backend — configure spec.provider.vault before use."
-spec:
-  provider: {}
----
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: suparship-aws-sm-store
-  labels:
-    suparship.io/managed-by: suparship
-  annotations:
-    suparship.io/description: "AWS Secrets Manager backend — configure spec.provider.aws before use."
-spec:
-  provider: {}
 EOYAML
 ok "gitops-output/_infra/eso-stores.yaml"
 
