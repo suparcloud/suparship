@@ -246,7 +246,7 @@ spec:
     path: gitops-output
     directory:
       recurse: true
-      include: "{**/*argocd-app.yaml,**/appproject.yaml}"
+      include: "{_infra/*.yaml,_infra/**/*.yaml}"
   destination:
     server: https://kubernetes.default.svc
     namespace: ${ARGOCD_NAMESPACE}
@@ -290,7 +290,7 @@ cat <<EOF
     charts/web-service/     Helm chart for the web-service template
     gitops-output/          suparship writes Application CRDs here
 
-  Root ArgoCD App   suparship-apps  (watches gitops-output/**/argocd-app.yaml)
+  Root ArgoCD App   suparship-apps  (watches gitops-output/_infra/**/*.yaml for ApplicationSets + AppProjects)
     kubectl get application suparship-apps -n ${ARGOCD_NAMESPACE}
 
   Credentials saved to .env.cluster  (git-ignored)

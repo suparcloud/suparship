@@ -5,7 +5,6 @@ export interface GitOpsConfig {
   repoURL: string;
   branch: string;
   subPath?: string;
-  authSecretRef?: string;
   credentialExpiresAt?: string;
   argoCDRepoURL?: string;
   kargoGitRepoURL?: string;
@@ -15,9 +14,30 @@ export interface GitOpsConfig {
   bitbucket?: { workspace?: string };
 }
 
+/** Plaintext credentials submitted from the UI — never stored in Git. */
+export interface GitOpsCredentials {
+  /** Personal access token for GitHub, GitLab, Gitea. */
+  token?: string;
+  /** Username for Bitbucket and generic providers. */
+  username?: string;
+  /** Password or app-password for Bitbucket / generic providers. */
+  password?: string;
+}
+
 export interface GitOpsConfigResponse {
   configured: boolean;
+  /** True when a credential Secret already exists in the cluster. */
+  credentialsSet: boolean;
   config?: GitOpsConfig;
+  /**
+   * Non-empty when post-save ArgoCD registration or publisher hot-reload
+   * encountered a non-fatal error. Config was saved successfully.
+   */
+  activationWarning?: string;
+}
+
+export interface UpdateGitOpsConfigRequest extends GitOpsConfig {
+  credentials?: GitOpsCredentials;
 }
 
 export interface TestConnectionRequest {
@@ -37,9 +57,9 @@ export function fetchGitOpsConfig(): Promise<GitOpsConfigResponse> {
 }
 
 export function updateGitOpsConfig(
-  config: GitOpsConfig,
+  request: UpdateGitOpsConfigRequest,
 ): Promise<GitOpsConfigResponse> {
-  return api.put<GitOpsConfigResponse>("/gitops/config", config);
+  return api.put<GitOpsConfigResponse>("/gitops/config", request);
 }
 
 export function testGitOpsConnection(

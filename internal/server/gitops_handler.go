@@ -14,9 +14,10 @@ import (
 
 // gitopsHandler serves the GitOps configuration API.
 type gitopsHandler struct {
-	store  *gitops.ConfigStore
-	auth   *authHandler
-	logger *slog.Logger
+	store     *gitops.ConfigStore
+	auth      *authHandler
+	logger    *slog.Logger
+	activator GitOpsActivatorFunc // optional; nil = skip post-save activation
 }
 
 func (h *gitopsHandler) registerRoutes(mux *http.ServeMux) {
@@ -38,34 +39,104 @@ func (h *gitopsHandler) handleGetConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	credSet, err := h.store.HasCredentials(r.Context())
+	if err != nil {
+		h.logger.Warn("check gitops credentials", "error", err)
+	}
+
 	writeJSON(w, http.StatusOK, gitopsConfigResponse{
-		Configured: true,
-		Config:     cfg,
+		Configured:     true,
+		CredentialsSet: credSet,
+		Config:         cfg,
 	})
 }
 
-// handleUpdateConfig saves or updates the GitOps repo configuration.
+// gitopsUpdateRequest is the body for PUT /api/v1/gitops/config.
+// It extends RepoConfig with optional credential fields so the UI can
+// submit credentials without requiring users to pre-create a K8s Secret.
+type gitopsUpdateRequest struct {
+	gitops.RepoConfig
+	Credentials *gitopsCredentials `json:"credentials,omitempty"`
+}
+
+// gitopsCredentials holds the plaintext credential values submitted by the UI.
+// They are written into the managed K8s Secret; never persisted in Git.
+type gitopsCredentials struct {
+	// Token is used for GitHub, GitLab, and Gitea (personal access token).
+	Token string `json:"token,omitempty"`
+	// Username is used for Bitbucket and generic providers.
+	Username string `json:"username,omitempty"`
+	// Password is the password or app-password for Bitbucket / generic providers.
+	Password string `json:"password,omitempty"`
+}
+
+// handleUpdateConfig saves or updates the GitOps repo configuration and,
+// if credentials are provided, stores them in the managed K8s Secret.
+// After saving, it calls the optional activator to register the repo with
+// ArgoCD and hot-reload the publisher.
 func (h *gitopsHandler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	var cfg gitops.RepoConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	var req gitopsUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
 		return
 	}
 
-	if err := cfg.Validate(); err != nil {
+	if err := req.RepoConfig.Validate(); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
 
-	if err := h.store.Save(r.Context(), &cfg); err != nil {
+	hasNewCredentials := req.Credentials != nil &&
+		(req.Credentials.Token != "" || req.Credentials.Username != "" || req.Credentials.Password != "")
+
+	if hasNewCredentials {
+		// Save new credentials into the managed Secret.
+		if err := h.store.SaveCredentials(r.Context(), req.Provider, req.Credentials.Token, req.Credentials.Username, req.Credentials.Password); err != nil {
+			h.logger.Error("save gitops credentials", "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save credentials"})
+			return
+		}
+		// Always point config at the managed secret so downstream tooling
+		// (publisher, ArgoCD reg) can find credentials without manual setup.
+		req.RepoConfig.AuthSecretRef = gitops.ManagedCredentialSecretName
+	} else {
+		// No new credentials: carry forward any existing authSecretRef so
+		// a re-save of the URL/branch doesn't accidentally orphan stored creds.
+		if existing, err := h.store.Get(r.Context()); err == nil && existing.AuthSecretRef != "" {
+			req.RepoConfig.AuthSecretRef = existing.AuthSecretRef
+		}
+	}
+
+	if err := h.store.Save(r.Context(), &req.RepoConfig); err != nil {
 		h.logger.Error("save gitops config", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save gitops configuration"})
 		return
 	}
 
+	credSet, err := h.store.HasCredentials(r.Context())
+	if err != nil {
+		h.logger.Warn("check gitops credentials", "error", err)
+	}
+
+	// Post-save activation: register repo with ArgoCD + hot-reload publisher.
+	var activationWarning string
+	if h.activator != nil {
+		// Resolve credentials from the just-saved (or previously saved) managed Secret.
+		username, password, credErr := h.store.GetCredentials(r.Context(), &req.RepoConfig)
+		if credErr != nil {
+			h.logger.Warn("resolve credentials for activator", "error", credErr)
+		}
+		if actErr := h.activator(r.Context(), &req.RepoConfig, username, password); actErr != nil {
+			h.logger.Warn("gitops activation failed", "error", actErr)
+			activationWarning = actErr.Error()
+		}
+	}
+
 	writeJSON(w, http.StatusOK, gitopsConfigResponse{
-		Configured: true,
-		Config:     &cfg,
+		Configured:        true,
+		CredentialsSet:    credSet,
+		Config:            &req.RepoConfig,
+		ActivationWarning: activationWarning,
 	})
 }
 
@@ -84,7 +155,8 @@ type testConnectionResponse struct {
 }
 
 // handleTestConnection verifies that the given credentials can reach the Git repo.
-// It uses `git ls-remote` which works without cloning the full repo.
+// When no credentials are provided in the request body it falls back to any
+// credentials already stored in the managed K8s Secret.
 func (h *gitopsHandler) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	var req testConnectionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -97,9 +169,26 @@ func (h *gitopsHandler) handleTestConnection(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	username := req.Username
+	password := req.Password
+
+	// Fall back to stored credentials when none are provided in the request.
+	if username == "" || password == "" {
+		if cfg, err := h.store.Get(r.Context()); err == nil {
+			if u, p, err := h.store.GetCredentials(r.Context(), cfg); err == nil {
+				if username == "" {
+					username = u
+				}
+				if password == "" {
+					password = p
+				}
+			}
+		}
+	}
+
 	repoURL := req.RepoURL
-	if req.Username != "" && req.Password != "" && strings.HasPrefix(repoURL, "https://") {
-		repoURL = injectCredentials(repoURL, req.Username, req.Password)
+	if username != "" && password != "" && strings.HasPrefix(repoURL, "https://") {
+		repoURL = injectCredentials(repoURL, username, password)
 	}
 
 	start := time.Now()
@@ -127,8 +216,13 @@ func (h *gitopsHandler) handleTestConnection(w http.ResponseWriter, r *http.Requ
 
 // gitopsConfigResponse wraps the GitOps config for the API response.
 type gitopsConfigResponse struct {
-	Configured bool               `json:"configured"`
-	Config     *gitops.RepoConfig `json:"config,omitempty"`
+	Configured     bool               `json:"configured"`
+	CredentialsSet bool               `json:"credentialsSet"`
+	Config         *gitops.RepoConfig `json:"config,omitempty"`
+	// ActivationWarning is non-empty when post-save ArgoCD registration or
+	// publisher hot-reload encountered a non-fatal error. The config was saved
+	// successfully; the user can investigate and retry.
+	ActivationWarning string `json:"activationWarning,omitempty"`
 }
 
 // injectCredentials embeds username:password into an HTTPS URL for git operations.

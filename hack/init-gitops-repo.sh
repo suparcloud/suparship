@@ -15,12 +15,17 @@
 #     .gitkeep              ← placeholder; suparship writes per-app dirs here
 #   README.md
 #
-# ArgoCD Application CRDs committed by suparship live at:
-#   gitops-output/<project>/<app>/<env>/argocd-app.yaml
+# ArgoCD infra manifests (ApplicationSets, AppProjects) are committed by
+# suparship to:
+#   gitops-output/_infra/{env}-appset.yaml
+#   gitops-output/_infra/{project}-appproject.yaml
 #
-# Those Applications reference the chart at:
-#   charts/<template-name>/
-# with inline Helm values for that environment.
+# Per-app Git File generator parameters are committed to:
+#   gitops-output/{env}/{project}/{app}/app.yaml
+#   gitops-output/{env}/{project}/{app}/values.yaml
+#
+# The root ArgoCD App of Apps (suparship-apps) watches:
+#   gitops-output/_infra/**/*.yaml
 #
 # Environment variables (all required — set by install-gitea.sh):
 #   GITEA_HOST_URL       e.g. http://gitea.localhost:8880
@@ -199,24 +204,37 @@ charts/
 
 gitops-output/
   _infra/
-    eso-stores.yaml         ClusterSecretStore definitions for ESO backends.
-                            Applied directly by hack/install-eso.sh; tracked
-                            here for auditability.
-    eso-secrets-*.yaml      ExternalSecret CRs for upper-level secret refs.
-                            Committed by: suparship server on env config update.
-
-  <project>/<app>/<env>/
-    argocd-app.yaml         ArgoCD Application CRD for this app+env.
+    <env>-appset.yaml       ArgoCD ApplicationSet for one environment cluster.
+                            Git File generator watches <env>/*/*/app.yaml.
                             Committed by: suparship server on app create/update.
+    <project>-appproject.yaml  ArgoCD AppProject scoping an environment.
+                            Committed by: suparship server.
+    previews-appset.yaml    ArgoCD ApplicationSet for all preview environments.
+    eso-stores.yaml         ClusterSecretStore definitions for ESO backends.
+    kargo/
+      <project>-project.yaml          Kargo Project CR.
+      <project>-<app>-warehouse.yaml  Kargo Warehouse CR.
+      <project>-<app>-<env>-stage.yaml  Kargo Stage CR per stable env.
+
+  <env>/<project>/<app>/
+    app.yaml                Git File generator parameters (name, project,
+                            template, …). Consumed by the <env>-appset.yaml
+                            ApplicationSet to generate an ArgoCD Application.
+    values.yaml             Helm values for this app+env pair.
+                            Referenced by the ApplicationSet chart source.
 ```
 
 ## How it works
 
-1. `suparship` server commits `argocd-app.yaml` files under `gitops-output/`.
-2. The root ArgoCD Application (`suparship-apps`) watches `gitops-output/`
-   recursively for any `argocd-app.yaml` and applies them to the cluster.
-3. Each child Application syncs the Helm chart from `charts/<template>/`
-   with inline values specific to that environment.
+1. `suparship` server commits `_infra/*-appset.yaml` and `_infra/*-appproject.yaml`
+   for each project's environments.
+2. The root ArgoCD Application (`suparship-apps`) watches `gitops-output/_infra/**/*.yaml`
+   and applies ApplicationSets and AppProjects to the cluster.
+3. Each ApplicationSet uses a Git File generator to discover `app.yaml` files
+   under `gitops-output/<env>/<project>/<app>/app.yaml` and generates one
+   ArgoCD Application per file.
+4. Each generated Application syncs the Helm chart from `charts/<template>/`
+   with environment-specific values from the matching `values.yaml`.
 4. Env vars are loaded from ConfigMaps via `envFrom` in hierarchy order:
    Org < Environment < Project < App < App-Environment.
 5. Secrets are pulled by ESO from the configured ClusterSecretStore and

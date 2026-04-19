@@ -16,6 +16,11 @@ import (
 const (
 	gitopsConfigMapName = "suparship-gitops-config"
 	gitopsConfigMapKey  = "gitops.yaml"
+
+	// ManagedCredentialSecretName is the K8s Secret automatically managed by
+	// suparship to hold GitOps repository credentials. Users never need to
+	// create or reference this Secret directly.
+	ManagedCredentialSecretName = "suparship-gitops-credentials"
 )
 
 // ConfigStore reads and writes the GitOps repository configuration
@@ -97,6 +102,89 @@ func (s *ConfigStore) Save(ctx context.Context, cfg *RepoConfig) error {
 		return fmt.Errorf("update gitops configmap: %w", err)
 	}
 	return nil
+}
+
+// SaveCredentials creates or updates the managed GitOps credential Secret
+// (ManagedCredentialSecretName) with provider-appropriate keys. Only non-empty
+// values are written; omitted values leave existing keys untouched.
+func (s *ConfigStore) SaveCredentials(ctx context.Context, provider, token, username, password string) error {
+	data := map[string][]byte{}
+
+	switch provider {
+	case "github", "gitlab", "gitea":
+		if token != "" {
+			data["token"] = []byte(token)
+		}
+	case "bitbucket":
+		if password != "" {
+			data["appPassword"] = []byte(password)
+		}
+		if username != "" {
+			data["username"] = []byte(username)
+		}
+	default: // generic
+		if password != "" {
+			data["password"] = []byte(password)
+		}
+		if username != "" {
+			data["username"] = []byte(username)
+		}
+	}
+
+	if len(data) == 0 {
+		return nil
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ManagedCredentialSecretName,
+			Namespace: envconfig.SystemNamespace,
+			Labels: map[string]string{
+				"suparship.io/managed-by": "suparship",
+				"suparship.io/type":       "gitops-credentials",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: data,
+	}
+
+	existing, err := s.client.CoreV1().Secrets(envconfig.SystemNamespace).Get(ctx, ManagedCredentialSecretName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			_, createErr := s.client.CoreV1().Secrets(envconfig.SystemNamespace).Create(ctx, secret, metav1.CreateOptions{})
+			if createErr != nil {
+				return fmt.Errorf("create gitops credential secret: %w", createErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("get existing gitops credential secret: %w", err)
+	}
+
+	if existing.Data == nil {
+		existing.Data = map[string][]byte{}
+	}
+	for k, v := range data {
+		existing.Data[k] = v
+	}
+	existing.Labels = secret.Labels
+	_, err = s.client.CoreV1().Secrets(envconfig.SystemNamespace).Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("update gitops credential secret: %w", err)
+	}
+	return nil
+}
+
+// HasCredentials reports whether the managed credential Secret exists and
+// contains at least one credential key.
+func (s *ConfigStore) HasCredentials(ctx context.Context) (bool, error) {
+	secret, err := s.client.CoreV1().Secrets(envconfig.SystemNamespace).Get(ctx, ManagedCredentialSecretName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("check gitops credentials: %w", err)
+	}
+	return len(secret.Data) > 0, nil
 }
 
 // GetCredentials reads the Secret referenced by cfg.AuthSecretRef and returns

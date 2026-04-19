@@ -288,6 +288,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				"repo", cfg.GitOps.RepoURL,
 				"argocd_repo", cfg.GitOps.ArgoCDRepoURL,
 			)
+			// On startup, publish ApplicationSets + AppProjects so ArgoCD can
+			// discover apps immediately without needing a UI config save first.
+			// This is idempotent and runs in the background to avoid delaying startup.
+			go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
 			// Register GitOps repo connectivity probe.
 			// Use ArgoCDRepoURL when set (internal cluster URL); fall back to
 			// the host-accessible RepoURL for the probe.
@@ -302,6 +306,62 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 	} else {
 		logger.Info("gitops publisher disabled — set SUPARSHIP_GITOPS_REPO_URL to enable")
+	}
+
+	// Wrap the initial publisher in a holder so it can be swapped at runtime
+	// when the user saves new GitOps config through the settings UI.
+	publisherHolder := server.NewPublisherHolder(gitOpsPublisher)
+
+	// Build the activator closure: called by gitopsHandler after config is saved.
+	// It registers the repo with ArgoCD, hot-reloads the publisher, and
+	// kicks off an initial env-infra publish so ArgoCD can start discovering apps.
+	var gitOpsActivator server.GitOpsActivatorFunc
+	if cfg.RuntimeMode != config.ModeFake && kubeClient != nil {
+		gitOpsActivator = func(ctx context.Context, repoCfg *gitops.RepoConfig, username, password string) error {
+			// 1. Register the repo with ArgoCD so it can clone for syncs.
+			if regErr := gitops.RegisterArgoCDRepo(ctx, kubeClient, repoCfg, username, password); regErr != nil {
+				// Non-fatal: ArgoCD may not be installed yet, or its namespace
+				// may not exist. Log the warning and continue.
+				logger.Warn("argocd repo registration failed — ArgoCD may not be installed yet",
+					"error", regErr,
+				)
+			} else {
+				logger.Info("argocd repo registered",
+					"url", repoCfg.ArgoCDRepoURL,
+					"secret", "argocd/suparship-gitops-repo",
+				)
+			}
+
+			// 2. Rebuild the publisher from the new config.
+			pub, err := gitops.NewPublisher(gitops.PublisherConfig{
+				RepoURL:          repoCfg.RepoURL,
+				RepoUser:         username,
+				RepoPassword:     password,
+				ArgoCDRepoURL:    repoCfg.ArgoCDRepoURL,
+				KargoGitRepoURL:  repoCfg.KargoGitRepoURL,
+				Branch:           repoCfg.Branch,
+				SyncAutomated:    true,
+				TemplatesDir:     templatesDir,
+			})
+			if err != nil {
+				return fmt.Errorf("rebuild gitops publisher: %w", err)
+			}
+
+			// 3. Hot-swap the live publisher so new app creates/promotes use it.
+			publisherHolder.Swap(&gitOpsPublisherAdapter{
+				inner:        pub,
+				orgProvider:  orgProvider,
+				clusterStore: clusterStore,
+			})
+			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
+
+			// 4. Trigger initial env-infra publish in background (idempotent).
+			// This ensures ArgoCD ApplicationSets and AppProjects are in Git
+			// even before the first app is created.
+			go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+
+			return nil
+		}
 	}
 
 	srv := server.New(server.Config{
@@ -319,7 +379,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		ClusterStore:     clusterStore,
 		SecretBackend:            secretBackend,
 		UpperLevelSecretWriter:   upperLevelSecretWriter,
-		GitOpsPublisher:         gitOpsPublisher,
+		GitOpsPublisher:         publisherHolder,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,
 		KargoPipelineReader:     kargoPipelineReader,
@@ -329,6 +389,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		Logger:           logger,
 		KubeClient:        kubeClient,
 		GitOpsConfigStore:     gitopsConfigStore,
+		GitOpsActivator:       gitOpsActivator,
 		TemplateRegistryStore: templateRegistryStore,
 		RegistryStore:         registryStore,
 	})
@@ -570,4 +631,72 @@ func (a *fakeHistoryAdapter) GetAppDeploymentHistory(_ context.Context, appName,
 		})
 	}
 	return out, nil
+}
+
+// publishInitialEnvInfra writes ArgoCD ApplicationSets and AppProjects to the
+// GitOps repo for all org environments and known projects. It is called in a
+// background goroutine after the GitOps publisher is first wired (or reloaded)
+// so that ArgoCD can start discovering apps without waiting for the first
+// app creation. The operation is idempotent — safe to call multiple times.
+func publishInitialEnvInfra(
+	ctx context.Context,
+	pub *gitops.Publisher,
+	orgProvider rbac.OrgProvider,
+	clusterStore domain.ClusterStore,
+	projectStore project.Store,
+	logger *slog.Logger,
+) {
+	if orgProvider == nil {
+		return
+	}
+
+	org, err := orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		logger.Warn("initial env infra: could not load org config", "error", err)
+		return
+	}
+
+	appSetEnvs := make([]gitops.AppSetEnv, 0, len(org.Environments))
+	for _, orgEnv := range org.Environments {
+		clusterServer := "https://kubernetes.default.svc"
+		if orgEnv.ClusterRef != "" && clusterStore != nil {
+			if cluster, err := clusterStore.GetCluster(ctx, orgEnv.ClusterRef); err == nil && cluster.APIServer != "" {
+				clusterServer = cluster.APIServer
+			}
+		}
+		baseDomain := orgEnv.BaseDomain
+		if baseDomain == "" {
+			baseDomain = "localhost"
+		}
+		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
+			EnvName:          orgEnv.Name,
+			ClusterServer:    clusterServer,
+			NamespacePattern: orgEnv.NamespacePattern,
+			BaseDomain:       baseDomain,
+		})
+	}
+
+	if len(appSetEnvs) == 0 {
+		logger.Info("initial env infra: no environments configured, skipping")
+		return
+	}
+
+	// Collect project names; fall back to "default" if none exist yet.
+	projectNames := []string{"default"}
+	if projectStore != nil {
+		if projects, err := projectStore.List(ctx); err == nil && len(projects) > 0 {
+			projectNames = make([]string, 0, len(projects))
+			for _, p := range projects {
+				projectNames = append(projectNames, p.Metadata.Name)
+			}
+		}
+	}
+
+	for _, name := range projectNames {
+		if err := pub.PublishEnvInfra(ctx, name, appSetEnvs); err != nil {
+			logger.Warn("initial env infra: publish failed", "project", name, "error", err)
+		} else {
+			logger.Info("initial env infra: published", "project", name)
+		}
+	}
 }

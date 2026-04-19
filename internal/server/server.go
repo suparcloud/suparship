@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -137,6 +138,53 @@ type ReadinessProber struct {
 	Check func(ctx context.Context) error
 }
 
+// GitOpsActivatorFunc is called after GitOps configuration is saved through
+// the settings API. It receives the saved config and the resolved credentials
+// (empty strings for public repos or when none are available) and is
+// responsible for: registering the repo with ArgoCD, hot-swapping the live
+// GitOpsPublisher, and optionally triggering an initial env-infra publish.
+//
+// The function should be idempotent and treat ArgoCD registration failures as
+// non-fatal warnings — ArgoCD may not be installed yet.
+// Nil means no activation is wired (safe default for tests).
+type GitOpsActivatorFunc func(ctx context.Context, cfg *gitops.RepoConfig, username, password string) error
+
+// PublisherHolder wraps a GitOpsPublisher behind an RW mutex so the live
+// publisher can be swapped at runtime when new GitOps config is saved.
+// It implements GitOpsPublisher so it can be passed anywhere a publisher is
+// expected; the inner publisher is replaced via Swap without restarting the
+// server.
+type PublisherHolder struct {
+	mu sync.RWMutex
+	p  GitOpsPublisher
+}
+
+// NewPublisherHolder creates a PublisherHolder with an optional initial publisher.
+// Pass nil when no publisher is configured at startup.
+func NewPublisherHolder(initial GitOpsPublisher) *PublisherHolder {
+	return &PublisherHolder{p: initial}
+}
+
+// PublishApp implements GitOpsPublisher. It delegates to the currently held
+// publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.PublishApp(ctx, app, envs)
+}
+
+// Swap replaces the inner publisher atomically. Subsequent PublishApp calls
+// will use the new publisher. Any in-flight call completes against the old one.
+func (h *PublisherHolder) Swap(p GitOpsPublisher) {
+	h.mu.Lock()
+	h.p = p
+	h.mu.Unlock()
+}
+
 // Config holds server configuration.
 type Config struct {
 	Addr            string
@@ -171,6 +219,10 @@ type Config struct {
 	// GitOpsConfigStore reads/writes the GitOps repo ConfigMap. Nil disables
 	// the /api/v1/gitops/* endpoints.
 	GitOpsConfigStore *gitops.ConfigStore
+	// GitOpsActivator is called after GitOps config is saved via the settings
+	// API to apply it immediately (ArgoCD registration + publisher hot-reload).
+	// Nil disables post-save activation (safe for tests and fake mode).
+	GitOpsActivator GitOpsActivatorFunc
 	// TemplateRegistryStore reads/writes the template registry ConfigMap.
 	// Nil disables the /api/v1/templates/registry and /sources endpoints.
 	TemplateRegistryStore *tpl.RegistryStore
@@ -324,9 +376,10 @@ func New(cfg Config) *Server {
 
 	if cfg.GitOpsConfigStore != nil && ah != nil {
 		gh := &gitopsHandler{
-			store:  cfg.GitOpsConfigStore,
-			auth:   ah,
-			logger: cfg.Logger,
+			store:     cfg.GitOpsConfigStore,
+			auth:      ah,
+			logger:    cfg.Logger,
+			activator: cfg.GitOpsActivator,
 		}
 		gh.registerRoutes(mux)
 		cfg.Logger.Info("gitops config endpoints enabled")
