@@ -51,6 +51,7 @@ func newSecretsMux() (*http.ServeMux, *authHandler) {
 		appStore:    appStore,
 		backend:     memBE,
 		upperWriter: secrets.NewMemUpperLevelWriter(memBE),
+		auditor:     secrets.NewAuditor(slog.Default()),
 		logger:      slog.Default(),
 	}
 

@@ -432,7 +432,7 @@ spec:
 | `template.name` | yes | Template to use for rendering |
 | `template.version` | no | Pin to a specific template version |
 | `values` | no | Input values matching template inputs |
-| `secretRefs` | no | Secret references (name → K8s secret.key) |
+| `secretRefs` | no | Secret references (written to vault, pulled by ESO) |
 | `environmentOverrides` | no | Per-environment value and secret overrides |
 
 ### Runtime inventory
@@ -523,6 +523,7 @@ Significant design decisions are recorded as Architecture Decision Records (ADRs
 | Document | Purpose |
 |----------|---------|
 | [`docs/app-model.md`](docs/app-model.md) | App, Environment, and Component concepts and guardrails |
+| [`docs/secrets.md`](docs/secrets.md) | Secrets architecture: 1Password integration, provisioning, audit policy |
 | [`docs/templates-components.md`](docs/templates-components.md) | How templates define component topology |
 | [`docs/templates.md`](docs/templates.md) | Full template authoring reference |
 | [`docs/migration-app-model.md`](docs/migration-app-model.md) | Service → app migration guide |

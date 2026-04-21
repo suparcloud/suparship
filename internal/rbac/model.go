@@ -102,6 +102,9 @@ type Org struct {
 	// SecretBackend selects the backend used to store app-level secrets.
 	// Defaults to "k8s" (native Kubernetes Secrets) when absent.
 	SecretBackend secrets.BackendConfig `yaml:"secretBackend,omitempty"`
+	// ResourceNaming holds configurable naming patterns for K8s resources
+	// and vault items. Allows vendor-neutral names outside suparship-system.
+	ResourceNaming secrets.ResourceNaming `yaml:"resourceNaming,omitempty"`
 }
 
 // Team represents a named group of users.

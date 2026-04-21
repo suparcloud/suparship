@@ -17,12 +17,20 @@ import {
 import {
   getSecretsBackend,
   updateSecretsBackend,
+  saveSAToken,
+  listVaults,
+  addBinding,
+  removeBinding,
   listOrgSecretKeys,
   upsertOrgSecrets,
   deleteOrgSecretKey,
   listEnvTypeSecretKeys,
   upsertEnvTypeSecrets,
   deleteEnvTypeSecretKey,
+} from "../lib/secrets";
+import type {
+  SecretBackendConfig,
+  VaultInfo,
 } from "../lib/secrets";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
@@ -482,33 +490,54 @@ const BACKEND_OPTIONS = [
   {
     value: "k8s",
     label: "Kubernetes Secrets",
-    description: "Native K8s Secrets in app namespaces (recommended for MVP)",
+    description: "Native K8s Secrets in app namespaces (demo/default)",
   },
   {
-    value: "vault",
-    label: "HashiCorp Vault",
-    description: "External Vault backend (future)",
-    disabled: true,
-  },
-  {
-    value: "aws-sm",
-    label: "AWS Secrets Manager",
-    description: "AWS Secrets Manager backend (future)",
-    disabled: true,
+    value: "onepassword",
+    label: "1Password",
+    description: "1Password via External Secrets Operator (production)",
   },
 ];
 
 function SecretsBackendSection() {
-  const [backendType, setBackendType] = useState<string>("k8s");
+  const [config, setConfig] = useState<SecretBackendConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // SA Token paste state
+  const [saToken, setSaToken] = useState("");
+  const [tokenSaving, setTokenSaving] = useState(false);
+  const [tokenMsg, setTokenMsg] = useState<string | null>(null);
+
+  // Vault list from SA token
+  const [vaults, setVaults] = useState<VaultInfo[]>([]);
+  const [vaultsLoading, setVaultsLoading] = useState(false);
+
+  // Add binding form state
+  const [showAddBinding, setShowAddBinding] = useState(false);
+  const [bindEnv, setBindEnv] = useState("");
+  const [bindVaultId, setBindVaultId] = useState("");
+  const [bindToken, setBindToken] = useState("");
+  const [bindBusy, setBindBusy] = useState(false);
+
+  // Remove binding state
+  const [removingEnv, setRemovingEnv] = useState<string | null>(null);
+
+  // Setup guide toggle
+  const [showGuide, setShowGuide] = useState(false);
+
+  // Org environments (for binding dropdown)
+  const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
+
   useEffect(() => {
     let cancelled = false;
-    getSecretsBackend()
-      .then((cfg) => {
-        if (!cancelled) setBackendType(cfg.type);
+    Promise.all([getSecretsBackend(), listOrgEnvironments()])
+      .then(([cfg, envsResp]) => {
+        if (!cancelled) {
+          setConfig(cfg);
+          setOrgEnvs(envsResp.environments || []);
+        }
       })
       .catch((err) => {
         if (!cancelled)
@@ -522,16 +551,99 @@ function SecretsBackendSection() {
     };
   }, []);
 
-  async function handleChange(value: string) {
+  const loadVaults = useCallback(async () => {
+    setVaultsLoading(true);
+    try {
+      const v = await listVaults();
+      setVaults(v);
+    } catch {
+      setVaults([]);
+    } finally {
+      setVaultsLoading(false);
+    }
+  }, []);
+
+  async function handleTypeChange(value: string) {
+    if (!config) return;
     setSaving(true);
     setError(null);
     try {
-      const result = await updateSecretsBackend({ type: value });
-      setBackendType(result.type);
+      const updated: Partial<SecretBackendConfig> = { type: value };
+      if (value === "k8s") {
+        updated.onePassword = undefined;
+      }
+      const result = await updateSecretsBackend(updated);
+      setConfig(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleSaveToken() {
+    if (!saToken.trim()) return;
+    setTokenSaving(true);
+    setTokenMsg(null);
+    try {
+      const res = await saveSAToken(saToken.trim());
+      if (res.valid) {
+        setTokenMsg(`Token saved. ${res.vaultCount ?? 0} vault(s) accessible.`);
+        setSaToken("");
+        const updated = await getSecretsBackend();
+        setConfig(updated);
+        await loadVaults();
+      } else {
+        setTokenMsg(res.error || "Token validation failed.");
+      }
+    } catch (err) {
+      setTokenMsg(err instanceof Error ? err.message : "Failed to save token");
+    } finally {
+      setTokenSaving(false);
+    }
+  }
+
+  async function handleAddBinding() {
+    if (!bindEnv || !bindVaultId || !bindToken.trim()) return;
+    setBindBusy(true);
+    setError(null);
+    try {
+      const vault = vaults.find((v) => v.id === bindVaultId);
+      const res = await addBinding(
+        bindEnv,
+        bindVaultId,
+        bindToken.trim(),
+        vault?.title,
+      );
+      if (res.error) {
+        setError(res.error);
+      } else {
+        const updated = await getSecretsBackend();
+        setConfig(updated);
+        setShowAddBinding(false);
+        setBindEnv("");
+        setBindVaultId("");
+        setBindToken("");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Add binding failed");
+    } finally {
+      setBindBusy(false);
+    }
+  }
+
+  async function handleRemoveBinding(env: string) {
+    if (!confirm(`Remove binding for ${env}? The vault itself will be kept in 1Password.`)) return;
+    setRemovingEnv(env);
+    setError(null);
+    try {
+      await removeBinding(env);
+      const updated = await getSecretsBackend();
+      setConfig(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Remove failed");
+    } finally {
+      setRemovingEnv(null);
     }
   }
 
@@ -540,8 +652,7 @@ function SecretsBackendSection() {
       <div className="border-b border-gray-100 px-6 py-4">
         <h2 className="text-sm font-medium text-gray-900">Secrets Backend</h2>
         <p className="mt-0.5 text-xs text-gray-500">
-          Choose how app-level secrets are stored. Developers only enter
-          key/value pairs — backend details are handled here.
+          Configure how app secrets are stored and delivered to clusters.
         </p>
       </div>
 
@@ -550,36 +661,297 @@ function SecretsBackendSection() {
           <div className="h-10 animate-pulse rounded bg-gray-100" />
         ) : error ? (
           <p className="text-sm text-red-600">{error}</p>
-        ) : (
-          <div className="space-y-2">
-            {BACKEND_OPTIONS.map((opt) => (
-              <label
-                key={opt.value}
-                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-                  backendType === opt.value
-                    ? "border-indigo-200 bg-indigo-50"
-                    : "border-gray-200 hover:bg-gray-50"
-                } ${opt.disabled ? "cursor-not-allowed opacity-50" : ""}`}
-              >
-                <input
-                  type="radio"
-                  name="secrets-backend"
-                  value={opt.value}
-                  checked={backendType === opt.value}
-                  disabled={opt.disabled || saving}
-                  onChange={() => handleChange(opt.value)}
-                  className="mt-0.5"
-                />
-                <div>
-                  <span className="text-sm font-medium text-gray-900">
-                    {opt.label}
-                  </span>
-                  <p className="text-xs text-gray-500">{opt.description}</p>
+        ) : config ? (
+          <div className="space-y-6">
+            {/* Provider selector */}
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-gray-700">Provider</label>
+              {BACKEND_OPTIONS.map((opt) => (
+                <label
+                  key={opt.value}
+                  className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
+                    config.type === opt.value
+                      ? "border-indigo-200 bg-indigo-50"
+                      : "border-gray-200 hover:bg-gray-50"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="secrets-backend"
+                    value={opt.value}
+                    checked={config.type === opt.value}
+                    disabled={saving}
+                    onChange={() => handleTypeChange(opt.value)}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <span className="text-sm font-medium text-gray-900">
+                      {opt.label}
+                    </span>
+                    <p className="text-xs text-gray-500">{opt.description}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+
+            {/* 1Password section */}
+            {config.type === "onepassword" && (
+              <div className="space-y-5">
+                {/* Collapsible setup guide */}
+                <div className="rounded-lg border border-blue-100 bg-blue-50/50">
+                  <button
+                    onClick={() => setShowGuide(!showGuide)}
+                    className="flex w-full items-center justify-between px-4 py-3 text-left"
+                  >
+                    <span className="text-sm font-medium text-blue-900">
+                      Setup Guide
+                    </span>
+                    <span className="text-xs text-blue-600">
+                      {showGuide ? "Hide" : "Show steps"}
+                    </span>
+                  </button>
+                  {showGuide && (
+                    <div className="border-t border-blue-100 px-4 py-3">
+                      <ol className="space-y-2 text-xs text-blue-900">
+                        <li>
+                          <strong>1. Create vaults</strong> in 1Password for each
+                          environment (e.g. <code>staging-apps</code>,{" "}
+                          <code>prod-apps</code>).
+                        </li>
+                        <li>
+                          <strong>2. Create a Service Account</strong> with Read
+                          &amp; Write access to these vaults.
+                        </li>
+                        <li>
+                          <strong>3. Paste the SA token</strong> below &mdash;
+                          suparShip validates and shows accessible vaults.
+                        </li>
+                        <li>
+                          <strong>4. Set up a Connect Server</strong> in
+                          1Password and grant it access to the vaults.
+                        </li>
+                        <li>
+                          <strong>5. Deploy Connect</strong> to your tooling
+                          cluster (Helm chart or Docker).
+                        </li>
+                        <li>
+                          <strong>6. Create per-env Connect tokens</strong>{" "}
+                          scoped to each vault.
+                        </li>
+                        <li>
+                          <strong>7. Add bindings</strong> below &mdash; select
+                          vault, paste Connect token for each environment.
+                        </li>
+                      </ol>
+                    </div>
+                  )}
                 </div>
-              </label>
-            ))}
+
+                {/* SA Token paste field */}
+                <div className="space-y-3">
+                  <label className="block text-xs font-medium text-gray-700">
+                    Service Account Token
+                  </label>
+                  <p className="text-xs text-gray-500">
+                    Paste the 1Password Service Account token. It should have
+                    Read &amp; Write access to the environment vaults.
+                  </p>
+                  <div className="flex items-end gap-3">
+                    <div className="flex-1">
+                      <input
+                        type="password"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+                        placeholder="Paste SA token here…"
+                        value={saToken}
+                        onChange={(e) => setSaToken(e.target.value)}
+                      />
+                    </div>
+                    <button
+                      onClick={handleSaveToken}
+                      disabled={tokenSaving || !saToken.trim()}
+                      className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+                    >
+                      {tokenSaving ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                  {tokenMsg && (
+                    <p className="text-xs text-gray-600">{tokenMsg}</p>
+                  )}
+                </div>
+
+                {/* Environment bindings table */}
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <label className="text-xs font-medium text-gray-700">
+                      Environment Bindings
+                    </label>
+                    <button
+                      onClick={() => {
+                        setShowAddBinding(!showAddBinding);
+                        if (!showAddBinding && vaults.length === 0) {
+                          loadVaults();
+                        }
+                      }}
+                      className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+                    >
+                      {showAddBinding ? "Cancel" : "+ Add Binding"}
+                    </button>
+                  </div>
+
+                  {/* Add binding form */}
+                  {showAddBinding && (
+                    <div className="mb-4 space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-4">
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-gray-700">
+                          Environment
+                        </label>
+                        {(() => {
+                          const boundEnvs = new Set(
+                            (config?.onePassword?.bindings || []).map((b) => b.env),
+                          );
+                          const available = orgEnvs.filter(
+                            (e) => !boundEnvs.has(e.name),
+                          );
+                          return available.length > 0 ? (
+                            <select
+                              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                              value={bindEnv}
+                              onChange={(e) => setBindEnv(e.target.value)}
+                            >
+                              <option value="">Select an environment…</option>
+                              {available.map((e) => (
+                                <option key={e.name} value={e.name}>
+                                  {e.name}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <p className="text-xs text-gray-400">
+                              All environments are already bound. Create a new
+                              environment in Settings &gt; Environments first.
+                            </p>
+                          );
+                        })()}
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-gray-700">
+                          Vault
+                        </label>
+                        {vaultsLoading ? (
+                          <div className="h-9 animate-pulse rounded bg-gray-100" />
+                        ) : vaults.length > 0 ? (
+                          <select
+                            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                            value={bindVaultId}
+                            onChange={(e) => setBindVaultId(e.target.value)}
+                          >
+                            <option value="">Select a vault…</option>
+                            {vaults.map((v) => (
+                              <option key={v.id} value={v.id}>
+                                {v.title} ({v.id.slice(0, 8)}…)
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="text"
+                            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+                            placeholder="Vault UUID (save SA token first to see a dropdown)"
+                            value={bindVaultId}
+                            onChange={(e) => setBindVaultId(e.target.value)}
+                          />
+                        )}
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-gray-700">
+                          Connect Token
+                        </label>
+                        <input
+                          type="password"
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+                          placeholder="Paste the per-env Connect token…"
+                          value={bindToken}
+                          onChange={(e) => setBindToken(e.target.value)}
+                        />
+                      </div>
+                      <button
+                        onClick={handleAddBinding}
+                        disabled={
+                          bindBusy ||
+                          !bindEnv ||
+                          !bindVaultId ||
+                          !bindToken.trim()
+                        }
+                        className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+                      >
+                        {bindBusy ? "Saving…" : "Add Binding"}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Existing bindings */}
+                  {(config.onePassword?.bindings || []).length === 0 ? (
+                    <p className="text-xs text-gray-400">
+                      No environment bindings yet. Click &ldquo;+ Add
+                      Binding&rdquo; to connect an environment to a 1Password
+                      vault.
+                    </p>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                          <th className="py-2">Env</th>
+                          <th className="py-2">Vault</th>
+                          <th className="py-2">ClusterSecretStore</th>
+                          <th className="py-2">Status</th>
+                          <th className="py-2"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {(config.onePassword?.bindings || []).map((b) => (
+                          <tr key={b.env}>
+                            <td className="py-2 font-mono text-xs">{b.env}</td>
+                            <td className="py-2 font-mono text-xs">
+                              {b.vaultName || b.vaultId}
+                            </td>
+                            <td className="py-2 font-mono text-xs text-gray-500">
+                              {b.clusterSecretStoreName || "—"}
+                            </td>
+                            <td className="py-2 text-xs">
+                              {b.provisioned ? (
+                                <span className="inline-flex items-center gap-1 rounded bg-green-50 px-2 py-0.5 text-green-700">
+                                  bound
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-amber-700">
+                                  pending
+                                </span>
+                              )}
+                              {b.lastError && (
+                                <span className="ml-2 text-xs text-red-600">
+                                  {b.lastError}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2 text-right space-x-2">
+                              <button
+                                onClick={() => handleRemoveBinding(b.env)}
+                                disabled={removingEnv === b.env}
+                                className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
+                              >
+                                {removingEnv === b.env ? "Removing…" : "Remove"}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );

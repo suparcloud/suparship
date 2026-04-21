@@ -1,23 +1,15 @@
 import { api } from "./api";
 
-export interface ComponentStatus {
+export interface PrerequisitesResponse {
+  ready: boolean;
+  prerequisites: PrerequisiteItem[];
+}
+
+export interface PrerequisiteItem {
+  name: string;
   installed: boolean;
   namespace?: string;
-  version?: string;
-  healthy: boolean;
-}
-
-export interface InClusterInfo {
-  apiServer: string;
-  clusterName?: string;
-}
-
-export interface PrerequisitesResponse {
-  argocd: ComponentStatus;
-  ingressController: ComponentStatus;
-  eso: ComponentStatus;
-  inCluster: InClusterInfo;
-  detectedDomain?: string;
+  message?: string;
 }
 
 export function fetchPrerequisites(): Promise<PrerequisitesResponse> {

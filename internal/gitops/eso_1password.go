@@ -13,72 +13,29 @@ func init() {
 }
 
 // Build1PasswordClusterSecretStoreYAML returns the YAML for a
-// ClusterSecretStore that connects ESO to 1Password.
-//
-// Connect mode uses the 1Password Connect server API.
-// Service-account mode uses the 1Password CLI service account token.
-func Build1PasswordClusterSecretStoreYAML(cfg *secrets.OnePasswordConfig) string {
-	switch cfg.Mode {
-	case secrets.OnePasswordModeConnect:
-		return build1PasswordConnectStore(cfg)
-	case secrets.OnePasswordModeServiceAccount:
-		return build1PasswordServiceAccountStore(cfg)
-	default:
-		return fmt.Sprintf("# unsupported 1password mode: %s\n", cfg.Mode)
-	}
-}
-
-func build1PasswordConnectStore(cfg *secrets.OnePasswordConfig) string {
-	tokenSecretRef := ""
-	if cfg.ExistingSecret != "" {
-		tokenSecretRef = fmt.Sprintf(`      auth:
-        secretRef:
-          connectTokenSecretRef:
-            name: %s
-            key: token
-            namespace: suparship-system`, cfg.ExistingSecret)
-	}
-
+// ClusterSecretStore that connects ESO to 1Password via Connect.
+// The Connect URL points to the managed Connect server in the tooling
+// cluster; the auth secret is the sealed per-env Connect token.
+func Build1PasswordClusterSecretStoreYAML(storeName, connectURL, vaultID, tokenSecretName, tokenSecretKey, tokenSecretNS string) string {
 	return fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: %s
   labels:
-    suparship.io/managed-by: suparship
-  annotations:
-    suparship.io/description: "1Password Connect backend"
+    app.kubernetes.io/managed-by: suparship
 spec:
   provider:
     onepassword:
       connectHost: %s
-%s
-`, onePasswordStoreName, cfg.ConnectHost, tokenSecretRef)
-}
-
-func build1PasswordServiceAccountStore(cfg *secrets.OnePasswordConfig) string {
-	tokenSecretRef := ""
-	if cfg.ExistingSecret != "" {
-		tokenSecretRef = fmt.Sprintf(`      auth:
+      vaults:
+        %s: 1
+      auth:
         secretRef:
-          serviceAccountTokenSecretRef:
+          connectTokenSecretRef:
             name: %s
-            key: token
-            namespace: suparship-system`, cfg.ExistingSecret)
-	}
-
-	return fmt.Sprintf(`apiVersion: external-secrets.io/v1
-kind: ClusterSecretStore
-metadata:
-  name: %s
-  labels:
-    suparship.io/managed-by: suparship
-  annotations:
-    suparship.io/description: "1Password Service Account backend"
-spec:
-  provider:
-    onepassword:
-%s
-`, onePasswordStoreName, tokenSecretRef)
+            key: %s
+            namespace: %s
+`, storeName, connectURL, vaultID, tokenSecretName, tokenSecretKey, tokenSecretNS)
 }
 
 // Build1PasswordExternalSecretYAML returns an ExternalSecret CR that pulls
@@ -99,7 +56,7 @@ metadata:
   name: %s
   namespace: %s
   labels:
-    suparship.io/managed-by: suparship
+    app.kubernetes.io/managed-by: suparship
 spec:
   refreshInterval: 1h
   secretStoreRef:
@@ -111,3 +68,7 @@ spec:
   data:
 %s`, name, namespace, onePasswordStoreName, name, dataEntries)
 }
+
+// DefaultConnectEndpoint is the in-cluster URL of the managed Connect
+// server in the tooling cluster. Used in ClusterSecretStore specs.
+const DefaultConnectEndpoint = "http://onepassword-connect." + secrets.DefaultConnectNamespace + ".svc.cluster.local:8080"

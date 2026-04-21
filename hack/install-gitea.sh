@@ -246,7 +246,7 @@ spec:
     path: gitops-output
     directory:
       recurse: true
-      include: "{_infra/*.yaml,_infra/**/*.yaml}"
+      include: "{_infra/*.yaml,_infra/kargo/*.yaml}"
   destination:
     server: https://kubernetes.default.svc
     namespace: ${ARGOCD_NAMESPACE}

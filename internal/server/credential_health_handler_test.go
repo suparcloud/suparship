@@ -237,13 +237,11 @@ func TestCredentialHealth_OnePasswordHealthy(t *testing.T) {
 		SecretBackend: secrets.BackendConfig{
 			Type: secrets.Backend1Password,
 			OnePassword: &secrets.OnePasswordConfig{
-				Mode:           secrets.OnePasswordModeConnect,
-				ConnectHost:    "https://op.internal:8443",
-				ExistingSecret: "op-token",
+				GroupName: "Suparship",
 			},
 		},
 	}
-	secret := makeSecret("op-token")
+	secret := makeSecret(secrets.SATokenSecretName)
 
 	mux, ah := newCredHealthMux(t, org, secret)
 	cookie := sessionCookieFor(ah, "admin", "org_admin")

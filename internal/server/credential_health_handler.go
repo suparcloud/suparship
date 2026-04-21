@@ -200,13 +200,7 @@ func (h *credentialHealthHandler) checkOnePassword(ctx context.Context) Credenti
 		return cs
 	}
 
-	ref := org.SecretBackend.OnePassword.ExistingSecret
-	if ref == "" {
-		cs.Status = credStatusNotConfigured
-		cs.Message = "No token secret reference configured"
-		return cs
-	}
-
+	ref := secrets.SATokenSecretName
 	cs.SecretRef = ref
 
 	if !h.secretExists(ctx, ref) {

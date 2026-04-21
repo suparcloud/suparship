@@ -21,9 +21,9 @@ import (
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/preview"
-	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/server"
@@ -97,26 +97,26 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	cfg := config.Load()
 
 	var (
-		authenticator    auth.Authenticator
-		orgProvider      rbac.OrgStore
-		projectStore     project.Store
-		previewStore     preview.Store
-		runtimeProvider  runtime.Provider
-		logsProvider     runtime.LogsProvider
-		appStore         domain.AppStore
-		clusterStore     domain.ClusterStore
-		secretBackend    secrets.Backend
-		upperLevelSecretWriter secrets.UpperLevelWriter
-		templates        []*tpl.Template
-		readinessProbers []server.ReadinessProber
-		kargoPromoter    server.KargoPromoter
-		kargoStatusReader server.KargoStatusReader
-		kargoPipelineReader server.KargoPipelineReader
+		authenticator           auth.Authenticator
+		orgProvider             rbac.OrgStore
+		projectStore            project.Store
+		previewStore            preview.Store
+		runtimeProvider         runtime.Provider
+		logsProvider            runtime.LogsProvider
+		appStore                domain.AppStore
+		clusterStore            domain.ClusterStore
+		secretBackend           secrets.Backend
+		upperLevelSecretWriter  secrets.UpperLevelWriter
+		templates               []*tpl.Template
+		readinessProbers        []server.ReadinessProber
+		kargoPromoter           server.KargoPromoter
+		kargoStatusReader       server.KargoStatusReader
+		kargoPipelineReader     server.KargoPipelineReader
 		deploymentHistoryReader server.DeploymentHistoryReader
-		kubeClient             kubernetes.Interface
-		gitopsConfigStore      *gitops.ConfigStore
-		templateRegistryStore  *tpl.RegistryStore
-		registryStore          *registry.Store
+		kubeClient              kubernetes.Interface
+		gitopsConfigStore       *gitops.ConfigStore
+		templateRegistryStore   *tpl.RegistryStore
+		registryStore           *registry.Store
 	)
 
 	switch cfg.RuntimeMode {
@@ -265,6 +265,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// Wire the GitOps publisher when the gitops repo URL is configured.
 	// In fake/local dev mode this is optional; in cluster mode it is expected.
 	var gitOpsPublisher server.GitOpsPublisher
+	sealPublisherHolder := server.NewSealPublisherHolder(nil)
 	if cfg.GitOps.RepoURL != "" {
 		pub, err := gitops.NewPublisher(gitops.PublisherConfig{
 			RepoURL:          cfg.GitOps.RepoURL,
@@ -284,6 +285,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				orgProvider:  orgProvider,
 				clusterStore: clusterStore,
 			}
+			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher enabled",
 				"repo", cfg.GitOps.RepoURL,
 				"argocd_repo", cfg.GitOps.ArgoCDRepoURL,
@@ -334,14 +336,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 			// 2. Rebuild the publisher from the new config.
 			pub, err := gitops.NewPublisher(gitops.PublisherConfig{
-				RepoURL:          repoCfg.RepoURL,
-				RepoUser:         username,
-				RepoPassword:     password,
-				ArgoCDRepoURL:    repoCfg.ArgoCDRepoURL,
-				KargoGitRepoURL:  repoCfg.KargoGitRepoURL,
-				Branch:           repoCfg.Branch,
-				SyncAutomated:    true,
-				TemplatesDir:     templatesDir,
+				RepoURL:         repoCfg.RepoURL,
+				RepoUser:        username,
+				RepoPassword:    password,
+				ArgoCDRepoURL:   repoCfg.ArgoCDRepoURL,
+				KargoGitRepoURL: repoCfg.KargoGitRepoURL,
+				Branch:          repoCfg.Branch,
+				SyncAutomated:   true,
+				TemplatesDir:    templatesDir,
 			})
 			if err != nil {
 				return fmt.Errorf("rebuild gitops publisher: %w", err)
@@ -353,6 +355,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				orgProvider:  orgProvider,
 				clusterStore: clusterStore,
 			})
+			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
 
 			// 4. Trigger initial env-infra publish in background (idempotent).
@@ -365,33 +368,34 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	srv := server.New(server.Config{
-		Addr:             addr,
-		UIDir:            uiDir,
-		CORSOrigins:      origins,
-		Authenticator:    authenticator,
-		OrgProvider:      orgProvider,
-		Templates:        templates,
-		ProjectStore:     projectStore,
-		RuntimeProvider:  runtimeProvider,
-		LogsProvider:     logsProvider,
-		PreviewStore:     previewStore,
-		AppStore:         appStore,
-		ClusterStore:     clusterStore,
-		SecretBackend:            secretBackend,
-		UpperLevelSecretWriter:   upperLevelSecretWriter,
+		Addr:                    addr,
+		UIDir:                   uiDir,
+		CORSOrigins:             origins,
+		Authenticator:           authenticator,
+		OrgProvider:             orgProvider,
+		Templates:               templates,
+		ProjectStore:            projectStore,
+		RuntimeProvider:         runtimeProvider,
+		LogsProvider:            logsProvider,
+		PreviewStore:            previewStore,
+		AppStore:                appStore,
+		ClusterStore:            clusterStore,
+		SecretBackend:           secretBackend,
+		UpperLevelSecretWriter:  upperLevelSecretWriter,
 		GitOpsPublisher:         publisherHolder,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,
 		KargoPipelineReader:     kargoPipelineReader,
 		DeploymentHistoryReader: deploymentHistoryReader,
-		ReadinessProbers: readinessProbers,
-		CookieSecure:     cookieSecure,
-		Logger:           logger,
-		KubeClient:        kubeClient,
-		GitOpsConfigStore:     gitopsConfigStore,
-		GitOpsActivator:       gitOpsActivator,
-		TemplateRegistryStore: templateRegistryStore,
-		RegistryStore:         registryStore,
+		ReadinessProbers:        readinessProbers,
+		CookieSecure:            cookieSecure,
+		Logger:                  logger,
+		KubeClient:              kubeClient,
+		GitOpsConfigStore:       gitopsConfigStore,
+		GitOpsActivator:         gitOpsActivator,
+		SealedTokenPublisher:    sealPublisherHolder,
+		TemplateRegistryStore:   templateRegistryStore,
+		RegistryStore:           registryStore,
 	})
 
 	if err := srv.Run(cmd.Context()); err != nil {

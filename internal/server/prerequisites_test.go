@@ -4,54 +4,43 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestPrerequisitesHandler_AllPresent(t *testing.T) {
 	client := fake.NewSimpleClientset(
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "argocd"}},
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "argocd-server", Namespace: "argocd"},
-			Spec: appsv1.DeploymentSpec{
-				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "argocd-server"}},
-				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "argocd-server"}},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "argocd-server", Image: "quay.io/argoproj/argocd:v2.9.3"}},
-					},
-				},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sealed-secrets-controller",
+				Namespace: "kube-system",
+				Labels:    map[string]string{"app.kubernetes.io/name": "sealed-secrets"},
 			},
-			Status: appsv1.DeploymentStatus{ReadyReplicas: 1},
-		},
-		&networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "nginx"}},
-		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "ingress-nginx-controller", Namespace: "ingress-nginx"},
 			Spec: appsv1.DeploymentSpec{
-				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "ingress-nginx"}},
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "sealed-secrets"}},
 				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "ingress-nginx"}},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "controller", Image: "registry.k8s.io/ingress-nginx/controller:v1.9.0"}},
-					},
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "sealed-secrets"}},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "sealed-secrets", Image: "bitnami/sealed-secrets-controller:v0.25.0"}}},
 				},
 			},
 			Status: appsv1.DeploymentStatus{ReadyReplicas: 1},
 		},
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "external-secrets", Namespace: "external-secrets"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "external-secrets",
+				Namespace: "external-secrets",
+				Labels:    map[string]string{"app.kubernetes.io/name": "external-secrets"},
+			},
 			Spec: appsv1.DeploymentSpec{
 				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "external-secrets"}},
 				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "external-secrets"}},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "external-secrets", Image: "ghcr.io/external-secrets/external-secrets:v0.9.0"}},
-					},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "external-secrets", Image: "ghcr.io/external-secrets/external-secrets:v0.9.0"}}},
 				},
 			},
 			Status: appsv1.DeploymentStatus{ReadyReplicas: 1},
@@ -75,19 +64,33 @@ func TestPrerequisitesHandler_AllPresent(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if !resp.ArgoCD.Installed || !resp.ArgoCD.Healthy {
-		t.Errorf("argocd: installed=%v healthy=%v", resp.ArgoCD.Installed, resp.ArgoCD.Healthy)
+	if !resp.Ready {
+		t.Error("expected Ready=true when all prerequisites are present")
 	}
-	if resp.ArgoCD.Version != "v2.9.3" {
-		t.Errorf("argocd version: got %q, want v2.9.3", resp.ArgoCD.Version)
-	}
-
-	if !resp.IngressController.Installed || !resp.IngressController.Healthy {
-		t.Errorf("ingress: installed=%v healthy=%v", resp.IngressController.Installed, resp.IngressController.Healthy)
+	if len(resp.Prerequisites) != 2 {
+		t.Fatalf("expected 2 prerequisites, got %d", len(resp.Prerequisites))
 	}
 
-	if !resp.ESO.Installed || !resp.ESO.Healthy {
-		t.Errorf("eso: installed=%v healthy=%v", resp.ESO.Installed, resp.ESO.Healthy)
+	ss := resp.Prerequisites[0]
+	if ss.Name != "sealed-secrets" {
+		t.Errorf("first prerequisite name: got %q, want sealed-secrets", ss.Name)
+	}
+	if !ss.Installed {
+		t.Errorf("sealed-secrets should be installed")
+	}
+	if ss.Namespace != "kube-system" {
+		t.Errorf("sealed-secrets namespace: got %q, want kube-system", ss.Namespace)
+	}
+
+	eso := resp.Prerequisites[1]
+	if eso.Name != "external-secrets" {
+		t.Errorf("second prerequisite name: got %q, want external-secrets", eso.Name)
+	}
+	if !eso.Installed {
+		t.Errorf("external-secrets should be installed")
+	}
+	if eso.Namespace != "external-secrets" {
+		t.Errorf("external-secrets namespace: got %q, want external-secrets", eso.Namespace)
 	}
 }
 
@@ -111,63 +114,59 @@ func TestPrerequisitesHandler_NothingInstalled(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if resp.ArgoCD.Installed {
-		t.Error("argocd should not be installed")
+	if resp.Ready {
+		t.Error("expected Ready=false when nothing is installed")
 	}
-	if resp.IngressController.Installed {
-		t.Error("ingress should not be installed")
-	}
-	if resp.ESO.Installed {
-		t.Error("eso should not be installed")
+	for _, p := range resp.Prerequisites {
+		if p.Installed {
+			t.Errorf("%s should not be installed", p.Name)
+		}
 	}
 }
 
-func TestExtractImageTag(t *testing.T) {
-	tests := []struct {
-		image string
-		want  string
-	}{
-		{"quay.io/argoproj/argocd:v2.9.3", "v2.9.3"},
-		{"registry.k8s.io/ingress-nginx/controller:v1.9.0", "v1.9.0"},
-		{"ghcr.io/external-secrets/external-secrets:v0.9.0", "v0.9.0"},
-		{"myimage", ""},
-		{"myimage:latest", "latest"},
-		{"localhost:5000/myimage:v1", "v1"},
-	}
-
-	for _, tt := range tests {
-		deploy := &appsv1.Deployment{
+func TestPrerequisitesHandler_PartialInstall(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "external-secrets",
+				Namespace: "external-secrets",
+				Labels:    map[string]string{"app.kubernetes.io/name": "external-secrets"},
+			},
 			Spec: appsv1.DeploymentSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "external-secrets"}},
 				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Image: tt.image}},
-					},
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "external-secrets"}},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "external-secrets", Image: "ghcr.io/external-secrets/external-secrets:v0.9.0"}}},
 				},
 			},
-		}
-		got := extractImageTag(deploy)
-		if got != tt.want {
-			t.Errorf("extractImageTag(%q) = %q, want %q", tt.image, got, tt.want)
-		}
-	}
-}
+		},
+	)
 
-func TestContainsAny(t *testing.T) {
-	tests := []struct {
-		s      string
-		subs   []string
-		expect bool
-	}{
-		{"ghcr.io/external-secrets/external-secrets:v0.9.0", []string{"external-secrets"}, true},
-		{"registry.k8s.io/ingress-nginx/controller:v1.9.0", []string{"ingress-nginx", "traefik"}, true},
-		{"my-random-image:latest", []string{"ingress-nginx", "traefik"}, false},
+	mux := http.NewServeMux()
+	h := &prerequisitesHandler{client: client}
+	h.registerRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/api/v1/prerequisites", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	var resp PrerequisitesResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
 
-	for _, tt := range tests {
-		got := containsAny(tt.s, tt.subs...)
-		if got != tt.expect {
-			t.Errorf("containsAny(%q, %v) = %v, want %v", tt.s, tt.subs, got, tt.expect)
-		}
+	if resp.Ready {
+		t.Error("expected Ready=false when only ESO is present")
+	}
+
+	ss := resp.Prerequisites[0]
+	if ss.Installed {
+		t.Error("sealed-secrets should not be installed")
+	}
+
+	eso := resp.Prerequisites[1]
+	if !eso.Installed {
+		t.Error("external-secrets should be installed")
 	}
 }
 
@@ -189,13 +188,41 @@ func TestPlaceholderPrerequisitesHandler(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if !resp.ArgoCD.Installed || !resp.ArgoCD.Healthy {
-		t.Error("placeholder should report argocd as installed and healthy")
+	if resp.Ready {
+		t.Error("placeholder should report not ready")
 	}
-	if !resp.IngressController.Installed || !resp.IngressController.Healthy {
-		t.Error("placeholder should report ingress as installed and healthy")
+	if len(resp.Prerequisites) != 2 {
+		t.Fatalf("expected 2 prerequisites, got %d", len(resp.Prerequisites))
 	}
-	if !resp.ESO.Installed || !resp.ESO.Healthy {
-		t.Error("placeholder should report eso as installed and healthy")
+	for _, p := range resp.Prerequisites {
+		if p.Installed {
+			t.Errorf("placeholder %s should not be installed", p.Name)
+		}
 	}
+}
+
+func TestInstallerYAML(t *testing.T) {
+	t.Run("SealedSecrets", func(t *testing.T) {
+		yaml := SealedSecretsInstallerYAML()
+		if yaml == "" {
+			t.Fatal("empty YAML")
+		}
+		for _, want := range []string{"sealed-secrets", "bitnami-labs.github.io", "2.16.2"} {
+			if !strings.Contains(yaml, want) {
+				t.Errorf("YAML missing %q", want)
+			}
+		}
+	})
+
+	t.Run("ESO", func(t *testing.T) {
+		yaml := ESOInstallerYAML()
+		if yaml == "" {
+			t.Fatal("empty YAML")
+		}
+		for _, want := range []string{"external-secrets", "charts.external-secrets.io", "0.10.7"} {
+			if !strings.Contains(yaml, want) {
+				t.Errorf("YAML missing %q", want)
+			}
+		}
+	})
 }

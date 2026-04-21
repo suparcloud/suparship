@@ -3,199 +3,200 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
-	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
-// ComponentStatus describes whether a cluster component is installed and healthy.
-type ComponentStatus struct {
+// PrerequisiteStatus represents the state of a required cluster component.
+type PrerequisiteStatus struct {
+	Name      string `json:"name"`
 	Installed bool   `json:"installed"`
 	Namespace string `json:"namespace,omitempty"`
-	Version   string `json:"version,omitempty"`
-	Healthy   bool   `json:"healthy"`
+	Message   string `json:"message,omitempty"`
 }
 
-// InClusterInfo describes the cluster suparship is running on.
-type InClusterInfo struct {
-	APIServer   string `json:"apiServer"`
-	ClusterName string `json:"clusterName,omitempty"`
-}
-
-// PrerequisitesResponse is returned by GET /api/v1/prerequisites.
+// PrerequisitesResponse is the API response for the prerequisites check.
 type PrerequisitesResponse struct {
-	ArgoCD            ComponentStatus `json:"argocd"`
-	IngressController ComponentStatus `json:"ingressController"`
-	ESO               ComponentStatus `json:"eso"`
-	InCluster         InClusterInfo   `json:"inCluster"`
-	DetectedDomain    string          `json:"detectedDomain,omitempty"`
+	Ready         bool                 `json:"ready"`
+	Prerequisites []PrerequisiteStatus `json:"prerequisites"`
 }
 
-// prerequisitesHandler detects cluster prerequisites for the settings UI.
+// prerequisitesHandler checks for required cluster components.
 type prerequisitesHandler struct {
 	client kubernetes.Interface
+	logger *slog.Logger
 }
 
 func (h *prerequisitesHandler) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/prerequisites", h.handlePrerequisites)
+	mux.HandleFunc("GET /api/v1/prerequisites", h.handleGetPrerequisites)
 }
 
-func (h *prerequisitesHandler) handlePrerequisites(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
+func (h *prerequisitesHandler) handleGetPrerequisites(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 
-	resp := PrerequisitesResponse{
-		ArgoCD:            h.detectArgoCD(ctx),
-		IngressController: h.detectIngress(ctx),
-		ESO:               h.detectESO(ctx),
-		InCluster: InClusterInfo{
-			APIServer: "https://kubernetes.default.svc",
-		},
+	results := []PrerequisiteStatus{
+		h.checkSealedSecrets(ctx),
+		h.checkESO(ctx),
 	}
 
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (h *prerequisitesHandler) detectArgoCD(ctx context.Context) ComponentStatus {
-	status := ComponentStatus{}
-
-	_, err := h.client.CoreV1().Namespaces().Get(ctx, "argocd", metav1.GetOptions{})
-	if err != nil {
-		return status
-	}
-
-	deploy, err := h.client.AppsV1().Deployments("argocd").Get(ctx, "argocd-server", metav1.GetOptions{})
-	if err != nil {
-		return status
-	}
-
-	status.Installed = true
-	status.Namespace = "argocd"
-	status.Version = extractImageTag(deploy)
-	status.Healthy = deploy.Status.ReadyReplicas > 0
-
-	return status
-}
-
-func (h *prerequisitesHandler) detectIngress(ctx context.Context) ComponentStatus {
-	status := ComponentStatus{}
-
-	classes, err := h.client.NetworkingV1().IngressClasses().List(ctx, metav1.ListOptions{})
-	if err != nil || len(classes.Items) == 0 {
-		return status
-	}
-
-	status.Installed = true
-	status.Healthy = true
-
-	for _, ns := range []string{"ingress-nginx", "nginx-ingress", "traefik", "kube-system"} {
-		deploys, err := h.client.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
-		if err != nil || len(deploys.Items) == 0 {
-			continue
-		}
-		for _, d := range deploys.Items {
-			for _, c := range d.Spec.Template.Spec.Containers {
-				if containsAny(c.Image, "ingress-nginx", "traefik", "haproxy-ingress", "contour") {
-					status.Namespace = ns
-					status.Version = extractImageTag(&d)
-					status.Healthy = d.Status.ReadyReplicas > 0
-					return status
-				}
-			}
-		}
-	}
-
-	return status
-}
-
-func (h *prerequisitesHandler) detectESO(ctx context.Context) ComponentStatus {
-	status := ComponentStatus{}
-
-	for _, ns := range []string{"external-secrets", "external-secrets-operator"} {
-		deploys, err := h.client.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
-		if err != nil || len(deploys.Items) == 0 {
-			continue
-		}
-		for _, d := range deploys.Items {
-			for _, c := range d.Spec.Template.Spec.Containers {
-				if containsAny(c.Image, "external-secrets") {
-					status.Installed = true
-					status.Namespace = ns
-					status.Version = extractImageTag(&d)
-					status.Healthy = d.Status.ReadyReplicas > 0
-					return status
-				}
-			}
-		}
-	}
-
-	return status
-}
-
-func extractImageTag(deploy *appsv1.Deployment) string {
-	if len(deploy.Spec.Template.Spec.Containers) == 0 {
-		return ""
-	}
-	image := deploy.Spec.Template.Spec.Containers[0].Image
-	for i := len(image) - 1; i >= 0; i-- {
-		if image[i] == ':' {
-			return image[i+1:]
-		}
-		if image[i] == '/' {
+	allReady := true
+	for _, p := range results {
+		if !p.Installed {
+			allReady = false
 			break
 		}
 	}
-	return ""
+
+	writeJSON(w, http.StatusOK, PrerequisitesResponse{
+		Ready:         allReady,
+		Prerequisites: results,
+	})
 }
 
-func containsAny(s string, substrs ...string) bool {
-	for _, sub := range substrs {
-		if len(sub) > 0 && len(s) >= len(sub) {
-			for i := 0; i <= len(s)-len(sub); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
+func (h *prerequisitesHandler) checkSealedSecrets(ctx context.Context) PrerequisiteStatus {
+	status := PrerequisiteStatus{
+		Name:      "sealed-secrets",
+		Namespace: "kube-system",
+	}
+
+	if h.client == nil {
+		status.Message = "cluster client not available"
+		return status
+	}
+
+	for _, ns := range []string{"kube-system", "sealed-secrets"} {
+		deploys, err := h.client.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=sealed-secrets",
+		})
+		if err != nil {
+			continue
+		}
+		if len(deploys.Items) > 0 {
+			status.Installed = true
+			status.Namespace = ns
+			status.Message = fmt.Sprintf("found deployment %s/%s", ns, deploys.Items[0].Name)
+			return status
 		}
 	}
-	return false
+
+	_, err := h.client.Discovery().ServerResourcesForGroupVersion("bitnami.com/v1alpha1")
+	if err == nil {
+		status.Installed = true
+		status.Message = "CRD bitnami.com/v1alpha1 found"
+		return status
+	}
+
+	status.Message = "sealed-secrets controller not found"
+	return status
 }
 
-// placeholderPrerequisitesHandler returns static data for fake mode.
+func (h *prerequisitesHandler) checkESO(ctx context.Context) PrerequisiteStatus {
+	status := PrerequisiteStatus{
+		Name:      "external-secrets",
+		Namespace: "external-secrets",
+	}
+
+	if h.client == nil {
+		status.Message = "cluster client not available"
+		return status
+	}
+
+	for _, ns := range []string{"external-secrets", "external-secrets-system"} {
+		deploys, err := h.client.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=external-secrets",
+		})
+		if err != nil {
+			continue
+		}
+		if len(deploys.Items) > 0 {
+			status.Installed = true
+			status.Namespace = ns
+			status.Message = fmt.Sprintf("found deployment %s/%s", ns, deploys.Items[0].Name)
+			return status
+		}
+	}
+
+	_, err := h.client.Discovery().ServerResourcesForGroupVersion("external-secrets.io/v1")
+	if err == nil {
+		status.Installed = true
+		status.Message = "CRD external-secrets.io/v1 found"
+		return status
+	}
+
+	status.Message = "external-secrets operator not found"
+	return status
+}
+
+// placeholderPrerequisitesHandler returns a static response when no cluster client is available.
 type placeholderPrerequisitesHandler struct{}
 
 func (h *placeholderPrerequisitesHandler) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/prerequisites", h.handlePrerequisites)
+	mux.HandleFunc("GET /api/v1/prerequisites", h.handleGetPrerequisites)
 }
 
-func (h *placeholderPrerequisitesHandler) handlePrerequisites(w http.ResponseWriter, _ *http.Request) {
-	resp := PrerequisitesResponse{
-		ArgoCD:            ComponentStatus{Installed: true, Namespace: "argocd", Version: "v2.9.3", Healthy: true},
-		IngressController: ComponentStatus{Installed: true, Namespace: "ingress-nginx", Version: "v1.9.0", Healthy: true},
-		ESO:               ComponentStatus{Installed: true, Namespace: "external-secrets", Version: "v0.9.0", Healthy: true},
-		InCluster: InClusterInfo{
-			APIServer:   "https://kubernetes.default.svc",
-			ClusterName: "fake-cluster",
+func (h *placeholderPrerequisitesHandler) handleGetPrerequisites(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, PrerequisitesResponse{
+		Ready: false,
+		Prerequisites: []PrerequisiteStatus{
+			{Name: "sealed-secrets", Message: "cluster client not configured"},
+			{Name: "external-secrets", Message: "cluster client not configured"},
 		},
-	}
-	writeJSON(w, http.StatusOK, resp)
+	})
 }
 
-// FormatPrerequisitesSummary returns a human-readable summary for logging.
-func FormatPrerequisitesSummary(p PrerequisitesResponse) string {
-	icon := func(ok bool) string {
-		if ok {
-			return "ok"
-		}
-		return "missing"
-	}
-	return fmt.Sprintf(
-		"argocd=%s ingress=%s eso=%s",
-		icon(p.ArgoCD.Installed),
-		icon(p.IngressController.Installed),
-		icon(p.ESO.Installed),
+// ArgoInstallerApp generates an ArgoCD Application YAML for installing a component.
+func buildInstallerArgoApp(name, chartRepo, chartName, chartVersion, namespace, argoCDNS string) string {
+	return fmt.Sprintf(`apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app.kubernetes.io/managed-by: suparship
+    suparship.io/component: %s
+spec:
+  project: default
+  source:
+    repoURL: %s
+    chart: %s
+    targetRevision: %s
+    helm:
+      releaseName: %s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: %s
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+`, name, argoCDNS, name, chartRepo, chartName, chartVersion, name, namespace)
+}
+
+// SealedSecretsInstallerYAML returns the ArgoCD Application for sealed-secrets.
+func SealedSecretsInstallerYAML() string {
+	return buildInstallerArgoApp(
+		"sealed-secrets",
+		"https://bitnami-labs.github.io/sealed-secrets",
+		"sealed-secrets",
+		"2.16.2",
+		"kube-system",
+		"argocd",
+	)
+}
+
+// ESOInstallerYAML returns the ArgoCD Application for External Secrets Operator.
+func ESOInstallerYAML() string {
+	return buildInstallerArgoApp(
+		"external-secrets",
+		"https://charts.external-secrets.io",
+		"external-secrets",
+		"0.10.7",
+		"external-secrets",
+		"argocd",
 	)
 }
