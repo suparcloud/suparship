@@ -96,9 +96,9 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 	})
 
 	storeYAML := BuildClusterSecretStoreYAML(ESOSecretStoreConfig{
-		Name:        storeName,
-		BackendType: secrets.Backend1Password,
-		Binding:     secrets.EnvBinding{Env: params.Env, VaultID: params.VaultID},
+		Name:         storeName,
+		BackendType:  secrets.Backend1Password,
+		Binding:      secrets.EnvBinding{Env: params.Env, VaultID: params.VaultID},
 		ESONamespace: esoNS,
 	})
 
@@ -111,6 +111,18 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 		// Manifests live outside _infra/ to avoid root-app double-sync.
 		storesDir := filepath.Join(repoDir, "gitops-output", "_secret-stores", params.Env)
 		infraDir := filepath.Join(repoDir, "gitops-output", "_infra")
+
+		// Clean up legacy paths from older suparship versions (env-named app +
+		// _infra/secret-stores/ dir) before writing the current layout, so stale
+		// ArgoCD Applications don't keep deploying wrong resources to the cluster.
+		legacyStoresDir := filepath.Join(infraDir, "secret-stores", params.Env)
+		legacyAppFile := filepath.Join(infraDir, "secrets-"+params.Env+"-app.yaml")
+		if _, err := os.Stat(legacyStoresDir); err == nil {
+			_ = os.RemoveAll(legacyStoresDir)
+		}
+		if _, err := os.Stat(legacyAppFile); err == nil {
+			_ = os.Remove(legacyAppFile)
+		}
 
 		if err := p.writeFile(filepath.Join(storesDir, "sealed-token.yaml"), []byte(sealedYAML)); err != nil {
 			return err
@@ -130,7 +142,10 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 
 // DeleteSealedReadToken removes the per-environment secret-store directory
 // and the ArgoCD Application from the GitOps repo and commits the deletion.
-// It is a no-op if neither exists.
+// It also removes any legacy paths written by older versions of suparship
+// (which used the env name instead of the cluster name and wrote manifests
+// under _infra/secret-stores/ rather than _secret-stores/).
+// It is a no-op if none of the paths exist.
 func (p *Publisher) DeleteSealedReadToken(ctx context.Context, params DeleteSealedReadTokenParams) error {
 	if params.Env == "" {
 		return fmt.Errorf("DeleteSealedReadToken: env is required")
@@ -139,23 +154,33 @@ func (p *Publisher) DeleteSealedReadToken(ctx context.Context, params DeleteSeal
 		return fmt.Errorf("DeleteSealedReadToken: clusterName is required")
 	}
 	return p.withClonedRepo(ctx, func(repoDir string) error {
+		// Current paths (cluster-named app + dedicated _secret-stores/ dir).
 		storesDir := filepath.Join(repoDir, "gitops-output", "_secret-stores", params.Env)
 		appFile := filepath.Join(repoDir, "gitops-output", "_infra", "secrets-"+params.ClusterName+"-app.yaml")
 
+		// Legacy paths created by older suparship versions: env-named app +
+		// secrets dir nested inside _infra/.
+		legacyStoresDir := filepath.Join(repoDir, "gitops-output", "_infra", "secret-stores", params.Env)
+		legacyAppFile := filepath.Join(repoDir, "gitops-output", "_infra", "secrets-"+params.Env+"-app.yaml")
+
 		removedAny := false
 
-		if _, err := os.Stat(storesDir); err == nil {
-			if err := os.RemoveAll(storesDir); err != nil {
-				return fmt.Errorf("removing secret-store dir for env %s: %w", params.Env, err)
+		for _, dir := range []string{storesDir, legacyStoresDir} {
+			if _, err := os.Stat(dir); err == nil {
+				if err := os.RemoveAll(dir); err != nil {
+					return fmt.Errorf("removing secret-store dir %s: %w", dir, err)
+				}
+				removedAny = true
 			}
-			removedAny = true
 		}
 
-		if _, err := os.Stat(appFile); err == nil {
-			if err := os.Remove(appFile); err != nil {
-				return fmt.Errorf("removing secrets app for cluster %s: %w", params.ClusterName, err)
+		for _, f := range []string{appFile, legacyAppFile} {
+			if _, err := os.Stat(f); err == nil {
+				if err := os.Remove(f); err != nil {
+					return fmt.Errorf("removing secrets app file %s: %w", f, err)
+				}
+				removedAny = true
 			}
-			removedAny = true
 		}
 
 		if !removedAny {

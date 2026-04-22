@@ -1,14 +1,13 @@
 // Package seal implements native, kubeseal-compatible encryption of
 // Kubernetes Secret values into SealedSecret resources.
 //
-// The encryption scheme matches the one used by Bitnami's sealed-secrets
-// controller (and the kubeseal CLI):
+// The encryption scheme matches HybridEncrypt in bitnami-labs/sealed-secrets:
 //
 //   - A fresh 32-byte AES-256 session key is generated per value.
-//   - The session key is wrapped with RSA-OAEP (SHA-256, no label) using
-//     the controller's public RSA key.
+//   - The session key is wrapped with RSA-OAEP (SHA-256) using the scope
+//     label as the OAEP label — this binds the ciphertext to its scope.
 //   - The plaintext is encrypted with AES-256-GCM using a zero nonce
-//     (safe because the session key is single-use) and AAD = scope label.
+//     (safe because the session key is single-use) and no AAD.
 //   - The wire format is:
 //         uint16(BE) length of RSA ciphertext  || RSA ciphertext || AES ciphertext
 //   - The result is base64-encoded into the SealedSecret encryptedData map.
@@ -103,9 +102,10 @@ func LoadCertFromPEM(pemData []byte) (*rsa.PublicKey, error) {
 	}
 }
 
-// EncryptValue encrypts plaintext using the hybrid scheme.
-// label is the SealedSecret AAD: "" for cluster-wide, "<namespace>" for
-// namespace-wide, "<namespace>/<name>" for strict.
+// EncryptValue encrypts plaintext using the hybrid scheme compatible with the
+// sealed-secrets controller (matches HybridEncrypt in bitnami-labs/sealed-secrets).
+// label is the scope binding: nil for cluster-wide, []byte(namespace) for
+// namespace-wide, []byte(namespace+"/"+name) for strict.
 func EncryptValue(pub *rsa.PublicKey, plaintext, label []byte) ([]byte, error) {
 	// 1. Generate a single-use AES-256 session key.
 	sessionKey := make([]byte, 32)
@@ -113,13 +113,18 @@ func EncryptValue(pub *rsa.PublicKey, plaintext, label []byte) ([]byte, error) {
 		return nil, fmt.Errorf("seal: generating session key: %w", err)
 	}
 
-	// 2. Wrap the session key with RSA-OAEP-SHA256 (no OAEP label).
-	rsaCiphertext, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, sessionKey, nil)
+	// 2. Wrap the session key with RSA-OAEP-SHA256.
+	// The scope label is passed as the OAEP label — this is how the
+	// sealed-secrets controller binds the ciphertext to its scope.
+	// Using nil here (as AES-GCM AAD instead) causes "no key could decrypt".
+	rsaCiphertext, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, sessionKey, label)
 	if err != nil {
 		return nil, fmt.Errorf("seal: RSA-OAEP encrypt: %w", err)
 	}
 
-	// 3. Encrypt plaintext with AES-256-GCM using a zero nonce + AAD = label.
+	// 3. Encrypt plaintext with AES-256-GCM using a zero nonce + no AAD.
+	// The scope binding is already in the RSA-OAEP label above; the AES-GCM
+	// additional data must be nil to match what the controller expects.
 	block, err := aes.NewCipher(sessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("seal: aes.NewCipher: %w", err)
@@ -129,7 +134,7 @@ func EncryptValue(pub *rsa.PublicKey, plaintext, label []byte) ([]byte, error) {
 		return nil, fmt.Errorf("seal: cipher.NewGCM: %w", err)
 	}
 	nonce := make([]byte, gcm.NonceSize())
-	aesCiphertext := gcm.Seal(nil, nonce, plaintext, label)
+	aesCiphertext := gcm.Seal(nil, nonce, plaintext, nil)
 
 	// 4. Concatenate: uint16(BE) len(rsa) || rsa || aes.
 	out := make([]byte, 2+len(rsaCiphertext)+len(aesCiphertext))

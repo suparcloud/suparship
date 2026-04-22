@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   listClusters,
   registerCluster,
+  refreshSealingCert,
   removeCluster,
 } from "../lib/clusters";
 import type { Cluster } from "../lib/clusters";
@@ -242,6 +243,8 @@ export function ClusterSettings() {
   const [error, setError] = useState<string | null>(null);
   const [showRegister, setShowRegister] = useState(false);
   const [removingName, setRemovingName] = useState<string | null>(null);
+  const [refreshingCert, setRefreshingCert] = useState<string | null>(null);
+  const [certMessage, setCertMessage] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -269,6 +272,25 @@ export function ClusterSettings() {
       alert(err instanceof Error ? err.message : "Failed to remove cluster");
     } finally {
       setRemovingName(null);
+    }
+  }
+
+  async function handleRefreshCert(name: string) {
+    setRefreshingCert(name);
+    setCertMessage((prev) => ({ ...prev, [name]: "" }));
+    try {
+      const res = await refreshSealingCert(name);
+      setCertMessage((prev) => ({
+        ...prev,
+        [name]: res.message ?? "Certificate refreshed successfully.",
+      }));
+    } catch (err) {
+      setCertMessage((prev) => ({
+        ...prev,
+        [name]: err instanceof Error ? err.message : "Refresh failed",
+      }));
+    } finally {
+      setRefreshingCert(null);
     }
   }
 
@@ -364,13 +386,42 @@ export function ClusterSettings() {
                     <StatusBadge status={c.status} />
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <button
-                      onClick={() => handleRemove(c.name)}
-                      disabled={removingName === c.name}
-                      className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50"
-                    >
-                      {removingName === c.name ? "Removing…" : "Remove"}
-                    </button>
+                    <div className="flex flex-col items-end gap-1">
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => handleRefreshCert(c.name)}
+                          disabled={
+                            refreshingCert === c.name ||
+                            removingName === c.name
+                          }
+                          title="Re-fetch the sealed-secrets controller certificate from this cluster and update the cache"
+                          className="text-sm text-indigo-600 hover:text-indigo-700 disabled:opacity-50"
+                        >
+                          {refreshingCert === c.name
+                            ? "Refreshing…"
+                            : "Refresh cert"}
+                        </button>
+                        <button
+                          onClick={() => handleRemove(c.name)}
+                          disabled={removingName === c.name}
+                          className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50"
+                        >
+                          {removingName === c.name ? "Removing…" : "Remove"}
+                        </button>
+                      </div>
+                      {certMessage[c.name] && (
+                        <p
+                          className={`text-xs ${
+                            certMessage[c.name].toLowerCase().includes("fail") ||
+                            certMessage[c.name].toLowerCase().includes("error")
+                              ? "text-red-600"
+                              : "text-green-600"
+                          }`}
+                        >
+                          {certMessage[c.name]}
+                        </p>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

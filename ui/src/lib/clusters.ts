@@ -43,3 +43,20 @@ export async function registerCluster(
 export async function removeCluster(name: string): Promise<void> {
   return api.del(`/clusters/${name}`);
 }
+
+export interface SealingCertRefreshResponse {
+  cluster: string;
+  cached: boolean;
+  message?: string;
+}
+
+/** Fetches the sealed-secrets controller certificate from the target cluster
+ *  and caches it, replacing any stale or incorrect cached value. */
+export async function refreshSealingCert(
+  clusterName: string,
+): Promise<SealingCertRefreshResponse> {
+  return api.post<SealingCertRefreshResponse>(
+    `/clusters/${clusterName}/sealing-cert/refresh`,
+    {},
+  );
+}

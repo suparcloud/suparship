@@ -133,6 +133,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		gitopsConfigStore       *gitops.ConfigStore
 		templateRegistryStore   *tpl.RegistryStore
 		registryStore           *registry.Store
+		clusterPool             *k8s.ClusterClientPool
 	)
 
 	switch cfg.RuntimeMode {
@@ -243,6 +244,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		gitopsConfigStore = gitops.NewConfigStore(client)
 		templateRegistryStore = tpl.NewRegistryStore(client)
 		registryStore = registry.NewStore(client)
+
+		// Build the per-cluster client pool so sealing certs can be fetched
+		// directly from each registered cluster's kubeseal controller.
+		clusterPool = k8s.NewClusterClientPool(kubeDeps.ClusterStore)
 
 		// Bootstrap: reconcile Helm-provided ConfigMaps and log what was found.
 		bootstrapResult := bootstrap.Reconcile(cmd.Context(), client, logger)
@@ -460,6 +465,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		Logger:                  logger,
 		KubeClient:              kubeClient,
 		DynClient:               dynClient,
+		ClusterPool:             clusterPool,
 		GitOpsConfigStore:       gitopsConfigStore,
 		GitOpsActivator:         gitOpsActivator,
 		SealedTokenPublisher:    sealPublisherHolder,

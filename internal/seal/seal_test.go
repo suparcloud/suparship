@@ -41,12 +41,14 @@ func genTestKey(t *testing.T) (*rsa.PrivateKey, []byte) {
 }
 
 // decryptValue is the inverse of EncryptValue, used to verify the format.
+// Mirrors HybridDecrypt in bitnami-labs/sealed-secrets: OAEP label is the
+// scope label; AES-GCM additional data is nil.
 func decryptValue(priv *rsa.PrivateKey, ct, label []byte) ([]byte, error) {
 	rsaLen := int(binary.BigEndian.Uint16(ct[0:2]))
 	rsaCT := ct[2 : 2+rsaLen]
 	aesCT := ct[2+rsaLen:]
 
-	sessionKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, priv, rsaCT, nil)
+	sessionKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, priv, rsaCT, label)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +61,7 @@ func decryptValue(priv *rsa.PrivateKey, ct, label []byte) ([]byte, error) {
 		return nil, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
-	return gcm.Open(nil, nonce, aesCT, label)
+	return gcm.Open(nil, nonce, aesCT, nil)
 }
 
 func TestLoadCertFromPEM_Cert(t *testing.T) {

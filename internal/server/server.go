@@ -18,6 +18,7 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/project"
@@ -31,6 +32,16 @@ import (
 )
 
 const shutdownTimeout = 5 * time.Second
+
+// clusterPoolAdapter bridges *k8s.ClusterClientPool to the sealClientPool
+// interface expected by secretsHandler and clusterHandler.
+type clusterPoolAdapter struct {
+	pool *k8s.ClusterClientPool
+}
+
+func (a *clusterPoolAdapter) GetKubeClient(ctx context.Context, clusterName string) (kubernetes.Interface, error) {
+	return a.pool.Get(ctx, clusterName)
+}
 
 // GitOpsPublisher commits app manifests to the GitOps repository. When nil,
 // app creation only persists to the store and no git commit is performed.
@@ -264,6 +275,10 @@ type Config struct {
 	// DynClient is the dynamic Kubernetes client for CRD interactions (ArgoCD, Kargo).
 	// Used for the ArgoCD system-project prerequisite check. Nil disables that check.
 	DynClient dynamic.Interface
+	// ClusterPool builds per-cluster Kubernetes clients from stored kubeconfigs.
+	// Used to auto-fetch sealed-secrets certificates on cache miss or refresh.
+	// Nil disables auto-fetch (cert must be pre-populated in the ConfigMap).
+	ClusterPool *k8s.ClusterClientPool
 	// GitOpsConfigStore reads/writes the GitOps repo ConfigMap. Nil disables
 	// the /api/v1/gitops/* endpoints.
 	GitOpsConfigStore *gitops.ConfigStore
@@ -404,6 +419,9 @@ func New(cfg Config) *Server {
 				}
 				rh.secretsHandler.certCache = seal.NewK8sCertCache(cfg.KubeClient)
 			}
+			if cfg.ClusterPool != nil {
+				rh.secretsHandler.clusterPool = &clusterPoolAdapter{pool: cfg.ClusterPool}
+			}
 			if cfg.ClusterStore != nil {
 				rh.secretsHandler.clusterStore = cfg.ClusterStore
 			}
@@ -417,7 +435,15 @@ func New(cfg Config) *Server {
 	}
 
 	if cfg.ClusterStore != nil && ah != nil {
-		ch := &clusterHandler{store: cfg.ClusterStore, auth: ah}
+		ch := &clusterHandler{
+			store:     cfg.ClusterStore,
+			auth:      ah,
+			certCache: seal.NewK8sCertCache(cfg.KubeClient),
+			logger:    cfg.Logger,
+		}
+		if cfg.ClusterPool != nil {
+			ch.pool = &clusterPoolAdapter{pool: cfg.ClusterPool}
+		}
 		ch.registerRoutes(mux)
 		cfg.Logger.Info("cluster endpoints enabled")
 	}
