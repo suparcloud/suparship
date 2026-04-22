@@ -19,6 +19,7 @@ export interface EnvBinding {
   lastProvisioned?: string;
   lastError?: string;
   clusterSecretStoreName?: string;
+  connectEndpoint?: string;
 }
 
 export interface ConnectStatus {
@@ -100,12 +101,14 @@ export function addBinding(
   vaultId: string,
   connectToken: string,
   vaultName?: string,
+  connectEndpoint?: string,
 ): Promise<BindingResponse> {
   return api.post<BindingResponse>("/org/secret-backend/bindings", {
     env,
     vaultId,
     vaultName: vaultName || "",
     connectToken,
+    connectEndpoint: connectEndpoint || "",
   });
 }
 

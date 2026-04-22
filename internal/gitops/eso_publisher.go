@@ -17,6 +17,10 @@ type ESOSecretStoreConfig struct {
 	// ESONamespace is the namespace where the auth Secret (sealed Connect token)
 	// lives on the target cluster. Defaults to "external-secrets" when empty.
 	ESONamespace string
+	// ConnectEndpoint is the in-cluster URL of the 1Password Connect server
+	// (e.g. http://onepassword-connect.1password.svc.cluster.local:8080).
+	// Defaults to DefaultConnectEndpoint when empty.
+	ConnectEndpoint string
 }
 
 // ESOExternalSecretConfig captures the info needed to render one collapsed
@@ -58,6 +62,10 @@ spec:
 		if esoNS == "" {
 			esoNS = "external-secrets"
 		}
+		connectEndpoint := cfg.ConnectEndpoint
+		if connectEndpoint == "" {
+			connectEndpoint = DefaultConnectEndpoint
+		}
 		sb.WriteString(fmt.Sprintf(`    onepassword:
       connectHost: %s
       vaults:
@@ -69,7 +77,7 @@ spec:
             key: %s
             namespace: %s
 `,
-			DefaultConnectEndpoint,
+			connectEndpoint,
 			cfg.Binding.VaultID,
 			authName,
 			secrets.SATokenSecretKey,

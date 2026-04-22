@@ -519,6 +519,7 @@ function SecretsBackendSection() {
   const [bindEnv, setBindEnv] = useState("");
   const [bindVaultId, setBindVaultId] = useState("");
   const [bindToken, setBindToken] = useState("");
+  const [bindConnectEndpoint, setBindConnectEndpoint] = useState("");
   const [bindBusy, setBindBusy] = useState(false);
 
   // Remove binding state
@@ -614,6 +615,7 @@ function SecretsBackendSection() {
         bindVaultId,
         bindToken.trim(),
         vault?.title,
+        bindConnectEndpoint.trim() || undefined,
       );
       if (res.error) {
         setError(res.error);
@@ -624,6 +626,7 @@ function SecretsBackendSection() {
         setBindEnv("");
         setBindVaultId("");
         setBindToken("");
+        setBindConnectEndpoint("");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Add binding failed");
@@ -779,6 +782,65 @@ function SecretsBackendSection() {
                   )}
                 </div>
 
+                {/* Connect Server endpoint */}
+                <div className="space-y-1">
+                  <label className="block text-xs font-medium text-gray-700">
+                    Connect Server URL{" "}
+                    <span className="font-normal text-gray-400">(org default)</span>
+                  </label>
+                  <p className="text-xs text-gray-500">
+                    In-cluster URL where the 1Password Connect server is
+                    reachable. Used in every <code className="font-mono">ClusterSecretStore</code> unless
+                    overridden per-binding.
+                  </p>
+                  <div className="flex items-end gap-3">
+                    <input
+                      type="text"
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+                      placeholder="http://onepassword-connect.<namespace>.svc.cluster.local:8080"
+                      defaultValue={
+                        config.onePassword?.connect?.endpoint ?? ""
+                      }
+                      id="connect-endpoint-input"
+                    />
+                    <button
+                      onClick={async () => {
+                        const val = (
+                          document.getElementById(
+                            "connect-endpoint-input",
+                          ) as HTMLInputElement
+                        )?.value?.trim();
+                        if (!config?.onePassword) return;
+                        setSaving(true);
+                        try {
+                          const updated = await updateSecretsBackend({
+                            type: config.type,
+                            onePassword: {
+                              ...config.onePassword,
+                              connect: {
+                                ...config.onePassword.connect,
+                                endpoint: val,
+                              },
+                            },
+                          });
+                          setConfig(updated);
+                        } finally {
+                          setSaving(false);
+                        }
+                      }}
+                      disabled={saving}
+                      className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+                    >
+                      {saving ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                  {config.onePassword?.connect?.endpoint && (
+                    <p className="text-xs text-green-600">
+                      Stored: {config.onePassword.connect.endpoint}
+                    </p>
+                  )}
+                </div>
+
                 {/* Environment bindings table */}
                 <div>
                   <div className="mb-2 flex items-center justify-between">
@@ -874,6 +936,24 @@ function SecretsBackendSection() {
                           onChange={(e) => setBindToken(e.target.value)}
                         />
                       </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-gray-700">
+                          Connect Server URL{" "}
+                          <span className="font-normal text-gray-400">(optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+                          placeholder="http://onepassword-connect.1password.svc.cluster.local:8080"
+                          value={bindConnectEndpoint}
+                          onChange={(e) => setBindConnectEndpoint(e.target.value)}
+                        />
+                        <p className="mt-1 text-xs text-gray-400">
+                          Override the 1Password Connect server URL used in the{" "}
+                          <code className="font-mono">ClusterSecretStore</code>. Leave
+                          blank to use the org default or the built-in default.
+                        </p>
+                      </div>
                       <button
                         onClick={handleAddBinding}
                         disabled={
@@ -925,6 +1005,14 @@ function SecretsBackendSection() {
                               ) : (
                                 <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-amber-700">
                                   pending
+                                </span>
+                              )}
+                              {b.connectEndpoint && (
+                                <span
+                                  className="ml-2 font-mono text-xs text-gray-400"
+                                  title="Per-binding Connect endpoint override"
+                                >
+                                  {b.connectEndpoint}
                                 </span>
                               )}
                               {b.lastError && (

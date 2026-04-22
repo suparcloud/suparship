@@ -78,6 +78,10 @@ type EnvBinding struct {
 	// ClusterSecretStoreName is the name of the ClusterSecretStore resource
 	// created for this environment. Used when generating ExternalSecrets.
 	ClusterSecretStoreName string `json:"clusterSecretStoreName,omitempty" yaml:"clusterSecretStoreName,omitempty"`
+	// ConnectEndpoint is the per-binding override for the 1Password Connect
+	// server URL. When set, it takes precedence over the org-level endpoint
+	// and the built-in default when regenerating the ClusterSecretStore.
+	ConnectEndpoint string `json:"connectEndpoint,omitempty" yaml:"connectEndpoint,omitempty"`
 }
 
 // ── BackendConfig ─────────────────────────────────────────────────────────

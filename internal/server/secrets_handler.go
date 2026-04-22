@@ -287,10 +287,14 @@ func (h *secretsHandler) handleListVaults(w http.ResponseWriter, r *http.Request
 
 // AddBindingRequest is the JSON body for POST /api/v1/org/secret-backend/bindings.
 type AddBindingRequest struct {
-	Env          string `json:"env"`
-	VaultID      string `json:"vaultId"`
-	VaultName    string `json:"vaultName"`
-	ConnectToken string `json:"connectToken"`
+	Env             string `json:"env"`
+	VaultID         string `json:"vaultId"`
+	VaultName       string `json:"vaultName"`
+	ConnectToken    string `json:"connectToken"`
+	// ConnectEndpoint overrides the 1Password Connect server URL for this binding.
+	// When empty, the stored org-level Connect endpoint is used, falling back to
+	// the default (http://onepassword-connect.onepassword-connect.svc.cluster.local:8080).
+	ConnectEndpoint string `json:"connectEndpoint,omitempty"`
 }
 
 // BindingResponse is the JSON response after adding or rotating a binding.
@@ -407,6 +411,7 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 			ArgoCDDestination: cluster.APIServer,
 			ClusterName:       clusterName,
 			ESONamespace:      cluster.EffectiveESONamespace(),
+			ConnectEndpoint:   resolveConnectEndpoint(req.ConnectEndpoint, org),
 		})
 		if publishErr != nil {
 			h.logger.Error("failed to publish sealed token", "env", req.Env, "err", publishErr)
@@ -429,6 +434,7 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 		Provisioned:            true,
 		LastProvisioned:        time.Now(),
 		ClusterSecretStoreName: storeName,
+		ConnectEndpoint:        req.ConnectEndpoint,
 	})
 	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
 		h.logger.Error("failed to save org after binding", "err", err)
@@ -586,6 +592,18 @@ func (h *secretsHandler) fetchOrLoadCert(ctx context.Context, clusterName string
 
 	h.logger.Info("sealing cert fetched and cached", "cluster", clusterName)
 	return pemBytes, nil
+}
+
+// resolveConnectEndpoint returns the Connect server URL to use for sealing.
+// Priority: request body override → org-stored endpoint → empty (publisher uses default).
+func resolveConnectEndpoint(reqEndpoint string, org *rbac.Org) string {
+	if reqEndpoint != "" {
+		return reqEndpoint
+	}
+	if org.SecretBackend.OnePassword != nil {
+		return org.SecretBackend.OnePassword.Connect.Endpoint
+	}
+	return ""
 }
 
 // ── Org-level secrets CRUD ──────────────────────────────────────────────────

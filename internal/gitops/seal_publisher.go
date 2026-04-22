@@ -28,6 +28,9 @@ type SealedReadTokenPublishParams struct {
 	// ESONamespace is the namespace where External Secrets Operator is
 	// installed on the target cluster. Defaults to "external-secrets".
 	ESONamespace string
+	// ConnectEndpoint is the in-cluster URL of the 1Password Connect server.
+	// Defaults to DefaultConnectEndpoint when empty.
+	ConnectEndpoint string
 }
 
 // DeleteSealedReadTokenParams captures the inputs needed to remove a
@@ -95,10 +98,11 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 	})
 
 	storeYAML := BuildClusterSecretStoreYAML(ESOSecretStoreConfig{
-		Name:         storeName,
-		BackendType:  secrets.Backend1Password,
-		Binding:      secrets.EnvBinding{Env: params.Env, VaultID: params.VaultID},
-		ESONamespace: esoNS,
+		Name:            storeName,
+		BackendType:     secrets.Backend1Password,
+		Binding:         secrets.EnvBinding{Env: params.Env, VaultID: params.VaultID},
+		ESONamespace:    esoNS,
+		ConnectEndpoint: params.ConnectEndpoint,
 	})
 
 	destServer := params.ArgoCDDestination
@@ -138,7 +142,6 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): provision env=%s cluster=%s", params.Env, params.ClusterName))
 	})
 }
-
 // DeleteSealedReadToken removes the per-environment secret-store directory
 // and the ArgoCD Application from the GitOps repo and commits the deletion.
 // It also removes any legacy paths written by older versions of suparship
