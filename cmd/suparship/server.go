@@ -42,7 +42,13 @@ Runtime modes:
   fake       — in-memory seed data, no Kubernetes required (default for contributors)
   kubernetes — connects to a real cluster via kubeconfig
 
-Environment variables:
+Configuration model:
+  GitOps, registry, and org configuration is read from Kubernetes ConfigMaps
+  (the single source of truth). These ConfigMaps are created by the Helm chart
+  on first install or seeded from environment variables on first boot.
+  After initial creation, use the settings UI or API to modify configuration.
+
+Environment variables (process-level, always active):
   SUPARSHIP_DEV_MODE       set to "local" to enable fake mode (recommended for contributors)
   SUPARSHIP_CLUSTER_MODE   set to "fake" to enable fake mode (alternative override)
   SUPARSHIP_ADDR           listen address (default ":8080")
@@ -50,7 +56,15 @@ Environment variables:
   SUPARSHIP_CORS_ORIGINS   comma-separated allowed origins
   SUPARSHIP_TEMPLATES_DIR  path to templates directory
   SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments
-  SUPARSHIP_LOG_LEVEL      log verbosity: debug, info, warn, error (default "info")`,
+  SUPARSHIP_LOG_LEVEL      log verbosity: debug, info, warn, error (default "info")
+
+Environment variables (bootstrap-only, used to seed ConfigMaps on first boot):
+  SUPARSHIP_GITOPS_REPO_URL       seed gitops ConfigMap with this repo URL
+  SUPARSHIP_GITOPS_REPO_USER      seed gitops credential Secret with this username
+  SUPARSHIP_GITOPS_REPO_PASSWORD  seed gitops credential Secret with this password/token
+  SUPARSHIP_ARGOCD_REPO_URL       seed gitops ConfigMap with ArgoCD-specific repo URL
+  SUPARSHIP_KARGO_GIT_REPO_URL    seed gitops ConfigMap with Kargo-specific repo URL
+  SUPARSHIP_INSECURE_REGISTRY     seed registry ConfigMap with insecure flag ("true")`,
 	RunE: runServer,
 }
 
@@ -262,52 +276,59 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger.Info("templates loaded", "dir", templatesDir, "count", len(templates))
 	}
 
-	// Wire the GitOps publisher when the gitops repo URL is configured.
-	// In fake/local dev mode this is optional; in cluster mode it is expected.
+	// Wire the GitOps publisher from the ConfigMap (the single source of truth).
+	// In fake/local dev mode the ConfigStore is nil and the publisher is disabled.
 	var gitOpsPublisher server.GitOpsPublisher
 	sealPublisherHolder := server.NewSealPublisherHolder(nil)
-	if cfg.GitOps.RepoURL != "" {
-		pub, err := gitops.NewPublisher(gitops.PublisherConfig{
-			RepoURL:          cfg.GitOps.RepoURL,
-			RepoUser:         cfg.GitOps.RepoUser,
-			RepoPassword:     cfg.GitOps.RepoPassword,
-			ArgoCDRepoURL:    cfg.GitOps.ArgoCDRepoURL,
-			KargoGitRepoURL:  cfg.GitOps.KargoGitRepoURL,
-			SyncAutomated:    true,
-			TemplatesDir:     templatesDir,
-			InsecureRegistry: cfg.GitOps.InsecureRegistry,
-		})
-		if err != nil {
-			logger.Warn("gitops publisher disabled", "reason", err.Error())
+	if gitopsConfigStore != nil {
+		repoCfg, cfgErr := gitopsConfigStore.Get(cmd.Context())
+		if cfgErr == nil && repoCfg.RepoURL != "" {
+			username, password, _ := gitopsConfigStore.GetCredentials(cmd.Context(), repoCfg)
+			pubCfg := repoCfg.ToPublisherConfig()
+			pubCfg.RepoUser = username
+			pubCfg.RepoPassword = password
+			pubCfg.SyncAutomated = true
+			pubCfg.TemplatesDir = templatesDir
+
+			// InsecureRegistry is read from the registry ConfigMap (if configured).
+			if registryStore != nil {
+				if regCfg, regErr := registryStore.Get(cmd.Context()); regErr == nil {
+					pubCfg.InsecureRegistry = regCfg.Insecure
+				}
+			}
+
+			pub, err := gitops.NewPublisher(pubCfg)
+			if err != nil {
+				logger.Warn("gitops publisher disabled", "reason", err.Error())
+			} else {
+				gitOpsPublisher = &gitOpsPublisherAdapter{
+					inner:        pub,
+					orgProvider:  orgProvider,
+					clusterStore: clusterStore,
+				}
+				sealPublisherHolder.Swap(pub)
+				logger.Info("gitops publisher enabled",
+					"repo", repoCfg.RepoURL,
+					"argocd_repo", pubCfg.ArgoCDRepoURL,
+				)
+				go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+
+				gitopsProbeURL := pubCfg.ArgoCDRepoURL
+				if gitopsProbeURL == "" {
+					gitopsProbeURL = repoCfg.RepoURL
+				}
+				readinessProbers = append(readinessProbers, server.ReadinessProber{
+					Name:  "gitops-repo",
+					Check: kube.NewGitOpsRepoReadinessProbe(gitopsProbeURL),
+				})
+			}
+		} else if cfgErr != nil && cfgErr != gitops.ErrConfigNotFound {
+			logger.Warn("could not read gitops config from ConfigMap", "error", cfgErr)
 		} else {
-			gitOpsPublisher = &gitOpsPublisherAdapter{
-				inner:        pub,
-				orgProvider:  orgProvider,
-				clusterStore: clusterStore,
-			}
-			sealPublisherHolder.Swap(pub)
-			logger.Info("gitops publisher enabled",
-				"repo", cfg.GitOps.RepoURL,
-				"argocd_repo", cfg.GitOps.ArgoCDRepoURL,
-			)
-			// On startup, publish ApplicationSets + AppProjects so ArgoCD can
-			// discover apps immediately without needing a UI config save first.
-			// This is idempotent and runs in the background to avoid delaying startup.
-			go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
-			// Register GitOps repo connectivity probe.
-			// Use ArgoCDRepoURL when set (internal cluster URL); fall back to
-			// the host-accessible RepoURL for the probe.
-			gitopsProbeURL := cfg.GitOps.ArgoCDRepoURL
-			if gitopsProbeURL == "" {
-				gitopsProbeURL = cfg.GitOps.RepoURL
-			}
-			readinessProbers = append(readinessProbers, server.ReadinessProber{
-				Name:  "gitops-repo",
-				Check: kube.NewGitOpsRepoReadinessProbe(gitopsProbeURL),
-			})
+			logger.Info("gitops publisher disabled — configure via settings UI or Helm values")
 		}
 	} else {
-		logger.Info("gitops publisher disabled — set SUPARSHIP_GITOPS_REPO_URL to enable")
+		logger.Info("gitops publisher disabled — running in fake mode")
 	}
 
 	// Wrap the initial publisher in a holder so it can be swapped at runtime

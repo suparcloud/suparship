@@ -94,3 +94,66 @@ func TestRuntimeMode_Constants(t *testing.T) {
 		t.Error("ModeKubernetes must not be empty string")
 	}
 }
+
+func TestLoadBootstrapEnv(t *testing.T) {
+	t.Run("reads all gitops env vars", func(t *testing.T) {
+		t.Setenv("SUPARSHIP_GITOPS_REPO_URL", "https://git.example.com/org/repo")
+		t.Setenv("SUPARSHIP_GITOPS_REPO_USER", "deploy-bot")
+		t.Setenv("SUPARSHIP_GITOPS_REPO_PASSWORD", "s3cret")
+		t.Setenv("SUPARSHIP_ARGOCD_REPO_URL", "http://gitea:3000/org/repo")
+		t.Setenv("SUPARSHIP_KARGO_GIT_REPO_URL", "https://gitea:3000/org/repo")
+		t.Setenv("SUPARSHIP_INSECURE_REGISTRY", "true")
+
+		env := config.LoadBootstrapEnv()
+
+		if env.GitOpsRepoURL != "https://git.example.com/org/repo" {
+			t.Errorf("GitOpsRepoURL = %q", env.GitOpsRepoURL)
+		}
+		if env.GitOpsRepoUser != "deploy-bot" {
+			t.Errorf("GitOpsRepoUser = %q", env.GitOpsRepoUser)
+		}
+		if env.GitOpsRepoPassword != "s3cret" {
+			t.Errorf("GitOpsRepoPassword = %q", env.GitOpsRepoPassword)
+		}
+		if env.ArgoCDRepoURL != "http://gitea:3000/org/repo" {
+			t.Errorf("ArgoCDRepoURL = %q", env.ArgoCDRepoURL)
+		}
+		if env.KargoGitRepoURL != "https://gitea:3000/org/repo" {
+			t.Errorf("KargoGitRepoURL = %q", env.KargoGitRepoURL)
+		}
+		if !env.InsecureRegistry {
+			t.Error("InsecureRegistry should be true")
+		}
+		if !env.HasGitOps() {
+			t.Error("HasGitOps should be true when repo URL is set")
+		}
+	})
+
+	t.Run("empty env vars", func(t *testing.T) {
+		env := config.LoadBootstrapEnv()
+
+		if env.GitOpsRepoURL != "" {
+			t.Errorf("GitOpsRepoURL should be empty, got %q", env.GitOpsRepoURL)
+		}
+		if env.InsecureRegistry {
+			t.Error("InsecureRegistry should be false by default")
+		}
+		if env.HasGitOps() {
+			t.Error("HasGitOps should be false when repo URL is empty")
+		}
+	})
+
+	t.Run("insecure registry requires true", func(t *testing.T) {
+		t.Setenv("SUPARSHIP_INSECURE_REGISTRY", "false")
+		env := config.LoadBootstrapEnv()
+		if env.InsecureRegistry {
+			t.Error("InsecureRegistry should be false for value 'false'")
+		}
+	})
+}
+
+func TestLoad_NoGitOpsField(t *testing.T) {
+	cfg := config.Load()
+	_ = cfg.RuntimeMode
+	_ = cfg.RuntimeModeTrigger
+}

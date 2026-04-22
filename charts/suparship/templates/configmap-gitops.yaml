@@ -1,4 +1,5 @@
 {{- if .Values.gitops.repoURL }}
+{{- if not (lookup "v1" "ConfigMap" (include "suparship.namespace" .) "suparship-gitops-config") }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -42,4 +43,5 @@ data:
       workspace: {{ .Values.gitops.bitbucket.workspace | quote }}
     {{- end }}
     {{- end }}
+{{- end }}
 {{- end }}
