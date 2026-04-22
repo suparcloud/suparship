@@ -42,7 +42,7 @@ func TestMemCertCache_List(t *testing.T) {
 func TestLoadCachedCert(t *testing.T) {
 	c := NewMemCertCache()
 	ctx := context.Background()
-	_, pemBytes := genTestKey(t)
+	pemBytes, _ := genTestCertPEM(t)
 	if err := c.Put(ctx, "prod", pemBytes); err != nil {
 		t.Fatal(err)
 	}

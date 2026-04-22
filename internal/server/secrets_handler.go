@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -534,17 +533,16 @@ func (h *secretsHandler) handleRemoveBinding(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// fetchFreshCert fetches the sealing certificate directly from the target
-// cluster's sealed-secrets controller, updates the cache, and returns the key.
-// It is used at bind/rotate time to guarantee the cert is current and correct.
+// fetchFreshCert fetches the sealing certificate PEM directly from the target
+// cluster's sealed-secrets controller, updates the cache, and returns the PEM.
 // Falls back to the cache if the cluster pool is not configured.
-func (h *secretsHandler) fetchFreshCert(ctx context.Context, clusterName string) (*rsa.PublicKey, error) {
+func (h *secretsHandler) fetchFreshCert(ctx context.Context, clusterName string) ([]byte, error) {
 	if h.clusterPool != nil && h.certCache != nil {
 		kubeClient, err := h.clusterPool.GetKubeClient(ctx, clusterName)
 		if err == nil {
 			pemBytes, ferr := seal.FetchAndCache(ctx, h.certCache, kubeClient, clusterName, seal.FetchOptions{})
 			if ferr == nil {
-				return seal.LoadCertFromPEM(pemBytes)
+				return pemBytes, nil
 			}
 			h.logger.Warn("live cert fetch failed, falling back to cache", "cluster", clusterName, "err", ferr)
 		}
@@ -552,26 +550,21 @@ func (h *secretsHandler) fetchFreshCert(ctx context.Context, clusterName string)
 	return h.fetchOrLoadCert(ctx, clusterName)
 }
 
-// fetchOrLoadCert returns the sealing certificate for clusterName.
+// fetchOrLoadCert returns the sealing certificate PEM for clusterName.
 //
 // Resolution order:
 //  1. Try the cert cache (ConfigMap in suparship-system).
-//  2. On cache miss, if a clusterPool is configured, fetch the cert live from
-//     the target cluster's sealed-secrets controller via its stored kubeconfig
-//     and populate the cache so future calls are fast.
+//  2. On cache miss, if a clusterPool is configured, fetch live from the
+//     target cluster's sealed-secrets controller and populate the cache.
 //  3. If neither is available, return a descriptive error.
-//
-// Auto-fetching means suparship no longer requires a manual kubeseal
-// --fetch-cert step; it fetches the correct cert from the target cluster
-// automatically on first use.
-func (h *secretsHandler) fetchOrLoadCert(ctx context.Context, clusterName string) (*rsa.PublicKey, error) {
+func (h *secretsHandler) fetchOrLoadCert(ctx context.Context, clusterName string) ([]byte, error) {
 	if h.certCache == nil {
 		return nil, fmt.Errorf("cert cache not configured")
 	}
 
 	pemBytes, err := h.certCache.Get(ctx, clusterName)
 	if err == nil {
-		return seal.LoadCertFromPEM(pemBytes)
+		return pemBytes, nil
 	}
 
 	// Cache miss — fetch live from the target cluster if pool is available.
@@ -592,7 +585,7 @@ func (h *secretsHandler) fetchOrLoadCert(ctx context.Context, clusterName string
 	}
 
 	h.logger.Info("sealing cert fetched and cached", "cluster", clusterName)
-	return seal.LoadCertFromPEM(pemBytes)
+	return pemBytes, nil
 }
 
 // ── Org-level secrets CRUD ──────────────────────────────────────────────────

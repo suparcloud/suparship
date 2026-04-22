@@ -1,30 +1,25 @@
 package seal
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/pem"
 	"math/big"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 )
 
-// genTestKey generates a small RSA key + self-signed cert PEM for tests.
-func genTestKey(t *testing.T) (*rsa.PrivateKey, []byte) {
+// genTestCertPEM generates a small RSA key + self-signed cert PEM for tests.
+func genTestCertPEM(t *testing.T) ([]byte, *rsa.PrivateKey) {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "sealed-secrets-test"},
@@ -37,36 +32,17 @@ func genTestKey(t *testing.T) (*rsa.PrivateKey, []byte) {
 		t.Fatalf("create cert: %v", err)
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	return priv, pemBytes
+	return pemBytes, priv
 }
 
-// decryptValue is the inverse of EncryptValue, used to verify the format.
-// Mirrors HybridDecrypt in bitnami-labs/sealed-secrets: OAEP label is the
-// scope label; AES-GCM additional data is nil.
-func decryptValue(priv *rsa.PrivateKey, ct, label []byte) ([]byte, error) {
-	rsaLen := int(binary.BigEndian.Uint16(ct[0:2]))
-	rsaCT := ct[2 : 2+rsaLen]
-	aesCT := ct[2+rsaLen:]
-
-	sessionKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, priv, rsaCT, label)
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(sessionKey)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	return gcm.Open(nil, nonce, aesCT, nil)
+func kubesealAvailable() bool {
+	_, err := exec.LookPath("kubeseal")
+	return err == nil
 }
 
 func TestLoadCertFromPEM_Cert(t *testing.T) {
-	_, pemBytes := genTestKey(t)
-	pub, err := LoadCertFromPEM(pemBytes)
+	certPEM, _ := genTestCertPEM(t)
+	pub, err := LoadCertFromPEM(certPEM)
 	if err != nil {
 		t.Fatalf("LoadCertFromPEM: %v", err)
 	}
@@ -81,156 +57,116 @@ func TestLoadCertFromPEM_Invalid(t *testing.T) {
 	}
 }
 
-func TestEncryptValue_RoundTrip(t *testing.T) {
-	priv, pemBytes := genTestKey(t)
-	pub, err := LoadCertFromPEM(pemBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	plaintext := []byte("super-secret-token")
-	label := []byte("1password/op-token-prod")
-
-	ct, err := EncryptValue(pub, plaintext, label)
-	if err != nil {
-		t.Fatalf("EncryptValue: %v", err)
-	}
-	got, err := decryptValue(priv, ct, label)
-	if err != nil {
-		t.Fatalf("decrypt: %v", err)
-	}
-	if string(got) != string(plaintext) {
-		t.Errorf("roundtrip mismatch: got %q, want %q", got, plaintext)
-	}
-}
-
-func TestBuildSealedSecret_Strict(t *testing.T) {
-	priv, pemBytes := genTestKey(t)
-	pub, err := LoadCertFromPEM(pemBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	yaml, err := BuildSealedSecret(pub, SealedSecretInput{
-		Name:      "op-token-prod",
-		Namespace: "1password",
-		Scope:     ScopeStrict,
-		Data:      map[string][]byte{"token": []byte("rt-prod-secret")},
+func TestBuildSecretYAML_ContainsExpectedFields(t *testing.T) {
+	in := SealedSecretInput{
+		Name:      "my-secret",
+		Namespace: "my-ns",
+		Scope:     ScopeNamespaceWide,
+		Type:      "Opaque",
+		Data:      map[string][]byte{"token": []byte("abc123")},
 		Labels: map[string]string{
-			"app.kubernetes.io/managed-by": "suparship",
+			"app": "test",
 		},
-	})
-	if err != nil {
-		t.Fatalf("BuildSealedSecret: %v", err)
 	}
-
+	yaml := buildSecretYAML(in)
 	for _, want := range []string{
-		"apiVersion: bitnami.com/v1alpha1",
-		"kind: SealedSecret",
-		"name: op-token-prod",
-		"namespace: 1password",
+		"kind: Secret",
+		"name: my-secret",
+		"namespace: my-ns",
+		"app: test",
 		"type: Opaque",
-		`app.kubernetes.io/managed-by: "suparship"`,
+		"stringData:",
+		"token: abc123",
 	} {
 		if !strings.Contains(yaml, want) {
-			t.Errorf("YAML missing %q.\n%s", want, yaml)
+			t.Errorf("Secret YAML missing %q:\n%s", want, yaml)
 		}
-	}
-	// Strict scope: no namespace-wide / cluster-wide annotations.
-	if strings.Contains(yaml, "namespace-wide") || strings.Contains(yaml, "cluster-wide") {
-		t.Errorf("strict scope should have no scope annotation; got:\n%s", yaml)
-	}
-
-	// Extract the encrypted token, decrypt it, verify.
-	ctB64 := extractEncrypted(t, yaml, "token")
-	ct, err := base64.StdEncoding.DecodeString(ctB64)
-	if err != nil {
-		t.Fatalf("base64 decode: %v", err)
-	}
-	got, err := decryptValue(priv, ct, []byte("1password/op-token-prod"))
-	if err != nil {
-		t.Fatalf("decrypt: %v", err)
-	}
-	if string(got) != "rt-prod-secret" {
-		t.Errorf("got %q, want %q", got, "rt-prod-secret")
-	}
-}
-
-func TestBuildSealedSecret_NamespaceWide(t *testing.T) {
-	priv, pemBytes := genTestKey(t)
-	pub, _ := LoadCertFromPEM(pemBytes)
-
-	yaml, err := BuildSealedSecret(pub, SealedSecretInput{
-		Name:      "op-token-staging",
-		Namespace: "1password",
-		Scope:     ScopeNamespaceWide,
-		Data:      map[string][]byte{"token": []byte("rt-stg")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(yaml, `sealedsecrets.bitnami.com/namespace-wide: "true"`) {
-		t.Errorf("missing namespace-wide annotation:\n%s", yaml)
-	}
-
-	ct, _ := base64.StdEncoding.DecodeString(extractEncrypted(t, yaml, "token"))
-	got, err := decryptValue(priv, ct, []byte("1password"))
-	if err != nil {
-		t.Fatalf("decrypt: %v", err)
-	}
-	if string(got) != "rt-stg" {
-		t.Errorf("got %q, want %q", got, "rt-stg")
-	}
-}
-
-func TestBuildSealedSecret_ClusterWide(t *testing.T) {
-	priv, pemBytes := genTestKey(t)
-	pub, _ := LoadCertFromPEM(pemBytes)
-
-	yaml, err := BuildSealedSecret(pub, SealedSecretInput{
-		Name:      "op-token-cw",
-		Namespace: "kube-system",
-		Scope:     ScopeClusterWide,
-		Data:      map[string][]byte{"token": []byte("rt-cw")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(yaml, `sealedsecrets.bitnami.com/cluster-wide: "true"`) {
-		t.Errorf("missing cluster-wide annotation:\n%s", yaml)
-	}
-	ct, _ := base64.StdEncoding.DecodeString(extractEncrypted(t, yaml, "token"))
-	got, err := decryptValue(priv, ct, nil)
-	if err != nil {
-		t.Fatalf("decrypt: %v", err)
-	}
-	if string(got) != "rt-cw" {
-		t.Errorf("got %q, want %q", got, "rt-cw")
 	}
 }
 
 func TestBuildSealedSecret_Validation(t *testing.T) {
-	_, pemBytes := genTestKey(t)
-	pub, _ := LoadCertFromPEM(pemBytes)
+	certPEM, _ := genTestCertPEM(t)
 
-	if _, err := BuildSealedSecret(pub, SealedSecretInput{Namespace: "ns"}); err == nil {
+	if _, err := BuildSealedSecret(certPEM, SealedSecretInput{Namespace: "ns"}); err == nil {
 		t.Error("expected error when name is missing")
 	}
-	if _, err := BuildSealedSecret(pub, SealedSecretInput{Name: "n"}); err == nil {
+	if _, err := BuildSealedSecret(certPEM, SealedSecretInput{Name: "n"}); err == nil {
 		t.Error("expected error when namespace is missing")
 	}
 }
 
-// extractEncrypted finds the line `    <key>: <base64>` in the encryptedData
-// block of a SealedSecret YAML and returns the base64.
-func extractEncrypted(t *testing.T, yaml, key string) string {
-	t.Helper()
-	prefix := "    " + key + ": "
-	for _, line := range strings.Split(yaml, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return strings.TrimPrefix(line, prefix)
-		}
+func TestBuildSealedSecret_WithKubeseal(t *testing.T) {
+	if !kubesealAvailable() {
+		t.Skip("kubeseal not on PATH")
 	}
-	t.Fatalf("encrypted key %q not found in YAML:\n%s", key, yaml)
-	return ""
+
+	certPEM, _ := genTestCertPEM(t)
+
+	cases := []struct {
+		name  string
+		input SealedSecretInput
+		want  []string
+	}{
+		{
+			name: "namespace-wide",
+			input: SealedSecretInput{
+				Name:      "op-token-staging",
+				Namespace: "external-secrets-system",
+				Scope:     ScopeNamespaceWide,
+				Data:      map[string][]byte{"token": []byte("rt-stg")},
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "suparship",
+					"suparship.io/env":             "staging",
+				},
+			},
+			want: []string{
+				"kind: SealedSecret",
+				"name: op-token-staging",
+				"namespace: external-secrets-system",
+				`sealedsecrets.bitnami.com/namespace-wide`,
+				"encryptedData:",
+				"token:",
+			},
+		},
+		{
+			name: "cluster-wide",
+			input: SealedSecretInput{
+				Name:      "op-token-cw",
+				Namespace: "kube-system",
+				Scope:     ScopeClusterWide,
+				Data:      map[string][]byte{"token": []byte("rt-cw")},
+			},
+			want: []string{
+				"kind: SealedSecret",
+				`sealedsecrets.bitnami.com/cluster-wide`,
+			},
+		},
+		{
+			name: "strict",
+			input: SealedSecretInput{
+				Name:      "op-token-prod",
+				Namespace: "1password",
+				Scope:     ScopeStrict,
+				Data:      map[string][]byte{"token": []byte("rt-prod")},
+			},
+			want: []string{
+				"kind: SealedSecret",
+				"name: op-token-prod",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml, err := BuildSealedSecret(certPEM, tc.input)
+			if err != nil {
+				t.Fatalf("BuildSealedSecret: %v", err)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(yaml, w) {
+					t.Errorf("missing %q in:\n%s", w, yaml)
+				}
+			}
+		})
+	}
 }

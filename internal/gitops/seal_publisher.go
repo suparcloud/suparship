@@ -2,7 +2,6 @@ package gitops
 
 import (
 	"context"
-	"crypto/rsa"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,7 +17,7 @@ type SealedReadTokenPublishParams struct {
 	VaultID string // 1Password vault UUID for this env
 	OrgName string // for ClusterSecretStore naming
 	Token   []byte // plaintext Connect token (sealed; never written to Git)
-	Cert    *rsa.PublicKey
+	Cert    []byte // PEM-encoded sealed-secrets controller public certificate
 	// ArgoCDDestination is the ArgoCD destination server URL for the target
 	// cluster (https://...). Required — no fallback to in-cluster default.
 	ArgoCDDestination string
@@ -57,7 +56,7 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 	if params.ClusterName == "" {
 		return fmt.Errorf("PublishSealedReadToken: clusterName is required")
 	}
-	if params.Cert == nil {
+	if len(params.Cert) == 0 {
 		return fmt.Errorf("PublishSealedReadToken: cert is required")
 	}
 	if len(params.Token) == 0 {

@@ -10,11 +10,10 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/suparcloud/suparship/internal/seal"
 )
 
-func freshTestKey(t *testing.T) *rsa.PublicKey {
+// freshTestCertPEM generates a self-signed cert and returns the PEM bytes.
+func freshTestCertPEM(t *testing.T) []byte {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -30,12 +29,7 @@ func freshTestKey(t *testing.T) *rsa.PublicKey {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	pub, err := seal.LoadCertFromPEM(pemBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pub
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 func TestBuildSecretStoreArgoApp(t *testing.T) {
@@ -72,7 +66,7 @@ func TestPublishSealedReadToken_ValidatesInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub := freshTestKey(t)
+	certPEM := freshTestCertPEM(t)
 
 	const dest = "https://k8s:6443"
 	const cluster = "my-cluster"
@@ -81,12 +75,12 @@ func TestPublishSealedReadToken_ValidatesInputs(t *testing.T) {
 		name   string
 		params SealedReadTokenPublishParams
 	}{
-		{"missing env", SealedReadTokenPublishParams{VaultID: "v1", Cert: pub, Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
-		{"missing vault", SealedReadTokenPublishParams{Env: "prod", Cert: pub, Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
+		{"missing env", SealedReadTokenPublishParams{VaultID: "v1", Cert: certPEM, Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
+		{"missing vault", SealedReadTokenPublishParams{Env: "prod", Cert: certPEM, Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
 		{"missing cert", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
-		{"empty token", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, ArgoCDDestination: dest, ClusterName: cluster}},
-		{"empty destination", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, Token: []byte("x"), ClusterName: cluster}},
-		{"missing cluster", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, Token: []byte("x"), ArgoCDDestination: dest}},
+		{"empty token", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: certPEM, ArgoCDDestination: dest, ClusterName: cluster}},
+		{"empty destination", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: certPEM, Token: []byte("x"), ClusterName: cluster}},
+		{"missing cluster", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: certPEM, Token: []byte("x"), ArgoCDDestination: dest}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

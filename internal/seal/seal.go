@@ -1,35 +1,23 @@
-// Package seal implements native, kubeseal-compatible encryption of
-// Kubernetes Secret values into SealedSecret resources.
+// Package seal wraps the kubeseal CLI to produce SealedSecret manifests.
 //
-// The encryption scheme matches HybridEncrypt in bitnami-labs/sealed-secrets:
+// BuildSealedSecret writes a temporary cert file and pipes a plain K8s Secret
+// to `kubeseal --cert <certfile> --scope <scope> --format yaml`, returning
+// the SealedSecret YAML.  Callers obtain the cert PEM via FetchCert /
+// FetchAndCache; no connection to the target cluster is needed at seal time.
 //
-//   - A fresh 32-byte AES-256 session key is generated per value.
-//   - The session key is wrapped with RSA-OAEP (SHA-256) using the scope
-//     label as the OAEP label — this binds the ciphertext to its scope.
-//   - The plaintext is encrypted with AES-256-GCM using a zero nonce
-//     (safe because the session key is single-use) and no AAD.
-//   - The wire format is:
-//         uint16(BE) length of RSA ciphertext  || RSA ciphertext || AES ciphertext
-//   - The result is base64-encoded into the SealedSecret encryptedData map.
-//
-// This package does not require the kubeseal CLI or a connection to the
-// target cluster: callers supply the controller's public certificate
-// (PEM-encoded X.509) once and reuse it.
+// Requires `kubeseal` on PATH.  Install from
+// https://github.com/bitnami-labs/sealed-secrets/releases
 package seal
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
+	"bytes"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 )
@@ -40,32 +28,40 @@ type Scope int
 
 const (
 	// ScopeStrict (default): name + namespace fixed.
-	// Sealed value can be decrypted only at this exact name+namespace.
 	ScopeStrict Scope = iota
 	// ScopeNamespaceWide: namespace fixed, name free.
-	// Sealed value can be decrypted by any SealedSecret in the namespace.
 	ScopeNamespaceWide
 	// ScopeClusterWide: no constraints.
-	// Sealed value can be decrypted by any SealedSecret in the cluster.
 	ScopeClusterWide
 )
 
-// scopeAnnotation returns the SealedSecret annotation that signals the
-// scope to the controller (none for strict).
-func (s Scope) annotation() (string, string, bool) {
+func (s Scope) flag() string {
 	switch s {
 	case ScopeNamespaceWide:
-		return "sealedsecrets.bitnami.com/namespace-wide", "true", true
+		return "namespace-wide"
 	case ScopeClusterWide:
-		return "sealedsecrets.bitnami.com/cluster-wide", "true", true
+		return "cluster-wide"
 	default:
-		return "", "", false
+		return "strict"
 	}
 }
 
+// SealedSecretInput captures the inputs needed to build one SealedSecret.
+type SealedSecretInput struct {
+	Name      string
+	Namespace string
+	// Scope controls where the sealed value can be decrypted.
+	Scope Scope
+	// Data holds the secret key/value pairs to encrypt.
+	Data map[string][]byte
+	// Type is the K8s Secret type (e.g. "Opaque"). Defaults to "Opaque".
+	Type string
+	// Labels are copied into spec.template.metadata.labels.
+	Labels map[string]string
+}
+
 // LoadCertFromPEM parses the controller's PEM-encoded public certificate
-// and returns the RSA public key. Returns an error if the PEM is malformed
-// or does not contain an RSA public key.
+// and returns the RSA public key. Used by the cert cache for validation.
 func LoadCertFromPEM(pemData []byte) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode(pemData)
 	if block == nil {
@@ -85,7 +81,6 @@ func LoadCertFromPEM(pemData []byte) (*rsa.PublicKey, error) {
 	case "PUBLIC KEY", "RSA PUBLIC KEY":
 		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 		if err != nil {
-			// Fallback for "RSA PUBLIC KEY" in PKCS#1 form.
 			rsaPub, err2 := x509.ParsePKCS1PublicKey(block.Bytes)
 			if err2 != nil {
 				return nil, fmt.Errorf("seal: parsing public key: %w / %v", err, err2)
@@ -102,79 +97,13 @@ func LoadCertFromPEM(pemData []byte) (*rsa.PublicKey, error) {
 	}
 }
 
-// EncryptValue encrypts plaintext using the hybrid scheme compatible with the
-// sealed-secrets controller (matches HybridEncrypt in bitnami-labs/sealed-secrets).
-// label is the scope binding: nil for cluster-wide, []byte(namespace) for
-// namespace-wide, []byte(namespace+"/"+name) for strict.
-func EncryptValue(pub *rsa.PublicKey, plaintext, label []byte) ([]byte, error) {
-	// 1. Generate a single-use AES-256 session key.
-	sessionKey := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, sessionKey); err != nil {
-		return nil, fmt.Errorf("seal: generating session key: %w", err)
-	}
-
-	// 2. Wrap the session key with RSA-OAEP-SHA256.
-	// The scope label is passed as the OAEP label — this is how the
-	// sealed-secrets controller binds the ciphertext to its scope.
-	// Using nil here (as AES-GCM AAD instead) causes "no key could decrypt".
-	rsaCiphertext, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, sessionKey, label)
-	if err != nil {
-		return nil, fmt.Errorf("seal: RSA-OAEP encrypt: %w", err)
-	}
-
-	// 3. Encrypt plaintext with AES-256-GCM using a zero nonce + no AAD.
-	// The scope binding is already in the RSA-OAEP label above; the AES-GCM
-	// additional data must be nil to match what the controller expects.
-	block, err := aes.NewCipher(sessionKey)
-	if err != nil {
-		return nil, fmt.Errorf("seal: aes.NewCipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("seal: cipher.NewGCM: %w", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	aesCiphertext := gcm.Seal(nil, nonce, plaintext, nil)
-
-	// 4. Concatenate: uint16(BE) len(rsa) || rsa || aes.
-	out := make([]byte, 2+len(rsaCiphertext)+len(aesCiphertext))
-	binary.BigEndian.PutUint16(out[0:2], uint16(len(rsaCiphertext)))
-	copy(out[2:2+len(rsaCiphertext)], rsaCiphertext)
-	copy(out[2+len(rsaCiphertext):], aesCiphertext)
-	return out, nil
-}
-
-// SealedSecretInput captures the inputs needed to build one SealedSecret.
-type SealedSecretInput struct {
-	Name      string
-	Namespace string
-	// Scope controls where the sealed value can be decrypted.
-	Scope Scope
-	// Data holds the secret key/value pairs to encrypt.
-	Data map[string][]byte
-	// Type is the K8s Secret type for the embedded template (e.g. "Opaque").
-	// Defaults to "Opaque" when empty.
-	Type string
-	// Labels are added to the produced K8s Secret.
-	Labels map[string]string
-}
-
-// label returns the AAD bytes for a given input.
-func (in SealedSecretInput) label() []byte {
-	switch in.Scope {
-	case ScopeClusterWide:
-		return nil
-	case ScopeNamespaceWide:
-		return []byte(in.Namespace)
-	default:
-		return []byte(in.Namespace + "/" + in.Name)
-	}
-}
-
-// BuildSealedSecret returns a YAML manifest for a SealedSecret that the
-// sealed-secrets controller in the target cluster can decrypt with its
-// matching private key.
-func BuildSealedSecret(pub *rsa.PublicKey, in SealedSecretInput) (string, error) {
+// BuildSealedSecret calls the kubeseal CLI to produce a SealedSecret YAML
+// manifest from certPEM (the sealed-secrets controller's public certificate)
+// and the provided input.
+//
+// kubeseal must be on PATH.  The cert is written to a temporary file that is
+// removed before the function returns.
+func BuildSealedSecret(certPEM []byte, in SealedSecretInput) (string, error) {
 	if in.Name == "" {
 		return "", errors.New("seal: name is required")
 	}
@@ -185,50 +114,79 @@ func BuildSealedSecret(pub *rsa.PublicKey, in SealedSecretInput) (string, error)
 		in.Type = "Opaque"
 	}
 
-	label := in.label()
-	encrypted := make(map[string]string, len(in.Data))
-	for k, v := range in.Data {
-		ct, err := EncryptValue(pub, v, label)
-		if err != nil {
-			return "", fmt.Errorf("seal: encrypting key %q: %w", k, err)
-		}
-		encrypted[k] = base64.StdEncoding.EncodeToString(ct)
+	// Write cert to a temp file — kubeseal reads it via --cert.
+	certFile, err := os.CreateTemp("", "suparship-seal-cert-*.pem")
+	if err != nil {
+		return "", fmt.Errorf("seal: creating cert temp file: %w", err)
+	}
+	defer os.Remove(certFile.Name())
+	if _, err := certFile.Write(certPEM); err != nil {
+		certFile.Close()
+		return "", fmt.Errorf("seal: writing cert temp file: %w", err)
+	}
+	certFile.Close()
+
+	// Build a plain K8s Secret YAML to pipe into kubeseal.
+	// kubeseal carries metadata.labels into spec.template.metadata.labels.
+	secretYAML := buildSecretYAML(in)
+
+	// kubeseal --cert <file> --scope <scope> --format yaml  < secret.yaml
+	path, err := exec.LookPath("kubeseal")
+	if err != nil {
+		return "", fmt.Errorf("seal: kubeseal not found on PATH: %w", err)
 	}
 
-	// Build YAML with deterministic key ordering.
-	var sb strings.Builder
-	sb.WriteString("apiVersion: bitnami.com/v1alpha1\n")
-	sb.WriteString("kind: SealedSecret\n")
-	sb.WriteString("metadata:\n")
-	sb.WriteString("  creationTimestamp: null\n")
-	sb.WriteString(fmt.Sprintf("  name: %s\n", in.Name))
-	sb.WriteString(fmt.Sprintf("  namespace: %s\n", in.Namespace))
-	if ann, val, ok := in.Scope.annotation(); ok {
-		sb.WriteString("  annotations:\n")
-		sb.WriteString(fmt.Sprintf("    %s: %q\n", ann, val))
-	}
-	sb.WriteString("spec:\n")
-	sb.WriteString("  encryptedData:\n")
-	for _, k := range sortedStringKeys(encrypted) {
-		sb.WriteString(fmt.Sprintf("    %s: %s\n", k, encrypted[k]))
-	}
-	sb.WriteString("  template:\n")
-	sb.WriteString("    metadata:\n")
-	sb.WriteString("      creationTimestamp: null\n")
-	sb.WriteString(fmt.Sprintf("      name: %s\n", in.Name))
-	sb.WriteString(fmt.Sprintf("      namespace: %s\n", in.Namespace))
-	if len(in.Labels) > 0 {
-		sb.WriteString("      labels:\n")
-		for _, k := range sortedStringKeys(in.Labels) {
-			sb.WriteString(fmt.Sprintf("        %s: %q\n", k, in.Labels[k]))
-		}
-	}
-	sb.WriteString(fmt.Sprintf("    type: %s\n", in.Type))
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(path, //nolint:gosec // controlled args, no user input
+		"--cert", certFile.Name(),
+		"--scope", in.Scope.flag(),
+		"--format", "yaml",
+	)
+	cmd.Stdin = strings.NewReader(secretYAML)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
-	return sb.String(), nil
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("seal: kubeseal failed: %w\n%s", err, stderr.String())
+	}
+	return stdout.String(), nil
 }
 
-func sortedStringKeys(m map[string]string) []string {
+// buildSecretYAML renders a minimal K8s Secret YAML from the input.
+// Data values are base64-encoded per the K8s Secret spec.
+func buildSecretYAML(in SealedSecretInput) string {
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\n")
+	sb.WriteString("kind: Secret\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: %s\n", in.Name))
+	sb.WriteString(fmt.Sprintf("  namespace: %s\n", in.Namespace))
+	if len(in.Labels) > 0 {
+		sb.WriteString("  labels:\n")
+		for _, k := range sortedKeys(in.Labels) {
+			sb.WriteString(fmt.Sprintf("    %s: %s\n", k, in.Labels[k]))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("type: %s\n", in.Type))
+	if len(in.Data) > 0 {
+		sb.WriteString("stringData:\n")
+		for _, k := range sortedDataKeys(in.Data) {
+			sb.WriteString(fmt.Sprintf("  %s: %s\n", k, in.Data[k]))
+		}
+	}
+	return sb.String()
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedDataKeys(m map[string][]byte) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
