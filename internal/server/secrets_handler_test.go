@@ -2,14 +2,25 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/session"
 )
@@ -470,5 +481,168 @@ func TestResolvedSecrets(t *testing.T) {
 	}
 	if byKey["ENV_ONLY"].Source != "app-environment" {
 		t.Errorf("ENV_ONLY source = %q, want app-environment", byKey["ENV_ONLY"].Source)
+	}
+}
+
+// ── Fakes for binding tests ─────────────────────────────────────────────────
+
+type stubSealPublisher struct {
+	published []gitops.SealedReadTokenPublishParams
+}
+
+func (s *stubSealPublisher) PublishSealedReadToken(_ context.Context, params gitops.SealedReadTokenPublishParams) error {
+	s.published = append(s.published, params)
+	return nil
+}
+
+func (s *stubSealPublisher) DeleteSealedReadToken(_ context.Context, _ string) error {
+	return nil
+}
+
+type errClusterStore struct {
+	clusters map[string]domain.Cluster
+}
+
+func (e *errClusterStore) GetCluster(_ context.Context, name string) (*domain.Cluster, error) {
+	c, ok := e.clusters[name]
+	if !ok {
+		return nil, fmt.Errorf("cluster %q not found", name)
+	}
+	return &c, nil
+}
+func (e *errClusterStore) ListClusters(_ context.Context) ([]domain.Cluster, error) { return nil, nil }
+func (e *errClusterStore) CreateCluster(_ context.Context, _ domain.Cluster, _ []byte) error {
+	return nil
+}
+func (e *errClusterStore) DeleteCluster(_ context.Context, _ string) error { return nil }
+
+func testCertPEM(t *testing.T) []byte {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "sealed-secrets"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func onePasswordOrg(clusterRef string) *rbac.Org {
+	org := testRBACOrg()
+	org.Environments = []rbac.OrgEnvironment{
+		{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRef: clusterRef},
+	}
+	org.SecretBackend = secrets.BackendConfig{
+		Type:        secrets.Backend1Password,
+		OnePassword: &secrets.OnePasswordConfig{},
+	}
+	return org
+}
+
+func newBindingTestMux(t *testing.T, org *rbac.Org, cs domain.ClusterStore, certPEM []byte) (*http.ServeMux, *authHandler) {
+	t.Helper()
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+		cookieSecure:  false,
+	}
+	ah.registerRoutes(mux)
+
+	appStore := newMemAppStore()
+	appStore.addApp(&domain.App{
+		Name: "backend", ProjectName: "api",
+		Spec: domain.AppSpec{DisplayName: "Backend", Template: domain.AppTemplateRef{Name: "web-service"}},
+	})
+	appStore.addEnv(&domain.AppEnvironment{
+		AppName: "backend", ProjectName: "api", EnvName: "staging",
+		EnvType: domain.AppEnvStaging, Namespace: "api-backend-staging",
+	})
+
+	certCache := seal.NewMemCertCache()
+	if certPEM != nil {
+		_ = certCache.Put(context.Background(), org.Environments[0].ClusterRef, certPEM)
+	}
+
+	orgProvider := &staticOrgProvider{org: org}
+	sh := &secretsHandler{
+		orgStore:      orgProvider,
+		appStore:      appStore,
+		backend:       secrets.NewMemBackend(),
+		upperWriter:   secrets.NewMemUpperLevelWriter(secrets.NewMemBackend()),
+		auditor:       secrets.NewAuditor(slog.Default()),
+		logger:        slog.Default(),
+		clusterStore:  cs,
+		certCache:     certCache,
+		sealPublisher: &stubSealPublisher{},
+	}
+
+	rh := &rbacHandler{
+		auth:           ah,
+		orgStore:       orgProvider,
+		secretsHandler: sh,
+	}
+	rh.registerRoutes(mux)
+	return mux, ah
+}
+
+// ── Binding cluster-resolution tests ────────────────────────────────────────
+
+func TestAddBinding_ClusterNotFound(t *testing.T) {
+	cs := &errClusterStore{clusters: map[string]domain.Cluster{}}
+	org := onePasswordOrg("nonexistent-cluster")
+	certPEM := testCertPEM(t)
+	mux, ah := newBindingTestMux(t, org, cs, certPEM)
+
+	body, _ := json.Marshal(AddBindingRequest{
+		Env:          "staging",
+		VaultID:      "vault-123",
+		ConnectToken: "fake-token-value",
+	})
+	req := httptest.NewRequest("POST", "/api/v1/org/secret-backend/bindings", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(sessionCookieFor(ah, "alice", "org_admin"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for missing cluster, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp errorResponse
+	mustDecode(t, rec.Body.Bytes(), &resp)
+	if resp.Error == "" {
+		t.Fatal("expected non-empty error message")
+	}
+}
+
+func TestAddBinding_ClusterEmptyAPIServer(t *testing.T) {
+	cs := &errClusterStore{clusters: map[string]domain.Cluster{
+		"staging-cluster": {Name: "staging-cluster", APIServer: ""},
+	}}
+	org := onePasswordOrg("staging-cluster")
+	certPEM := testCertPEM(t)
+	mux, ah := newBindingTestMux(t, org, cs, certPEM)
+
+	body, _ := json.Marshal(AddBindingRequest{
+		Env:          "staging",
+		VaultID:      "vault-123",
+		ConnectToken: "fake-token-value",
+	})
+	req := httptest.NewRequest("POST", "/api/v1/org/secret-backend/bindings", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(sessionCookieFor(ah, "alice", "org_admin"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for empty apiServer, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

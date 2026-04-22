@@ -362,9 +362,22 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 
 		var destServer string
 		if h.clusterStore != nil {
-			if cluster, cerr := h.clusterStore.GetCluster(ctx, clusterName); cerr == nil {
-				destServer = cluster.APIServer
+			cluster, cerr := h.clusterStore.GetCluster(ctx, clusterName)
+			if cerr != nil {
+				h.logger.Error("cluster not found in registry", "cluster", clusterName, "err", cerr)
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+					Error: fmt.Sprintf("cluster %q not found in registry; check Settings > Clusters", clusterName),
+				})
+				return
 			}
+			if cluster.APIServer == "" {
+				h.logger.Error("cluster has no apiServer configured", "cluster", clusterName)
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+					Error: fmt.Sprintf("cluster %q has no apiServer configured; update it in Settings > Clusters", clusterName),
+				})
+				return
+			}
+			destServer = cluster.APIServer
 		}
 
 		publishErr := h.sealPublisher.PublishSealedReadToken(ctx, gitops.SealedReadTokenPublishParams{

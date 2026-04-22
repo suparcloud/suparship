@@ -76,7 +76,7 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 
 	destServer := params.ArgoCDDestination
 	if destServer == "" {
-		destServer = "https://kubernetes.default.svc"
+		return fmt.Errorf("PublishSealedReadToken: ArgoCDDestination is required (resolved to empty for env %q)", params.Env)
 	}
 
 	return p.withClonedRepo(ctx, func(repoDir string) error {

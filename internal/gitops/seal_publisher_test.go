@@ -68,10 +68,11 @@ func TestPublishSealedReadToken_ValidatesInputs(t *testing.T) {
 		name   string
 		params SealedReadTokenPublishParams
 	}{
-		{"missing env", SealedReadTokenPublishParams{VaultID: "v1", Cert: pub, Token: []byte("x")}},
-		{"missing vault", SealedReadTokenPublishParams{Env: "prod", Cert: pub, Token: []byte("x")}},
-		{"missing cert", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Token: []byte("x")}},
-		{"empty token", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub}},
+		{"missing env", SealedReadTokenPublishParams{VaultID: "v1", Cert: pub, Token: []byte("x"), ArgoCDDestination: "https://k8s:6443"}},
+		{"missing vault", SealedReadTokenPublishParams{Env: "prod", Cert: pub, Token: []byte("x"), ArgoCDDestination: "https://k8s:6443"}},
+		{"missing cert", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Token: []byte("x"), ArgoCDDestination: "https://k8s:6443"}},
+		{"empty token", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, ArgoCDDestination: "https://k8s:6443"}},
+		{"empty destination", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, Token: []byte("x")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

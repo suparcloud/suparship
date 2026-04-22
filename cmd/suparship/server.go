@@ -506,7 +506,14 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 
 		// Resolve the cluster API server from the cluster store.
 		if orgEnv.ClusterRef != "" && a.clusterStore != nil {
-			if cluster, err := a.clusterStore.GetCluster(ctx, orgEnv.ClusterRef); err == nil && cluster.APIServer != "" {
+			cluster, err := a.clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
+			if err != nil {
+				slog.Warn("resolveEnvs: cluster not found in registry, falling back to in-cluster default",
+					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef, "err", err)
+			} else if cluster.APIServer == "" {
+				slog.Warn("resolveEnvs: cluster has empty apiServer, falling back to in-cluster default",
+					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
+			} else {
 				res.clusterServer = cluster.APIServer
 			}
 		}
@@ -707,7 +714,14 @@ func publishInitialEnvInfra(
 	for _, orgEnv := range org.Environments {
 		clusterServer := "https://kubernetes.default.svc"
 		if orgEnv.ClusterRef != "" && clusterStore != nil {
-			if cluster, err := clusterStore.GetCluster(ctx, orgEnv.ClusterRef); err == nil && cluster.APIServer != "" {
+			cluster, err := clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
+			if err != nil {
+				logger.Warn("initial env infra: cluster not found in registry, falling back to in-cluster default",
+					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef, "err", err)
+			} else if cluster.APIServer == "" {
+				logger.Warn("initial env infra: cluster has empty apiServer, falling back to in-cluster default",
+					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
+			} else {
 				clusterServer = cluster.APIServer
 			}
 		}
