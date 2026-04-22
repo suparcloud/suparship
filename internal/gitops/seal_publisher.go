@@ -180,7 +180,7 @@ metadata:
     suparship.io/env: %s
     suparship.io/cluster: %s
 spec:
-  project: default
+  project: suparship-system
   source:
     repoURL: %s
     targetRevision: %s

@@ -7,6 +7,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/kube"
 )
 
 var adminCmd = &cobra.Command{
@@ -104,6 +105,21 @@ func runAdminBootstrap(cmd *cobra.Command, _ []string) error {
 
 	printCredentials(cmd, "Admin credentials created", creds.Username, plaintext)
 	fmt.Fprintln(cmd.OutOrStdout())
+
+	// Ensure the suparship-system ArgoCD AppProject exists so the root app
+	// can sync immediately after bootstrap. Non-fatal: if ArgoCD is not
+	// installed the warning is printed but bootstrap still succeeds.
+	dynClient, dynErr := k8s.NewDynamicClient(kubeconfig, kubecontext)
+	if dynErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  Warning: could not build dynamic client — skipping ArgoCD AppProject check (%v)\n", dynErr)
+	} else {
+		if err := kube.EnsureArgoCDSystemProject(cmd.Context(), dynClient, "argocd"); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  Warning: could not ensure suparship-system AppProject: %v\n", err)
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "  ArgoCD suparship-system project ready")
+		}
+	}
+
 	fmt.Fprintln(cmd.OutOrStdout(), "  Next steps:")
 	fmt.Fprintln(cmd.OutOrStdout(), "    1. Save the password above — it will not be shown again")
 	fmt.Fprintln(cmd.OutOrStdout(), "    2. Start the server: suparship server")

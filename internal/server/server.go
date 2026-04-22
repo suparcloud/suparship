@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/auth"
@@ -260,6 +261,9 @@ type Config struct {
 	// KubeClient is the Kubernetes clientset for prerequisite detection.
 	// Nil in fake mode (placeholder data is returned instead).
 	KubeClient kubernetes.Interface
+	// DynClient is the dynamic Kubernetes client for CRD interactions (ArgoCD, Kargo).
+	// Used for the ArgoCD system-project prerequisite check. Nil disables that check.
+	DynClient dynamic.Interface
 	// GitOpsConfigStore reads/writes the GitOps repo ConfigMap. Nil disables
 	// the /api/v1/gitops/* endpoints.
 	GitOpsConfigStore *gitops.ConfigStore
@@ -426,7 +430,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /api/v1/onboarding/status", oh.handleStatus)
 
 	if cfg.KubeClient != nil {
-		ph := &prerequisitesHandler{client: cfg.KubeClient}
+		ph := &prerequisitesHandler{client: cfg.KubeClient, dynClient: cfg.DynClient}
 		ph.registerRoutes(mux)
 		cfg.Logger.Info("prerequisites detection endpoint enabled")
 	} else {

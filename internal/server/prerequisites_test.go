@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,8 +11,43 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
+
+// prereqAppProjectGVR mirrors the GVR used by EnsureArgoCDSystemProject.
+var prereqAppProjectGVR = schema.GroupVersionResource{
+	Group:    "argoproj.io",
+	Version:  "v1alpha1",
+	Resource: "appprojects",
+}
+
+func newTestDynClient() *dynfake.FakeDynamicClient {
+	scheme := runtime.NewScheme()
+	return dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{
+			prereqAppProjectGVR: "AppProjectList",
+		},
+	)
+}
+
+// seedSystemProject creates the suparship-system AppProject in the fake client
+// so the prerequisite check reports it as installed.
+func seedSystemProject(t *testing.T, dyn *dynfake.FakeDynamicClient) {
+	t.Helper()
+	obj := &unstructured.Unstructured{}
+	obj.SetAPIVersion("argoproj.io/v1alpha1")
+	obj.SetKind("AppProject")
+	obj.SetName("suparship-system")
+	obj.SetNamespace("argocd")
+	if _, err := dyn.Resource(prereqAppProjectGVR).Namespace("argocd").
+		Create(context.Background(), obj, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed system project: %v", err)
+	}
+}
 
 func TestPrerequisitesHandler_AllPresent(t *testing.T) {
 	client := fake.NewSimpleClientset(
@@ -48,7 +84,9 @@ func TestPrerequisitesHandler_AllPresent(t *testing.T) {
 	)
 
 	mux := http.NewServeMux()
-	h := &prerequisitesHandler{client: client}
+	dyn := newTestDynClient()
+	seedSystemProject(t, dyn)
+	h := &prerequisitesHandler{client: client, dynClient: dyn}
 	h.registerRoutes(mux)
 
 	req := httptest.NewRequest("GET", "/api/v1/prerequisites", nil)
@@ -67,8 +105,8 @@ func TestPrerequisitesHandler_AllPresent(t *testing.T) {
 	if !resp.Ready {
 		t.Error("expected Ready=true when all prerequisites are present")
 	}
-	if len(resp.Prerequisites) != 2 {
-		t.Fatalf("expected 2 prerequisites, got %d", len(resp.Prerequisites))
+	if len(resp.Prerequisites) != 3 {
+		t.Fatalf("expected 3 prerequisites, got %d", len(resp.Prerequisites))
 	}
 
 	ss := resp.Prerequisites[0]
@@ -91,6 +129,14 @@ func TestPrerequisitesHandler_AllPresent(t *testing.T) {
 	}
 	if eso.Namespace != "external-secrets" {
 		t.Errorf("external-secrets namespace: got %q, want external-secrets", eso.Namespace)
+	}
+
+	argoCDProj := resp.Prerequisites[2]
+	if argoCDProj.Name != "argocd-system-project" {
+		t.Errorf("third prerequisite name: got %q, want argocd-system-project", argoCDProj.Name)
+	}
+	if !argoCDProj.Installed {
+		t.Errorf("argocd-system-project should be installed")
 	}
 }
 
@@ -191,8 +237,8 @@ func TestPlaceholderPrerequisitesHandler(t *testing.T) {
 	if resp.Ready {
 		t.Error("placeholder should report not ready")
 	}
-	if len(resp.Prerequisites) != 2 {
-		t.Fatalf("expected 2 prerequisites, got %d", len(resp.Prerequisites))
+	if len(resp.Prerequisites) != 3 {
+		t.Fatalf("expected 3 prerequisites, got %d", len(resp.Prerequisites))
 	}
 	for _, p := range resp.Prerequisites {
 		if p.Installed {

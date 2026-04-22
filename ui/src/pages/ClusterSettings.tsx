@@ -40,6 +40,8 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
   const [apiServer, setApiServer] = useState("");
   const [kubeconfigB64, setKubeconfigB64] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
+  const [esoNamespace, setEsoNamespace] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,6 +74,7 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
         displayName: displayName || undefined,
         apiServer,
         kubeconfig: kubeconfigB64,
+        esoNamespace: esoNamespace.trim() || undefined,
       });
       onRegistered();
       onClose();
@@ -156,6 +159,51 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
                 </p>
               )}
             </div>
+          </div>
+
+          {/* Advanced options */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700"
+            >
+              <svg
+                className={`h-4 w-4 transition-transform ${showAdvanced ? "rotate-90" : ""}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+              Advanced options
+            </button>
+
+            {showAdvanced && (
+              <div className="mt-3 space-y-4 rounded-md border border-gray-200 bg-gray-50 p-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">
+                    External Secrets namespace
+                  </label>
+                  <input
+                    type="text"
+                    value={esoNamespace}
+                    onChange={(e) => setEsoNamespace(e.target.value)}
+                    placeholder="external-secrets"
+                    className="mt-1 block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">
+                    Namespace where the External Secrets Operator is installed on
+                    this cluster. Defaults to{" "}
+                    <code className="font-mono">external-secrets</code> when left
+                    blank. Set to{" "}
+                    <code className="font-mono">external-secrets-system</code> if
+                    that is where ESO runs on this cluster.
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
 
           {error && (
@@ -301,8 +349,16 @@ export function ClusterSettings() {
                     </p>
                     <p className="text-xs text-gray-400">{c.name}</p>
                   </td>
-                  <td className="px-6 py-4 font-mono text-xs text-gray-600">
-                    {c.apiServer}
+                  <td className="px-6 py-4">
+                    <p className="font-mono text-xs text-gray-600">
+                      {c.apiServer}
+                    </p>
+                    {c.esoNamespace && (
+                      <p className="mt-0.5 text-xs text-gray-400">
+                        ESO:{" "}
+                        <span className="font-mono">{c.esoNamespace}</span>
+                      </p>
+                    )}
                   </td>
                   <td className="px-6 py-4">
                     <StatusBadge status={c.status} />

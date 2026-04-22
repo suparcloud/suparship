@@ -13,10 +13,12 @@ import (
 	"fmt"
 	"log/slog"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/registry"
 )
 
@@ -186,6 +188,27 @@ func reconcileRegistry(ctx context.Context, client kubernetes.Interface, logger 
 	if cfg.URL == "" {
 		result.Warnings = append(result.Warnings, "Registry is enabled but URL is empty")
 	}
+}
+
+// ReconcileArgoCD ensures that suparship's required ArgoCD resources exist.
+// Currently this covers the suparship-system AppProject which must be present
+// before the root ArgoCD "App of Apps" can sync.
+//
+// The function is non-fatal: if ArgoCD is not installed on the cluster or the
+// dynamic client is nil, a warning is logged and the server continues normally.
+// Only unexpected Kubernetes API errors are returned.
+func ReconcileArgoCD(ctx context.Context, dyn dynamic.Interface, logger *slog.Logger) {
+	if dyn == nil {
+		return
+	}
+	if err := kube.EnsureArgoCDSystemProject(ctx, dyn, "argocd"); err != nil {
+		logger.Warn("bootstrap: failed to ensure suparship-system AppProject",
+			"error", err,
+			"hint", "check that suparship has permission to create AppProject resources in the argocd namespace",
+		)
+		return
+	}
+	logger.Info("bootstrap: suparship-system AppProject ready")
 }
 
 // FormatSummary returns a human-readable summary for log output.

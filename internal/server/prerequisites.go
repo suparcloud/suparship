@@ -7,7 +7,10 @@ import (
 	"net/http"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/suparcloud/suparship/internal/kube"
 )
 
 // PrerequisiteStatus represents the state of a required cluster component.
@@ -26,8 +29,9 @@ type PrerequisitesResponse struct {
 
 // prerequisitesHandler checks for required cluster components.
 type prerequisitesHandler struct {
-	client kubernetes.Interface
-	logger *slog.Logger
+	client    kubernetes.Interface
+	dynClient dynamic.Interface
+	logger    *slog.Logger
 }
 
 func (h *prerequisitesHandler) registerRoutes(mux *http.ServeMux) {
@@ -40,6 +44,7 @@ func (h *prerequisitesHandler) handleGetPrerequisites(w http.ResponseWriter, r *
 	results := []PrerequisiteStatus{
 		h.checkSealedSecrets(ctx),
 		h.checkESO(ctx),
+		h.checkArgoCDSystemProject(ctx),
 	}
 
 	allReady := true
@@ -130,6 +135,32 @@ func (h *prerequisitesHandler) checkESO(ctx context.Context) PrerequisiteStatus 
 	return status
 }
 
+func (h *prerequisitesHandler) checkArgoCDSystemProject(ctx context.Context) PrerequisiteStatus {
+	status := PrerequisiteStatus{
+		Name:      "argocd-system-project",
+		Namespace: "argocd",
+	}
+
+	if h.dynClient == nil {
+		status.Message = "dynamic client not available"
+		return status
+	}
+
+	exists, err := kube.ArgoCDSystemProjectExists(ctx, h.dynClient, "argocd")
+	if err != nil {
+		status.Message = fmt.Sprintf("error checking suparship-system AppProject: %v", err)
+		return status
+	}
+	if exists {
+		status.Installed = true
+		status.Message = "suparship-system AppProject found in argocd namespace"
+		return status
+	}
+
+	status.Message = "suparship-system AppProject not found — run 'suparship admin bootstrap' or upgrade the Helm release"
+	return status
+}
+
 // placeholderPrerequisitesHandler returns a static response when no cluster client is available.
 type placeholderPrerequisitesHandler struct{}
 
@@ -143,6 +174,7 @@ func (h *placeholderPrerequisitesHandler) handleGetPrerequisites(w http.Response
 		Prerequisites: []PrerequisiteStatus{
 			{Name: "sealed-secrets", Message: "cluster client not configured"},
 			{Name: "external-secrets", Message: "cluster client not configured"},
+			{Name: "argocd-system-project", Message: "cluster client not configured"},
 		},
 	})
 }
@@ -158,7 +190,7 @@ metadata:
     app.kubernetes.io/managed-by: suparship
     suparship.io/component: %s
 spec:
-  project: default
+  project: suparship-system
   source:
     repoURL: %s
     chart: %s

@@ -38,6 +38,12 @@ const (
 	defaultDestination    = "https://kubernetes.default.svc"
 	defaultTargetRevision = "HEAD"
 
+	// suparshipSystemProject is the ArgoCD AppProject used by all suparship
+	// infrastructure Applications (root app, secrets-<cluster>, etc.).
+	// It is created by the Helm chart with broad cluster/namespace permissions.
+	// Workload Applications use per-project AppProjects with narrower scope.
+	suparshipSystemProject = "suparship-system"
+
 	// labelApp, labelProject, labelEnv are well-known labels attached to every
 	// generated Application so that ArgoCD list views and external tooling can
 	// filter by suparship identity without parsing the object name.

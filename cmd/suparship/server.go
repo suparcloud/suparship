@@ -248,6 +248,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		bootstrapResult := bootstrap.Reconcile(cmd.Context(), client, logger)
 		logger.Info("bootstrap complete", "summary", bootstrap.FormatSummary(bootstrapResult))
 
+		// Ensure the suparship-system ArgoCD AppProject exists. This is a
+		// self-healing step: if the Helm chart was not yet upgraded (or ArgoCD
+		// was installed after suparship), this creates the project automatically
+		// so the root "App of Apps" can sync without manual intervention.
+		// Non-fatal: if ArgoCD is not installed or permissions are insufficient,
+		// a warning is logged and the server continues.
+		bootstrap.ReconcileArgoCD(cmd.Context(), dynClient, logger)
+
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
 		// suparship.io/type=template, namespace suparship-system).
@@ -434,6 +442,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		CookieSecure:            cookieSecure,
 		Logger:                  logger,
 		KubeClient:              kubeClient,
+		DynClient:               dynClient,
 		GitOpsConfigStore:       gitopsConfigStore,
 		GitOpsActivator:         gitOpsActivator,
 		SealedTokenPublisher:    sealPublisherHolder,

@@ -1,0 +1,46 @@
+{{- if .Values.argocd.createSystemProject }}
+# suparship-system ArgoCD AppProject
+#
+# This privileged project is used by all suparship infrastructure Applications:
+#   - The root "App of Apps" (suparship-apps)
+#   - Per-cluster secrets Applications (secrets-<cluster>)
+#   - Any other suparship-managed infra sync jobs
+#
+# It intentionally allows access to all registered clusters, all namespaces,
+# and all cluster-scoped resource types so that suparship can bootstrap
+# infrastructure across multiple workload clusters without per-cluster
+# AppProject maintenance.
+#
+# Workload applications (web-service, worker, etc.) use per-project AppProjects
+# with narrower destination and resource permissions.
+#
+# sync-wave: -2 ensures this project exists before any Application or ApplicationSet
+# that references it, even before the gitops-generated AppProjects at wave -1.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: suparship-system
+  namespace: {{ default "argocd" .Values.argocd.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+    helm.sh/chart: {{ include "suparship.chart" . }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  labels:
+    app.kubernetes.io/name: suparship-system
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    suparship.io/managed-by: suparship
+    suparship.io/role: system-project
+spec:
+  description: Privileged ArgoCD project for suparship infrastructure resources
+  sourceRepos:
+    - "*"
+  destinations:
+    - server: "*"
+      namespace: "*"
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+{{- end }}

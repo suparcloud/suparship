@@ -55,6 +55,20 @@ tolerations: []
 affinity: {}
 
 # ---------------------------------------------------------------------------
+# ArgoCD integration
+# ---------------------------------------------------------------------------
+
+# -- ArgoCD settings
+argocd:
+  # -- Namespace where ArgoCD is installed on the tooling cluster.
+  # The suparship-system AppProject is created in this namespace.
+  namespace: argocd
+  # -- Whether to create the suparship-system ArgoCD AppProject during Helm
+  # install/upgrade. Set to false if you manage AppProjects externally or if
+  # suparship is installed in a cluster where ArgoCD is not present.
+  createSystemProject: true
+
+# ---------------------------------------------------------------------------
 # Optional infrastructure dependencies (subcharts)
 # Set to true to install as part of this release. Production users should
 # install these independently and set to false.

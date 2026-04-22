@@ -4,6 +4,9 @@ export interface Cluster {
   name: string;
   displayName?: string;
   apiServer: string;
+  /** Namespace where External Secrets Operator is installed on this cluster.
+   *  Defaults to "external-secrets" when omitted. */
+  esoNamespace?: string;
   status?: string;
 }
 
@@ -26,6 +29,9 @@ export interface RegisterClusterRequest {
   apiServer: string;
   /** Base64-encoded kubeconfig bytes */
   kubeconfig: string;
+  /** Namespace where External Secrets Operator is installed on this cluster.
+   *  Leave blank to use the default ("external-secrets"). */
+  esoNamespace?: string;
 }
 
 export async function registerCluster(

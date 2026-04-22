@@ -54,6 +54,7 @@ func TestBuildSecretStoreArgoApp(t *testing.T) {
 		"suparship.io/env: staging",
 		"suparship.io/cluster: staging-aks-02-scus",
 		"namespace: argocd",
+		"project: suparship-system",
 		"path: gitops-output/_secret-stores/staging",
 		"server: https://10.0.0.1:6443",
 		"namespace: external-secrets-system",
