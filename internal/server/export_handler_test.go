@@ -68,10 +68,7 @@ func newExportMux(t *testing.T) (*http.ServeMux, *authHandler) {
 		SecretBackend: secrets.BackendConfig{
 			Type: secrets.Backend1Password,
 			OnePassword: &secrets.OnePasswordConfig{
-				Mode:           secrets.OnePasswordModeConnect,
-				ConnectHost:    "https://op.internal:8443",
-				ExistingSecret: "op-token",
-				Vaults:         map[string]string{"staging": "v-1", "prod": "v-2"},
+				GroupName: "Suparship",
 			},
 		},
 	}
@@ -130,14 +127,14 @@ func TestExportHandler_JSON(t *testing.T) {
 	if len(vals.Clusters) != 1 {
 		t.Errorf("clusters = %d, want 1", len(vals.Clusters))
 	}
-	if vals.Secrets.Backend != "1password" {
-		t.Errorf("secrets backend = %q, want 1password", vals.Secrets.Backend)
+	if vals.Secrets.Backend != "onepassword" {
+		t.Errorf("secrets backend = %q, want onepassword", vals.Secrets.Backend)
 	}
 	if vals.Secrets.OnePassword == nil {
 		t.Fatal("expected onePassword config")
 	}
-	if vals.Secrets.OnePassword.Mode != "connect" {
-		t.Errorf("1password mode = %q, want connect", vals.Secrets.OnePassword.Mode)
+	if vals.Secrets.OnePassword.GroupName != "Suparship" {
+		t.Errorf("1password groupName = %q, want Suparship", vals.Secrets.OnePassword.GroupName)
 	}
 }
 
@@ -164,8 +161,8 @@ func TestExportHandler_YAML(t *testing.T) {
 		"org:", "name: testorg",
 		"environments:", "name: staging", "name: prod",
 		"clusters:", "name: in-cluster",
-		"secrets:", "backend: 1password",
-		"onePassword:", "mode: connect",
+		"secrets:", "backend: onepassword",
+		"onePassword:", "groupName: Suparship",
 	}
 	for _, c := range checks {
 		if !strings.Contains(body, c) {
@@ -232,12 +229,9 @@ func TestToYAML_FullConfig(t *testing.T) {
 			GitHub:         &helmGitHub{AppID: "12345"},
 		},
 		Secrets: helmSecrets{
-			Backend: "1password",
+			Backend: "onepassword",
 			OnePassword: &helmOnePassword{
-				Mode:           "connect",
-				ConnectHost:    "https://op.internal:8443",
-				ExistingSecret: "op-token",
-				Vaults:         map[string]string{"staging": "vault-1", "prod": "vault-2"},
+				GroupName: "suparship-secrets",
 			},
 		},
 		Registry: &helmRegistry{
@@ -262,8 +256,8 @@ func TestToYAML_FullConfig(t *testing.T) {
 		"environments:", "name: staging", "name: prod",
 		"clusters:", "inCluster: true",
 		"gitops:", "provider: github",
-		"secrets:", "backend: 1password",
-		"onePassword:", "mode: connect",
+		"secrets:", "backend: onepassword",
+		"onePassword:", "groupName: suparship-secrets",
 		"registry:", "enabled: true",
 		"templates:", "builtIn:", "external:",
 	}
@@ -276,10 +270,8 @@ func TestToYAML_FullConfig(t *testing.T) {
 
 func TestSecretBackendTypes_MatchHelmValues(t *testing.T) {
 	helmTypes := map[secrets.BackendType]bool{
-		"k8s":       true,
-		"1password": true,
-		"vault":     true,
-		"aws-sm":    true,
+		"k8s":         true,
+		"onepassword": true,
 	}
 	for bt := range secrets.ValidBackendTypes {
 		if !helmTypes[bt] {

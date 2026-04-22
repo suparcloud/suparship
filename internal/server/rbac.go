@@ -161,6 +161,14 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// Org-level secrets backend config — org_admin only.
 		mux.HandleFunc("GET /api/v1/org/secrets-backend", rh.auth.requireAuth(sh.handleGetSecretsBackend))
 		mux.HandleFunc("PUT /api/v1/org/secrets-backend", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePutSecretsBackend)))
+		// Full backend config (new schema).
+		mux.HandleFunc("GET /api/v1/org/secret-backend", rh.auth.requireAuth(sh.handleGetSecretsBackendFull))
+		mux.HandleFunc("PUT /api/v1/org/secret-backend", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePutSecretsBackendFull)))
+		// SA token, vault listing, and binding endpoints.
+		mux.HandleFunc("POST /api/v1/org/secret-backend/sa-token", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePostSAToken)))
+		mux.HandleFunc("GET /api/v1/org/secret-backend/vaults", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListVaults)))
+		mux.HandleFunc("POST /api/v1/org/secret-backend/bindings", requireOrgAdmin(rh.requireOrgAdmin(sh.handleAddBinding)))
+		mux.HandleFunc("DELETE /api/v1/org/secret-backend/bindings/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRemoveBinding)))
 		// Org-level secrets CRUD — org_admin writes, any-auth reads.
 		mux.HandleFunc("GET /api/v1/org/secrets", rh.auth.requireAuth(sh.handleListOrgSecrets))
 		mux.HandleFunc("POST /api/v1/org/secrets", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertOrgSecrets)))
@@ -183,6 +191,8 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets/{key}", devProject(sh.handleDeleteSecret))
 		// Resolved secrets — merged view across all 5 levels.
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets/resolved", viewProject(sh.handleGetResolvedSecrets))
+		// Force-sync: bumps ExternalSecret annotation to trigger ESO re-pull.
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/sync", devProject(sh.handleSecretSync))
 	}
 
 	if rh.appHandler != nil {

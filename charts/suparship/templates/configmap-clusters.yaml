@@ -1,4 +1,5 @@
 {{- range .Values.clusters }}
+{{- if not (lookup "v1" "ConfigMap" (include "suparship.namespace" $) (printf "suparship-cluster-%s" .name)) }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -24,4 +25,5 @@ data:
       "kubeconfigSecretRef": {{ .existingSecret | quote }}
       {{- end }}
     }
+{{- end }}
 {{- end }}

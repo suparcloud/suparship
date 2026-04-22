@@ -39,6 +39,7 @@ ESO_RELEASE="external-secrets"
 SYSTEM_NAMESPACE="suparship-system"
 ESO_SA_NAME="suparship-eso-reader"
 HELM_TIMEOUT="180s"
+PROFILE="${SUPARSHIP_PROFILE:-demo}"
 
 # ── Repo root ──────────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -173,7 +174,7 @@ echo ""
 # Helm --wait ensures the controller pods are running but the CRDs may still
 # be in the process of being registered with the API server.  Without this
 # wait the subsequent kubectl apply fails with "no matches for kind
-# ClusterSecretStore in version external-secrets.io/v1beta1".
+# ClusterSecretStore in version external-secrets.io/v1".
 info "Waiting for ClusterSecretStore CRD to be established..."
 kubectl wait crd/clustersecretstores.external-secrets.io \
   --for=condition=Established \
@@ -183,16 +184,18 @@ kubectl wait crd/clustersecretstores.external-secrets.io \
 echo ""
 
 # ── 7. Apply demo ClusterSecretStores ─────────────────────────────────────
-# The k8s store is fully configured for demo use.
-# Vault and aws-sm stores are stubs — configure spec.provider before activating.
-info "Applying ClusterSecretStores..."
-kubectl apply -f - <<EOF
-apiVersion: external-secrets.io/v1beta1
+# For the demo profile, apply the k8s ClusterSecretStore. For core/full
+# profiles, the publisher generates stores from VaultBindings — users
+# configure them via `suparship secrets backend set`.
+if [ "${PROFILE}" = "demo" ]; then
+  info "Applying ClusterSecretStore (k8s backend — demo profile)..."
+  kubectl apply -f - <<EOF
+apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: suparship-k8s-store
   labels:
-    suparship.io/managed-by: suparship
+    app.kubernetes.io/managed-by: suparship
   annotations:
     suparship.io/description: "Kubernetes Secrets backend for demo/default use. Reads Secrets from suparship-system namespace."
 spec:
@@ -203,30 +206,16 @@ spec:
         serviceAccount:
           name: ${ESO_SA_NAME}
           namespace: ${SYSTEM_NAMESPACE}
----
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: suparship-vault-store
-  labels:
-    suparship.io/managed-by: suparship
-  annotations:
-    suparship.io/description: "HashiCorp Vault backend — configure spec.provider.vault before use."
-spec:
-  provider: {}
----
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: suparship-aws-sm-store
-  labels:
-    suparship.io/managed-by: suparship
-  annotations:
-    suparship.io/description: "AWS Secrets Manager backend — configure spec.provider.aws before use."
-spec:
-  provider: {}
 EOF
-ok "ClusterSecretStores applied"
+  ok "suparship-k8s-store applied (demo)"
+else
+  info "Non-demo profile (${PROFILE}) — skipping ClusterSecretStore creation."
+  info "Configure your secret backend with:"
+  info "  suparship secrets backend set --type=1password --mode=connect --connect-host=<url> --isolation=hard"
+  info "  suparship secrets backend binding add --env=prod --vault=<uuid> --auth-secret=op-prod-token"
+  info "  suparship secrets token import --env=prod --from-file=token.txt"
+  ok "ESO installed — configure backend via CLI or UI"
+fi
 echo ""
 
 # ── Done ───────────────────────────────────────────────────────────────────
@@ -234,14 +223,10 @@ cat <<EOF
   ──────────────────────────────────────────────────────────────────
   External Secrets Operator is ready.
 
+  Profile      ${PROFILE}
   Namespace    ${ESO_NAMESPACE}
   App version  ${ESO_APP_VERSION}
   Chart        ${ESO_REPO_ALIAS}/${ESO_CHART_NAME}:${ESO_CHART_VERSION}
-
-  ClusterSecretStores:
-    suparship-k8s-store    — demo backend (reads from ${SYSTEM_NAMESPACE})
-    suparship-vault-store  — stub (configure spec.provider.vault)
-    suparship-aws-sm-store — stub (configure spec.provider.aws)
 
   Verify pods:
     kubectl get pods -n ${ESO_NAMESPACE}
@@ -249,10 +234,10 @@ cat <<EOF
   Verify stores:
     kubectl get clustersecretstores
 
-  To create a demo secret for testing:
-    kubectl create secret generic my-demo-secret \\
-      --namespace ${SYSTEM_NAMESPACE} \\
-      --from-literal=MY_KEY=my-value
+  Configure your secret backend:
+    suparship secrets backend set --type=1password ...
+    suparship secrets backend binding add --env=prod ...
+    suparship secrets token import --env=prod --from-file=token.txt
 
   Docs:
     https://external-secrets.io

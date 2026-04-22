@@ -27,6 +27,10 @@ type Config struct {
 	// Environments lists which environments need imagePullSecrets
 	// from this registry. Empty means all environments.
 	Environments []string `json:"environments,omitempty" yaml:"environments,omitempty"`
+	// Insecure disables TLS verification for registry operations (e.g.
+	// Kargo Warehouse image subscriptions). Required when using an
+	// HTTP-only registry such as a local dev registry.
+	Insecure bool `json:"insecure,omitempty" yaml:"insecure,omitempty"`
 }
 
 // Validate returns an error if the config is incomplete.

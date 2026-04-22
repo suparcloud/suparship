@@ -93,10 +93,7 @@ type helmSecrets struct {
 }
 
 type helmOnePassword struct {
-	Mode           string            `json:"mode"`
-	ConnectHost    string            `json:"connectHost,omitempty"`
-	ExistingSecret string            `json:"existingSecret,omitempty"`
-	Vaults         map[string]string `json:"vaults,omitempty"`
+	GroupName string `json:"groupName,omitempty"`
 }
 
 type helmRegistry struct {
@@ -178,10 +175,7 @@ func (h *exportHandler) collectOrg(ctx context.Context, vals *helmValues) {
 		vals.Secrets.Backend = string(org.SecretBackend.Type)
 		if org.SecretBackend.OnePassword != nil {
 			vals.Secrets.OnePassword = &helmOnePassword{
-				Mode:           string(org.SecretBackend.OnePassword.Mode),
-				ConnectHost:    org.SecretBackend.OnePassword.ConnectHost,
-				ExistingSecret: org.SecretBackend.OnePassword.ExistingSecret,
-				Vaults:         org.SecretBackend.OnePassword.Vaults,
+				GroupName: org.SecretBackend.OnePassword.GroupName,
 			}
 		}
 	}
@@ -387,18 +381,8 @@ func toYAML(v helmValues) string {
 	b.WriteString(fmt.Sprintf("  backend: %s\n", yamlQ(v.Secrets.Backend)))
 	if v.Secrets.OnePassword != nil {
 		b.WriteString("  onePassword:\n")
-		b.WriteString(fmt.Sprintf("    mode: %s\n", yamlQ(v.Secrets.OnePassword.Mode)))
-		if v.Secrets.OnePassword.ConnectHost != "" {
-			b.WriteString(fmt.Sprintf("    connectHost: %s\n", yamlQ(v.Secrets.OnePassword.ConnectHost)))
-		}
-		if v.Secrets.OnePassword.ExistingSecret != "" {
-			b.WriteString(fmt.Sprintf("    existingSecret: %s\n", yamlQ(v.Secrets.OnePassword.ExistingSecret)))
-		}
-		if len(v.Secrets.OnePassword.Vaults) > 0 {
-			b.WriteString("    vaults:\n")
-			for env, vault := range v.Secrets.OnePassword.Vaults {
-				b.WriteString(fmt.Sprintf("      %s: %s\n", env, yamlQ(vault)))
-			}
+		if v.Secrets.OnePassword.GroupName != "" {
+			b.WriteString(fmt.Sprintf("    groupName: %s\n", yamlQ(v.Secrets.OnePassword.GroupName)))
 		}
 	}
 

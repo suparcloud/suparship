@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/auth"
@@ -21,9 +22,9 @@ import (
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/preview"
-	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/server"
@@ -42,7 +43,13 @@ Runtime modes:
   fake       — in-memory seed data, no Kubernetes required (default for contributors)
   kubernetes — connects to a real cluster via kubeconfig
 
-Environment variables:
+Configuration model:
+  GitOps, registry, and org configuration is read from Kubernetes ConfigMaps
+  (the single source of truth). These ConfigMaps are created by the Helm chart
+  on first install or seeded from environment variables on first boot.
+  After initial creation, use the settings UI or API to modify configuration.
+
+Environment variables (process-level, always active):
   SUPARSHIP_DEV_MODE       set to "local" to enable fake mode (recommended for contributors)
   SUPARSHIP_CLUSTER_MODE   set to "fake" to enable fake mode (alternative override)
   SUPARSHIP_ADDR           listen address (default ":8080")
@@ -50,7 +57,15 @@ Environment variables:
   SUPARSHIP_CORS_ORIGINS   comma-separated allowed origins
   SUPARSHIP_TEMPLATES_DIR  path to templates directory
   SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments
-  SUPARSHIP_LOG_LEVEL      log verbosity: debug, info, warn, error (default "info")`,
+  SUPARSHIP_LOG_LEVEL      log verbosity: debug, info, warn, error (default "info")
+
+Environment variables (bootstrap-only, used to seed ConfigMaps on first boot):
+  SUPARSHIP_GITOPS_REPO_URL       seed gitops ConfigMap with this repo URL
+  SUPARSHIP_GITOPS_REPO_USER      seed gitops credential Secret with this username
+  SUPARSHIP_GITOPS_REPO_PASSWORD  seed gitops credential Secret with this password/token
+  SUPARSHIP_ARGOCD_REPO_URL       seed gitops ConfigMap with ArgoCD-specific repo URL
+  SUPARSHIP_KARGO_GIT_REPO_URL    seed gitops ConfigMap with Kargo-specific repo URL
+  SUPARSHIP_INSECURE_REGISTRY     seed registry ConfigMap with insecure flag ("true")`,
 	RunE: runServer,
 }
 
@@ -97,26 +112,28 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	cfg := config.Load()
 
 	var (
-		authenticator    auth.Authenticator
-		orgProvider      rbac.OrgStore
-		projectStore     project.Store
-		previewStore     preview.Store
-		runtimeProvider  runtime.Provider
-		logsProvider     runtime.LogsProvider
-		appStore         domain.AppStore
-		clusterStore     domain.ClusterStore
-		secretBackend    secrets.Backend
-		upperLevelSecretWriter secrets.UpperLevelWriter
-		templates        []*tpl.Template
-		readinessProbers []server.ReadinessProber
-		kargoPromoter    server.KargoPromoter
-		kargoStatusReader server.KargoStatusReader
-		kargoPipelineReader server.KargoPipelineReader
+		authenticator           auth.Authenticator
+		orgProvider             rbac.OrgStore
+		projectStore            project.Store
+		previewStore            preview.Store
+		runtimeProvider         runtime.Provider
+		logsProvider            runtime.LogsProvider
+		appStore                domain.AppStore
+		clusterStore            domain.ClusterStore
+		secretBackend           secrets.Backend
+		upperLevelSecretWriter  secrets.UpperLevelWriter
+		templates               []*tpl.Template
+		readinessProbers        []server.ReadinessProber
+		kargoPromoter           server.KargoPromoter
+		kargoStatusReader       server.KargoStatusReader
+		kargoPipelineReader     server.KargoPipelineReader
 		deploymentHistoryReader server.DeploymentHistoryReader
-		kubeClient             kubernetes.Interface
-		gitopsConfigStore      *gitops.ConfigStore
-		templateRegistryStore  *tpl.RegistryStore
-		registryStore          *registry.Store
+		kubeClient              kubernetes.Interface
+		dynClient               dynamic.Interface
+		gitopsConfigStore       *gitops.ConfigStore
+		templateRegistryStore   *tpl.RegistryStore
+		registryStore           *registry.Store
+		clusterPool             *k8s.ClusterClientPool
 	)
 
 	switch cfg.RuntimeMode {
@@ -179,7 +196,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kubeClient = client
 
 		// Build dynamic client for CRD interactions (ArgoCD, Kargo).
-		dynClient, dynErr := k8s.NewDynamicClient(kubeconfig, kubecontext)
+		var dynErr error
+		dynClient, dynErr = k8s.NewDynamicClient(kubeconfig, kubecontext)
 		if dynErr != nil {
 			logger.Warn("dynamic client unavailable — ArgoCD/Kargo features disabled", "error", dynErr)
 		} else {
@@ -227,9 +245,21 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		templateRegistryStore = tpl.NewRegistryStore(client)
 		registryStore = registry.NewStore(client)
 
+		// Build the per-cluster client pool so sealing certs can be fetched
+		// directly from each registered cluster's kubeseal controller.
+		clusterPool = k8s.NewClusterClientPool(kubeDeps.ClusterStore)
+
 		// Bootstrap: reconcile Helm-provided ConfigMaps and log what was found.
 		bootstrapResult := bootstrap.Reconcile(cmd.Context(), client, logger)
 		logger.Info("bootstrap complete", "summary", bootstrap.FormatSummary(bootstrapResult))
+
+		// Ensure the suparship-system ArgoCD AppProject exists. This is a
+		// self-healing step: if the Helm chart was not yet upgraded (or ArgoCD
+		// was installed after suparship), this creates the project automatically
+		// so the root "App of Apps" can sync without manual intervention.
+		// Non-fatal: if ArgoCD is not installed or permissions are insufficient,
+		// a warning is logged and the server continues.
+		bootstrap.ReconcileArgoCD(cmd.Context(), dynClient, logger)
 
 		// When no local templates directory is provided, attempt to load
 		// templates stored as ConfigMaps in the cluster (label
@@ -262,75 +292,185 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger.Info("templates loaded", "dir", templatesDir, "count", len(templates))
 	}
 
-	// Wire the GitOps publisher when the gitops repo URL is configured.
-	// In fake/local dev mode this is optional; in cluster mode it is expected.
+	// Wire the GitOps publisher from the ConfigMap (the single source of truth).
+	// In fake/local dev mode the ConfigStore is nil and the publisher is disabled.
 	var gitOpsPublisher server.GitOpsPublisher
-	if cfg.GitOps.RepoURL != "" {
-		pub, err := gitops.NewPublisher(gitops.PublisherConfig{
-			RepoURL:          cfg.GitOps.RepoURL,
-			RepoUser:         cfg.GitOps.RepoUser,
-			RepoPassword:     cfg.GitOps.RepoPassword,
-			ArgoCDRepoURL:    cfg.GitOps.ArgoCDRepoURL,
-			KargoGitRepoURL:  cfg.GitOps.KargoGitRepoURL,
-			SyncAutomated:    true,
-			TemplatesDir:     templatesDir,
-			InsecureRegistry: cfg.GitOps.InsecureRegistry,
-		})
-		if err != nil {
-			logger.Warn("gitops publisher disabled", "reason", err.Error())
+	sealPublisherHolder := server.NewSealPublisherHolder(nil)
+	if gitopsConfigStore != nil {
+		repoCfg, cfgErr := gitopsConfigStore.Get(cmd.Context())
+		if cfgErr == nil && repoCfg.RepoURL != "" {
+			username, password, _ := gitopsConfigStore.GetCredentials(cmd.Context(), repoCfg)
+			pubCfg := repoCfg.ToPublisherConfig()
+			pubCfg.RepoUser = username
+			pubCfg.RepoPassword = password
+			pubCfg.SyncAutomated = true
+			pubCfg.TemplatesDir = templatesDir
+
+			// InsecureRegistry is read from the registry ConfigMap (if configured).
+			if registryStore != nil {
+				if regCfg, regErr := registryStore.Get(cmd.Context()); regErr == nil {
+					pubCfg.InsecureRegistry = regCfg.Insecure
+				}
+			}
+
+			pub, err := gitops.NewPublisher(pubCfg)
+			if err != nil {
+				logger.Warn("gitops publisher disabled", "reason", err.Error())
+			} else {
+				gitOpsPublisher = &gitOpsPublisherAdapter{
+					inner:        pub,
+					orgProvider:  orgProvider,
+					clusterStore: clusterStore,
+				}
+				sealPublisherHolder.Swap(pub)
+				logger.Info("gitops publisher enabled",
+					"repo", repoCfg.RepoURL,
+					"argocd_repo", pubCfg.ArgoCDRepoURL,
+				)
+				go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+
+			// Ensure the suparship-apps root ArgoCD Application exists.
+			// This replaces the manual `kubectl apply -f config/gitops/root-app.yaml`
+			// step by deriving the manifest from the live gitops ConfigMap.
+			// Non-fatal: a warning is logged when ArgoCD is not installed or the
+			// application already exists (idempotent create-only).
+			go func() {
+				if err := kube.EnsureRootArgoApp(
+					context.Background(),
+					dynClient,
+					pubCfg.ArgoCDRepoURL,
+					pubCfg.Branch,
+					"argocd",
+				); err != nil {
+					logger.Warn("could not ensure suparship-apps root ArgoCD Application", "error", err)
+				}
+			}()
+
+			gitopsProbeURL := pubCfg.ArgoCDRepoURL
+				if gitopsProbeURL == "" {
+					gitopsProbeURL = repoCfg.RepoURL
+				}
+				readinessProbers = append(readinessProbers, server.ReadinessProber{
+					Name:  "gitops-repo",
+					Check: kube.NewGitOpsRepoReadinessProbe(gitopsProbeURL),
+				})
+			}
+		} else if cfgErr != nil && cfgErr != gitops.ErrConfigNotFound {
+			logger.Warn("could not read gitops config from ConfigMap", "error", cfgErr)
 		} else {
-			gitOpsPublisher = &gitOpsPublisherAdapter{
+			logger.Info("gitops publisher disabled — configure via settings UI or Helm values")
+		}
+	} else {
+		logger.Info("gitops publisher disabled — running in fake mode")
+	}
+
+	// Wrap the initial publisher in a holder so it can be swapped at runtime
+	// when the user saves new GitOps config through the settings UI.
+	publisherHolder := server.NewPublisherHolder(gitOpsPublisher)
+
+	// Build the activator closure: called by gitopsHandler after config is saved.
+	// It registers the repo with ArgoCD, hot-reloads the publisher, and
+	// kicks off an initial env-infra publish so ArgoCD can start discovering apps.
+	var gitOpsActivator server.GitOpsActivatorFunc
+	if cfg.RuntimeMode != config.ModeFake && kubeClient != nil {
+		gitOpsActivator = func(ctx context.Context, repoCfg *gitops.RepoConfig, username, password string) error {
+			// 1. Register the repo with ArgoCD so it can clone for syncs.
+			if regErr := gitops.RegisterArgoCDRepo(ctx, kubeClient, repoCfg, username, password); regErr != nil {
+				// Non-fatal: ArgoCD may not be installed yet, or its namespace
+				// may not exist. Log the warning and continue.
+				logger.Warn("argocd repo registration failed — ArgoCD may not be installed yet",
+					"error", regErr,
+				)
+			} else {
+				logger.Info("argocd repo registered",
+					"url", repoCfg.ArgoCDRepoURL,
+					"secret", "argocd/suparship-gitops-repo",
+				)
+			}
+
+			// 2. Ensure the root "App of Apps" Application exists so ArgoCD
+			// syncs _infra/ (ApplicationSets, AppProjects) from the gitops repo.
+			// Skipped when the dynamic client is unavailable (Application CRD
+			// requires it) or when an externally managed root app already exists.
+			if dynClient != nil {
+				rootCfg := gitops.RootAppConfig{
+					ArgoCDRepoURL: repoCfg.ArgoCDRepoURL,
+					RepoURL:       repoCfg.RepoURL,
+					Branch:        repoCfg.Branch,
+				}
+				if rootErr := gitops.EnsureRootApplication(ctx, dynClient, rootCfg); rootErr != nil {
+					logger.Warn("root application creation failed — ArgoCD CRD may not be available",
+						"error", rootErr,
+					)
+				} else {
+					logger.Info("argocd root application ensured", "name", "suparship-apps")
+				}
+			}
+
+			// 3. Rebuild the publisher from the new config.
+			pub, err := gitops.NewPublisher(gitops.PublisherConfig{
+				RepoURL:         repoCfg.RepoURL,
+				RepoUser:        username,
+				RepoPassword:    password,
+				ArgoCDRepoURL:   repoCfg.ArgoCDRepoURL,
+				KargoGitRepoURL: repoCfg.KargoGitRepoURL,
+				Branch:          repoCfg.Branch,
+				SyncAutomated:   true,
+				TemplatesDir:    templatesDir,
+			})
+			if err != nil {
+				return fmt.Errorf("rebuild gitops publisher: %w", err)
+			}
+
+			// 4. Hot-swap the live publisher so new app creates/promotes use it.
+			publisherHolder.Swap(&gitOpsPublisherAdapter{
 				inner:        pub,
 				orgProvider:  orgProvider,
 				clusterStore: clusterStore,
-			}
-			logger.Info("gitops publisher enabled",
-				"repo", cfg.GitOps.RepoURL,
-				"argocd_repo", cfg.GitOps.ArgoCDRepoURL,
-			)
-			// Register GitOps repo connectivity probe.
-			// Use ArgoCDRepoURL when set (internal cluster URL); fall back to
-			// the host-accessible RepoURL for the probe.
-			gitopsProbeURL := cfg.GitOps.ArgoCDRepoURL
-			if gitopsProbeURL == "" {
-				gitopsProbeURL = cfg.GitOps.RepoURL
-			}
-			readinessProbers = append(readinessProbers, server.ReadinessProber{
-				Name:  "gitops-repo",
-				Check: kube.NewGitOpsRepoReadinessProbe(gitopsProbeURL),
 			})
+			sealPublisherHolder.Swap(pub)
+			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
+
+			// 5. Trigger initial env-infra publish in background (idempotent).
+			// This ensures ArgoCD ApplicationSets and AppProjects are in Git
+			// even before the first app is created.
+			go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+
+			return nil
 		}
-	} else {
-		logger.Info("gitops publisher disabled — set SUPARSHIP_GITOPS_REPO_URL to enable")
 	}
 
 	srv := server.New(server.Config{
-		Addr:             addr,
-		UIDir:            uiDir,
-		CORSOrigins:      origins,
-		Authenticator:    authenticator,
-		OrgProvider:      orgProvider,
-		Templates:        templates,
-		ProjectStore:     projectStore,
-		RuntimeProvider:  runtimeProvider,
-		LogsProvider:     logsProvider,
-		PreviewStore:     previewStore,
-		AppStore:         appStore,
-		ClusterStore:     clusterStore,
-		SecretBackend:            secretBackend,
-		UpperLevelSecretWriter:   upperLevelSecretWriter,
-		GitOpsPublisher:         gitOpsPublisher,
+		Addr:                    addr,
+		UIDir:                   uiDir,
+		CORSOrigins:             origins,
+		Authenticator:           authenticator,
+		OrgProvider:             orgProvider,
+		Templates:               templates,
+		ProjectStore:            projectStore,
+		RuntimeProvider:         runtimeProvider,
+		LogsProvider:            logsProvider,
+		PreviewStore:            previewStore,
+		AppStore:                appStore,
+		ClusterStore:            clusterStore,
+		SecretBackend:           secretBackend,
+		UpperLevelSecretWriter:  upperLevelSecretWriter,
+		GitOpsPublisher:         publisherHolder,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,
 		KargoPipelineReader:     kargoPipelineReader,
 		DeploymentHistoryReader: deploymentHistoryReader,
-		ReadinessProbers: readinessProbers,
-		CookieSecure:     cookieSecure,
-		Logger:           logger,
-		KubeClient:        kubeClient,
-		GitOpsConfigStore:     gitopsConfigStore,
-		TemplateRegistryStore: templateRegistryStore,
-		RegistryStore:         registryStore,
+		ReadinessProbers:        readinessProbers,
+		CookieSecure:            cookieSecure,
+		Logger:                  logger,
+		KubeClient:              kubeClient,
+		DynClient:               dynClient,
+		ClusterPool:             clusterPool,
+		GitOpsConfigStore:       gitopsConfigStore,
+		GitOpsActivator:         gitOpsActivator,
+		SealedTokenPublisher:    sealPublisherHolder,
+		TemplateRegistryStore:   templateRegistryStore,
+		RegistryStore:           registryStore,
 	})
 
 	if err := srv.Run(cmd.Context()); err != nil {
@@ -398,7 +538,14 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 
 		// Resolve the cluster API server from the cluster store.
 		if orgEnv.ClusterRef != "" && a.clusterStore != nil {
-			if cluster, err := a.clusterStore.GetCluster(ctx, orgEnv.ClusterRef); err == nil && cluster.APIServer != "" {
+			cluster, err := a.clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
+			if err != nil {
+				slog.Warn("resolveEnvs: cluster not found in registry, falling back to in-cluster default",
+					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef, "err", err)
+			} else if cluster.APIServer == "" {
+				slog.Warn("resolveEnvs: cluster has empty apiServer, falling back to in-cluster default",
+					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
+			} else {
 				res.clusterServer = cluster.APIServer
 			}
 		}
@@ -570,4 +717,79 @@ func (a *fakeHistoryAdapter) GetAppDeploymentHistory(_ context.Context, appName,
 		})
 	}
 	return out, nil
+}
+
+// publishInitialEnvInfra writes ArgoCD ApplicationSets and AppProjects to the
+// GitOps repo for all org environments and known projects. It is called in a
+// background goroutine after the GitOps publisher is first wired (or reloaded)
+// so that ArgoCD can start discovering apps without waiting for the first
+// app creation. The operation is idempotent — safe to call multiple times.
+func publishInitialEnvInfra(
+	ctx context.Context,
+	pub *gitops.Publisher,
+	orgProvider rbac.OrgProvider,
+	clusterStore domain.ClusterStore,
+	projectStore project.Store,
+	logger *slog.Logger,
+) {
+	if orgProvider == nil {
+		return
+	}
+
+	org, err := orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		logger.Warn("initial env infra: could not load org config", "error", err)
+		return
+	}
+
+	appSetEnvs := make([]gitops.AppSetEnv, 0, len(org.Environments))
+	for _, orgEnv := range org.Environments {
+		clusterServer := "https://kubernetes.default.svc"
+		if orgEnv.ClusterRef != "" && clusterStore != nil {
+			cluster, err := clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
+			if err != nil {
+				logger.Warn("initial env infra: cluster not found in registry, falling back to in-cluster default",
+					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef, "err", err)
+			} else if cluster.APIServer == "" {
+				logger.Warn("initial env infra: cluster has empty apiServer, falling back to in-cluster default",
+					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
+			} else {
+				clusterServer = cluster.APIServer
+			}
+		}
+		baseDomain := orgEnv.BaseDomain
+		if baseDomain == "" {
+			baseDomain = "localhost"
+		}
+		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
+			EnvName:          orgEnv.Name,
+			ClusterServer:    clusterServer,
+			NamespacePattern: orgEnv.NamespacePattern,
+			BaseDomain:       baseDomain,
+		})
+	}
+
+	if len(appSetEnvs) == 0 {
+		logger.Info("initial env infra: no environments configured, skipping")
+		return
+	}
+
+	// Collect project names; fall back to "default" if none exist yet.
+	projectNames := []string{"default"}
+	if projectStore != nil {
+		if projects, err := projectStore.List(ctx); err == nil && len(projects) > 0 {
+			projectNames = make([]string, 0, len(projects))
+			for _, p := range projects {
+				projectNames = append(projectNames, p.Metadata.Name)
+			}
+		}
+	}
+
+	for _, name := range projectNames {
+		if err := pub.PublishEnvInfra(ctx, name, appSetEnvs); err != nil {
+			logger.Warn("initial env infra: publish failed", "project", name, "error", err)
+		} else {
+			logger.Info("initial env infra: published", "project", name)
+		}
+	}
 }

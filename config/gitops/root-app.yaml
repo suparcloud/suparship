@@ -31,7 +31,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: suparship-system
   source:
     repoURL: "http://gitea-http.gitea.svc.cluster.local:3000/gitops/gitops.git"
     targetRevision: main

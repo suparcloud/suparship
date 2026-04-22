@@ -52,7 +52,7 @@ Wire real GitOps-native promotions using Kargo.
 
 ---
 
-## Phase 2: Hierarchical Env Vars and Secrets
+## Phase 2: Hierarchical Env Vars and Secrets ✅ (secrets layer complete)
 
 > Highest-priority company requirement. Enables teams to manage config and secrets at any scope.
 
@@ -61,41 +61,37 @@ Wire real GitOps-native promotions using Kargo.
 Config is merged bottom-up; lower scopes win:
 
 ```
-org  →  environment  →  project  →  app
+org  →  environment-type  →  project  →  app  →  app-environment
 ```
 
 Each scope stores two kinds of entries:
 - **Plain env vars** — key/value pairs, stored in ConfigMaps
-- **Secret refs** — `ref:secret-name.key` strings that become `ExternalSecret` CRs at deploy time
+- **Secrets** — written to external vault (1Password, etc.) via `VaultWriter`; materialised by ESO
 
-### New API surface
+### Secrets layer (done)
 
-```
-GET/POST/PUT/DELETE  /api/v1/org/envvars
-GET/POST/PUT/DELETE  /api/v1/org/environments/:env/envvars
-GET/POST/PUT/DELETE  /api/v1/projects/:project/envvars
-GET/POST/PUT/DELETE  /api/v1/projects/:project/apps/:app/envvars
-GET                  /api/v1/projects/:project/apps/:app/envvars/merged
-```
+The five-level secret hierarchy is fully implemented. See [docs/secrets.md](docs/secrets.md) for the full architecture.
 
-The `/merged` endpoint returns the fully resolved set for a given target environment — useful for UI diff views and debugging.
+Key capabilities delivered:
+- `VaultWriter` interface with K8s demo backend and `MemVaultWriter` for tests
+- `VaultBinding` + `IsolationMode` (hard/soft) in `BackendConfig` for SOC2-grade env isolation
+- Vendor-neutral `ResourceNaming` patterns (configurable via `OrgSpec`)
+- Collapsed `ExternalSecret` model — one per app-env namespace, `dataFrom` merges all scopes
+- RBAC-gated API endpoints for five-level secret CRUD
+- Optimistic concurrency via `If-Match` / `ETag` headers
+- Structured audit logging (keys only, never values)
+- Force-sync endpoint to trigger immediate ESO refresh
+- CLI: `suparship secrets backend set/binding add/test`, `suparship secrets token import`
+- UI: full OrgSettings backend config panel with isolation toggle, bindings table, token import, test
+- GitOps publisher for `ClusterSecretStore` and collapsed `ExternalSecret` YAML
 
-### GitOps output (per app-environment)
+### Remaining work
 
-- One `ConfigMap` containing all merged plain vars
-- One `ExternalSecret` CR per secret ref (referencing the company's `ClusterSecretStore`)
-- App Helm chart mounts both via `envFrom`
+- **Plain env vars**: ConfigMap-based env vars at each scope (API + UI + GitOps output)
+- **Merged view**: `/merged` endpoint returning fully resolved set for a target environment
+- 1Password Connect `VaultWriter` implementation (interface exists; concrete writer is next)
 
-### Key new files
-
-- `internal/domain/envvars.go` — `EnvVar`, `SecretRef`, `EnvVarSet` types and deterministic merge logic
-- `internal/kube/envvar_store.go` — CRUD against ConfigMaps in `suparship-system`
-- `internal/server/envvar_handler.go` — four-level HTTP handlers
-- `internal/gitops/envvars.go` — generates `ConfigMap` + `ExternalSecret` manifests
-- `internal/gitops/publisher.go` — updated to call envvar generation on every sync
-- `hack/install-external-secrets.sh` — installs External Secrets Operator via Helm
-
-**Deliverable:** teams can set `DATABASE_URL=ref:prod-db.url` at the org level and have it automatically available to every app, with ExternalSecret CRs managing actual secret resolution.
+**Deliverable:** teams can manage secrets at any scope via UI or CLI, with values written directly to the external vault and ESO pulling them into the cluster. Plain env vars are the remaining follow-up.
 
 ---
 
@@ -306,7 +302,9 @@ Kargo CRs generated under `gitops-output/_infra/kargo/{app}/`:
 
 ## Architecture Decisions
 
-- **ExternalSecrets backend**: MVP generates `ExternalSecret` CRs referencing a `ClusterSecretStore` — the company configures which backend (AWS SSM, Vault, etc.). suparship never holds or transmits secret values.
+- **ExternalSecrets backend**: suparShip writes secret values to the external vault (1Password, Vault, AWS-SM) via the `VaultWriter` interface. ESO pulls them into the cluster via generated `ExternalSecret` CRs. Git never holds secret values — only `ClusterSecretStore` and `ExternalSecret` manifests. See [docs/secrets.md](docs/secrets.md).
+- **Isolation modes**: `hard` = one `ClusterSecretStore` + token per environment (SOC2); `soft` = single store (demo/POC). Configurable via `suparship secrets backend set --isolation=hard|soft`.
+- **Vendor-neutral naming**: Resources outside `suparship-system` use configurable patterns (default: `{app}`) tracked by `app.kubernetes.io/managed-by: suparship` label rather than name prefix. Users can manage apps via plain GitOps without suparShip.
 - **Release train naming**: always `{app}-{env}-{train}` — deterministic, never includes timestamps.
 - **Traffic weight validation**: weights must sum to 100; enforced in the API before any GitOps write.
 - **Promotion scope**: a promotion moves a coherent `(app, train, image-tag)` tuple — never individual components.

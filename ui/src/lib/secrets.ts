@@ -11,8 +11,54 @@ export interface SecretKeysResponse {
   secretName: string;
 }
 
+export interface EnvBinding {
+  env: string;
+  vaultId: string;
+  vaultName: string;
+  provisioned: boolean;
+  lastProvisioned?: string;
+  lastError?: string;
+  clusterSecretStoreName?: string;
+  connectEndpoint?: string;
+}
+
+export interface ConnectStatus {
+  endpoint: string;
+  installed: boolean;
+  healthy: boolean;
+  lastProbe?: string;
+}
+
+export interface OnePasswordConfig {
+  groupName: string;
+  connect: ConnectStatus;
+  bindings: EnvBinding[];
+}
+
 export interface SecretBackendConfig {
   type: string;
+  onePassword?: OnePasswordConfig;
+}
+
+export interface SATokenResponse {
+  valid: boolean;
+  vaultCount?: number;
+  error?: string;
+}
+
+export interface VaultInfo {
+  id: string;
+  title: string;
+}
+
+export interface BindingResponse {
+  env: string;
+  vaultId: string;
+  vaultName: string;
+  clusterSecretStoreName: string;
+  provisioned: boolean;
+  rotated: boolean;
+  error?: string;
 }
 
 export interface ResolvedSecretEntry {
@@ -24,16 +70,64 @@ export interface ResolvedSecretsResponse {
   secrets: ResolvedSecretEntry[];
 }
 
-// ── Org backend config ─────────────────────────────────────────────────────────
+// ── Backend state (GET) ─────────────────────────────────────────────────────────
 
 export function getSecretsBackend(): Promise<SecretBackendConfig> {
-  return api.get<SecretBackendConfig>("/org/secrets-backend");
+  return api.get<SecretBackendConfig>("/org/secret-backend");
 }
 
 export function updateSecretsBackend(
-  cfg: SecretBackendConfig,
+  cfg: Partial<SecretBackendConfig>,
 ): Promise<SecretBackendConfig> {
-  return api.put<SecretBackendConfig>("/org/secrets-backend", cfg);
+  return api.put<SecretBackendConfig>("/org/secret-backend", cfg);
+}
+
+// ── SA Token (POST) ──────────────────────────────────────────────────────────────
+
+export function saveSAToken(token: string): Promise<SATokenResponse> {
+  return api.post<SATokenResponse>("/org/secret-backend/sa-token", { token });
+}
+
+// ── Vault listing ───────────────────────────────────────────────────────────────
+
+export function listVaults(): Promise<VaultInfo[]> {
+  return api.get<VaultInfo[]>("/org/secret-backend/vaults");
+}
+
+// ── Bindings (Add / Remove) ─────────────────────────────────────────────────────
+
+export function addBinding(
+  env: string,
+  vaultId: string,
+  connectToken: string,
+  vaultName?: string,
+  connectEndpoint?: string,
+): Promise<BindingResponse> {
+  return api.post<BindingResponse>("/org/secret-backend/bindings", {
+    env,
+    vaultId,
+    vaultName: vaultName || "",
+    connectToken,
+    connectEndpoint: connectEndpoint || "",
+  });
+}
+
+export function removeBinding(env: string): Promise<void> {
+  return api.del(
+    `/org/secret-backend/bindings/${encodeURIComponent(env)}`,
+  );
+}
+
+// ── Secret sync ────────────────────────────────────────────────────────────────
+
+export function syncSecrets(
+  project: string,
+  app: string,
+): Promise<{ status: string; syncToken: string }> {
+  return api.post(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/secrets/sync`,
+    {},
+  );
 }
 
 // ── Org-level secrets CRUD ─────────────────────────────────────────────────────

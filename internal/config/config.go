@@ -1,9 +1,13 @@
 // Package config loads and exposes suparship startup configuration from
 // environment variables.
 //
-// Keep this package simple and explicit — no config frameworks, no reflection,
-// no magic defaults that change with context.  Each public symbol maps
-// directly to a documented environment variable.
+// This package handles process-level configuration only: runtime mode and
+// server infrastructure flags. Domain configuration (GitOps, registry, org)
+// lives in Kubernetes ConfigMaps and is read via store interfaces at runtime.
+//
+// Legacy SUPARSHIP_GITOPS_* environment variables are read by
+// LoadBootstrapEnv and used exclusively for one-time seeding of the
+// GitOps ConfigMap when it does not yet exist (bootstrap path).
 package config
 
 import "os"
@@ -24,36 +28,9 @@ const (
 	ModeKubernetes RuntimeMode = "kubernetes"
 )
 
-// GitOpsConfig holds the configuration for the GitOps repository integration.
-// All fields are optional; when RepoURL is empty the gitops publisher is
-// disabled and app creation only persists to the store (no git commit).
-type GitOpsConfig struct {
-	// RepoURL is the host-accessible Git URL used for cloning and pushing.
-	// Read from SUPARSHIP_GITOPS_REPO_URL.
-	RepoURL string
-	// RepoUser is the Git username for HTTP basic auth.
-	// Read from SUPARSHIP_GITOPS_REPO_USER.
-	RepoUser string
-	// RepoPassword is the Git password or token.
-	// Read from SUPARSHIP_GITOPS_REPO_PASSWORD.
-	RepoPassword string
-	// ArgoCDRepoURL is the URL ArgoCD uses to sync from the gitops repo
-	// (may be an internal cluster URL). Falls back to RepoURL when empty.
-	// Read from SUPARSHIP_ARGOCD_REPO_URL.
-	ArgoCDRepoURL string
-	// KargoGitRepoURL is the HTTPS Git URL Kargo uses for gitRepoUpdates
-	// during promotion. Kargo v0.9+ requires HTTPS for credential-based
-	// git operations. Falls back to ArgoCDRepoURL when empty.
-	// Read from SUPARSHIP_KARGO_GIT_REPO_URL.
-	KargoGitRepoURL string
-	// InsecureRegistry disables TLS verification for Kargo Warehouse image
-	// subscriptions. Required when using an HTTP-only registry (e.g. local
-	// kind-registry in dev mode).
-	// Read from SUPARSHIP_INSECURE_REGISTRY ("true" to enable).
-	InsecureRegistry bool
-}
-
 // Config holds the resolved startup configuration for the suparship server.
+// It contains only process-level settings; domain config (GitOps, registry,
+// org) is read from Kubernetes ConfigMaps at runtime.
 type Config struct {
 	// RuntimeMode indicates whether the server uses fake in-memory data or a
 	// real Kubernetes cluster.
@@ -63,51 +40,60 @@ type Config struct {
 	// to be set to ModeFake.  Empty when RuntimeMode is ModeKubernetes.
 	// Used only for the startup log message.
 	RuntimeModeTrigger string
-
-	// GitOps holds the gitops repository connection details. When
-	// GitOps.RepoURL is empty the publisher is disabled.
-	GitOps GitOpsConfig
 }
 
 // Load reads environment variables and returns a resolved Config.
 //
 // Mode selection rules (first match wins):
-//  1. SUPARSHIP_DEV_MODE=local  → ModeFake (primary local-dev switch)
+//  1. SUPARSHIP_DEV_MODE=local    → ModeFake (primary local-dev switch)
 //  2. SUPARSHIP_CLUSTER_MODE=fake → ModeFake (explicit cluster override)
-//  3. otherwise                 → ModeKubernetes
-//
-// GitOps configuration is always read from environment variables regardless of
-// runtime mode:
-//   - SUPARSHIP_GITOPS_REPO_URL
-//   - SUPARSHIP_GITOPS_REPO_USER
-//   - SUPARSHIP_GITOPS_REPO_PASSWORD
-//   - SUPARSHIP_ARGOCD_REPO_URL
+//  3. otherwise                   → ModeKubernetes
 func Load() Config {
-	gitops := GitOpsConfig{
-		RepoURL:          os.Getenv("SUPARSHIP_GITOPS_REPO_URL"),
-		RepoUser:         os.Getenv("SUPARSHIP_GITOPS_REPO_USER"),
-		RepoPassword:     os.Getenv("SUPARSHIP_GITOPS_REPO_PASSWORD"),
-		ArgoCDRepoURL:    os.Getenv("SUPARSHIP_ARGOCD_REPO_URL"),
-		KargoGitRepoURL:  os.Getenv("SUPARSHIP_KARGO_GIT_REPO_URL"),
-		InsecureRegistry: os.Getenv("SUPARSHIP_INSECURE_REGISTRY") == "true",
-	}
-
 	if os.Getenv("SUPARSHIP_DEV_MODE") == "local" {
 		return Config{
 			RuntimeMode:        ModeFake,
 			RuntimeModeTrigger: "SUPARSHIP_DEV_MODE=local",
-			GitOps:             gitops,
 		}
 	}
 	if os.Getenv("SUPARSHIP_CLUSTER_MODE") == "fake" {
 		return Config{
 			RuntimeMode:        ModeFake,
 			RuntimeModeTrigger: "SUPARSHIP_CLUSTER_MODE=fake",
-			GitOps:             gitops,
 		}
 	}
 	return Config{
 		RuntimeMode: ModeKubernetes,
-		GitOps:      gitops,
+	}
+}
+
+// BootstrapEnv holds legacy GitOps environment variables used exclusively
+// for one-time seeding of the GitOps ConfigMap and credential Secret.
+// After the ConfigMap exists, these values are ignored on subsequent boots.
+type BootstrapEnv struct {
+	GitOpsRepoURL      string
+	GitOpsRepoUser     string
+	GitOpsRepoPassword string
+	ArgoCDRepoURL      string
+	KargoGitRepoURL    string
+	InsecureRegistry   bool
+}
+
+// HasGitOps reports whether the bootstrap env contains a GitOps repo URL.
+func (b *BootstrapEnv) HasGitOps() bool {
+	return b.GitOpsRepoURL != ""
+}
+
+// LoadBootstrapEnv reads legacy SUPARSHIP_GITOPS_* environment variables.
+// These are used only by the bootstrap reconciler to seed the GitOps
+// ConfigMap when it does not yet exist. In steady state, the ConfigMap
+// (managed via Helm install or the settings UI) is the sole source of truth.
+func LoadBootstrapEnv() BootstrapEnv {
+	return BootstrapEnv{
+		GitOpsRepoURL:      os.Getenv("SUPARSHIP_GITOPS_REPO_URL"),
+		GitOpsRepoUser:     os.Getenv("SUPARSHIP_GITOPS_REPO_USER"),
+		GitOpsRepoPassword: os.Getenv("SUPARSHIP_GITOPS_REPO_PASSWORD"),
+		ArgoCDRepoURL:      os.Getenv("SUPARSHIP_ARGOCD_REPO_URL"),
+		KargoGitRepoURL:    os.Getenv("SUPARSHIP_KARGO_GIT_REPO_URL"),
+		InsecureRegistry:   os.Getenv("SUPARSHIP_INSECURE_REGISTRY") == "true",
 	}
 }

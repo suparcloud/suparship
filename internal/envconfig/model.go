@@ -35,9 +35,10 @@ package envconfig
 // KnownProviders is the set of recognised external secret backend names.
 // Each maps to a well-known ClusterSecretStore deployed in the cluster.
 var KnownProviders = map[string]bool{
-	"k8s":    true, // Kubernetes Secrets in suparship-system (demo/default)
-	"vault":  true, // HashiCorp Vault
-	"aws-sm": true, // AWS Secrets Manager
+	"k8s":        true, // Kubernetes Secrets in suparship-system (demo/default)
+	"1password":  true, // 1Password via ESO
+	"vault":      true, // HashiCorp Vault
+	"aws-sm":     true, // AWS Secrets Manager
 }
 
 // SecretRef is a backend-agnostic reference to a single key in an external

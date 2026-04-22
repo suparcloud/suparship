@@ -6,6 +6,7 @@ import {
   updateGitOpsConfig,
   testGitOpsConnection,
   type GitOpsConfig,
+  type GitOpsCredentials,
 } from "../lib/gitops";
 
 const PROVIDERS = [
@@ -20,14 +21,23 @@ function Field({
   label,
   children,
   help,
+  optional,
 }: {
   label: string;
   children: React.ReactNode;
   help?: string;
+  optional?: boolean;
 }) {
   return (
     <label className="block">
-      <span className="text-sm font-medium text-gray-700">{label}</span>
+      <span className="flex items-center gap-2 text-sm font-medium text-gray-700">
+        {label}
+        {optional && (
+          <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-normal text-gray-400">
+            optional
+          </span>
+        )}
+      </span>
       <div className="mt-1">{children}</div>
       {help && <p className="mt-1 text-xs text-gray-400">{help}</p>}
     </label>
@@ -39,9 +49,183 @@ const inputClass =
 const selectClass =
   "block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white";
 
+function CredentialSavedBadge() {
+  return (
+    <div className="mb-2 flex items-center gap-1.5 rounded-md border border-green-200 bg-green-50 px-3 py-1.5 text-xs text-green-700">
+      <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 20 20">
+        <path
+          fillRule="evenodd"
+          d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+          clipRule="evenodd"
+        />
+      </svg>
+      Credentials saved — leave blank to keep existing
+    </div>
+  );
+}
+
+function CredentialFields({
+  provider,
+  credentialsSet,
+  credentials,
+  onUpdate,
+}: {
+  provider: string;
+  credentialsSet: boolean;
+  credentials: GitOpsCredentials;
+  onUpdate: (c: GitOpsCredentials) => void;
+}) {
+  const keepPlaceholder = credentialsSet ? "Leave blank to keep existing" : "";
+
+  if (provider === "github" || provider === "gitlab" || provider === "gitea") {
+    const tokenLabel =
+      provider === "github"
+        ? "Personal Access Token"
+        : provider === "gitlab"
+          ? "Access Token"
+          : "Access Token";
+    const tokenHelp =
+      provider === "github"
+        ? "A GitHub PAT with repo read/write permissions"
+        : provider === "gitlab"
+          ? "A GitLab personal or project access token with write access"
+          : "A Gitea personal access token with repo write permissions";
+
+    return (
+      <div className="space-y-4 rounded-md border border-gray-100 bg-gray-50 p-4">
+        <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+          Authentication
+        </p>
+        {credentialsSet && !credentials.token && <CredentialSavedBadge />}
+        <Field label={tokenLabel} help={tokenHelp}>
+          <input
+            type="password"
+            className={inputClass}
+            value={credentials.token ?? ""}
+            onChange={(e) =>
+              onUpdate({ ...credentials, token: e.target.value || undefined })
+            }
+            placeholder={keepPlaceholder || "ghp_xxxxxxxxxxxxxxxxxxxx"}
+            autoComplete="new-password"
+          />
+        </Field>
+
+        {provider === "github" && (
+          <div className="space-y-3 rounded border border-blue-100 bg-blue-50 p-3">
+            <p className="text-xs text-blue-600">
+              Using a GitHub App instead? Provide the App ID and Installation ID
+              below. The token field above should contain the private key in PEM
+              format.
+            </p>
+            <Field label="GitHub App ID" optional>
+              <input
+                className={inputClass}
+                value={""}
+                onChange={() => {}}
+                placeholder="123456"
+                disabled
+              />
+            </Field>
+            <p className="text-xs text-gray-400">
+              GitHub App support coming soon — use a PAT for now.
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (provider === "bitbucket") {
+    const hasExisting =
+      credentialsSet && !credentials.username && !credentials.password;
+    return (
+      <div className="space-y-4 rounded-md border border-gray-100 bg-gray-50 p-4">
+        <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+          Authentication
+        </p>
+        {hasExisting && <CredentialSavedBadge />}
+        <Field label="Username" help="Your Bitbucket username or email">
+          <input
+            className={inputClass}
+            value={credentials.username ?? ""}
+            onChange={(e) =>
+              onUpdate({
+                ...credentials,
+                username: e.target.value || undefined,
+              })
+            }
+            placeholder={keepPlaceholder || "your-username"}
+            autoComplete="username"
+          />
+        </Field>
+        <Field
+          label="App Password"
+          help="A Bitbucket app password with repository read/write permissions"
+        >
+          <input
+            type="password"
+            className={inputClass}
+            value={credentials.password ?? ""}
+            onChange={(e) =>
+              onUpdate({
+                ...credentials,
+                password: e.target.value || undefined,
+              })
+            }
+            placeholder={keepPlaceholder || "ATBBxxxxxxxxxxxxxxxx"}
+            autoComplete="new-password"
+          />
+        </Field>
+      </div>
+    );
+  }
+
+  // generic
+  const hasExisting =
+    credentialsSet && !credentials.username && !credentials.password;
+  return (
+    <div className="space-y-4 rounded-md border border-gray-100 bg-gray-50 p-4">
+      <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+        Authentication
+      </p>
+      {hasExisting && <CredentialSavedBadge />}
+      <Field
+        label="Username"
+        optional
+        help="Leave blank for public repos or SSH key auth"
+      >
+        <input
+          className={inputClass}
+          value={credentials.username ?? ""}
+          onChange={(e) =>
+            onUpdate({ ...credentials, username: e.target.value || undefined })
+          }
+          placeholder={keepPlaceholder || "git-user"}
+          autoComplete="username"
+        />
+      </Field>
+      <Field label="Password" optional help="Password or personal access token">
+        <input
+          type="password"
+          className={inputClass}
+          value={credentials.password ?? ""}
+          onChange={(e) =>
+            onUpdate({ ...credentials, password: e.target.value || undefined })
+          }
+          placeholder={keepPlaceholder || "••••••••"}
+          autoComplete="new-password"
+        />
+      </Field>
+    </div>
+  );
+}
+
 export function GitOpsSettings() {
   const [config, setConfig] = useState<GitOpsConfig | null>(null);
+  const [credentialsSet, setCredentialsSet] = useState(false);
+  const [credentials, setCredentials] = useState<GitOpsCredentials>({});
   const [configured, setConfigured] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -54,6 +238,7 @@ export function GitOpsSettings() {
         const res = await fetchGitOpsConfig();
         if (cancelled) return;
         setConfigured(res.configured);
+        setCredentialsSet(res.credentialsSet);
         setConfig(
           res.config ?? {
             provider: "",
@@ -71,16 +256,29 @@ export function GitOpsSettings() {
       }
     }
     load();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleSave = async () => {
     if (!config) return;
     setSaving(true);
     try {
-      const res = await updateGitOpsConfig(config);
+      const res = await updateGitOpsConfig({ ...config, credentials });
       setConfigured(res.configured);
-      toast.success("GitOps configuration saved");
+      setCredentialsSet(res.credentialsSet);
+      // Clear plaintext credentials from local state after saving.
+      setCredentials({});
+      if (res.activationWarning) {
+        toast.success("Configuration saved", { description: "GitOps config stored in cluster." });
+        toast.warning(`ArgoCD registration: ${res.activationWarning}`, {
+          description: "Config is saved. ArgoCD may not be installed yet — it will pick up the repo Secret once available.",
+          duration: 8000,
+        });
+      } else {
+        toast.success("GitOps configuration saved and applied");
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Save failed");
     } finally {
@@ -92,7 +290,13 @@ export function GitOpsSettings() {
     if (!config?.repoURL) return;
     setTesting(true);
     try {
-      const res = await testGitOpsConnection({ repoURL: config.repoURL });
+      // Pass current unsaved credentials if the user typed them; otherwise
+      // the backend will fall back to stored credentials automatically.
+      const res = await testGitOpsConnection({
+        repoURL: config.repoURL,
+        username: credentials.username,
+        password: credentials.token ?? credentials.password,
+      });
       if (res.success) {
         toast.success(`Connection successful (${res.durationMs}ms)`);
       } else {
@@ -129,9 +333,12 @@ export function GitOpsSettings() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold text-gray-900">GitOps Repository</h1>
+        <h1 className="text-2xl font-semibold text-gray-900">
+          GitOps Repository
+        </h1>
         <p className="mt-1 text-sm text-gray-500">
-          Configure the Git repository used for GitOps manifests.
+          Connect the Git repository where suparShip will store deployment
+          manifests.
           {configured && (
             <span className="ml-2 inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
               Connected
@@ -142,13 +349,17 @@ export function GitOpsSettings() {
 
       {config && (
         <div className="max-w-xl space-y-6 rounded-lg border border-gray-200 bg-white p-6">
-          <Field label="Provider">
+          {/* Provider */}
+          <Field label="Git Provider">
             <select
               className={selectClass}
               value={config.provider}
-              onChange={(e) => update({ provider: e.target.value })}
+              onChange={(e) => {
+                update({ provider: e.target.value });
+                setCredentials({});
+              }}
             >
-              <option value="">Select provider...</option>
+              <option value="">Select a provider...</option>
               {PROVIDERS.map((p) => (
                 <option key={p.value} value={p.value}>
                   {p.label}
@@ -157,16 +368,18 @@ export function GitOpsSettings() {
             </select>
           </Field>
 
-          <Field label="Repository URL" help="HTTPS or SSH clone URL">
+          {/* Repository URL */}
+          <Field label="Repository URL" help="HTTPS clone URL of your GitOps repository">
             <input
               className={inputClass}
               value={config.repoURL}
               onChange={(e) => update({ repoURL: e.target.value })}
-              placeholder="https://github.com/org/gitops-repo.git"
+              placeholder="https://github.com/my-org/gitops-manifests.git"
             />
           </Field>
 
-          <Field label="Branch">
+          {/* Branch */}
+          <Field label="Branch" help="Branch where manifests will be committed">
             <input
               className={inputClass}
               value={config.branch}
@@ -175,73 +388,46 @@ export function GitOpsSettings() {
             />
           </Field>
 
-          <Field label="Sub-path" help="Optional directory within the repo for gitops content">
+          {/* Sub-path */}
+          <Field
+            label="Folder"
+            optional
+            help="Sub-directory within the repo to use for manifests (e.g. gitops/)"
+          >
             <input
               className={inputClass}
               value={config.subPath ?? ""}
-              onChange={(e) => update({ subPath: e.target.value || undefined })}
+              onChange={(e) =>
+                update({ subPath: e.target.value || undefined })
+              }
               placeholder="gitops/"
             />
           </Field>
 
-          <Field
-            label="Auth Secret Reference"
-            help="Name of a K8s Secret in suparship-system containing credentials"
-          >
-            <input
-              className={inputClass}
-              value={config.authSecretRef ?? ""}
-              onChange={(e) =>
-                update({ authSecretRef: e.target.value || undefined })
-              }
-              placeholder="suparship-gitops-credentials"
+          {/* Credentials — shown only when a provider is selected */}
+          {config.provider && (
+            <CredentialFields
+              provider={config.provider}
+              credentialsSet={credentialsSet}
+              credentials={credentials}
+              onUpdate={setCredentials}
             />
-          </Field>
-
-          {config.provider === "github" && (
-            <div className="space-y-4 rounded-md border border-blue-100 bg-blue-50 p-4">
-              <p className="text-xs font-semibold uppercase tracking-wider text-blue-600">
-                GitHub App (optional)
-              </p>
-              <Field label="App ID">
-                <input
-                  className={inputClass}
-                  value={config.github?.appId ?? ""}
-                  onChange={(e) =>
-                    update({
-                      github: {
-                        ...config.github,
-                        appId: e.target.value || undefined,
-                      },
-                    })
-                  }
-                />
-              </Field>
-              <Field label="Installation ID">
-                <input
-                  className={inputClass}
-                  value={config.github?.installationId ?? ""}
-                  onChange={(e) =>
-                    update({
-                      github: {
-                        ...config.github,
-                        installationId: e.target.value || undefined,
-                      },
-                    })
-                  }
-                />
-              </Field>
-            </div>
           )}
 
+          {/* Token expiry — optional quality-of-life warning field */}
           <Field
-            label="Credential Expiry"
-            help="ISO 8601 date when the auth token/PAT expires (for health warnings)"
+            label="Token Expiry"
+            optional
+            help="When your access token expires — suparShip will warn you before it does"
           >
             <input
               type="date"
               className={inputClass}
-              value={config.credentialExpiresAt ? config.credentialExpiresAt.split("T")[0] : ""}
+              value={
+                config.credentialExpiresAt
+                  ? config.credentialExpiresAt.split("T")[0]
+                  : ""
+              }
               onChange={(e) => {
                 const val = e.target.value;
                 update({
@@ -253,18 +439,51 @@ export function GitOpsSettings() {
             />
           </Field>
 
-          <Field label="ArgoCD Repo URL" help="If ArgoCD uses a different URL (e.g. in-cluster)">
-            <input
-              className={inputClass}
-              value={config.argoCDRepoURL ?? ""}
-              onChange={(e) =>
-                update({ argoCDRepoURL: e.target.value || undefined })
-              }
-              placeholder="http://gitea-http.gitea.svc:3000/org/repo"
-            />
-          </Field>
+          {/* Advanced settings */}
+          <div>
+            <button
+              type="button"
+              className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+              onClick={() => setShowAdvanced((v) => !v)}
+            >
+              <svg
+                className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? "rotate-90" : ""}`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M9 5l7 7-7 7"
+                />
+              </svg>
+              Advanced settings
+            </button>
 
-          <div className="flex items-center gap-3 pt-2">
+            {showAdvanced && (
+              <div className="mt-4 space-y-4 rounded-md border border-gray-100 bg-gray-50 p-4">
+                <Field
+                  label="ArgoCD Repo URL"
+                  optional
+                  help="Only needed if ArgoCD uses a different in-cluster URL to reach this repo"
+                >
+                  <input
+                    className={inputClass}
+                    value={config.argoCDRepoURL ?? ""}
+                    onChange={(e) =>
+                      update({ argoCDRepoURL: e.target.value || undefined })
+                    }
+                    placeholder="http://gitea-http.gitea.svc:3000/org/repo"
+                  />
+                </Field>
+              </div>
+            )}
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center gap-3 border-t border-gray-100 pt-4">
             <button
               onClick={handleSave}
               disabled={saving || !config.repoURL}

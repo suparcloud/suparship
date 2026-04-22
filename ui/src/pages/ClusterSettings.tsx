@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   listClusters,
   registerCluster,
+  refreshSealingCert,
   removeCluster,
 } from "../lib/clusters";
 import type { Cluster } from "../lib/clusters";
@@ -40,6 +41,8 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
   const [apiServer, setApiServer] = useState("");
   const [kubeconfigB64, setKubeconfigB64] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
+  const [esoNamespace, setEsoNamespace] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,6 +75,7 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
         displayName: displayName || undefined,
         apiServer,
         kubeconfig: kubeconfigB64,
+        esoNamespace: esoNamespace.trim() || undefined,
       });
       onRegistered();
       onClose();
@@ -158,6 +162,51 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
             </div>
           </div>
 
+          {/* Advanced options */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700"
+            >
+              <svg
+                className={`h-4 w-4 transition-transform ${showAdvanced ? "rotate-90" : ""}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+              Advanced options
+            </button>
+
+            {showAdvanced && (
+              <div className="mt-3 space-y-4 rounded-md border border-gray-200 bg-gray-50 p-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">
+                    External Secrets namespace
+                  </label>
+                  <input
+                    type="text"
+                    value={esoNamespace}
+                    onChange={(e) => setEsoNamespace(e.target.value)}
+                    placeholder="external-secrets"
+                    className="mt-1 block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">
+                    Namespace where the External Secrets Operator is installed on
+                    this cluster. Defaults to{" "}
+                    <code className="font-mono">external-secrets</code> when left
+                    blank. Set to{" "}
+                    <code className="font-mono">external-secrets-system</code> if
+                    that is where ESO runs on this cluster.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
           {error && (
             <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
               {error}
@@ -194,6 +243,8 @@ export function ClusterSettings() {
   const [error, setError] = useState<string | null>(null);
   const [showRegister, setShowRegister] = useState(false);
   const [removingName, setRemovingName] = useState<string | null>(null);
+  const [refreshingCert, setRefreshingCert] = useState<string | null>(null);
+  const [certMessage, setCertMessage] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -221,6 +272,25 @@ export function ClusterSettings() {
       alert(err instanceof Error ? err.message : "Failed to remove cluster");
     } finally {
       setRemovingName(null);
+    }
+  }
+
+  async function handleRefreshCert(name: string) {
+    setRefreshingCert(name);
+    setCertMessage((prev) => ({ ...prev, [name]: "" }));
+    try {
+      const res = await refreshSealingCert(name);
+      setCertMessage((prev) => ({
+        ...prev,
+        [name]: res.message ?? "Certificate refreshed successfully.",
+      }));
+    } catch (err) {
+      setCertMessage((prev) => ({
+        ...prev,
+        [name]: err instanceof Error ? err.message : "Refresh failed",
+      }));
+    } finally {
+      setRefreshingCert(null);
     }
   }
 
@@ -301,20 +371,57 @@ export function ClusterSettings() {
                     </p>
                     <p className="text-xs text-gray-400">{c.name}</p>
                   </td>
-                  <td className="px-6 py-4 font-mono text-xs text-gray-600">
-                    {c.apiServer}
+                  <td className="px-6 py-4">
+                    <p className="font-mono text-xs text-gray-600">
+                      {c.apiServer}
+                    </p>
+                    {c.esoNamespace && (
+                      <p className="mt-0.5 text-xs text-gray-400">
+                        ESO:{" "}
+                        <span className="font-mono">{c.esoNamespace}</span>
+                      </p>
+                    )}
                   </td>
                   <td className="px-6 py-4">
                     <StatusBadge status={c.status} />
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <button
-                      onClick={() => handleRemove(c.name)}
-                      disabled={removingName === c.name}
-                      className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50"
-                    >
-                      {removingName === c.name ? "Removing…" : "Remove"}
-                    </button>
+                    <div className="flex flex-col items-end gap-1">
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => handleRefreshCert(c.name)}
+                          disabled={
+                            refreshingCert === c.name ||
+                            removingName === c.name
+                          }
+                          title="Re-fetch the sealed-secrets controller certificate from this cluster and update the cache"
+                          className="text-sm text-indigo-600 hover:text-indigo-700 disabled:opacity-50"
+                        >
+                          {refreshingCert === c.name
+                            ? "Refreshing…"
+                            : "Refresh cert"}
+                        </button>
+                        <button
+                          onClick={() => handleRemove(c.name)}
+                          disabled={removingName === c.name}
+                          className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50"
+                        >
+                          {removingName === c.name ? "Removing…" : "Remove"}
+                        </button>
+                      </div>
+                      {certMessage[c.name] && (
+                        <p
+                          className={`text-xs ${
+                            certMessage[c.name].toLowerCase().includes("fail") ||
+                            certMessage[c.name].toLowerCase().includes("error")
+                              ? "text-red-600"
+                              : "text-green-600"
+                          }`}
+                        >
+                          {certMessage[c.name]}
+                        </p>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

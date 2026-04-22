@@ -14,9 +14,6 @@ spec:
     metadata:
       annotations:
         checksum/org-config: {{ include (print $.Template.BasePath "/configmap-org.yaml") . | sha256sum }}
-        {{- if .Values.gitops.repoURL }}
-        checksum/gitops-config: {{ include (print $.Template.BasePath "/configmap-gitops.yaml") . | sha256sum }}
-        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -54,32 +51,6 @@ spec:
           env:
             - name: SUPARSHIP_CLUSTER_MODE
               value: kubernetes
-            {{- if .Values.gitops.repoURL }}
-            - name: SUPARSHIP_GITOPS_REPO_URL
-              value: {{ .Values.gitops.repoURL | quote }}
-            {{- if .Values.gitops.existingSecret }}
-            - name: SUPARSHIP_GITOPS_REPO_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.gitops.existingSecret }}
-                  key: username
-                  optional: true
-            - name: SUPARSHIP_GITOPS_REPO_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.gitops.existingSecret }}
-                  key: {{ if eq .Values.gitops.provider "github" }}token{{ else if eq .Values.gitops.provider "gitlab" }}token{{ else if eq .Values.gitops.provider "gitea" }}token{{ else }}password{{ end }}
-                  optional: true
-            {{- end }}
-            {{- if .Values.gitops.argoCDRepoURL }}
-            - name: SUPARSHIP_ARGOCD_REPO_URL
-              value: {{ .Values.gitops.argoCDRepoURL | quote }}
-            {{- end }}
-            {{- if .Values.gitops.kargoGitRepoURL }}
-            - name: SUPARSHIP_KARGO_GIT_REPO_URL
-              value: {{ .Values.gitops.kargoGitRepoURL | quote }}
-            {{- end }}
-            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

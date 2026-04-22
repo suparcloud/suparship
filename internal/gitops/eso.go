@@ -64,25 +64,19 @@ func (p *Publisher) WriteUpperLevelExternalSecrets(repoDir string, level string,
 	return nil
 }
 
-// buildESOStoresYAML returns a multi-document YAML string containing one
-// ClusterSecretStore per supported provider.
+// buildESOStoresYAML returns a YAML string containing the ClusterSecretStore
+// for the Kubernetes backend. Vault and AWS SM stores are omitted because the
+// v1 API requires a valid provider config — users should create them manually
+// when their backend is ready.
 func buildESOStoresYAML() string {
-	var sb strings.Builder
-
-	sb.WriteString(buildK8sClusterSecretStore())
-	sb.WriteString("---\n")
-	sb.WriteString(buildStubClusterSecretStore("vault", "suparship-vault-store", "vault"))
-	sb.WriteString("---\n")
-	sb.WriteString(buildStubClusterSecretStore("aws-sm", "suparship-aws-sm-store", "aws"))
-
-	return sb.String()
+	return buildK8sClusterSecretStore()
 }
 
 // buildK8sClusterSecretStore returns the YAML for the demo Kubernetes backend
 // ClusterSecretStore. It reads K8s Secrets from suparship-system so that users
 // can create real Secrets there and reference them from any level's SecretRefs.
 func buildK8sClusterSecretStore() string {
-	return `apiVersion: external-secrets.io/v1beta1
+	return `apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: suparship-k8s-store
@@ -101,29 +95,11 @@ spec:
 `
 }
 
-// buildStubClusterSecretStore returns a minimal placeholder ClusterSecretStore
-// for non-k8s providers. These are intentionally left unconfigured so users
-// must fill in their provider credentials before activating them.
-func buildStubClusterSecretStore(provider, name, providerKey string) string {
-	return fmt.Sprintf(`apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: %s
-  labels:
-    suparship.io/managed-by: suparship
-  annotations:
-    suparship.io/description: "%s backend — configure spec.provider.%s before use"
-spec:
-  provider:
-    {}  # TODO: configure %s provider credentials
-`, name, provider, providerKey, provider)
-}
-
 // buildExternalSecretYAML returns the YAML for a single ExternalSecret CR
 // that pulls a set of secret refs into a K8s Secret in the given namespace.
 func buildExternalSecretYAML(secretName, namespace, storeName string, refs []envconfig.SecretRef) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1beta1
+	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: %s

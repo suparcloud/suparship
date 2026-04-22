@@ -147,7 +147,7 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 		// to avoid ArgoCD rejecting the root app due to duplicate resource names.
 		appProject := BuildArgoAppProject(projectName, AppProjectOptions{
 			Description:           "suparShip project: " + projectName,
-			AllowClusterResources: true,
+			AllowClusterResources: false,
 			Destinations:          destinations,
 		})
 		appProjectBytes, err := yaml.Marshal(appProject)

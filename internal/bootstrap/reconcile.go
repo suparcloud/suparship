@@ -1,12 +1,11 @@
-// Package bootstrap reconciles Helm-provided ConfigMaps on server startup.
-// When suparship is installed via Helm, the chart creates ConfigMaps for
-// GitOps config, registry config, org config, and cluster definitions.
-// This package reads those ConfigMaps and logs their status so operators
-// can verify the Helm values were applied correctly.
+// Package bootstrap reconciles configuration on server startup.
 //
-// The reconciliation is idempotent and read-only — it never overwrites
-// user-modified ConfigMaps. It only logs what was found and reports any
-// gaps between what was expected (from env vars) and what exists.
+// On first boot the reconciler seeds ConfigMaps from legacy environment
+// variables (BootstrapEnv) when no ConfigMap exists yet. On subsequent
+// boots the existing ConfigMap is the sole source of truth and env vars
+// are ignored. This makes Helm-installed ConfigMaps and UI-saved
+// ConfigMaps equally authoritative while preserving a migration path
+// for setups that previously relied on SUPARSHIP_GITOPS_* env vars.
 package bootstrap
 
 import (
@@ -14,15 +13,19 @@ import (
 	"fmt"
 	"log/slog"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/registry"
 )
 
 // Result holds the outcome of the bootstrap reconciliation.
 type Result struct {
 	GitOpsConfigured    bool
+	GitOpsSeededFromEnv bool
 	RegistryConfigured  bool
 	GitOpsProvider      string
 	GitOpsRepoURL       string
@@ -30,14 +33,15 @@ type Result struct {
 	Warnings            []string
 }
 
-// Reconcile reads Helm-provided ConfigMaps and logs their status.
-// It returns a summary of what was found. This never writes data —
-// the Helm chart and API handlers are the only writers.
+// Reconcile checks ConfigMaps for GitOps and registry configuration.
+// When a ConfigMap is missing but legacy env vars are set, it seeds the
+// ConfigMap from those env vars (one-time bootstrap). Returns a summary.
 func Reconcile(ctx context.Context, client kubernetes.Interface, logger *slog.Logger) Result {
 	result := Result{}
+	env := config.LoadBootstrapEnv()
 
-	reconcileGitOps(ctx, client, logger, &result)
-	reconcileRegistry(ctx, client, logger, &result)
+	reconcileGitOps(ctx, client, logger, &env, &result)
+	reconcileRegistry(ctx, client, logger, &env, &result)
 
 	if len(result.Warnings) > 0 {
 		for _, w := range result.Warnings {
@@ -48,18 +52,38 @@ func Reconcile(ctx context.Context, client kubernetes.Interface, logger *slog.Lo
 	return result
 }
 
-func reconcileGitOps(ctx context.Context, client kubernetes.Interface, logger *slog.Logger, result *Result) {
+func reconcileGitOps(ctx context.Context, client kubernetes.Interface, logger *slog.Logger, env *config.BootstrapEnv, result *Result) {
 	store := gitops.NewConfigStore(client)
 	cfg, err := store.Get(ctx)
 	if err != nil {
 		if err == gitops.ErrConfigNotFound {
-			logger.Info("bootstrap: gitops config not found — configure via Helm values or settings UI")
-			result.Warnings = append(result.Warnings, "GitOps repository not configured")
+			// ConfigMap does not exist. Seed from env vars if available.
+			if env.HasGitOps() {
+				if seedErr := seedGitOpsFromEnv(ctx, store, env, logger); seedErr != nil {
+					logger.Error("bootstrap: failed to seed gitops config from env vars", "error", seedErr)
+					result.Warnings = append(result.Warnings, fmt.Sprintf("gitops env seed error: %v", seedErr))
+					return
+				}
+				result.GitOpsSeededFromEnv = true
+				// Re-read the just-created ConfigMap so the rest of the flow sees it.
+				cfg, err = store.Get(ctx)
+				if err != nil {
+					logger.Error("bootstrap: failed to re-read seeded gitops config", "error", err)
+					result.Warnings = append(result.Warnings, fmt.Sprintf("gitops re-read error: %v", err))
+					return
+				}
+			} else {
+				logger.Info("bootstrap: gitops config not found — configure via Helm values or settings UI")
+				result.Warnings = append(result.Warnings, "GitOps repository not configured")
+				return
+			}
+		} else {
+			logger.Error("bootstrap: failed to read gitops config", "error", err)
+			result.Warnings = append(result.Warnings, fmt.Sprintf("gitops config read error: %v", err))
 			return
 		}
-		logger.Error("bootstrap: failed to read gitops config", "error", err)
-		result.Warnings = append(result.Warnings, fmt.Sprintf("gitops config read error: %v", err))
-		return
+	} else if env.HasGitOps() {
+		logger.Info("bootstrap: gitops config found in ConfigMap, ignoring environment variables")
 	}
 
 	result.GitOpsConfigured = true
@@ -88,12 +112,56 @@ func reconcileGitOps(ctx context.Context, client kubernetes.Interface, logger *s
 	}
 }
 
-func reconcileRegistry(ctx context.Context, client kubernetes.Interface, logger *slog.Logger, result *Result) {
+// seedGitOpsFromEnv creates the GitOps ConfigMap and credential Secret
+// from legacy environment variables. Called only when the ConfigMap does
+// not yet exist.
+func seedGitOpsFromEnv(ctx context.Context, store *gitops.ConfigStore, env *config.BootstrapEnv, logger *slog.Logger) error {
+	repoCfg := &gitops.RepoConfig{
+		Provider:        "generic",
+		RepoURL:         env.GitOpsRepoURL,
+		Branch:          "main",
+		ArgoCDRepoURL:   env.ArgoCDRepoURL,
+		KargoGitRepoURL: env.KargoGitRepoURL,
+	}
+	if err := store.Save(ctx, repoCfg); err != nil {
+		return fmt.Errorf("save gitops configmap: %w", err)
+	}
+	logger.Info("bootstrap: seeded gitops config from environment variables (one-time bootstrap)",
+		"repoURL", env.GitOpsRepoURL,
+	)
+
+	if env.GitOpsRepoUser != "" || env.GitOpsRepoPassword != "" {
+		if err := store.SaveCredentials(ctx, "generic", "", env.GitOpsRepoUser, env.GitOpsRepoPassword); err != nil {
+			return fmt.Errorf("save gitops credentials: %w", err)
+		}
+		// Point the config at the managed secret so downstream code finds creds.
+		repoCfg.AuthSecretRef = gitops.ManagedCredentialSecretName
+		if err := store.Save(ctx, repoCfg); err != nil {
+			return fmt.Errorf("update gitops configmap with authSecretRef: %w", err)
+		}
+		logger.Info("bootstrap: seeded gitops credentials from environment variables")
+	}
+
+	return nil
+}
+
+func reconcileRegistry(ctx context.Context, client kubernetes.Interface, logger *slog.Logger, env *config.BootstrapEnv, result *Result) {
 	store := registry.NewStore(client)
 	cfg, err := store.Get(ctx)
 	if err != nil {
 		if err == registry.ErrConfigNotFound {
-			logger.Info("bootstrap: registry config not found — disabled or not configured via Helm")
+			// If SUPARSHIP_INSECURE_REGISTRY was set but no registry ConfigMap
+			// exists, seed a minimal registry config with the insecure flag.
+			if env.InsecureRegistry {
+				regCfg := &registry.Config{Insecure: true}
+				if saveErr := store.Save(ctx, regCfg); saveErr != nil {
+					logger.Warn("bootstrap: failed to seed registry insecure flag from env", "error", saveErr)
+				} else {
+					logger.Info("bootstrap: seeded registry insecure flag from environment variables (one-time bootstrap)")
+				}
+			} else {
+				logger.Info("bootstrap: registry config not found — disabled or not configured via Helm")
+			}
 			return
 		}
 		logger.Error("bootstrap: failed to read registry config", "error", err)
@@ -113,6 +181,7 @@ func reconcileRegistry(ctx context.Context, client kubernetes.Interface, logger 
 		"url", cfg.URL,
 		"username", cfg.Username,
 		"authSecretRef", cfg.AuthSecretRef,
+		"insecure", cfg.Insecure,
 		"environments", cfg.Environments,
 	)
 
@@ -121,11 +190,35 @@ func reconcileRegistry(ctx context.Context, client kubernetes.Interface, logger 
 	}
 }
 
+// ReconcileArgoCD ensures that suparship's required ArgoCD resources exist.
+// Currently this covers the suparship-system AppProject which must be present
+// before the root ArgoCD "App of Apps" can sync.
+//
+// The function is non-fatal: if ArgoCD is not installed on the cluster or the
+// dynamic client is nil, a warning is logged and the server continues normally.
+// Only unexpected Kubernetes API errors are returned.
+func ReconcileArgoCD(ctx context.Context, dyn dynamic.Interface, logger *slog.Logger) {
+	if dyn == nil {
+		return
+	}
+	if err := kube.EnsureArgoCDSystemProject(ctx, dyn, "argocd"); err != nil {
+		logger.Warn("bootstrap: failed to ensure suparship-system AppProject",
+			"error", err,
+			"hint", "check that suparship has permission to create AppProject resources in the argocd namespace",
+		)
+		return
+	}
+	logger.Info("bootstrap: suparship-system AppProject ready")
+}
+
 // FormatSummary returns a human-readable summary for log output.
 func FormatSummary(r Result) string {
-	gitops := "not configured"
+	g := "not configured"
 	if r.GitOpsConfigured {
-		gitops = fmt.Sprintf("%s (%s)", r.GitOpsRepoURL, r.GitOpsProvider)
+		g = fmt.Sprintf("%s (%s)", r.GitOpsRepoURL, r.GitOpsProvider)
+		if r.GitOpsSeededFromEnv {
+			g += " [seeded from env]"
+		}
 	}
 
 	reg := "disabled"
@@ -133,5 +226,5 @@ func FormatSummary(r Result) string {
 		reg = r.RegistryURL
 	}
 
-	return fmt.Sprintf("gitops=%s registry=%s warnings=%d", gitops, reg, len(r.Warnings))
+	return fmt.Sprintf("gitops=%s registry=%s warnings=%d", g, reg, len(r.Warnings))
 }

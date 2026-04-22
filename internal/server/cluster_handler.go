@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/seal"
 )
 
 // clusterHandler serves /api/v1/clusters endpoints.
@@ -13,8 +16,11 @@ import (
 // All write operations (POST, DELETE) require org_admin role (validated by
 // the session middleware). Read operations (GET) require any authenticated user.
 type clusterHandler struct {
-	store domain.ClusterStore
-	auth  *authHandler
+	store    domain.ClusterStore
+	auth     *authHandler
+	certCache seal.CertCache
+	pool     sealClientPool
+	logger   *slog.Logger
 }
 
 // registerRoutes wires cluster endpoints into mux.
@@ -23,6 +29,7 @@ func (ch *clusterHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/clusters/{name}", ch.requireAuth(ch.handleGet))
 	mux.HandleFunc("POST /api/v1/clusters", ch.requireAuth(ch.handleCreate))
 	mux.HandleFunc("DELETE /api/v1/clusters/{name}", ch.requireAuth(ch.handleDelete))
+	mux.HandleFunc("POST /api/v1/clusters/{name}/sealing-cert/refresh", ch.requireAuth(ch.handleRefreshSealingCert))
 }
 
 // requireAuth wraps a handler with session authentication.
@@ -63,6 +70,9 @@ type createClusterRequest struct {
 	DisplayName string `json:"displayName,omitempty"`
 	// APIServer is the Kubernetes API server URL (e.g. "https://10.0.0.1:6443").
 	APIServer string `json:"apiServer"`
+	// ESONamespace is the namespace where External Secrets Operator is installed
+	// on this cluster. Defaults to "external-secrets" when empty.
+	ESONamespace string `json:"esoNamespace,omitempty"`
 	// Kubeconfig is the base64-encoded raw kubeconfig for this cluster.
 	// It is stored encrypted in Kubernetes Secrets and never written to Git.
 	Kubeconfig string `json:"kubeconfig"`
@@ -100,16 +110,22 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cluster := domain.Cluster{
-		Name:        req.Name,
-		DisplayName: displayName,
-		APIServer:   req.APIServer,
-		Status:      "ready",
+		Name:         req.Name,
+		DisplayName:  displayName,
+		APIServer:    req.APIServer,
+		ESONamespace: req.ESONamespace,
+		Status:       "ready",
 	}
 
 	if err := ch.store.CreateCluster(r.Context(), cluster, kubeconfigBytes); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to register cluster: " + err.Error()})
 		return
 	}
+
+	// Best-effort: fetch and cache the sealed-secrets certificate from the
+	// newly registered cluster so that token sealing works immediately without
+	// a separate admin step. Failures are logged but do not fail the registration.
+	go ch.tryFetchSealingCert(r.Context(), req.Name)
 
 	writeJSON(w, http.StatusCreated, cluster)
 }
@@ -123,4 +139,87 @@ func (ch *clusterHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── POST /api/v1/clusters/{name}/sealing-cert/refresh ────────────────────────
+
+// SealingCertRefreshResponse is the JSON body returned after a cert refresh.
+type SealingCertRefreshResponse struct {
+	Cluster string `json:"cluster"`
+	Cached  bool   `json:"cached"`
+	Message string `json:"message,omitempty"`
+}
+
+// handleRefreshSealingCert fetches the sealed-secrets controller public cert
+// from the target cluster and stores it in the cert cache, replacing any
+// previously cached (possibly wrong) cert. Use this to fix "could not decrypt"
+// errors caused by a stale or incorrect cached certificate.
+func (ch *clusterHandler) handleRefreshSealingCert(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "cluster name is required"})
+		return
+	}
+
+	// Ensure cluster exists.
+	if _, err := ch.store.GetCluster(r.Context(), name); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "cluster not found"})
+		return
+	}
+
+	if ch.certCache == nil || ch.pool == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{
+			Error: "cert cache or cluster pool not configured on this server",
+		})
+		return
+	}
+
+	kubeClient, err := ch.pool.GetKubeClient(r.Context(), name)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{
+			Error: "failed to build kube client for cluster: " + err.Error(),
+		})
+		return
+	}
+
+	if _, err := seal.FetchAndCache(r.Context(), ch.certCache, kubeClient, name, seal.FetchOptions{}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{
+			Error: "failed to fetch sealing cert from cluster: " + err.Error(),
+		})
+		return
+	}
+
+	if ch.logger != nil {
+		ch.logger.Info("sealing cert refreshed", "cluster", name)
+	}
+	writeJSON(w, http.StatusOK, SealingCertRefreshResponse{
+		Cluster: name,
+		Cached:  true,
+		Message: "sealing certificate fetched from cluster and cached successfully",
+	})
+}
+
+// tryFetchSealingCert is a best-effort background fetch of the sealed-secrets
+// controller cert for a newly registered cluster. Errors are only logged.
+func (ch *clusterHandler) tryFetchSealingCert(ctx context.Context, clusterName string) {
+	if ch.certCache == nil || ch.pool == nil {
+		return
+	}
+	kubeClient, err := ch.pool.GetKubeClient(ctx, clusterName)
+	if err != nil {
+		if ch.logger != nil {
+			ch.logger.Warn("could not build kube client for cert fetch", "cluster", clusterName, "err", err)
+		}
+		return
+	}
+	if _, err := seal.FetchAndCache(ctx, ch.certCache, kubeClient, clusterName, seal.FetchOptions{}); err != nil {
+		if ch.logger != nil {
+			ch.logger.Warn("sealing cert auto-fetch failed (non-fatal); use refresh endpoint to retry",
+				"cluster", clusterName, "err", err)
+		}
+		return
+	}
+	if ch.logger != nil {
+		ch.logger.Info("sealing cert auto-fetched after cluster registration", "cluster", clusterName)
+	}
 }

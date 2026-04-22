@@ -3,49 +3,32 @@ package gitops
 import (
 	"strings"
 	"testing"
-
-	"github.com/suparcloud/suparship/internal/secrets"
 )
 
-func TestBuild1PasswordClusterSecretStoreYAML_Connect(t *testing.T) {
-	cfg := &secrets.OnePasswordConfig{
-		Mode:           secrets.OnePasswordModeConnect,
-		ConnectHost:    "https://op-connect.internal:8443",
-		ExistingSecret: "op-token",
-	}
+func TestBuild1PasswordClusterSecretStoreYAML(t *testing.T) {
+	yaml := Build1PasswordClusterSecretStoreYAML(
+		"onepassword-prod",
+		"http://op-connect.onepassword-connect.svc.cluster.local:8080",
+		"vault-uuid-123",
+		"op-connect-token-prod",
+		"token",
+		"external-secrets",
+	)
 
-	yaml := Build1PasswordClusterSecretStoreYAML(cfg)
-
-	if !strings.Contains(yaml, "suparship-1password-store") {
+	if !strings.Contains(yaml, "onepassword-prod") {
 		t.Error("expected store name in output")
 	}
-	if !strings.Contains(yaml, "connectHost: https://op-connect.internal:8443") {
+	if !strings.Contains(yaml, "connectHost: http://op-connect.onepassword-connect.svc.cluster.local:8080") {
 		t.Error("expected connectHost in output")
 	}
-	if !strings.Contains(yaml, "op-token") {
-		t.Error("expected secret ref in output")
+	if !strings.Contains(yaml, "vault-uuid-123") {
+		t.Error("expected vault ID in output")
+	}
+	if !strings.Contains(yaml, "op-connect-token-prod") {
+		t.Error("expected token secret name in output")
 	}
 	if !strings.Contains(yaml, "connectTokenSecretRef") {
 		t.Error("expected connect token ref in output")
-	}
-}
-
-func TestBuild1PasswordClusterSecretStoreYAML_ServiceAccount(t *testing.T) {
-	cfg := &secrets.OnePasswordConfig{
-		Mode:           secrets.OnePasswordModeServiceAccount,
-		ExistingSecret: "op-sa-token",
-	}
-
-	yaml := Build1PasswordClusterSecretStoreYAML(cfg)
-
-	if !strings.Contains(yaml, "suparship-1password-store") {
-		t.Error("expected store name in output")
-	}
-	if !strings.Contains(yaml, "serviceAccountTokenSecretRef") {
-		t.Error("expected service account token ref in output")
-	}
-	if !strings.Contains(yaml, "op-sa-token") {
-		t.Error("expected secret ref in output")
 	}
 }
 

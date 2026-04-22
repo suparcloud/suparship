@@ -134,3 +134,55 @@ func EnsureNamespace(ctx context.Context, client kubernetes.Interface, ns string
 
 	return nil
 }
+
+// UpsertSecretData creates or updates a K8s Secret in the given namespace,
+// merging the provided data into existing keys.
+func UpsertSecretData(ctx context.Context, client kubernetes.Interface, ns, name string, data map[string][]byte) error {
+	existing, err := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: ns,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "suparship",
+				},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: data,
+		}
+		_, err = client.CoreV1().Secrets(ns).Create(ctx, secret, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("creating secret %s/%s: %w", ns, name, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading secret %s/%s: %w", ns, name, err)
+	}
+
+	if existing.Data == nil {
+		existing.Data = make(map[string][]byte)
+	}
+	for k, v := range data {
+		existing.Data[k] = v
+	}
+	_, err = client.CoreV1().Secrets(ns).Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("updating secret %s/%s: %w", ns, name, err)
+	}
+	return nil
+}
+
+// GetSecretData reads a single key from a Kubernetes Secret.
+// Returns nil if the secret or key does not exist.
+func GetSecretData(ctx context.Context, client kubernetes.Interface, ns, name, key string) ([]byte, error) {
+	secret, err := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading secret %s/%s: %w", ns, name, err)
+	}
+	return secret.Data[key], nil
+}

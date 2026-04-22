@@ -8,25 +8,40 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
+	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 const shutdownTimeout = 5 * time.Second
+
+// clusterPoolAdapter bridges *k8s.ClusterClientPool to the sealClientPool
+// interface expected by secretsHandler and clusterHandler.
+type clusterPoolAdapter struct {
+	pool *k8s.ClusterClientPool
+}
+
+func (a *clusterPoolAdapter) GetKubeClient(ctx context.Context, clusterName string) (kubernetes.Interface, error) {
+	return a.pool.Get(ctx, clusterName)
+}
 
 // GitOpsPublisher commits app manifests to the GitOps repository. When nil,
 // app creation only persists to the store and no git commit is performed.
@@ -137,6 +152,94 @@ type ReadinessProber struct {
 	Check func(ctx context.Context) error
 }
 
+// GitOpsActivatorFunc is called after GitOps configuration is saved through
+// the settings API. It receives the saved config and the resolved credentials
+// (empty strings for public repos or when none are available) and is
+// responsible for: registering the repo with ArgoCD, hot-swapping the live
+// GitOpsPublisher, and optionally triggering an initial env-infra publish.
+//
+// The function should be idempotent and treat ArgoCD registration failures as
+// non-fatal warnings — ArgoCD may not be installed yet.
+// Nil means no activation is wired (safe default for tests).
+type GitOpsActivatorFunc func(ctx context.Context, cfg *gitops.RepoConfig, username, password string) error
+
+// PublisherHolder wraps a GitOpsPublisher behind an RW mutex so the live
+// publisher can be swapped at runtime when new GitOps config is saved.
+// It implements GitOpsPublisher so it can be passed anywhere a publisher is
+// expected; the inner publisher is replaced via Swap without restarting the
+// server.
+type PublisherHolder struct {
+	mu sync.RWMutex
+	p  GitOpsPublisher
+}
+
+// NewPublisherHolder creates a PublisherHolder with an optional initial publisher.
+// Pass nil when no publisher is configured at startup.
+func NewPublisherHolder(initial GitOpsPublisher) *PublisherHolder {
+	return &PublisherHolder{p: initial}
+}
+
+// PublishApp implements GitOpsPublisher. It delegates to the currently held
+// publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.PublishApp(ctx, app, envs)
+}
+
+// Swap replaces the inner publisher atomically. Subsequent PublishApp calls
+// will use the new publisher. Any in-flight call completes against the old one.
+func (h *PublisherHolder) Swap(p GitOpsPublisher) {
+	h.mu.Lock()
+	h.p = p
+	h.mu.Unlock()
+}
+
+// SealPublisherHolder wraps a SealedTokenPublisher behind an RW mutex so it
+// can be hot-swapped when GitOps config is changed via the settings UI.
+type SealPublisherHolder struct {
+	mu sync.RWMutex
+	p  SealedTokenPublisher
+}
+
+// NewSealPublisherHolder creates a holder with an optional initial publisher.
+func NewSealPublisherHolder(initial SealedTokenPublisher) *SealPublisherHolder {
+	return &SealPublisherHolder{p: initial}
+}
+
+// PublishSealedReadToken implements SealedTokenPublisher.
+func (h *SealPublisherHolder) PublishSealedReadToken(ctx context.Context, params gitops.SealedReadTokenPublishParams) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.PublishSealedReadToken(ctx, params)
+}
+
+// DeleteSealedReadToken implements SealedTokenPublisher.
+func (h *SealPublisherHolder) DeleteSealedReadToken(ctx context.Context, params gitops.DeleteSealedReadTokenParams) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.DeleteSealedReadToken(ctx, params)
+}
+
+// Swap replaces the inner publisher atomically.
+func (h *SealPublisherHolder) Swap(p SealedTokenPublisher) {
+	h.mu.Lock()
+	h.p = p
+	h.mu.Unlock()
+}
+
 // Config holds server configuration.
 type Config struct {
 	Addr            string
@@ -158,6 +261,7 @@ type Config struct {
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
 	SecretBackend        secrets.Backend           // optional: enables simple app-env secret CRUD
 	UpperLevelSecretWriter secrets.UpperLevelWriter // optional: enables org/envtype/project-level secret CRUD
+	SecretsAuditor       *secrets.Auditor           // optional: enables audit logging for secret ops
 	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
@@ -168,9 +272,23 @@ type Config struct {
 	// KubeClient is the Kubernetes clientset for prerequisite detection.
 	// Nil in fake mode (placeholder data is returned instead).
 	KubeClient kubernetes.Interface
+	// DynClient is the dynamic Kubernetes client for CRD interactions (ArgoCD, Kargo).
+	// Used for the ArgoCD system-project prerequisite check. Nil disables that check.
+	DynClient dynamic.Interface
+	// ClusterPool builds per-cluster Kubernetes clients from stored kubeconfigs.
+	// Used to auto-fetch sealed-secrets certificates on cache miss or refresh.
+	// Nil disables auto-fetch (cert must be pre-populated in the ConfigMap).
+	ClusterPool *k8s.ClusterClientPool
 	// GitOpsConfigStore reads/writes the GitOps repo ConfigMap. Nil disables
 	// the /api/v1/gitops/* endpoints.
 	GitOpsConfigStore *gitops.ConfigStore
+	// GitOpsActivator is called after GitOps config is saved via the settings
+	// API to apply it immediately (ArgoCD registration + publisher hot-reload).
+	// Nil disables post-save activation (safe for tests and fake mode).
+	GitOpsActivator GitOpsActivatorFunc
+	// SealedTokenPublisher publishes sealed Connect tokens to the GitOps repo.
+	// Nil disables GitOps publishing in the binding flow (binding still saves state).
+	SealedTokenPublisher SealedTokenPublisher
 	// TemplateRegistryStore reads/writes the template registry ConfigMap.
 	// Nil disables the /api/v1/templates/registry and /sources endpoints.
 	TemplateRegistryStore *tpl.RegistryStore
@@ -291,7 +409,24 @@ func New(cfg Config) *Server {
 				appStore:    cfg.AppStore,
 				backend:     cfg.SecretBackend,
 				upperWriter: cfg.UpperLevelSecretWriter,
+				auditor:     cfg.SecretsAuditor,
 				logger:      cfg.Logger,
+			}
+			if cfg.KubeClient != nil {
+				rh.secretsHandler.saTokenStore = NewKubeSATokenStore(cfg.KubeClient)
+				rh.secretsHandler.saClientFactory = func(ctx context.Context, token string) (onepassword.SAClient, error) {
+					return onepassword.NewSDKClient(ctx, token)
+				}
+				rh.secretsHandler.certCache = seal.NewK8sCertCache(cfg.KubeClient)
+			}
+			if cfg.ClusterPool != nil {
+				rh.secretsHandler.clusterPool = &clusterPoolAdapter{pool: cfg.ClusterPool}
+			}
+			if cfg.ClusterStore != nil {
+				rh.secretsHandler.clusterStore = cfg.ClusterStore
+			}
+			if cfg.SealedTokenPublisher != nil {
+				rh.secretsHandler.sealPublisher = cfg.SealedTokenPublisher
 			}
 			cfg.Logger.Info("secrets management endpoints enabled")
 		}
@@ -300,7 +435,15 @@ func New(cfg Config) *Server {
 	}
 
 	if cfg.ClusterStore != nil && ah != nil {
-		ch := &clusterHandler{store: cfg.ClusterStore, auth: ah}
+		ch := &clusterHandler{
+			store:     cfg.ClusterStore,
+			auth:      ah,
+			certCache: seal.NewK8sCertCache(cfg.KubeClient),
+			logger:    cfg.Logger,
+		}
+		if cfg.ClusterPool != nil {
+			ch.pool = &clusterPoolAdapter{pool: cfg.ClusterPool}
+		}
 		ch.registerRoutes(mux)
 		cfg.Logger.Info("cluster endpoints enabled")
 	}
@@ -313,7 +456,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /api/v1/onboarding/status", oh.handleStatus)
 
 	if cfg.KubeClient != nil {
-		ph := &prerequisitesHandler{client: cfg.KubeClient}
+		ph := &prerequisitesHandler{client: cfg.KubeClient, dynClient: cfg.DynClient}
 		ph.registerRoutes(mux)
 		cfg.Logger.Info("prerequisites detection endpoint enabled")
 	} else {
@@ -324,9 +467,10 @@ func New(cfg Config) *Server {
 
 	if cfg.GitOpsConfigStore != nil && ah != nil {
 		gh := &gitopsHandler{
-			store:  cfg.GitOpsConfigStore,
-			auth:   ah,
-			logger: cfg.Logger,
+			store:     cfg.GitOpsConfigStore,
+			auth:      ah,
+			logger:    cfg.Logger,
+			activator: cfg.GitOpsActivator,
 		}
 		gh.registerRoutes(mux)
 		cfg.Logger.Info("gitops config endpoints enabled")

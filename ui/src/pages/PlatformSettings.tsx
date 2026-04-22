@@ -9,50 +9,30 @@ import {
 import {
   fetchPrerequisites,
   type PrerequisitesResponse,
-  type ComponentStatus,
+  type PrerequisiteItem,
 } from "../lib/prerequisites";
 
-function StatusBadge({ installed, healthy }: ComponentStatus) {
-  if (!installed) {
-    return (
-      <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600">
-        Not installed
-      </span>
-    );
-  }
-  if (!healthy) {
-    return (
-      <span className="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800">
-        Unhealthy
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
-      Healthy
-    </span>
-  );
-}
-
-function ComponentRow({
-  label,
-  status,
-}: {
-  label: string;
-  status: ComponentStatus;
-}) {
+function PrerequisiteRow({ item }: { item: PrerequisiteItem }) {
   return (
     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-5 py-4">
       <div>
-        <p className="text-sm font-medium text-gray-900">{label}</p>
-        {status.installed && (
-          <p className="mt-0.5 text-xs text-gray-500">
-            {status.namespace && <span>{status.namespace}</span>}
-            {status.version && <span className="ml-2">{status.version}</span>}
-          </p>
+        <p className="text-sm font-medium text-gray-900">{item.name}</p>
+        {item.namespace && (
+          <p className="mt-0.5 text-xs text-gray-500">{item.namespace}</p>
+        )}
+        {item.message && !item.installed && (
+          <p className="mt-0.5 text-xs text-gray-400">{item.message}</p>
         )}
       </div>
-      <StatusBadge {...status} />
+      {item.installed ? (
+        <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
+          Installed
+        </span>
+      ) : (
+        <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600">
+          Not installed
+        </span>
+      )}
     </div>
   );
 }
@@ -108,35 +88,30 @@ export function PlatformSettings() {
       </div>
 
       {data && (
-        <>
-          <section className="space-y-3">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-gray-500">
-              Components
-            </h2>
-            <ComponentRow label="ArgoCD" status={data.argocd} />
-            <ComponentRow label="Ingress Controller" status={data.ingressController} />
-            <ComponentRow label="External Secrets Operator" status={data.eso} />
-          </section>
-
-          <section className="space-y-3">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-gray-500">
-              Cluster
-            </h2>
-            <div className="rounded-lg border border-gray-200 bg-white px-5 py-4">
-              <p className="text-sm text-gray-700">
-                <span className="font-medium">API Server:</span>{" "}
-                <code className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">
-                  {data.inCluster.apiServer}
-                </code>
-              </p>
-              {data.inCluster.clusterName && (
-                <p className="mt-1 text-sm text-gray-500">
-                  Cluster: {data.inCluster.clusterName}
-                </p>
-              )}
-            </div>
-          </section>
-        </>
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-gray-500">
+            Prerequisites
+          </h2>
+          {data.prerequisites.length === 0 ? (
+            <p className="text-sm text-gray-400">No prerequisite checks configured.</p>
+          ) : (
+            data.prerequisites.map((item) => (
+              <PrerequisiteRow key={item.name} item={item} />
+            ))
+          )}
+          <div className="flex items-center gap-2 pt-1">
+            <span className="text-xs font-medium text-gray-500">Overall:</span>
+            {data.ready ? (
+              <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
+                Ready
+              </span>
+            ) : (
+              <span className="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800">
+                Not ready
+              </span>
+            )}
+          </div>
+        </section>
       )}
 
       <CredentialHealth />
