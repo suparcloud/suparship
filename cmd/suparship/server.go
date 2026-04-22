@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/auth"
@@ -128,6 +129,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kargoPipelineReader     server.KargoPipelineReader
 		deploymentHistoryReader server.DeploymentHistoryReader
 		kubeClient              kubernetes.Interface
+		dynClient               dynamic.Interface
 		gitopsConfigStore       *gitops.ConfigStore
 		templateRegistryStore   *tpl.RegistryStore
 		registryStore           *registry.Store
@@ -193,7 +195,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kubeClient = client
 
 		// Build dynamic client for CRD interactions (ArgoCD, Kargo).
-		dynClient, dynErr := k8s.NewDynamicClient(kubeconfig, kubecontext)
+		var dynErr error
+		dynClient, dynErr = k8s.NewDynamicClient(kubeconfig, kubecontext)
 		if dynErr != nil {
 			logger.Warn("dynamic client unavailable — ArgoCD/Kargo features disabled", "error", dynErr)
 		} else {
@@ -355,7 +358,26 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				)
 			}
 
-			// 2. Rebuild the publisher from the new config.
+			// 2. Ensure the root "App of Apps" Application exists so ArgoCD
+			// syncs _infra/ (ApplicationSets, AppProjects) from the gitops repo.
+			// Skipped when the dynamic client is unavailable (Application CRD
+			// requires it) or when an externally managed root app already exists.
+			if dynClient != nil {
+				rootCfg := gitops.RootAppConfig{
+					ArgoCDRepoURL: repoCfg.ArgoCDRepoURL,
+					RepoURL:       repoCfg.RepoURL,
+					Branch:        repoCfg.Branch,
+				}
+				if rootErr := gitops.EnsureRootApplication(ctx, dynClient, rootCfg); rootErr != nil {
+					logger.Warn("root application creation failed — ArgoCD CRD may not be available",
+						"error", rootErr,
+					)
+				} else {
+					logger.Info("argocd root application ensured", "name", "suparship-apps")
+				}
+			}
+
+			// 3. Rebuild the publisher from the new config.
 			pub, err := gitops.NewPublisher(gitops.PublisherConfig{
 				RepoURL:         repoCfg.RepoURL,
 				RepoUser:        username,
@@ -370,7 +392,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				return fmt.Errorf("rebuild gitops publisher: %w", err)
 			}
 
-			// 3. Hot-swap the live publisher so new app creates/promotes use it.
+			// 4. Hot-swap the live publisher so new app creates/promotes use it.
 			publisherHolder.Swap(&gitOpsPublisherAdapter{
 				inner:        pub,
 				orgProvider:  orgProvider,
@@ -379,7 +401,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
 
-			// 4. Trigger initial env-infra publish in background (idempotent).
+			// 5. Trigger initial env-infra publish in background (idempotent).
 			// This ensures ArgoCD ApplicationSets and AppProjects are in Git
 			// even before the first app is created.
 			go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
