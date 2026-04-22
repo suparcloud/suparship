@@ -77,6 +77,25 @@ type Cluster struct {
 	// Status reflects the last known reachability of this cluster.
 	// Values: "ready" | "unknown".
 	Status string `json:"status,omitempty"`
+	// ArgoCDOwned is true when suparship created and manages the ArgoCD cluster
+	// Secret for this cluster. When false (or absent), the ArgoCD Secret was
+	// pre-existing and suparship only linked to it — the Secret will not be
+	// deleted when this cluster is unregistered from suparship.
+	ArgoCDOwned bool `json:"argoCDOwned,omitempty"`
+	// ESONamespace is the Kubernetes namespace where External Secrets Operator
+	// is installed on this cluster. Defaults to "external-secrets" when empty.
+	// SealedSecrets and ClusterSecretStore resources for this cluster are
+	// created in this namespace.
+	ESONamespace string `json:"esoNamespace,omitempty"`
+}
+
+// EffectiveESONamespace returns ESONamespace, falling back to "external-secrets"
+// when the field is empty (the upstream default installation namespace for ESO).
+func (c Cluster) EffectiveESONamespace() string {
+	if c.ESONamespace != "" {
+		return c.ESONamespace
+	}
+	return "external-secrets"
 }
 
 // Service is a deployable workload belonging to a project.

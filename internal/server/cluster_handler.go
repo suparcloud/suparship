@@ -63,6 +63,9 @@ type createClusterRequest struct {
 	DisplayName string `json:"displayName,omitempty"`
 	// APIServer is the Kubernetes API server URL (e.g. "https://10.0.0.1:6443").
 	APIServer string `json:"apiServer"`
+	// ESONamespace is the namespace where External Secrets Operator is installed
+	// on this cluster. Defaults to "external-secrets" when empty.
+	ESONamespace string `json:"esoNamespace,omitempty"`
 	// Kubeconfig is the base64-encoded raw kubeconfig for this cluster.
 	// It is stored encrypted in Kubernetes Secrets and never written to Git.
 	Kubeconfig string `json:"kubeconfig"`
@@ -100,10 +103,11 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cluster := domain.Cluster{
-		Name:        req.Name,
-		DisplayName: displayName,
-		APIServer:   req.APIServer,
-		Status:      "ready",
+		Name:         req.Name,
+		DisplayName:  displayName,
+		APIServer:    req.APIServer,
+		ESONamespace: req.ESONamespace,
+		Status:       "ready",
 	}
 
 	if err := ch.store.CreateCluster(r.Context(), cluster, kubeconfigBytes); err != nil {

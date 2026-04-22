@@ -68,7 +68,7 @@ type SAClientFactory func(ctx context.Context, token string) (onepassword.SAClie
 // SealedTokenPublisher publishes sealed Connect tokens to the GitOps repo.
 type SealedTokenPublisher interface {
 	PublishSealedReadToken(ctx context.Context, params gitops.SealedReadTokenPublishParams) error
-	DeleteSealedReadToken(ctx context.Context, env string) error
+	DeleteSealedReadToken(ctx context.Context, params gitops.DeleteSealedReadTokenParams) error
 }
 
 // ClusterKubeBuilder builds a Kubernetes client for a registered cluster.
@@ -360,24 +360,26 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 			return
 		}
 
-		var destServer string
-		if h.clusterStore != nil {
-			cluster, cerr := h.clusterStore.GetCluster(ctx, clusterName)
-			if cerr != nil {
-				h.logger.Error("cluster not found in registry", "cluster", clusterName, "err", cerr)
-				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
-					Error: fmt.Sprintf("cluster %q not found in registry; check Settings > Clusters", clusterName),
-				})
-				return
-			}
-			if cluster.APIServer == "" {
-				h.logger.Error("cluster has no apiServer configured", "cluster", clusterName)
-				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
-					Error: fmt.Sprintf("cluster %q has no apiServer configured; update it in Settings > Clusters", clusterName),
-				})
-				return
-			}
-			destServer = cluster.APIServer
+		if h.clusterStore == nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{
+				Error: "cluster store not configured; cannot resolve destination",
+			})
+			return
+		}
+		cluster, cerr := h.clusterStore.GetCluster(ctx, clusterName)
+		if cerr != nil {
+			h.logger.Error("cluster not found in registry", "cluster", clusterName, "err", cerr)
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+				Error: fmt.Sprintf("cluster %q not found in registry; check Settings > Clusters", clusterName),
+			})
+			return
+		}
+		if cluster.APIServer == "" {
+			h.logger.Error("cluster has no apiServer configured", "cluster", clusterName)
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+				Error: fmt.Sprintf("cluster %q has no apiServer configured; update it in Settings > Clusters", clusterName),
+			})
+			return
 		}
 
 		publishErr := h.sealPublisher.PublishSealedReadToken(ctx, gitops.SealedReadTokenPublishParams{
@@ -386,7 +388,9 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 			OrgName:           org.Name,
 			Token:             []byte(req.ConnectToken),
 			Cert:              cert,
-			ArgoCDDestination: destServer,
+			ArgoCDDestination: cluster.APIServer,
+			ClusterName:       clusterName,
+			ESONamespace:      cluster.EffectiveESONamespace(),
 		})
 		if publishErr != nil {
 			h.logger.Error("failed to publish sealed token", "env", req.Env, "err", publishErr)
@@ -465,7 +469,24 @@ func (h *secretsHandler) handleRemoveBinding(w http.ResponseWriter, r *http.Requ
 	}
 
 	if h.sealPublisher != nil {
-		if err := h.sealPublisher.DeleteSealedReadToken(ctx, env); err != nil {
+		// Resolve cluster name for the ArgoCD app filename.
+		var clusterName string
+		for i := range org.Environments {
+			if org.Environments[i].Name == env {
+				clusterName = org.Environments[i].ClusterRef
+				break
+			}
+		}
+		if clusterName == "" {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+				Error: fmt.Sprintf("environment %q has no cluster assigned; cannot remove secret-store files", env),
+			})
+			return
+		}
+		if err := h.sealPublisher.DeleteSealedReadToken(ctx, gitops.DeleteSealedReadTokenParams{
+			Env:         env,
+			ClusterName: clusterName,
+		}); err != nil {
 			h.logger.Error("failed to delete sealed token from gitops", "env", env, "err", err)
 			writeJSON(w, http.StatusInternalServerError, errorResponse{
 				Error: fmt.Sprintf("failed to remove secret-store files from GitOps repo: %v", err),

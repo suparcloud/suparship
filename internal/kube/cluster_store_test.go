@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -56,7 +57,7 @@ func TestIsOwnedBySuparship(t *testing.T) {
 	}
 }
 
-func TestRegisterWithArgoCD_RefusesToOverwriteExternalSecret(t *testing.T) {
+func TestRegisterWithArgoCD_LinksToPreExistingExternalSecret(t *testing.T) {
 	apiServer := "https://10.0.0.1:6443"
 	secretName := argoCDClusterSecretName(apiServer)
 
@@ -83,35 +84,20 @@ func TestRegisterWithArgoCD_RefusesToOverwriteExternalSecret(t *testing.T) {
 		APIServer: apiServer,
 		Status:    "ready",
 	}
-	// Minimal valid kubeconfig pointing at the same server.
-	kubeconfig := []byte(`apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: ` + apiServer + `
-    insecure-skip-tls-verify: true
-  name: test
-contexts:
-- context:
-    cluster: test
-    user: test
-  name: test
-current-context: test
-users:
-- name: test
-  user:
-    token: fake-token
-`)
+	kubeconfig := minimalKubeconfig(apiServer)
 
-	err := store.registerWithArgoCD(context.Background(), cluster, kubeconfig)
-	if err == nil {
-		t.Fatal("expected error when overwriting external ArgoCD secret, got nil")
+	owned, err := store.registerWithArgoCD(context.Background(), cluster, kubeconfig)
+	if err != nil {
+		t.Fatalf("expected no error when linking to external ArgoCD secret, got: %v", err)
+	}
+	if owned {
+		t.Error("expected owned=false when linking to pre-existing ArgoCD secret")
 	}
 
-	// Verify the original secret was NOT overwritten.
+	// The external secret must NOT have been overwritten.
 	existing, _ := client.CoreV1().Secrets(argoCDNS).Get(context.Background(), secretName, metav1.GetOptions{})
 	if existing.StringData["name"] == "my-cluster" {
-		t.Error("external secret was overwritten — name changed to my-cluster")
+		t.Error("external secret was overwritten — name should still be external-cluster")
 	}
 }
 
@@ -144,28 +130,13 @@ func TestRegisterWithArgoCD_UpdatesOwnedSecret(t *testing.T) {
 		APIServer: apiServer,
 		Status:    "ready",
 	}
-	kubeconfig := []byte(`apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: ` + apiServer + `
-    insecure-skip-tls-verify: true
-  name: test
-contexts:
-- context:
-    cluster: test
-    user: test
-  name: test
-current-context: test
-users:
-- name: test
-  user:
-    token: fake-token
-`)
 
-	err := store.registerWithArgoCD(context.Background(), cluster, kubeconfig)
+	owned, err := store.registerWithArgoCD(context.Background(), cluster, minimalKubeconfig(apiServer))
 	if err != nil {
 		t.Fatalf("expected no error when updating owned secret, got: %v", err)
+	}
+	if !owned {
+		t.Error("expected owned=true when updating suparship-owned ArgoCD secret")
 	}
 }
 
@@ -269,6 +240,210 @@ func TestDeleteCluster_RemovesOwnedArgoCDSecret(t *testing.T) {
 	// The owned ArgoCD secret must be gone.
 	_, getErr := client.CoreV1().Secrets(argoCDNS).Get(context.Background(), secretName, metav1.GetOptions{})
 	if getErr == nil {
+		t.Error("owned ArgoCD secret should have been deleted")
+	}
+}
+
+// minimalKubeconfig returns a minimal but parseable kubeconfig for tests.
+func minimalKubeconfig(apiServer string) []byte {
+	return []byte(`apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: ` + apiServer + `
+    insecure-skip-tls-verify: true
+  name: test
+contexts:
+- context:
+    cluster: test
+    user: test
+  name: test
+current-context: test
+users:
+- name: test
+  user:
+    token: fake-token
+`)
+}
+
+// ── CreateCluster with pre-existing ArgoCD secret ────────────────────────────
+
+func TestCreateCluster_LinksPreExistingArgoCDSecret(t *testing.T) {
+	apiServer := "https://10.0.0.5:6443"
+	clusterName := "linked-cluster"
+	secretName := argoCDClusterSecretName(apiServer)
+
+	// Pre-existing ArgoCD secret without suparship ownership label.
+	preExisting := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: argoCDNS,
+			Labels:    map[string]string{argoCDSecretType: argoCDCluster},
+		},
+		StringData: map[string]string{
+			"name":   "pre-registered",
+			"server": apiServer,
+			"config": "{}",
+		},
+	}
+
+	client := newTestClient(preExisting)
+	store := NewK8sClusterStore(client)
+
+	err := store.CreateCluster(context.Background(), domain.Cluster{
+		Name: clusterName, APIServer: apiServer, Status: "ready",
+	}, minimalKubeconfig(apiServer))
+	if err != nil {
+		t.Fatalf("CreateCluster failed: %v", err)
+	}
+
+	// The cluster ConfigMap must exist and ArgoCDOwned must be false.
+	cm, err := client.CoreV1().ConfigMaps(suparshipSystemNS).Get(
+		context.Background(), clusterConfigMapPrefix+clusterName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("cluster ConfigMap not found: %v", err)
+	}
+	var stored domain.Cluster
+	if err := json.Unmarshal([]byte(cm.Data[clusterConfigMapKey]), &stored); err != nil {
+		t.Fatalf("unmarshal cluster: %v", err)
+	}
+	if stored.ArgoCDOwned {
+		t.Error("ArgoCDOwned should be false when linking to a pre-existing ArgoCD secret")
+	}
+
+	// The pre-existing ArgoCD secret must not have been modified.
+	existing, _ := client.CoreV1().Secrets(argoCDNS).Get(
+		context.Background(), secretName, metav1.GetOptions{})
+	if existing.StringData["name"] == clusterName {
+		t.Error("pre-existing ArgoCD secret was overwritten")
+	}
+}
+
+func TestCreateCluster_SetsArgoCDOwnedTrue_WhenSecretIsNew(t *testing.T) {
+	apiServer := "https://10.0.0.6:6443"
+	clusterName := "fresh-cluster"
+
+	client := newTestClient()
+	store := NewK8sClusterStore(client)
+
+	err := store.CreateCluster(context.Background(), domain.Cluster{
+		Name: clusterName, APIServer: apiServer, Status: "ready",
+	}, minimalKubeconfig(apiServer))
+	if err != nil {
+		t.Fatalf("CreateCluster failed: %v", err)
+	}
+
+	cm, err := client.CoreV1().ConfigMaps(suparshipSystemNS).Get(
+		context.Background(), clusterConfigMapPrefix+clusterName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("cluster ConfigMap not found: %v", err)
+	}
+	var stored domain.Cluster
+	if err := json.Unmarshal([]byte(cm.Data[clusterConfigMapKey]), &stored); err != nil {
+		t.Fatalf("unmarshal cluster: %v", err)
+	}
+	if !stored.ArgoCDOwned {
+		t.Error("ArgoCDOwned should be true when suparship created the ArgoCD secret")
+	}
+}
+
+// ── DeleteCluster with ArgoCDOwned flag ──────────────────────────────────────
+
+func TestDeleteCluster_PreserversPreExistingArgoCDSecret_ViaFlag(t *testing.T) {
+	apiServer := "https://10.0.0.7:6443"
+	clusterName := "linked-del"
+	secretName := argoCDClusterSecretName(apiServer)
+
+	// Cluster metadata with ArgoCDOwned=false (linked, not owned).
+	clusterData, _ := json.Marshal(domain.Cluster{
+		Name: clusterName, APIServer: apiServer, Status: "ready", ArgoCDOwned: false,
+	})
+	// The ArgoCD secret has no suparship label (simulating pre-existing).
+	preExistingArgoSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: argoCDNS,
+			Labels:    map[string]string{argoCDSecretType: argoCDCluster},
+		},
+		StringData: map[string]string{"name": "external", "server": apiServer},
+	}
+	clusterCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterConfigMapPrefix + clusterName,
+			Namespace: suparshipSystemNS,
+			Labels: map[string]string{
+				labelManagedBy: "suparship",
+				labelType:      "cluster",
+				labelCluster:   clusterName,
+			},
+		},
+		Data: map[string]string{clusterConfigMapKey: string(clusterData)},
+	}
+
+	client := newTestClient(preExistingArgoSecret, clusterCM)
+	store := NewK8sClusterStore(client)
+
+	if err := store.DeleteCluster(context.Background(), clusterName); err != nil {
+		t.Fatalf("DeleteCluster failed: %v", err)
+	}
+
+	// Pre-existing ArgoCD secret must survive.
+	if _, err := client.CoreV1().Secrets(argoCDNS).Get(
+		context.Background(), secretName, metav1.GetOptions{}); err != nil {
+		t.Errorf("pre-existing ArgoCD secret was deleted: %v", err)
+	}
+
+	// Suparship ConfigMap must be gone.
+	if _, err := client.CoreV1().ConfigMaps(suparshipSystemNS).Get(
+		context.Background(), clusterConfigMapPrefix+clusterName, metav1.GetOptions{}); err == nil {
+		t.Error("cluster ConfigMap should have been deleted")
+	}
+}
+
+func TestDeleteCluster_DeletesOwnedArgoCDSecret_ViaFlag(t *testing.T) {
+	apiServer := "https://10.0.0.8:6443"
+	clusterName := "owned-del"
+	secretName := argoCDClusterSecretName(apiServer)
+
+	// Cluster metadata with ArgoCDOwned=true.
+	clusterData, _ := json.Marshal(domain.Cluster{
+		Name: clusterName, APIServer: apiServer, Status: "ready", ArgoCDOwned: true,
+	})
+	ownedArgoSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: argoCDNS,
+			Labels: map[string]string{
+				argoCDSecretType: argoCDCluster,
+				labelManagedBy:   "suparship",
+				labelCluster:     clusterName,
+			},
+		},
+		StringData: map[string]string{"name": clusterName, "server": apiServer},
+	}
+	clusterCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterConfigMapPrefix + clusterName,
+			Namespace: suparshipSystemNS,
+			Labels: map[string]string{
+				labelManagedBy: "suparship",
+				labelType:      "cluster",
+				labelCluster:   clusterName,
+			},
+		},
+		Data: map[string]string{clusterConfigMapKey: string(clusterData)},
+	}
+
+	client := newTestClient(ownedArgoSecret, clusterCM)
+	store := NewK8sClusterStore(client)
+
+	if err := store.DeleteCluster(context.Background(), clusterName); err != nil {
+		t.Fatalf("DeleteCluster failed: %v", err)
+	}
+
+	// Owned ArgoCD secret must be gone.
+	if _, err := client.CoreV1().Secrets(argoCDNS).Get(
+		context.Background(), secretName, metav1.GetOptions{}); err == nil {
 		t.Error("owned ArgoCD secret should have been deleted")
 	}
 }

@@ -211,14 +211,14 @@ func (h *SealPublisherHolder) PublishSealedReadToken(ctx context.Context, params
 }
 
 // DeleteSealedReadToken implements SealedTokenPublisher.
-func (h *SealPublisherHolder) DeleteSealedReadToken(ctx context.Context, env string) error {
+func (h *SealPublisherHolder) DeleteSealedReadToken(ctx context.Context, params gitops.DeleteSealedReadTokenParams) error {
 	h.mu.RLock()
 	p := h.p
 	h.mu.RUnlock()
 	if p == nil {
 		return nil
 	}
-	return p.DeleteSealedReadToken(ctx, env)
+	return p.DeleteSealedReadToken(ctx, params)
 }
 
 // Swap replaces the inner publisher atomically.

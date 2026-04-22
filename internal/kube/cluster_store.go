@@ -82,16 +82,53 @@ func (s *K8sClusterStore) GetCluster(ctx context.Context, name string) (*domain.
 }
 
 // CreateCluster registers a new cluster. It:
-//  1. Stores cluster metadata as a ConfigMap in suparship-system.
-//  2. Stores the raw kubeconfig as a Secret in suparship-system.
-//  3. Registers the cluster with ArgoCD by creating an ArgoCD cluster Secret
-//     in the argocd namespace, with credentials extracted from the kubeconfig.
+//  1. Stores the raw kubeconfig as a Secret in suparship-system.
+//  2. Registers (or links) the cluster with ArgoCD by looking for a
+//     pre-existing ArgoCD cluster Secret. If one exists but was not
+//     created by suparship, suparship links to it without touching it;
+//     the ArgoCD Secret will NOT be deleted when this cluster is removed.
+//     If no ArgoCD Secret exists, suparship creates one and marks it as owned.
+//  3. Stores cluster metadata as a ConfigMap in suparship-system, with
+//     ArgoCDOwned reflecting whether suparship owns the ArgoCD Secret.
 func (s *K8sClusterStore) CreateCluster(ctx context.Context, cluster domain.Cluster, kubeconfig []byte) error {
 	if err := domain.ValidateClusterName(cluster.Name); err != nil {
 		return err
 	}
 
-	// 1. Store cluster metadata ConfigMap.
+	// 1. Store raw kubeconfig Secret first (needed for ArgoCD credential extraction).
+	kubeconfigSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterKubeconfigPrefix + cluster.Name,
+			Namespace: suparshipSystemNS,
+			Labels: map[string]string{
+				labelManagedBy: "suparship",
+				labelType:      "cluster-kubeconfig",
+				labelCluster:   cluster.Name,
+			},
+		},
+		Data: map[string][]byte{
+			clusterKubeconfigKey: kubeconfig,
+		},
+	}
+	if _, err := s.client.CoreV1().Secrets(suparshipSystemNS).Create(ctx, kubeconfigSecret, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating cluster kubeconfig secret: %w", err)
+		}
+		if _, err := s.client.CoreV1().Secrets(suparshipSystemNS).Update(ctx, kubeconfigSecret, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("updating cluster kubeconfig secret: %w", err)
+		}
+	}
+
+	// 2. Register or link with ArgoCD. Determine whether suparship owns the Secret.
+	argoCDOwned, err := s.registerWithArgoCD(ctx, cluster, kubeconfig)
+	if err != nil {
+		// Non-fatal: ArgoCD may not be installed. The cluster is still usable
+		// for log streaming; the operator must register it with ArgoCD separately.
+		argoCDOwned = false
+	}
+	cluster.ArgoCDOwned = argoCDOwned
+
+	// 3. Store cluster metadata ConfigMap with final ArgoCDOwned state.
 	data, err := json.Marshal(cluster)
 	if err != nil {
 		return fmt.Errorf("marshaling cluster: %w", err)
@@ -119,55 +156,32 @@ func (s *K8sClusterStore) CreateCluster(ctx context.Context, cluster domain.Clus
 		}
 	}
 
-	// 2. Store raw kubeconfig Secret.
-	kubeconfigSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      clusterKubeconfigPrefix + cluster.Name,
-			Namespace: suparshipSystemNS,
-			Labels: map[string]string{
-				labelManagedBy: "suparship",
-				labelType:      "cluster-kubeconfig",
-				labelCluster:   cluster.Name,
-			},
-		},
-		Data: map[string][]byte{
-			clusterKubeconfigKey: kubeconfig,
-		},
-	}
-	if _, err := s.client.CoreV1().Secrets(suparshipSystemNS).Create(ctx, kubeconfigSecret, metav1.CreateOptions{}); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("creating cluster kubeconfig secret: %w", err)
-		}
-		if _, err := s.client.CoreV1().Secrets(suparshipSystemNS).Update(ctx, kubeconfigSecret, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("updating cluster kubeconfig secret: %w", err)
-		}
-	}
-
-	// 3. Register with ArgoCD.
-	if err := s.registerWithArgoCD(ctx, cluster, kubeconfig); err != nil {
-		// Non-fatal: ArgoCD may not be installed. Log but don't fail.
-		// The cluster is still usable for log streaming; the operator must
-		// register it with ArgoCD separately if ArgoCD is present.
-		_ = err // TODO: log warning
-	}
-
 	return nil
 }
 
 // DeleteCluster removes a cluster registration. The ArgoCD cluster Secret
-// is only removed if it was created by suparship (has the managed-by label).
+// is only removed if suparship owns it — i.e. ArgoCDOwned is true in the
+// stored metadata, or (for clusters registered before this field existed)
+// the Secret carries the suparship.io/managed-by label. Pre-existing ArgoCD
+// cluster registrations are never touched.
 func (s *K8sClusterStore) DeleteCluster(ctx context.Context, name string) error {
 	cluster, err := s.GetCluster(ctx, name)
 	if err != nil {
 		return err
 	}
 
-	// Remove ArgoCD cluster Secret only if suparship owns it.
+	// Remove ArgoCD cluster Secret only when suparship owns it.
+	// Prefer the stored ArgoCDOwned flag; fall back to label check for clusters
+	// registered before ArgoCDOwned was introduced.
 	argoCDSecretName := argoCDClusterSecretName(cluster.APIServer)
 	existing, getErr := s.client.CoreV1().Secrets(argoCDNS).Get(ctx, argoCDSecretName, metav1.GetOptions{})
-	if getErr == nil && isOwnedBySuparship(existing.Labels) {
-		if err := s.client.CoreV1().Secrets(argoCDNS).Delete(ctx, argoCDSecretName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("deleting argocd cluster secret: %w", err)
+	if getErr == nil {
+		ownedByFlag := cluster.ArgoCDOwned
+		ownedByLabel := isOwnedBySuparship(existing.Labels)
+		if ownedByFlag || ownedByLabel {
+			if err := s.client.CoreV1().Secrets(argoCDNS).Delete(ctx, argoCDSecretName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting argocd cluster secret: %w", err)
+			}
 		}
 	}
 
@@ -220,20 +234,22 @@ type argoCDTLSConfig struct {
 	KeyData  []byte `json:"keyData,omitempty"`
 }
 
-// registerWithArgoCD creates an ArgoCD cluster Secret from the provided
-// kubeconfig. ArgoCD uses this Secret to deploy Applications to the cluster.
+// registerWithArgoCD creates or links an ArgoCD cluster Secret for the given
+// cluster. It returns (owned, err) where:
+//   - owned=true means suparship created the Secret and will manage it.
+//   - owned=false means a pre-existing Secret was found; suparship links to it
+//     without modifying it, and will not delete it on cluster removal.
 //
-// If an ArgoCD Secret for the same API server URL already exists but was
-// not created by suparship (missing suparship.io/managed-by label), the
-// Secret is left untouched to avoid overwriting externally managed clusters.
-func (s *K8sClusterStore) registerWithArgoCD(ctx context.Context, cluster domain.Cluster, kubeconfigBytes []byte) error {
+// A non-nil error is only returned for unexpected failures (e.g. network
+// errors), not for the pre-existing-secret case.
+func (s *K8sClusterStore) registerWithArgoCD(ctx context.Context, cluster domain.Cluster, kubeconfigBytes []byte) (owned bool, err error) {
 	config, err := clientcmd.NewClientConfigFromBytes(kubeconfigBytes)
 	if err != nil {
-		return fmt.Errorf("parsing kubeconfig: %w", err)
+		return false, fmt.Errorf("parsing kubeconfig: %w", err)
 	}
 	restCfg, err := config.ClientConfig()
 	if err != nil {
-		return fmt.Errorf("building rest config from kubeconfig: %w", err)
+		return false, fmt.Errorf("building rest config from kubeconfig: %w", err)
 	}
 
 	argoCDCfg := argoCDClusterConfig{
@@ -248,7 +264,7 @@ func (s *K8sClusterStore) registerWithArgoCD(ctx context.Context, cluster domain
 
 	argoCDCfgJSON, err := json.Marshal(argoCDCfg)
 	if err != nil {
-		return fmt.Errorf("marshaling argocd cluster config: %w", err)
+		return false, fmt.Errorf("marshaling argocd cluster config: %w", err)
 	}
 
 	secretName := argoCDClusterSecretName(cluster.APIServer)
@@ -274,22 +290,29 @@ func (s *K8sClusterStore) registerWithArgoCD(ctx context.Context, cluster domain
 
 	if _, err := s.client.CoreV1().Secrets(argoCDNS).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("creating argocd cluster secret: %w", err)
+			return false, fmt.Errorf("creating argocd cluster secret: %w", err)
 		}
-		// Secret already exists — only update if suparship owns it.
+
+		// Secret already exists — check ownership.
 		existing, getErr := s.client.CoreV1().Secrets(argoCDNS).Get(ctx, secretName, metav1.GetOptions{})
 		if getErr != nil {
-			return fmt.Errorf("reading existing argocd cluster secret: %w", getErr)
+			return false, fmt.Errorf("reading existing argocd cluster secret: %w", getErr)
 		}
+
 		if !isOwnedBySuparship(existing.Labels) {
-			return fmt.Errorf("argocd cluster secret %q exists but is not managed by suparship — refusing to overwrite", secretName)
+			// Pre-existing ArgoCD cluster registration — link without touching it.
+			// suparship will not manage or delete this Secret.
+			return false, nil
 		}
+
+		// Owned by suparship — update credentials.
 		if _, err := s.client.CoreV1().Secrets(argoCDNS).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("updating argocd cluster secret: %w", err)
+			return false, fmt.Errorf("updating argocd cluster secret: %w", err)
 		}
+		return true, nil
 	}
 
-	return nil
+	return true, nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

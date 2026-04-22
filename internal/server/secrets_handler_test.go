@@ -495,7 +495,7 @@ func (s *stubSealPublisher) PublishSealedReadToken(_ context.Context, params git
 	return nil
 }
 
-func (s *stubSealPublisher) DeleteSealedReadToken(_ context.Context, _ string) error {
+func (s *stubSealPublisher) DeleteSealedReadToken(_ context.Context, _ gitops.DeleteSealedReadTokenParams) error {
 	return nil
 }
 

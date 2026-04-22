@@ -39,15 +39,24 @@ func freshTestKey(t *testing.T) *rsa.PublicKey {
 }
 
 func TestBuildSecretStoreArgoApp(t *testing.T) {
-	yaml := buildSecretStoreArgoApp("prod", "https://git.example.com/org/gitops.git", "main", "https://10.0.0.1:6443")
+	yaml := buildSecretStoreArgoApp(
+		"staging",
+		"staging-aks-02-scus",
+		"https://git.example.com/org/gitops.git",
+		"main",
+		"https://10.0.0.1:6443",
+		"external-secrets-system",
+	)
 	for _, want := range []string{
 		"apiVersion: argoproj.io/v1alpha1",
 		"kind: Application",
-		"name: secrets-prod",
+		"name: secrets-staging-aks-02-scus",
+		"suparship.io/env: staging",
+		"suparship.io/cluster: staging-aks-02-scus",
 		"namespace: argocd",
-		"path: gitops-output/_infra/secret-stores/prod",
+		"path: gitops-output/_secret-stores/staging",
 		"server: https://10.0.0.1:6443",
-		"namespace: external-secrets",
+		"namespace: external-secrets-system",
 		"prune: true",
 		"selfHeal: true",
 	} {
@@ -64,15 +73,19 @@ func TestPublishSealedReadToken_ValidatesInputs(t *testing.T) {
 	}
 	pub := freshTestKey(t)
 
+	const dest = "https://k8s:6443"
+	const cluster = "my-cluster"
+
 	cases := []struct {
 		name   string
 		params SealedReadTokenPublishParams
 	}{
-		{"missing env", SealedReadTokenPublishParams{VaultID: "v1", Cert: pub, Token: []byte("x"), ArgoCDDestination: "https://k8s:6443"}},
-		{"missing vault", SealedReadTokenPublishParams{Env: "prod", Cert: pub, Token: []byte("x"), ArgoCDDestination: "https://k8s:6443"}},
-		{"missing cert", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Token: []byte("x"), ArgoCDDestination: "https://k8s:6443"}},
-		{"empty token", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, ArgoCDDestination: "https://k8s:6443"}},
-		{"empty destination", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, Token: []byte("x")}},
+		{"missing env", SealedReadTokenPublishParams{VaultID: "v1", Cert: pub, Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
+		{"missing vault", SealedReadTokenPublishParams{Env: "prod", Cert: pub, Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
+		{"missing cert", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
+		{"empty token", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, ArgoCDDestination: dest, ClusterName: cluster}},
+		{"empty destination", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, Token: []byte("x"), ClusterName: cluster}},
+		{"missing cluster", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: pub, Token: []byte("x"), ArgoCDDestination: dest}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

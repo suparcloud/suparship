@@ -14,6 +14,9 @@ type ESOSecretStoreConfig struct {
 	Name        string // rendered from ResourceNaming.ClusterSecretStore
 	Binding     secrets.EnvBinding
 	BackendType secrets.BackendType
+	// ESONamespace is the namespace where the auth Secret (sealed Connect token)
+	// lives on the target cluster. Defaults to "external-secrets" when empty.
+	ESONamespace string
 }
 
 // ESOExternalSecretConfig captures the info needed to render one collapsed
@@ -51,6 +54,10 @@ spec:
 `))
 	case secrets.Backend1Password:
 		authName := secrets.ConnectTokenSecretName(cfg.Binding.Env)
+		esoNS := cfg.ESONamespace
+		if esoNS == "" {
+			esoNS = "external-secrets"
+		}
 		sb.WriteString(fmt.Sprintf(`    onepassword:
       connectHost: %s
       vaults:
@@ -66,7 +73,7 @@ spec:
 			cfg.Binding.VaultID,
 			authName,
 			secrets.SATokenSecretKey,
-			secrets.OnePasswordRemoteNamespace,
+			esoNS,
 		))
 	default:
 		sb.WriteString(fmt.Sprintf("    # %s provider — configure manually\n", cfg.BackendType))
