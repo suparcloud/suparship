@@ -154,17 +154,21 @@ func (s *K8sClusterStore) CreateCluster(ctx context.Context, cluster domain.Clus
 	return nil
 }
 
-// DeleteCluster removes a cluster registration and its ArgoCD Secret.
+// DeleteCluster removes a cluster registration. The ArgoCD cluster Secret
+// is only removed if it was created by suparship (has the managed-by label).
 func (s *K8sClusterStore) DeleteCluster(ctx context.Context, name string) error {
 	cluster, err := s.GetCluster(ctx, name)
 	if err != nil {
 		return err
 	}
 
-	// Remove ArgoCD cluster Secret if present.
+	// Remove ArgoCD cluster Secret only if suparship owns it.
 	argoCDSecretName := argoCDClusterSecretName(cluster.APIServer)
-	if err := s.client.CoreV1().Secrets(argoCDNS).Delete(ctx, argoCDSecretName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("deleting argocd cluster secret: %w", err)
+	existing, getErr := s.client.CoreV1().Secrets(argoCDNS).Get(ctx, argoCDSecretName, metav1.GetOptions{})
+	if getErr == nil && isOwnedBySuparship(existing.Labels) {
+		if err := s.client.CoreV1().Secrets(argoCDNS).Delete(ctx, argoCDSecretName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting argocd cluster secret: %w", err)
+		}
 	}
 
 	// Remove kubeconfig Secret.
@@ -218,6 +222,10 @@ type argoCDTLSConfig struct {
 
 // registerWithArgoCD creates an ArgoCD cluster Secret from the provided
 // kubeconfig. ArgoCD uses this Secret to deploy Applications to the cluster.
+//
+// If an ArgoCD Secret for the same API server URL already exists but was
+// not created by suparship (missing suparship.io/managed-by label), the
+// Secret is left untouched to avoid overwriting externally managed clusters.
 func (s *K8sClusterStore) registerWithArgoCD(ctx context.Context, cluster domain.Cluster, kubeconfigBytes []byte) error {
 	config, err := clientcmd.NewClientConfigFromBytes(kubeconfigBytes)
 	if err != nil {
@@ -267,6 +275,14 @@ func (s *K8sClusterStore) registerWithArgoCD(ctx context.Context, cluster domain
 	if _, err := s.client.CoreV1().Secrets(argoCDNS).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("creating argocd cluster secret: %w", err)
+		}
+		// Secret already exists — only update if suparship owns it.
+		existing, getErr := s.client.CoreV1().Secrets(argoCDNS).Get(ctx, secretName, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("reading existing argocd cluster secret: %w", getErr)
+		}
+		if !isOwnedBySuparship(existing.Labels) {
+			return fmt.Errorf("argocd cluster secret %q exists but is not managed by suparship — refusing to overwrite", secretName)
 		}
 		if _, err := s.client.CoreV1().Secrets(argoCDNS).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("updating argocd cluster secret: %w", err)
@@ -323,4 +339,11 @@ func argoCDClusterSecretName(apiServer string) string {
 		s = s[:maxSuffix]
 	}
 	return argoCDClusterSecretPrefix + s
+}
+
+// isOwnedBySuparship returns true if the labels indicate the resource was
+// created and is managed by suparship. Used to avoid overwriting or deleting
+// ArgoCD cluster Secrets that were registered externally.
+func isOwnedBySuparship(labels map[string]string) bool {
+	return labels != nil && labels[labelManagedBy] == "suparship"
 }
