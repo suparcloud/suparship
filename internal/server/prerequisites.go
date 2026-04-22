@@ -45,6 +45,7 @@ func (h *prerequisitesHandler) handleGetPrerequisites(w http.ResponseWriter, r *
 		h.checkSealedSecrets(ctx),
 		h.checkESO(ctx),
 		h.checkArgoCDSystemProject(ctx),
+		h.checkRootArgoApp(ctx),
 	}
 
 	allReady := true
@@ -161,6 +162,32 @@ func (h *prerequisitesHandler) checkArgoCDSystemProject(ctx context.Context) Pre
 	return status
 }
 
+func (h *prerequisitesHandler) checkRootArgoApp(ctx context.Context) PrerequisiteStatus {
+	status := PrerequisiteStatus{
+		Name:      "root-argoapp",
+		Namespace: "argocd",
+	}
+
+	if h.dynClient == nil {
+		status.Message = "dynamic client not available"
+		return status
+	}
+
+	exists, err := kube.RootArgoAppExists(ctx, h.dynClient, "argocd")
+	if err != nil {
+		status.Message = fmt.Sprintf("error checking suparship-apps Application: %v", err)
+		return status
+	}
+	if exists {
+		status.Installed = true
+		status.Message = "suparship-apps root Application found in argocd namespace"
+		return status
+	}
+
+	status.Message = "suparship-apps Application not found — configure gitops repo to trigger auto-creation"
+	return status
+}
+
 // placeholderPrerequisitesHandler returns a static response when no cluster client is available.
 type placeholderPrerequisitesHandler struct{}
 
@@ -175,6 +202,7 @@ func (h *placeholderPrerequisitesHandler) handleGetPrerequisites(w http.Response
 			{Name: "sealed-secrets", Message: "cluster client not configured"},
 			{Name: "external-secrets", Message: "cluster client not configured"},
 			{Name: "argocd-system-project", Message: "cluster client not configured"},
+			{Name: "root-argoapp", Message: "cluster client not configured"},
 		},
 	})
 }

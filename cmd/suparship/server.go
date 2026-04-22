@@ -324,7 +324,24 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				)
 				go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
 
-				gitopsProbeURL := pubCfg.ArgoCDRepoURL
+			// Ensure the suparship-apps root ArgoCD Application exists.
+			// This replaces the manual `kubectl apply -f config/gitops/root-app.yaml`
+			// step by deriving the manifest from the live gitops ConfigMap.
+			// Non-fatal: a warning is logged when ArgoCD is not installed or the
+			// application already exists (idempotent create-only).
+			go func() {
+				if err := kube.EnsureRootArgoApp(
+					context.Background(),
+					dynClient,
+					pubCfg.ArgoCDRepoURL,
+					pubCfg.Branch,
+					"argocd",
+				); err != nil {
+					logger.Warn("could not ensure suparship-apps root ArgoCD Application", "error", err)
+				}
+			}()
+
+			gitopsProbeURL := pubCfg.ArgoCDRepoURL
 				if gitopsProbeURL == "" {
 					gitopsProbeURL = repoCfg.RepoURL
 				}

@@ -25,11 +25,19 @@ var prereqAppProjectGVR = schema.GroupVersionResource{
 	Resource: "appprojects",
 }
 
+// prereqApplicationGVR mirrors the GVR used by RootArgoAppExists.
+var prereqApplicationGVR = schema.GroupVersionResource{
+	Group:    "argoproj.io",
+	Version:  "v1alpha1",
+	Resource: "applications",
+}
+
 func newTestDynClient() *dynfake.FakeDynamicClient {
 	scheme := runtime.NewScheme()
 	return dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
 		map[schema.GroupVersionResource]string{
-			prereqAppProjectGVR: "AppProjectList",
+			prereqAppProjectGVR:  "AppProjectList",
+			prereqApplicationGVR: "ApplicationList",
 		},
 	)
 }
@@ -46,6 +54,21 @@ func seedSystemProject(t *testing.T, dyn *dynfake.FakeDynamicClient) {
 	if _, err := dyn.Resource(prereqAppProjectGVR).Namespace("argocd").
 		Create(context.Background(), obj, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seed system project: %v", err)
+	}
+}
+
+// seedRootApp creates the suparship-apps Application in the fake client so the
+// prerequisite check reports it as installed.
+func seedRootApp(t *testing.T, dyn *dynfake.FakeDynamicClient) {
+	t.Helper()
+	obj := &unstructured.Unstructured{}
+	obj.SetAPIVersion("argoproj.io/v1alpha1")
+	obj.SetKind("Application")
+	obj.SetName("suparship-apps")
+	obj.SetNamespace("argocd")
+	if _, err := dyn.Resource(prereqApplicationGVR).Namespace("argocd").
+		Create(context.Background(), obj, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed root app: %v", err)
 	}
 }
 
@@ -86,6 +109,7 @@ func TestPrerequisitesHandler_AllPresent(t *testing.T) {
 	mux := http.NewServeMux()
 	dyn := newTestDynClient()
 	seedSystemProject(t, dyn)
+	seedRootApp(t, dyn)
 	h := &prerequisitesHandler{client: client, dynClient: dyn}
 	h.registerRoutes(mux)
 
@@ -105,8 +129,8 @@ func TestPrerequisitesHandler_AllPresent(t *testing.T) {
 	if !resp.Ready {
 		t.Error("expected Ready=true when all prerequisites are present")
 	}
-	if len(resp.Prerequisites) != 3 {
-		t.Fatalf("expected 3 prerequisites, got %d", len(resp.Prerequisites))
+	if len(resp.Prerequisites) != 4 {
+		t.Fatalf("expected 4 prerequisites, got %d", len(resp.Prerequisites))
 	}
 
 	ss := resp.Prerequisites[0]
@@ -137,6 +161,14 @@ func TestPrerequisitesHandler_AllPresent(t *testing.T) {
 	}
 	if !argoCDProj.Installed {
 		t.Errorf("argocd-system-project should be installed")
+	}
+
+	rootApp := resp.Prerequisites[3]
+	if rootApp.Name != "root-argoapp" {
+		t.Errorf("fourth prerequisite name: got %q, want root-argoapp", rootApp.Name)
+	}
+	if !rootApp.Installed {
+		t.Errorf("root-argoapp should be installed")
 	}
 }
 
@@ -237,8 +269,8 @@ func TestPlaceholderPrerequisitesHandler(t *testing.T) {
 	if resp.Ready {
 		t.Error("placeholder should report not ready")
 	}
-	if len(resp.Prerequisites) != 3 {
-		t.Fatalf("expected 3 prerequisites, got %d", len(resp.Prerequisites))
+	if len(resp.Prerequisites) != 4 {
+		t.Fatalf("expected 4 prerequisites, got %d", len(resp.Prerequisites))
 	}
 	for _, p := range resp.Prerequisites {
 		if p.Installed {
