@@ -212,7 +212,7 @@ func Create(req CreateRequest) (*CreateResult, error) {
 // instances for a newly-created app. Both start with no release and a
 // StatusNotDeployed phase.
 //
-// Namespace convention: {appName}-{envName} via GenerateNamespace.
+// Namespace convention: {projectName}-{appName}-{envName} via GenerateProjectNamespace.
 func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 	return []*domain.AppEnvironment{
 		{
@@ -220,7 +220,7 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 			ProjectName: a.ProjectName,
 			EnvName:     "staging",
 			EnvType:     domain.AppEnvStaging,
-			Namespace:   domain.GenerateNamespace(a.Name, "staging", domain.AppEnvStaging),
+			Namespace:   domain.GenerateProjectNamespace(a.ProjectName, a.Name, "staging"),
 			URLs:        []string{},
 			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 		},
@@ -229,7 +229,7 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 			ProjectName: a.ProjectName,
 			EnvName:     "prod",
 			EnvType:     domain.AppEnvProd,
-			Namespace:   domain.GenerateNamespace(a.Name, "prod", domain.AppEnvProd),
+			Namespace:   domain.GenerateProjectNamespace(a.ProjectName, a.Name, "prod"),
 			URLs:        []string{},
 			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 		},

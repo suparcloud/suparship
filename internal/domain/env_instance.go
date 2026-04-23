@@ -105,6 +105,18 @@ func GenerateNamespace(appName, envName string, _ AppEnvironmentType) string {
 	return GenerateNamespaceFromPattern(appName, envName, "", "")
 }
 
+// GenerateProjectNamespace derives the Kubernetes namespace including the
+// project name using the "{project}-{app}-{env}" pattern. This is the default
+// for new apps to avoid namespace collisions across projects on a shared cluster.
+//
+// Examples:
+//
+//	"acme", "api", "staging" → "acme-api-staging"
+//	"acme", "api", "prod"    → "acme-api-prod"
+func GenerateProjectNamespace(projectName, appName, envName string) string {
+	return GenerateNamespaceFromPattern(appName, envName, projectName, "{project}-{app}-{env}")
+}
+
 // GenerateURL derives the primary ingress URL for an environment instance.
 //
 // URL patterns (using the default "localhost" base domain for local/demo):

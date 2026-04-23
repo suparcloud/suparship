@@ -129,7 +129,13 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	var syncPolicy *SyncPolicy
 	if opts.SyncAutomated {
 		syncPolicy = &SyncPolicy{
-			Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			SyncOptions: []string{"CreateNamespace=true"},
+		}
+	} else {
+		// Always create the destination namespace even without auto-sync so
+		// ArgoCD can deploy into the correct namespace on the first manual sync.
+		syncPolicy = &SyncPolicy{
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	}
@@ -220,7 +226,11 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 	var syncPolicy *SyncPolicy
 	if opts.SyncAutomated {
 		syncPolicy = &SyncPolicy{
-			Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			SyncOptions: []string{"CreateNamespace=true"},
+		}
+	} else {
+		syncPolicy = &SyncPolicy{
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	}

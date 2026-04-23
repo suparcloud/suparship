@@ -163,6 +163,22 @@ func (m *memStore) DeleteAppEnvironment(_ context.Context, projectName, appName,
 	return nil
 }
 
+func (m *memStore) DeleteApp(_ context.Context, projectName, appName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.apps[projectName] == nil {
+		return fmt.Errorf("app %q not found in project %q", appName, projectName)
+	}
+	if _, ok := m.apps[projectName][appName]; !ok {
+		return fmt.Errorf("app %q not found in project %q", appName, projectName)
+	}
+	delete(m.apps[projectName], appName)
+	if m.envs[projectName] != nil {
+		delete(m.envs[projectName], appName)
+	}
+	return nil
+}
+
 // --- test helpers ---
 
 const (

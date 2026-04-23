@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { toast } from "sonner";
 
 import { listClusters } from "../lib/clusters";
 import type { Cluster } from "../lib/clusters";
@@ -12,6 +13,7 @@ import {
   updateProjectNaming,
 } from "../lib/projects";
 import type { ProjectEnvironment, ProjectNaming } from "../lib/projects";
+import { deleteProject } from "../lib/settings";
 import { getProjectEnvConfig, updateProjectEnvConfig } from "../lib/envconfig";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
@@ -274,7 +276,6 @@ function ProjectNamespaceSection({ projectName }: { projectName: string }) {
   const [naming, setNaming] = useState<ProjectNaming>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -325,8 +326,6 @@ function ProjectNamespaceSection({ projectName }: { projectName: string }) {
       <div className="px-6 py-4">
         {loading ? (
           <div className="h-16 animate-pulse rounded bg-gray-100" />
-        ) : error ? (
-          <p className="text-sm text-red-600">{error}</p>
         ) : (
           <div className="space-y-3">
             <div className="flex flex-wrap gap-1.5">
@@ -403,6 +402,7 @@ function ProjectNamespaceSection({ projectName }: { projectName: string }) {
 
 export function ProjectSettings() {
   const { project = "" } = useParams();
+  const navigate = useNavigate();
   const [envs, setEnvs] = useState<ProjectEnvironment[]>([]);
   const [clusters, setClusters] = useState<Cluster[]>([]);
   const [loading, setLoading] = useState(true);
@@ -410,6 +410,12 @@ export function ProjectSettings() {
   const [showAdd, setShowAdd] = useState(false);
   const [editEnv, setEditEnv] = useState<ProjectEnvironment | null>(null);
   const [isFirstOverride, setIsFirstOverride] = useState(false);
+
+  // Delete project
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteConfirmInput, setDeleteConfirmInput] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const fetchProjectEnvConfig = useCallback(
     () => getProjectEnvConfig(project),
@@ -698,6 +704,89 @@ export function ProjectSettings() {
           }}
           onSaved={reload}
         />
+      )}
+
+      {/* Danger zone */}
+      <div className="rounded-xl border border-red-200 bg-red-50/40 p-6">
+        <h2 className="text-base font-semibold text-red-700">Danger zone</h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Permanently delete this project and all its apps, environments, and configuration.
+          This action cannot be undone.
+        </p>
+        <button
+          onClick={() => {
+            setDeleteConfirmInput("");
+            setDeleteError(null);
+            setShowDeleteConfirm(true);
+          }}
+          className="mt-4 rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50"
+        >
+          Delete project
+        </button>
+      </div>
+
+      {/* Delete project confirmation modal */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+            <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-red-100 text-red-600">
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900">Delete {project}</h3>
+            <p className="mt-1 text-sm text-gray-500">
+              This action cannot be undone. The project, all its apps, environments, and configuration will be permanently removed.
+            </p>
+            <p className="mt-3 text-sm text-gray-700">
+              Type <span className="font-mono font-semibold text-gray-900">{project}</span> to confirm.
+            </p>
+            <input
+              type="text"
+              value={deleteConfirmInput}
+              onChange={(e) => setDeleteConfirmInput(e.target.value)}
+              placeholder={project}
+              className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-red-400 focus:outline-none focus:ring-1 focus:ring-red-400"
+              autoFocus
+            />
+            {deleteError && (
+              <div className="mt-3 rounded-md bg-red-50 px-3 py-2">
+                <p className="text-sm text-red-700">{deleteError}</p>
+              </div>
+            )}
+            <div className="mt-6 flex gap-3">
+              <button
+                onClick={async () => {
+                  if (!project || deleteConfirmInput !== project) return;
+                  setDeleting(true);
+                  setDeleteError(null);
+                  try {
+                    await deleteProject(project);
+                    toast.success("Project deleted", { description: `${project} has been removed.` });
+                    navigate("/");
+                  } catch (err) {
+                    const msg = err instanceof Error ? err.message : "Delete failed";
+                    setDeleteError(msg);
+                    toast.error("Failed to delete project", { description: msg });
+                  } finally {
+                    setDeleting(false);
+                  }
+                }}
+                disabled={deleting || deleteConfirmInput !== project}
+                className="flex-1 rounded-lg bg-red-600 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+              >
+                {deleting ? "Deleting…" : "Delete project"}
+              </button>
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={deleting}
+                className="flex-1 rounded-lg border border-gray-300 bg-white py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

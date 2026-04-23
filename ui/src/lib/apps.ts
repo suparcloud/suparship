@@ -155,3 +155,9 @@ export function fetchAppLogs(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/logs?${qs.toString()}`,
   );
 }
+
+export function deleteApp(project: string, app: string): Promise<void> {
+  return api.del(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}`,
+  );
+}

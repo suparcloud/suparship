@@ -654,6 +654,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 			EnvName:    env.EnvName,
 			EnvType:    env.EnvType,
 			BaseDomain: res.baseDomain,
+			Namespace:  env.Namespace,
 		})
 	}
 
@@ -665,6 +666,12 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 
 	// Write app.yaml + values.yaml for each environment.
 	return a.inner.PublishApp(ctx, app, pubEnvs)
+}
+
+// UnpublishApp implements server.GitOpsPublisher by removing all gitops-output
+// directories for the given app and committing the deletion.
+func (a *gitOpsPublisherAdapter) UnpublishApp(ctx context.Context, projectName, appName string) error {
+	return a.inner.UnpublishApp(ctx, projectName, appName)
 }
 
 // argoCDHistoryAdapter bridges kube.ArgoCDStatusReader.GetAppDeploymentHistory

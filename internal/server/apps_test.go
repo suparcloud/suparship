@@ -185,6 +185,23 @@ func (m *memAppStore) DeleteAppEnvironment(_ context.Context, projectName, appNa
 	return nil
 }
 
+func (m *memAppStore) DeleteApp(_ context.Context, projectName, appName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	projectApps, ok := m.apps[projectName]
+	if !ok {
+		return fmt.Errorf("app %q not found in project %q", appName, projectName)
+	}
+	if _, ok := projectApps[appName]; !ok {
+		return fmt.Errorf("app %q not found in project %q", appName, projectName)
+	}
+	delete(projectApps, appName)
+	if projectEnvs, ok := m.envs[projectName]; ok {
+		delete(projectEnvs, appName)
+	}
+	return nil
+}
+
 // --- Test helpers ---
 
 func newTestAppMux() (*http.ServeMux, *authHandler, *memAppStore) {

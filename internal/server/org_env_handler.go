@@ -60,12 +60,15 @@ func (rh *rbacHandler) handleListOrgEnvironments(w http.ResponseWriter, r *http.
 // ── POST /api/v1/org/environments ────────────────────────────────────────────
 
 type upsertOrgEnvRequest struct {
-	Name             string `json:"name"`
-	DisplayName      string `json:"displayName,omitempty"`
-	Order            int    `json:"order"`
-	ClusterRef       string `json:"clusterRef,omitempty"`
-	BaseDomain       string `json:"baseDomain,omitempty"`
-	NamespacePattern string `json:"namespacePattern,omitempty"`
+	Name             string  `json:"name"`
+	DisplayName      string  `json:"displayName,omitempty"`
+	Order            int     `json:"order"`
+	ClusterRef       string  `json:"clusterRef,omitempty"`
+	BaseDomain       string  `json:"baseDomain,omitempty"`
+	// NamespacePattern when present (including empty string) replaces the stored
+	// per-environment namespace pattern. Use "" to clear an existing override
+	// and fall back to the org-wide ResourceNaming.AppNamespace default.
+	NamespacePattern *string `json:"namespacePattern,omitempty"`
 }
 
 func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http.Request) {
@@ -98,12 +101,14 @@ func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http
 	}
 
 	newEnv := rbac.OrgEnvironment{
-		Name:             req.Name,
-		DisplayName:      req.DisplayName,
-		Order:            order,
-		ClusterRef:       req.ClusterRef,
-		BaseDomain:       req.BaseDomain,
-		NamespacePattern: req.NamespacePattern,
+		Name:        req.Name,
+		DisplayName: req.DisplayName,
+		Order:       order,
+		ClusterRef:  req.ClusterRef,
+		BaseDomain:  req.BaseDomain,
+	}
+	if req.NamespacePattern != nil {
+		newEnv.NamespacePattern = *req.NamespacePattern
 	}
 	org.Environments = append(org.Environments, newEnv)
 	sortOrgEnvs(org.Environments)
@@ -145,8 +150,9 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 			if req.BaseDomain != "" {
 				org.Environments[i].BaseDomain = req.BaseDomain
 			}
-			if req.NamespacePattern != "" {
-				org.Environments[i].NamespacePattern = req.NamespacePattern
+			// NamespacePattern is a pointer: nil = don't touch, "" = clear.
+			if req.NamespacePattern != nil {
+				org.Environments[i].NamespacePattern = *req.NamespacePattern
 			}
 			if req.Order > 0 {
 				org.Environments[i].Order = req.Order

@@ -155,11 +155,11 @@ func TestDefaultEnvironmentsNamespaceConvention(t *testing.T) {
 		byName[e.EnvName] = e
 	}
 
-	if byName["staging"].Namespace != "my-api-staging" {
-		t.Errorf("expected namespace %q, got %q", "my-api-staging", byName["staging"].Namespace)
+	if byName["staging"].Namespace != "demo-my-api-staging" {
+		t.Errorf("expected namespace %q, got %q", "demo-my-api-staging", byName["staging"].Namespace)
 	}
-	if byName["prod"].Namespace != "my-api-prod" {
-		t.Errorf("expected namespace %q, got %q", "my-api-prod", byName["prod"].Namespace)
+	if byName["prod"].Namespace != "demo-my-api-prod" {
+		t.Errorf("expected namespace %q, got %q", "demo-my-api-prod", byName["prod"].Namespace)
 	}
 }
 
@@ -387,20 +387,20 @@ func TestDefaultEnvironmentsUsesGenerateNamespace(t *testing.T) {
 		t.Fatalf("expected 2 environments, got %d", len(envs))
 	}
 	for _, env := range envs {
-		want := domain.GenerateNamespace(env.AppName, env.EnvName, env.EnvType)
+		want := domain.GenerateProjectNamespace(a.ProjectName, env.AppName, env.EnvName)
 		if env.Namespace != want {
-			t.Errorf("env %q: Namespace = %q, want %q (from GenerateNamespace)", env.EnvName, env.Namespace, want)
+			t.Errorf("env %q: Namespace = %q, want %q (from GenerateProjectNamespace)", env.EnvName, env.Namespace, want)
 		}
 	}
 }
 
 func TestDefaultEnvironmentsNamespacePatterns(t *testing.T) {
 	tests := []struct {
-		appName   string
-		wantNSs   []string
+		appName string
+		wantNSs []string
 	}{
-		{"hello", []string{"hello-staging", "hello-prod"}},
-		{"api-gateway", []string{"api-gateway-staging", "api-gateway-prod"}},
+		{"hello", []string{"demo-hello-staging", "demo-hello-prod"}},
+		{"api-gateway", []string{"demo-api-gateway-staging", "demo-api-gateway-prod"}},
 	}
 	for _, tt := range tests {
 		tt := tt

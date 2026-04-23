@@ -47,6 +47,11 @@ func (rh *rbacHandler) handleGetOrgNaming(w http.ResponseWriter, r *http.Request
 }
 
 // PUT /api/v1/org/naming
+//
+// Setting AppNamespace also clears any per-environment NamespacePattern
+// overrides so the new global default is applied uniformly. Operators that
+// need per-environment overrides can re-set them via PUT
+// /api/v1/org/environments/{env} after saving the global default.
 func (rh *rbacHandler) handlePutOrgNaming(w http.ResponseWriter, r *http.Request) {
 	var req OrgNamingDTO
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -80,6 +85,13 @@ func (rh *rbacHandler) handlePutOrgNaming(w http.ResponseWriter, r *http.Request
 
 	org.ResourceNaming.ProjectNamespace = req.ProjectNamespace
 	org.ResourceNaming.AppNamespace = req.AppNamespace
+
+	// Clear per-environment NamespacePattern overrides so the new global
+	// default applies uniformly. Operators may restore individual overrides
+	// via PUT /api/v1/org/environments/{env}.
+	for i := range org.Environments {
+		org.Environments[i].NamespacePattern = ""
+	}
 
 	if err := rh.orgStore.SaveOrg(r.Context(), org); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save org"})

@@ -47,6 +47,24 @@ func AppSecretName(project, app, env string) string {
 	return AppEnvSecretName(project, app, env)
 }
 
+// SecretNameForNamespace returns the K8s Secret name for an app's secrets
+// derived from the resolved namespace. Use this variant when the caller has
+// already resolved the Kubernetes namespace (e.g. via domain.ResolveNamespace)
+// so the secretName is consistent with the namespace name.
+//
+// Pattern: suparship-secrets-{namespace}
+func SecretNameForNamespace(namespace string) string {
+	return "suparship-secrets-" + namespace
+}
+
+// ConfigNameForNamespace returns the K8s ConfigMap name for an app's config
+// derived from the resolved namespace.
+//
+// Pattern: suparship-config-{namespace}
+func ConfigNameForNamespace(namespace string) string {
+	return "suparship-config-" + namespace
+}
+
 // AppConfigName returns the deterministic ConfigMap name for an app's
 // non-secret config in a given environment. Templates reference this name
 // via {{ .Values.suparship.configName }}.

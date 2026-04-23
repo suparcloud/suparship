@@ -386,6 +386,24 @@ func (r *DevRuntime) DeleteAppEnvironment(_ context.Context, projectName, appNam
 	return nil
 }
 
+func (r *DevRuntime) DeleteApp(_ context.Context, projectName, appName string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	projectApps, ok := r.apps[projectName]
+	if !ok {
+		return fmt.Errorf("app %q not found in project %q", appName, projectName)
+	}
+	if _, ok := projectApps[appName]; !ok {
+		return fmt.Errorf("app %q not found in project %q", appName, projectName)
+	}
+	delete(projectApps, appName)
+	// Remove all environment instances for this app.
+	if projectEnvs, ok := r.appEnvs[projectName]; ok {
+		delete(projectEnvs, appName)
+	}
+	return nil
+}
+
 // ── ClusterStore ─────────────────────────────────────────────────────────────
 
 func (r *DevRuntime) ListClusters(_ context.Context) ([]domain.Cluster, error) {

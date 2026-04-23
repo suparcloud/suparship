@@ -239,6 +239,38 @@ func (s *K8sAppStore) ListAppPreviews(ctx context.Context, projectName, appName 
 	return previews, nil
 }
 
+// DeleteApp removes the app definition ConfigMap and all its environment
+// instance ConfigMaps for the given project/app pair.
+func (s *K8sAppStore) DeleteApp(ctx context.Context, projectName, appName string) error {
+	// Verify the app exists first.
+	cmName := appConfigMapName(projectName, appName)
+	if _, err := s.client.CoreV1().ConfigMaps(project.Namespace).Get(ctx, cmName, metav1.GetOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("app %q not found in project %q", appName, projectName)
+		}
+		return fmt.Errorf("checking app configmap %s: %w", cmName, err)
+	}
+
+	// Delete all environment instance ConfigMaps for this app.
+	envCMs, err := s.client.CoreV1().ConfigMaps(project.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "suparship.io/type=app-environment,suparship.io/project=" + projectName + ",suparship.io/app=" + appName,
+	})
+	if err != nil {
+		return fmt.Errorf("listing app-environment configmaps for app %q/%q: %w", projectName, appName, err)
+	}
+	for _, cm := range envCMs.Items {
+		if err := s.client.CoreV1().ConfigMaps(project.Namespace).Delete(ctx, cm.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting app-environment configmap %s: %w", cm.Name, err)
+		}
+	}
+
+	// Delete the app definition ConfigMap.
+	if err := s.client.CoreV1().ConfigMaps(project.Namespace).Delete(ctx, cmName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting app configmap %s: %w", cmName, err)
+	}
+	return nil
+}
+
 // DeleteAppEnvironment removes an environment instance ConfigMap.
 func (s *K8sAppStore) DeleteAppEnvironment(ctx context.Context, projectName, appName, envName string) error {
 	cmName := appEnvConfigMapName(projectName, appName, envName)

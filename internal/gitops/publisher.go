@@ -147,7 +147,7 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 		// to avoid ArgoCD rejecting the root app due to duplicate resource names.
 		appProject := BuildArgoAppProject(projectName, AppProjectOptions{
 			Description:           "suparShip project: " + projectName,
-			AllowClusterResources: false,
+			AllowClusterResources: true,
 			Destinations:          destinations,
 		})
 		appProjectBytes, err := yaml.Marshal(appProject)
@@ -297,8 +297,9 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 				return err
 			}
 
-			// Write values.yaml — Helm values with env-specific baseDomain.
-			hv := helmvalues.MapToHelmValuesWithDomain(app, env.EnvName, env.EnvType, env.BaseDomain)
+			// Write values.yaml — Helm values with env-specific baseDomain and
+			// the resolved namespace so secretName/configName are consistent.
+			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace)
 			hvBytes, err := yaml.Marshal(hv)
 			if err != nil {
 				return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
@@ -524,7 +525,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 			return err
 		}
 
-		hv := helmvalues.MapToHelmValuesWithDomain(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain)
+		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
@@ -565,6 +566,50 @@ func (p *Publisher) DeletePreview(ctx context.Context, projectName, previewName 
 			return fmt.Errorf("removing preview dir: %w", err)
 		}
 		commitMsg := fmt.Sprintf("feat(previews): delete preview %s/%s\n\nDeleted by suparShip.", projectName, previewName)
+		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
+// UnpublishApp removes all GitOps manifests for an app — specifically the
+// app's subdirectory under every stable-env directory in gitops-output/ —
+// and commits + pushes the deletion. It is a no-op if no files are found.
+func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName string) error {
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		outputDir := filepath.Join(repoDir, "gitops-output")
+
+		// Walk the top-level entries of gitops-output/ (each is an env dir or
+		// the special "previews" directory) and remove {envDir}/{project}/{app}/.
+		entries, err := os.ReadDir(outputDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("reading gitops-output: %w", err)
+		}
+
+		removed := false
+		for _, entry := range entries {
+			if !entry.IsDir() || entry.Name() == "previews" || entry.Name() == "_infra" {
+				continue
+			}
+			appDir := filepath.Join(outputDir, entry.Name(), projectName, appName)
+			if _, err := os.Stat(appDir); os.IsNotExist(err) {
+				continue
+			}
+			if err := os.RemoveAll(appDir); err != nil {
+				return fmt.Errorf("removing app dir %s: %w", appDir, err)
+			}
+			slog.Debug("gitops: removed app directory", "dir", appDir)
+			removed = true
+		}
+
+		if !removed {
+			slog.Debug("gitops: no app directories found — nothing to delete",
+				"project", projectName, "app", appName)
+			return nil
+		}
+
+		commitMsg := fmt.Sprintf("feat(apps): delete app %s/%s\n\nDeleted by suparShip.", projectName, appName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }

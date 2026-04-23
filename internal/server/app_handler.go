@@ -168,6 +168,10 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve namespaces using org-level ResourceNaming patterns before
+	// persisting so both the store and the GitOps commit use the correct names.
+	ah.resolveEnvNamespaces(r.Context(), result.App, result.Environments)
+
 	if err := ah.appStore.SaveApp(r.Context(), projectName, result.App); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
 		return
@@ -215,6 +219,38 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, createAppResponse{
 		App: appToDetailDTO(saved, savedEnvs),
 	})
+}
+
+// handleDeleteApp handles DELETE /api/v1/projects/{project}/apps/{app}.
+//
+// It deletes the app and all its environment instances from the store, then
+// removes the corresponding GitOps manifests from the repository. The GitOps
+// removal is best-effort — a failure there does not roll back the store delete.
+func (ah *appHandler) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	if err := ah.appStore.DeleteApp(r.Context(), projectName, appName); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete app"})
+		return
+	}
+
+	if ah.gitOpsPublisher != nil {
+		if err := ah.gitOpsPublisher.UnpublishApp(r.Context(), projectName, appName); err != nil {
+			slog.Error("gitops unpublish failed — app deleted from store but git not updated",
+				"project", projectName, "app", appName, "error", err,
+			)
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // itoa converts a small non-negative int to its decimal string representation
@@ -534,6 +570,23 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 		stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
 	}
 
+	// Re-resolve namespaces using the current org settings so that stale
+	// namespace values (e.g. from apps created before the namespace pattern
+	// feature existed) are corrected before publishing. This also persists
+	// the corrected namespaces back to the store for future reads.
+	ah.resolveEnvNamespaces(r.Context(), app, stableEnvs)
+	for _, env := range stableEnvs {
+		if err := ah.appStore.SaveAppEnvironment(r.Context(), app.ProjectName, env); err != nil {
+			slog.Warn("sync: failed to persist corrected namespace — publishing with in-memory value",
+				"project", app.ProjectName,
+				"app", app.Name,
+				"env", env.EnvName,
+				"namespace", env.Namespace,
+				"error", err,
+			)
+		}
+	}
+
 	slog.Info("syncing app to gitops repo",
 		"project", projectName,
 		"app", appName,
@@ -562,6 +615,58 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// resolveEnvNamespaces overwrites each environment's Namespace field with the
+// value produced by domain.ResolveNamespace, which honours the org-level
+// ResourceNaming patterns and cluster topology. Called after domainapp.Create
+// so that both persisted data and the GitOps commit use the operator-configured
+// namespace pattern rather than the hardcoded fallback.
+//
+// If orgProvider is nil or the org cannot be loaded, the function is a no-op
+// (caller's existing Namespace values are preserved).
+func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) {
+	if ah.orgProvider == nil {
+		return
+	}
+	org, err := ah.orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		return
+	}
+
+	// Determine whether stable environments each run on their own cluster so
+	// the {env} token can be omitted from namespace names for uniqueness.
+	stableRefs := make([]string, 0, len(org.Environments))
+	for _, e := range org.Environments {
+		stableRefs = append(stableRefs, e.ClusterRef)
+	}
+	dedicated := domain.IsDedicatedClusterTopology(stableRefs)
+
+	// Per-environment namespace pattern overrides defined at the org level.
+	orgEnvPatterns := make(map[string]string, len(org.Environments))
+	for _, e := range org.Environments {
+		if e.NamespacePattern != "" {
+			orgEnvPatterns[e.Name] = e.NamespacePattern
+		}
+	}
+
+	for _, env := range envs {
+		ns, resolveErr := domain.ResolveNamespace(domain.NamespaceResolveInput{
+			AppName:           app.Name,
+			EnvName:           env.EnvName,
+			ProjectName:       app.ProjectName,
+			OrgName:           org.Name,
+			Scope:             app.Spec.NamespaceScope,
+			Dedicated:         dedicated,
+			AppPattern:        app.Spec.NamespacePattern,
+			OrgEnvPattern:     orgEnvPatterns[env.EnvName],
+			OrgAppDefault:     org.ResourceNaming.EffectiveAppNamespace(),
+			OrgProjectDefault: org.ResourceNaming.EffectiveProjectNamespace(),
+		})
+		if resolveErr == nil {
+			env.Namespace = ns
+		}
+	}
+}
+
 // stableEnvsFromOrg synthesises a minimal set of stable AppEnvironments from
 // the org-level environment definitions. Used as a fallback in handleSyncApp
 // when the app's environments have not been persisted to the store (e.g. for
@@ -576,18 +681,49 @@ func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []
 		return domainapp.DefaultEnvironments(app)
 	}
 
+	// Reuse the same topology and pattern lookup built inside resolveEnvNamespaces.
+	stableRefs := make([]string, 0, len(org.Environments))
+	for _, e := range org.Environments {
+		stableRefs = append(stableRefs, e.ClusterRef)
+	}
+	dedicated := domain.IsDedicatedClusterTopology(stableRefs)
+
+	orgEnvPatterns := make(map[string]string, len(org.Environments))
+	for _, e := range org.Environments {
+		if e.NamespacePattern != "" {
+			orgEnvPatterns[e.Name] = e.NamespacePattern
+		}
+	}
+
 	envs := make([]*domain.AppEnvironment, 0, len(org.Environments))
 	for _, orgEnv := range org.Environments {
 		envType := domain.AppEnvStaging
 		if orgEnv.Name == "prod" || orgEnv.Name == "production" {
 			envType = domain.AppEnvProd
 		}
+
+		ns, resolveErr := domain.ResolveNamespace(domain.NamespaceResolveInput{
+			AppName:           app.Name,
+			EnvName:           orgEnv.Name,
+			ProjectName:       app.ProjectName,
+			OrgName:           org.Name,
+			Scope:             app.Spec.NamespaceScope,
+			Dedicated:         dedicated,
+			AppPattern:        app.Spec.NamespacePattern,
+			OrgEnvPattern:     orgEnvPatterns[orgEnv.Name],
+			OrgAppDefault:     org.ResourceNaming.EffectiveAppNamespace(),
+			OrgProjectDefault: org.ResourceNaming.EffectiveProjectNamespace(),
+		})
+		if resolveErr != nil {
+			ns = domain.GenerateProjectNamespace(app.ProjectName, app.Name, orgEnv.Name)
+		}
+
 		envs = append(envs, &domain.AppEnvironment{
 			AppName:     app.Name,
 			ProjectName: app.ProjectName,
 			EnvName:     orgEnv.Name,
 			EnvType:     envType,
-			Namespace:   domain.GenerateNamespace(app.Name, orgEnv.Name, envType),
+			Namespace:   ns,
 			URLs:        []string{},
 			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 		})
