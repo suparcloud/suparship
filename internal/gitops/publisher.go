@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -261,54 +262,24 @@ func (p *Publisher) PublishProjectNamespaces(ctx context.Context, projectName st
 // PublishApp writes the per-app app.yaml and values.yaml for each environment,
 // plus Kargo Warehouse and Stage CRs so promotions are wired automatically.
 //
-// Written files (per env):
+// Written files (per bound env):
 //   - gitops-output/{envName}/{project}/{app}/app.yaml
 //   - gitops-output/{envName}/{project}/{app}/values.yaml
 //
 // Written Kargo infrastructure files (all under _infra/kargo/):
 //   - gitops-output/_infra/kargo/{project}-project.yaml         ← Kargo Project CR (v0.9+)
 //   - gitops-output/_infra/kargo/{project}-{app}-warehouse.yaml
-//   - gitops-output/_infra/kargo/{project}-{app}-{env}-stage.yaml  (per stable env)
+//   - gitops-output/_infra/kargo/{project}-{app}-{env}-stage.yaml  (per bound stable env)
+//
+// Environments with Bound=false are skipped for GitOps publishing; they still
+// appear in the app's environment list in the store so the UI can prompt the
+// operator to assign a cluster. A warning is logged for each skipped env.
 //
 // PublishApp is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppPublishEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		for _, env := range envs {
-			// Resolve the namespace: use the pre-computed value from the caller
-			// when set; fall back to the legacy "{app}-{env}" default.
-			ns := env.Namespace
-			if ns == "" {
-				ns = app.Name + "-" + env.EnvName
-			}
-
-			// Write app.yaml — Git File generator parameters.
-			appMeta := AppMetadata{
-				Name:      app.Name,
-				Project:   app.ProjectName,
-				Template:  app.Spec.Template.Name,
-				Namespace: ns,
-			}
-			appMetaBytes, err := yaml.Marshal(appMeta)
-			if err != nil {
-				return fmt.Errorf("marshal app.yaml for env %s: %w", env.EnvName, err)
-			}
-			appMetaPath := filepath.Join(repoDir, "gitops-output", env.EnvName, app.ProjectName, app.Name, "app.yaml")
-			if err := p.writeFile(appMetaPath, appMetaBytes); err != nil {
-				return err
-			}
-
-			// Write values.yaml — Helm values with env-specific baseDomain and
-			// the resolved namespace so secretName/configName are consistent.
-			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace)
-			hvBytes, err := yaml.Marshal(hv)
-			if err != nil {
-				return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
-			}
-			valuesPath := filepath.Join(repoDir, "gitops-output", env.EnvName, app.ProjectName, app.Name, "values.yaml")
-			if err := p.writeFile(valuesPath, hvBytes); err != nil {
-				return err
-			}
-			slog.Debug("gitops: wrote app files", "env", env.EnvName, "app", app.Name)
+		if err := p.publishAppFiles(repoDir, app, envs); err != nil {
+			return err
 		}
 
 		// Sync the Helm chart into charts/{template}/ so ArgoCD's
@@ -326,6 +297,56 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s\n\nCreated by suparShip.", app.ProjectName, app.Name)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// publishAppFiles writes app.yaml and values.yaml for each bound environment.
+// Unbound environments are skipped with a warning log.
+// This is the inner loop extracted from PublishApp for testability.
+func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	for _, env := range envs {
+		if !env.Bound {
+			slog.Warn("gitops: skipping publish for unbound env — assign a cluster via Settings > Environments",
+				"app", app.Name, "env", env.EnvName)
+			continue
+		}
+
+		// Resolve the namespace: use the pre-computed value from the caller
+		// when set; fall back to the legacy "{app}-{env}" default.
+		ns := env.Namespace
+		if ns == "" {
+			ns = app.Name + "-" + env.EnvName
+		}
+
+		// Write app.yaml — Git File generator parameters.
+		appMeta := AppMetadata{
+			Name:      app.Name,
+			Project:   app.ProjectName,
+			Template:  app.Spec.Template.Name,
+			Namespace: ns,
+		}
+		appMetaBytes, err := yaml.Marshal(appMeta)
+		if err != nil {
+			return fmt.Errorf("marshal app.yaml for env %s: %w", env.EnvName, err)
+		}
+		appMetaPath := filepath.Join(repoDir, "gitops-output", env.EnvName, app.ProjectName, app.Name, "app.yaml")
+		if err := p.writeFile(appMetaPath, appMetaBytes); err != nil {
+			return err
+		}
+
+		// Write values.yaml — Helm values with env-specific baseDomain and
+		// the resolved namespace so secretName/configName are consistent.
+		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace)
+		hvBytes, err := yaml.Marshal(hv)
+		if err != nil {
+			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
+		}
+		valuesPath := filepath.Join(repoDir, "gitops-output", env.EnvName, app.ProjectName, app.Name, "values.yaml")
+		if err := p.writeFile(valuesPath, hvBytes); err != nil {
+			return err
+		}
+		slog.Debug("gitops: wrote app files", "env", env.EnvName, "app", app.Name)
+	}
+	return nil
 }
 
 // syncChart copies the Helm chart for templateName from the local templates
@@ -378,29 +399,50 @@ func (p *Publisher) syncChart(repoDir, templateName string) error {
 // publishKargoCRs writes the Kargo Namespace, Warehouse, and Stage manifests
 // for app into gitops-output/_infra/kargo/ so ArgoCD syncs them to the cluster.
 //
-// Only stable environments (staging, prod) get Stage CRs; preview environments
-// are skipped because previews don't participate in the Kargo promotion pipeline.
+// Only stable environments (non-preview) that are Bound (have a registered
+// cluster) get Stage CRs; preview environments and unbound environments are
+// skipped because previews don't participate in the Kargo promotion pipeline
+// and unbound envs have no cluster to deploy to.
 //
-// The MVP promotion pipeline is: Warehouse → staging → prod.
-// If the envs list contains a staging environment its name is used as the
-// upstream for the prod Stage so Kargo enforces the gating.
+// The promotion pipeline is derived from the org environment Order field.
+// Environments are sorted by Order (then Name for tie-breaking); each stage
+// declares the previous stage as its upstream gate. The first stage (lowest
+// Order) pulls directly from the Warehouse with auto-promotion enabled.
 func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	projectNS := KargoNamespaceForProject(app.ProjectName)
 	kargoDir := filepath.Join(repoDir, "gitops-output", "_infra", "kargo")
+
+	// ── Build ordered stable env list ──────────────────────────────────────────
+	// Exclude preview envs and unbound envs; sort by Order (then Name) for determinism.
+	stableEnvs := make([]AppPublishEnv, 0, len(envs))
+	for _, env := range envs {
+		if env.EnvType == domain.AppEnvPreview {
+			continue
+		}
+		if !env.Bound {
+			slog.Warn("gitops: skipping kargo stage for unbound env — assign a cluster via Settings > Environments",
+				"app", app.Name, "env", env.EnvName)
+			continue
+		}
+		stableEnvs = append(stableEnvs, env)
+	}
+	sort.Slice(stableEnvs, func(i, j int) bool {
+		if stableEnvs[i].Order != stableEnvs[j].Order {
+			return stableEnvs[i].Order < stableEnvs[j].Order
+		}
+		return stableEnvs[i].EnvName < stableEnvs[j].EnvName
+	})
 
 	// ── Project CR (Kargo v0.9+) ───────────────────────────────────────────────
 	// The Project CR replaces the Namespace-label approach and also holds
 	// PromotionPolicies so that the Kargo v0.9 admission webhook permits
 	// Promotion CR creation for each stable environment.
 	var projectEnvs []KargoProjectEnv
-	for _, env := range envs {
-		if env.EnvType == domain.AppEnvPreview {
-			continue
-		}
+	for i, env := range stableEnvs {
 		projectEnvs = append(projectEnvs, KargoProjectEnv{
 			AppName:      app.Name,
 			EnvName:      env.EnvName,
-			IsFirstStage: env.EnvType == domain.AppEnvStaging,
+			IsFirstStage: i == 0,
 		})
 	}
 	proj := BuildKargoProject(projectNS, projectEnvs)
@@ -437,23 +479,12 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	slog.Debug("gitops: wrote kargo warehouse", "app", app.Name)
 
 	// ── Stages ─────────────────────────────────────────────────────────────────
-	// Find the staging env name so prod can declare it as an upstream gate.
-	var stagingEnvName string
-	for _, env := range envs {
-		if env.EnvType == domain.AppEnvStaging {
-			stagingEnvName = env.EnvName
-			break
-		}
-	}
-
-	for _, env := range envs {
-		if env.EnvType == domain.AppEnvPreview {
-			continue
-		}
-
+	// Build a linear chain: stableEnvs[0] pulls from Warehouse, each subsequent
+	// stage gates on the previous stage by name.
+	for i, env := range stableEnvs {
 		var upstreams []string
-		if env.EnvType == domain.AppEnvProd && stagingEnvName != "" {
-			upstreams = []string{stagingEnvName}
+		if i > 0 {
+			upstreams = []string{stableEnvs[i-1].EnvName}
 		}
 
 		appEnv := domain.AppEnvironment{
@@ -487,8 +518,21 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 type AppPublishEnv struct {
 	// EnvName is the logical environment name, e.g. "staging".
 	EnvName string
-	// EnvType classifies the environment for Helm values mapping.
+	// EnvType classifies the environment for Helm values mapping and preview
+	// detection. Pipeline ordering is controlled by Order, not this field.
 	EnvType domain.AppEnvironmentType
+	// Order defines the position of this environment in the promotion pipeline.
+	// Lower values are deployed/promoted earlier. Preview environments have
+	// Order=0 and are excluded from the Kargo Stage chain.
+	Order int
+	// Bound indicates that this environment has a registered cluster assigned
+	// and is eligible for GitOps publishing. When false, PublishApp skips
+	// writing app.yaml/values.yaml and publishKargoCRs skips the Kargo Stage
+	// for this env, logging a warning instead.
+	//
+	// AppEnvironment rows are still persisted for unbound envs so the UI can
+	// surface them with a "bind a cluster" prompt.
+	Bound bool
 	// BaseDomain is used to derive routing.host in values.yaml.
 	// When empty, "localhost" is used.
 	BaseDomain string

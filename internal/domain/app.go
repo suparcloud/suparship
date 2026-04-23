@@ -284,7 +284,13 @@ type AppEnvironment struct {
 	// EnvName is the logical environment name (e.g. "staging", "prod", "pr-42").
 	EnvName string `json:"envName"`
 	// EnvType classifies the environment as staging, prod, or preview.
+	// This is a soft hint for UI rendering only. Pipeline ordering is
+	// controlled by Order, not by this field.
 	EnvType AppEnvironmentType `json:"envType"`
+	// Order defines the position of this environment in the promotion pipeline.
+	// Lower values are deployed earlier (e.g. staging=1, prod=2). Preview
+	// environments always have Order=0 and are excluded from the pipeline chain.
+	Order int `json:"order,omitempty"`
 	// Namespace is the Kubernetes namespace for this environment instance.
 	// Convention: {app}-{envName} for all environments, e.g. "hello-staging",
 	// "hello-prod", "hello-pr-42".

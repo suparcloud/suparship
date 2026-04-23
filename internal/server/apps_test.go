@@ -14,6 +14,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -245,10 +246,14 @@ func newTestAppCreateMux() (*http.ServeMux, *authHandler, *memAppStore, *memProj
 	projStore := newMemProjectStore()
 	_ = projStore.Save(context.Background(), appCreateTestProject())
 
+	orgProv := &staticOrgProvider{org: testRBACOrg()}
+	appH := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, projStore)
+	appH.orgProvider = orgProv
+
 	rh := &rbacHandler{
-		auth:        ah,
-		orgStore: &staticOrgProvider{org: testRBACOrg()},
-		appHandler:  newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, projStore),
+		auth:       ah,
+		orgStore:   orgProv,
+		appHandler: appH,
 	}
 	rh.registerRoutes(mux)
 
@@ -978,5 +983,125 @@ func TestAppSummaryStatusFallback(t *testing.T) {
 	}
 	if resp.Apps[0].Status.Phase != domain.StatusNotDeployed {
 		t.Errorf("expected status %q, got %q", domain.StatusNotDeployed, resp.Apps[0].Status.Phase)
+	}
+}
+
+// TestCreateAppNoOrgEnvironmentsRejects verifies that app creation returns 400
+// when no environments are registered in the org, with an actionable message.
+func TestCreateAppNoOrgEnvironmentsRejects(t *testing.T) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	appStore := newMemAppStore()
+	appStore.mu.Lock()
+	appStore.apps["demo"] = make(map[string]*domain.App)
+	appStore.mu.Unlock()
+
+	projStore := newMemProjectStore()
+	_ = projStore.Save(context.Background(), appCreateTestProject())
+
+	// Org with NO environments registered.
+	emptyEnvOrg := &rbac.Org{
+		Name:        "test",
+		DisplayName: "Test Org",
+		Environments: []rbac.OrgEnvironment{}, // explicitly empty
+		Teams: []rbac.Team{
+			{Name: "admins", DisplayName: "Admins", Members: []string{"alice"}},
+		},
+		RoleBindings: []rbac.RoleBinding{
+			{Project: "*", Team: "admins", Role: rbac.RoleOrgAdmin},
+		},
+	}
+	orgProv := &staticOrgProvider{org: emptyEnvOrg}
+	appH := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, projStore)
+	appH.orgProvider = orgProv
+
+	rh := &rbacHandler{
+		auth:       ah,
+		orgStore:   orgProv,
+		appHandler: appH,
+	}
+	rh.registerRoutes(mux)
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "my-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when no org envs, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errResp errorResponse
+	_ = json.NewDecoder(rec.Body).Decode(&errResp)
+	if !contains(errResp.Error, "no environments registered") {
+		t.Errorf("expected actionable error message, got %q", errResp.Error)
+	}
+}
+
+// TestCreateAppSingleEnvOnlyCreatesOneEnv verifies that when only one environment
+// is registered, the created app has exactly one AppEnvironment (not hardcoded staging+prod).
+func TestCreateAppSingleEnvOnlyCreatesOneEnv(t *testing.T) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	appStore := newMemAppStore()
+	appStore.mu.Lock()
+	appStore.apps["demo"] = make(map[string]*domain.App)
+	appStore.mu.Unlock()
+
+	projStore := newMemProjectStore()
+	_ = projStore.Save(context.Background(), appCreateTestProject())
+
+	// Org with only one environment registered.
+	singleEnvOrg := &rbac.Org{
+		Name:        "test",
+		DisplayName: "Test Org",
+		Environments: []rbac.OrgEnvironment{
+			{Name: "dev", DisplayName: "Development", Order: 1, ClusterRef: "in-cluster"},
+		},
+		Teams: []rbac.Team{
+			{Name: "admins", DisplayName: "Admins", Members: []string{"alice"}},
+		},
+		RoleBindings: []rbac.RoleBinding{
+			{Project: "*", Team: "admins", Role: rbac.RoleOrgAdmin},
+		},
+	}
+	orgProv2 := &staticOrgProvider{org: singleEnvOrg}
+	appH2 := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, projStore)
+	appH2.orgProvider = orgProv2
+
+	rh := &rbacHandler{
+		auth:       ah,
+		orgStore:   orgProv2,
+		appHandler: appH2,
+	}
+	rh.registerRoutes(mux)
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "single-env-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "img:v1"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp createAppResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.App.Environments) != 1 {
+		t.Fatalf("expected exactly 1 environment, got %d: %v", len(resp.App.Environments), resp.App.Environments)
+	}
+	if resp.App.Environments[0].EnvName != "dev" {
+		t.Errorf("expected env name %q, got %q", "dev", resp.App.Environments[0].EnvName)
 	}
 }

@@ -17,14 +17,6 @@ import (
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
-// appPromotionOrder defines the canonical MVP promotion chain.
-// preview → staging → prod; higher order = later in the chain.
-var appPromotionOrder = map[domain.AppEnvironmentType]int{
-	domain.AppEnvPreview: 0,
-	domain.AppEnvStaging: 1,
-	domain.AppEnvProd:    2,
-}
-
 // appHandler serves app-oriented API endpoints. It is wired into the
 // rbacHandler's route registration so that RBAC middleware is applied.
 //
@@ -168,9 +160,24 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve namespaces using org-level ResourceNaming patterns before
-	// persisting so both the store and the GitOps commit use the correct names.
-	ah.resolveEnvNamespaces(r.Context(), result.App, result.Environments)
+	// Verify at least one environment is registered in the org before creating
+	// the app. Deploying to unregistered environments silently would produce
+	// orphaned GitOps manifests pointing at clusters that don't exist.
+	if ah.orgProvider != nil {
+		org, orgErr := ah.orgProvider.GetOrg(r.Context())
+		if orgErr != nil || org == nil || len(org.Environments) == 0 {
+			writeJSON(w, http.StatusBadRequest, errorResponse{
+				Error: "no environments registered in the org; register at least one via POST /api/v1/org/environments before creating apps",
+			})
+			return
+		}
+	}
+
+	// Replace the hardcoded staging+prod environments produced by DefaultEnvironments
+	// with the actual environments registered in the org config. This ensures only
+	// environments the operator has explicitly defined are created and published.
+	// Falls back to the hardcoded defaults when no org provider is configured.
+	result.Environments = ah.stableEnvsFromOrg(r.Context(), result.App)
 
 	if err := ah.appStore.SaveApp(r.Context(), projectName, result.App); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
@@ -671,6 +678,10 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 // the org-level environment definitions. Used as a fallback in handleSyncApp
 // when the app's environments have not been persisted to the store (e.g. for
 // legacy apps seeded from the project.Service model).
+//
+// Environments are sorted by their org Order (then Name for determinism) so
+// the resulting slice is in pipeline order. The Order field is propagated from
+// the org definition into each AppEnvironment.
 func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []*domain.AppEnvironment {
 	if ah.orgProvider == nil {
 		return domainapp.DefaultEnvironments(app)
@@ -681,22 +692,32 @@ func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []
 		return domainapp.DefaultEnvironments(app)
 	}
 
+	// Sort org envs by Order (then Name) for a deterministic pipeline sequence.
+	sortedOrgEnvs := make([]rbac.OrgEnvironment, len(org.Environments))
+	copy(sortedOrgEnvs, org.Environments)
+	sort.Slice(sortedOrgEnvs, func(i, j int) bool {
+		if sortedOrgEnvs[i].Order != sortedOrgEnvs[j].Order {
+			return sortedOrgEnvs[i].Order < sortedOrgEnvs[j].Order
+		}
+		return sortedOrgEnvs[i].Name < sortedOrgEnvs[j].Name
+	})
+
 	// Reuse the same topology and pattern lookup built inside resolveEnvNamespaces.
-	stableRefs := make([]string, 0, len(org.Environments))
-	for _, e := range org.Environments {
+	stableRefs := make([]string, 0, len(sortedOrgEnvs))
+	for _, e := range sortedOrgEnvs {
 		stableRefs = append(stableRefs, e.ClusterRef)
 	}
 	dedicated := domain.IsDedicatedClusterTopology(stableRefs)
 
-	orgEnvPatterns := make(map[string]string, len(org.Environments))
-	for _, e := range org.Environments {
+	orgEnvPatterns := make(map[string]string, len(sortedOrgEnvs))
+	for _, e := range sortedOrgEnvs {
 		if e.NamespacePattern != "" {
 			orgEnvPatterns[e.Name] = e.NamespacePattern
 		}
 	}
 
-	envs := make([]*domain.AppEnvironment, 0, len(org.Environments))
-	for _, orgEnv := range org.Environments {
+	envs := make([]*domain.AppEnvironment, 0, len(sortedOrgEnvs))
+	for _, orgEnv := range sortedOrgEnvs {
 		envType := domain.AppEnvStaging
 		if orgEnv.Name == "prod" || orgEnv.Name == "production" {
 			envType = domain.AppEnvProd
@@ -723,6 +744,7 @@ func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []
 			ProjectName: app.ProjectName,
 			EnvName:     orgEnv.Name,
 			EnvType:     envType,
+			Order:       orgEnv.Order,
 			Namespace:   ns,
 			URLs:        []string{},
 			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
@@ -733,11 +755,10 @@ func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []
 
 // handlePromoteApp handles POST /api/v1/projects/{project}/apps/{app}/promote.
 //
-// Promotion path is preview → staging → prod. Promoting to a preview
-// environment is rejected. The handler resolves the source environment
-// deterministically (lexicographically first candidate at the tier immediately
-// below the target), then delegates the actual release-copy to
-// domainapp.Promote which performs the all-or-nothing write.
+// Promotion path is driven by OrgEnvironment.Order: the source is resolved as
+// the stable env with the highest Order strictly below the target's Order. If
+// no stable predecessor exists, preview environments are considered. Promoting
+// to a preview environment is always rejected.
 //
 // All components in the app share a single AppReleaseRef, so there is no
 // possibility of partial component promotion: the entire release bundle moves
@@ -778,17 +799,10 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetOrder, ok := appPromotionOrder[targetEnv.EnvType]
-	if !ok {
-		writeJSON(w, http.StatusBadRequest, errorResponse{
-			Error: "environment \"" + req.TargetEnvironment + "\" has an unrecognised type",
-		})
-		return
-	}
-
-	// Resolve the source: the lexicographically first environment at the tier
-	// immediately below the target in the promotion chain.
-	sourceEnv, err := ah.findPromotionSource(r.Context(), projectName, appName, targetOrder)
+	// Resolve the source: the stable env with the highest Order strictly below
+	// the target's Order (closest predecessor). Falls back to preview envs when
+	// no stable predecessor exists.
+	sourceEnv, err := ah.findPromotionSource(r.Context(), projectName, appName, targetEnv)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
@@ -871,42 +885,51 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 }
 
 // findPromotionSource returns the best source environment for a promotion to
-// the given target order. It expects an environment of the immediately lower
-// tier in the MVP chain (preview < staging < prod). When multiple candidates
-// exist (e.g. several preview environments), the lexicographically first is
-// chosen for determinism.
-func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appName string, targetOrder int) (*domain.AppEnvironment, error) {
+// the given target. It prefers the stable env with the highest Order strictly
+// below target.Order (i.e. the closest predecessor in the pipeline). When no
+// stable predecessor exists, the lexicographically first preview env is
+// returned so that preview→first-stable promotions still work.
+func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appName string, target *domain.AppEnvironment) (*domain.AppEnvironment, error) {
 	envs, err := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list app environments")
 	}
 
-	wantOrder := targetOrder - 1
-	var candidates []*domain.AppEnvironment
+	// Find stable candidates (non-preview, Order < target.Order).
+	var stableCandidates []*domain.AppEnvironment
+	var previewCandidates []*domain.AppEnvironment
 	for _, env := range envs {
-		if order, ok := appPromotionOrder[env.EnvType]; ok && order == wantOrder {
-			candidates = append(candidates, env)
+		if env.EnvName == target.EnvName {
+			continue
+		}
+		if env.EnvType == domain.AppEnvPreview {
+			previewCandidates = append(previewCandidates, env)
+		} else if env.Order < target.Order {
+			stableCandidates = append(stableCandidates, env)
 		}
 	}
 
-	if len(candidates) == 0 {
-		var sourceTier string
-		for t, o := range appPromotionOrder {
-			if o == wantOrder {
-				sourceTier = string(t)
-				break
+	if len(stableCandidates) > 0 {
+		// Pick the stable env with the highest Order (closest predecessor).
+		// Tie-break lexicographically for determinism.
+		sort.Slice(stableCandidates, func(i, j int) bool {
+			if stableCandidates[i].Order != stableCandidates[j].Order {
+				return stableCandidates[i].Order > stableCandidates[j].Order // descending: pick highest Order
 			}
-		}
-		if sourceTier == "" {
-			sourceTier = "previous"
-		}
-		return nil, fmt.Errorf("no %s environment found to promote from", sourceTier)
+			return stableCandidates[i].EnvName < stableCandidates[j].EnvName
+		})
+		return stableCandidates[0], nil
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].EnvName < candidates[j].EnvName
-	})
-	return candidates[0], nil
+	// No stable predecessor — fall back to preview environments.
+	if len(previewCandidates) > 0 {
+		sort.Slice(previewCandidates, func(i, j int) bool {
+			return previewCandidates[i].EnvName < previewCandidates[j].EnvName
+		})
+		return previewCandidates[0], nil
+	}
+
+	return nil, fmt.Errorf("no environment found to promote from; ensure an earlier environment has been deployed")
 }
 
 // enrichEnvWithLiveStatus overwrites the stored status fields in env with

@@ -9,3 +9,9 @@ import "github.com/suparcloud/suparship/internal/domain"
 func (p *Publisher) PublishKargoCRsForTest(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	return p.publishKargoCRs(repoDir, app, envs)
 }
+
+// PublishAppFilesForTest exposes the per-env file writing loop of PublishApp
+// for white-box unit testing without git operations.
+func (p *Publisher) PublishAppFilesForTest(repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	return p.publishAppFiles(repoDir, app, envs)
+}

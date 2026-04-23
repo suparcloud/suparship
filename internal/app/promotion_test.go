@@ -218,6 +218,7 @@ func stagingEnv(tag string) *domain.AppEnvironment {
 		AppName:   testApp,
 		EnvName:   "staging",
 		EnvType:   domain.AppEnvStaging,
+		Order:     1,
 		Namespace: testApp + "-staging",
 	}
 	if tag != "" {
@@ -231,6 +232,7 @@ func prodEnv() *domain.AppEnvironment {
 		AppName:   testApp,
 		EnvName:   "prod",
 		EnvType:   domain.AppEnvProd,
+		Order:     2,
 		Namespace: testApp + "-prod",
 	}
 }
@@ -500,6 +502,7 @@ func TestPromote_WrongOrder_ProdToStaging(t *testing.T) {
 		AppName:   testApp,
 		EnvName:   "prod",
 		EnvType:   domain.AppEnvProd,
+		Order:     2,
 		Namespace: testApp + "-prod",
 		Release:   &domain.AppReleaseRef{Tag: "v5.0.0"},
 	})

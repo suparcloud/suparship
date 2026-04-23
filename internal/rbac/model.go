@@ -123,12 +123,29 @@ type RoleBinding struct {
 }
 
 // NewDefaultOrg creates a minimal org with a single admins team containing
-// the given admin user, bound to org_admin on all projects.
+// the given admin user, bound to org_admin on all projects. Two default
+// environments (staging → prod) are seeded so that apps can be created
+// immediately after install without registering environments manually.
+// Operators can add, rename, or remove environments via the API.
 func NewDefaultOrg(orgName, displayName, adminUsername string) *Org {
 	return &Org{
 		Name:        orgName,
 		DisplayName: displayName,
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		Environments: []OrgEnvironment{
+			{
+				Name:        "staging",
+				DisplayName: "Staging",
+				Order:       1,
+				ClusterRef:  "in-cluster",
+			},
+			{
+				Name:        "prod",
+				DisplayName: "Production",
+				Order:       2,
+				ClusterRef:  "in-cluster",
+			},
+		},
 		Teams: []Team{
 			{
 				Name:        "admins",

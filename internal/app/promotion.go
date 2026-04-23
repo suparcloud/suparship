@@ -12,16 +12,6 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 )
 
-// promotionOrder defines the canonical MVP promotion chain.
-// preview → staging → prod; higher value = later in the chain.
-// This mirrors appPromotionOrder in internal/server but is kept here so the
-// domain-level Promote function has no dependency on the HTTP layer.
-var promotionOrder = map[domain.AppEnvironmentType]int{
-	domain.AppEnvPreview: 0,
-	domain.AppEnvStaging: 1,
-	domain.AppEnvProd:    2,
-}
-
 // ErrNoRelease is returned by Promote when the source environment has no
 // release ref to copy. The caller should surface this as a 4xx rather than 5xx.
 var ErrNoRelease = errors.New("source environment has no release to promote")
@@ -69,8 +59,8 @@ type PromoteResult struct {
 //   - FromEnv and ToEnv must be different names.
 //   - Both environments must exist for the app in the store.
 //   - ToEnv must not be a preview environment.
-//   - FromEnv must be strictly lower in the promotion chain than ToEnv
-//     (preview < staging < prod).
+//   - For non-preview source envs: FromEnv.Order must be strictly less than ToEnv.Order.
+//   - Preview source envs may promote to any non-preview destination.
 //   - FromEnv must have a non-nil release (returns ErrNoRelease otherwise).
 func Promote(ctx context.Context, store domain.AppStore, req PromoteRequest) (PromoteResult, error) {
 	if req.ProjectName == "" || req.AppName == "" || req.FromEnv == "" || req.ToEnv == "" {
@@ -93,19 +83,16 @@ func Promote(ctx context.Context, store domain.AppStore, req PromoteRequest) (Pr
 		return PromoteResult{}, fmt.Errorf("cannot promote to preview environment %q", req.ToEnv)
 	}
 
-	srcOrder, srcOK := promotionOrder[srcEnv.EnvType]
-	dstOrder, dstOK := promotionOrder[dstEnv.EnvType]
-	if !srcOK || !dstOK {
-		return PromoteResult{}, fmt.Errorf(
-			"unrecognised environment type: source=%q dest=%q",
-			srcEnv.EnvType, dstEnv.EnvType,
-		)
-	}
-	if srcOrder >= dstOrder {
-		return PromoteResult{}, fmt.Errorf(
-			"cannot promote from %q (%s) to %q (%s): source must precede destination in the promotion chain",
-			req.FromEnv, srcEnv.EnvType, req.ToEnv, dstEnv.EnvType,
-		)
+	// Preview sources may promote to any non-preview destination.
+	// For stable-to-stable promotions, the source must precede the destination
+	// in the pipeline order (lower Order value = earlier in the chain).
+	if srcEnv.EnvType != domain.AppEnvPreview {
+		if srcEnv.Order >= dstEnv.Order {
+			return PromoteResult{}, fmt.Errorf(
+				"cannot promote from %q (order %d) to %q (order %d): source must precede destination in the promotion chain",
+				req.FromEnv, srcEnv.Order, req.ToEnv, dstEnv.Order,
+			)
+		}
 	}
 
 	if srcEnv.Release == nil {

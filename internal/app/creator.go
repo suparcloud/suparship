@@ -210,7 +210,8 @@ func Create(req CreateRequest) (*CreateResult, error) {
 
 // DefaultEnvironments returns the default staging and prod AppEnvironment
 // instances for a newly-created app. Both start with no release and a
-// StatusNotDeployed phase.
+// StatusNotDeployed phase. This is used as a fallback for the sync path
+// when no org environments have been registered (e.g. legacy apps).
 //
 // Namespace convention: {projectName}-{appName}-{envName} via GenerateProjectNamespace.
 func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
@@ -220,6 +221,7 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 			ProjectName: a.ProjectName,
 			EnvName:     "staging",
 			EnvType:     domain.AppEnvStaging,
+			Order:       1,
 			Namespace:   domain.GenerateProjectNamespace(a.ProjectName, a.Name, "staging"),
 			URLs:        []string{},
 			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
@@ -229,6 +231,7 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 			ProjectName: a.ProjectName,
 			EnvName:     "prod",
 			EnvType:     domain.AppEnvProd,
+			Order:       2,
 			Namespace:   domain.GenerateProjectNamespace(a.ProjectName, a.Name, "prod"),
 			URLs:        []string{},
 			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},

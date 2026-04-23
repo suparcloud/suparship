@@ -510,6 +510,11 @@ type envResolved struct {
 	clusterServer    string
 	baseDomain       string
 	namespacePattern string
+	// bound is true when the org environment has a non-empty ClusterRef that
+	// maps to a known cluster. GitOps artifacts are only published for bound
+	// environments; unbound envs are tracked in the store so the UI can prompt
+	// the operator to assign a cluster.
+	bound bool
 }
 
 // resolveEnvs builds a map of envName → resolved cluster info from org config
@@ -537,6 +542,8 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 		}
 
 		// Resolve the cluster API server from the cluster store.
+		// An env is bound when it has a non-empty ClusterRef that resolves to a
+		// known cluster. Unbound envs are skipped during GitOps publishing.
 		if orgEnv.ClusterRef != "" && a.clusterStore != nil {
 			cluster, err := a.clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
 			if err != nil {
@@ -545,8 +552,10 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 			} else if cluster.APIServer == "" {
 				slog.Warn("resolveEnvs: cluster has empty apiServer, falling back to in-cluster default",
 					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
+				res.bound = true // ClusterRef is valid even if apiServer defaults
 			} else {
 				res.clusterServer = cluster.APIServer
+				res.bound = true
 			}
 		}
 
@@ -638,33 +647,41 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 	for _, env := range envs {
 		res, ok := resolved[env.EnvName]
 		if !ok {
-			// Environment not in org config — use safe defaults.
+			// Environment not in org config — treat as unbound so we don't
+			// accidentally publish to a stale or undefined cluster.
 			res = envResolved{
 				clusterServer: "https://kubernetes.default.svc",
 				baseDomain:    "localhost",
+				bound:         false,
 			}
 		}
 
-		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
-			EnvName:       env.EnvName,
-			ClusterServer: res.clusterServer,
-			BaseDomain:    res.baseDomain,
-		})
+		// Only include bound environments in the ApplicationSet so ArgoCD
+		// doesn't try to connect to a cluster that hasn't been registered.
+		if res.bound {
+			appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
+				EnvName:       env.EnvName,
+				ClusterServer: res.clusterServer,
+				BaseDomain:    res.baseDomain,
+			})
+		}
 		pubEnvs = append(pubEnvs, gitops.AppPublishEnv{
 			EnvName:    env.EnvName,
 			EnvType:    env.EnvType,
+			Order:      env.Order,
+			Bound:      res.bound,
 			BaseDomain: res.baseDomain,
 			Namespace:  env.Namespace,
 		})
 	}
 
-	// Write appset.yaml + appproject.yaml for each environment so ArgoCD can
-	// discover apps through its Git File generator. This is idempotent.
+	// Write appset.yaml + appproject.yaml for each bound environment so ArgoCD
+	// can discover apps through its Git File generator. This is idempotent.
 	if err := a.inner.PublishEnvInfra(ctx, app.ProjectName, appSetEnvs); err != nil {
 		return fmt.Errorf("publish env infra: %w", err)
 	}
 
-	// Write app.yaml + values.yaml for each environment.
+	// Write app.yaml + values.yaml for each bound environment.
 	return a.inner.PublishApp(ctx, app, pubEnvs)
 }
 
