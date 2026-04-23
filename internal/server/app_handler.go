@@ -808,6 +808,21 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Write GitOps files for the target environment before triggering the
+	// promotion. This ensures ArgoCD can find app.yaml + values.yaml when
+	// Kargo (or the store fallback) signals a sync. Best-effort: a publish
+	// failure is logged but does not abort the promotion response.
+	if ah.gitOpsPublisher != nil {
+		app, appErr := ah.appStore.GetApp(r.Context(), projectName, appName)
+		if appErr == nil {
+			if pubErr := ah.gitOpsPublisher.PublishAppEnv(r.Context(), app, targetEnv); pubErr != nil {
+				slog.Warn("promote: failed to publish env files — proceeding with promotion",
+					"project", projectName, "app", appName,
+					"env", req.TargetEnvironment, "err", pubErr)
+			}
+		}
+	}
+
 	// When Kargo is configured, create a Kargo Promotion CR. The Promotion CR
 	// drives the actual release copy through the Kargo pipeline; suparship
 	// then returns the Promotion details rather than the local release copy.

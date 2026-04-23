@@ -259,26 +259,67 @@ func (p *Publisher) PublishProjectNamespaces(ctx context.Context, projectName st
 	})
 }
 
+// firstDeployEnvs returns the subset of envs that should have app.yaml +
+// values.yaml written on initial app creation:
+//   - all preview environments (they deploy immediately by definition)
+//   - the first bound stable environment only (lowest Order, Name tiebreak)
+//
+// Higher stable environments are intentionally excluded from the initial
+// publish so that ArgoCD does not deploy to them until an explicit promotion
+// writes their files via PublishAppEnv. Kargo Stage CRs for all bound stable
+// envs are written separately and unconditionally — the pipeline wiring is
+// ready from day one even though the target files don't exist yet.
+func firstDeployEnvs(envs []AppPublishEnv) []AppPublishEnv {
+	result := make([]AppPublishEnv, 0, len(envs))
+
+	// Always include preview envs — they are ephemeral and deploy immediately.
+	for _, env := range envs {
+		if env.EnvType == domain.AppEnvPreview {
+			result = append(result, env)
+		}
+	}
+
+	// Collect bound stable envs and sort to find the first one.
+	stable := make([]AppPublishEnv, 0, len(envs))
+	for _, env := range envs {
+		if env.EnvType != domain.AppEnvPreview && env.Bound {
+			stable = append(stable, env)
+		}
+	}
+	sort.Slice(stable, func(i, j int) bool {
+		if stable[i].Order != stable[j].Order {
+			return stable[i].Order < stable[j].Order
+		}
+		return stable[i].EnvName < stable[j].EnvName
+	})
+	if len(stable) > 0 {
+		result = append(result, stable[0])
+	}
+	return result
+}
+
 // PublishApp writes the per-app app.yaml and values.yaml for each environment,
 // plus Kargo Warehouse and Stage CRs so promotions are wired automatically.
 //
-// Written files (per bound env):
+// On initial creation only the first bound stable environment (lowest Order)
+// and any preview environments receive app.yaml + values.yaml. Higher stable
+// environments are intentionally skipped so ArgoCD does not deploy to them
+// until an explicit promotion writes their files via PublishAppEnv.
+//
+// Written files (first bound stable env + previews):
 //   - gitops-output/{envName}/{project}/{app}/app.yaml
 //   - gitops-output/{envName}/{project}/{app}/values.yaml
 //
-// Written Kargo infrastructure files (all under _infra/kargo/):
-//   - gitops-output/_infra/kargo/{project}-project.yaml         ← Kargo Project CR (v0.9+)
+// Written Kargo infrastructure files (all bound stable envs):
+//   - gitops-output/_infra/kargo/{project}-project.yaml
 //   - gitops-output/_infra/kargo/{project}-{app}-warehouse.yaml
-//   - gitops-output/_infra/kargo/{project}-{app}-{env}-stage.yaml  (per bound stable env)
-//
-// Environments with Bound=false are skipped for GitOps publishing; they still
-// appear in the app's environment list in the store so the UI can prompt the
-// operator to assign a cluster. A warning is logged for each skipped env.
+//   - gitops-output/_infra/kargo/{project}-{app}-{env}-stage.yaml
 //
 // PublishApp is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppPublishEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		if err := p.publishAppFiles(repoDir, app, envs); err != nil {
+		// Only write app/values files for the first env (+ previews) on create.
+		if err := p.publishAppFiles(repoDir, app, firstDeployEnvs(envs)); err != nil {
 			return err
 		}
 
@@ -288,13 +329,29 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 			return fmt.Errorf("sync chart for template %s: %w", app.Spec.Template.Name, err)
 		}
 
-		// Write Kargo Warehouse + Stage CRs so promotion pipelines are created
-		// automatically when the app is first published.
+		// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
+		// full promotion pipeline is wired from day one.
 		if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
 			return fmt.Errorf("write kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
 		}
 
 		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s\n\nCreated by suparShip.", app.ProjectName, app.Name)
+		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
+// PublishAppEnv writes app.yaml and values.yaml for a single environment to
+// the GitOps repo and commits. This is called on every explicit promotion so
+// that the target environment's files land in Git before Kargo / ArgoCD act.
+//
+// PublishAppEnv is idempotent — if the files already contain identical content
+// the resulting git commit is a no-op (stagedIsEmpty check in commitAndPush).
+func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppPublishEnv) error {
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		if err := p.publishAppFiles(repoDir, app, []AppPublishEnv{env}); err != nil {
+			return err
+		}
+		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s to %s\n\nPromoted by suparShip.", app.ProjectName, app.Name, env.EnvName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }

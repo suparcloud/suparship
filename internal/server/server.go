@@ -47,12 +47,15 @@ func (a *clusterPoolAdapter) GetKubeClient(ctx context.Context, clusterName stri
 // app creation only persists to the store and no git commit is performed.
 // Implementations must be safe for concurrent use.
 type GitOpsPublisher interface {
-	// PublishApp writes app.yaml and values.yaml for each environment to the
-	// GitOps repo. BaseDomain controls the routing.host value in values.yaml;
-	// it is taken from the environment's cluster registration (defaults to
-	// "localhost" when the environment has no cluster or when the cluster has
-	// no configured base domain).
+	// PublishApp writes app.yaml and values.yaml for the first bound stable
+	// environment (and all preview environments) to the GitOps repo on initial
+	// app creation. Higher stable environments receive their files only when an
+	// explicit promotion is triggered via PublishAppEnv.
 	PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error
+	// PublishAppEnv writes app.yaml and values.yaml for a single environment to
+	// the GitOps repo. Called on every explicit promotion so the target env's
+	// files are present before Kargo / ArgoCD act on the promotion.
+	PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error
 	// UnpublishApp removes all GitOps files for an app (all stable-env
 	// directories) and commits + pushes the deletion. It is a no-op if no
 	// files exist for the app.
@@ -193,6 +196,18 @@ func (h *PublisherHolder) PublishApp(ctx context.Context, app *domain.App, envs 
 		return nil
 	}
 	return p.PublishApp(ctx, app, envs)
+}
+
+// PublishAppEnv implements GitOpsPublisher. It delegates to the currently held
+// publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.PublishAppEnv(ctx, app, env)
 }
 
 // UnpublishApp implements GitOpsPublisher. It delegates to the currently held

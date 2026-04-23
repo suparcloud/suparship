@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -563,5 +564,101 @@ func TestAppPromoteThreeEnvChain(t *testing.T) {
 	_ = json.NewDecoder(recProd.Body).Decode(&respProd)
 	if respProd.Source != "staging" {
 		t.Errorf("prod promote source = %q, want %q", respProd.Source, "staging")
+	}
+}
+
+// --- PublishAppEnv is called on promote ---
+
+// recordingPublisher is a GitOpsPublisher stub that records PublishAppEnv calls.
+type recordingPublisher struct {
+	publishedEnvs []string
+}
+
+func (r *recordingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*domain.AppEnvironment) error {
+	return nil
+}
+func (r *recordingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, env *domain.AppEnvironment) error {
+	r.publishedEnvs = append(r.publishedEnvs, env.EnvName)
+	return nil
+}
+func (r *recordingPublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }
+
+// newTestAppPromoteMuxWithPublisher wires an appHandler for promotion tests
+// with a GitOpsPublisher injected.
+func newTestAppPromoteMuxWithPublisher(projectName string, pub GitOpsPublisher) (*http.ServeMux, *authHandler, *memAppStore) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	store := newMemAppStore()
+	store.mu.Lock()
+	store.apps[projectName] = make(map[string]*domain.App)
+	store.mu.Unlock()
+
+	appH := newAppHandler(store, nil, nil)
+	appH.gitOpsPublisher = pub
+
+	rh := &rbacHandler{
+		auth:        ah,
+		orgStore: &staticOrgProvider{org: testRBACOrg()},
+		appHandler:  appH,
+	}
+	rh.registerRoutes(mux)
+
+	return mux, ah, store
+}
+
+// TestPromote_CallsPublishAppEnv verifies that handlePromoteApp calls
+// GitOpsPublisher.PublishAppEnv for the target environment before returning.
+func TestPromote_CallsPublishAppEnv(t *testing.T) {
+	rec := &recordingPublisher{}
+	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, rec)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	// Promote to prod (from staging which has a release).
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	if len(rec.publishedEnvs) == 0 {
+		t.Fatal("expected PublishAppEnv to be called, but no calls were recorded")
+	}
+	if rec.publishedEnvs[0] != "prod" {
+		t.Errorf("expected PublishAppEnv called with env=prod, got %q", rec.publishedEnvs[0])
+	}
+}
+
+// TestPromote_PublishAppEnvFailureContinues verifies that a PublishAppEnv
+// failure does not abort the promotion — the promote response is still 200.
+type failingPublisher struct{}
+
+func (f *failingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*domain.AppEnvironment) error {
+	return nil
+}
+func (f *failingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, _ *domain.AppEnvironment) error {
+	return fmt.Errorf("simulated publish failure")
+}
+func (f *failingPublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }
+
+func TestPromote_PublishAppEnvFailureContinues(t *testing.T) {
+	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, &failingPublisher{})
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	// Promotion should succeed even though file publishing failed.
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 even with publish failure, got %d: %s", resp.Code, resp.Body.String())
 	}
 }

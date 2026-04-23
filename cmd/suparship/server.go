@@ -685,6 +685,31 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 	return a.inner.PublishApp(ctx, app, pubEnvs)
 }
 
+// PublishAppEnv implements server.GitOpsPublisher by resolving cluster info for
+// the single environment and writing its app.yaml + values.yaml to the GitOps
+// repo. Called on every explicit promotion so the target env's files exist
+// before Kargo / ArgoCD act.
+func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error {
+	resolved := a.resolveEnvs(ctx)
+	res, ok := resolved[env.EnvName]
+	if !ok {
+		res = envResolved{
+			clusterServer: "https://kubernetes.default.svc",
+			baseDomain:    "localhost",
+			bound:         false,
+		}
+	}
+	pub := gitops.AppPublishEnv{
+		EnvName:    env.EnvName,
+		EnvType:    env.EnvType,
+		Order:      env.Order,
+		Bound:      res.bound,
+		BaseDomain: res.baseDomain,
+		Namespace:  env.Namespace,
+	}
+	return a.inner.PublishAppEnv(ctx, app, pub)
+}
+
 // UnpublishApp implements server.GitOpsPublisher by removing all gitops-output
 // directories for the given app and committing the deletion.
 func (a *gitOpsPublisherAdapter) UnpublishApp(ctx context.Context, projectName, appName string) error {
