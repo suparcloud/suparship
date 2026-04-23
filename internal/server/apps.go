@@ -202,6 +202,12 @@ type createAppRequest struct {
 	// templates that declare a spec.components section. When absent, the
 	// handler initialises components from the template via ComponentToggles.
 	Components []ComponentCreateDTO `json:"components,omitempty"`
+	// NamespaceScope controls whether this app deploys into a dedicated
+	// namespace ("app", default) or the shared project namespace ("project").
+	NamespaceScope string `json:"namespaceScope,omitempty"`
+	// NamespacePattern overrides org/project defaults. Only applies when
+	// NamespaceScope is "app". Tokens: {org}, {project}, {app}, {env}.
+	NamespacePattern string `json:"namespacePattern,omitempty"`
 }
 
 // createAppResponse is the JSON body returned on a successful app creation.

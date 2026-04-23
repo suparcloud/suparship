@@ -409,6 +409,10 @@ export interface CreateAppRequest {
   template: string;
   values: Record<string, unknown>;
   secretRefs: SecretRefInput[];
+  /** "app" (default) — dedicated namespace per app+env; "project" — share the project namespace */
+  namespaceScope?: "app" | "project";
+  /** Optional namespace pattern override. Only applies when namespaceScope is "app". */
+  namespacePattern?: string;
 }
 
 export interface CreateAppResponse {

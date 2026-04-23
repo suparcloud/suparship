@@ -16,6 +16,19 @@ const (
 	AppEnvPreview AppEnvironmentType = "preview"
 )
 
+// NamespaceScope controls where an app's workloads are deployed.
+type NamespaceScope string
+
+const (
+	// NamespaceScopeApp gives the app a dedicated namespace per environment
+	// (default — safe for preview teardown and RBAC).
+	NamespaceScopeApp NamespaceScope = "app"
+	// NamespaceScopeProject shares the project's namespace across apps in the
+	// same environment. Requires the project to have a NamespacePattern set,
+	// or the org ResourceNaming.ProjectNamespace to be configured.
+	NamespaceScopeProject NamespaceScope = "project"
+)
+
 // ParseAppEnvironmentType converts a raw string into an AppEnvironmentType,
 // returning an error if the value is not one of the known MVP values.
 func ParseAppEnvironmentType(s string) (AppEnvironmentType, error) {
@@ -200,6 +213,15 @@ type AppSpec struct {
 	// Component-specific vars should use ComponentSpec.Config instead, which
 	// renders as direct env: entries and wins over all envFrom layers.
 	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
+	// NamespaceScope controls whether this app deploys into a dedicated app
+	// namespace ("app", default) or the shared project namespace ("project").
+	// Empty is treated as "app".
+	NamespaceScope NamespaceScope `json:"namespaceScope,omitempty" yaml:"namespaceScope,omitempty"`
+	// NamespacePattern overrides the org/project defaults for app namespace
+	// naming. Only applies when NamespaceScope is "app".
+	// Tokens: {org}, {project}, {app}, {env}.
+	// Empty: inherits from project, org environment, or org-level defaults.
+	NamespacePattern string `json:"namespacePattern,omitempty" yaml:"namespacePattern,omitempty"`
 }
 
 // App is a deployable unit owned by a project. It combines identity metadata

@@ -177,6 +177,87 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 	})
 }
 
+// ProjectNamespaceEnv carries the resolved namespace for one stable environment
+// when emitting project-level Namespace manifests.
+type ProjectNamespaceEnv struct {
+	// EnvName is the logical environment name, e.g. "staging".
+	EnvName string
+	// Namespace is the resolved project namespace for this environment.
+	// When empty, no manifest is written for this env.
+	Namespace string
+}
+
+// namespaceManifest is the minimal YAML representation of a Kubernetes Namespace.
+type namespaceManifest struct {
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   namespaceMetadata `yaml:"metadata"`
+}
+
+type namespaceMetadata struct {
+	Name   string            `yaml:"name"`
+	Labels map[string]string `yaml:"labels"`
+}
+
+// PublishProjectNamespaces writes a Kubernetes Namespace manifest per stable
+// environment into gitops-output/_infra/ when the resolved project namespace
+// is non-empty. The root ArgoCD App-of-Apps watches _infra/*.yaml and syncs
+// these to the cluster, so no direct kubectl apply is needed.
+//
+// Written files (one per env with a non-empty namespace):
+//
+//	gitops-output/_infra/{project}-ns-{env}.yaml
+//
+// Removing the NamespacePattern from a project causes the file to be deleted
+// on the next call, which triggers ArgoCD to prune the Namespace resource.
+//
+// PublishProjectNamespaces is idempotent; it only creates a commit when content
+// changes.
+func (p *Publisher) PublishProjectNamespaces(ctx context.Context, projectName string, envs []ProjectNamespaceEnv) error {
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		infraDir := filepath.Join(repoDir, "gitops-output", "_infra")
+		changed := false
+		for _, env := range envs {
+			filePath := filepath.Join(infraDir, projectName+"-ns-"+env.EnvName+".yaml")
+			if env.Namespace == "" {
+				// Remove stale manifest when the pattern has been cleared.
+				if _, err := os.Stat(filePath); err == nil {
+					if err := os.Remove(filePath); err != nil {
+						return fmt.Errorf("remove project namespace manifest %s: %w", filePath, err)
+					}
+					changed = true
+					slog.Debug("gitops: removed project namespace manifest", "path", filePath)
+				}
+				continue
+			}
+			manifest := namespaceManifest{
+				APIVersion: "v1",
+				Kind:       "Namespace",
+				Metadata: namespaceMetadata{
+					Name: env.Namespace,
+					Labels: map[string]string{
+						"suparship.io/project":    projectName,
+						"suparship.io/managed-by": "suparship",
+					},
+				},
+			}
+			data, err := yaml.Marshal(manifest)
+			if err != nil {
+				return fmt.Errorf("marshal namespace manifest for %s/%s: %w", projectName, env.EnvName, err)
+			}
+			if err := p.writeFile(filePath, data); err != nil {
+				return err
+			}
+			changed = true
+			slog.Debug("gitops: wrote project namespace manifest", "path", filePath, "namespace", env.Namespace)
+		}
+		if !changed {
+			return nil
+		}
+		return p.commitAndPush(ctx, repoDir, "feat(infra): update project namespaces for "+projectName)
+	})
+}
+
 // PublishApp writes the per-app app.yaml and values.yaml for each environment,
 // plus Kargo Warehouse and Stage CRs so promotions are wired automatically.
 //
@@ -193,11 +274,19 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppPublishEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		for _, env := range envs {
+			// Resolve the namespace: use the pre-computed value from the caller
+			// when set; fall back to the legacy "{app}-{env}" default.
+			ns := env.Namespace
+			if ns == "" {
+				ns = app.Name + "-" + env.EnvName
+			}
+
 			// Write app.yaml — Git File generator parameters.
 			appMeta := AppMetadata{
-				Name:     app.Name,
-				Project:  app.ProjectName,
-				Template: app.Spec.Template.Name,
+				Name:      app.Name,
+				Project:   app.ProjectName,
+				Template:  app.Spec.Template.Name,
+				Namespace: ns,
 			}
 			appMetaBytes, err := yaml.Marshal(appMeta)
 			if err != nil {
@@ -402,6 +491,10 @@ type AppPublishEnv struct {
 	// BaseDomain is used to derive routing.host in values.yaml.
 	// When empty, "localhost" is used.
 	BaseDomain string
+	// Namespace is the resolved Kubernetes namespace for this app+env instance.
+	// Resolved by domain.ResolveNamespace before calling PublishApp.
+	// When empty, PublishApp falls back to "{app}-{env}" for backward compatibility.
+	Namespace string
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD

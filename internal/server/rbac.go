@@ -86,6 +86,10 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/org/environments/{env}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleUpdateOrgEnvironment)))
 	mux.HandleFunc("DELETE /api/v1/org/environments/{env}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteOrgEnvironment)))
 
+	// Org-level namespace naming patterns — reads for all; writes require org_admin.
+	mux.HandleFunc("GET /api/v1/org/naming", rh.auth.requireAuth(rh.handleGetOrgNaming))
+	mux.HandleFunc("PUT /api/v1/org/naming", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgNaming)))
+
 	// Project-scoped endpoints — role-based access.
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(rh.handleGetProject))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
@@ -96,6 +100,10 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/projects/{project}/environments", manageProject(rh.handleCreateProjectEnvironment))
 	mux.HandleFunc("PUT /api/v1/projects/{project}/environments/{env}", manageProject(rh.handleUpdateProjectEnvironment))
 	mux.HandleFunc("DELETE /api/v1/projects/{project}/environments/{env}", manageProject(rh.handleDeleteProjectEnvironment))
+
+	// Project namespace naming pattern.
+	mux.HandleFunc("GET /api/v1/projects/{project}/naming", viewProject(rh.handleGetProjectNaming))
+	mux.HandleFunc("PUT /api/v1/projects/{project}/naming", manageProject(rh.handlePutProjectNaming))
 	// --- Legacy service-oriented routes (compatibility) ---
 	//
 	// The routes below are deprecated. They are retained for backwards

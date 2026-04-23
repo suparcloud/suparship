@@ -646,10 +646,9 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 		}
 
 		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
-			EnvName:          env.EnvName,
-			ClusterServer:    res.clusterServer,
-			NamespacePattern: res.namespacePattern,
-			BaseDomain:       res.baseDomain,
+			EnvName:       env.EnvName,
+			ClusterServer: res.clusterServer,
+			BaseDomain:    res.baseDomain,
 		})
 		pubEnvs = append(pubEnvs, gitops.AppPublishEnv{
 			EnvName:    env.EnvName,
@@ -762,10 +761,9 @@ func publishInitialEnvInfra(
 			baseDomain = "localhost"
 		}
 		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
-			EnvName:          orgEnv.Name,
-			ClusterServer:    clusterServer,
-			NamespacePattern: orgEnv.NamespacePattern,
-			BaseDomain:       baseDomain,
+			EnvName:       orgEnv.Name,
+			ClusterServer: clusterServer,
+			BaseDomain:    baseDomain,
 		})
 	}
 

@@ -125,6 +125,12 @@ type CreateRequest struct {
 	// entirely and uses these specs directly. Intended for legacy callers that
 	// supply fully-specified component lists.
 	ExplicitComponents []domain.ComponentSpec
+	// NamespaceScope controls whether the app deploys into a dedicated
+	// namespace ("app", default) or the shared project namespace ("project").
+	NamespaceScope domain.NamespaceScope
+	// NamespacePattern overrides org/project defaults for app namespace naming.
+	// Only applies when NamespaceScope is "app".
+	NamespacePattern string
 }
 
 // CreateResult holds the pure-function outputs of Create.
@@ -180,6 +186,14 @@ func Create(req CreateRequest) (*CreateResult, error) {
 		req.SecretRefs,
 		comps,
 	)
+
+	// Apply namespace scope and pattern overrides from the request.
+	if req.NamespaceScope != "" {
+		app.Spec.NamespaceScope = req.NamespaceScope
+	}
+	if req.NamespacePattern != "" {
+		app.Spec.NamespacePattern = req.NamespacePattern
+	}
 
 	// Generate Helm values for each default environment.
 	hvMap := make(map[string]helmvalues.HelmValues, len(envs))

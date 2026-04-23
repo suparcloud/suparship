@@ -118,3 +118,87 @@ func TestValidateRenderedDNS1123(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRenderedNamespace(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+		errMsg  string
+	}{
+		{"valid simple", "web", false, ""},
+		{"valid with dash", "acme-web-prod", false, ""},
+		{"valid 63 chars", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false, ""},
+		{"invalid empty", "", true, ""},
+		{"invalid uppercase", "Web", true, "DNS-1123"},
+		{"invalid underscore", "web_prod", true, "DNS-1123"},
+		{"invalid 64 chars", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true, "63-char"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRenderedNamespace(tt.input, "test")
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateRenderedNamespace(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if err != nil && tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
+				t.Errorf("error %q does not contain %q", err.Error(), tt.errMsg)
+			}
+		})
+	}
+}
+
+func TestResourceNaming_NamespacePatterns(t *testing.T) {
+	params := NamingParams{Org: "myorg", Env: "staging", Project: "billing", App: "api", Provider: "vault"}
+
+	t.Run("defaults return empty (topology decides)", func(t *testing.T) {
+		var n ResourceNaming
+		if got := n.EffectiveProjectNamespace(); got != "" {
+			t.Errorf("EffectiveProjectNamespace default: got %q, want empty", got)
+		}
+		if got := n.EffectiveAppNamespace(); got != "" {
+			t.Errorf("EffectiveAppNamespace default: got %q, want empty", got)
+		}
+	})
+
+	t.Run("custom project namespace pattern", func(t *testing.T) {
+		n := ResourceNaming{ProjectNamespace: "{project}-{env}"}
+		got := RenderPattern(n.EffectiveProjectNamespace(), params)
+		if got != "billing-staging" {
+			t.Errorf("got %q, want %q", got, "billing-staging")
+		}
+	})
+
+	t.Run("custom app namespace pattern", func(t *testing.T) {
+		n := ResourceNaming{AppNamespace: "{project}-{app}-{env}"}
+		got := RenderPattern(n.EffectiveAppNamespace(), params)
+		if got != "billing-api-staging" {
+			t.Errorf("got %q, want %q", got, "billing-api-staging")
+		}
+	})
+
+	t.Run("validate accepts valid namespace patterns", func(t *testing.T) {
+		n := ResourceNaming{
+			ProjectNamespace: "{project}-{env}",
+			AppNamespace:     "{project}-{app}-{env}",
+		}
+		if err := n.Validate(); err != nil {
+			t.Errorf("unexpected validation error: %v", err)
+		}
+	})
+
+	t.Run("validate rejects invalid project namespace pattern", func(t *testing.T) {
+		n := ResourceNaming{ProjectNamespace: "{project} {env}"}
+		if err := n.Validate(); err == nil {
+			t.Error("expected validation error for whitespace in projectNamespace")
+		}
+	})
+
+	t.Run("validate rejects too-long app namespace pattern", func(t *testing.T) {
+		// Renders to 64 chars with sample values
+		long := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX"
+		n := ResourceNaming{AppNamespace: long}
+		if err := n.Validate(); err == nil {
+			t.Error("expected validation error for too-long appNamespace")
+		}
+	})
+}

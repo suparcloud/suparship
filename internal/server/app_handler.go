@@ -160,6 +160,8 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		SecretRefs:         domainSecretRefs,
 		ComponentToggles:   req.ComponentToggles,
 		ExplicitComponents: explicitComponents,
+		NamespaceScope:     domain.NamespaceScope(req.NamespaceScope),
+		NamespacePattern:   req.NamespacePattern,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})

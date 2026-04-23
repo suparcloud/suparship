@@ -20,6 +20,20 @@ type ResourceNaming struct {
 
 	// VaultItem holds per-scope vault item title patterns.
 	VaultItem ItemNaming `json:"vaultItem,omitempty" yaml:"vaultItem,omitempty"`
+
+	// ProjectNamespace is the org-wide default pattern for project-level
+	// Kubernetes namespaces. Tokens: {org}, {project}, {env}.
+	// Empty: topology-aware default is applied at resolution time.
+	//   Shared cluster:    "{project}-{env}" → "myproject-staging"
+	//   Dedicated cluster: "{project}"       → "myproject"
+	ProjectNamespace string `json:"projectNamespace,omitempty" yaml:"projectNamespace,omitempty"`
+
+	// AppNamespace is the org-wide default pattern for app-level
+	// Kubernetes namespaces. Tokens: {org}, {project}, {app}, {env}.
+	// Empty: topology-aware default is applied at resolution time.
+	//   Shared cluster:    "{project}-{app}-{env}" → "myproject-api-staging"
+	//   Dedicated cluster: "{project}-{app}"       → "myproject-api"
+	AppNamespace string `json:"appNamespace,omitempty" yaml:"appNamespace,omitempty"`
 }
 
 // ItemNaming holds configurable patterns for vault item titles, one per
@@ -98,6 +112,19 @@ func ValidateRenderedDNS1123(rendered, context string) error {
 	return nil
 }
 
+// ValidateRenderedNamespace validates a rendered Kubernetes namespace name.
+// Extends ValidateRenderedDNS1123 with the 63-character limit imposed by
+// RFC 1123 for DNS label components.
+func ValidateRenderedNamespace(rendered, context string) error {
+	if err := ValidateRenderedDNS1123(rendered, context); err != nil {
+		return err
+	}
+	if len(rendered) > 63 {
+		return fmt.Errorf("naming: %s exceeds 63-char Kubernetes limit: %q (%d chars)", context, rendered, len(rendered))
+	}
+	return nil
+}
+
 // ── Effective getters ──────────────────────────────────────────────────────
 
 func (n ResourceNaming) EffectiveAppResource() string {
@@ -112,6 +139,18 @@ func (n ResourceNaming) EffectiveClusterSecretStore() string {
 		return n.ClusterSecretStore
 	}
 	return DefaultClusterSecretStore
+}
+
+// EffectiveProjectNamespace returns the org-wide project namespace pattern.
+// Empty string means no org default is set; topology decides at resolution time.
+func (n ResourceNaming) EffectiveProjectNamespace() string {
+	return n.ProjectNamespace
+}
+
+// EffectiveAppNamespace returns the org-wide app namespace pattern.
+// Empty string means no org default is set; topology decides at resolution time.
+func (n ResourceNaming) EffectiveAppNamespace() string {
+	return n.AppNamespace
 }
 
 func (n ItemNaming) EffectiveOrg() string {
@@ -197,6 +236,19 @@ func (n ResourceNaming) Validate() error {
 	}
 	if err := ValidateRenderedDNS1123(n.RenderClusterSecretStore(sample), "clusterSecretStore"); err != nil {
 		return err
+	}
+
+	if n.ProjectNamespace != "" {
+		r := RenderPattern(n.ProjectNamespace, sample)
+		if err := ValidateRenderedNamespace(r, "projectNamespace"); err != nil {
+			return err
+		}
+	}
+	if n.AppNamespace != "" {
+		r := RenderPattern(n.AppNamespace, sample)
+		if err := ValidateRenderedNamespace(r, "appNamespace"); err != nil {
+			return err
+		}
 	}
 
 	// Vault item titles don't need DNS-1123, just non-empty/no-whitespace.

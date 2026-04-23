@@ -507,3 +507,50 @@ func TestBuildArgoApplicationFromInstance_Determinism(t *testing.T) {
 		t.Error("BuildArgoApplicationFromInstance is non-deterministic: namespaces differ")
 	}
 }
+
+// ── BuildArgoAppSet namespace behaviour ──────────────────────────────────────
+
+// TestBuildArgoAppSet_NamespaceIsTemplateVar verifies that after moving
+// namespace resolution to publish time, the stable-env AppSet uses
+// "{{namespace}}" as its destination namespace template — not a computed
+// pattern. This aligns it with the preview AppSet.
+func TestBuildArgoAppSet_NamespaceIsTemplateVar(t *testing.T) {
+	env := gitops.AppSetEnv{
+		EnvName:       "staging",
+		ClusterServer: "https://kubernetes.default.svc",
+		BaseDomain:    "staging.localhost",
+	}
+	appSet := gitops.BuildArgoAppSet(env, "https://gitea.local/gitops/gitops", gitops.AppSetOptions{
+		SyncAutomated: true,
+	})
+
+	ns := appSet.Spec.Template.Spec.Destination.Namespace
+	if ns != "{{namespace}}" {
+		t.Errorf("AppSet destination.namespace = %q, want {{namespace}}", ns)
+	}
+}
+
+// TestBuildArgoAppSet_NamespaceDoesNotIncludeEnvName verifies that the AppSet
+// template no longer hard-codes the env name into the namespace (e.g. no
+// "{{name}}-staging" pattern). The env name belongs in app.yaml, not the AppSet.
+func TestBuildArgoAppSet_NamespaceDoesNotIncludeEnvName(t *testing.T) {
+	env := gitops.AppSetEnv{
+		EnvName:       "staging",
+		ClusterServer: "https://kubernetes.default.svc",
+	}
+	appSet := gitops.BuildArgoAppSet(env, "https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
+	ns := appSet.Spec.Template.Spec.Destination.Namespace
+	if ns == "{{name}}-staging" || ns == "{{name}}-prod" {
+		t.Errorf("AppSet namespace template %q contains hard-coded env name — should be {{namespace}}", ns)
+	}
+}
+
+// TestBuildArgoPreviewAppSet_NamespaceIsTemplateVar ensures the preview AppSet
+// still uses {{namespace}} (regression guard).
+func TestBuildArgoPreviewAppSet_NamespaceIsTemplateVar(t *testing.T) {
+	appSet := gitops.BuildArgoPreviewAppSet("https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
+	ns := appSet.Spec.Template.Spec.Destination.Namespace
+	if ns != "{{namespace}}" {
+		t.Errorf("preview AppSet destination.namespace = %q, want {{namespace}}", ns)
+	}
+}

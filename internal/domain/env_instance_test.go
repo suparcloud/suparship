@@ -469,3 +469,181 @@ func TestGenerateNamespaceFromPatternAppOnly(t *testing.T) {
 		t.Errorf("pattern {app}: namespace %q unexpectedly contains env name", ns)
 	}
 }
+
+// ── IsDedicatedClusterTopology ────────────────────────────────────────────────
+
+func TestIsDedicatedClusterTopology(t *testing.T) {
+	tests := []struct {
+		name string
+		refs []string
+		want bool
+	}{
+		{"empty list", []string{}, false},
+		{"single empty ref", []string{""}, false},
+		{"single non-empty ref (one env)", []string{"cluster-a"}, true},
+		{"two distinct refs", []string{"cluster-a", "cluster-b"}, true},
+		{"duplicate refs", []string{"cluster-a", "cluster-a"}, false},
+		{"one empty among distinct", []string{"cluster-a", ""}, false},
+		{"three distinct", []string{"c1", "c2", "c3"}, true},
+		{"three with duplicate", []string{"c1", "c2", "c1"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsDedicatedClusterTopology(tt.refs)
+			if got != tt.want {
+				t.Errorf("IsDedicatedClusterTopology(%v) = %v, want %v", tt.refs, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── ResolveNamespace ──────────────────────────────────────────────────────────
+
+func TestResolveNamespace(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      NamespaceResolveInput
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "shared cluster app scope — hardcoded default",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeApp, Dedicated: false,
+			},
+			want: "billing-api-staging",
+		},
+		{
+			name: "dedicated cluster app scope — no env suffix",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "prod", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeApp, Dedicated: true,
+			},
+			want: "billing-api",
+		},
+		{
+			name: "shared cluster project scope — hardcoded default",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeProject, Dedicated: false,
+			},
+			want: "billing-staging",
+		},
+		{
+			name: "dedicated cluster project scope — no env suffix",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "prod", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeProject, Dedicated: true,
+			},
+			want: "billing",
+		},
+		{
+			name: "org app default overrides hardcoded default",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeApp, Dedicated: false,
+				OrgAppDefault: "{project}-{app}",
+			},
+			want: "billing-api",
+		},
+		{
+			name: "org env pattern overrides org app default",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeApp, Dedicated: false,
+				OrgAppDefault: "{project}-{app}",
+				OrgEnvPattern: "{project}-{app}-stg",
+			},
+			want: "billing-api-stg",
+		},
+		{
+			name: "project pattern overrides org env pattern",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeApp, Dedicated: false,
+				OrgEnvPattern:  "{project}-{app}-stg",
+				ProjectPattern: "{project}-{app}-{env}",
+			},
+			want: "billing-api-staging",
+		},
+		{
+			name: "app pattern is highest priority",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeApp, Dedicated: false,
+				OrgEnvPattern:  "{project}-{app}-stg",
+				ProjectPattern: "{project}-{app}-{env}",
+				AppPattern:     "{app}",
+			},
+			want: "api",
+		},
+		{
+			name: "org project default used for project scope",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeProject, Dedicated: false,
+				OrgProjectDefault: "{project}-{env}",
+			},
+			want: "billing-staging",
+		},
+		{
+			name: "empty scope treated as app scope",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Dedicated: false,
+			},
+			want: "billing-api-staging",
+		},
+		{
+			name: "org token substituted",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeApp, Dedicated: false,
+				AppPattern: "{org}-{project}-{app}",
+			},
+			want: "myorg-billing-api",
+		},
+		{
+			name: "invalid namespace — uppercase in result",
+			in: NamespaceResolveInput{
+				AppName: "API", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeApp, Dedicated: false,
+				AppPattern: "{app}-{env}",
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveNamespace(tt.in)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ResolveNamespace() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ResolveNamespace() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveNamespaceIsDeterministic(t *testing.T) {
+	in := NamespaceResolveInput{
+		AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+		Scope: NamespaceScopeApp, Dedicated: false,
+	}
+	first, err := ResolveNamespace(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		got, err := ResolveNamespace(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != first {
+			t.Errorf("run %d: not deterministic, got %q, want %q", i, got, first)
+		}
+	}
+}

@@ -7,7 +7,10 @@ import {
   createOrgEnvironment,
   updateOrgEnvironment,
   deleteOrgEnvironment,
+  getOrgNaming,
+  updateOrgNaming,
 } from "../lib/settings";
+import type { OrgNaming } from "../lib/settings";
 import {
   getOrgEnvConfig,
   updateOrgEnvConfig,
@@ -480,6 +483,212 @@ function EnvironmentTypeEnvConfigSection({
           />
         </>
       )}
+    </div>
+  );
+}
+
+// ── Namespace Naming section ──────────────────────────────────────────────────
+
+const SHARED_APP_PRESETS = [
+  { label: "{project}-{app}-{env}", value: "{project}-{app}-{env}" },
+  { label: "{project}-{app}", value: "{project}-{app}" },
+];
+const DEDICATED_APP_PRESETS = [
+  { label: "{project}-{app}", value: "{project}-{app}" },
+  { label: "{app}", value: "{app}" },
+];
+const SHARED_PROJECT_PRESETS = [
+  { label: "{project}-{env}", value: "{project}-{env}" },
+  { label: "{project}", value: "{project}" },
+];
+const DEDICATED_PROJECT_PRESETS = [
+  { label: "{project}", value: "{project}" },
+];
+
+function NamespaceNamingSection() {
+  const [naming, setNaming] = useState<OrgNaming>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getOrgNaming()
+      .then((n) => { if (!cancelled) setNaming(n); })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function handleSave() {
+    setSaving(true);
+    setSaveError(null);
+    setSaved(false);
+    try {
+      const updated = await updateOrgNaming(naming);
+      setNaming(updated);
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Live preview using sample values
+  function renderPreview(pattern: string): string {
+    if (!pattern) return "";
+    return pattern
+      .replace("{org}", "myorg")
+      .replace("{project}", "billing")
+      .replace("{app}", "api")
+      .replace("{env}", "staging");
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-6 py-4">
+        <h2 className="text-sm font-medium text-gray-900">Namespace Naming</h2>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Org-wide default patterns for Kubernetes namespaces. Projects and apps
+          can override these. Leave blank for the topology-aware default.
+        </p>
+      </div>
+
+      <div className="px-6 py-4">
+        {loading ? (
+          <div className="h-24 animate-pulse rounded bg-gray-100" />
+        ) : error ? (
+          <p className="text-sm text-red-600">{error}</p>
+        ) : (
+          <div className="space-y-6">
+            {/* Project namespace pattern */}
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-gray-700">
+                Project namespace pattern
+              </label>
+              <p className="text-xs text-gray-400">
+                Tokens: <code className="font-mono">{"{org}"}</code>,{" "}
+                <code className="font-mono">{"{project}"}</code>,{" "}
+                <code className="font-mono">{"{env}"}</code>. Used when an app
+                has{" "}
+                <code className="font-mono">namespaceScope: project</code>.
+              </p>
+              <div className="flex flex-wrap gap-1.5 mb-1">
+                {[...SHARED_PROJECT_PRESETS, ...DEDICATED_PROJECT_PRESETS.filter(
+                  (p) => !SHARED_PROJECT_PRESETS.some((s) => s.value === p.value)
+                )].map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    onClick={() => setNaming((n) => ({ ...n, projectNamespace: p.value }))}
+                    className={`rounded px-2 py-0.5 text-xs font-mono transition-colors ${
+                      naming.projectNamespace === p.value
+                        ? "bg-indigo-100 text-indigo-800"
+                        : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="e.g. {project}-{env}  or  {project}"
+                value={naming.projectNamespace ?? ""}
+                onChange={(e) => setNaming((n) => ({ ...n, projectNamespace: e.target.value || undefined }))}
+              />
+              {naming.projectNamespace && (
+                <p className="text-xs text-gray-400">
+                  Preview:{" "}
+                  <code className="font-mono text-gray-700">
+                    {renderPreview(naming.projectNamespace)}
+                  </code>
+                </p>
+              )}
+              {!naming.projectNamespace && (
+                <p className="text-xs text-gray-400 italic">
+                  Empty → topology-aware default: <code className="font-mono">billing-staging</code> (shared) or <code className="font-mono">billing</code> (dedicated)
+                </p>
+              )}
+            </div>
+
+            {/* App namespace pattern */}
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-gray-700">
+                App namespace pattern
+              </label>
+              <p className="text-xs text-gray-400">
+                Tokens: <code className="font-mono">{"{org}"}</code>,{" "}
+                <code className="font-mono">{"{project}"}</code>,{" "}
+                <code className="font-mono">{"{app}"}</code>,{" "}
+                <code className="font-mono">{"{env}"}</code>. Used for apps with
+                dedicated namespaces (default).
+              </p>
+              <div className="flex flex-wrap gap-1.5 mb-1">
+                {[...SHARED_APP_PRESETS, ...DEDICATED_APP_PRESETS.filter(
+                  (p) => !SHARED_APP_PRESETS.some((s) => s.value === p.value)
+                )].map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    onClick={() => setNaming((n) => ({ ...n, appNamespace: p.value }))}
+                    className={`rounded px-2 py-0.5 text-xs font-mono transition-colors ${
+                      naming.appNamespace === p.value
+                        ? "bg-indigo-100 text-indigo-800"
+                        : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="e.g. {project}-{app}-{env}  or  {project}-{app}"
+                value={naming.appNamespace ?? ""}
+                onChange={(e) => setNaming((n) => ({ ...n, appNamespace: e.target.value || undefined }))}
+              />
+              {naming.appNamespace && (
+                <p className="text-xs text-gray-400">
+                  Preview:{" "}
+                  <code className="font-mono text-gray-700">
+                    {renderPreview(naming.appNamespace)}
+                  </code>
+                </p>
+              )}
+              {!naming.appNamespace && (
+                <p className="text-xs text-gray-400 italic">
+                  Empty → topology-aware default: <code className="font-mono">billing-api-staging</code> (shared) or <code className="font-mono">billing-api</code> (dedicated)
+                </p>
+              )}
+            </div>
+
+            {saveError && (
+              <p className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">
+                {saveError}
+              </p>
+            )}
+            {saved && (
+              <p className="rounded bg-green-50 px-3 py-2 text-xs text-green-700">
+                Namespace naming patterns saved.
+              </p>
+            )}
+
+            <div className="flex justify-end">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {saving ? "Saving…" : "Save naming patterns"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1152,6 +1361,9 @@ export function OrgSettings() {
 
       {/* Secrets backend configuration — org_admin only */}
       <SecretsBackendSection />
+
+      {/* Org-wide namespace naming patterns — org_admin only */}
+      <NamespaceNamingSection />
 
       {/* Org-wide environment variables */}
       <EnvConfigEditor

@@ -277,6 +277,8 @@ function ConfigureStep({
     buildDefaultSecretRefs(template),
   );
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [namespaceScope, setNamespaceScope] = useState<"app" | "project">("app");
+  const [namespacePattern, setNamespacePattern] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -347,6 +349,8 @@ function ConfigureStep({
         template: template.name,
         values,
         secretRefs: secretRefList,
+        namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
+        namespacePattern: namespacePattern.trim() || undefined,
       });
       navigate(`/projects/${project}/apps/${appName}`);
     } catch (err) {
@@ -514,6 +518,88 @@ function ConfigureStep({
           )}
         </div>
       )}
+
+      {/* Namespace settings */}
+      <FormSection title="Namespace">
+        <p className="mb-3 text-xs text-gray-400">
+          Control where this app's workloads are deployed. Leave blank to inherit
+          org/project defaults.
+        </p>
+        <div className="space-y-3">
+          {/* Scope toggle */}
+          <div className="flex gap-3">
+            {(["app", "project"] as const).map((scope) => (
+              <label
+                key={scope}
+                className={`flex flex-1 cursor-pointer items-center gap-2 rounded-lg border p-3 text-sm transition-colors ${
+                  namespaceScope === scope
+                    ? "border-indigo-200 bg-indigo-50"
+                    : "border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="ns-scope"
+                  value={scope}
+                  checked={namespaceScope === scope}
+                  onChange={() => {
+                    setNamespaceScope(scope);
+                    setNamespacePattern("");
+                  }}
+                  className="mt-0.5"
+                />
+                <div>
+                  <span className="font-medium text-gray-900">
+                    {scope === "app" ? "Dedicated namespace" : "Project namespace"}
+                  </span>
+                  <p className="text-xs text-gray-400">
+                    {scope === "app"
+                      ? "Each app+env gets its own isolated namespace (default)"
+                      : "Share the project's namespace across apps"}
+                  </p>
+                </div>
+              </label>
+            ))}
+          </div>
+
+          {/* Pattern override — only when scope=app */}
+          {namespaceScope === "app" && (
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-700">
+                Namespace pattern{" "}
+                <span className="font-normal text-gray-400">
+                  (optional — overrides org/project default)
+                </span>
+              </label>
+              <input
+                type="text"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="e.g. {project}-{app}-{env}  or  {project}-{app}"
+                value={namespacePattern}
+                onChange={(e) => setNamespacePattern(e.target.value)}
+              />
+              <p className="mt-1 text-xs text-gray-400">
+                Tokens: <code className="font-mono">{"{org}"}</code>,{" "}
+                <code className="font-mono">{"{project}"}</code>,{" "}
+                <code className="font-mono">{"{app}"}</code>,{" "}
+                <code className="font-mono">{"{env}"}</code>
+              </p>
+              {namespacePattern.trim() && (
+                <p className="mt-1 text-xs text-gray-400">
+                  Preview:{" "}
+                  <code className="font-mono text-gray-700">
+                    {namespacePattern
+                      .replace("{org}", "myorg")
+                      .replace("{project}", project)
+                      .replace("{app}", appName || "myapp")
+                      .replace("{env}", "staging")}
+                  </code>
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </FormSection>
 
       {/* Secret inputs */}
       {template.secretInputs.length > 0 && (
