@@ -36,6 +36,7 @@ type appHandler struct {
 	kargoStatusReader KargoStatusReader    // optional: reads live Kargo Promotion status
 	kargoPipelineReader KargoPipelineReader // optional: reads live Kargo Stage pipeline status
 	deploymentHistoryReader DeploymentHistoryReader // optional: reads ArgoCD sync history
+	vaultWriter       VaultItemWriter      // optional: creates 1Password vault items on app/preview create
 }
 
 // newAppHandler creates an appHandler.
@@ -187,6 +188,27 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app environment"})
 			return
+		}
+	}
+
+	// Best-effort: create a 1Password vault item skeleton per bound stable env
+	// so the platform-managed ExternalSecret can resolve as soon as ArgoCD syncs.
+	// Unbound envs are skipped — the item will be backfilled when the env is bound.
+	if ah.vaultWriter != nil && ah.orgProvider != nil {
+		if org, orgErr := ah.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
+			orgName := org.Name
+			if orgName == "" {
+				orgName = "default"
+			}
+			for _, env := range result.Environments {
+				if env.EnvType == domain.AppEnvPreview {
+					continue // preview lifecycle is separate
+				}
+				if err := ah.vaultWriter.UpsertAppItem(r.Context(), orgName, projectName, req.Name, env.EnvName); err != nil {
+					slog.Error("vault: failed to create app item skeleton — continuing",
+						"project", projectName, "app", req.Name, "env", env.EnvName, "error", err)
+				}
+			}
 		}
 	}
 
@@ -490,6 +512,21 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Best-effort: create a 1Password vault item for this preview so the
+	// platform-managed ExternalSecret can pull secrets as soon as ArgoCD syncs.
+	if ah.vaultWriter != nil && ah.orgProvider != nil {
+		if org, orgErr := ah.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
+			orgName := org.Name
+			if orgName == "" {
+				orgName = "default"
+			}
+			if vErr := ah.vaultWriter.UpsertAppItem(r.Context(), orgName, projectName, appName, sanitized); vErr != nil {
+				slog.Error("vault: failed to create preview item — continuing",
+					"project", projectName, "app", appName, "preview", sanitized, "error", vErr)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, appPreviewToDTO(env))
 }
 
@@ -518,6 +555,20 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 	if err := ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, previewName); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete preview"})
 		return
+	}
+
+	// Best-effort: delete the 1Password vault item for this preview.
+	if ah.vaultWriter != nil && ah.orgProvider != nil {
+		if org, orgErr := ah.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
+			orgName := org.Name
+			if orgName == "" {
+				orgName = "default"
+			}
+			if vErr := ah.vaultWriter.DeleteAppItem(r.Context(), orgName, projectName, appName, previewName); vErr != nil {
+				slog.Error("vault: failed to delete preview item — continuing",
+					"project", projectName, "app", appName, "preview", previewName, "error", vErr)
+			}
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)

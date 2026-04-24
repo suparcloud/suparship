@@ -11,8 +11,13 @@ import (
 // are vendor-neutral — no "suparship" prefix.
 type ResourceNaming struct {
 	// AppResource is the K8s ExternalSecret + target Secret name in app-env
-	// namespaces. Tokens: {project} {app} {env}. Default: "{app}".
+	// namespaces. Tokens: {project} {app} {env}. Default: "{app}-secrets".
 	AppResource string `json:"appResource,omitempty" yaml:"appResource,omitempty"`
+
+	// AppConfigMap is the K8s ConfigMap name written by the GitOps publisher
+	// to hold non-secret env vars for the app in each env namespace.
+	// Tokens: {project} {app} {env}. Default: "{app}-config".
+	AppConfigMap string `json:"appConfigMap,omitempty" yaml:"appConfigMap,omitempty"`
 
 	// ClusterSecretStore is the ClusterSecretStore name pattern.
 	// Tokens: {provider} {env} {org}. Default: "{provider}-{env}".
@@ -48,7 +53,8 @@ type ItemNaming struct {
 
 // Default patterns for each naming slot.
 const (
-	DefaultAppResource        = "{app}"
+	DefaultAppResource        = "{app}-secrets"
+	DefaultAppConfigMap       = "{app}-config"
 	DefaultClusterSecretStore = "{provider}-{env}"
 	DefaultItemOrg            = "org"
 	DefaultItemEnvType        = "env-{env}"
@@ -134,6 +140,13 @@ func (n ResourceNaming) EffectiveAppResource() string {
 	return DefaultAppResource
 }
 
+func (n ResourceNaming) EffectiveAppConfigMap() string {
+	if n.AppConfigMap != "" {
+		return n.AppConfigMap
+	}
+	return DefaultAppConfigMap
+}
+
 func (n ResourceNaming) EffectiveClusterSecretStore() string {
 	if n.ClusterSecretStore != "" {
 		return n.ClusterSecretStore
@@ -195,6 +208,11 @@ func (n ResourceNaming) RenderAppResource(params NamingParams) string {
 	return RenderPattern(n.EffectiveAppResource(), params)
 }
 
+// RenderAppConfigMap renders the K8s ConfigMap name for an app-env namespace.
+func (n ResourceNaming) RenderAppConfigMap(params NamingParams) string {
+	return RenderPattern(n.EffectiveAppConfigMap(), params)
+}
+
 // RenderClusterSecretStore renders the ClusterSecretStore name.
 func (n ResourceNaming) RenderClusterSecretStore(params NamingParams) string {
 	return RenderPattern(n.EffectiveClusterSecretStore(), params)
@@ -232,6 +250,9 @@ func (n ResourceNaming) Validate() error {
 	}
 
 	if err := ValidateRenderedDNS1123(n.RenderAppResource(sample), "appResource"); err != nil {
+		return err
+	}
+	if err := ValidateRenderedDNS1123(n.RenderAppConfigMap(sample), "appConfigMap"); err != nil {
 		return err
 	}
 	if err := ValidateRenderedDNS1123(n.RenderClusterSecretStore(sample), "clusterSecretStore"); err != nil {

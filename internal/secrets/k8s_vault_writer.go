@@ -124,6 +124,15 @@ func (w *K8sVaultWriter) DeleteKey(ctx context.Context, _ EnvBinding, scope Scop
 	return ItemMeta{Version: updated.ResourceVersion}, nil
 }
 
+func (w *K8sVaultWriter) DeleteItem(ctx context.Context, _ EnvBinding, scope Scope) error {
+	name := w.secretName(scope)
+	err := w.client.CoreV1().Secrets(w.ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
 func (w *K8sVaultWriter) Probe(ctx context.Context, _ EnvBinding) error {
 	canary := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

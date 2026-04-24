@@ -27,8 +27,11 @@ import (
 	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var serverCmd = &cobra.Command{
@@ -122,6 +125,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		clusterStore            domain.ClusterStore
 		secretBackend           secrets.Backend
 		upperLevelSecretWriter  secrets.UpperLevelWriter
+		vaultItemWriter         server.VaultItemWriter
 		templates               []*tpl.Template
 		readinessProbers        []server.ReadinessProber
 		kargoPromoter           server.KargoPromoter
@@ -241,10 +245,42 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		clusterStore = kubeDeps.ClusterStore
 		secretBackend = secrets.NewK8sBackend(client)
 		upperLevelSecretWriter = secrets.NewUpperLevelSecretWriter(client)
+
+		// Wire 1Password vault item writer when the org backend is configured for
+		// 1Password. The SA token must already be stored in the K8s Secret created
+		// by the provision flow. Failure is non-fatal — log and continue without it.
+		if orgProvider != nil {
+			if org, orgErr := orgProvider.GetOrg(cmd.Context()); orgErr == nil && org != nil {
+				if org.SecretBackend.Effective() == secrets.Backend1Password && org.SecretBackend.OnePassword != nil {
+					saTokenRaw, tokenErr := func() (string, error) {
+						sec, err := client.CoreV1().Secrets("suparship-system").Get(
+							cmd.Context(), secrets.SATokenSecretName, metav1.GetOptions{},
+						)
+						if err != nil {
+							return "", err
+						}
+						return string(sec.Data[secrets.SATokenSecretKey]), nil
+					}()
+					if tokenErr != nil {
+						logger.Warn("vault item writer: could not read SA token — 1Password vault items will not be created automatically",
+							"secret", secrets.SATokenSecretName, "error", tokenErr)
+					} else if saTokenRaw != "" {
+						saClient, saErr := onepassword.NewSDKClient(cmd.Context(), saTokenRaw)
+						if saErr != nil {
+							logger.Warn("vault item writer: SA client init failed — vault item auto-create disabled",
+								"error", saErr)
+						} else {
+							saWriter := onepassword.NewSAVaultWriter(saClient)
+							vaultItemWriter = server.NewSAVaultItemWriter(saWriter, org.SecretBackend.OnePassword.Bindings)
+							logger.Info("vault item writer: 1Password SA client enabled — vault items created on app create")
+						}
+					}
+				}
+			}
+		}
 		gitopsConfigStore = gitops.NewConfigStore(client)
 		templateRegistryStore = tpl.NewRegistryStore(client)
 		registryStore = registry.NewStore(client)
-
 		// Build the per-cluster client pool so sealing certs can be fetched
 		// directly from each registered cluster's kubeseal controller.
 		clusterPool = k8s.NewClusterClientPool(kubeDeps.ClusterStore)
@@ -455,6 +491,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		ClusterStore:            clusterStore,
 		SecretBackend:           secretBackend,
 		UpperLevelSecretWriter:  upperLevelSecretWriter,
+		VaultItemWriter:         vaultItemWriter,
 		GitOpsPublisher:         publisherHolder,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,
@@ -641,6 +678,12 @@ func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, project
 func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
 	resolved := a.resolveEnvs(ctx)
 
+	// Load org config once for naming and backend info.
+	var org *rbac.Org
+	if a.orgProvider != nil {
+		org, _ = a.orgProvider.GetOrg(ctx)
+	}
+
 	appSetEnvs := make([]gitops.AppSetEnv, 0, len(envs))
 	pubEnvs := make([]gitops.AppPublishEnv, 0, len(envs))
 
@@ -665,14 +708,22 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 				BaseDomain:    res.baseDomain,
 			})
 		}
-		pubEnvs = append(pubEnvs, gitops.AppPublishEnv{
+
+		pub := gitops.AppPublishEnv{
 			EnvName:    env.EnvName,
 			EnvType:    env.EnvType,
 			Order:      env.Order,
 			Bound:      res.bound,
 			BaseDomain: res.baseDomain,
 			Namespace:  env.Namespace,
-		})
+		}
+
+		// Populate secret-store info from org backend config.
+		if org != nil {
+			a.enrichPubEnvWithSecrets(org, app, env.EnvName, &pub)
+		}
+
+		pubEnvs = append(pubEnvs, pub)
 	}
 
 	// Write appset.yaml + appproject.yaml for each bound environment so ArgoCD
@@ -683,6 +734,27 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 
 	// Write app.yaml + values.yaml for each bound environment.
 	return a.inner.PublishApp(ctx, app, pubEnvs)
+}
+
+// enrichPubEnvWithSecrets adds StoreName and VaultItemTitle to pub based on the
+// org's secret backend config and naming patterns.
+func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(org *rbac.Org, app *domain.App, envName string, pub *gitops.AppPublishEnv) {
+	naming := org.ResourceNaming
+	orgName := org.Name
+	if orgName == "" {
+		orgName = "default"
+	}
+
+	np := secrets.NamingParams{
+		Org:      orgName,
+		Env:      envName,
+		Project:  app.ProjectName,
+		App:      app.Name,
+		Provider: string(org.SecretBackend.Effective()),
+	}
+
+	pub.StoreName = naming.RenderClusterSecretStore(np)
+	pub.VaultItemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
 }
 
 // PublishAppEnv implements server.GitOpsPublisher by resolving cluster info for
@@ -789,6 +861,14 @@ func publishInitialEnvInfra(
 		logger.Warn("initial env infra: could not load org config", "error", err)
 		return
 	}
+
+	// Update the publisher with the current org config so ClusterSecretStores
+	// and naming patterns are consistent when PublishEnvInfra runs.
+	orgName := org.Name
+	if orgName == "" {
+		orgName = "default"
+	}
+	pub.SetOrgConfig(orgName, org.ResourceNaming, &org.SecretBackend)
 
 	appSetEnvs := make([]gitops.AppSetEnv, 0, len(org.Environments))
 	for _, orgEnv := range org.Environments {

@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
@@ -33,6 +34,10 @@ type rbacHandler struct {
 	appHandler       *appHandler       // optional: enables app read endpoints
 	envConfigHandler *envConfigHandler // optional: enables env config endpoints
 	secretsHandler   *secretsHandler   // optional: enables simple secret management
+	// vaultItemWriter and appStore are optional — used to backfill vault items
+	// when an env is first bound to a cluster (so existing apps get their items).
+	vaultItemWriter VaultItemWriter  // optional: backfill vault items on env bind
+	vaultAppStore   domain.AppStore // optional: list apps for backfill
 }
 
 // requireRole returns middleware that enforces authentication and checks that

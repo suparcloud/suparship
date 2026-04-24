@@ -250,3 +250,44 @@ func (p *Publisher) WriteCollapsedExternalSecret(repoDir string, cfg ESOExternal
 	content := BuildCollapsedExternalSecretYAML(cfg)
 	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content))
 }
+
+// BuildAppConfigMapYAML renders a ConfigMap YAML for non-secret env vars.
+// vars may be nil or empty — in that case an empty-data ConfigMap is written
+// so ArgoCD can always resolve the envFrom reference without errors.
+func BuildAppConfigMapYAML(name, namespace string, vars map[string]string) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app.kubernetes.io/managed-by: suparship
+data:
+`, name, namespace))
+
+	if len(vars) == 0 {
+		sb.WriteString("  {}\n")
+		return sb.String()
+	}
+
+	// Sort keys for deterministic output.
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		sb.WriteString(fmt.Sprintf("  %s: %q\n", k, vars[k]))
+	}
+	return sb.String()
+}
+
+// WriteAppConfigMap writes env-configmap.yaml to dir.
+// dir should be the per-app-env directory, e.g.
+// gitops-output/{envName}/{project}/{app}/ or
+// gitops-output/previews/{project}/{previewName}/.
+func (p *Publisher) WriteAppConfigMap(dir, name, namespace string, vars map[string]string) error {
+	content := BuildAppConfigMapYAML(name, namespace, vars)
+	return p.writeFile(filepath.Join(dir, "env-configmap.yaml"), []byte(content))
+}

@@ -14,10 +14,14 @@ package server
 // environment endpoints (/api/v1/projects/{project}/environments).
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sort"
 
+	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
 
@@ -172,6 +176,19 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 		return
 	}
 
+	// Best-effort backfill: when a ClusterRef is being set on an existing env,
+	// upsert vault items for all apps so their ExternalSecrets can resolve.
+	// Run in a background goroutine to not delay the API response.
+	if req.ClusterRef != "" && rh.vaultItemWriter != nil && rh.vaultAppStore != nil {
+		orgName := org.Name
+		if orgName == "" {
+			orgName = "default"
+		}
+		go func() {
+			backfillVaultItems(context.Background(), rh.vaultAppStore, rh.vaultItemWriter, rh.projectStore, orgName, envName)
+		}()
+	}
+
 	for _, e := range org.Environments {
 		if e.Name == envName {
 			writeJSON(w, http.StatusOK, orgEnvToDTO(e))
@@ -224,4 +241,43 @@ func sortOrgEnvs(envs []rbac.OrgEnvironment) {
 		}
 		return envs[i].Name < envs[j].Name
 	})
+}
+
+// backfillVaultItems iterates over all apps in all projects and upserts a
+// vault item skeleton for the given env. Called as a background goroutine when
+// a cluster is first bound to an org environment.
+func backfillVaultItems(
+	ctx context.Context,
+	appStore domain.AppStore,
+	vaultWriter VaultItemWriter,
+	projectStore project.Store,
+	orgName, envName string,
+) {
+	if appStore == nil || vaultWriter == nil {
+		return
+	}
+	projects := []string{}
+	if projectStore != nil {
+		if projs, err := projectStore.List(ctx); err == nil {
+			for _, p := range projs {
+				projects = append(projects, p.Metadata.Name)
+			}
+		}
+	}
+	if len(projects) == 0 {
+		projects = []string{"default"}
+	}
+	for _, projName := range projects {
+		apps, err := appStore.ListApps(ctx, projName)
+		if err != nil {
+			continue
+		}
+		for _, app := range apps {
+			if uErr := vaultWriter.UpsertAppItem(ctx, orgName, projName, app.Name, envName); uErr != nil {
+				slog.Error("vault backfill: failed to upsert item",
+					"org", orgName, "project", projName, "app", app.Name, "env", envName, "error", uErr)
+			}
+		}
+	}
+	slog.Info("vault backfill: complete", "org", orgName, "env", envName)
 }

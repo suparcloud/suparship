@@ -99,6 +99,13 @@ func (w *MemVaultWriter) DeleteKey(_ context.Context, binding EnvBinding, scope 
 	return ItemMeta{Version: item.version}, nil
 }
 
+func (w *MemVaultWriter) DeleteItem(_ context.Context, binding EnvBinding, scope Scope) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.items, itemKey(binding, scope))
+	return nil
+}
+
 func (w *MemVaultWriter) Probe(_ context.Context, _ EnvBinding) error {
 	return nil
 }

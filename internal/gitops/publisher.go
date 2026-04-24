@@ -13,6 +13,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/helmvalues"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"gopkg.in/yaml.v3"
 )
 
@@ -44,6 +45,17 @@ type PublisherConfig struct {
 	// subscriptions. Required when using an HTTP-only registry (e.g. local
 	// kind-registry in dev mode).
 	InsecureRegistry bool
+	// ResourceNaming holds configurable naming patterns for K8s resources and
+	// vault items. When zero-value, ResourceNaming defaults apply.
+	// Used when writing per-app ExternalSecret and ConfigMap YAMLs.
+	ResourceNaming secrets.ResourceNaming
+	// OrgName is used for vault item naming in per-app ExternalSecrets.
+	// When empty, "default" is used.
+	OrgName string
+	// BackendConfig is the org-level secret backend configuration.
+	// When non-nil and the effective backend is 1Password, PublishEnvInfra
+	// also writes ClusterSecretStore YAMLs to _infra/secret-stores/.
+	BackendConfig *secrets.BackendConfig
 }
 
 // Publisher writes GitOps manifests to the GitOps repository and commits +
@@ -71,6 +83,16 @@ type PublisherConfig struct {
 // per file to the cluster configured in appset.yaml.
 type Publisher struct {
 	cfg PublisherConfig
+}
+
+// SetOrgConfig updates the publisher's org-scoped configuration (naming
+// patterns, backend config, and org name). Thread-safe for callers that
+// rebuild the publisher when org config changes; for concurrent use call
+// this before handing the publisher to goroutines.
+func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, backend *secrets.BackendConfig) {
+	p.cfg.OrgName = orgName
+	p.cfg.ResourceNaming = naming
+	p.cfg.BackendConfig = backend
 }
 
 // NewPublisher creates a Publisher from cfg.
@@ -172,6 +194,21 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 		previewAppSetPath := filepath.Join(infraDir, "previews-appset.yaml")
 		if err := p.writeFile(previewAppSetPath, previewAppSetBytes); err != nil {
 			return err
+		}
+
+		// Write ClusterSecretStores when a secret backend is configured.
+		// For K8s backend this is the suparship-k8s-store; for 1Password it
+		// is one store per provisioned env binding. Stores are idempotent — if
+		// nothing changed git will produce no new commit.
+		if p.cfg.BackendConfig != nil {
+			orgName := p.cfg.OrgName
+			if orgName == "" {
+				orgName = "default"
+			}
+			stores := BuildSecretStoresForConfig(*p.cfg.BackendConfig, p.cfg.ResourceNaming, orgName)
+			if err := p.WriteSecretStores(repoDir, stores); err != nil {
+				return fmt.Errorf("writing ClusterSecretStores: %w", err)
+			}
 		}
 
 		return p.commitAndPush(ctx, repoDir, "feat(infra): update appsets and appprojects for "+projectName)
@@ -356,10 +393,18 @@ func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppP
 	})
 }
 
-// publishAppFiles writes app.yaml and values.yaml for each bound environment.
+// publishAppFiles writes app.yaml and values.yaml for each bound environment,
+// and optionally platform-managed ExternalSecret + ConfigMap YAMLs when the
+// env carries a StoreName (1Password-backed envs).
 // Unbound environments are skipped with a warning log.
 // This is the inner loop extracted from PublishApp for testability.
 func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	naming := p.cfg.ResourceNaming
+	orgName := p.cfg.OrgName
+	if orgName == "" {
+		orgName = "default"
+	}
+
 	for _, env := range envs {
 		if !env.Bound {
 			slog.Warn("gitops: skipping publish for unbound env — assign a cluster via Settings > Environments",
@@ -401,9 +446,86 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if err := p.writeFile(valuesPath, hvBytes); err != nil {
 			return err
 		}
+
+		// Write platform-managed per-app resources into the same directory as
+		// app.yaml/values.yaml so ArgoCD picks them up with the same ApplicationSet.
+		appDir := filepath.Join(repoDir, "gitops-output", env.EnvName, app.ProjectName, app.Name)
+		if err := p.writeAppPlatformResources(appDir, app, ns, env, naming, orgName); err != nil {
+			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
+		}
+
 		slog.Debug("gitops: wrote app files", "env", env.EnvName, "app", app.Name)
 	}
 	return nil
+}
+
+// writeAppPlatformResources writes the platform-managed ExternalSecret and
+// ConfigMap YAML files into dir (the per-app-env directory under gitops-output).
+// These resources are consumed by the Helm chart via envFrom.
+//
+// ConfigMap (always written, even when empty):
+//
+//	{dir}/env-configmap.yaml  →  K8s ConfigMap named "{app}-config"
+//
+// ExternalSecret (only when env.StoreName is non-empty):
+//
+//	{dir}/external-secret.yaml  →  K8s ExternalSecret named "{app}-secrets"
+func (p *Publisher) writeAppPlatformResources(
+	dir string,
+	app *domain.App,
+	namespace string,
+	env AppPublishEnv,
+	naming secrets.ResourceNaming,
+	orgName string,
+) error {
+	np := secrets.NamingParams{
+		Org:     orgName,
+		Env:     env.EnvName,
+		Project: app.ProjectName,
+		App:     app.Name,
+	}
+
+	// ConfigMap — always written with merged app + env vars.
+	cmName := naming.RenderAppConfigMap(np)
+	vars := mergeVars(app.Spec.EnvConfig.Vars, env.EnvVars)
+	if err := p.WriteAppConfigMap(dir, cmName, namespace, vars); err != nil {
+		return fmt.Errorf("writing app ConfigMap: %w", err)
+	}
+
+	// ExternalSecret — only when the env has an associated ClusterSecretStore.
+	if env.StoreName == "" {
+		return nil
+	}
+
+	secretName := naming.RenderAppResource(np)
+	itemTitle := env.VaultItemTitle
+	if itemTitle == "" {
+		itemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
+	}
+	esCfg := ESOExternalSecretConfig{
+		Name:      secretName,
+		Namespace: namespace,
+		StoreName: env.StoreName,
+		ItemKeys:  []string{itemTitle},
+	}
+	content := BuildCollapsedExternalSecretYAML(esCfg)
+	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content))
+}
+
+// mergeVars merges base vars with overrides. Override values win on conflict.
+// Returns nil when both inputs are empty.
+func mergeVars(base, overrides map[string]string) map[string]string {
+	if len(base) == 0 && len(overrides) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(base)+len(overrides))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range overrides {
+		merged[k] = v
+	}
+	return merged
 }
 
 // syncChart copies the Helm chart for templateName from the local templates
@@ -597,6 +719,17 @@ type AppPublishEnv struct {
 	// Resolved by domain.ResolveNamespace before calling PublishApp.
 	// When empty, PublishApp falls back to "{app}-{env}" for backward compatibility.
 	Namespace string
+	// StoreName is the ClusterSecretStore name for this env.
+	// When non-empty, publishAppFiles writes a platform-managed ExternalSecret YAML
+	// for this env's namespace so ESO materialises the app secrets.
+	StoreName string
+	// VaultItemTitle is the vault item title used in the ExternalSecret's dataFrom.
+	// Typically rendered as "{project}-{app}-{env}" from ResourceNaming.
+	// Ignored when StoreName is empty.
+	VaultItemTitle string
+	// EnvVars holds per-env variable overrides to merge into the platform-managed
+	// ConfigMap alongside app.Spec.EnvConfig.Vars (env values win on conflict).
+	EnvVars map[string]string
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD
@@ -605,6 +738,8 @@ type AppPublishEnv struct {
 // Written files:
 //   - gitops-output/previews/{project}/{previewName}/app.yaml
 //   - gitops-output/previews/{project}/{previewName}/values.yaml
+//   - gitops-output/previews/{project}/{previewName}/env-configmap.yaml
+//   - gitops-output/previews/{project}/{previewName}/external-secret.yaml (when StoreName is set)
 //
 // PublishPreview is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview PreviewPublishSpec) error {
@@ -636,6 +771,22 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 			return err
 		}
 
+		// Write platform-managed ConfigMap and ExternalSecret (same as stable envs).
+		previewDir := filepath.Join(repoDir, "gitops-output", "previews", app.ProjectName, preview.PreviewName)
+		previewPublishEnv := AppPublishEnv{
+			EnvName:        preview.PreviewName,
+			StoreName:      preview.StoreName,
+			VaultItemTitle: preview.VaultItemTitle,
+			EnvVars:        preview.EnvVars,
+		}
+		orgName := p.cfg.OrgName
+		if orgName == "" {
+			orgName = "default"
+		}
+		if err := p.writeAppPlatformResources(previewDir, app, preview.Namespace, previewPublishEnv, p.cfg.ResourceNaming, orgName); err != nil {
+			return fmt.Errorf("writing preview platform resources: %w", err)
+		}
+
 		commitMsg := fmt.Sprintf("feat(previews): create preview %s/%s\n\nCreated by suparShip.", app.ProjectName, preview.PreviewName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
@@ -652,6 +803,14 @@ type PreviewPublishSpec struct {
 	// BaseDomain is used to derive routing.host in values.yaml.
 	// When empty, "localhost" is used.
 	BaseDomain string
+	// StoreName is the ClusterSecretStore name for this preview env.
+	// When non-empty, PublishPreview writes a platform-managed ExternalSecret YAML.
+	StoreName string
+	// VaultItemTitle is the vault item title used in the ExternalSecret's dataFrom.
+	VaultItemTitle string
+	// EnvVars holds per-preview variable overrides to merge into the platform-managed
+	// ConfigMap alongside app.Spec.EnvConfig.Vars.
+	EnvVars map[string]string
 }
 
 // DeletePreview removes the preview directory from the GitOps repo and commits.

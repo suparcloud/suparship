@@ -136,8 +136,8 @@ func TestBuildCollapsedExternalSecretForApp(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	if result.Name != "web" {
-		t.Errorf("expected name 'web', got %q", result.Name)
+	if result.Name != "web-secrets" {
+		t.Errorf("expected name 'web-secrets', got %q", result.Name)
 	}
 	if result.StoreName != "onepassword-prod" {
 		t.Errorf("expected store 'onepassword-prod', got %q", result.StoreName)
@@ -207,5 +207,63 @@ func TestBuildCollapsedExternalSecretForApp_CustomNaming(t *testing.T) {
 	}
 	if result.ItemKeys[1] != "billing-api-prod-config" {
 		t.Errorf("expected appenv item 'billing-api-prod-config', got %q", result.ItemKeys[1])
+	}
+}
+
+// ── BuildAppConfigMapYAML ──────────────────────────────────────────────────────
+
+func TestBuildAppConfigMapYAML_WithVars(t *testing.T) {
+	yaml := BuildAppConfigMapYAML("nginx-config", "demo-nginx-staging", map[string]string{
+		"LOG_LEVEL": "info",
+		"APP_ENV":   "staging",
+	})
+
+	if !strings.Contains(yaml, "name: nginx-config") {
+		t.Error("expected name 'nginx-config'")
+	}
+	if !strings.Contains(yaml, "namespace: demo-nginx-staging") {
+		t.Error("expected namespace in output")
+	}
+	if !strings.Contains(yaml, "app.kubernetes.io/managed-by: suparship") {
+		t.Error("expected managed-by label")
+	}
+	if !strings.Contains(yaml, `APP_ENV: "staging"`) {
+		t.Error("expected APP_ENV var")
+	}
+	if !strings.Contains(yaml, `LOG_LEVEL: "info"`) {
+		t.Error("expected LOG_LEVEL var")
+	}
+}
+
+func TestBuildAppConfigMapYAML_Empty(t *testing.T) {
+	yaml := BuildAppConfigMapYAML("nginx-config", "demo-nginx-prod", nil)
+
+	if !strings.Contains(yaml, "name: nginx-config") {
+		t.Error("expected name in output")
+	}
+	if !strings.Contains(yaml, "data:\n  {}\n") {
+		t.Errorf("expected empty data block, got:\n%s", yaml)
+	}
+}
+
+func TestBuildAppConfigMapYAML_Deterministic(t *testing.T) {
+	vars := map[string]string{
+		"Z_VAR": "z",
+		"A_VAR": "a",
+		"M_VAR": "m",
+	}
+	y1 := BuildAppConfigMapYAML("app-config", "ns", vars)
+	y2 := BuildAppConfigMapYAML("app-config", "ns", vars)
+
+	if y1 != y2 {
+		t.Error("expected deterministic output — two calls with same input should produce identical YAML")
+	}
+
+	// Keys should appear in sorted order.
+	aIdx := strings.Index(y1, "A_VAR")
+	mIdx := strings.Index(y1, "M_VAR")
+	zIdx := strings.Index(y1, "Z_VAR")
+	if aIdx > mIdx || mIdx > zIdx {
+		t.Errorf("expected sorted key order A < M < Z, got positions a=%d m=%d z=%d", aIdx, mIdx, zIdx)
 	}
 }

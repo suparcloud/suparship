@@ -208,7 +208,8 @@ These are intentionally not configurable — they keep every install identical a
 
 | Pattern | Default | Example (`project=acme, app=web, env=prod`) |
 |---------|---------|---------------------------------------------|
-| K8s ExternalSecret + Secret | `{app}` | `web` |
+| K8s ExternalSecret + Secret | `{app}-secrets` | `web-secrets` |
+| K8s ConfigMap | `{app}-config` | `web-config` |
 | ClusterSecretStore | `{provider}-{env}` | `onepassword-prod` |
 | Vault item: org | `org` | `org` |
 | Vault item: env-type | `env-{env}` | `env-prod` |
@@ -216,15 +217,104 @@ These are intentionally not configurable — they keep every install identical a
 | Vault item: app | `{project}-{app}` | `acme-web` |
 | Vault item: app-env | `{project}-{app}-{env}` | `acme-web-prod` |
 
+All patterns are configurable via org-level `ResourceNaming` settings. The defaults above are the out-of-the-box values for every new installation.
+
+## Platform-managed secrets and config (default)
+
+When suparShip creates an app it automatically provisions the following per app+environment:
+
+| Resource | Name | Location |
+|----------|------|----------|
+| `ConfigMap` | `{app}-config` | same namespace as the app-env |
+| `ExternalSecret` (+ `Secret`) | `{app}-secrets` | same namespace as the app-env |
+| 1Password vault item | `{org}/{env}/{project}/{app}` | env-bound 1Password vault |
+
+### How it works
+
+```mermaid
+flowchart LR
+  user["User creates app"] --> handler["handleCreateApp"]
+  handler --> domain["domain.Create"]
+  handler --> vault["1Password: upsert item skeleton\n(per bound stable env)"]
+  handler --> publisher["PublishApp"]
+  publisher --> esYaml["external-secret.yaml\nper env namespace"]
+  publisher --> cmYaml["env-configmap.yaml\nper env namespace"]
+  publisher --> css["ClusterSecretStore\n(_infra/secret-stores/)"]
+  esYaml --> argocd["ArgoCD sync"]
+  cmYaml --> argocd
+  css --> argocd
+  argocd --> cluster["K8s: ExternalSecret pulls from 1Password\nConfigMap consumed by pods"]
+```
+
+The Helm chart consumes both resources via `envFrom`:
+
+```yaml
+# in deployment.yaml (simplified)
+envFrom:
+  - configMapRef:
+      name: "{{ .Values.app.name }}-config"
+      optional: true
+  - secretRef:
+      name: "{{ .Values.app.name }}-secrets"
+      optional: true
+```
+
+Both resources are `optional: true` so pods start even before 1Password keys are populated.
+
+### Preview environments
+
+On **preview create**, suparShip:
+1. Upserts a 1Password vault item for the preview (`{org}/{previewName}/{project}/{app}`).
+2. Commits `external-secret.yaml` and `env-configmap.yaml` into `gitops-output/previews/{project}/{previewName}/`.
+
+On **preview delete**, suparShip:
+1. Deletes the 1Password vault item for the preview.
+2. Removes the preview directory from GitOps (handled by `DeletePreview`).
+
+### Unbound environments and backfill
+
+suparShip creates vault items only for **bound** stable environments (those with a `ClusterRef` set). Environments that have no cluster attached at app-create time are **deferred**: the item is created automatically when a cluster is later bound to that environment via Settings → Environments.
+
+### Populating secrets
+
+After app creation:
+
+1. Log in to the 1Password web console and open the vault that backs the target environment.
+2. Find the item created by suparShip (named `{org}/{env}/{project}/{app}`).
+3. Replace the `_placeholder` field with real `KEY = value` pairs.
+
+ESO syncs the updated item to the Kubernetes `Secret` within the `refreshInterval` (default: `1h`). To force immediate sync call:
+
+```bash
+kubectl annotate externalsecret <app>-secrets \
+  suparship.io/forced-sync-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -n <namespace> --overwrite
+```
+
+### Opting out (bring-your-own secrets)
+
+Charts that want to manage their own `ConfigMap` / `ExternalSecret` can disable the platform-managed defaults:
+
+```yaml
+# in app values override or chart values.yaml
+secrets:
+  managedByPlatform: false
+```
+
+When `managedByPlatform: false`:
+- The legacy chart-side `env-configmaps.yaml` and `env-externalsecrets.yaml` templates are re-enabled.
+- The platform does **not** create 1Password vault items or commit platform-managed YAML.
+- Naming, content, and lifecycle are fully under the chart author's control.
+
 ## Collapsed ExternalSecret model
 
-Each app-env namespace receives **one** `ExternalSecret` (and one K8s `Secret`) named from the app resource pattern (default: `{app}`). Its `dataFrom` lists all inherited scope items in precedence order:
+Each app-env namespace receives **one** `ExternalSecret` (and one K8s `Secret`) named from the app resource pattern (default: `{app}-secrets`). Its `dataFrom` lists all inherited scope items in precedence order:
 
 ```yaml
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: web
+  name: web-secrets
   namespace: acme-web-prod
   labels:
     app.kubernetes.io/managed-by: suparship
@@ -234,7 +324,7 @@ spec:
     name: onepassword-prod
     kind: ClusterSecretStore
   target:
-    name: web
+    name: web-secrets
     creationPolicy: Owner
   dataFrom:
     - extract: { key: "org" }
@@ -244,7 +334,7 @@ spec:
     - extract: { key: "acme-web-prod" }
 ```
 
-ESO merges them at sync time; later entries win on key collision (matching the hierarchy precedence). Pod templates use `envFrom: secretRef: name: web`.
+ESO merges them at sync time; later entries win on key collision (matching the hierarchy precedence). Pod templates use `envFrom: secretRef: name: web-secrets`.
 
 Only scopes that actually have keys get a `dataFrom` entry — computed at publish time.
 

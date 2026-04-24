@@ -37,6 +37,10 @@ type VaultWriter interface {
 	// No-op when the key or Item does not exist.
 	DeleteKey(ctx context.Context, binding EnvBinding, scope Scope, key, expectedVersion string) (ItemMeta, error)
 
+	// DeleteItem removes the entire Item for the given scope from the vault.
+	// No-op when the Item does not exist.
+	DeleteItem(ctx context.Context, binding EnvBinding, scope Scope) error
+
 	// Probe verifies connectivity and access to the vault for the given
 	// binding.
 	Probe(ctx context.Context, binding EnvBinding) error

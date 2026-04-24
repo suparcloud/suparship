@@ -156,5 +156,32 @@ func (w *SAVaultWriter) Probe(ctx context.Context, binding secrets.EnvBinding) e
 	return err
 }
 
+// DeleteItem permanently removes the Item for scope from the vault identified
+// by binding. It is a no-op when the item does not exist.
+func (w *SAVaultWriter) DeleteItem(ctx context.Context, binding secrets.EnvBinding, scope secrets.Scope) error {
+	if binding.VaultID == "" {
+		return fmt.Errorf("vault ID is empty")
+	}
+
+	title := itemTitle(scope)
+	items, err := w.client.ListItems(ctx, binding.VaultID)
+	if err != nil {
+		return err
+	}
+
+	var itemID string
+	for _, item := range items {
+		if item.Title == title {
+			itemID = item.ID
+			break
+		}
+	}
+	if itemID == "" {
+		return nil // already gone
+	}
+
+	return w.client.DeleteItem(ctx, binding.VaultID, itemID)
+}
+
 // Compile-time check.
 var _ secrets.VaultWriter = (*SAVaultWriter)(nil)

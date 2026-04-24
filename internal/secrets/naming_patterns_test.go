@@ -14,7 +14,8 @@ func TestResourceNaming_Defaults(t *testing.T) {
 		render func() string
 		want   string
 	}{
-		{"AppResource", func() string { return n.RenderAppResource(params) }, "web"},
+		{"AppResource", func() string { return n.RenderAppResource(params) }, "web-secrets"},
+		{"AppConfigMap", func() string { return n.RenderAppConfigMap(params) }, "web-config"},
 		{"ClusterSecretStore", func() string { return n.RenderClusterSecretStore(params) }, "1password-prod"},
 		{"VaultItem org", func() string { return n.RenderVaultItem(LevelOrg, params) }, "org"},
 		{"VaultItem envType", func() string { return n.RenderVaultItem(LevelEnvironment, params) }, "env-prod"},
