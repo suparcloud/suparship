@@ -470,6 +470,14 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 // ExternalSecret (only when env.StoreName is non-empty):
 //
 //	{dir}/external-secret.yaml  →  K8s ExternalSecret named "{app}-secrets"
+//
+// When p.cfg.BackendConfig is set, the ExternalSecret is rendered as a
+// collapsed multi-scope merge across all six hierarchy levels (org → env-type
+// → project → app → app-env → cluster) using BuildCollapsedExternalSecretForApp.
+// Empty scopes are skipped (per env.ScopeKeys) so ESO doesn't error trying to
+// extract from non-existent vault items. When BackendConfig is nil — typically
+// in tests or pre-Phase-3 callers — the writer falls back to a single-key
+// dataFrom for the app-env scope only, preserving prior behaviour.
 func (p *Publisher) writeAppPlatformResources(
 	dir string,
 	app *domain.App,
@@ -497,18 +505,40 @@ func (p *Publisher) writeAppPlatformResources(
 		return nil
 	}
 
-	secretName := naming.RenderAppResource(np)
-	itemTitle := env.VaultItemTitle
-	if itemTitle == "" {
-		itemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
+	var esCfg *ESOExternalSecretConfig
+	if p.cfg.BackendConfig != nil {
+		esCfg = BuildCollapsedExternalSecretForApp(
+			AppEnvPublishParams{
+				Project:           app.ProjectName,
+				App:               app.Name,
+				Env:               env.EnvName,
+				Namespace:         namespace,
+				Cluster:           env.ClusterRef,
+				ScopeKeys:         env.ScopeKeys,
+				PlatformStoreName: env.PlatformStoreName,
+			},
+			naming,
+			*p.cfg.BackendConfig,
+			orgName,
+		)
 	}
-	esCfg := ESOExternalSecretConfig{
-		Name:      secretName,
-		Namespace: namespace,
-		StoreName: env.StoreName,
-		ItemKeys:  []string{itemTitle},
+	if esCfg == nil {
+		// Fall back to the single-key path when BackendConfig is unavailable
+		// (tests / older callers) or when the collapsed builder returned nil
+		// (no scopes have keys yet).
+		secretName := naming.RenderAppResource(np)
+		itemTitle := env.VaultItemTitle
+		if itemTitle == "" {
+			itemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
+		}
+		esCfg = &ESOExternalSecretConfig{
+			Name:      secretName,
+			Namespace: namespace,
+			StoreName: env.StoreName,
+			Items:     []ESOItemRef{{Key: itemTitle, StoreName: env.StoreName}},
+		}
 	}
-	content := BuildCollapsedExternalSecretYAML(esCfg)
+	content := BuildCollapsedExternalSecretYAML(*esCfg)
 	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content))
 }
 
@@ -730,6 +760,26 @@ type AppPublishEnv struct {
 	// EnvVars holds per-env variable overrides to merge into the platform-managed
 	// ConfigMap alongside app.Spec.EnvConfig.Vars (env values win on conflict).
 	EnvVars map[string]string
+	// ClusterRef is the registered cluster bound to this env. Used for the
+	// cluster-scope vault item title in the collapsed ExternalSecret. Empty
+	// when the env is unbound — the cluster scope is then omitted from the
+	// merge regardless of ScopeKeys.
+	ClusterRef string
+	// ScopeKeys reports which scope levels actually have keys in the vault for
+	// this app-env. Used by BuildCollapsedExternalSecretForApp to skip
+	// dataFrom entries for empty scopes, since ESO would otherwise error
+	// trying to extract from a non-existent vault item. The map keys are the
+	// secrets.Level* constants; missing entries mean "no keys present".
+	//
+	// Populated by the adapter (cmd/suparship/server.go) at publish time. When
+	// nil, every scope is included — back-compat behaviour for callers that
+	// haven't been updated yet.
+	ScopeKeys map[string]bool
+	// PlatformStoreName is the ClusterSecretStore name for the platform vault
+	// when running a separate-store deployment. Empty for the single-store
+	// model (ClusterSecretStore lists both vaults), which is the default
+	// behaviour today.
+	PlatformStoreName string
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD

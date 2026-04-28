@@ -373,9 +373,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				logger.Warn("gitops publisher disabled", "reason", err.Error())
 			} else {
 				gitOpsPublisher = &gitOpsPublisherAdapter{
-					inner:        pub,
-					orgProvider:  orgProvider,
-					clusterStore: clusterStore,
+					inner:           pub,
+					orgProvider:     orgProvider,
+					clusterStore:    clusterStore,
+					upperWriter:     upperLevelSecretWriter,
+					backend:         secretBackend,
+					appNamespaceFor: appStoreNamespaceResolver(appStore),
 				}
 				sealPublisherHolder.Swap(pub)
 				logger.Info("gitops publisher enabled",
@@ -479,9 +482,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 			// 4. Hot-swap the live publisher so new app creates/promotes use it.
 			publisherHolder.Swap(&gitOpsPublisherAdapter{
-				inner:        pub,
-				orgProvider:  orgProvider,
-				clusterStore: clusterStore,
+				inner:           pub,
+				orgProvider:     orgProvider,
+				clusterStore:    clusterStore,
+				upperWriter:     upperLevelSecretWriter,
+				backend:         secretBackend,
+				appNamespaceFor: appStoreNamespaceResolver(appStore),
 			})
 			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
@@ -559,6 +565,19 @@ type gitOpsPublisherAdapter struct {
 	inner        *gitops.Publisher
 	orgProvider  rbac.OrgProvider
 	clusterStore domain.ClusterStore
+	// upperWriter and backend are used to populate AppPublishEnv.ScopeKeys —
+	// which scope levels actually have keys in the vault — so the collapsed
+	// ExternalSecret omits dataFrom entries for empty scopes (ESO would
+	// otherwise error trying to extract from a missing item).
+	//
+	// Both are optional: when nil, the publisher's collapsed builder still
+	// works but every scope is included.
+	upperWriter secrets.UpperLevelWriter
+	backend     secrets.Backend
+	// appNamespaceFor resolves the app-env K8s namespace from app + env. Used
+	// to read app/app-env secret keys from the right namespace when populating
+	// ScopeKeys.
+	appNamespaceFor func(ctx context.Context, projectName, appName, envName string) (string, error)
 }
 
 // envResolved holds the resolved cluster and domain info for one environment.
@@ -739,7 +758,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 
 		// Populate secret-store info from org backend config.
 		if org != nil {
-			a.enrichPubEnvWithSecrets(org, app, env.EnvName, &pub)
+			a.enrichPubEnvWithSecrets(ctx, org, app, env.EnvName, &pub)
 		}
 
 		pubEnvs = append(pubEnvs, pub)
@@ -755,9 +774,12 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 	return a.inner.PublishApp(ctx, app, pubEnvs)
 }
 
-// enrichPubEnvWithSecrets adds StoreName and VaultItemTitle to pub based on the
-// org's secret backend config and naming patterns.
-func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(org *rbac.Org, app *domain.App, envName string, pub *gitops.AppPublishEnv) {
+// enrichPubEnvWithSecrets adds StoreName, VaultItemTitle, ClusterRef, and
+// ScopeKeys to pub based on the org's secret backend config and naming
+// patterns. ScopeKeys reflects which scope levels actually have keys in the
+// vault so the collapsed ExternalSecret skips dataFrom entries for empty
+// scopes — ESO would otherwise error trying to extract from a missing item.
+func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, org *rbac.Org, app *domain.App, envName string, pub *gitops.AppPublishEnv) {
 	naming := org.ResourceNaming
 	orgName := org.Name
 	if orgName == "" {
@@ -774,6 +796,58 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(org *rbac.Org, app *dom
 
 	pub.StoreName = naming.RenderClusterSecretStore(np)
 	pub.VaultItemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
+
+	// Resolve the cluster bound to this env from the org config so the
+	// publisher can render the cluster-scope item title.
+	for _, e := range org.Environments {
+		if e.Name == envName {
+			pub.ClusterRef = e.ClusterRef
+			break
+		}
+	}
+
+	pub.ScopeKeys = a.collectScopeKeys(ctx, app, envName, pub.ClusterRef)
+}
+
+// collectScopeKeys probes each scope level and reports which ones currently
+// have at least one key in the vault. Errors are swallowed (treated as "no
+// keys") because the resolved view is best-effort during a publish — partial
+// information is better than failing the entire commit.
+func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *domain.App, envName, clusterRef string) map[string]bool {
+	out := make(map[string]bool, 6)
+
+	if a.upperWriter != nil {
+		if entries, err := a.upperWriter.ReadOrgSecretKeys(ctx); err == nil && len(entries) > 0 {
+			out[secrets.LevelOrg] = true
+		}
+		if entries, err := a.upperWriter.ReadEnvTypeSecretKeys(ctx, envName); err == nil && len(entries) > 0 {
+			out[secrets.LevelEnvironment] = true
+		}
+		if entries, err := a.upperWriter.ReadProjectSecretKeys(ctx, app.ProjectName); err == nil && len(entries) > 0 {
+			out[secrets.LevelProject] = true
+		}
+		if clusterRef != "" {
+			if entries, err := a.upperWriter.ReadClusterSecretKeys(ctx, clusterRef); err == nil && len(entries) > 0 {
+				out[secrets.LevelCluster] = true
+			}
+		}
+	}
+
+	if a.backend != nil && a.appNamespaceFor != nil {
+		// App-level secrets live in the same namespace as any app-env secret;
+		// passing the env name is fine here because the app-level Secret name
+		// is keyed by project+app, not env.
+		if ns, err := a.appNamespaceFor(ctx, app.ProjectName, app.Name, envName); err == nil && ns != "" {
+			if entries, err := a.backend.ListKeys(ctx, ns, secrets.AppLevelSecretName(app.ProjectName, app.Name)); err == nil && len(entries) > 0 {
+				out[secrets.LevelApp] = true
+			}
+			if entries, err := a.backend.ListKeys(ctx, ns, secrets.AppEnvSecretName(app.ProjectName, app.Name, envName)); err == nil && len(entries) > 0 {
+				out[secrets.LevelAppEnv] = true
+			}
+		}
+	}
+
+	return out
 }
 
 // PublishAppEnv implements server.GitOpsPublisher by resolving cluster info for
@@ -957,5 +1031,24 @@ func buildEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string 
 	}
 	return func(cluster string) string {
 		return clusterToEnv[cluster]
+	}
+}
+
+// appStoreNamespaceResolver returns a function that looks up the resolved K8s
+// namespace for an app-env from the AppStore. Returns "" when the env is not
+// persisted (e.g. apps created before AppEnvironment was introduced) so that
+// callers can treat the lookup as best-effort.
+func appStoreNamespaceResolver(store domain.AppStore) func(ctx context.Context, projectName, appName, envName string) (string, error) {
+	if store == nil {
+		return func(context.Context, string, string, string) (string, error) {
+			return "", nil
+		}
+	}
+	return func(ctx context.Context, projectName, appName, envName string) (string, error) {
+		env, err := store.GetAppEnvironment(ctx, projectName, appName, envName)
+		if err != nil {
+			return "", err
+		}
+		return env.Namespace, nil
 	}
 }
