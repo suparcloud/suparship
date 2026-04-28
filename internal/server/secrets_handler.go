@@ -928,7 +928,7 @@ func (h *secretsHandler) handleListOrgSecrets(w http.ResponseWriter, r *http.Req
 	entries, err := h.currentUpperWriter().ReadOrgSecretKeys(r.Context())
 	if err != nil {
 		h.logger.Error("failed to list org secret keys", "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.OrgSecretName()))
@@ -941,7 +941,7 @@ func (h *secretsHandler) handleUpsertOrgSecrets(w http.ResponseWriter, r *http.R
 	}
 	if err := h.currentUpperWriter().WriteOrgSecrets(r.Context(), toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert org secrets", "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -951,7 +951,7 @@ func (h *secretsHandler) handleDeleteOrgSecret(w http.ResponseWriter, r *http.Re
 	key := r.PathValue("key")
 	if err := h.currentUpperWriter().DeleteOrgSecretKey(r.Context(), key); err != nil {
 		h.logger.Error("failed to delete org secret key", "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -964,7 +964,7 @@ func (h *secretsHandler) handleListEnvTypeSecrets(w http.ResponseWriter, r *http
 	entries, err := h.currentUpperWriter().ReadEnvTypeSecretKeys(r.Context(), envType)
 	if err != nil {
 		h.logger.Error("failed to list env-type secret keys", "envtype", envType, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.EnvTypeSecretName(envType)))
@@ -978,7 +978,7 @@ func (h *secretsHandler) handleUpsertEnvTypeSecrets(w http.ResponseWriter, r *ht
 	}
 	if err := h.currentUpperWriter().WriteEnvTypeSecrets(r.Context(), envType, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert env-type secrets", "envtype", envType, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -989,7 +989,7 @@ func (h *secretsHandler) handleDeleteEnvTypeSecret(w http.ResponseWriter, r *htt
 	key := r.PathValue("key")
 	if err := h.currentUpperWriter().DeleteEnvTypeSecretKey(r.Context(), envType, key); err != nil {
 		h.logger.Error("failed to delete env-type secret key", "envtype", envType, "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1002,7 +1002,7 @@ func (h *secretsHandler) handleListProjectSecrets(w http.ResponseWriter, r *http
 	entries, err := h.currentUpperWriter().ReadProjectSecretKeys(r.Context(), project)
 	if err != nil {
 		h.logger.Error("failed to list project secret keys", "project", project, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.ProjectSecretName(project)))
@@ -1016,7 +1016,7 @@ func (h *secretsHandler) handleUpsertProjectSecrets(w http.ResponseWriter, r *ht
 	}
 	if err := h.currentUpperWriter().WriteProjectSecrets(r.Context(), project, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert project secrets", "project", project, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1027,7 +1027,7 @@ func (h *secretsHandler) handleDeleteProjectSecret(w http.ResponseWriter, r *htt
 	key := r.PathValue("key")
 	if err := h.currentUpperWriter().DeleteProjectSecretKey(r.Context(), project, key); err != nil {
 		h.logger.Error("failed to delete project secret key", "project", project, "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1040,7 +1040,7 @@ func (h *secretsHandler) handleListClusterSecrets(w http.ResponseWriter, r *http
 	entries, err := h.currentUpperWriter().ReadClusterSecretKeys(r.Context(), cluster)
 	if err != nil {
 		h.logger.Error("failed to list cluster secret keys", "cluster", cluster, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.ClusterSecretName(cluster)))
@@ -1054,7 +1054,7 @@ func (h *secretsHandler) handleUpsertClusterSecrets(w http.ResponseWriter, r *ht
 	}
 	if err := h.currentUpperWriter().WriteClusterSecrets(r.Context(), cluster, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert cluster secrets", "cluster", cluster, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1065,7 +1065,7 @@ func (h *secretsHandler) handleDeleteClusterSecret(w http.ResponseWriter, r *htt
 	key := r.PathValue("key")
 	if err := h.currentUpperWriter().DeleteClusterSecretKey(r.Context(), cluster, key); err != nil {
 		h.logger.Error("failed to delete cluster secret key", "cluster", cluster, "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1087,7 +1087,7 @@ func (h *secretsHandler) handleListAppSecrets(w http.ResponseWriter, r *http.Req
 	entries, err := h.backend.ListKeys(r.Context(), ns, secretName)
 	if err != nil {
 		h.logger.Error("failed to list app secret keys", "project", project, "app", appName, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secretName))
@@ -1111,7 +1111,7 @@ func (h *secretsHandler) handleUpsertAppSecrets(w http.ResponseWriter, r *http.R
 	secretName := secrets.AppLevelSecretName(project, appName)
 	if err := h.backend.Upsert(r.Context(), ns, secretName, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert app secrets", "project", project, "app", appName, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1131,7 +1131,7 @@ func (h *secretsHandler) handleDeleteAppSecret(w http.ResponseWriter, r *http.Re
 	secretName := secrets.AppLevelSecretName(project, appName)
 	if err := h.backend.DeleteKey(r.Context(), ns, secretName, key); err != nil {
 		h.logger.Error("failed to delete app secret key", "project", project, "app", appName, "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1155,7 +1155,7 @@ func (h *secretsHandler) handleListSecrets(w http.ResponseWriter, r *http.Reques
 	entries, err := h.backend.ListKeys(r.Context(), ns, secretName)
 	if err != nil {
 		h.logger.Error("failed to list secret keys", "ns", ns, "secret", secretName, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secretName))
@@ -1181,7 +1181,7 @@ func (h *secretsHandler) handleUpsertSecrets(w http.ResponseWriter, r *http.Requ
 
 	if err := h.backend.Upsert(r.Context(), ns, secretName, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert secrets", "ns", ns, "secret", secretName, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1203,7 +1203,7 @@ func (h *secretsHandler) handleDeleteSecret(w http.ResponseWriter, r *http.Reque
 
 	if err := h.backend.DeleteKey(r.Context(), ns, secretName, key); err != nil {
 		h.logger.Error("failed to delete secret key", "ns", ns, "secret", secretName, "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
