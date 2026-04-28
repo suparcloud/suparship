@@ -201,7 +201,8 @@ type NamespaceResolveInput struct {
 	// Empty string = not set at this level; fall through to the next level.
 	AppPattern        string // AppSpec.NamespacePattern
 	ProjectPattern    string // ProjectSpec.NamespacePattern
-	OrgEnvPattern     string // OrgEnvironment.NamespacePattern (per env, org level)
+	OrgEnvAppPattern  string // OrgEnvironment.EffectiveAppNamespacePattern (scope=app)
+	OrgEnvProjPattern string // OrgEnvironment.EffectiveProjectNamespacePattern (scope=project)
 	OrgAppDefault     string // ResourceNaming.EffectiveAppNamespace()
 	OrgProjectDefault string // ResourceNaming.EffectiveProjectNamespace()
 }
@@ -211,18 +212,30 @@ type NamespaceResolveInput struct {
 // NamespaceResolveInput. It validates the result against Kubernetes namespace
 // naming rules (DNS-1123, max 63 chars).
 //
+// Per-env patterns are scope-specific: an OrgEnvironment can carry one
+// override for app-scope and a different one for project-scope, because a
+// pattern like "{app}" is meaningful for dedicated namespaces but produces
+// confusing results when applied to a shared project namespace.
+//
 // Precedence (highest to lowest):
-//  1. AppPattern           (AppSpec.NamespacePattern, scope=app only)
-//  2. ProjectPattern       (ProjectSpec.NamespacePattern)
-//  3. OrgEnvPattern        (OrgEnvironment.NamespacePattern)
-//  4. OrgAppDefault        (ResourceNaming.AppNamespace)
-//  5. OrgProjectDefault    (ResourceNaming.ProjectNamespace, scope=project only)
-//  6. Topology-aware hardcoded default
+//
+//	scope=app:
+//	  1. AppPattern        (AppSpec.NamespacePattern)
+//	  2. ProjectPattern    (ProjectSpec.NamespacePattern)
+//	  3. OrgEnvAppPattern  (OrgEnvironment.AppNamespacePattern, with legacy fallback)
+//	  4. OrgAppDefault     (ResourceNaming.AppNamespace)
+//	  5. Topology default
+//
+//	scope=project:
+//	  1. ProjectPattern    (ProjectSpec.NamespacePattern)
+//	  2. OrgEnvProjPattern (OrgEnvironment.ProjectNamespacePattern)
+//	  3. OrgProjectDefault (ResourceNaming.ProjectNamespace)
+//	  4. Topology default
 func ResolveNamespace(in NamespaceResolveInput) (string, error) {
 	var pattern string
 	switch in.Scope {
 	case NamespaceScopeProject:
-		pattern = firstNonEmpty(in.ProjectPattern, in.OrgEnvPattern, in.OrgProjectDefault)
+		pattern = firstNonEmpty(in.ProjectPattern, in.OrgEnvProjPattern, in.OrgProjectDefault)
 		if pattern == "" {
 			if in.Dedicated {
 				pattern = "{project}"
@@ -231,7 +244,7 @@ func ResolveNamespace(in NamespaceResolveInput) (string, error) {
 			}
 		}
 	default: // NamespaceScopeApp (default when empty)
-		pattern = firstNonEmpty(in.AppPattern, in.ProjectPattern, in.OrgEnvPattern, in.OrgAppDefault)
+		pattern = firstNonEmpty(in.AppPattern, in.ProjectPattern, in.OrgEnvAppPattern, in.OrgAppDefault)
 		if pattern == "" {
 			if in.Dedicated {
 				pattern = "{project}-{app}"

@@ -181,3 +181,58 @@ func TestIsValidRole(t *testing.T) {
 		t.Fatal("superuser should not be a valid role")
 	}
 }
+
+func TestOrgEnvironment_EffectivePatterns(t *testing.T) {
+	tests := []struct {
+		name       string
+		env        OrgEnvironment
+		wantApp    string
+		wantProj   string
+	}{
+		{
+			name:    "all empty",
+			env:     OrgEnvironment{},
+			wantApp: "", wantProj: "",
+		},
+		{
+			name: "explicit fields preferred over legacy",
+			env: OrgEnvironment{
+				NamespacePattern:        "{app}",
+				AppNamespacePattern:     "{project}-{app}",
+				ProjectNamespacePattern: "{project}-{env}",
+			},
+			wantApp:  "{project}-{app}",
+			wantProj: "{project}-{env}",
+		},
+		// Back-compat: configs written by older suparship versions only have
+		// NamespacePattern. It must continue to drive app-scope resolution so
+		// existing operators don't see a behaviour change after upgrade.
+		{
+			name: "legacy NamespacePattern falls back to app only",
+			env: OrgEnvironment{
+				NamespacePattern: "{app}",
+			},
+			wantApp:  "{app}",
+			wantProj: "", // intentionally empty — {app} doesn't make sense for project scope
+		},
+		{
+			name: "legacy NamespacePattern with explicit ProjectNamespacePattern",
+			env: OrgEnvironment{
+				NamespacePattern:        "{app}",
+				ProjectNamespacePattern: "{project}",
+			},
+			wantApp:  "{app}",
+			wantProj: "{project}",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.env.EffectiveAppNamespacePattern(); got != tt.wantApp {
+				t.Errorf("EffectiveAppNamespacePattern() = %q, want %q", got, tt.wantApp)
+			}
+			if got := tt.env.EffectiveProjectNamespacePattern(); got != tt.wantProj {
+				t.Errorf("EffectiveProjectNamespacePattern() = %q, want %q", got, tt.wantProj)
+			}
+		})
+	}
+}

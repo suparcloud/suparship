@@ -553,7 +553,7 @@ func TestResolveNamespace(t *testing.T) {
 				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
 				Scope: NamespaceScopeApp, Dedicated: false,
 				OrgAppDefault: "{project}-{app}",
-				OrgEnvPattern: "{project}-{app}-stg",
+				OrgEnvAppPattern: "{project}-{app}-stg",
 			},
 			want: "billing-api-stg",
 		},
@@ -562,7 +562,7 @@ func TestResolveNamespace(t *testing.T) {
 			in: NamespaceResolveInput{
 				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
 				Scope: NamespaceScopeApp, Dedicated: false,
-				OrgEnvPattern:  "{project}-{app}-stg",
+				OrgEnvAppPattern: "{project}-{app}-stg",
 				ProjectPattern: "{project}-{app}-{env}",
 			},
 			want: "billing-api-staging",
@@ -572,7 +572,7 @@ func TestResolveNamespace(t *testing.T) {
 			in: NamespaceResolveInput{
 				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
 				Scope: NamespaceScopeApp, Dedicated: false,
-				OrgEnvPattern:  "{project}-{app}-stg",
+				OrgEnvAppPattern: "{project}-{app}-stg",
 				ProjectPattern: "{project}-{app}-{env}",
 				AppPattern:     "{app}",
 			},
@@ -586,6 +586,42 @@ func TestResolveNamespace(t *testing.T) {
 				OrgProjectDefault: "{project}-{env}",
 			},
 			want: "billing-staging",
+		},
+		// Regression: per-env app pattern containing "{app}" must NOT bleed
+		// into project-scope resolution. Operators set per-env app patterns
+		// for dedicated namespaces; applying them to a project-shared
+		// namespace yields nonsensical results (one app's name as the
+		// project namespace).
+		{
+			name: "scope=project ignores OrgEnvAppPattern",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeProject, Dedicated: true,
+				OrgEnvAppPattern:  "{app}",
+				OrgProjectDefault: "{project}",
+			},
+			want: "billing",
+		},
+		{
+			name: "scope=project uses OrgEnvProjPattern when set",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeProject, Dedicated: true,
+				OrgEnvAppPattern:  "{app}",
+				OrgEnvProjPattern: "{project}-{env}",
+				OrgProjectDefault: "{project}",
+			},
+			want: "billing-staging",
+		},
+		{
+			name: "scope=app ignores OrgEnvProjPattern",
+			in: NamespaceResolveInput{
+				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
+				Scope: NamespaceScopeApp, Dedicated: true,
+				OrgEnvAppPattern:  "{project}-{app}",
+				OrgEnvProjPattern: "{project}",
+			},
+			want: "billing-api",
 		},
 		{
 			name: "empty scope treated as app scope",
