@@ -71,15 +71,14 @@ type HelmValues struct {
 	Suparship SuparshipValues `json:"suparship" yaml:"suparship"`
 }
 
-// SuparshipValues carries deterministic, well-known resource names so Helm
-// templates can reference them without knowing backend-specific details.
+// SuparshipValues carries the precedence-ordered hierarchy of ConfigMaps and
+// Secrets that the chart should envFrom. Names are computed by the publisher
+// from the active backend + naming patterns, so the chart needs no knowledge
+// of either. Order is org → env-type → project → app → app-env → cluster;
+// later entries win on key collision per Kubernetes envFrom semantics.
 type SuparshipValues struct {
-	// SecretName is the Kubernetes Secret name holding app-level secrets
-	// for this environment. Templates use it via envFrom.secretRef.name.
-	SecretName string `json:"secretName" yaml:"secretName"`
-	// ConfigName is the Kubernetes ConfigMap name holding app-level config
-	// for this environment. Templates use it via envFrom.configMapRef.name.
-	ConfigName string `json:"configName" yaml:"configName"`
+	EnvFromConfigMaps []string `json:"envFromConfigMaps,omitempty" yaml:"envFromConfigMaps,omitempty"`
+	EnvFromSecrets    []string `json:"envFromSecrets,omitempty" yaml:"envFromSecrets,omitempty"`
 }
 
 // AppContext carries top-level app identity injected into every chart.

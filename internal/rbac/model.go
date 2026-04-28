@@ -77,13 +77,45 @@ type OrgEnvironment struct {
 	// BaseDomain is the ingress base domain for apps in this environment.
 	// App URLs are derived as: http://{app}.{baseDomain}
 	BaseDomain string `yaml:"baseDomain,omitempty"`
-	// NamespacePattern controls Kubernetes namespace naming.
-	// Tokens: {app}, {env}, {project}.
-	// Default (empty) falls back to "{app}-{env}".
+	// AppNamespacePattern overrides the K8s namespace pattern for apps in
+	// this environment that use NamespaceScopeApp ("Dedicated namespace").
+	// Tokens: {app}, {env}, {project}, {org}.
+	AppNamespacePattern string `yaml:"appNamespacePattern,omitempty"`
+	// ProjectNamespacePattern overrides the K8s namespace pattern for apps
+	// in this environment that use NamespaceScopeProject ("Project namespace").
+	// Tokens: {env}, {project}, {org}. Note: {app} is intentionally not
+	// honoured here — a project-scope namespace is shared across apps.
+	ProjectNamespacePattern string `yaml:"projectNamespacePattern,omitempty"`
+	// NamespacePattern is deprecated; retained so configs written by older
+	// suparship versions still load. Treated as AppNamespacePattern when
+	// the new fields are empty (preserves backward-compatible behaviour
+	// for app-scope; project-scope ignores it because it usually contains
+	// {app}, which doesn't make sense for shared project namespaces).
+	//
+	// Deprecated: use AppNamespacePattern.
 	NamespacePattern string `yaml:"namespacePattern,omitempty"`
 	// EnvConfig holds env vars and secret refs that apply to all apps
 	// deployed to this environment type (Environment level of the hierarchy).
 	EnvConfig envconfig.EnvConfig `yaml:"envConfig,omitempty"`
+}
+
+// EffectiveAppNamespacePattern returns the per-env override that applies to
+// apps with NamespaceScopeApp. Falls back to the legacy NamespacePattern for
+// configs written before the field was split.
+func (e OrgEnvironment) EffectiveAppNamespacePattern() string {
+	if e.AppNamespacePattern != "" {
+		return e.AppNamespacePattern
+	}
+	return e.NamespacePattern
+}
+
+// EffectiveProjectNamespacePattern returns the per-env override that applies
+// to apps with NamespaceScopeProject. The legacy NamespacePattern is NOT used
+// as a fallback because it commonly contains {app}, which doesn't render
+// meaningfully into a shared project namespace; operators must opt in
+// explicitly by setting ProjectNamespacePattern.
+func (e OrgEnvironment) EffectiveProjectNamespacePattern() string {
+	return e.ProjectNamespacePattern
 }
 
 // Org represents a single organization.

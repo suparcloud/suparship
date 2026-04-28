@@ -455,7 +455,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 
 		// Write values.yaml — Helm values with env-specific baseDomain and
 		// the resolved namespace so secretName/configName are consistent.
-		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace)
+		var backend secrets.BackendType
+		if p.cfg.BackendConfig != nil {
+			backend = p.cfg.BackendConfig.Effective()
+		}
+		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName, backend)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
@@ -485,6 +489,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 //
 //	{dir}/env-configmap.yaml  →  K8s ConfigMap named "{app}-config"
 //
+// The ConfigMap data is env.EnvVars verbatim — the caller is responsible for
+// merging org → env-type → project → app → app-env → cluster scopes before
+// publishing, so the YAML committed to git is the audit-trail for what the
+// pod will see (no chart-side multi-source merge).
+//
 // ExternalSecret (only when env.StoreName is non-empty):
 //
 //	{dir}/external-secret.yaml  →  K8s ExternalSecret named "{app}-secrets"
@@ -511,10 +520,9 @@ func (p *Publisher) writeAppPlatformResources(
 		App:     app.Name,
 	}
 
-	// ConfigMap — always written with merged app + env vars.
+	// ConfigMap — written with the fully-merged map the caller passed in.
 	cmName := naming.RenderAppConfigMap(np)
-	vars := mergeVars(app.Spec.EnvConfig.Vars, env.EnvVars)
-	if err := p.WriteAppConfigMap(dir, cmName, namespace, vars); err != nil {
+	if err := p.WriteAppConfigMap(dir, cmName, namespace, env.EnvVars); err != nil {
 		return fmt.Errorf("writing app ConfigMap: %w", err)
 	}
 
@@ -558,22 +566,6 @@ func (p *Publisher) writeAppPlatformResources(
 	}
 	content := BuildCollapsedExternalSecretYAML(*esCfg)
 	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content))
-}
-
-// mergeVars merges base vars with overrides. Override values win on conflict.
-// Returns nil when both inputs are empty.
-func mergeVars(base, overrides map[string]string) map[string]string {
-	if len(base) == 0 && len(overrides) == 0 {
-		return nil
-	}
-	merged := make(map[string]string, len(base)+len(overrides))
-	for k, v := range base {
-		merged[k] = v
-	}
-	for k, v := range overrides {
-		merged[k] = v
-	}
-	return merged
 }
 
 // syncChart copies the Helm chart for templateName from the local templates
@@ -775,8 +767,11 @@ type AppPublishEnv struct {
 	// Typically rendered as "{project}-{app}-{env}" from ResourceNaming.
 	// Ignored when StoreName is empty.
 	VaultItemTitle string
-	// EnvVars holds per-env variable overrides to merge into the platform-managed
-	// ConfigMap alongside app.Spec.EnvConfig.Vars (env values win on conflict).
+	// EnvVars is the fully-merged env-var map the publisher writes into the
+	// per-app ConfigMap ({app}-config) for this env. The caller is expected to
+	// merge all six scope levels (org → env-type → project → app → app-env →
+	// cluster) before publishing so the committed YAML is the source-of-truth
+	// for what the pod sees — no chart-side multi-source merge.
 	EnvVars map[string]string
 	// ClusterRef is the registered cluster bound to this env. Used for the
 	// cluster-scope vault item title in the collapsed ExternalSecret. Empty
@@ -829,7 +824,15 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 			return err
 		}
 
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace)
+		previewOrgName := p.cfg.OrgName
+		if previewOrgName == "" {
+			previewOrgName = "default"
+		}
+		var previewBackend secrets.BackendType
+		if p.cfg.BackendConfig != nil {
+			previewBackend = p.cfg.BackendConfig.Effective()
+		}
+		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName, previewBackend)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)

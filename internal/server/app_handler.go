@@ -728,10 +728,18 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 	dedicated := domain.IsDedicatedClusterTopology(stableRefs)
 
 	// Per-environment namespace pattern overrides defined at the org level.
-	orgEnvPatterns := make(map[string]string, len(org.Environments))
+	// AppNamespacePattern (with legacy NamespacePattern fallback) drives
+	// scope=app; ProjectNamespacePattern drives scope=project — the two are
+	// resolved independently so a pattern like "{app}" set for app-scope
+	// doesn't bleed into project-scope resolution.
+	orgEnvAppPatterns := make(map[string]string, len(org.Environments))
+	orgEnvProjPatterns := make(map[string]string, len(org.Environments))
 	for _, e := range org.Environments {
-		if e.NamespacePattern != "" {
-			orgEnvPatterns[e.Name] = e.NamespacePattern
+		if p := e.EffectiveAppNamespacePattern(); p != "" {
+			orgEnvAppPatterns[e.Name] = p
+		}
+		if p := e.EffectiveProjectNamespacePattern(); p != "" {
+			orgEnvProjPatterns[e.Name] = p
 		}
 	}
 
@@ -744,7 +752,8 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 			Scope:             app.Spec.NamespaceScope,
 			Dedicated:         dedicated,
 			AppPattern:        app.Spec.NamespacePattern,
-			OrgEnvPattern:     orgEnvPatterns[env.EnvName],
+			OrgEnvAppPattern:  orgEnvAppPatterns[env.EnvName],
+			OrgEnvProjPattern: orgEnvProjPatterns[env.EnvName],
 			OrgAppDefault:     org.ResourceNaming.EffectiveAppNamespace(),
 			OrgProjectDefault: org.ResourceNaming.EffectiveProjectNamespace(),
 		})
@@ -789,10 +798,14 @@ func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []
 	}
 	dedicated := domain.IsDedicatedClusterTopology(stableRefs)
 
-	orgEnvPatterns := make(map[string]string, len(sortedOrgEnvs))
+	orgEnvAppPatterns := make(map[string]string, len(sortedOrgEnvs))
+	orgEnvProjPatterns := make(map[string]string, len(sortedOrgEnvs))
 	for _, e := range sortedOrgEnvs {
-		if e.NamespacePattern != "" {
-			orgEnvPatterns[e.Name] = e.NamespacePattern
+		if p := e.EffectiveAppNamespacePattern(); p != "" {
+			orgEnvAppPatterns[e.Name] = p
+		}
+		if p := e.EffectiveProjectNamespacePattern(); p != "" {
+			orgEnvProjPatterns[e.Name] = p
 		}
 	}
 
@@ -811,7 +824,8 @@ func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []
 			Scope:             app.Spec.NamespaceScope,
 			Dedicated:         dedicated,
 			AppPattern:        app.Spec.NamespacePattern,
-			OrgEnvPattern:     orgEnvPatterns[orgEnv.Name],
+			OrgEnvAppPattern:  orgEnvAppPatterns[orgEnv.Name],
+			OrgEnvProjPattern: orgEnvProjPatterns[orgEnv.Name],
 			OrgAppDefault:     org.ResourceNaming.EffectiveAppNamespace(),
 			OrgProjectDefault: org.ResourceNaming.EffectiveProjectNamespace(),
 		})

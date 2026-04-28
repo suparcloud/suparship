@@ -68,21 +68,41 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 //
 // When baseDomain is empty, "localhost" is used.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
-	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "")
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "", "")
 }
 
-// MapToHelmValuesForEnv is the canonical mapper that accepts the resolved
-// Kubernetes namespace in addition to the base domain. When namespace is
-// non-empty the suparship.secretName and suparship.configName values are
-// derived from it (pattern: suparship-secrets-{namespace} and
-// suparship-config-{namespace}), ensuring they are consistent with the
-// operator-configured namespace pattern.
+// MapToHelmValuesForEnv is the canonical mapper. The naming and orgName
+// arguments mirror what the publisher uses to render ExternalSecret /
+// ConfigMap names in gitops-output, so values.yaml's envFrom lists always
+// match the K8s resources the platform-managed publisher actually creates.
 //
-// When namespace is empty the legacy {project}-{app}-{env} names are used so
-// that callers that do not yet have a resolved namespace remain unaffected.
-func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain, namespace string) HelmValues {
+// backend selects which app-env name appears in the envFrom lists:
+//   - secrets.Backend1Password → ESO-materialised target name from
+//     RenderAppResource (the only Secret that exists on this backend).
+//   - secrets.BackendK8s       → suparship-system-replicated name from
+//     AppEnvSecretName / AppConfigName (the only Secret/ConfigMap that
+//     exists on this backend).
+//
+// Cluster is used only for the cluster-scope envFrom name; pass "" for
+// unbound envs (the cluster scope is then omitted from the lists).
+//
+// Namespace is plumbed for backwards-compatibility (callers that have it
+// pass it; the mapper does not currently use it for naming — names come
+// from the configurable ResourceNaming patterns).
+func MapToHelmValuesForEnv(
+	app *domain.App,
+	envName string,
+	envType domain.AppEnvironmentType,
+	baseDomain, namespace, cluster string,
+	naming secrets.ResourceNaming,
+	orgName string,
+	backend secrets.BackendType,
+) HelmValues {
 	if baseDomain == "" {
 		baseDomain = "localhost"
+	}
+	if orgName == "" {
+		orgName = "default"
 	}
 
 	envOverride := app.Spec.EnvironmentDefaults[envName] // zero value if absent
@@ -94,14 +114,23 @@ func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEn
 	routingComponent := resolveRoutingComponent(app.Spec.Components)
 	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain))
 
-	var secretName, configName string
-	if namespace != "" {
-		secretName = secrets.SecretNameForNamespace(namespace)
-		configName = secrets.ConfigNameForNamespace(namespace)
-	} else {
-		secretName = secrets.AppSecretName(app.ProjectName, app.Name, envName)
-		configName = secrets.AppConfigName(app.ProjectName, app.Name, envName)
+	// Resource names come from the same ResourceNaming patterns the
+	// publisher uses, so values.yaml lines up with the K8s resources
+	// actually created — RenderAppResource → ExternalSecret target,
+	// RenderAppConfigMap → published ConfigMap.
+	np := secrets.NamingParams{
+		Org:     orgName,
+		Env:     envName,
+		Project: app.ProjectName,
+		App:     app.Name,
+		Cluster: cluster,
 	}
+	cms, secs := envFromLists(
+		app.ProjectName, app.Name, envName, cluster,
+		naming.RenderAppResource(np),
+		naming.RenderAppConfigMap(np),
+		backend,
+	)
 
 	return HelmValues{
 		App: AppContext{
@@ -118,10 +147,55 @@ func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEn
 			AppEnv: envOverride.EnvConfig,
 		}),
 		Suparship: SuparshipValues{
-			SecretName: secretName,
-			ConfigName: configName,
+			EnvFromConfigMaps: cms,
+			EnvFromSecrets:    secs,
 		},
 	}
+}
+
+// envFromLists returns the names the chart should envFrom for this app-env.
+// Both lists collapse to a single entry on ESO-mediated backends because the
+// publisher pre-merges all six scopes into one ConfigMap and one Secret — the
+// committed YAML in gitops-output is the audit-trail for what the pod sees.
+//
+// envFromConfigMaps — always one entry: the per-app "{app}-config" ConfigMap
+// the publisher writes with org → env-type → project → app → app-env → cluster
+// merged in precedence order. There is no chart-side multi-source merge.
+//
+// envFromSecrets — backend-specific:
+//   - 1Password (and any ESO-mediated backend): ESO merges all six scopes into
+//     a single K8s Secret named by RenderAppResource (e.g. "{app}-secrets").
+//     The chart envFroms only that one Secret.
+//   - K8s: there is no ESO collapse. The K8s UpperLevelSecretWriter writes
+//     a Secret per scope into suparship-system; Stakater Replicator copies
+//     each into the env namespace under the same name. The chart envFroms
+//     all six.
+//
+// cluster=="" omits the cluster-scope tail of the K8s Secret list (env unbound).
+func envFromLists(project, app, envName, cluster, appEnvESOName, appEnvESOConfigName string, backend secrets.BackendType) ([]string, []string) {
+	cms := []string{appEnvESOConfigName}
+
+	var secs []string
+	switch backend {
+	case secrets.BackendK8s:
+		// One replicated Secret per scope.
+		envvarsKey := envName
+		secs = []string{
+			"suparship-secrets-org",
+			"suparship-secrets-envtype-" + envvarsKey,
+			"suparship-secrets-project-" + project,
+			"suparship-secrets-app-" + project + "-" + app,
+			secrets.AppEnvSecretName(project, app, envName),
+		}
+		if cluster != "" {
+			secs = append(secs, "suparship-secrets-cluster-"+cluster)
+		}
+	default:
+		// 1Password / any ESO-mediated backend: ESO collapses all six
+		// scopes into a single Secret.
+		secs = []string{appEnvESOName}
+	}
+	return cms, secs
 }
 
 // extractImage pulls the image repository and tag from an AppSpec Values map.
