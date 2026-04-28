@@ -24,6 +24,7 @@ import {
   listVaults,
   addBinding,
   removeBinding,
+  setPlatformVault,
   listOrgSecretKeys,
   upsertOrgSecrets,
   deleteOrgSecretKey,
@@ -929,38 +930,82 @@ function SecretsBackendSection() {
                     </span>
                   </button>
                   {showGuide && (
-                    <div className="border-t border-blue-100 px-4 py-3">
+                    <div className="space-y-3 border-t border-blue-100 px-4 py-3">
+                      <p className="text-xs text-blue-900">
+                        <strong>Two vault tiers:</strong> a{" "}
+                        <strong>platform-shared vault</strong> for org and
+                        project secrets (read-only from every cluster), plus
+                        one <strong>env vault</strong> per environment for
+                        env-type, app, app-env, and cluster secrets. 1Password
+                        Service Accounts cannot create vaults or Connect
+                        tokens — you create both manually in the 1Password
+                        console; suparShip handles the cluster-side automation
+                        (sealing tokens, generating ClusterSecretStores,
+                        publishing to GitOps).
+                      </p>
                       <ol className="space-y-2 text-xs text-blue-900">
                         <li>
-                          <strong>1. Create vaults</strong> in 1Password for each
-                          environment (e.g. <code>staging-apps</code>,{" "}
+                          <strong>
+                            1. Create the platform-shared vault and per-env
+                            vaults
+                          </strong>{" "}
+                          in the 1Password web console (e.g.{" "}
+                          <code>company-shared</code>,{" "}
+                          <code>staging-apps</code>,{" "}
                           <code>prod-apps</code>).
                         </li>
                         <li>
-                          <strong>2. Create a Service Account</strong> with Read
-                          &amp; Write access to these vaults.
+                          <strong>2. Create a Service Account</strong> with
+                          Read &amp; Write access to all those vaults. (No
+                          vault-creation permission is needed — SAs can't
+                          create vaults regardless.)
                         </li>
                         <li>
-                          <strong>3. Paste the SA token</strong> below &mdash;
-                          suparShip validates and shows accessible vaults.
+                          <strong>3. Paste the SA token</strong> below —
+                          suparShip validates it and shows how many vaults
+                          are visible.
                         </li>
                         <li>
-                          <strong>4. Set up a Connect Server</strong> in
-                          1Password and grant it access to the vaults.
+                          <strong>4. Pick the platform-shared vault</strong>{" "}
+                          from the dropdown that appears after the SA token
+                          is saved.
                         </li>
                         <li>
-                          <strong>5. Deploy Connect</strong> to your tooling
+                          <strong>5. Set up a Connect Server</strong> in
+                          1Password and grant it access to <strong>all</strong>{" "}
+                          suparShip vaults — every env vault <em>and</em> the
+                          platform vault.
+                        </li>
+                        <li>
+                          <strong>6. Deploy Connect</strong> to your tooling
                           cluster (Helm chart or Docker).
                         </li>
                         <li>
-                          <strong>6. Create per-env Connect tokens</strong>{" "}
-                          scoped to each vault.
+                          <strong>7. Issue per-env Connect tokens</strong> in
+                          the 1Password console. Each token must read{" "}
+                          <strong>both vaults</strong>: its env vault{" "}
+                          <em>and</em> the platform vault. Without platform
+                          access, ESO can't resolve org/project items at sync
+                          time.
                         </li>
                         <li>
-                          <strong>7. Add bindings</strong> below &mdash; select
-                          vault, paste Connect token for each environment.
+                          <strong>8. Add bindings</strong> below — select env
+                          vault, paste the env's Connect token, for each
+                          environment. suparShip seals the token and publishes
+                          the SealedSecret + ClusterSecretStore to GitOps.
+                        </li>
+                        <li>
+                          <strong>9. (Optional) Migrate existing K8s Secrets</strong>{" "}
+                          using the &ldquo;Migrate K8s Secrets to
+                          1Password&rdquo; panel below. Idempotent; safe to
+                          re-run.
                         </li>
                       </ol>
+                      <p className="text-xs text-blue-900">
+                        Need more detail? See{" "}
+                        <code>docs/secrets.md</code> for architecture diagrams,
+                        troubleshooting, and the full RBAC matrix.
+                      </p>
                     </div>
                   )}
                 </div>
@@ -971,8 +1016,11 @@ function SecretsBackendSection() {
                     Service Account Token
                   </label>
                   <p className="text-xs text-gray-500">
-                    Paste the 1Password Service Account token. It should have
-                    Read &amp; Write access to the environment vaults.
+                    Paste the 1Password Service Account token. It needs Read
+                    &amp; Write access to every vault you want suparShip to
+                    manage — the platform-shared vault and each env vault.
+                    1Password Service Accounts cannot create vaults, so make
+                    sure these vaults already exist before pasting.
                   </p>
                   <div className="flex items-end gap-3">
                     <div className="flex-1">
@@ -996,6 +1044,18 @@ function SecretsBackendSection() {
                     <p className="text-xs text-gray-600">{tokenMsg}</p>
                   )}
                 </div>
+
+                {/* Platform-shared vault picker — operator selects the vault
+                    they created manually in the 1Password console. 1Password
+                    Service Accounts cannot create vaults, so suparShip cannot
+                    auto-provision this. */}
+                <PlatformVaultPicker
+                  config={config}
+                  onChanged={async () => {
+                    const updated = await getSecretsBackend();
+                    setConfig(updated);
+                  }}
+                />
 
                 {/* Connect Server endpoint */}
                 <div className="space-y-1">
@@ -1264,6 +1324,148 @@ function SecretsBackendSection() {
 }
 
 // ── Migration panel ──────────────────────────────────────────────────────────
+
+// ── Platform vault picker ────────────────────────────────────────────────────
+//
+// 1Password Service Accounts cannot create new vaults. The operator creates
+// the platform-shared vault by hand in the 1Password console; suparShip just
+// needs to know which vault it is. This component lists every vault the SA
+// token can see, lets the operator pick one, and POSTs the choice to
+// /org/secret-backend/platform-vault.
+//
+// Note: the upper-level writer in the suparShip server is built once at
+// startup using the persisted PlatformVaultID. After picking, a server
+// restart is required before org / project secret writes start landing in
+// the chosen vault — surfaced inline.
+
+function PlatformVaultPicker({
+  config,
+  onChanged,
+}: {
+  config: SecretBackendConfig;
+  onChanged: () => Promise<void>;
+}) {
+  const currentID = config.onePassword?.platformVaultId ?? "";
+  const currentName = config.onePassword?.platformVaultName ?? "";
+  const [vaults, setVaults] = useState<VaultInfo[] | null>(null);
+  const [selectedID, setSelectedID] = useState(currentID);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+
+  // Keep the dropdown in sync with the persisted ID across re-fetches.
+  useEffect(() => {
+    setSelectedID(currentID);
+  }, [currentID]);
+
+  async function handleLoadVaults() {
+    setLoading(true);
+    setError(null);
+    try {
+      const v = await listVaults();
+      setVaults(v);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load vaults");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!selectedID) return;
+    setSaving(true);
+    setError(null);
+    setSavedMsg(null);
+    try {
+      const picked = vaults?.find((v) => v.id === selectedID);
+      const res = await setPlatformVault(selectedID, picked?.title);
+      setSavedMsg(
+        `Saved. Restart the suparShip server so the new platform vault (${res.vaultName}) becomes the source of truth for org / project secrets.`,
+      );
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <label className="block text-xs font-medium text-gray-700">
+        Platform-shared vault
+      </label>
+      <p className="text-xs text-gray-500">
+        Pick the 1Password vault you created (manually) for org and project
+        secrets — read-only from every cluster's ESO. Per-env vaults are
+        configured separately in the bindings table below.
+      </p>
+      <div className="flex items-center gap-2">
+        {currentID ? (
+          <span className="flex items-center gap-1.5 text-xs text-green-700">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />
+            Currently:{" "}
+            <code className="font-mono">{currentName || currentID}</code>
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5 text-xs text-amber-700">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
+            Not set — org / project secret writes will fail until a vault is
+            picked.
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-end gap-2">
+        {vaults === null ? (
+          <button
+            type="button"
+            onClick={handleLoadVaults}
+            disabled={loading}
+            className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {loading ? "Loading…" : "List vaults"}
+          </button>
+        ) : (
+          <>
+            <select
+              value={selectedID}
+              onChange={(e) => setSelectedID(e.target.value)}
+              className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+            >
+              <option value="">— select a vault —</option>
+              {vaults.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.title}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving || !selectedID || selectedID === currentID}
+              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={handleLoadVaults}
+              disabled={loading}
+              title="Refresh the vault list"
+              className="rounded-lg border border-gray-300 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              ⟳
+            </button>
+          </>
+        )}
+      </div>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      {savedMsg && <p className="text-xs text-green-700">{savedMsg}</p>}
+    </div>
+  );
+}
 
 function MigrationPanel({ config }: { config: SecretBackendConfig }) {
   const platformVaultID = config.onePassword?.platformVaultId ?? "";

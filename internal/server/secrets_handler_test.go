@@ -653,72 +653,115 @@ func TestAddBinding_ClusterEmptyAPIServer(t *testing.T) {
 	}
 }
 
-// ── ensurePlatformVault ─────────────────────────────────────────────────────
+// ── Platform vault picker ──────────────────────────────────────────────────
 
-func TestEnsurePlatformVault_CreatesAndPersistsID(t *testing.T) {
-	org := &rbac.Org{
-		Name:        "default",
-		DisplayName: "Default",
-		SecretBackend: secrets.BackendConfig{
-			Type: secrets.Backend1Password,
-		},
-	}
-	store := &staticOrgProvider{org: org}
-	sh := &secretsHandler{
-		orgStore: store,
-		logger:   slog.Default(),
-	}
-	client := onepassword.NewFakeClient()
+func TestSetPlatformVault_PersistsOperatorPick(t *testing.T) {
+	// Operator picks an existing 1Password vault that the SA token can see.
+	fakeOP := onepassword.NewFakeClient()
+	chosen, _ := fakeOP.CreateVault(context.Background(), "company-shared", "")
 
-	if err := sh.ensurePlatformVault(context.Background(), client); err != nil {
-		t.Fatalf("ensurePlatformVault: %v", err)
-	}
-
-	if store.org.SecretBackend.OnePassword == nil {
-		t.Fatal("OnePassword config was not initialised")
-	}
-	if store.org.SecretBackend.OnePassword.PlatformVaultID == "" {
-		t.Errorf("PlatformVaultID was not persisted")
-	}
-	if got, want := store.org.SecretBackend.OnePassword.PlatformVaultName, secrets.PlatformVaultName("default"); got != want {
-		t.Errorf("PlatformVaultName = %q, want %q", got, want)
-	}
-}
-
-func TestEnsurePlatformVault_Idempotent(t *testing.T) {
 	org := &rbac.Org{
 		Name:          "default",
 		SecretBackend: secrets.BackendConfig{Type: secrets.Backend1Password},
 	}
 	store := &staticOrgProvider{org: org}
 	sh := &secretsHandler{
-		orgStore: store,
-		logger:   slog.Default(),
+		orgStore:        store,
+		logger:          slog.Default(),
+		saTokenStore:    &memSATokenStore{token: "fake"},
+		saClientFactory: func(_ context.Context, _ string) (onepassword.SAClient, error) { return fakeOP, nil },
 	}
-	client := onepassword.NewFakeClient()
 
-	if err := sh.ensurePlatformVault(context.Background(), client); err != nil {
-		t.Fatalf("first call: %v", err)
-	}
-	firstID := store.org.SecretBackend.OnePassword.PlatformVaultID
+	body, _ := json.Marshal(SetPlatformVaultRequest{VaultID: chosen.ID, VaultName: chosen.Title})
+	req := httptest.NewRequest("PUT", "/api/v1/org/secret-backend/platform-vault", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	sh.handleSetPlatformVault(rec, req)
 
-	if err := sh.ensurePlatformVault(context.Background(), client); err != nil {
-		t.Fatalf("second call: %v", err)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if store.org.SecretBackend.OnePassword.PlatformVaultID != firstID {
-		t.Errorf("vault ID changed on second call: %s -> %s",
-			firstID, store.org.SecretBackend.OnePassword.PlatformVaultID)
+	if got := store.org.SecretBackend.OnePassword.PlatformVaultID; got != chosen.ID {
+		t.Errorf("PlatformVaultID = %q, want %q", got, chosen.ID)
 	}
-	// Only one vault should exist with that title.
-	vaults, _ := client.ListVaults(context.Background())
-	count := 0
-	for _, v := range vaults {
-		if v.Title == secrets.PlatformVaultName("default") {
-			count++
-		}
+	if got := store.org.SecretBackend.OnePassword.PlatformVaultName; got != chosen.Title {
+		t.Errorf("PlatformVaultName = %q, want %q", got, chosen.Title)
 	}
-	if count != 1 {
-		t.Errorf("expected 1 platform vault, got %d", count)
+}
+
+func TestSetPlatformVault_RejectsUnknownVault(t *testing.T) {
+	// Operator submits a vault ID that the SA token can't see — should 422
+	// rather than persist a dangling reference.
+	fakeOP := onepassword.NewFakeClient()
+	org := &rbac.Org{
+		Name:          "default",
+		SecretBackend: secrets.BackendConfig{Type: secrets.Backend1Password},
+	}
+	store := &staticOrgProvider{org: org}
+	sh := &secretsHandler{
+		orgStore:        store,
+		logger:          slog.Default(),
+		saTokenStore:    &memSATokenStore{token: "fake"},
+		saClientFactory: func(_ context.Context, _ string) (onepassword.SAClient, error) { return fakeOP, nil },
+	}
+
+	body, _ := json.Marshal(SetPlatformVaultRequest{VaultID: "no-such-vault"})
+	req := httptest.NewRequest("PUT", "/api/v1/org/secret-backend/platform-vault", bytes.NewBuffer(body))
+	rec := httptest.NewRecorder()
+	sh.handleSetPlatformVault(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for unknown vault, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if store.org.SecretBackend.OnePassword != nil &&
+		store.org.SecretBackend.OnePassword.PlatformVaultID != "" {
+		t.Error("PlatformVaultID should not be persisted on validation failure")
+	}
+}
+
+func TestSetPlatformVault_RejectsK8sBackend(t *testing.T) {
+	org := &rbac.Org{
+		Name:          "default",
+		SecretBackend: secrets.BackendConfig{Type: secrets.BackendK8s},
+	}
+	store := &staticOrgProvider{org: org}
+	sh := &secretsHandler{
+		orgStore:        store,
+		logger:          slog.Default(),
+		saTokenStore:    &memSATokenStore{token: "fake"},
+		saClientFactory: func(_ context.Context, _ string) (onepassword.SAClient, error) { return onepassword.NewFakeClient(), nil },
+	}
+
+	body, _ := json.Marshal(SetPlatformVaultRequest{VaultID: "v1"})
+	req := httptest.NewRequest("PUT", "/api/v1/org/secret-backend/platform-vault", bytes.NewBuffer(body))
+	rec := httptest.NewRecorder()
+	sh.handleSetPlatformVault(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for k8s backend, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetPlatformVault_MissingVaultIDIs422(t *testing.T) {
+	org := &rbac.Org{
+		Name:          "default",
+		SecretBackend: secrets.BackendConfig{Type: secrets.Backend1Password},
+	}
+	store := &staticOrgProvider{org: org}
+	sh := &secretsHandler{
+		orgStore:        store,
+		logger:          slog.Default(),
+		saTokenStore:    &memSATokenStore{token: "fake"},
+		saClientFactory: func(_ context.Context, _ string) (onepassword.SAClient, error) { return onepassword.NewFakeClient(), nil },
+	}
+
+	body, _ := json.Marshal(SetPlatformVaultRequest{})
+	req := httptest.NewRequest("PUT", "/api/v1/org/secret-backend/platform-vault", bytes.NewBuffer(body))
+	rec := httptest.NewRecorder()
+	sh.handleSetPlatformVault(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for missing vaultId, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -879,31 +922,3 @@ type memSATokenStore struct {
 func (m *memSATokenStore) SaveToken(_ context.Context, t string) error { m.token = t; return nil }
 func (m *memSATokenStore) LoadToken(_ context.Context) (string, error) { return m.token, nil }
 
-func TestEnsurePlatformVault_SkipsForK8sBackend(t *testing.T) {
-	// K8s backend should not provision a platform vault even if a SA client
-	// is wired (e.g., during a backend-type switch). The 1Password vault
-	// should only appear when 1Password is the effective backend.
-	org := &rbac.Org{
-		Name:          "default",
-		SecretBackend: secrets.BackendConfig{Type: secrets.BackendK8s},
-	}
-	store := &staticOrgProvider{org: org}
-	sh := &secretsHandler{
-		orgStore: store,
-		logger:   slog.Default(),
-	}
-	client := onepassword.NewFakeClient()
-
-	if err := sh.ensurePlatformVault(context.Background(), client); err != nil {
-		t.Fatalf("ensurePlatformVault: %v", err)
-	}
-
-	if store.org.SecretBackend.OnePassword != nil {
-		t.Errorf("OnePassword config should remain nil for K8s backend, got %+v",
-			store.org.SecretBackend.OnePassword)
-	}
-	vaults, _ := client.ListVaults(context.Background())
-	if len(vaults) != 0 {
-		t.Errorf("expected 0 vaults for K8s backend, got %d", len(vaults))
-	}
-}

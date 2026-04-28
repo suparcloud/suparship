@@ -6,10 +6,9 @@ The setup is **opinionated by design** — there is one supported way to wire 1P
 
 ## TL;DR
 
-- Two credential types: a **Service Account (SA) token** for suparShip to write secrets, and **per-env Connect tokens** for ESO to read them.
-- Paste the SA token → suparShip auto-creates a **platform-shared vault** for org / project items.
-- **Add Binding** per environment (pick env vault, paste Connect token). Grant the Connect token read access to **both** the env vault and the platform vault.
-- suparShip seals each Connect token, commits SealedSecret + ClusterSecretStore to GitOps, and saves the binding.
+- 1Password Service Accounts **cannot create vaults or issue Connect tokens** — the operator creates both manually in the 1Password console. suparShip handles the cluster-side automation: sealing Connect tokens, generating `ClusterSecretStore`s, and publishing the manifests to GitOps.
+- Two credential types: a **Service Account (SA) token** for suparShip to write secrets into existing vaults, and **per-env Connect tokens** for ESO to read them at runtime.
+- After creating the vaults: paste the SA token, **pick the platform-shared vault** from the dropdown, then **Add Binding** per environment (pick env vault, paste Connect token). Each Connect token must have read access to **both** the env vault and the platform vault.
 
 ### Scope → vault routing
 
@@ -36,15 +35,17 @@ sequenceDiagram
     participant Argo as ArgoCD
     participant Target as Target Cluster
 
-    Admin->>OP: 1. Create env vaults (staging-apps, prod-apps)
+    Admin->>OP: 1. Create platform-shared vault + per-env vaults
     Admin->>OP: 2. Create SA token with R/W to all suparship vaults
-    Admin->>OP: 3. Create Connect Server, grant access to env vaults
-    Admin->>OP: 4. Issue per-env Connect tokens
-    Admin->>OP: 5. Grant each Connect token read access to the platform vault
-    Admin->>UI: 6. Paste SA token
+    Admin->>OP: 3. Create Connect Server, grant access to all vaults
+    Admin->>OP: 4. Issue per-env Connect tokens (each scoped to its env vault + platform vault)
+    Admin->>UI: 5. Paste SA token
     UI->>API: POST /sa-token
-    API->>OP: CreateVault(suparship-{org}-platform)
-    API-->>UI: valid, N vaults visible, platform vault provisioned
+    API-->>UI: valid, N vaults visible
+    Admin->>UI: 6. Pick platform-shared vault from dropdown
+    UI->>API: PUT /platform-vault {vaultId}
+    API->>OP: GetVault(vaultId) — validate
+    API-->>UI: persisted
     Admin->>UI: 7. Add binding (select env vault, paste Connect token)
     UI->>API: POST /bindings
     API->>API: Fetch sealed-secrets cert from target cluster
@@ -76,12 +77,14 @@ Before you begin, you need:
 
 ### Step 1: Create vaults in 1Password
 
-In the 1Password web console:
+1Password Service Accounts **cannot create vaults**, so the operator creates them by hand in the 1Password web console:
 
-1. Create one vault per environment (e.g. `staging-apps`, `prod-apps`).
-2. Do **not** create the platform-shared vault by hand — suparShip creates it for you on SA-token paste with the conventional name `suparship-{org}-platform`.
-3. Create a **Service Account** with Read & Write access to those vaults plus permission to create new vaults (so suparShip can provision the platform vault on first run).
+1. Create the **platform-shared vault** (any name you like; e.g. `company-shared`). This holds org and project secrets and is read-only from every cluster's ESO.
+2. Create one **env vault** per environment (e.g. `staging-apps`, `prod-apps`). These hold env-type, app, app-env, and cluster secrets for that environment.
+3. Create a **Service Account** with Read & Write access to all of those vaults.
 4. Copy the SA token.
+
+> The platform-shared vault has no naming convention enforced — suparShip remembers whichever vault you pick in the UI. Common names: `platform-shared`, `{org}-shared`, or just `org-secrets`.
 
 ### Step 2: Save the SA token in suparShip
 
@@ -92,7 +95,23 @@ In the 1Password web console:
 suparship secrets sa-token --from-file=sa-token.txt
 ```
 
-suparShip validates the token, **creates the platform-shared vault** (idempotently — re-pasting reuses the existing vault), and shows how many vaults are accessible. The SA token is stored as a Kubernetes Secret in `suparship-system/suparship-op-sa-token`; the platform vault ID is persisted in the org config.
+suparShip validates the token and shows how many vaults are accessible. The SA token is stored as a Kubernetes Secret in `suparship-system/suparship-op-sa-token`.
+
+### Step 2b: Pick the platform-shared vault
+
+**UI:** Settings → Secrets Backend → "List vaults" → pick the platform-shared vault from the dropdown → Save.
+
+suparShip validates the chosen vault is visible to the SA token (via `GetVault`) and persists the ID into `org.SecretBackend.OnePassword.PlatformVaultID`.
+
+> **Server restart required**: the upper-level writer that routes org/project secret writes is built once at startup. Restart the suparShip server after picking the platform vault so subsequent writes land in the chosen vault. Restart is also required after rotating to a different platform vault.
+
+The corresponding API call is:
+```bash
+curl -X PUT $SUPARSHIP_URL/api/v1/org/secret-backend/platform-vault \
+  -H "Cookie: session=…" \
+  -H "Content-Type: application/json" \
+  -d '{"vaultId": "abc-123-def-456"}'
+```
 
 ### Step 3: Check cluster prerequisites
 
@@ -239,7 +258,6 @@ These are intentionally not configurable — they keep every install identical a
 | K8s ExternalSecret + Secret | `{app}-secrets` | `web-secrets` |
 | K8s ConfigMap | `{app}-config` | `web-config` |
 | ClusterSecretStore | `{provider}-{env}` | `onepassword-prod` |
-| Platform vault | `suparship-{org}-platform` | `suparship-default-platform` |
 | Vault item: org | `org` | `org` |
 | Vault item: env-type | `env-{env}` | `env-prod` |
 | Vault item: project | `{project}` | `acme` |
@@ -247,7 +265,7 @@ These are intentionally not configurable — they keep every install identical a
 | Vault item: app-env | `{project}-{app}-{env}` | `acme-web-prod` |
 | Vault item: cluster | `cluster-{cluster}` | `cluster-kind-prod` |
 
-All patterns are configurable via org-level `ResourceNaming` settings. The defaults above are the out-of-the-box values for every new installation. The platform vault name follows the fixed `suparship-{org}-platform` convention and is not configurable — operators recognise it on sight.
+All patterns are configurable via org-level `ResourceNaming` settings. The defaults above are the out-of-the-box values for every new installation. The platform-shared vault and per-env vaults are named freely by the operator in the 1Password console — suparShip stores their UUIDs, not their names.
 
 ## Platform-managed secrets and config (default)
 
@@ -440,7 +458,7 @@ When an org switches `secretBackend.type` from `k8s` to `onepassword`, existing 
 **Preconditions:**
 
 1. The org backend is set to `onepassword`.
-2. The SA token has been pasted (and the platform vault has been provisioned automatically as a side effect — see Step 2).
+2. The SA token has been pasted, the platform-shared vault has been picked (Step 2b), and the suparShip server has been restarted so the upper-level writer points at the chosen vault.
 3. Each env's Connect token has read access to both the env vault and the platform vault.
 
 **UI:** Settings → Secrets Backend → 1Password section → scroll to **Migrate K8s Secrets to 1Password** → tick which env-types / projects / clusters to migrate (org scope is always included) → click **Migrate to 1Password**.
@@ -481,18 +499,20 @@ Response:
 The Connect token for that env can't read the platform vault. ESO will succeed for env-vault items but log `vault not found` for `org` / `{project}` items. Fix:
 
 1. In the 1Password web console, open the Connect server's vault grants.
-2. Add read access to `suparship-{org}-platform` for the env's Connect token.
+2. Add read access to the platform-shared vault (whichever vault you picked in Step 2b) for the env's Connect token.
 3. Trigger a re-sync: `kubectl annotate externalsecret <app>-secrets suparship.io/forced-sync-at="$(date -u +%FT%TZ)" -n <ns> --overwrite`.
 
 No re-bind is needed — the same Connect token now sees both vaults.
 
 ### Migration endpoint returns 422 "platform vault not provisioned"
 
-The platform vault was never created — most often because the SA token paste failed before reaching `CreateVault`, or the SA token lacked `create vault` permission at the time. Fix:
+The platform-shared vault hasn't been picked yet (or the org config got cleared). Fix:
 
-1. Confirm the SA in 1Password has Read & Write on existing vaults **plus** vault-creation permission.
-2. Re-paste the SA token in Settings → Secrets Backend. The provisioning step is idempotent and runs on every paste.
+1. Settings → Secrets Backend → "List vaults" → pick the platform-shared vault → Save.
+2. Restart the suparShip server so the upper-level writer is rebuilt against the new ID.
 3. Re-run the migration.
+
+If you don't see the vault you want in the dropdown, the SA token doesn't have access to it — grant Read & Write in the 1Password console and click ⟳ to refresh.
 
 ### `gitops: skipping publish for unbound env`
 
@@ -500,7 +520,7 @@ The env has no `ClusterRef`, or the referenced cluster isn't registered in supar
 
 ### "Resolved Secrets" shows org keys but they don't reach the workload
 
-Most likely the per-app `ExternalSecret` was generated before the platform vault existed (so its `dataFrom` lacks the org entry), or the upper-level writer wasn't rebuilt after restart. Fix:
+Most likely the per-app `ExternalSecret` was generated before the platform vault was picked (so its `dataFrom` lacks the org entry), or the upper-level writer wasn't rebuilt after the platform-vault change. Fix:
 
 1. Verify `org.SecretBackend.OnePassword.PlatformVaultID` is non-empty (check via `GET /api/v1/org/secret-backend`).
 2. Restart suparShip — the upper-level writer is built once at startup; later changes to `PlatformVaultID` aren't hot-reloaded.

@@ -123,6 +123,23 @@ export function removeBinding(env: string): Promise<void> {
   );
 }
 
+// ── Platform vault picker ──────────────────────────────────────────────────────
+
+export interface SetPlatformVaultResponse {
+  vaultId: string;
+  vaultName: string;
+}
+
+export function setPlatformVault(
+  vaultId: string,
+  vaultName?: string,
+): Promise<SetPlatformVaultResponse> {
+  return api.put<SetPlatformVaultResponse>(
+    "/org/secret-backend/platform-vault",
+    { vaultId, vaultName: vaultName || "" },
+  );
+}
+
 // ── Migration to 1Password ─────────────────────────────────────────────────────
 
 export interface MigrateToOnePasswordRequest {

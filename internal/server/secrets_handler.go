@@ -241,16 +241,6 @@ func (h *secretsHandler) handlePostSAToken(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, http.StatusOK, SATokenResponse{Valid: false, Error: err.Error()})
 			return
 		}
-
-		// Idempotently provision the org-wide platform-shared vault and persist
-		// its ID. This is the source of truth for org/project secrets when the
-		// 1Password backend is active. Failure is non-fatal — the token is
-		// still valid; the operator can retry the paste to recover.
-		if err := h.ensurePlatformVault(r.Context(), client); err != nil {
-			h.logger.Warn("platform vault provision failed — org/project secret writes will be unavailable until resolved",
-				"err", err)
-		}
-
 		writeJSON(w, http.StatusOK, SATokenResponse{Valid: true, VaultCount: count})
 		return
 	}
@@ -400,58 +390,97 @@ func buildOrgEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) stri
 	}
 }
 
-// ensurePlatformVault creates (idempotently) the org-wide platform-shared
-// vault and persists its ID into org.SecretBackend.OnePassword.PlatformVaultID.
-// Safe to call repeatedly: existing vaults with the platform name are reused,
-// and the persisted ID is only updated when it changes.
+// SetPlatformVaultRequest is the JSON body for the platform-vault picker
+// endpoint. The operator supplies a vault ID they created manually in the
+// 1Password console (1Password Service Accounts cannot create vaults, so
+// suparShip cannot auto-provision one).
+type SetPlatformVaultRequest struct {
+	// VaultID is the 1Password vault UUID the operator picked from the
+	// dropdown populated by listVaults. Required.
+	VaultID string `json:"vaultId"`
+	// VaultName is informational — the operator-visible title carried from
+	// the listVaults response. Persisted alongside the ID for UI display.
+	VaultName string `json:"vaultName,omitempty"`
+}
+
+// handleSetPlatformVault persists the operator's choice of platform-shared
+// vault. The vault must already exist in 1Password and be visible to the
+// stored SA token; this handler validates that with a GetVault call before
+// saving so a typo can't leave org config pointing at a non-existent vault.
 //
-// The vault is the source of truth for org and project secrets when the
-// 1Password backend is active. Bindings (per-env vaults) are still created
-// separately via handleAddBinding.
-func (h *secretsHandler) ensurePlatformVault(ctx context.Context, client onepassword.SAClient) error {
-	if h.orgStore == nil {
-		return fmt.Errorf("org store not configured")
+// Note: org/project writes won't actually start landing in the chosen vault
+// until the suparShip server is restarted — the upper-level writer is
+// constructed once at startup using the persisted PlatformVaultID. Hot-reload
+// is a follow-up.
+func (h *secretsHandler) handleSetPlatformVault(w http.ResponseWriter, r *http.Request) {
+	var req SetPlatformVaultRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
 	}
+	if req.VaultID == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "vaultId is required"})
+		return
+	}
+
+	ctx := r.Context()
 	org, err := h.orgStore.GetOrg(ctx)
 	if err != nil {
-		return fmt.Errorf("load org: %w", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
 	}
-	// Only provision when the org has selected the 1Password backend; for K8s
-	// orgs this would needlessly create a vault.
 	if org.SecretBackend.Effective() != secrets.Backend1Password {
-		return nil
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "platform vault can only be set when the 1Password backend is selected",
+		})
+		return
 	}
 
-	orgName := org.Name
-	if orgName == "" {
-		orgName = "default"
+	// Validate the vault exists and is accessible to the stored SA token.
+	if h.saTokenStore == nil || h.saClientFactory == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "1Password client not configured"})
+		return
 	}
-	title := secrets.PlatformVaultName(orgName)
-
-	vault, err := client.CreateVault(ctx, title, "Platform-shared vault: org and project secrets, read-only from every cluster")
+	token, err := h.saTokenStore.LoadToken(ctx)
+	if err != nil || token == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "SA token not saved yet — paste it first"})
+		return
+	}
+	client, err := h.saClientFactory(ctx, token)
 	if err != nil {
-		return fmt.Errorf("create platform vault %q: %w", title, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to create 1Password client: " + err.Error()})
+		return
+	}
+	info, err := client.GetVault(ctx, req.VaultID)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "vault not accessible to the stored SA token: " + err.Error(),
+		})
+		return
+	}
+	resolvedName := info.Title
+	if req.VaultName != "" {
+		resolvedName = req.VaultName
 	}
 
 	if org.SecretBackend.OnePassword == nil {
 		org.SecretBackend.OnePassword = &secrets.OnePasswordConfig{}
 	}
-	if org.SecretBackend.OnePassword.PlatformVaultID == vault.ID &&
-		org.SecretBackend.OnePassword.PlatformVaultName == vault.Title {
-		// Already persisted — nothing to write.
-		return nil
-	}
-	org.SecretBackend.OnePassword.PlatformVaultID = vault.ID
-	org.SecretBackend.OnePassword.PlatformVaultName = vault.Title
-
+	org.SecretBackend.OnePassword.PlatformVaultID = info.ID
+	org.SecretBackend.OnePassword.PlatformVaultName = resolvedName
 	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
-		return fmt.Errorf("persist platform vault id: %w", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist org"})
+		return
 	}
-	h.logger.Info("platform vault provisioned",
-		"vaultID", vault.ID,
-		"vaultTitle", vault.Title,
+
+	h.logger.Info("platform vault set",
+		"vaultID", info.ID,
+		"vaultTitle", resolvedName,
 	)
-	return nil
+	writeJSON(w, http.StatusOK, map[string]string{
+		"vaultId":   info.ID,
+		"vaultName": resolvedName,
+	})
 }
 
 // ── Vault listing ───────────────────────────────────────────────────────────
