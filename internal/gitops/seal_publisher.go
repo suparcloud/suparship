@@ -31,6 +31,12 @@ type SealedReadTokenPublishParams struct {
 	// ConnectEndpoint is the in-cluster URL of the 1Password Connect server.
 	// Defaults to DefaultConnectEndpoint when empty.
 	ConnectEndpoint string
+	// PlatformVaultID is the org-wide platform-shared 1Password vault. When
+	// non-empty, the rendered ClusterSecretStore lists it as a priority-2
+	// vault alongside the env vault, so org/project items live in a single
+	// vault read by every cluster's ESO (matches the multi-store design from
+	// Phase 3). The Connect token must have read access to both vaults.
+	PlatformVaultID string
 }
 
 // DeleteSealedReadTokenParams captures the inputs needed to remove a
@@ -40,6 +46,22 @@ type DeleteSealedReadTokenParams struct {
 	Env string
 	// ClusterName is the cluster name used in the ArgoCD Application name.
 	ClusterName string
+}
+
+// RefreshSecretStoreParams captures the inputs needed to rewrite ONLY the
+// store.yaml under gitops-output/_secret-stores/{env}/ — without re-sealing
+// the Connect token or republishing the per-cluster ArgoCD Application.
+//
+// Used after the operator picks a new platform-shared vault so existing
+// bindings' deployed ClusterSecretStores pick up the platform vault entry
+// without forcing the operator to re-paste each Connect token.
+type RefreshSecretStoreParams struct {
+	Env             string
+	VaultID         string
+	OrgName         string
+	ESONamespace    string
+	ConnectEndpoint string
+	PlatformVaultID string
 }
 
 // PublishSealedReadToken seals the provided Connect token using the target
@@ -103,6 +125,7 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 		Binding:         secrets.EnvBinding{Env: params.Env, VaultID: params.VaultID},
 		ESONamespace:    esoNS,
 		ConnectEndpoint: params.ConnectEndpoint,
+		PlatformVaultID: params.PlatformVaultID,
 	})
 
 	destServer := params.ArgoCDDestination
@@ -189,6 +212,57 @@ func (p *Publisher) DeleteSealedReadToken(ctx context.Context, params DeleteSeal
 			return nil
 		}
 		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): remove secret-store for env=%s cluster=%s", params.Env, params.ClusterName))
+	})
+}
+
+// RefreshSecretStore rewrites only store.yaml under gitops-output/_secret-stores/{env}/
+// without re-sealing the Connect token. Idempotent — when the rendered YAML
+// matches the file already in Git, no commit is created.
+//
+// Used after handleSetPlatformVault saves a new PlatformVaultID, so every
+// existing binding's deployed ClusterSecretStore picks up the platform vault
+// entry on its next ArgoCD sync without forcing the operator to re-paste any
+// Connect tokens.
+func (p *Publisher) RefreshSecretStore(ctx context.Context, params RefreshSecretStoreParams) error {
+	if params.Env == "" || params.VaultID == "" {
+		return fmt.Errorf("RefreshSecretStore: env and vaultID are required")
+	}
+
+	naming := secrets.ResourceNaming{}
+	storeName := naming.RenderClusterSecretStore(secrets.NamingParams{
+		Provider: string(secrets.Backend1Password),
+		Env:      params.Env,
+		Org:      params.OrgName,
+	})
+	esoNS := params.ESONamespace
+	if esoNS == "" {
+		esoNS = "external-secrets"
+	}
+	storeYAML := BuildClusterSecretStoreYAML(ESOSecretStoreConfig{
+		Name:            storeName,
+		BackendType:     secrets.Backend1Password,
+		Binding:         secrets.EnvBinding{Env: params.Env, VaultID: params.VaultID},
+		ESONamespace:    esoNS,
+		ConnectEndpoint: params.ConnectEndpoint,
+		PlatformVaultID: params.PlatformVaultID,
+	})
+
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		path := filepath.Join(repoDir, "gitops-output", "_secret-stores", params.Env, "store.yaml")
+		// Refuse to write if the per-env directory doesn't exist — that means
+		// no binding was ever published for this env, and creating an
+		// orphaned store.yaml without a sealed-token would yield a broken
+		// ClusterSecretStore once ArgoCD picks it up.
+		if _, err := os.Stat(filepath.Dir(path)); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("stat secret-store dir for env %s: %w", params.Env, err)
+		}
+		if err := p.writeFile(path, []byte(storeYAML)); err != nil {
+			return err
+		}
+		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): refresh store for env=%s", params.Env))
 	})
 }
 

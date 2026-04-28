@@ -71,6 +71,11 @@ type SAClientFactory func(ctx context.Context, token string) (onepassword.SAClie
 type SealedTokenPublisher interface {
 	PublishSealedReadToken(ctx context.Context, params gitops.SealedReadTokenPublishParams) error
 	DeleteSealedReadToken(ctx context.Context, params gitops.DeleteSealedReadTokenParams) error
+	// RefreshSecretStore rewrites only store.yaml for an existing binding
+	// (no Connect-token reseal). Used to propagate a new PlatformVaultID
+	// into stores deployed via per-cluster ArgoCD Applications without
+	// forcing operators to re-paste each Connect token.
+	RefreshSecretStore(ctx context.Context, params gitops.RefreshSecretStoreParams) error
 }
 
 // ClusterKubeBuilder builds a Kubernetes client for a registered cluster.
@@ -549,6 +554,35 @@ func (h *secretsHandler) handleSetPlatformVault(w http.ResponseWriter, r *http.R
 		)
 	}
 
+	// Refresh existing per-env ClusterSecretStore manifests in the GitOps
+	// repo so the deployed stores pick up the new platform vault on the
+	// next ArgoCD sync. The store is rewritten without re-sealing the
+	// Connect token, so operators don't need to re-paste anything. Each
+	// failure is logged but doesn't fail the whole save — the operator
+	// can re-bind the affected env to refresh manually.
+	if h.sealPublisher != nil && org.SecretBackend.OnePassword != nil {
+		for _, b := range org.SecretBackend.OnePassword.Bindings {
+			if !b.Provisioned || b.VaultID == "" {
+				continue
+			}
+			refreshErr := h.sealPublisher.RefreshSecretStore(ctx, gitops.RefreshSecretStoreParams{
+				Env:             b.Env,
+				VaultID:         b.VaultID,
+				OrgName:         org.Name,
+				ConnectEndpoint: b.ConnectEndpoint,
+				PlatformVaultID: info.ID,
+			})
+			if refreshErr != nil {
+				h.logger.Warn("refresh secret store failed for env — re-bind to refresh manually",
+					"env", b.Env,
+					"err", refreshErr,
+				)
+			} else {
+				h.logger.Info("refreshed secret store for env", "env", b.Env, "platformVaultID", info.ID)
+			}
+		}
+	}
+
 	h.logger.Info("platform vault set",
 		"vaultID", info.ID,
 		"vaultTitle", resolvedName,
@@ -718,6 +752,10 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 			return
 		}
 
+		var platformVaultID string
+		if op := org.SecretBackend.OnePassword; op != nil {
+			platformVaultID = op.PlatformVaultID
+		}
 		publishErr := h.sealPublisher.PublishSealedReadToken(ctx, gitops.SealedReadTokenPublishParams{
 			Env:               req.Env,
 			VaultID:           req.VaultID,
@@ -728,6 +766,7 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 			ClusterName:       clusterName,
 			ESONamespace:      cluster.EffectiveESONamespace(),
 			ConnectEndpoint:   resolveConnectEndpoint(req.ConnectEndpoint, org),
+			PlatformVaultID:   platformVaultID,
 		})
 		if publishErr != nil {
 			h.logger.Error("failed to publish sealed token", "env", req.Env, "err", publishErr)

@@ -278,6 +278,17 @@ func (h *SealPublisherHolder) DeleteSealedReadToken(ctx context.Context, params 
 	return p.DeleteSealedReadToken(ctx, params)
 }
 
+// RefreshSecretStore implements SealedTokenPublisher.
+func (h *SealPublisherHolder) RefreshSecretStore(ctx context.Context, params gitops.RefreshSecretStoreParams) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.RefreshSecretStore(ctx, params)
+}
+
 // Swap replaces the inner publisher atomically.
 func (h *SealPublisherHolder) Swap(p SealedTokenPublisher) {
 	h.mu.Lock()

@@ -499,6 +499,7 @@ func TestResolvedSecrets(t *testing.T) {
 
 type stubSealPublisher struct {
 	published []gitops.SealedReadTokenPublishParams
+	refreshed []gitops.RefreshSecretStoreParams
 }
 
 func (s *stubSealPublisher) PublishSealedReadToken(_ context.Context, params gitops.SealedReadTokenPublishParams) error {
@@ -507,6 +508,11 @@ func (s *stubSealPublisher) PublishSealedReadToken(_ context.Context, params git
 }
 
 func (s *stubSealPublisher) DeleteSealedReadToken(_ context.Context, _ gitops.DeleteSealedReadTokenParams) error {
+	return nil
+}
+
+func (s *stubSealPublisher) RefreshSecretStore(_ context.Context, params gitops.RefreshSecretStoreParams) error {
+	s.refreshed = append(s.refreshed, params)
 	return nil
 }
 
@@ -691,6 +697,68 @@ func TestSetPlatformVault_PersistsOperatorPick(t *testing.T) {
 	}
 	if got := store.org.SecretBackend.OnePassword.PlatformVaultName; got != chosen.Title {
 		t.Errorf("PlatformVaultName = %q, want %q", got, chosen.Title)
+	}
+}
+
+// Regression test: when the operator picks a new platform vault, every
+// existing binding's per-cluster ClusterSecretStore in Git must be rewritten
+// so the deployed store sees both vaults. Without this, the workload
+// cluster's ESO can't resolve org/project items.
+func TestSetPlatformVault_RefreshesEachBoundEnvStore(t *testing.T) {
+	fakeOP := onepassword.NewFakeClient()
+	platform, _ := fakeOP.CreateVault(context.Background(), "company-shared", "")
+	org := &rbac.Org{
+		Name: "default",
+		SecretBackend: secrets.BackendConfig{
+			Type: secrets.Backend1Password,
+			OnePassword: &secrets.OnePasswordConfig{
+				Bindings: []secrets.EnvBinding{
+					{Env: "staging", VaultID: "v-stg", Provisioned: true, ConnectEndpoint: "http://op-stg:8080"},
+					{Env: "prod", VaultID: "v-prd", Provisioned: true},
+					{Env: "preview", VaultID: "v-prev", Provisioned: false}, // unprovisioned — should be skipped
+				},
+			},
+		},
+	}
+	store := &staticOrgProvider{org: org}
+	seal := &stubSealPublisher{}
+	sh := &secretsHandler{
+		orgStore:        store,
+		logger:          slog.Default(),
+		saTokenStore:    &memSATokenStore{token: "fake"},
+		saClientFactory: func(_ context.Context, _ string) (onepassword.SAClient, error) { return fakeOP, nil },
+		sealPublisher:   seal,
+	}
+
+	body, _ := json.Marshal(SetPlatformVaultRequest{VaultID: platform.ID})
+	req := httptest.NewRequest("PUT", "/api/v1/org/secret-backend/platform-vault", bytes.NewBuffer(body))
+	rec := httptest.NewRecorder()
+	sh.handleSetPlatformVault(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(seal.refreshed) != 2 {
+		t.Fatalf("expected 2 refresh calls (one per provisioned binding), got %d: %+v", len(seal.refreshed), seal.refreshed)
+	}
+	got := map[string]gitops.RefreshSecretStoreParams{}
+	for _, p := range seal.refreshed {
+		got[p.Env] = p
+	}
+	if got["staging"].PlatformVaultID != platform.ID {
+		t.Errorf("staging refresh PlatformVaultID = %q, want %q", got["staging"].PlatformVaultID, platform.ID)
+	}
+	if got["staging"].VaultID != "v-stg" {
+		t.Errorf("staging refresh VaultID = %q, want %q", got["staging"].VaultID, "v-stg")
+	}
+	if got["staging"].ConnectEndpoint != "http://op-stg:8080" {
+		t.Errorf("staging refresh ConnectEndpoint = %q, want per-binding override", got["staging"].ConnectEndpoint)
+	}
+	if got["prod"].PlatformVaultID != platform.ID {
+		t.Errorf("prod refresh PlatformVaultID = %q, want %q", got["prod"].PlatformVaultID, platform.ID)
+	}
+	if _, ok := got["preview"]; ok {
+		t.Errorf("unprovisioned binding 'preview' should not have triggered a refresh, got %+v", got["preview"])
 	}
 }
 
