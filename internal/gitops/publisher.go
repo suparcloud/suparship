@@ -455,7 +455,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 
 		// Write values.yaml — Helm values with env-specific baseDomain and
 		// the resolved namespace so secretName/configName are consistent.
-		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName)
+		var backend secrets.BackendType
+		if p.cfg.BackendConfig != nil {
+			backend = p.cfg.BackendConfig.Effective()
+		}
+		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName, backend)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
@@ -833,7 +837,11 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		if previewOrgName == "" {
 			previewOrgName = "default"
 		}
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName)
+		var previewBackend secrets.BackendType
+		if p.cfg.BackendConfig != nil {
+			previewBackend = p.cfg.BackendConfig.Effective()
+		}
+		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName, previewBackend)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)

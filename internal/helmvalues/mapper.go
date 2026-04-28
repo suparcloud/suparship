@@ -68,14 +68,20 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 //
 // When baseDomain is empty, "localhost" is used.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
-	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "")
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "", "")
 }
 
 // MapToHelmValuesForEnv is the canonical mapper. The naming and orgName
 // arguments mirror what the publisher uses to render ExternalSecret /
-// ConfigMap names in gitops-output, so values.yaml's
-// suparship.secretName / configName always match the K8s resource the
-// platform-managed publisher actually creates.
+// ConfigMap names in gitops-output, so values.yaml's envFrom lists always
+// match the K8s resources the platform-managed publisher actually creates.
+//
+// backend selects which app-env name appears in the envFrom lists:
+//   - secrets.Backend1Password → ESO-materialised target name from
+//     RenderAppResource (the only Secret that exists on this backend).
+//   - secrets.BackendK8s       → suparship-system-replicated name from
+//     AppEnvSecretName / AppConfigName (the only Secret/ConfigMap that
+//     exists on this backend).
 //
 // Cluster is used only for the cluster-scope envFrom name; pass "" for
 // unbound envs (the cluster scope is then omitted from the lists).
@@ -90,6 +96,7 @@ func MapToHelmValuesForEnv(
 	baseDomain, namespace, cluster string,
 	naming secrets.ResourceNaming,
 	orgName string,
+	backend secrets.BackendType,
 ) HelmValues {
 	if baseDomain == "" {
 		baseDomain = "localhost"
@@ -122,6 +129,7 @@ func MapToHelmValuesForEnv(
 		app.ProjectName, app.Name, envName, string(envType), cluster,
 		naming.RenderAppResource(np),
 		naming.RenderAppConfigMap(np),
+		backend,
 	)
 
 	return HelmValues{
@@ -145,58 +153,66 @@ func MapToHelmValuesForEnv(
 	}
 }
 
-// envFromLists returns the full hierarchy of ConfigMap and Secret names the
-// chart should envFrom, in precedence order — org → env-type → project → app
-// → app-env → cluster. Names match what the suparship platform-managed path
-// writes (publisher commits + K8s upper-level writer + Stakater Replicator):
-// the chart needs no string concatenation or backend awareness, just iterate.
+// envFromLists returns the names the chart should envFrom for this app-env,
+// in precedence order. The two lists evolve differently because Secrets and
+// ConfigMaps have different runtime collapsing strategies:
 //
-// The most-specific app-env entry includes both names that may exist:
-//   - appEnvESOName  — the ExternalSecret target (RenderAppResource), which
-//     ESO materialises in the env namespace on the 1Password backend.
-//   - appEnvK8sName  — the suparship-system K8s Secret name written by the
-//     UpperLevelSecretWriter on the K8s backend, replicated by Stakater into
-//     the env namespace.
+// envFromConfigMaps — always per-scope. Stakater Replicator delivers one
+// ConfigMap per scope (org / env-type / project / cluster) into the env
+// namespace; the publisher writes one more directly (app + app-env merged
+// into "{app}-config" by RenderAppConfigMap). There is no analogous
+// "collapse all scopes into one ConfigMap" mechanism.
 //
-// On a given backend only one of these actually exists; the other resolves
-// to a no-op via `optional: true` in the chart's envFrom block. When the
-// operator has customised RenderAppResource so the two names coincide, only
-// one entry is emitted.
+// envFromSecrets — backend-specific:
+//   - 1Password (and any ESO-mediated backend): the publisher writes a
+//     collapsed ExternalSecret with one dataFrom entry per scope; ESO
+//     merges them into a SINGLE K8s Secret named by RenderAppResource
+//     (e.g. "{app}-secrets"). The chart envFroms only that one Secret —
+//     listing the per-scope names would point at non-existent resources.
+//   - K8s: there is no ESO collapse. The K8s UpperLevelSecretWriter writes
+//     a Secret per scope into suparship-system; Stakater Replicator copies
+//     each into the env namespace under the same name. The chart envFroms
+//     all six.
 //
 // cluster=="" omits the cluster-scope tail (env unbound).
-func envFromLists(project, app, envName, envType, cluster, appEnvESOName, appEnvESOConfigName string) ([]string, []string) {
+func envFromLists(project, app, envName, envType, cluster, appEnvESOName, appEnvESOConfigName string, backend secrets.BackendType) ([]string, []string) {
 	envvarsKey := envType
 	if envvarsKey == "" {
 		envvarsKey = envName
 	}
-	appEnvK8sName := secrets.AppEnvSecretName(project, app, envName)
-	appEnvK8sConfigName := secrets.AppConfigName(project, app, envName)
 
+	// Order is precedence-low-to-high: Kubernetes envFrom merges later
+	// entries on top, so cluster (platform escape hatch) must come last.
 	cms := []string{
 		"suparship-envvars-org",
 		"suparship-envvars-env-" + envvarsKey,
 		"suparship-envvars-project-" + project,
-		"suparship-envvars-app-" + project + "-" + app,
+		// Per-app ConfigMap holds merged app + app-env vars; written by the
+		// publisher directly into the env namespace via ArgoCD.
 		appEnvESOConfigName,
 	}
-	if appEnvK8sConfigName != appEnvESOConfigName {
-		cms = append(cms, appEnvK8sConfigName)
-	}
-
-	secs := []string{
-		"suparship-secrets-org",
-		"suparship-secrets-envtype-" + envvarsKey,
-		"suparship-secrets-project-" + project,
-		"suparship-secrets-app-" + project + "-" + app,
-		appEnvESOName,
-	}
-	if appEnvK8sName != appEnvESOName {
-		secs = append(secs, appEnvK8sName)
-	}
-
 	if cluster != "" {
 		cms = append(cms, "suparship-envvars-cluster-"+cluster)
-		secs = append(secs, "suparship-secrets-cluster-"+cluster)
+	}
+
+	var secs []string
+	switch backend {
+	case secrets.BackendK8s:
+		// One replicated Secret per scope.
+		secs = []string{
+			"suparship-secrets-org",
+			"suparship-secrets-envtype-" + envvarsKey,
+			"suparship-secrets-project-" + project,
+			"suparship-secrets-app-" + project + "-" + app,
+			secrets.AppEnvSecretName(project, app, envName),
+		}
+		if cluster != "" {
+			secs = append(secs, "suparship-secrets-cluster-"+cluster)
+		}
+	default:
+		// 1Password / any ESO-mediated backend: ESO collapses all six
+		// scopes into a single Secret.
+		secs = []string{appEnvESOName}
 	}
 	return cms, secs
 }
