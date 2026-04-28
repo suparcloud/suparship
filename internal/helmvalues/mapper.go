@@ -126,7 +126,7 @@ func MapToHelmValuesForEnv(
 		Cluster: cluster,
 	}
 	cms, secs := envFromLists(
-		app.ProjectName, app.Name, envName, string(envType), cluster,
+		app.ProjectName, app.Name, envName, cluster,
 		naming.RenderAppResource(np),
 		naming.RenderAppConfigMap(np),
 		backend,
@@ -153,52 +153,33 @@ func MapToHelmValuesForEnv(
 	}
 }
 
-// envFromLists returns the names the chart should envFrom for this app-env,
-// in precedence order. The two lists evolve differently because Secrets and
-// ConfigMaps have different runtime collapsing strategies:
+// envFromLists returns the names the chart should envFrom for this app-env.
+// Both lists collapse to a single entry on ESO-mediated backends because the
+// publisher pre-merges all six scopes into one ConfigMap and one Secret — the
+// committed YAML in gitops-output is the audit-trail for what the pod sees.
 //
-// envFromConfigMaps — always per-scope. Stakater Replicator delivers one
-// ConfigMap per scope (org / env-type / project / cluster) into the env
-// namespace; the publisher writes one more directly (app + app-env merged
-// into "{app}-config" by RenderAppConfigMap). There is no analogous
-// "collapse all scopes into one ConfigMap" mechanism.
+// envFromConfigMaps — always one entry: the per-app "{app}-config" ConfigMap
+// the publisher writes with org → env-type → project → app → app-env → cluster
+// merged in precedence order. There is no chart-side multi-source merge.
 //
 // envFromSecrets — backend-specific:
-//   - 1Password (and any ESO-mediated backend): the publisher writes a
-//     collapsed ExternalSecret with one dataFrom entry per scope; ESO
-//     merges them into a SINGLE K8s Secret named by RenderAppResource
-//     (e.g. "{app}-secrets"). The chart envFroms only that one Secret —
-//     listing the per-scope names would point at non-existent resources.
+//   - 1Password (and any ESO-mediated backend): ESO merges all six scopes into
+//     a single K8s Secret named by RenderAppResource (e.g. "{app}-secrets").
+//     The chart envFroms only that one Secret.
 //   - K8s: there is no ESO collapse. The K8s UpperLevelSecretWriter writes
 //     a Secret per scope into suparship-system; Stakater Replicator copies
 //     each into the env namespace under the same name. The chart envFroms
 //     all six.
 //
-// cluster=="" omits the cluster-scope tail (env unbound).
-func envFromLists(project, app, envName, envType, cluster, appEnvESOName, appEnvESOConfigName string, backend secrets.BackendType) ([]string, []string) {
-	envvarsKey := envType
-	if envvarsKey == "" {
-		envvarsKey = envName
-	}
-
-	// Order is precedence-low-to-high: Kubernetes envFrom merges later
-	// entries on top, so cluster (platform escape hatch) must come last.
-	cms := []string{
-		"suparship-envvars-org",
-		"suparship-envvars-env-" + envvarsKey,
-		"suparship-envvars-project-" + project,
-		// Per-app ConfigMap holds merged app + app-env vars; written by the
-		// publisher directly into the env namespace via ArgoCD.
-		appEnvESOConfigName,
-	}
-	if cluster != "" {
-		cms = append(cms, "suparship-envvars-cluster-"+cluster)
-	}
+// cluster=="" omits the cluster-scope tail of the K8s Secret list (env unbound).
+func envFromLists(project, app, envName, cluster, appEnvESOName, appEnvESOConfigName string, backend secrets.BackendType) ([]string, []string) {
+	cms := []string{appEnvESOConfigName}
 
 	var secs []string
 	switch backend {
 	case secrets.BackendK8s:
 		// One replicated Secret per scope.
+		envvarsKey := envName
 		secs = []string{
 			"suparship-secrets-org",
 			"suparship-secrets-envtype-" + envvarsKey,

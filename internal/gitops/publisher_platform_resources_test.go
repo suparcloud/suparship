@@ -14,6 +14,10 @@ import (
 
 // TestPublishAppFiles_WritesConfigMap verifies that publishAppFiles writes
 // env-configmap.yaml with the correct name and namespace for each bound env.
+//
+// The publisher writes env.EnvVars verbatim — the adapter is responsible for
+// merging the six-scope hierarchy before publishing. Tests pass the merged map
+// directly via EnvVars to mirror that contract.
 func TestPublishAppFiles_WritesConfigMap(t *testing.T) {
 	dir := t.TempDir()
 
@@ -22,19 +26,18 @@ func TestPublishAppFiles_WritesConfigMap(t *testing.T) {
 		ProjectName: "demo",
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "web-service"},
-			EnvConfig: envconfig.EnvConfig{
-				Vars: map[string]string{"LOG_LEVEL": "info"},
-			},
 		},
 	}
 	envs := []gitops.AppPublishEnv{
 		{
 			EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
 			Namespace: "demo-nginx-staging",
+			EnvVars:   map[string]string{"LOG_LEVEL": "info"},
 		},
 		{
 			EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true,
 			Namespace: "demo-nginx-prod",
+			EnvVars:   map[string]string{"LOG_LEVEL": "info"},
 		},
 	}
 

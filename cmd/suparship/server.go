@@ -17,6 +17,7 @@ import (
 	"github.com/suparcloud/suparship/internal/bootstrap"
 	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/fake"
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/k8s"
@@ -379,6 +380,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					upperWriter:     upperLevelSecretWriter,
 					backend:         secretBackend,
 					appNamespaceFor: appStoreNamespaceResolver(appStore),
+					projectStore:    projectStore,
+					envConfigReader: envConfigReaderFromClient(kubeClient),
 				}
 				sealPublisherHolder.Swap(pub)
 				logger.Info("gitops publisher enabled",
@@ -488,6 +491,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				upperWriter:     upperLevelSecretWriter,
 				backend:         secretBackend,
 				appNamespaceFor: appStoreNamespaceResolver(appStore),
+				projectStore:    projectStore,
+				envConfigReader: envConfigReaderFromClient(kubeClient),
 			})
 			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
@@ -578,6 +583,13 @@ type gitOpsPublisherAdapter struct {
 	// to read app/app-env secret keys from the right namespace when populating
 	// ScopeKeys.
 	appNamespaceFor func(ctx context.Context, projectName, appName, envName string) (string, error)
+	// projectStore reads the project's own EnvConfig (project-scope env vars).
+	// Optional: when nil, the project layer contributes no vars.
+	projectStore project.Store
+	// envConfigReader reads the cluster-scope env-var ConfigMap from
+	// suparship-system. Optional: when nil, the cluster layer contributes no
+	// vars.
+	envConfigReader *envconfig.UpperLevelEnvWriter
 }
 
 // envResolved holds the resolved cluster and domain info for one environment.
@@ -761,6 +773,12 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 			a.enrichPubEnvWithSecrets(ctx, org, app, env.EnvName, &pub)
 		}
 
+		// Resolve and merge env vars from all six scopes into a single map.
+		// The publisher writes this verbatim as the per-app ConfigMap so the
+		// committed YAML in the GitOps repo is the audit-trail for what the
+		// pod will see — no chart-side multi-source merging.
+		pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
+
 		pubEnvs = append(pubEnvs, pub)
 	}
 
@@ -850,6 +868,70 @@ func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *doma
 	return out
 }
 
+// mergeAllEnvVars resolves env vars across the six-scope hierarchy and returns
+// the flattened map the publisher writes into gitops-output as the per-app
+// ConfigMap. Precedence is low-to-high — later scopes overwrite earlier keys:
+//
+//	1. org           (org.EnvConfig.Vars)
+//	2. env-type      (org.Environments[envName].EnvConfig.Vars)
+//	3. project       (project.Spec.EnvConfig.Vars)
+//	4. app           (app.Spec.EnvConfig.Vars)
+//	5. app-env       (app.Spec.EnvironmentDefaults[envName].EnvConfig.Vars)
+//	6. cluster       (suparship-envvars-cluster-{name} ConfigMap data)
+//
+// Errors at any layer are swallowed and the layer is treated as empty —
+// publishing should not fail because an upper-level ConfigMap is unreadable;
+// partial information is better than refusing to commit. Returns nil when no
+// layer contributes a key, mirroring helmvalues' "omit empty" YAML behaviour.
+func (a *gitOpsPublisherAdapter) mergeAllEnvVars(ctx context.Context, app *domain.App, envName, clusterRef string, org *rbac.Org) map[string]string {
+	merged := map[string]string{}
+
+	if org != nil {
+		for k, v := range org.EnvConfig.Vars {
+			merged[k] = v
+		}
+		for _, e := range org.Environments {
+			if e.Name == envName {
+				for k, v := range e.EnvConfig.Vars {
+					merged[k] = v
+				}
+				break
+			}
+		}
+	}
+
+	if a.projectStore != nil {
+		if proj, err := a.projectStore.Get(ctx, app.ProjectName); err == nil && proj != nil {
+			for k, v := range proj.Spec.EnvConfig.Vars {
+				merged[k] = v
+			}
+		}
+	}
+
+	for k, v := range app.Spec.EnvConfig.Vars {
+		merged[k] = v
+	}
+
+	if override, ok := app.Spec.EnvironmentDefaults[envName]; ok {
+		for k, v := range override.EnvConfig.Vars {
+			merged[k] = v
+		}
+	}
+
+	if clusterRef != "" && a.envConfigReader != nil {
+		if cfg, err := a.envConfigReader.ReadClusterEnvConfig(ctx, clusterRef); err == nil {
+			for k, v := range cfg.Vars {
+				merged[k] = v
+			}
+		}
+	}
+
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
 // PublishAppEnv implements server.GitOpsPublisher by resolving cluster info for
 // the single environment and writing its app.yaml + values.yaml to the GitOps
 // repo. Called on every explicit promotion so the target env's files exist
@@ -872,6 +954,16 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 		BaseDomain: res.baseDomain,
 		Namespace:  env.Namespace,
 	}
+
+	var org *rbac.Org
+	if a.orgProvider != nil {
+		org, _ = a.orgProvider.GetOrg(ctx)
+	}
+	if org != nil {
+		a.enrichPubEnvWithSecrets(ctx, org, app, env.EnvName, &pub)
+	}
+	pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
+
 	return a.inner.PublishAppEnv(ctx, app, pub)
 }
 
@@ -1032,6 +1124,16 @@ func buildEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string 
 	return func(cluster string) string {
 		return clusterToEnv[cluster]
 	}
+}
+
+// envConfigReaderFromClient builds a cluster-scope env-var reader from the K8s
+// client. Returns nil when the client is unavailable (fake mode) so the adapter
+// gracefully skips the cluster layer.
+func envConfigReaderFromClient(client kubernetes.Interface) *envconfig.UpperLevelEnvWriter {
+	if client == nil {
+		return nil
+	}
+	return envconfig.NewUpperLevelEnvWriter(client)
 }
 
 // appStoreNamespaceResolver returns a function that looks up the resolved K8s

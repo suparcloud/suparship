@@ -190,6 +190,8 @@ func (h *envConfigHandler) handlePutOrgEnvConfig(w http.ResponseWriter, r *http.
 		}
 	}
 
+	h.scheduleRepublishAllApps("org-envconfig")
+
 	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
 }
 
@@ -268,6 +270,8 @@ func (h *envConfigHandler) handlePutEnvTypeEnvConfig(w http.ResponseWriter, r *h
 		}
 	}
 
+	h.scheduleRepublishAllApps("envtype=" + envType)
+
 	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
 }
 
@@ -329,6 +333,8 @@ func (h *envConfigHandler) handlePutClusterEnvConfig(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save cluster env config"})
 		return
 	}
+
+	h.scheduleRepublishClusterApps(cluster)
 
 	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
 }
@@ -409,6 +415,8 @@ func (h *envConfigHandler) handlePutProjectEnvConfig(w http.ResponseWriter, r *h
 			h.logger.Error("failed to write project env configmap", "project", projectName, "err", err)
 		}
 	}
+
+	h.scheduleRepublishProjectApps(projectName, "project-envconfig")
 
 	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
 }
@@ -666,6 +674,112 @@ func (h *envConfigHandler) scheduleRepublish(projectName, appName string) {
 			h.logger.Error("republish: publisher failed", "project", projectName, "app", appName, "err", err)
 		}
 	}()
+}
+
+// scheduleRepublishAllApps republishes every app in every project. Used after
+// org-level or env-type-level env-var changes since those scopes reach every
+// app. The publisher's commitAndPush is a no-op when nothing changed, so apps
+// untouched by the change produce no commit. Errors per app are logged but do
+// not stop the fan-out.
+func (h *envConfigHandler) scheduleRepublishAllApps(reason string) {
+	if h.publisher == nil || h.projectStore == nil {
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		projects, err := h.projectStore.List(ctx)
+		if err != nil {
+			h.logger.Error("republish: failed to list projects", "reason", reason, "err", err)
+			return
+		}
+		for _, p := range projects {
+			h.republishProjectApps(ctx, p.Metadata.Name, nil, reason)
+		}
+	}()
+}
+
+// scheduleRepublishProjectApps republishes every app in one project. Used
+// after a project-level env-var change.
+func (h *envConfigHandler) scheduleRepublishProjectApps(projectName, reason string) {
+	if h.publisher == nil {
+		return
+	}
+	go func() {
+		h.republishProjectApps(context.Background(), projectName, nil, reason)
+	}()
+}
+
+// scheduleRepublishClusterApps republishes apps whose environment list
+// references one of the env names bound to clusterName. Used after a
+// cluster-level env-var change so the fan-out only touches apps actually
+// deployed to that cluster.
+//
+// The cluster → env-name mapping is resolved from the org's Environments list
+// at fan-out time, so the cluster's current bindings are always honoured.
+func (h *envConfigHandler) scheduleRepublishClusterApps(clusterName string) {
+	if h.publisher == nil || h.projectStore == nil || h.orgStore == nil {
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		org, err := h.orgStore.GetOrg(ctx)
+		if err != nil {
+			h.logger.Error("republish: failed to load org for cluster fan-out", "cluster", clusterName, "err", err)
+			return
+		}
+		envNames := make(map[string]bool)
+		for _, e := range org.Environments {
+			if e.ClusterRef == clusterName {
+				envNames[e.Name] = true
+			}
+		}
+		if len(envNames) == 0 {
+			h.logger.Info("republish: no envs bound to cluster, nothing to republish", "cluster", clusterName)
+			return
+		}
+		projects, err := h.projectStore.List(ctx)
+		if err != nil {
+			h.logger.Error("republish: failed to list projects for cluster fan-out", "cluster", clusterName, "err", err)
+			return
+		}
+		reason := "cluster=" + clusterName
+		for _, p := range projects {
+			h.republishProjectApps(ctx, p.Metadata.Name, envNames, reason)
+		}
+	}()
+}
+
+// republishProjectApps re-publishes every app in projectName. When envFilter
+// is non-nil, only apps owning at least one matching env are republished —
+// used by the cluster-scope fan-out.
+func (h *envConfigHandler) republishProjectApps(ctx context.Context, projectName string, envFilter map[string]bool, reason string) {
+	apps, err := h.appStore.ListApps(ctx, projectName)
+	if err != nil {
+		h.logger.Error("republish: failed to list apps", "project", projectName, "reason", reason, "err", err)
+		return
+	}
+	for _, app := range apps {
+		envs, err := h.appStore.ListAppEnvironments(ctx, projectName, app.Name)
+		if err != nil {
+			h.logger.Error("republish: failed to list app envs", "project", projectName, "app", app.Name, "reason", reason, "err", err)
+			continue
+		}
+		if envFilter != nil {
+			match := false
+			for _, env := range envs {
+				if envFilter[env.EnvName] {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+		if err := h.publisher.PublishApp(ctx, app, envs); err != nil {
+			h.logger.Error("republish: publisher failed", "project", projectName, "app", app.Name, "reason", reason, "err", err)
+		}
+	}
 }
 
 // sortStrings sorts a string slice in-place (imported from sort package via
