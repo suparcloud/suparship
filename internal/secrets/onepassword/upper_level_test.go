@@ -168,6 +168,67 @@ func TestSAUpperLevelWriter_OrgWithoutPlatformVaultErrors(t *testing.T) {
 	}
 }
 
+func TestSAUpperLevelWriter_AppRoutesToPlatformVault(t *testing.T) {
+	client, w, binding := upperWriterFixture(t)
+	ctx := context.Background()
+
+	if err := w.WriteAppSecrets(ctx, "demo", "nginx", map[string][]byte{"APP_KEY": []byte("v")}); err != nil {
+		t.Fatalf("WriteAppSecrets: %v", err)
+	}
+
+	// App-level item lives in platform vault (shared across envs).
+	platformItems, _ := client.ListItems(ctx, w.platformVaultID)
+	if len(platformItems) != 1 || platformItems[0].Title != "demo-nginx" {
+		t.Fatalf("platform vault items = %+v, want one item titled 'demo-nginx'", platformItems)
+	}
+	envItems, _ := client.ListItems(ctx, binding.VaultID)
+	if len(envItems) != 0 {
+		t.Errorf("env vault should be empty for app-level writes, got %+v", envItems)
+	}
+}
+
+func TestSAUpperLevelWriter_AppEnvRoutesToEnvVault(t *testing.T) {
+	client, w, binding := upperWriterFixture(t)
+	ctx := context.Background()
+
+	if err := w.WriteAppEnvSecrets(ctx, "demo", "nginx", "staging", "irrelevant-namespace", map[string][]byte{"DB": []byte("v")}); err != nil {
+		t.Fatalf("WriteAppEnvSecrets: %v", err)
+	}
+
+	// App-env item lives in the env vault.
+	envItems, _ := client.ListItems(ctx, binding.VaultID)
+	if len(envItems) != 1 || envItems[0].Title != "demo-nginx-staging" {
+		t.Fatalf("env vault items = %+v, want one item titled 'demo-nginx-staging'", envItems)
+	}
+	platformItems, _ := client.ListItems(ctx, w.platformVaultID)
+	if len(platformItems) != 0 {
+		t.Errorf("platform vault should be empty for app-env writes, got %+v", platformItems)
+	}
+}
+
+func TestSAUpperLevelWriter_AppEnvUnboundEnvErrors(t *testing.T) {
+	_, w, _ := upperWriterFixture(t)
+	ctx := context.Background()
+
+	err := w.WriteAppEnvSecrets(ctx, "demo", "nginx", "prod", "", map[string][]byte{"K": []byte("v")})
+	if err == nil {
+		t.Fatal("expected error for unbound env, got nil")
+	}
+}
+
+func TestSAUpperLevelWriter_AppWithoutPlatformVaultErrors(t *testing.T) {
+	client := NewFakeClient()
+	w := NewSAUpperLevelWriter(SAUpperLevelWriterConfig{
+		Client:  client,
+		OrgName: "default",
+	})
+
+	err := w.WriteAppSecrets(context.Background(), "demo", "nginx", map[string][]byte{"K": []byte("v")})
+	if err == nil {
+		t.Fatal("expected error when platform vault is missing, got nil")
+	}
+}
+
 func TestSAUpperLevelWriter_MergesExistingFields(t *testing.T) {
 	_, w, _ := upperWriterFixture(t)
 	ctx := context.Background()

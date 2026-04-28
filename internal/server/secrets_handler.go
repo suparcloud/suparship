@@ -1072,25 +1072,23 @@ func (h *secretsHandler) handleDeleteClusterSecret(w http.ResponseWriter, r *htt
 }
 
 // ── App-level secrets CRUD ──────────────────────────────────────────────────
+//
+// Routes through currentUpperWriter() so writes follow the active backend:
+// 1Password backend → platform-shared vault item; K8s backend → K8s Secret in
+// suparship-system with a Stakater replicator annotation matching project+app
+// labels. Either way, the operator can save before the app namespace exists.
 
 func (h *secretsHandler) handleListAppSecrets(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	appName := r.PathValue("app")
 
-	ns, err := h.resolveAnyAppNamespace(r, project, appName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppLevelSecretName(project, appName)
-	entries, err := h.backend.ListKeys(r.Context(), ns, secretName)
+	entries, err := h.currentUpperWriter().ReadAppSecretKeys(r.Context(), project, appName)
 	if err != nil {
 		h.logger.Error("failed to list app secret keys", "project", project, "app", appName, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secretName))
+	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.AppLevelSecretName(project, appName)))
 }
 
 func (h *secretsHandler) handleUpsertAppSecrets(w http.ResponseWriter, r *http.Request) {
@@ -1102,14 +1100,7 @@ func (h *secretsHandler) handleUpsertAppSecrets(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	ns, err := h.resolveAnyAppNamespace(r, project, appName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppLevelSecretName(project, appName)
-	if err := h.backend.Upsert(r.Context(), ns, secretName, toByteMap(req.Entries)); err != nil {
+	if err := h.currentUpperWriter().WriteAppSecrets(r.Context(), project, appName, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert app secrets", "project", project, "app", appName, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
@@ -1122,14 +1113,7 @@ func (h *secretsHandler) handleDeleteAppSecret(w http.ResponseWriter, r *http.Re
 	appName := r.PathValue("app")
 	key := r.PathValue("key")
 
-	ns, err := h.resolveAnyAppNamespace(r, project, appName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppLevelSecretName(project, appName)
-	if err := h.backend.DeleteKey(r.Context(), ns, secretName, key); err != nil {
+	if err := h.currentUpperWriter().DeleteAppSecretKey(r.Context(), project, appName, key); err != nil {
 		h.logger.Error("failed to delete app secret key", "project", project, "app", appName, "key", key, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
@@ -1138,27 +1122,23 @@ func (h *secretsHandler) handleDeleteAppSecret(w http.ResponseWriter, r *http.Re
 }
 
 // ── App-env secrets CRUD ────────────────────────────────────────────────────
+//
+// Routes through currentUpperWriter() so writes follow the active backend:
+// 1Password backend → env vault item; K8s backend → K8s Secret in
+// suparship-system with replicate-to matching the env namespace by name.
 
 func (h *secretsHandler) handleListSecrets(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	appName := r.PathValue("app")
 	envName := r.PathValue("env")
 
-	ns, err := h.resolveNamespace(r, project, appName, envName)
+	entries, err := h.currentUpperWriter().ReadAppEnvSecretKeys(r.Context(), project, appName, envName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppEnvSecretName(project, appName, envName)
-
-	entries, err := h.backend.ListKeys(r.Context(), ns, secretName)
-	if err != nil {
-		h.logger.Error("failed to list secret keys", "ns", ns, "secret", secretName, "err", err)
+		h.logger.Error("failed to list app-env secret keys", "project", project, "app", appName, "env", envName, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secretName))
+	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.AppEnvSecretName(project, appName, envName)))
 }
 
 func (h *secretsHandler) handleUpsertSecrets(w http.ResponseWriter, r *http.Request) {
@@ -1171,16 +1151,14 @@ func (h *secretsHandler) handleUpsertSecrets(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	ns, err := h.resolveNamespace(r, project, appName, envName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppEnvSecretName(project, appName, envName)
-
-	if err := h.backend.Upsert(r.Context(), ns, secretName, toByteMap(req.Entries)); err != nil {
-		h.logger.Error("failed to upsert secrets", "ns", ns, "secret", secretName, "err", err)
+	// Resolve the env namespace as a hint for the K8s backend's replicator
+	// target. The 1Password backend ignores it. Best-effort: if the namespace
+	// can't be resolved (env unbound, app not yet persisted), the K8s impl
+	// writes the Secret to suparship-system without a replicator target so
+	// the save still succeeds.
+	ns, _ := h.resolveNamespace(r, project, appName, envName)
+	if err := h.currentUpperWriter().WriteAppEnvSecrets(r.Context(), project, appName, envName, ns, toByteMap(req.Entries)); err != nil {
+		h.logger.Error("failed to upsert app-env secrets", "project", project, "app", appName, "env", envName, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
@@ -1193,16 +1171,8 @@ func (h *secretsHandler) handleDeleteSecret(w http.ResponseWriter, r *http.Reque
 	envName := r.PathValue("env")
 	key := r.PathValue("key")
 
-	ns, err := h.resolveNamespace(r, project, appName, envName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppEnvSecretName(project, appName, envName)
-
-	if err := h.backend.DeleteKey(r.Context(), ns, secretName, key); err != nil {
-		h.logger.Error("failed to delete secret key", "ns", ns, "secret", secretName, "key", key, "err", err)
+	if err := h.currentUpperWriter().DeleteAppEnvSecretKey(r.Context(), project, appName, envName, key); err != nil {
+		h.logger.Error("failed to delete app-env secret key", "project", project, "app", appName, "env", envName, "key", key, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
@@ -1240,26 +1210,21 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 		return
 	}
 
-	appNs, _ := h.resolveAnyAppNamespace(r, project, appName)
-	var appKeys []secrets.SecretEntry
-	if appNs != "" {
-		appKeys, err = h.backend.ListKeys(ctx, appNs, secrets.AppLevelSecretName(project, appName))
-		if err != nil {
-			h.logger.Error("failed to read app secret keys", "project", project, "app", appName, "err", err)
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
-			return
-		}
+	// App-level and app-env keys come from the active upper-level writer —
+	// 1Password vault items on 1Password backend, K8s Secrets in
+	// suparship-system on K8s backend.
+	appKeys, err := h.currentUpperWriter().ReadAppSecretKeys(ctx, project, appName)
+	if err != nil {
+		h.logger.Error("failed to read app secret keys", "project", project, "app", appName, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
+		return
 	}
 
-	ns, _ := h.resolveNamespace(r, project, appName, envName)
-	var appEnvKeys []secrets.SecretEntry
-	if ns != "" {
-		appEnvKeys, err = h.backend.ListKeys(ctx, ns, secrets.AppEnvSecretName(project, appName, envName))
-		if err != nil {
-			h.logger.Error("failed to read app-env secret keys", "project", project, "app", appName, "env", envName, "err", err)
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
-			return
-		}
+	appEnvKeys, err := h.currentUpperWriter().ReadAppEnvSecretKeys(ctx, project, appName, envName)
+	if err != nil {
+		h.logger.Error("failed to read app-env secret keys", "project", project, "app", appName, "env", envName, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
+		return
 	}
 
 	var clusterKeys []secrets.SecretEntry

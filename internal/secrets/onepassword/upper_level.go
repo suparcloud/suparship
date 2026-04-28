@@ -335,5 +335,68 @@ func (w *SAUpperLevelWriter) DeleteClusterSecretKey(ctx context.Context, cluster
 	return w.deleteKey(ctx, binding.VaultID, title, key)
 }
 
+// ── App scope (platform vault — shared across every env of the app) ───────
+//
+// App scope items live in the platform-shared vault (priority 2 in every
+// env's ClusterSecretStore vaults: map), so a single item is read by every
+// cluster's ESO regardless of which env the app runs in.
+
+func (w *SAUpperLevelWriter) WriteAppSecrets(ctx context.Context, project, app string, data map[string][]byte) error {
+	if w.platformVaultID == "" {
+		return fmt.Errorf("onepassword: platform vault not provisioned — pick one in Settings")
+	}
+	title := w.itemTitleFor(secrets.LevelApp, secrets.NamingParams{Project: project, App: app})
+	return w.upsertItem(ctx, w.platformVaultID, title, data)
+}
+
+func (w *SAUpperLevelWriter) ReadAppSecretKeys(ctx context.Context, project, app string) ([]secrets.SecretEntry, error) {
+	if w.platformVaultID == "" {
+		return nil, nil
+	}
+	title := w.itemTitleFor(secrets.LevelApp, secrets.NamingParams{Project: project, App: app})
+	return w.listKeys(ctx, w.platformVaultID, title)
+}
+
+func (w *SAUpperLevelWriter) DeleteAppSecretKey(ctx context.Context, project, app, key string) error {
+	if w.platformVaultID == "" {
+		return nil
+	}
+	title := w.itemTitleFor(secrets.LevelApp, secrets.NamingParams{Project: project, App: app})
+	return w.deleteKey(ctx, w.platformVaultID, title, key)
+}
+
+// ── App-env scope (env vault — most specific app-team layer) ──────────────
+//
+// The namespace argument is ignored on the 1Password backend (vault items
+// don't depend on K8s namespaces). It's part of the interface signature so
+// the K8s implementation can use it as a replicator target.
+
+func (w *SAUpperLevelWriter) WriteAppEnvSecrets(ctx context.Context, project, app, env, _ string, data map[string][]byte) error {
+	binding, ok := w.bindingFor(env)
+	if !ok {
+		return fmt.Errorf("onepassword: no provisioned binding for env %q — bind a vault in Settings first", env)
+	}
+	title := w.itemTitleFor(secrets.LevelAppEnv, secrets.NamingParams{Env: env, Project: project, App: app})
+	return w.upsertItem(ctx, binding.VaultID, title, data)
+}
+
+func (w *SAUpperLevelWriter) ReadAppEnvSecretKeys(ctx context.Context, project, app, env string) ([]secrets.SecretEntry, error) {
+	binding, ok := w.bindingFor(env)
+	if !ok {
+		return nil, nil
+	}
+	title := w.itemTitleFor(secrets.LevelAppEnv, secrets.NamingParams{Env: env, Project: project, App: app})
+	return w.listKeys(ctx, binding.VaultID, title)
+}
+
+func (w *SAUpperLevelWriter) DeleteAppEnvSecretKey(ctx context.Context, project, app, env, key string) error {
+	binding, ok := w.bindingFor(env)
+	if !ok {
+		return nil
+	}
+	title := w.itemTitleFor(secrets.LevelAppEnv, secrets.NamingParams{Env: env, Project: project, App: app})
+	return w.deleteKey(ctx, binding.VaultID, title, key)
+}
+
 // Compile-time check.
 var _ secrets.UpperLevelWriter = (*SAUpperLevelWriter)(nil)

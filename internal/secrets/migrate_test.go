@@ -168,3 +168,21 @@ func (f *failingWriter) ReadClusterSecretKeys(ctx context.Context, cluster strin
 func (f *failingWriter) DeleteClusterSecretKey(ctx context.Context, cluster, key string) error {
 	return f.base.DeleteClusterSecretKey(ctx, cluster, key)
 }
+func (f *failingWriter) WriteAppSecrets(ctx context.Context, project, app string, data map[string][]byte) error {
+	return f.base.WriteAppSecrets(ctx, project, app, data)
+}
+func (f *failingWriter) ReadAppSecretKeys(ctx context.Context, project, app string) ([]SecretEntry, error) {
+	return f.base.ReadAppSecretKeys(ctx, project, app)
+}
+func (f *failingWriter) DeleteAppSecretKey(ctx context.Context, project, app, key string) error {
+	return f.base.DeleteAppSecretKey(ctx, project, app, key)
+}
+func (f *failingWriter) WriteAppEnvSecrets(ctx context.Context, project, app, env, namespace string, data map[string][]byte) error {
+	return f.base.WriteAppEnvSecrets(ctx, project, app, env, namespace, data)
+}
+func (f *failingWriter) ReadAppEnvSecretKeys(ctx context.Context, project, app, env string) ([]SecretEntry, error) {
+	return f.base.ReadAppEnvSecretKeys(ctx, project, app, env)
+}
+func (f *failingWriter) DeleteAppEnvSecretKey(ctx context.Context, project, app, env, key string) error {
+	return f.base.DeleteAppEnvSecretKey(ctx, project, app, env, key)
+}

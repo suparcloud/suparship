@@ -120,3 +120,28 @@ func (m *MemUpperLevelWriter) ReadClusterSecretKeys(ctx context.Context, cluster
 func (m *MemUpperLevelWriter) DeleteClusterSecretKey(ctx context.Context, cluster, key string) error {
 	return m.backend.DeleteKey(ctx, memSystemNS, ClusterSecretName(cluster), key)
 }
+
+func (m *MemUpperLevelWriter) WriteAppSecrets(ctx context.Context, project, app string, data map[string][]byte) error {
+	return m.backend.Upsert(ctx, memSystemNS, AppLevelSecretName(project, app), data)
+}
+
+func (m *MemUpperLevelWriter) ReadAppSecretKeys(ctx context.Context, project, app string) ([]SecretEntry, error) {
+	return m.backend.ListKeys(ctx, memSystemNS, AppLevelSecretName(project, app))
+}
+
+func (m *MemUpperLevelWriter) DeleteAppSecretKey(ctx context.Context, project, app, key string) error {
+	return m.backend.DeleteKey(ctx, memSystemNS, AppLevelSecretName(project, app), key)
+}
+
+// WriteAppEnvSecrets ignores namespace — Mem doesn't model replicator targets.
+func (m *MemUpperLevelWriter) WriteAppEnvSecrets(ctx context.Context, project, app, env, _ string, data map[string][]byte) error {
+	return m.backend.Upsert(ctx, memSystemNS, AppEnvSecretName(project, app, env), data)
+}
+
+func (m *MemUpperLevelWriter) ReadAppEnvSecretKeys(ctx context.Context, project, app, env string) ([]SecretEntry, error) {
+	return m.backend.ListKeys(ctx, memSystemNS, AppEnvSecretName(project, app, env))
+}
+
+func (m *MemUpperLevelWriter) DeleteAppEnvSecretKey(ctx context.Context, project, app, env, key string) error {
+	return m.backend.DeleteKey(ctx, memSystemNS, AppEnvSecretName(project, app, env), key)
+}

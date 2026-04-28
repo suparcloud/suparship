@@ -62,14 +62,19 @@ func newSecretsMux() (*http.ServeMux, *authHandler) {
 	orgStore := &staticOrgProvider{org: testRBACOrg()}
 
 	memBE := secrets.NewMemBackend()
+	// App / app-env handlers use k8sUpperWriter against suparship-system; tests
+	// give it a fake K8s client so writes don't depend on the per-env namespace
+	// existing.
+	kc := k8sfake.NewSimpleClientset()
 
 	sh := &secretsHandler{
-		orgStore:    orgStore,
-		appStore:    appStore,
-		backend:     memBE,
-		upperWriter: secrets.NewMemUpperLevelWriter(memBE),
-		auditor:     secrets.NewAuditor(slog.Default()),
-		logger:      slog.Default(),
+		orgStore:       orgStore,
+		appStore:       appStore,
+		backend:        memBE,
+		upperWriter:    secrets.NewMemUpperLevelWriter(memBE),
+		k8sUpperWriter: secrets.NewUpperLevelSecretWriter(kc),
+		auditor:        secrets.NewAuditor(slog.Default()),
+		logger:         slog.Default(),
 	}
 
 	rh := &rbacHandler{
