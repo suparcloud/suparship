@@ -101,9 +101,7 @@ suparShip validates the token and shows how many vaults are accessible. The SA t
 
 **UI:** Settings → Secrets Backend → "List vaults" → pick the platform-shared vault from the dropdown → Save.
 
-suparShip validates the chosen vault is visible to the SA token (via `GetVault`) and persists the ID into `org.SecretBackend.OnePassword.PlatformVaultID`.
-
-> **Server restart required**: the upper-level writer that routes org/project secret writes is built once at startup. Restart the suparShip server after picking the platform vault so subsequent writes land in the chosen vault. Restart is also required after rotating to a different platform vault.
+suparShip validates the chosen vault is visible to the SA token (via `GetVault`), persists the ID into `org.SecretBackend.OnePassword.PlatformVaultID`, and **hot-swaps the in-process upper-level writer** so subsequent org/project writes route to the chosen vault immediately — no server restart required.
 
 The corresponding API call is:
 ```bash
@@ -458,7 +456,7 @@ When an org switches `secretBackend.type` from `k8s` to `onepassword`, existing 
 **Preconditions:**
 
 1. The org backend is set to `onepassword`.
-2. The SA token has been pasted, the platform-shared vault has been picked (Step 2b), and the suparShip server has been restarted so the upper-level writer points at the chosen vault.
+2. The SA token has been pasted and the platform-shared vault has been picked (Step 2b).
 3. Each env's Connect token has read access to both the env vault and the platform vault.
 
 **UI:** Settings → Secrets Backend → 1Password section → scroll to **Migrate K8s Secrets to 1Password** → tick which env-types / projects / clusters to migrate (org scope is always included) → click **Migrate to 1Password**.
@@ -509,8 +507,9 @@ No re-bind is needed — the same Connect token now sees both vaults.
 The platform-shared vault hasn't been picked yet (or the org config got cleared). Fix:
 
 1. Settings → Secrets Backend → "List vaults" → pick the platform-shared vault → Save.
-2. Restart the suparShip server so the upper-level writer is rebuilt against the new ID.
-3. Re-run the migration.
+2. Re-run the migration.
+
+The picker handler hot-swaps the in-process upper-level writer when you save, so org/project writes work immediately afterward — no restart needed.
 
 If you don't see the vault you want in the dropdown, the SA token doesn't have access to it — grant Read & Write in the 1Password console and click ⟳ to refresh.
 
@@ -520,11 +519,10 @@ The env has no `ClusterRef`, or the referenced cluster isn't registered in supar
 
 ### "Resolved Secrets" shows org keys but they don't reach the workload
 
-Most likely the per-app `ExternalSecret` was generated before the platform vault was picked (so its `dataFrom` lacks the org entry), or the upper-level writer wasn't rebuilt after the platform-vault change. Fix:
+Most likely the per-app `ExternalSecret` was generated before the platform vault was picked, so its `dataFrom` lacks the org entry. Fix:
 
 1. Verify `org.SecretBackend.OnePassword.PlatformVaultID` is non-empty (check via `GET /api/v1/org/secret-backend`).
-2. Restart suparShip — the upper-level writer is built once at startup; later changes to `PlatformVaultID` aren't hot-reloaded.
-3. Re-publish: `POST /api/v1/projects/{project}/apps/{app}/sync`.
+2. Re-publish: `POST /api/v1/projects/{project}/apps/{app}/sync` (or click "Sync to Git" in the app UI). The publisher reads the latest `PlatformVaultID` and writes a fresh `ExternalSecret` containing the org entry.
 
 ### Cluster-scope keys don't reach the workload (K8s backend)
 

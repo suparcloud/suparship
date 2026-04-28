@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -88,7 +89,6 @@ type secretsHandler struct {
 	orgStore        rbac.OrgStore
 	appStore        domain.AppStore
 	backend         secrets.Backend
-	upperWriter     secrets.UpperLevelWriter
 	auditor         *secrets.Auditor
 	logger          *slog.Logger
 	saTokenStore    SATokenStore
@@ -103,8 +103,69 @@ type secretsHandler struct {
 	// k8sUpperWriter is always the K8s implementation regardless of the
 	// active backend. Used as the migration *source* when copying upper-level
 	// secrets from suparship-system K8s Secrets into a 1Password vault
-	// (h.upperWriter may already be the 1Password writer post-switch).
+	// (the current upperWriter may already be the 1Password writer post-switch).
 	k8sUpperWriter *secrets.UpperLevelSecretWriter
+
+	// upperWriter holds the active upper-level writer. Guarded by upperWriterMu
+	// so it can be hot-swapped when the operator picks a new platform vault
+	// (otherwise the cached 1Password writer keeps PlatformVaultID="" from
+	// startup and org/project writes fail with "platform vault not provisioned").
+	// Always access via currentUpperWriter() / replaceUpperWriter().
+	upperWriterMu sync.RWMutex
+	upperWriter   secrets.UpperLevelWriter
+}
+
+// currentUpperWriter returns the active upper-level writer under a read-lock.
+// Callers should not retain the returned value across goroutines without
+// re-fetching.
+func (h *secretsHandler) currentUpperWriter() secrets.UpperLevelWriter {
+	h.upperWriterMu.RLock()
+	defer h.upperWriterMu.RUnlock()
+	return h.upperWriter
+}
+
+// replaceUpperWriter swaps the active writer atomically. Used by handlers that
+// observe an org-config change requiring a writer rebuild (most importantly
+// the platform-vault picker — the upper-level writer is built once at startup
+// from the org's PlatformVaultID; without a swap, every subsequent org/project
+// write fails until the server is restarted).
+func (h *secretsHandler) replaceUpperWriter(w secrets.UpperLevelWriter) {
+	h.upperWriterMu.Lock()
+	defer h.upperWriterMu.Unlock()
+	h.upperWriter = w
+}
+
+// build1PasswordUpperWriter constructs an SAUpperLevelWriter from the current
+// org config + saved SA token. Returns an error when prerequisites are not
+// met (no SA token, no client factory, backend not 1Password) — callers
+// decide whether that's fatal or a no-op.
+func (h *secretsHandler) build1PasswordUpperWriter(ctx context.Context, org *rbac.Org) (secrets.UpperLevelWriter, error) {
+	if h.saTokenStore == nil || h.saClientFactory == nil {
+		return nil, fmt.Errorf("1Password client factory not configured")
+	}
+	if org == nil || org.SecretBackend.Effective() != secrets.Backend1Password || org.SecretBackend.OnePassword == nil {
+		return nil, fmt.Errorf("org backend is not 1Password")
+	}
+	token, err := h.saTokenStore.LoadToken(ctx)
+	if err != nil || token == "" {
+		return nil, fmt.Errorf("SA token not saved")
+	}
+	saClient, err := h.saClientFactory(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("init SA client: %w", err)
+	}
+	orgName := org.Name
+	if orgName == "" {
+		orgName = "default"
+	}
+	return onepassword.NewSAUpperLevelWriter(onepassword.SAUpperLevelWriterConfig{
+		Client:          saClient,
+		PlatformVaultID: org.SecretBackend.OnePassword.PlatformVaultID,
+		Bindings:        org.SecretBackend.OnePassword.Bindings,
+		OrgName:         orgName,
+		Naming:          org.ResourceNaming,
+		EnvForCluster:   buildOrgEnvForClusterResolver(org.Environments),
+	}), nil
 }
 
 // ── Org backend config ────────────────────────────────────────────────────────
@@ -471,6 +532,21 @@ func (h *secretsHandler) handleSetPlatformVault(w http.ResponseWriter, r *http.R
 	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist org"})
 		return
+	}
+
+	// Hot-swap the upper-level writer so subsequent org/project writes
+	// pick up the new PlatformVaultID without a server restart. The
+	// previous writer was constructed at startup with PlatformVaultID="";
+	// every WriteOrgSecrets/WriteProjectSecrets call against it would
+	// return "platform vault not provisioned".
+	if newWriter, err := h.build1PasswordUpperWriter(ctx, org); err != nil {
+		h.logger.Warn("upper-level writer rebuild failed — server restart required for org/project writes to use the new platform vault",
+			"err", err)
+	} else {
+		h.replaceUpperWriter(newWriter)
+		h.logger.Info("upper-level writer rebuilt against new platform vault",
+			"vaultID", info.ID,
+		)
 	}
 
 	h.logger.Info("platform vault set",
@@ -849,7 +925,7 @@ func resolveConnectEndpoint(reqEndpoint string, org *rbac.Org) string {
 // ── Org-level secrets CRUD ──────────────────────────────────────────────────
 
 func (h *secretsHandler) handleListOrgSecrets(w http.ResponseWriter, r *http.Request) {
-	entries, err := h.upperWriter.ReadOrgSecretKeys(r.Context())
+	entries, err := h.currentUpperWriter().ReadOrgSecretKeys(r.Context())
 	if err != nil {
 		h.logger.Error("failed to list org secret keys", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
@@ -863,7 +939,7 @@ func (h *secretsHandler) handleUpsertOrgSecrets(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	if err := h.upperWriter.WriteOrgSecrets(r.Context(), toByteMap(req.Entries)); err != nil {
+	if err := h.currentUpperWriter().WriteOrgSecrets(r.Context(), toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert org secrets", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
 		return
@@ -873,7 +949,7 @@ func (h *secretsHandler) handleUpsertOrgSecrets(w http.ResponseWriter, r *http.R
 
 func (h *secretsHandler) handleDeleteOrgSecret(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	if err := h.upperWriter.DeleteOrgSecretKey(r.Context(), key); err != nil {
+	if err := h.currentUpperWriter().DeleteOrgSecretKey(r.Context(), key); err != nil {
 		h.logger.Error("failed to delete org secret key", "key", key, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
 		return
@@ -885,7 +961,7 @@ func (h *secretsHandler) handleDeleteOrgSecret(w http.ResponseWriter, r *http.Re
 
 func (h *secretsHandler) handleListEnvTypeSecrets(w http.ResponseWriter, r *http.Request) {
 	envType := r.PathValue("envtype")
-	entries, err := h.upperWriter.ReadEnvTypeSecretKeys(r.Context(), envType)
+	entries, err := h.currentUpperWriter().ReadEnvTypeSecretKeys(r.Context(), envType)
 	if err != nil {
 		h.logger.Error("failed to list env-type secret keys", "envtype", envType, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
@@ -900,7 +976,7 @@ func (h *secretsHandler) handleUpsertEnvTypeSecrets(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	if err := h.upperWriter.WriteEnvTypeSecrets(r.Context(), envType, toByteMap(req.Entries)); err != nil {
+	if err := h.currentUpperWriter().WriteEnvTypeSecrets(r.Context(), envType, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert env-type secrets", "envtype", envType, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
 		return
@@ -911,7 +987,7 @@ func (h *secretsHandler) handleUpsertEnvTypeSecrets(w http.ResponseWriter, r *ht
 func (h *secretsHandler) handleDeleteEnvTypeSecret(w http.ResponseWriter, r *http.Request) {
 	envType := r.PathValue("envtype")
 	key := r.PathValue("key")
-	if err := h.upperWriter.DeleteEnvTypeSecretKey(r.Context(), envType, key); err != nil {
+	if err := h.currentUpperWriter().DeleteEnvTypeSecretKey(r.Context(), envType, key); err != nil {
 		h.logger.Error("failed to delete env-type secret key", "envtype", envType, "key", key, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
 		return
@@ -923,7 +999,7 @@ func (h *secretsHandler) handleDeleteEnvTypeSecret(w http.ResponseWriter, r *htt
 
 func (h *secretsHandler) handleListProjectSecrets(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
-	entries, err := h.upperWriter.ReadProjectSecretKeys(r.Context(), project)
+	entries, err := h.currentUpperWriter().ReadProjectSecretKeys(r.Context(), project)
 	if err != nil {
 		h.logger.Error("failed to list project secret keys", "project", project, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
@@ -938,7 +1014,7 @@ func (h *secretsHandler) handleUpsertProjectSecrets(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	if err := h.upperWriter.WriteProjectSecrets(r.Context(), project, toByteMap(req.Entries)); err != nil {
+	if err := h.currentUpperWriter().WriteProjectSecrets(r.Context(), project, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert project secrets", "project", project, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
 		return
@@ -949,7 +1025,7 @@ func (h *secretsHandler) handleUpsertProjectSecrets(w http.ResponseWriter, r *ht
 func (h *secretsHandler) handleDeleteProjectSecret(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	key := r.PathValue("key")
-	if err := h.upperWriter.DeleteProjectSecretKey(r.Context(), project, key); err != nil {
+	if err := h.currentUpperWriter().DeleteProjectSecretKey(r.Context(), project, key); err != nil {
 		h.logger.Error("failed to delete project secret key", "project", project, "key", key, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
 		return
@@ -961,7 +1037,7 @@ func (h *secretsHandler) handleDeleteProjectSecret(w http.ResponseWriter, r *htt
 
 func (h *secretsHandler) handleListClusterSecrets(w http.ResponseWriter, r *http.Request) {
 	cluster := r.PathValue("cluster")
-	entries, err := h.upperWriter.ReadClusterSecretKeys(r.Context(), cluster)
+	entries, err := h.currentUpperWriter().ReadClusterSecretKeys(r.Context(), cluster)
 	if err != nil {
 		h.logger.Error("failed to list cluster secret keys", "cluster", cluster, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
@@ -976,7 +1052,7 @@ func (h *secretsHandler) handleUpsertClusterSecrets(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	if err := h.upperWriter.WriteClusterSecrets(r.Context(), cluster, toByteMap(req.Entries)); err != nil {
+	if err := h.currentUpperWriter().WriteClusterSecrets(r.Context(), cluster, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert cluster secrets", "cluster", cluster, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
 		return
@@ -987,7 +1063,7 @@ func (h *secretsHandler) handleUpsertClusterSecrets(w http.ResponseWriter, r *ht
 func (h *secretsHandler) handleDeleteClusterSecret(w http.ResponseWriter, r *http.Request) {
 	cluster := r.PathValue("cluster")
 	key := r.PathValue("key")
-	if err := h.upperWriter.DeleteClusterSecretKey(r.Context(), cluster, key); err != nil {
+	if err := h.currentUpperWriter().DeleteClusterSecretKey(r.Context(), cluster, key); err != nil {
 		h.logger.Error("failed to delete cluster secret key", "cluster", cluster, "key", key, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
 		return
@@ -1142,7 +1218,7 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 
 	ctx := r.Context()
 
-	orgKeys, err := h.upperWriter.ReadOrgSecretKeys(ctx)
+	orgKeys, err := h.currentUpperWriter().ReadOrgSecretKeys(ctx)
 	if err != nil {
 		h.logger.Error("failed to read org secret keys", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
@@ -1150,14 +1226,14 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 	}
 
 	envType := h.resolveEnvType(r, project, appName, envName)
-	envTypeKeys, err := h.upperWriter.ReadEnvTypeSecretKeys(ctx, envType)
+	envTypeKeys, err := h.currentUpperWriter().ReadEnvTypeSecretKeys(ctx, envType)
 	if err != nil {
 		h.logger.Error("failed to read env-type secret keys", "envtype", envType, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
 		return
 	}
 
-	projectKeys, err := h.upperWriter.ReadProjectSecretKeys(ctx, project)
+	projectKeys, err := h.currentUpperWriter().ReadProjectSecretKeys(ctx, project)
 	if err != nil {
 		h.logger.Error("failed to read project secret keys", "project", project, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
@@ -1188,7 +1264,7 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 
 	var clusterKeys []secrets.SecretEntry
 	if clusterRef := h.resolveClusterRef(r, envName); clusterRef != "" {
-		clusterKeys, err = h.upperWriter.ReadClusterSecretKeys(ctx, clusterRef)
+		clusterKeys, err = h.currentUpperWriter().ReadClusterSecretKeys(ctx, clusterRef)
 		if err != nil {
 			h.logger.Error("failed to read cluster secret keys", "cluster", clusterRef, "err", err)
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})

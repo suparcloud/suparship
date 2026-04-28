@@ -1381,7 +1381,7 @@ function PlatformVaultPicker({
       const picked = vaults?.find((v) => v.id === selectedID);
       const res = await setPlatformVault(selectedID, picked?.title);
       setSavedMsg(
-        `Saved. Restart the suparShip server so the new platform vault (${res.vaultName}) becomes the source of truth for org / project secrets.`,
+        `Saved. Org / project secret writes now route to "${res.vaultName}".`,
       );
       await onChanged();
     } catch (err) {

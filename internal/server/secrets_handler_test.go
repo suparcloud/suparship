@@ -689,6 +689,59 @@ func TestSetPlatformVault_PersistsOperatorPick(t *testing.T) {
 	}
 }
 
+// Regression test for the hot-swap: before this fix, the cached
+// upper-level writer kept PlatformVaultID="" from startup, so any
+// subsequent org write through h.upperWriter failed with "platform vault
+// not provisioned" until the server was restarted.
+func TestSetPlatformVault_RebuildsUpperWriterSoOrgWritesSucceed(t *testing.T) {
+	fakeOP := onepassword.NewFakeClient()
+	platform, _ := fakeOP.CreateVault(context.Background(), "company-shared", "")
+
+	org := &rbac.Org{
+		Name:          "default",
+		SecretBackend: secrets.BackendConfig{Type: secrets.Backend1Password},
+	}
+	store := &staticOrgProvider{org: org}
+
+	// Mimic startup: upper-level writer was built when PlatformVaultID="".
+	stalePlatformID := ""
+	staleWriter := onepassword.NewSAUpperLevelWriter(onepassword.SAUpperLevelWriterConfig{
+		Client:          fakeOP,
+		PlatformVaultID: stalePlatformID,
+		OrgName:         "default",
+	})
+	sh := &secretsHandler{
+		orgStore:        store,
+		logger:          slog.Default(),
+		saTokenStore:    &memSATokenStore{token: "fake"},
+		saClientFactory: func(_ context.Context, _ string) (onepassword.SAClient, error) { return fakeOP, nil },
+		upperWriter:     staleWriter,
+	}
+
+	// Sanity: stale writer would refuse the write.
+	if err := sh.currentUpperWriter().WriteOrgSecrets(context.Background(), map[string][]byte{"K": []byte("v")}); err == nil {
+		t.Fatal("stale writer should fail without PlatformVaultID")
+	}
+
+	body, _ := json.Marshal(SetPlatformVaultRequest{VaultID: platform.ID})
+	req := httptest.NewRequest("PUT", "/api/v1/org/secret-backend/platform-vault", bytes.NewBuffer(body))
+	rec := httptest.NewRecorder()
+	sh.handleSetPlatformVault(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// After the picker save, an org write must succeed because the writer
+	// was rebuilt with the new PlatformVaultID.
+	if err := sh.currentUpperWriter().WriteOrgSecrets(context.Background(), map[string][]byte{"K": []byte("v")}); err != nil {
+		t.Fatalf("WriteOrgSecrets after picker save: %v", err)
+	}
+	items, _ := fakeOP.ListItems(context.Background(), platform.ID)
+	if len(items) != 1 {
+		t.Errorf("expected 1 item in platform vault after write, got %d", len(items))
+	}
+}
+
 func TestSetPlatformVault_RejectsUnknownVault(t *testing.T) {
 	// Operator submits a vault ID that the SA token can't see — should 422
 	// rather than persist a dangling reference.
