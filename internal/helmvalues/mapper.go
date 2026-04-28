@@ -68,7 +68,7 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 //
 // When baseDomain is empty, "localhost" is used.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
-	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "")
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "")
 }
 
 // MapToHelmValuesForEnv is the canonical mapper that accepts the resolved
@@ -80,7 +80,10 @@ func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.A
 //
 // When namespace is empty the legacy {project}-{app}-{env} names are used so
 // that callers that do not yet have a resolved namespace remain unaffected.
-func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain, namespace string) HelmValues {
+//
+// Cluster is used only to compute the cluster-scope envFrom names; pass ""
+// for unbound envs (the cluster scope is then omitted from the lists).
+func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain, namespace, cluster string) HelmValues {
 	if baseDomain == "" {
 		baseDomain = "localhost"
 	}
@@ -103,6 +106,8 @@ func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEn
 		configName = secrets.AppConfigName(app.ProjectName, app.Name, envName)
 	}
 
+	cms, secs := envFromLists(app.ProjectName, app.Name, envName, string(envType), cluster, secretName, configName)
+
 	return HelmValues{
 		App: AppContext{
 			Name: app.Name,
@@ -118,10 +123,49 @@ func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEn
 			AppEnv: envOverride.EnvConfig,
 		}),
 		Suparship: SuparshipValues{
-			SecretName: secretName,
-			ConfigName: configName,
+			SecretName:        secretName,
+			ConfigName:        configName,
+			EnvFromConfigMaps: cms,
+			EnvFromSecrets:    secs,
 		},
 	}
+}
+
+// envFromLists returns the full hierarchy of ConfigMap and Secret names the
+// chart should envFrom, in precedence order — org → env-type → project → app
+// → app-env → cluster. Names match what the suparship platform-managed path
+// writes (publisher commits + K8s upper-level writer + Stakater Replicator):
+// the chart needs no string concatenation or backend awareness, just iterate.
+//
+// The most-specific app-env entries are appended via the operator-configurable
+// secretName/configName so custom naming patterns (e.g. {project}-{app}-{env}
+// vs {namespace}) flow through transparently.
+//
+// cluster=="" omits the cluster-scope tail (env unbound).
+func envFromLists(project, app, envName, envType, cluster, appEnvSecretName, appEnvConfigName string) ([]string, []string) {
+	envvarsKey := envType
+	if envvarsKey == "" {
+		envvarsKey = envName
+	}
+	cms := []string{
+		"suparship-envvars-org",
+		"suparship-envvars-env-" + envvarsKey,
+		"suparship-envvars-project-" + project,
+		"suparship-envvars-app-" + project + "-" + app,
+		appEnvConfigName,
+	}
+	secs := []string{
+		"suparship-secrets-org",
+		"suparship-secrets-envtype-" + envvarsKey,
+		"suparship-secrets-project-" + project,
+		"suparship-secrets-app-" + project + "-" + app,
+		appEnvSecretName,
+	}
+	if cluster != "" {
+		cms = append(cms, "suparship-envvars-cluster-"+cluster)
+		secs = append(secs, "suparship-secrets-cluster-"+cluster)
+	}
+	return cms, secs
 }
 
 // extractImage pulls the image repository and tag from an AppSpec Values map.

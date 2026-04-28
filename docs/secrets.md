@@ -292,20 +292,24 @@ flowchart LR
   argocd --> cluster["K8s: ExternalSecret pulls from 1Password\nConfigMap consumed by pods"]
 ```
 
-The Helm chart consumes both resources via `envFrom`:
+The Helm chart's `deployment.yaml` consumes the full hierarchy via `envFrom` — but it does no string concatenation and has no awareness of naming patterns or backend type. The publisher passes the precedence-ordered lists `suparship.envFromConfigMaps` and `suparship.envFromSecrets` via values; the chart just iterates:
 
 ```yaml
 # in deployment.yaml (simplified)
 envFrom:
+  {{- range .Values.suparship.envFromConfigMaps }}
   - configMapRef:
-      name: "{{ .Values.app.name }}-config"
+      name: {{ . }}
       optional: true
+  {{- end }}
+  {{- range .Values.suparship.envFromSecrets }}
   - secretRef:
-      name: "{{ .Values.app.name }}-secrets"
+      name: {{ . }}
       optional: true
+  {{- end }}
 ```
 
-Both resources are `optional: true` so pods start even before 1Password keys are populated.
+The lists carry every scope (org → env-type → project → app → app-env → cluster) in precedence order so later entries win on key collision per Kubernetes envFrom semantics. All entries are `optional: true` so pods start even before any layer is populated. Customising naming patterns or switching backend types requires no chart changes — the publisher recomputes the lists on the next publish.
 
 ### Preview environments
 
@@ -336,21 +340,6 @@ kubectl annotate externalsecret <app>-secrets \
   suparship.io/forced-sync-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -n <namespace> --overwrite
 ```
-
-### Opting out (bring-your-own secrets)
-
-Charts that want to manage their own `ConfigMap` / `ExternalSecret` can disable the platform-managed defaults:
-
-```yaml
-# in app values override or chart values.yaml
-secrets:
-  managedByPlatform: false
-```
-
-When `managedByPlatform: false`:
-- The legacy chart-side `env-configmaps.yaml` and `env-externalsecrets.yaml` templates are re-enabled.
-- The platform does **not** create 1Password vault items or commit platform-managed YAML.
-- Naming, content, and lifecycle are fully under the chart author's control.
 
 ## Collapsed ExternalSecret model
 

@@ -455,7 +455,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 
 		// Write values.yaml — Helm values with env-specific baseDomain and
 		// the resolved namespace so secretName/configName are consistent.
-		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace)
+		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
@@ -829,7 +829,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 			return err
 		}
 
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace)
+		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "")
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
