@@ -100,6 +100,11 @@ type secretsHandler struct {
 	// fetching. When set, fetchOrLoadCert will auto-fetch the sealing cert
 	// from the target cluster on cache miss instead of returning an error.
 	clusterPool sealClientPool
+	// k8sUpperWriter is always the K8s implementation regardless of the
+	// active backend. Used as the migration *source* when copying upper-level
+	// secrets from suparship-system K8s Secrets into a 1Password vault
+	// (h.upperWriter may already be the 1Password writer post-switch).
+	k8sUpperWriter *secrets.UpperLevelSecretWriter
 }
 
 // ── Org backend config ────────────────────────────────────────────────────────
@@ -251,6 +256,148 @@ func (h *secretsHandler) handlePostSAToken(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, SATokenResponse{Valid: true})
+}
+
+// MigrateToOnePasswordRequest is the JSON body for the migration endpoint.
+//
+// All three lists are inventories the operator wants migrated. Empty lists
+// skip that scope's migration entirely (the helper only iterates the inputs
+// it's given). The org scope is always attempted because there's only one
+// org-level item — no inventory to enumerate.
+type MigrateToOnePasswordRequest struct {
+	EnvTypes []string `json:"envTypes,omitempty"`
+	Projects []string `json:"projects,omitempty"`
+	Clusters []string `json:"clusters,omitempty"`
+}
+
+// MigrateToOnePasswordResponse reports per-scope counts of keys copied. Useful
+// for the UI to surface "moved 3 staging keys, 1 prod key" feedback.
+type MigrateToOnePasswordResponse struct {
+	OrgKeys     int            `json:"orgKeys"`
+	EnvTypeKeys map[string]int `json:"envTypeKeys"`
+	ProjectKeys map[string]int `json:"projectKeys"`
+	ClusterKeys map[string]int `json:"clusterKeys"`
+}
+
+// handleMigrateToOnePassword copies upper-level secrets (org / env-type /
+// project / cluster) from the K8s suparship-system Secrets into the
+// configured 1Password vaults. App and app-env secrets are NOT migrated by
+// this endpoint — they live in env-bound K8s namespaces and follow a
+// different lifecycle.
+//
+// Preconditions: org backend is 1Password, the SA token has been pasted, and
+// the platform vault is provisioned (see handlePostSAToken). The migration
+// is idempotent — re-running picks up new keys without clobbering values
+// already entered directly into the destination vaults.
+func (h *secretsHandler) handleMigrateToOnePassword(w http.ResponseWriter, r *http.Request) {
+	if h.k8sUpperWriter == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{
+			Error: "migration source unavailable — suparship is not running on a Kubernetes cluster",
+		})
+		return
+	}
+	if h.saTokenStore == nil || h.saClientFactory == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{
+			Error: "1Password client not configured",
+		})
+		return
+	}
+
+	var req MigrateToOnePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+
+	ctx := r.Context()
+	org, err := h.orgStore.GetOrg(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	if org.SecretBackend.Effective() != secrets.Backend1Password || org.SecretBackend.OnePassword == nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "org backend must be set to 1Password before running migration",
+		})
+		return
+	}
+	if org.SecretBackend.OnePassword.PlatformVaultID == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "platform vault not provisioned — re-paste the SA token in Settings first",
+		})
+		return
+	}
+
+	token, err := h.saTokenStore.LoadToken(ctx)
+	if err != nil || token == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "SA token not saved yet"})
+		return
+	}
+	saClient, err := h.saClientFactory(ctx, token)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to create 1Password client: " + err.Error()})
+		return
+	}
+
+	orgName := org.Name
+	if orgName == "" {
+		orgName = "default"
+	}
+	envForCluster := buildOrgEnvForClusterResolver(org.Environments)
+	dst := onepassword.NewSAUpperLevelWriter(onepassword.SAUpperLevelWriterConfig{
+		Client:          saClient,
+		PlatformVaultID: org.SecretBackend.OnePassword.PlatformVaultID,
+		Bindings:        org.SecretBackend.OnePassword.Bindings,
+		OrgName:         orgName,
+		Naming:          org.ResourceNaming,
+		EnvForCluster:   envForCluster,
+	})
+
+	res, migErr := secrets.MigrateUpperLevelSecrets(ctx, h.k8sUpperWriter, dst, secrets.MigrateUpperLevelInput{
+		EnvTypes: req.EnvTypes,
+		Projects: req.Projects,
+		Clusters: req.Clusters,
+	})
+	if migErr != nil {
+		// Return what we managed to copy plus the error so the operator can
+		// see partial progress and retry.
+		h.logger.Error("upper-level migration failed mid-run",
+			"copied", res, "err", migErr)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{
+			Error: fmt.Sprintf("migration failed after partial progress (%d org / %d env-type / %d project / %d cluster keys copied): %v",
+				res.OrgKeys, len(res.EnvTypeKeys), len(res.ProjectKeys), len(res.ClusterKeys), migErr),
+		})
+		return
+	}
+
+	h.logger.Info("upper-level migration to 1Password complete",
+		"orgKeys", res.OrgKeys,
+		"envTypes", len(res.EnvTypeKeys),
+		"projects", len(res.ProjectKeys),
+		"clusters", len(res.ClusterKeys),
+	)
+	writeJSON(w, http.StatusOK, MigrateToOnePasswordResponse{
+		OrgKeys:     res.OrgKeys,
+		EnvTypeKeys: res.EnvTypeKeys,
+		ProjectKeys: res.ProjectKeys,
+		ClusterKeys: res.ClusterKeys,
+	})
+}
+
+// buildOrgEnvForClusterResolver returns a closure that maps a registered
+// cluster name to the env-name that has it as ClusterRef. Mirrors the helper
+// in cmd/suparship/server.go but inlined here so the secrets handler doesn't
+// import that package.
+func buildOrgEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string {
+	clusterToEnv := make(map[string]string, len(envs))
+	for _, e := range envs {
+		if e.ClusterRef != "" {
+			clusterToEnv[e.ClusterRef] = e.Name
+		}
+	}
+	return func(cluster string) string {
+		return clusterToEnv[cluster]
+	}
 }
 
 // ensurePlatformVault creates (idempotently) the org-wide platform-shared

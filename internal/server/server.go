@@ -471,6 +471,10 @@ func New(cfg Config) *Server {
 					return onepassword.NewSDKClient(ctx, token)
 				}
 				rh.secretsHandler.certCache = seal.NewK8sCertCache(cfg.KubeClient)
+				// Always keep a K8s upper-level writer around, even when the
+				// active backend is 1Password — used as the migration source
+				// when copying suparship-system Secrets into vaults.
+				rh.secretsHandler.k8sUpperWriter = secrets.NewUpperLevelSecretWriter(cfg.KubeClient)
 			}
 			if cfg.ClusterPool != nil {
 				rh.secretsHandler.clusterPool = &clusterPoolAdapter{pool: cfg.ClusterPool}

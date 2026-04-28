@@ -17,6 +17,11 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	client_runtime "k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -716,6 +721,163 @@ func TestEnsurePlatformVault_Idempotent(t *testing.T) {
 		t.Errorf("expected 1 platform vault, got %d", count)
 	}
 }
+
+// ── Migration to 1Password ──────────────────────────────────────────────────
+
+func TestMigrateToOnePassword_CopiesK8sSecretsIntoVaults(t *testing.T) {
+	// Pre-populate K8s suparship-system with upper-level Secrets.
+	preload := []*corev1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: secrets.OrgSecretName(), Namespace: secrets.SystemNamespace},
+			Data:       map[string][]byte{"GLOBAL_KEY": []byte("g")},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: secrets.EnvTypeSecretName("staging"), Namespace: secrets.SystemNamespace},
+			Data:       map[string][]byte{"DB_URL": []byte("staging-db")},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: secrets.ProjectSecretName("demo"), Namespace: secrets.SystemNamespace},
+			Data:       map[string][]byte{"PROJ": []byte("p")},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: secrets.ClusterSecretName("kind-staging"), Namespace: secrets.SystemNamespace},
+			Data:       map[string][]byte{"FEATURE_FLAG": []byte("off")},
+		},
+	}
+	objs := make([]client_runtime.Object, 0, len(preload))
+	for _, s := range preload {
+		objs = append(objs, s)
+	}
+	kc := k8sfake.NewSimpleClientset(objs...)
+
+	// Org with 1Password backend already provisioned (platform vault + binding).
+	fakeOP := onepassword.NewFakeClient()
+	platformVault, _ := fakeOP.CreateVault(context.Background(), secrets.PlatformVaultName("default"), "")
+	envVault, _ := fakeOP.CreateVault(context.Background(), secrets.VaultName("default", "staging"), "")
+	org := &rbac.Org{
+		Name: "default",
+		Environments: []rbac.OrgEnvironment{
+			{Name: "staging", ClusterRef: "kind-staging"},
+		},
+		SecretBackend: secrets.BackendConfig{
+			Type: secrets.Backend1Password,
+			OnePassword: &secrets.OnePasswordConfig{
+				PlatformVaultID: platformVault.ID,
+				Bindings: []secrets.EnvBinding{
+					{Env: "staging", VaultID: envVault.ID, Provisioned: true},
+				},
+			},
+		},
+	}
+	store := &staticOrgProvider{org: org}
+
+	sh := &secretsHandler{
+		orgStore:        store,
+		logger:          slog.Default(),
+		k8sUpperWriter:  secrets.NewUpperLevelSecretWriter(kc),
+		saTokenStore:    &memSATokenStore{token: "fake-token"},
+		saClientFactory: func(_ context.Context, _ string) (onepassword.SAClient, error) { return fakeOP, nil },
+	}
+
+	body, _ := json.Marshal(MigrateToOnePasswordRequest{
+		EnvTypes: []string{"staging"},
+		Projects: []string{"demo"},
+		Clusters: []string{"kind-staging"},
+	})
+	req := httptest.NewRequest("POST", "/api/v1/org/secret-backend/migrate-to-onepassword", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	sh.handleMigrateToOnePassword(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp MigrateToOnePasswordResponse
+	mustDecode(t, rec.Body.Bytes(), &resp)
+	if resp.OrgKeys != 1 {
+		t.Errorf("OrgKeys = %d, want 1", resp.OrgKeys)
+	}
+	if resp.EnvTypeKeys["staging"] != 1 {
+		t.Errorf("EnvTypeKeys[staging] = %d, want 1", resp.EnvTypeKeys["staging"])
+	}
+	if resp.ProjectKeys["demo"] != 1 {
+		t.Errorf("ProjectKeys[demo] = %d, want 1", resp.ProjectKeys["demo"])
+	}
+	if resp.ClusterKeys["kind-staging"] != 1 {
+		t.Errorf("ClusterKeys[kind-staging] = %d, want 1", resp.ClusterKeys["kind-staging"])
+	}
+
+	// Confirm vault items were actually created.
+	platformItems, _ := fakeOP.ListItems(context.Background(), platformVault.ID)
+	if len(platformItems) != 2 { // org + project
+		t.Errorf("expected 2 items in platform vault (org + project), got %+v", platformItems)
+	}
+	envItems, _ := fakeOP.ListItems(context.Background(), envVault.ID)
+	if len(envItems) != 2 { // env-type + cluster
+		t.Errorf("expected 2 items in env vault (env-type + cluster), got %+v", envItems)
+	}
+}
+
+func TestMigrateToOnePassword_RejectsWhenBackendStillK8s(t *testing.T) {
+	org := &rbac.Org{
+		Name:          "default",
+		SecretBackend: secrets.BackendConfig{Type: secrets.BackendK8s},
+	}
+	store := &staticOrgProvider{org: org}
+
+	sh := &secretsHandler{
+		orgStore:        store,
+		logger:          slog.Default(),
+		k8sUpperWriter:  secrets.NewUpperLevelSecretWriter(k8sfake.NewSimpleClientset()),
+		saTokenStore:    &memSATokenStore{token: "fake"},
+		saClientFactory: func(_ context.Context, _ string) (onepassword.SAClient, error) { return onepassword.NewFakeClient(), nil },
+	}
+
+	body, _ := json.Marshal(MigrateToOnePasswordRequest{})
+	req := httptest.NewRequest("POST", "/api/v1/org/secret-backend/migrate-to-onepassword", bytes.NewBuffer(body))
+	rec := httptest.NewRecorder()
+	sh.handleMigrateToOnePassword(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 when backend is still k8s, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMigrateToOnePassword_RejectsWhenPlatformVaultMissing(t *testing.T) {
+	org := &rbac.Org{
+		Name: "default",
+		SecretBackend: secrets.BackendConfig{
+			Type:        secrets.Backend1Password,
+			OnePassword: &secrets.OnePasswordConfig{}, // no PlatformVaultID
+		},
+	}
+	store := &staticOrgProvider{org: org}
+
+	sh := &secretsHandler{
+		orgStore:        store,
+		logger:          slog.Default(),
+		k8sUpperWriter:  secrets.NewUpperLevelSecretWriter(k8sfake.NewSimpleClientset()),
+		saTokenStore:    &memSATokenStore{token: "fake"},
+		saClientFactory: func(_ context.Context, _ string) (onepassword.SAClient, error) { return onepassword.NewFakeClient(), nil },
+	}
+
+	body, _ := json.Marshal(MigrateToOnePasswordRequest{})
+	req := httptest.NewRequest("POST", "/api/v1/org/secret-backend/migrate-to-onepassword", bytes.NewBuffer(body))
+	rec := httptest.NewRecorder()
+	sh.handleMigrateToOnePassword(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 when platform vault missing, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// memSATokenStore is a minimal in-memory SATokenStore for handler tests.
+type memSATokenStore struct {
+	token string
+}
+
+func (m *memSATokenStore) SaveToken(_ context.Context, t string) error { m.token = t; return nil }
+func (m *memSATokenStore) LoadToken(_ context.Context) (string, error) { return m.token, nil }
 
 func TestEnsurePlatformVault_SkipsForK8sBackend(t *testing.T) {
 	// K8s backend should not provision a platform vault even if a SA client

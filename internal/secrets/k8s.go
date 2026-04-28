@@ -201,6 +201,41 @@ func (w *UpperLevelSecretWriter) DeleteClusterSecretKey(ctx context.Context, clu
 	return w.deleteSecretKey(ctx, ClusterSecretName(cluster), key)
 }
 
+// ── Per-key value readers (used by MigrateUpperLevelSecrets) ─────────────
+
+// ReadOrgSecretValue returns the raw value for a single key in the org-level
+// secret. Returns nil bytes (and no error) when the secret or key does not
+// exist — callers should treat this as "missing" and skip.
+func (w *UpperLevelSecretWriter) ReadOrgSecretValue(ctx context.Context, key string) ([]byte, error) {
+	return w.readSecretValue(ctx, OrgSecretName(), key)
+}
+
+// ReadEnvTypeSecretValue returns the raw value for a key in an env-type Secret.
+func (w *UpperLevelSecretWriter) ReadEnvTypeSecretValue(ctx context.Context, envType, key string) ([]byte, error) {
+	return w.readSecretValue(ctx, EnvTypeSecretName(envType), key)
+}
+
+// ReadProjectSecretValue returns the raw value for a key in a project Secret.
+func (w *UpperLevelSecretWriter) ReadProjectSecretValue(ctx context.Context, project, key string) ([]byte, error) {
+	return w.readSecretValue(ctx, ProjectSecretName(project), key)
+}
+
+// ReadClusterSecretValue returns the raw value for a key in a cluster Secret.
+func (w *UpperLevelSecretWriter) ReadClusterSecretValue(ctx context.Context, cluster, key string) ([]byte, error) {
+	return w.readSecretValue(ctx, ClusterSecretName(cluster), key)
+}
+
+func (w *UpperLevelSecretWriter) readSecretValue(ctx context.Context, name, key string) ([]byte, error) {
+	secret, err := w.client.CoreV1().Secrets(SystemNamespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading secret %s: %w", name, err)
+	}
+	return secret.Data[key], nil
+}
+
 func (w *UpperLevelSecretWriter) upsertSecret(
 	ctx context.Context,
 	name string,

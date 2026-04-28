@@ -223,6 +223,12 @@ type ProjectNamespaceEnv struct {
 	// Namespace is the resolved project namespace for this environment.
 	// When empty, no manifest is written for this env.
 	Namespace string
+	// ClusterRef is the registered cluster this environment is bound to. When
+	// non-empty it is added as the "suparship.io/cluster" namespace label so
+	// the mittwald replicator can deliver cluster-scope Secrets/ConfigMaps
+	// (matched via "replicate-to-matching: suparship.io/cluster=<name>") into
+	// app namespaces hosted on this cluster.
+	ClusterRef string
 }
 
 // namespaceManifest is the minimal YAML representation of a Kubernetes Namespace.
@@ -235,6 +241,29 @@ type namespaceManifest struct {
 type namespaceMetadata struct {
 	Name   string            `yaml:"name"`
 	Labels map[string]string `yaml:"labels"`
+}
+
+// BuildProjectNamespaceManifest renders the Namespace YAML for one project
+// environment with the appropriate suparship labels. Pure function — no git
+// or filesystem side effects — exposed so tests can verify label behaviour
+// without exercising the cloned-repo plumbing.
+func BuildProjectNamespaceManifest(projectName string, env ProjectNamespaceEnv) ([]byte, error) {
+	labels := map[string]string{
+		"suparship.io/project":    projectName,
+		"suparship.io/managed-by": "suparship",
+	}
+	if env.ClusterRef != "" {
+		labels["suparship.io/cluster"] = env.ClusterRef
+	}
+	manifest := namespaceManifest{
+		APIVersion: "v1",
+		Kind:       "Namespace",
+		Metadata: namespaceMetadata{
+			Name:   env.Namespace,
+			Labels: labels,
+		},
+	}
+	return yaml.Marshal(manifest)
 }
 
 // PublishProjectNamespaces writes a Kubernetes Namespace manifest per stable
@@ -268,18 +297,7 @@ func (p *Publisher) PublishProjectNamespaces(ctx context.Context, projectName st
 				}
 				continue
 			}
-			manifest := namespaceManifest{
-				APIVersion: "v1",
-				Kind:       "Namespace",
-				Metadata: namespaceMetadata{
-					Name: env.Namespace,
-					Labels: map[string]string{
-						"suparship.io/project":    projectName,
-						"suparship.io/managed-by": "suparship",
-					},
-				},
-			}
-			data, err := yaml.Marshal(manifest)
+			data, err := BuildProjectNamespaceManifest(projectName, env)
 			if err != nil {
 				return fmt.Errorf("marshal namespace manifest for %s/%s: %w", projectName, env.EnvName, err)
 			}

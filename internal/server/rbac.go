@@ -185,6 +185,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/org/secret-backend/vaults", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListVaults)))
 		mux.HandleFunc("POST /api/v1/org/secret-backend/bindings", requireOrgAdmin(rh.requireOrgAdmin(sh.handleAddBinding)))
 		mux.HandleFunc("DELETE /api/v1/org/secret-backend/bindings/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRemoveBinding)))
+		// One-shot migration: copy upper-level K8s Secrets into the 1Password
+		// vaults after flipping the org backend. Idempotent.
+		mux.HandleFunc("POST /api/v1/org/secret-backend/migrate-to-onepassword", requireOrgAdmin(rh.requireOrgAdmin(sh.handleMigrateToOnePassword)))
 		// Org-level secrets CRUD — org_admin writes, any-auth reads.
 		mux.HandleFunc("GET /api/v1/org/secrets", rh.auth.requireAuth(sh.handleListOrgSecrets))
 		mux.HandleFunc("POST /api/v1/org/secrets", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertOrgSecrets)))
