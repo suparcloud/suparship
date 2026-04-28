@@ -71,31 +71,14 @@ type HelmValues struct {
 	Suparship SuparshipValues `json:"suparship" yaml:"suparship"`
 }
 
-// SuparshipValues carries deterministic, well-known resource names so Helm
-// templates can reference them without knowing backend-specific details.
-//
-// EnvFromConfigMaps and EnvFromSecrets give the chart the full hierarchy of
-// resources to envFrom, in precedence order (lower-precedence first; later
-// entries win on key collision per Kubernetes envFrom semantics). The chart
-// just iterates — no string concatenation, no naming-pattern awareness, no
-// backend-type branching.
+// SuparshipValues carries the precedence-ordered hierarchy of ConfigMaps and
+// Secrets that the chart should envFrom. Names are computed by the publisher
+// from the active backend + naming patterns, so the chart needs no knowledge
+// of either. Order is org → env-type → project → app → app-env → cluster;
+// later entries win on key collision per Kubernetes envFrom semantics.
 type SuparshipValues struct {
-	// SecretName is the Kubernetes Secret name holding the app's primary
-	// per-env secrets (the ESO-materialised target on 1Password backend, or
-	// the suparship-system-replicated app-env secret on K8s backend).
-	// Already included in EnvFromSecrets — exposed as a top-level field for
-	// templates that need the most-specific secret name on its own.
-	SecretName string `json:"secretName" yaml:"secretName"`
-	// ConfigName is the Kubernetes ConfigMap name holding the app's primary
-	// per-env config. Same shape as SecretName.
-	ConfigName string `json:"configName" yaml:"configName"`
-	// EnvFromConfigMaps lists every ConfigMap the pod should envFrom in
-	// precedence order: org → env-type → project → app → app-env → cluster.
-	// Names are computed by the publisher from the active backend + naming
-	// patterns, so the chart needs no knowledge of either.
 	EnvFromConfigMaps []string `json:"envFromConfigMaps,omitempty" yaml:"envFromConfigMaps,omitempty"`
-	// EnvFromSecrets is the parallel list for Secret envFroms.
-	EnvFromSecrets []string `json:"envFromSecrets,omitempty" yaml:"envFromSecrets,omitempty"`
+	EnvFromSecrets    []string `json:"envFromSecrets,omitempty" yaml:"envFromSecrets,omitempty"`
 }
 
 // AppContext carries top-level app identity injected into every chart.

@@ -68,24 +68,34 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 //
 // When baseDomain is empty, "localhost" is used.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
-	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "")
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "")
 }
 
-// MapToHelmValuesForEnv is the canonical mapper that accepts the resolved
-// Kubernetes namespace in addition to the base domain. When namespace is
-// non-empty the suparship.secretName and suparship.configName values are
-// derived from it (pattern: suparship-secrets-{namespace} and
-// suparship-config-{namespace}), ensuring they are consistent with the
-// operator-configured namespace pattern.
+// MapToHelmValuesForEnv is the canonical mapper. The naming and orgName
+// arguments mirror what the publisher uses to render ExternalSecret /
+// ConfigMap names in gitops-output, so values.yaml's
+// suparship.secretName / configName always match the K8s resource the
+// platform-managed publisher actually creates.
 //
-// When namespace is empty the legacy {project}-{app}-{env} names are used so
-// that callers that do not yet have a resolved namespace remain unaffected.
+// Cluster is used only for the cluster-scope envFrom name; pass "" for
+// unbound envs (the cluster scope is then omitted from the lists).
 //
-// Cluster is used only to compute the cluster-scope envFrom names; pass ""
-// for unbound envs (the cluster scope is then omitted from the lists).
-func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain, namespace, cluster string) HelmValues {
+// Namespace is plumbed for backwards-compatibility (callers that have it
+// pass it; the mapper does not currently use it for naming — names come
+// from the configurable ResourceNaming patterns).
+func MapToHelmValuesForEnv(
+	app *domain.App,
+	envName string,
+	envType domain.AppEnvironmentType,
+	baseDomain, namespace, cluster string,
+	naming secrets.ResourceNaming,
+	orgName string,
+) HelmValues {
 	if baseDomain == "" {
 		baseDomain = "localhost"
+	}
+	if orgName == "" {
+		orgName = "default"
 	}
 
 	envOverride := app.Spec.EnvironmentDefaults[envName] // zero value if absent
@@ -97,16 +107,22 @@ func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEn
 	routingComponent := resolveRoutingComponent(app.Spec.Components)
 	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain))
 
-	var secretName, configName string
-	if namespace != "" {
-		secretName = secrets.SecretNameForNamespace(namespace)
-		configName = secrets.ConfigNameForNamespace(namespace)
-	} else {
-		secretName = secrets.AppSecretName(app.ProjectName, app.Name, envName)
-		configName = secrets.AppConfigName(app.ProjectName, app.Name, envName)
+	// Resource names come from the same ResourceNaming patterns the
+	// publisher uses, so values.yaml lines up with the K8s resources
+	// actually created — RenderAppResource → ExternalSecret target,
+	// RenderAppConfigMap → published ConfigMap.
+	np := secrets.NamingParams{
+		Org:     orgName,
+		Env:     envName,
+		Project: app.ProjectName,
+		App:     app.Name,
+		Cluster: cluster,
 	}
-
-	cms, secs := envFromLists(app.ProjectName, app.Name, envName, string(envType), cluster, secretName, configName)
+	cms, secs := envFromLists(
+		app.ProjectName, app.Name, envName, string(envType), cluster,
+		naming.RenderAppResource(np),
+		naming.RenderAppConfigMap(np),
+	)
 
 	return HelmValues{
 		App: AppContext{
@@ -123,8 +139,6 @@ func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEn
 			AppEnv: envOverride.EnvConfig,
 		}),
 		Suparship: SuparshipValues{
-			SecretName:        secretName,
-			ConfigName:        configName,
 			EnvFromConfigMaps: cms,
 			EnvFromSecrets:    secs,
 		},
@@ -137,30 +151,49 @@ func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEn
 // writes (publisher commits + K8s upper-level writer + Stakater Replicator):
 // the chart needs no string concatenation or backend awareness, just iterate.
 //
-// The most-specific app-env entries are appended via the operator-configurable
-// secretName/configName so custom naming patterns (e.g. {project}-{app}-{env}
-// vs {namespace}) flow through transparently.
+// The most-specific app-env entry includes both names that may exist:
+//   - appEnvESOName  — the ExternalSecret target (RenderAppResource), which
+//     ESO materialises in the env namespace on the 1Password backend.
+//   - appEnvK8sName  — the suparship-system K8s Secret name written by the
+//     UpperLevelSecretWriter on the K8s backend, replicated by Stakater into
+//     the env namespace.
+//
+// On a given backend only one of these actually exists; the other resolves
+// to a no-op via `optional: true` in the chart's envFrom block. When the
+// operator has customised RenderAppResource so the two names coincide, only
+// one entry is emitted.
 //
 // cluster=="" omits the cluster-scope tail (env unbound).
-func envFromLists(project, app, envName, envType, cluster, appEnvSecretName, appEnvConfigName string) ([]string, []string) {
+func envFromLists(project, app, envName, envType, cluster, appEnvESOName, appEnvESOConfigName string) ([]string, []string) {
 	envvarsKey := envType
 	if envvarsKey == "" {
 		envvarsKey = envName
 	}
+	appEnvK8sName := secrets.AppEnvSecretName(project, app, envName)
+	appEnvK8sConfigName := secrets.AppConfigName(project, app, envName)
+
 	cms := []string{
 		"suparship-envvars-org",
 		"suparship-envvars-env-" + envvarsKey,
 		"suparship-envvars-project-" + project,
 		"suparship-envvars-app-" + project + "-" + app,
-		appEnvConfigName,
+		appEnvESOConfigName,
 	}
+	if appEnvK8sConfigName != appEnvESOConfigName {
+		cms = append(cms, appEnvK8sConfigName)
+	}
+
 	secs := []string{
 		"suparship-secrets-org",
 		"suparship-secrets-envtype-" + envvarsKey,
 		"suparship-secrets-project-" + project,
 		"suparship-secrets-app-" + project + "-" + app,
-		appEnvSecretName,
+		appEnvESOName,
 	}
+	if appEnvK8sName != appEnvESOName {
+		secs = append(secs, appEnvK8sName)
+	}
+
 	if cluster != "" {
 		cms = append(cms, "suparship-envvars-cluster-"+cluster)
 		secs = append(secs, "suparship-secrets-cluster-"+cluster)
