@@ -125,6 +125,12 @@ type CreateRequest struct {
 	// entirely and uses these specs directly. Intended for legacy callers that
 	// supply fully-specified component lists.
 	ExplicitComponents []domain.ComponentSpec
+	// NamespaceScope controls whether the app deploys into a dedicated
+	// namespace ("app", default) or the shared project namespace ("project").
+	NamespaceScope domain.NamespaceScope
+	// NamespacePattern overrides org/project defaults for app namespace naming.
+	// Only applies when NamespaceScope is "app".
+	NamespacePattern string
 }
 
 // CreateResult holds the pure-function outputs of Create.
@@ -181,6 +187,14 @@ func Create(req CreateRequest) (*CreateResult, error) {
 		comps,
 	)
 
+	// Apply namespace scope and pattern overrides from the request.
+	if req.NamespaceScope != "" {
+		app.Spec.NamespaceScope = req.NamespaceScope
+	}
+	if req.NamespacePattern != "" {
+		app.Spec.NamespacePattern = req.NamespacePattern
+	}
+
 	// Generate Helm values for each default environment.
 	hvMap := make(map[string]helmvalues.HelmValues, len(envs))
 	for _, env := range envs {
@@ -196,9 +210,10 @@ func Create(req CreateRequest) (*CreateResult, error) {
 
 // DefaultEnvironments returns the default staging and prod AppEnvironment
 // instances for a newly-created app. Both start with no release and a
-// StatusNotDeployed phase.
+// StatusNotDeployed phase. This is used as a fallback for the sync path
+// when no org environments have been registered (e.g. legacy apps).
 //
-// Namespace convention: {appName}-{envName} via GenerateNamespace.
+// Namespace convention: {projectName}-{appName}-{envName} via GenerateProjectNamespace.
 func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 	return []*domain.AppEnvironment{
 		{
@@ -206,7 +221,8 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 			ProjectName: a.ProjectName,
 			EnvName:     "staging",
 			EnvType:     domain.AppEnvStaging,
-			Namespace:   domain.GenerateNamespace(a.Name, "staging", domain.AppEnvStaging),
+			Order:       1,
+			Namespace:   domain.GenerateProjectNamespace(a.ProjectName, a.Name, "staging"),
 			URLs:        []string{},
 			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 		},
@@ -215,7 +231,8 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 			ProjectName: a.ProjectName,
 			EnvName:     "prod",
 			EnvType:     domain.AppEnvProd,
-			Namespace:   domain.GenerateNamespace(a.Name, "prod", domain.AppEnvProd),
+			Order:       2,
+			Namespace:   domain.GenerateProjectNamespace(a.ProjectName, a.Name, "prod"),
 			URLs:        []string{},
 			Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 		},

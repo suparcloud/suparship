@@ -51,6 +51,24 @@ export function updateEnvTypeEnvConfig(
   );
 }
 
+// ── Cluster level (platform escape hatch — wins over every layer) ─────────────
+
+export function getClusterEnvConfig(cluster: string): Promise<EnvConfig> {
+  return api.get<EnvConfig>(
+    `/clusters/${encodeURIComponent(cluster)}/envconfig`,
+  );
+}
+
+export function updateClusterEnvConfig(
+  cluster: string,
+  cfg: EnvConfig,
+): Promise<unknown> {
+  return api.put<unknown>(
+    `/clusters/${encodeURIComponent(cluster)}/envconfig`,
+    cfg,
+  );
+}
+
 // ── Project level ──────────────────────────────────────────────────────────────
 
 export function getProjectEnvConfig(project: string): Promise<EnvConfig> {

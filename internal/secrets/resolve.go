@@ -7,6 +7,7 @@ const (
 	LevelProject     = "project"
 	LevelApp         = "app"
 	LevelAppEnv      = "app-environment"
+	LevelCluster     = "cluster"
 )
 
 // ResolvedSecret describes a single secret key in the fully merged
@@ -17,12 +18,16 @@ type ResolvedSecret struct {
 	Source string `json:"source"`
 }
 
-// ResolveSecretLayers merges key names from all five hierarchy levels using
-// last-wins semantics (org < environment < project < app < app-env).
+// ResolveSecretLayers merges key names from all six hierarchy levels using
+// last-wins semantics (org < environment < project < app < app-env < cluster).
+//
+// Cluster wins last as a platform-engineering escape hatch (incident break-glass,
+// per-cluster feature kill-switches, regional tuning) — overriding even the
+// app team's most specific app-env layer.
 //
 // Each input is a slice of key names present at that level. The output maps
 // each unique key to its winning source level.
-func ResolveSecretLayers(org, env, project, app, appEnv []string) map[string]ResolvedSecret {
+func ResolveSecretLayers(org, env, project, app, appEnv, cluster []string) map[string]ResolvedSecret {
 	resolved := make(map[string]ResolvedSecret)
 
 	type levelEntry struct {
@@ -35,6 +40,7 @@ func ResolveSecretLayers(org, env, project, app, appEnv []string) map[string]Res
 		{LevelProject, project},
 		{LevelApp, app},
 		{LevelAppEnv, appEnv},
+		{LevelCluster, cluster},
 	}
 
 	for _, le := range ordered {

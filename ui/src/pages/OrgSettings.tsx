@@ -7,7 +7,10 @@ import {
   createOrgEnvironment,
   updateOrgEnvironment,
   deleteOrgEnvironment,
+  getOrgNaming,
+  updateOrgNaming,
 } from "../lib/settings";
+import type { OrgNaming } from "../lib/settings";
 import {
   getOrgEnvConfig,
   updateOrgEnvConfig,
@@ -21,17 +24,24 @@ import {
   listVaults,
   addBinding,
   removeBinding,
+  setPlatformVault,
   listOrgSecretKeys,
   upsertOrgSecrets,
   deleteOrgSecretKey,
   listEnvTypeSecretKeys,
   upsertEnvTypeSecrets,
   deleteEnvTypeSecretKey,
+  migrateToOnePassword,
 } from "../lib/secrets";
 import type {
+  MigrateToOnePasswordResponse,
   SecretBackendConfig,
   VaultInfo,
 } from "../lib/secrets";
+import { fetchProjects } from "../lib/settings";
+import { listClusters } from "../lib/clusters";
+import type { Cluster } from "../lib/clusters";
+import type { Project } from "../types";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
 import type { OrgInfo, RoleBinding } from "../types";
@@ -484,6 +494,212 @@ function EnvironmentTypeEnvConfigSection({
   );
 }
 
+// ── Namespace Naming section ──────────────────────────────────────────────────
+
+const SHARED_APP_PRESETS = [
+  { label: "{project}-{app}-{env}", value: "{project}-{app}-{env}" },
+  { label: "{project}-{app}", value: "{project}-{app}" },
+];
+const DEDICATED_APP_PRESETS = [
+  { label: "{project}-{app}", value: "{project}-{app}" },
+  { label: "{app}", value: "{app}" },
+];
+const SHARED_PROJECT_PRESETS = [
+  { label: "{project}-{env}", value: "{project}-{env}" },
+  { label: "{project}", value: "{project}" },
+];
+const DEDICATED_PROJECT_PRESETS = [
+  { label: "{project}", value: "{project}" },
+];
+
+function NamespaceNamingSection() {
+  const [naming, setNaming] = useState<OrgNaming>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getOrgNaming()
+      .then((n) => { if (!cancelled) setNaming(n); })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function handleSave() {
+    setSaving(true);
+    setSaveError(null);
+    setSaved(false);
+    try {
+      const updated = await updateOrgNaming(naming);
+      setNaming(updated);
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Live preview using sample values
+  function renderPreview(pattern: string): string {
+    if (!pattern) return "";
+    return pattern
+      .replace("{org}", "myorg")
+      .replace("{project}", "billing")
+      .replace("{app}", "api")
+      .replace("{env}", "staging");
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-6 py-4">
+        <h2 className="text-sm font-medium text-gray-900">Namespace Naming</h2>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Org-wide default patterns for Kubernetes namespaces. Projects and apps
+          can override these. Leave blank for the topology-aware default.
+        </p>
+      </div>
+
+      <div className="px-6 py-4">
+        {loading ? (
+          <div className="h-24 animate-pulse rounded bg-gray-100" />
+        ) : error ? (
+          <p className="text-sm text-red-600">{error}</p>
+        ) : (
+          <div className="space-y-6">
+            {/* Project namespace pattern */}
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-gray-700">
+                Project namespace pattern
+              </label>
+              <p className="text-xs text-gray-400">
+                Tokens: <code className="font-mono">{"{org}"}</code>,{" "}
+                <code className="font-mono">{"{project}"}</code>,{" "}
+                <code className="font-mono">{"{env}"}</code>. Used when an app
+                has{" "}
+                <code className="font-mono">namespaceScope: project</code>.
+              </p>
+              <div className="flex flex-wrap gap-1.5 mb-1">
+                {[...SHARED_PROJECT_PRESETS, ...DEDICATED_PROJECT_PRESETS.filter(
+                  (p) => !SHARED_PROJECT_PRESETS.some((s) => s.value === p.value)
+                )].map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    onClick={() => setNaming((n) => ({ ...n, projectNamespace: p.value }))}
+                    className={`rounded px-2 py-0.5 text-xs font-mono transition-colors ${
+                      naming.projectNamespace === p.value
+                        ? "bg-indigo-100 text-indigo-800"
+                        : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="e.g. {project}-{env}  or  {project}"
+                value={naming.projectNamespace ?? ""}
+                onChange={(e) => setNaming((n) => ({ ...n, projectNamespace: e.target.value || undefined }))}
+              />
+              {naming.projectNamespace && (
+                <p className="text-xs text-gray-400">
+                  Preview:{" "}
+                  <code className="font-mono text-gray-700">
+                    {renderPreview(naming.projectNamespace)}
+                  </code>
+                </p>
+              )}
+              {!naming.projectNamespace && (
+                <p className="text-xs text-gray-400 italic">
+                  Empty → topology-aware default: <code className="font-mono">billing-staging</code> (shared) or <code className="font-mono">billing</code> (dedicated)
+                </p>
+              )}
+            </div>
+
+            {/* App namespace pattern */}
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-gray-700">
+                App namespace pattern
+              </label>
+              <p className="text-xs text-gray-400">
+                Tokens: <code className="font-mono">{"{org}"}</code>,{" "}
+                <code className="font-mono">{"{project}"}</code>,{" "}
+                <code className="font-mono">{"{app}"}</code>,{" "}
+                <code className="font-mono">{"{env}"}</code>. Used for apps with
+                dedicated namespaces (default).
+              </p>
+              <div className="flex flex-wrap gap-1.5 mb-1">
+                {[...SHARED_APP_PRESETS, ...DEDICATED_APP_PRESETS.filter(
+                  (p) => !SHARED_APP_PRESETS.some((s) => s.value === p.value)
+                )].map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    onClick={() => setNaming((n) => ({ ...n, appNamespace: p.value }))}
+                    className={`rounded px-2 py-0.5 text-xs font-mono transition-colors ${
+                      naming.appNamespace === p.value
+                        ? "bg-indigo-100 text-indigo-800"
+                        : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="e.g. {project}-{app}-{env}  or  {project}-{app}"
+                value={naming.appNamespace ?? ""}
+                onChange={(e) => setNaming((n) => ({ ...n, appNamespace: e.target.value || undefined }))}
+              />
+              {naming.appNamespace && (
+                <p className="text-xs text-gray-400">
+                  Preview:{" "}
+                  <code className="font-mono text-gray-700">
+                    {renderPreview(naming.appNamespace)}
+                  </code>
+                </p>
+              )}
+              {!naming.appNamespace && (
+                <p className="text-xs text-gray-400 italic">
+                  Empty → topology-aware default: <code className="font-mono">billing-api-staging</code> (shared) or <code className="font-mono">billing-api</code> (dedicated)
+                </p>
+              )}
+            </div>
+
+            {saveError && (
+              <p className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">
+                {saveError}
+              </p>
+            )}
+            {saved && (
+              <p className="rounded bg-green-50 px-3 py-2 text-xs text-green-700">
+                Namespace naming patterns saved.
+              </p>
+            )}
+
+            <div className="flex justify-end">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {saving ? "Saving…" : "Save naming patterns"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Secrets backend section ────────────────────────────────────────────────────
 
 const BACKEND_OPTIONS = [
@@ -714,38 +930,82 @@ function SecretsBackendSection() {
                     </span>
                   </button>
                   {showGuide && (
-                    <div className="border-t border-blue-100 px-4 py-3">
+                    <div className="space-y-3 border-t border-blue-100 px-4 py-3">
+                      <p className="text-xs text-blue-900">
+                        <strong>Two vault tiers:</strong> a{" "}
+                        <strong>platform-shared vault</strong> for org and
+                        project secrets (read-only from every cluster), plus
+                        one <strong>env vault</strong> per environment for
+                        env-type, app, app-env, and cluster secrets. 1Password
+                        Service Accounts cannot create vaults or Connect
+                        tokens — you create both manually in the 1Password
+                        console; suparShip handles the cluster-side automation
+                        (sealing tokens, generating ClusterSecretStores,
+                        publishing to GitOps).
+                      </p>
                       <ol className="space-y-2 text-xs text-blue-900">
                         <li>
-                          <strong>1. Create vaults</strong> in 1Password for each
-                          environment (e.g. <code>staging-apps</code>,{" "}
+                          <strong>
+                            1. Create the platform-shared vault and per-env
+                            vaults
+                          </strong>{" "}
+                          in the 1Password web console (e.g.{" "}
+                          <code>company-shared</code>,{" "}
+                          <code>staging-apps</code>,{" "}
                           <code>prod-apps</code>).
                         </li>
                         <li>
-                          <strong>2. Create a Service Account</strong> with Read
-                          &amp; Write access to these vaults.
+                          <strong>2. Create a Service Account</strong> with
+                          Read &amp; Write access to all those vaults. (No
+                          vault-creation permission is needed — SAs can't
+                          create vaults regardless.)
                         </li>
                         <li>
-                          <strong>3. Paste the SA token</strong> below &mdash;
-                          suparShip validates and shows accessible vaults.
+                          <strong>3. Paste the SA token</strong> below —
+                          suparShip validates it and shows how many vaults
+                          are visible.
                         </li>
                         <li>
-                          <strong>4. Set up a Connect Server</strong> in
-                          1Password and grant it access to the vaults.
+                          <strong>4. Pick the platform-shared vault</strong>{" "}
+                          from the dropdown that appears after the SA token
+                          is saved.
                         </li>
                         <li>
-                          <strong>5. Deploy Connect</strong> to your tooling
+                          <strong>5. Set up a Connect Server</strong> in
+                          1Password and grant it access to <strong>all</strong>{" "}
+                          suparShip vaults — every env vault <em>and</em> the
+                          platform vault.
+                        </li>
+                        <li>
+                          <strong>6. Deploy Connect</strong> to your tooling
                           cluster (Helm chart or Docker).
                         </li>
                         <li>
-                          <strong>6. Create per-env Connect tokens</strong>{" "}
-                          scoped to each vault.
+                          <strong>7. Issue per-env Connect tokens</strong> in
+                          the 1Password console. Each token must read{" "}
+                          <strong>both vaults</strong>: its env vault{" "}
+                          <em>and</em> the platform vault. Without platform
+                          access, ESO can't resolve org/project items at sync
+                          time.
                         </li>
                         <li>
-                          <strong>7. Add bindings</strong> below &mdash; select
-                          vault, paste Connect token for each environment.
+                          <strong>8. Add bindings</strong> below — select env
+                          vault, paste the env's Connect token, for each
+                          environment. suparShip seals the token and publishes
+                          the SealedSecret + ClusterSecretStore to GitOps.
+                        </li>
+                        <li>
+                          <strong>9. (Optional) Migrate existing K8s Secrets</strong>{" "}
+                          using the &ldquo;Migrate K8s Secrets to
+                          1Password&rdquo; panel below. Idempotent; safe to
+                          re-run.
                         </li>
                       </ol>
+                      <p className="text-xs text-blue-900">
+                        Need more detail? See{" "}
+                        <code>docs/secrets.md</code> for architecture diagrams,
+                        troubleshooting, and the full RBAC matrix.
+                      </p>
                     </div>
                   )}
                 </div>
@@ -756,8 +1016,11 @@ function SecretsBackendSection() {
                     Service Account Token
                   </label>
                   <p className="text-xs text-gray-500">
-                    Paste the 1Password Service Account token. It should have
-                    Read &amp; Write access to the environment vaults.
+                    Paste the 1Password Service Account token. It needs Read
+                    &amp; Write access to every vault you want suparShip to
+                    manage — the platform-shared vault and each env vault.
+                    1Password Service Accounts cannot create vaults, so make
+                    sure these vaults already exist before pasting.
                   </p>
                   <div className="flex items-end gap-3">
                     <div className="flex-1">
@@ -781,6 +1044,18 @@ function SecretsBackendSection() {
                     <p className="text-xs text-gray-600">{tokenMsg}</p>
                   )}
                 </div>
+
+                {/* Platform-shared vault picker — operator selects the vault
+                    they created manually in the 1Password console. 1Password
+                    Service Accounts cannot create vaults, so suparShip cannot
+                    auto-provision this. */}
+                <PlatformVaultPicker
+                  config={config}
+                  onChanged={async () => {
+                    const updated = await getSecretsBackend();
+                    setConfig(updated);
+                  }}
+                />
 
                 {/* Connect Server endpoint */}
                 <div className="space-y-1">
@@ -1036,6 +1311,9 @@ function SecretsBackendSection() {
                     </table>
                   )}
                 </div>
+
+                {/* Migration panel — visible once the platform vault is ready. */}
+                <MigrationPanel config={config} />
               </div>
             )}
           </div>
@@ -1043,6 +1321,363 @@ function SecretsBackendSection() {
       </div>
     </div>
   );
+}
+
+// ── Migration panel ──────────────────────────────────────────────────────────
+
+// ── Platform vault picker ────────────────────────────────────────────────────
+//
+// 1Password Service Accounts cannot create new vaults. The operator creates
+// the platform-shared vault by hand in the 1Password console; suparShip just
+// needs to know which vault it is. This component lists every vault the SA
+// token can see, lets the operator pick one, and POSTs the choice to
+// /org/secret-backend/platform-vault.
+//
+// Note: the upper-level writer in the suparShip server is built once at
+// startup using the persisted PlatformVaultID. After picking, a server
+// restart is required before org / project secret writes start landing in
+// the chosen vault — surfaced inline.
+
+function PlatformVaultPicker({
+  config,
+  onChanged,
+}: {
+  config: SecretBackendConfig;
+  onChanged: () => Promise<void>;
+}) {
+  const currentID = config.onePassword?.platformVaultId ?? "";
+  const currentName = config.onePassword?.platformVaultName ?? "";
+  const [vaults, setVaults] = useState<VaultInfo[] | null>(null);
+  const [selectedID, setSelectedID] = useState(currentID);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+
+  // Keep the dropdown in sync with the persisted ID across re-fetches.
+  useEffect(() => {
+    setSelectedID(currentID);
+  }, [currentID]);
+
+  async function handleLoadVaults() {
+    setLoading(true);
+    setError(null);
+    try {
+      const v = await listVaults();
+      setVaults(v);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load vaults");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!selectedID) return;
+    setSaving(true);
+    setError(null);
+    setSavedMsg(null);
+    try {
+      const picked = vaults?.find((v) => v.id === selectedID);
+      const res = await setPlatformVault(selectedID, picked?.title);
+      setSavedMsg(
+        `Saved. Org / project secret writes now route to "${res.vaultName}".`,
+      );
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <label className="block text-xs font-medium text-gray-700">
+        Platform-shared vault
+      </label>
+      <p className="text-xs text-gray-500">
+        Pick the 1Password vault you created (manually) for org and project
+        secrets — read-only from every cluster's ESO. Per-env vaults are
+        configured separately in the bindings table below.
+      </p>
+      <div className="flex items-center gap-2">
+        {currentID ? (
+          <span className="flex items-center gap-1.5 text-xs text-green-700">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />
+            Currently:{" "}
+            <code className="font-mono">{currentName || currentID}</code>
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5 text-xs text-amber-700">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
+            Not set — org / project secret writes will fail until a vault is
+            picked.
+          </span>
+        )}
+      </div>
+
+      <div className="flex items-end gap-2">
+        {vaults === null ? (
+          <button
+            type="button"
+            onClick={handleLoadVaults}
+            disabled={loading}
+            className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {loading ? "Loading…" : "List vaults"}
+          </button>
+        ) : (
+          <>
+            <select
+              value={selectedID}
+              onChange={(e) => setSelectedID(e.target.value)}
+              className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+            >
+              <option value="">— select a vault —</option>
+              {vaults.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.title}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving || !selectedID || selectedID === currentID}
+              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={handleLoadVaults}
+              disabled={loading}
+              title="Refresh the vault list"
+              className="rounded-lg border border-gray-300 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              ⟳
+            </button>
+          </>
+        )}
+      </div>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      {savedMsg && <p className="text-xs text-green-700">{savedMsg}</p>}
+    </div>
+  );
+}
+
+function MigrationPanel({ config }: { config: SecretBackendConfig }) {
+  const platformVaultID = config.onePassword?.platformVaultId ?? "";
+  const bindings = config.onePassword?.bindings ?? [];
+
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [clusters, setClusters] = useState<Cluster[]>([]);
+  const [selectedEnvs, setSelectedEnvs] = useState<Record<string, boolean>>({});
+  const [selectedProjects, setSelectedProjects] = useState<Record<string, boolean>>({});
+  const [selectedClusters, setSelectedClusters] = useState<Record<string, boolean>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<MigrateToOnePasswordResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Load inventory once.
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const [{ projects: ps }, cs] = await Promise.all([
+          fetchProjects(),
+          listClusters(),
+        ]);
+        if (cancelled) return;
+        setProjects(ps);
+        setClusters(cs);
+        // Default-select every entry — operators usually want to migrate the
+        // full inventory once. Individual rows can still be opted out.
+        const envInit: Record<string, boolean> = {};
+        for (const b of bindings) envInit[b.env] = true;
+        setSelectedEnvs(envInit);
+        const projInit: Record<string, boolean> = {};
+        for (const p of ps) projInit[p.name] = true;
+        setSelectedProjects(projInit);
+        const clusterInit: Record<string, boolean> = {};
+        for (const c of cs) clusterInit[c.name] = true;
+        setSelectedClusters(clusterInit);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load inventory");
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+    // bindings come from `config` which is stable for the panel's lifetime;
+    // no need to re-run on every keystroke elsewhere on the page.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!platformVaultID) {
+    return (
+      <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+        Migration is unavailable until the platform vault is provisioned —
+        re-paste the SA token in the section above to create it.
+      </div>
+    );
+  }
+
+  const pickedKeys = (m: Record<string, boolean>) =>
+    Object.entries(m).filter(([, v]) => v).map(([k]) => k);
+
+  async function handleMigrate() {
+    setSubmitting(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await migrateToOnePassword({
+        envTypes: pickedKeys(selectedEnvs),
+        projects: pickedKeys(selectedProjects),
+        clusters: pickedKeys(selectedClusters),
+      });
+      setResult(res);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Migration failed");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function toggle(setter: React.Dispatch<React.SetStateAction<Record<string, boolean>>>, key: string) {
+    setter((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  return (
+    <div className="mt-6 space-y-4 rounded-lg border border-gray-200 bg-white p-5">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900">
+          Migrate K8s Secrets to 1Password
+        </h3>
+        <p className="mt-1 text-xs text-gray-500">
+          One-shot copy of org / env-type / project / cluster Secrets currently
+          stored in <code className="font-mono">suparship-system</code> into
+          your 1Password vaults. App and app-env secrets are not migrated —
+          rotate those manually after the switch. Idempotent — re-running picks
+          up new keys without clobbering values already entered directly into
+          the vault.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <CheckboxList
+          title="Environments"
+          empty="No env bindings configured."
+          items={bindings.map((b) => ({ key: b.env, label: b.env }))}
+          selected={selectedEnvs}
+          onToggle={(k) => toggle(setSelectedEnvs, k)}
+        />
+        <CheckboxList
+          title="Projects"
+          empty="No projects yet."
+          items={projects.map((p) => ({ key: p.name, label: p.displayName || p.name }))}
+          selected={selectedProjects}
+          onToggle={(k) => toggle(setSelectedProjects, k)}
+        />
+        <CheckboxList
+          title="Clusters"
+          empty="No clusters registered."
+          items={clusters.map((c) => ({ key: c.name, label: c.displayName || c.name }))}
+          selected={selectedClusters}
+          onToggle={(k) => toggle(setSelectedClusters, k)}
+        />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <button
+          onClick={handleMigrate}
+          disabled={submitting}
+          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+        >
+          {submitting ? "Migrating…" : "Migrate to 1Password"}
+        </button>
+        <p className="text-xs text-gray-400">
+          Org-scope keys are always migrated.
+        </p>
+      </div>
+
+      {error && (
+        <div className="rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+          {error}
+        </div>
+      )}
+
+      {result && (
+        <div className="rounded border border-green-200 bg-green-50 p-3 text-xs text-green-800">
+          <p className="font-medium">Migration complete.</p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            <li>Org keys: {result.orgKeys}</li>
+            <li>
+              Env-types:{" "}
+              {summariseCounts(result.envTypeKeys) || "none"}
+            </li>
+            <li>
+              Projects:{" "}
+              {summariseCounts(result.projectKeys) || "none"}
+            </li>
+            <li>
+              Clusters:{" "}
+              {summariseCounts(result.clusterKeys) || "none"}
+            </li>
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface CheckboxListProps {
+  title: string;
+  empty: string;
+  items: Array<{ key: string; label: string }>;
+  selected: Record<string, boolean>;
+  onToggle: (key: string) => void;
+}
+
+function CheckboxList({ title, empty, items, selected, onToggle }: CheckboxListProps) {
+  return (
+    <div>
+      <p className="mb-2 text-xs font-medium uppercase tracking-wider text-gray-500">
+        {title}
+      </p>
+      {items.length === 0 ? (
+        <p className="text-xs text-gray-400">{empty}</p>
+      ) : (
+        <ul className="space-y-1">
+          {items.map((it) => (
+            <li key={it.key} className="flex items-center gap-2">
+              <input
+                id={`migrate-${title}-${it.key}`}
+                type="checkbox"
+                checked={!!selected[it.key]}
+                onChange={() => onToggle(it.key)}
+                className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              <label
+                htmlFor={`migrate-${title}-${it.key}`}
+                className="text-sm text-gray-700"
+              >
+                {it.label}
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function summariseCounts(counts: Record<string, number>): string {
+  const entries = Object.entries(counts).filter(([, n]) => n > 0);
+  if (entries.length === 0) return "";
+  return entries.map(([k, n]) => `${k} (${n})`).join(", ");
 }
 
 // ── Main OrgSettings page ─────────────────────────────────────────────────────
@@ -1152,6 +1787,9 @@ export function OrgSettings() {
 
       {/* Secrets backend configuration — org_admin only */}
       <SecretsBackendSection />
+
+      {/* Org-wide namespace naming patterns — org_admin only */}
+      <NamespaceNamingSection />
 
       {/* Org-wide environment variables */}
       <EnvConfigEditor

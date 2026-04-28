@@ -7,10 +7,16 @@
   automatically by Stakater Replicator from suparship-system and are NOT
   created here.
 
+  This template is only rendered when secrets.managedByPlatform is false.
+  When managedByPlatform is true (the default), suparship writes a single
+  platform-managed ConfigMap named "{app.name}-config" to the GitOps repo
+  and the deployment's envFrom references that name directly.
+
   ConfigMap names (fixed, referenced by envFrom in deployment.yaml):
     suparship-envvars-app    ← App level
     suparship-envvars-appenv ← App Environment level
 */}}
+{{- if not .Values.secrets.managedByPlatform }}
 {{- if .Values.envLayers }}
 {{- if and .Values.envLayers.app .Values.envLayers.app.vars }}
 apiVersion: v1
@@ -36,5 +42,6 @@ metadata:
     suparship.io/level: app-environment
 data:
   {{- toYaml .Values.envLayers.appEnv.vars | nindent 2 }}
+{{- end }}
 {{- end }}
 {{- end }}

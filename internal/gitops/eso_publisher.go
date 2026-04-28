@@ -21,6 +21,25 @@ type ESOSecretStoreConfig struct {
 	// (e.g. http://onepassword-connect.1password.svc.cluster.local:8080).
 	// Defaults to DefaultConnectEndpoint when empty.
 	ConnectEndpoint string
+	// PlatformVaultID is an additional 1Password vault ID to include in the
+	// store's `vaults:` map so org/project items kept in the platform-shared
+	// vault are resolvable from the same store. Ignored for non-1Password
+	// backends and when empty.
+	PlatformVaultID string
+}
+
+// ESOItemRef is one dataFrom.extract entry in the collapsed ExternalSecret.
+// Carries both the vault item title and the ClusterSecretStore that backs it
+// so a single ExternalSecret can pull from multiple stores (e.g. the platform
+// vault for org/project items and the per-env vault for env-type/cluster/app/
+// app-env items).
+type ESOItemRef struct {
+	// Key is the vault item title (e.g. "org", "{project}", "{project}-{app}-{env}").
+	Key string
+	// StoreName is the ClusterSecretStore name to read this item from. When
+	// empty, BuildCollapsedExternalSecretYAML falls back to the top-level
+	// ESOExternalSecretConfig.StoreName.
+	StoreName string
 }
 
 // ESOExternalSecretConfig captures the info needed to render one collapsed
@@ -28,10 +47,15 @@ type ESOSecretStoreConfig struct {
 type ESOExternalSecretConfig struct {
 	Name      string // rendered from ResourceNaming.AppResource
 	Namespace string // app-env namespace
-	StoreName string // ClusterSecretStore name
-	// ItemKeys are the vault item titles in precedence order (org, env-type,
-	// project, app, app-env). Only scopes that actually have keys are included.
-	ItemKeys []string
+	// StoreName is the default ClusterSecretStore for items that don't carry
+	// their own StoreName. Kept as a fallback for single-store backends and
+	// to satisfy the ExternalSecret CRD's required spec.secretStoreRef.
+	StoreName string
+	// Items lists the vault items to pull, in precedence order (org first,
+	// most-specific last — Kubernetes ESO applies dataFrom in order, later
+	// entries overwriting earlier ones for duplicate keys). Only scopes that
+	// actually have keys are included.
+	Items []ESOItemRef
 }
 
 // BuildClusterSecretStoreYAML renders a ClusterSecretStore from cfg.
@@ -70,15 +94,23 @@ spec:
       connectHost: %s
       vaults:
         %s: 1
-      auth:
+`,
+			connectEndpoint,
+			cfg.Binding.VaultID,
+		))
+		// Include the platform-shared vault when configured so org/project
+		// items can be resolved from the same store. Lower priority (2) so
+		// per-env items still win when titles collide.
+		if cfg.PlatformVaultID != "" && cfg.PlatformVaultID != cfg.Binding.VaultID {
+			sb.WriteString(fmt.Sprintf("        %s: 2\n", cfg.PlatformVaultID))
+		}
+		sb.WriteString(fmt.Sprintf(`      auth:
         secretRef:
           connectTokenSecretRef:
             name: %s
             key: %s
             namespace: %s
 `,
-			connectEndpoint,
-			cfg.Binding.VaultID,
 			authName,
 			secrets.SATokenSecretKey,
 			esoNS,
@@ -91,7 +123,10 @@ spec:
 }
 
 // BuildCollapsedExternalSecretYAML renders a single ExternalSecret that merges
-// all inherited scope items via dataFrom.extract in precedence order.
+// all inherited scope items via dataFrom.extract in precedence order. Each
+// extract entry can target its own ClusterSecretStore — used to pull org/
+// project items from the platform-shared vault and env-type/cluster/app/
+// app-env items from the per-env vault in the same Secret.
 func BuildCollapsedExternalSecretYAML(cfg ESOExternalSecretConfig) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1
@@ -112,8 +147,13 @@ spec:
   dataFrom:
 `, cfg.Name, cfg.Namespace, cfg.StoreName, cfg.Name))
 
-	for _, key := range cfg.ItemKeys {
-		sb.WriteString(fmt.Sprintf("  - extract:\n      key: %q\n", key))
+	for _, item := range cfg.Items {
+		sb.WriteString(fmt.Sprintf("  - extract:\n      key: %q\n", item.Key))
+		// Per-entry storeRef overrides the top-level secretStoreRef. Only
+		// emit when it differs so single-store output stays terse.
+		if item.StoreName != "" && item.StoreName != cfg.StoreName {
+			sb.WriteString(fmt.Sprintf("    sourceRef:\n      storeRef:\n        name: %s\n        kind: ClusterSecretStore\n", item.StoreName))
+		}
 	}
 
 	return sb.String()
@@ -152,9 +192,10 @@ func BuildSecretStoresForConfig(
 			Org:      orgName,
 		})
 		stores = append(stores, ESOSecretStoreConfig{
-			Name:        name,
-			Binding:     b,
-			BackendType: cfg.Effective(),
+			Name:            name,
+			Binding:         b,
+			BackendType:     cfg.Effective(),
+			PlatformVaultID: cfg.OnePassword.PlatformVaultID,
 		})
 	}
 	return stores
@@ -166,13 +207,26 @@ type AppEnvPublishParams struct {
 	App       string
 	Env       string
 	Namespace string
+	// Cluster is the registered cluster name bound to Env. Used to render the
+	// cluster-scope vault item title. Empty when the env is unbound — the
+	// cluster scope is then skipped regardless of ScopeKeys.
+	Cluster string
 	// ScopeKeys maps scope level names to whether keys exist at that level.
 	// Only scopes with keys get a dataFrom entry.
 	ScopeKeys map[string]bool
+	// PlatformStoreName is the ClusterSecretStore that backs the platform
+	// (org-shared) vault. When set, org and project entries route to this
+	// store instead of the env store. Leave empty for single-store backends
+	// (K8s, or 1Password without a platform vault provisioned).
+	PlatformStoreName string
 }
 
 // BuildCollapsedExternalSecretForApp generates the ExternalSecret config
 // for one app-env namespace using the naming patterns.
+//
+// Precedence order (later wins): org → env-type → project → app → app-env →
+// cluster. Org and project route to PlatformStoreName when set; everything
+// else routes to the env's ClusterSecretStore.
 func BuildCollapsedExternalSecretForApp(
 	params AppEnvPublishParams,
 	naming secrets.ResourceNaming,
@@ -184,37 +238,59 @@ func BuildCollapsedExternalSecretForApp(
 		Env:      params.Env,
 		Project:  params.Project,
 		App:      params.App,
+		Cluster:  params.Cluster,
 		Provider: string(cfg.Effective()),
 	}
 
 	resourceName := naming.RenderAppResource(np)
-	storeName := naming.RenderClusterSecretStore(np)
+	envStoreName := naming.RenderClusterSecretStore(np)
 
-	levels := []string{
-		secrets.LevelOrg,
-		secrets.LevelEnvironment,
-		secrets.LevelProject,
-		secrets.LevelApp,
-		secrets.LevelAppEnv,
+	// platformStoreFor returns the store that backs scopes shared across all
+	// clusters (org, project). Falls back to the env store when no platform
+	// store is provisioned — single-store backends keep working unchanged.
+	platformStoreFor := func() string {
+		if params.PlatformStoreName != "" {
+			return params.PlatformStoreName
+		}
+		return envStoreName
 	}
 
-	var itemKeys []string
-	for _, level := range levels {
-		if params.ScopeKeys != nil && !params.ScopeKeys[level] {
+	type levelEntry struct {
+		level string
+		store string
+	}
+	ordered := []levelEntry{
+		{secrets.LevelOrg, platformStoreFor()},
+		{secrets.LevelEnvironment, envStoreName},
+		{secrets.LevelProject, platformStoreFor()},
+		{secrets.LevelApp, envStoreName},
+		{secrets.LevelAppEnv, envStoreName},
+		{secrets.LevelCluster, envStoreName},
+	}
+
+	var items []ESOItemRef
+	for _, le := range ordered {
+		if le.level == secrets.LevelCluster && params.Cluster == "" {
 			continue
 		}
-		itemKeys = append(itemKeys, naming.RenderVaultItem(level, np))
+		if params.ScopeKeys != nil && !params.ScopeKeys[le.level] {
+			continue
+		}
+		items = append(items, ESOItemRef{
+			Key:       naming.RenderVaultItem(le.level, np),
+			StoreName: le.store,
+		})
 	}
 
-	if len(itemKeys) == 0 {
+	if len(items) == 0 {
 		return nil
 	}
 
 	return &ESOExternalSecretConfig{
 		Name:      resourceName,
 		Namespace: params.Namespace,
-		StoreName: storeName,
-		ItemKeys:  itemKeys,
+		StoreName: envStoreName,
+		Items:     items,
 	}
 }
 
@@ -249,4 +325,45 @@ func (p *Publisher) WriteCollapsedExternalSecret(repoDir string, cfg ESOExternal
 	}
 	content := BuildCollapsedExternalSecretYAML(cfg)
 	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content))
+}
+
+// BuildAppConfigMapYAML renders a ConfigMap YAML for non-secret env vars.
+// vars may be nil or empty — in that case an empty-data ConfigMap is written
+// so ArgoCD can always resolve the envFrom reference without errors.
+func BuildAppConfigMapYAML(name, namespace string, vars map[string]string) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app.kubernetes.io/managed-by: suparship
+data:
+`, name, namespace))
+
+	if len(vars) == 0 {
+		sb.WriteString("  {}\n")
+		return sb.String()
+	}
+
+	// Sort keys for deterministic output.
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		sb.WriteString(fmt.Sprintf("  %s: %q\n", k, vars[k]))
+	}
+	return sb.String()
+}
+
+// WriteAppConfigMap writes env-configmap.yaml to dir.
+// dir should be the per-app-env directory, e.g.
+// gitops-output/{envName}/{project}/{app}/ or
+// gitops-output/previews/{project}/{previewName}/.
+func (p *Publisher) WriteAppConfigMap(dir, name, namespace string, vars map[string]string) error {
+	content := BuildAppConfigMapYAML(name, namespace, vars)
+	return p.writeFile(filepath.Join(dir, "env-configmap.yaml"), []byte(content))
 }

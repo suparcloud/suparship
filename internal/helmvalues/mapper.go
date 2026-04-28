@@ -68,6 +68,19 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 //
 // When baseDomain is empty, "localhost" is used.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "")
+}
+
+// MapToHelmValuesForEnv is the canonical mapper that accepts the resolved
+// Kubernetes namespace in addition to the base domain. When namespace is
+// non-empty the suparship.secretName and suparship.configName values are
+// derived from it (pattern: suparship-secrets-{namespace} and
+// suparship-config-{namespace}), ensuring they are consistent with the
+// operator-configured namespace pattern.
+//
+// When namespace is empty the legacy {project}-{app}-{env} names are used so
+// that callers that do not yet have a resolved namespace remain unaffected.
+func MapToHelmValuesForEnv(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain, namespace string) HelmValues {
 	if baseDomain == "" {
 		baseDomain = "localhost"
 	}
@@ -80,6 +93,15 @@ func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.A
 
 	routingComponent := resolveRoutingComponent(app.Spec.Components)
 	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain))
+
+	var secretName, configName string
+	if namespace != "" {
+		secretName = secrets.SecretNameForNamespace(namespace)
+		configName = secrets.ConfigNameForNamespace(namespace)
+	} else {
+		secretName = secrets.AppSecretName(app.ProjectName, app.Name, envName)
+		configName = secrets.AppConfigName(app.ProjectName, app.Name, envName)
+	}
 
 	return HelmValues{
 		App: AppContext{
@@ -96,8 +118,8 @@ func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.A
 			AppEnv: envOverride.EnvConfig,
 		}),
 		Suparship: SuparshipValues{
-			SecretName: secrets.AppSecretName(app.ProjectName, app.Name, envName),
-			ConfigName: secrets.AppConfigName(app.ProjectName, app.Name, envName),
+			SecretName: secretName,
+			ConfigName: configName,
 		},
 	}
 }

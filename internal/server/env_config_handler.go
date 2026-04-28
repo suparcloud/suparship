@@ -271,6 +271,96 @@ func (h *envConfigHandler) handlePutEnvTypeEnvConfig(w http.ResponseWriter, r *h
 	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
 }
 
+// ── Level 2.5 — Cluster (escape hatch) ────────────────────────────────────────
+
+// handleGetClusterEnvConfig serves GET /api/v1/clusters/{cluster}/envconfig.
+// Returns the cluster-level EnvConfig stored in suparship-system as a runtime
+// ConfigMap. When no writer is configured or the ConfigMap does not exist,
+// returns an empty EnvConfig.
+func (h *envConfigHandler) handleGetClusterEnvConfig(w http.ResponseWriter, r *http.Request) {
+	cluster := r.PathValue("cluster")
+	if cluster == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "cluster path parameter is required"})
+		return
+	}
+
+	if h.upperLevelWriter == nil {
+		writeJSON(w, http.StatusOK, toEnvConfigDTO(envconfig.EnvConfig{}))
+		return
+	}
+	cfg, err := h.upperLevelWriter.ReadClusterEnvConfig(r.Context(), cluster)
+	if err != nil {
+		h.logger.Error("failed to read cluster env configmap", "cluster", cluster, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to read cluster env config"})
+		return
+	}
+	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
+}
+
+// handlePutClusterEnvConfig serves PUT /api/v1/clusters/{cluster}/envconfig.
+// Replaces the cluster-level EnvConfig in the suparship-system ConfigMap.
+// The ConfigMap is the source of truth for cluster-scope env vars; there is
+// no domain-object duplication.
+func (h *envConfigHandler) handlePutClusterEnvConfig(w http.ResponseWriter, r *http.Request) {
+	cluster := r.PathValue("cluster")
+	if cluster == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "cluster path parameter is required"})
+		return
+	}
+
+	dto, ok := decodeEnvConfigDTO(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+
+	cfg := fromEnvConfigDTO(dto)
+	if err := envconfig.ValidateEnvConfig(cfg); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
+	if h.upperLevelWriter == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "cluster env config writer not configured"})
+		return
+	}
+	if err := h.upperLevelWriter.WriteClusterEnvConfig(r.Context(), cluster, cfg); err != nil {
+		h.logger.Error("failed to write cluster env configmap", "cluster", cluster, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save cluster env config"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
+}
+
+// readClusterEnvConfig resolves the cluster bound to envName via the org's
+// Environments list, then reads the runtime ConfigMap for that cluster.
+// Returns an empty EnvConfig when the env is unbound, no writer is configured,
+// or the read fails (best-effort — resolved view should not 500 on cluster
+// read failures).
+func (h *envConfigHandler) readClusterEnvConfig(ctx context.Context, envs []rbac.OrgEnvironment, envName string) envconfig.EnvConfig {
+	if h.upperLevelWriter == nil {
+		return envconfig.EnvConfig{}
+	}
+	var clusterRef string
+	for _, e := range envs {
+		if e.Name == envName {
+			clusterRef = e.ClusterRef
+			break
+		}
+	}
+	if clusterRef == "" {
+		return envconfig.EnvConfig{}
+	}
+	cfg, err := h.upperLevelWriter.ReadClusterEnvConfig(ctx, clusterRef)
+	if err != nil {
+		h.logger.Warn("failed to read cluster env configmap during resolve — treating as empty",
+			"cluster", clusterRef, "env", envName, "err", err)
+		return envconfig.EnvConfig{}
+	}
+	return cfg
+}
+
 // ── Level 3 — Project ─────────────────────────────────────────────────────────
 
 // handleGetProjectEnvConfig serves GET /api/v1/projects/{project}/envconfig.
@@ -436,7 +526,7 @@ func (h *envConfigHandler) handlePutAppEnvEnvConfig(w http.ResponseWriter, r *ht
 // handleGetResolvedEnvConfig serves
 // GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig/resolved.
 //
-// It reads all five hierarchy levels, runs them through envconfig.ResolveEnvLayers,
+// It reads all six hierarchy levels, runs them through envconfig.ResolveEnvLayers,
 // and returns the merged view with source attribution. Secret values are never
 // included; only the key, source, and isSecret flag are returned for secret refs.
 func (h *envConfigHandler) handleGetResolvedEnvConfig(w http.ResponseWriter, r *http.Request) {
@@ -471,12 +561,16 @@ func (h *envConfigHandler) handleGetResolvedEnvConfig(w http.ResponseWriter, r *
 	appCfg := app.Spec.EnvConfig
 	appEnvCfg := appEnvConfig(app, envName)
 
-	_, resolved := envconfig.ResolveEnvLayers(orgCfg, envCfg, projectCfg, appCfg, appEnvCfg)
+	// Cluster level: read the runtime ConfigMap for the cluster bound to envName.
+	// Empty when the env is unbound or no writer is configured.
+	clusterCfg := h.readClusterEnvConfig(ctx, org.Environments, envName)
+
+	_, resolved := envconfig.ResolveEnvLayers(orgCfg, envCfg, projectCfg, appCfg, appEnvCfg, clusterCfg)
 
 	// Build a lookup of plain-text values by merging Vars in hierarchy order
 	// (lower levels first, higher wins). Secret values are not included.
 	plainValues := make(map[string]string)
-	for _, cfg := range []envconfig.EnvConfig{orgCfg, envCfg, projectCfg, appCfg, appEnvCfg} {
+	for _, cfg := range []envconfig.EnvConfig{orgCfg, envCfg, projectCfg, appCfg, appEnvCfg, clusterCfg} {
 		for k, v := range cfg.Vars {
 			plainValues[k] = v
 		}

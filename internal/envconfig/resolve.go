@@ -6,18 +6,23 @@ package envconfig
 // across all levels). The value describes which level the winning definition
 // comes from, following last-wins order:
 //
-//	org → environment → project → app → app-environment
+//	org → environment → project → app → app-environment → cluster
+//
+// Cluster wins last as the platform-engineering escape hatch — incident
+// break-glass, regional tuning, per-cluster feature kill-switches — overriding
+// even the app team's most specific app-env layer.
 //
 // The returned EnvLayers is a verbatim copy of the inputs (no merging of
 // values is done here — merging is handled at runtime by Kubernetes envFrom
 // ordering). ResolvedEnvVars is used only for the API resolved-view endpoint.
-func ResolveEnvLayers(org, env, project, app, appEnv EnvConfig) (EnvLayers, map[string]ResolvedEnvVar) {
+func ResolveEnvLayers(org, env, project, app, appEnv, cluster EnvConfig) (EnvLayers, map[string]ResolvedEnvVar) {
 	layers := EnvLayers{
 		Org:     org,
 		Env:     env,
 		Project: project,
 		App:     app,
 		AppEnv:  appEnv,
+		Cluster: cluster,
 	}
 
 	resolved := make(map[string]ResolvedEnvVar)
@@ -33,6 +38,7 @@ func ResolveEnvLayers(org, env, project, app, appEnv EnvConfig) (EnvLayers, map[
 		{LevelProject, project},
 		{LevelApp, app},
 		{LevelAppEnv, appEnv},
+		{LevelCluster, cluster},
 	}
 
 	for _, le := range ordered {

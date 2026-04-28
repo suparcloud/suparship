@@ -3,6 +3,8 @@ package domain
 import (
 	"strings"
 	"time"
+
+	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // EnvironmentInstance is a running deployment of an app in one environment.
@@ -103,6 +105,18 @@ func GenerateNamespace(appName, envName string, _ AppEnvironmentType) string {
 	return GenerateNamespaceFromPattern(appName, envName, "", "")
 }
 
+// GenerateProjectNamespace derives the Kubernetes namespace including the
+// project name using the "{project}-{app}-{env}" pattern. This is the default
+// for new apps to avoid namespace collisions across projects on a shared cluster.
+//
+// Examples:
+//
+//	"acme", "api", "staging" → "acme-api-staging"
+//	"acme", "api", "prod"    → "acme-api-prod"
+func GenerateProjectNamespace(projectName, appName, envName string) string {
+	return GenerateNamespaceFromPattern(appName, envName, projectName, "{project}-{app}-{env}")
+}
+
 // GenerateURL derives the primary ingress URL for an environment instance.
 //
 // URL patterns (using the default "localhost" base domain for local/demo):
@@ -137,4 +151,112 @@ func GenerateURLWithDomain(appName, envName string, envType AppEnvironmentType, 
 	default:
 		return "http://" + appName + "." + string(envType) + "." + domain
 	}
+}
+
+// IsDedicatedClusterTopology returns true when every environment in
+// stableClusterRefs has a distinct, non-empty cluster reference — meaning each
+// environment runs on its own cluster and namespace names do not need an
+// {env} suffix for uniqueness.
+//
+// stableClusterRefs should contain only the ClusterRef values of stable
+// (non-preview) environments. Preview environments are excluded by callers
+// because they always share a cluster.
+//
+// Returns false when the slice is empty or any ref is empty or duplicated.
+func IsDedicatedClusterTopology(stableClusterRefs []string) bool {
+	if len(stableClusterRefs) == 0 {
+		return false
+	}
+	seen := make(map[string]bool, len(stableClusterRefs))
+	for _, ref := range stableClusterRefs {
+		if ref == "" || seen[ref] {
+			return false
+		}
+		seen[ref] = true
+	}
+	return true
+}
+
+// NamespaceResolveInput carries all inputs needed to resolve the effective
+// Kubernetes namespace for an app environment instance. Each pattern field
+// corresponds to one level of the Org → Env → Project → App hierarchy;
+// empty string means "not set at this level — fall through to next."
+type NamespaceResolveInput struct {
+	AppName     string
+	EnvName     string
+	ProjectName string
+	OrgName     string
+
+	// Scope controls whether the app deploys into a dedicated app namespace
+	// ("app", default) or the shared project namespace ("project").
+	// Empty is treated as NamespaceScopeApp.
+	Scope NamespaceScope
+
+	// Dedicated indicates that stable environments each run on their own
+	// cluster, so the {env} suffix is not needed for uniqueness.
+	// Derive this with IsDedicatedClusterTopology.
+	Dedicated bool
+
+	// Pattern overrides — highest priority first.
+	// Empty string = not set at this level; fall through to the next level.
+	AppPattern        string // AppSpec.NamespacePattern
+	ProjectPattern    string // ProjectSpec.NamespacePattern
+	OrgEnvPattern     string // OrgEnvironment.NamespacePattern (per env, org level)
+	OrgAppDefault     string // ResourceNaming.EffectiveAppNamespace()
+	OrgProjectDefault string // ResourceNaming.EffectiveProjectNamespace()
+}
+
+// ResolveNamespace resolves the effective Kubernetes namespace for an app
+// environment instance by walking the precedence chain defined in
+// NamespaceResolveInput. It validates the result against Kubernetes namespace
+// naming rules (DNS-1123, max 63 chars).
+//
+// Precedence (highest to lowest):
+//  1. AppPattern           (AppSpec.NamespacePattern, scope=app only)
+//  2. ProjectPattern       (ProjectSpec.NamespacePattern)
+//  3. OrgEnvPattern        (OrgEnvironment.NamespacePattern)
+//  4. OrgAppDefault        (ResourceNaming.AppNamespace)
+//  5. OrgProjectDefault    (ResourceNaming.ProjectNamespace, scope=project only)
+//  6. Topology-aware hardcoded default
+func ResolveNamespace(in NamespaceResolveInput) (string, error) {
+	var pattern string
+	switch in.Scope {
+	case NamespaceScopeProject:
+		pattern = firstNonEmpty(in.ProjectPattern, in.OrgEnvPattern, in.OrgProjectDefault)
+		if pattern == "" {
+			if in.Dedicated {
+				pattern = "{project}"
+			} else {
+				pattern = "{project}-{env}"
+			}
+		}
+	default: // NamespaceScopeApp (default when empty)
+		pattern = firstNonEmpty(in.AppPattern, in.ProjectPattern, in.OrgEnvPattern, in.OrgAppDefault)
+		if pattern == "" {
+			if in.Dedicated {
+				pattern = "{project}-{app}"
+			} else {
+				pattern = "{project}-{app}-{env}"
+			}
+		}
+	}
+
+	ns := secrets.RenderPattern(pattern, secrets.NamingParams{
+		Org:     in.OrgName,
+		Env:     in.EnvName,
+		Project: in.ProjectName,
+		App:     in.AppName,
+	})
+	return ns, secrets.ValidateRenderedNamespace(ns, "namespace")
+}
+
+// firstNonEmpty returns the first non-empty string from vals, or "" if all
+// are empty.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

@@ -5,11 +5,12 @@ import "context"
 // Scope identifies the hierarchy level and coordinates for a secret write.
 // Used by VaultWriter to determine Item naming in the external vault.
 type Scope struct {
-	Level   string // LevelOrg | LevelEnvironment | LevelProject | LevelApp | LevelAppEnv
+	Level   string // LevelOrg | LevelEnvironment | LevelProject | LevelApp | LevelAppEnv | LevelCluster
 	Org     string
 	Env     string // empty for org-level
 	Project string // empty for org/env levels
 	App     string // empty unless app/app-env
+	Cluster string // populated only for LevelCluster
 }
 
 // ItemMeta carries provider-supplied metadata about a vault item.
@@ -36,6 +37,10 @@ type VaultWriter interface {
 	// DeleteKey removes a single key from the scope's Item.
 	// No-op when the key or Item does not exist.
 	DeleteKey(ctx context.Context, binding EnvBinding, scope Scope, key, expectedVersion string) (ItemMeta, error)
+
+	// DeleteItem removes the entire Item for the given scope from the vault.
+	// No-op when the Item does not exist.
+	DeleteItem(ctx context.Context, binding EnvBinding, scope Scope) error
 
 	// Probe verifies connectivity and access to the vault for the given
 	// binding.

@@ -70,3 +70,25 @@ export function deleteProjectEnvironment(
     `/projects/${encodeURIComponent(project)}/environments/${encodeURIComponent(env)}`,
   );
 }
+
+// ── Project namespace naming ──────────────────────────────────────────────────
+
+export interface ProjectNaming {
+  namespacePattern?: string;
+}
+
+export function getProjectNaming(project: string): Promise<ProjectNaming> {
+  return api.get<ProjectNaming>(
+    `/projects/${encodeURIComponent(project)}/naming`,
+  );
+}
+
+export function updateProjectNaming(
+  project: string,
+  naming: ProjectNaming,
+): Promise<ProjectNaming> {
+  return api.put<ProjectNaming>(
+    `/projects/${encodeURIComponent(project)}/naming`,
+    naming,
+  );
+}

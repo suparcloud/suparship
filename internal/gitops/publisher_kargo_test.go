@@ -29,8 +29,8 @@ func TestPublishKargoCRs_WritesExpectedFiles(t *testing.T) {
 
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging},
-		{EnvName: "prod", EnvType: domain.AppEnvProd},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
 		{EnvName: "pr-42", EnvType: domain.AppEnvPreview}, // should be skipped
 	}
 
@@ -65,7 +65,7 @@ func TestPublishKargoCRs_ProjectCRIsGenerated(t *testing.T) {
 	dir := t.TempDir()
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Bound: true},
 	}
 
 	p := newTestPublisher(t)
@@ -96,8 +96,8 @@ func TestPublishKargoCRs_ProdStageHasStagingUpstream(t *testing.T) {
 	dir := t.TempDir()
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging},
-		{EnvName: "prod", EnvType: domain.AppEnvProd},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
 	}
 
 	p := newTestPublisher(t)
@@ -126,8 +126,8 @@ func TestPublishKargoCRs_StagingStageIsDirect(t *testing.T) {
 	dir := t.TempDir()
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging},
-		{EnvName: "prod", EnvType: domain.AppEnvProd},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
 	}
 
 	p := newTestPublisher(t)
@@ -148,7 +148,7 @@ func TestPublishKargoCRs_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Bound: true},
 	}
 	p := newTestPublisher(t)
 
@@ -164,5 +164,134 @@ func TestPublishKargoCRs_Idempotent(t *testing.T) {
 	content2, _ := os.ReadFile(filepath.Join(dir, "gitops-output", "_infra", "kargo", "demo-hello-warehouse.yaml"))
 	if string(content1) != string(content2) {
 		t.Error("publishKargoCRs is not idempotent: warehouse YAML changed between runs")
+	}
+}
+
+// TestPublishKargoCRs_SingleEnvNoUpstream verifies that when only one stable
+// env is registered the resulting Stage has direct:true and no upstream stages.
+func TestPublishKargoCRs_SingleEnvNoUpstream(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "dev", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
+	}
+
+	p := newTestPublisher(t)
+	if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishKargoCRsForTest: %v", err)
+	}
+
+	kargoDir := filepath.Join(dir, "gitops-output", "_infra", "kargo")
+
+	// Only one stage file and no prod stage.
+	devStage, err := os.ReadFile(filepath.Join(kargoDir, "demo-hello-dev-stage.yaml"))
+	if err != nil {
+		t.Fatalf("dev stage missing: %v", err)
+	}
+	if !strings.Contains(string(devStage), "direct: true") {
+		t.Errorf("single-env Stage should have direct:true:\n%s", string(devStage))
+	}
+	// Must NOT produce a prod stage.
+	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-prod-stage.yaml")); !os.IsNotExist(err) {
+		t.Error("single-env publish should not produce a prod stage file")
+	}
+}
+
+// TestPublishKargoCRs_ThreeEnvChain verifies that a three-env pipeline
+// (dev → staging → prod) chains each stage's upstream correctly.
+func TestPublishKargoCRs_ThreeEnvChain(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	// Intentionally provide envs out of Order-sort sequence to confirm sorting.
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 3, Bound: true},
+		{EnvName: "dev", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 2, Bound: true},
+	}
+
+	p := newTestPublisher(t)
+	if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishKargoCRsForTest: %v", err)
+	}
+
+	kargoDir := filepath.Join(dir, "gitops-output", "_infra", "kargo")
+
+	devStage, _ := os.ReadFile(filepath.Join(kargoDir, "demo-hello-dev-stage.yaml"))
+	stagingStage, _ := os.ReadFile(filepath.Join(kargoDir, "demo-hello-staging-stage.yaml"))
+	prodStage, _ := os.ReadFile(filepath.Join(kargoDir, "demo-hello-prod-stage.yaml"))
+
+	if !strings.Contains(string(devStage), "direct: true") {
+		t.Errorf("dev Stage (Order=1, first) should have direct:true:\n%s", string(devStage))
+	}
+	if !strings.Contains(string(stagingStage), "hello-dev") {
+		t.Errorf("staging Stage should reference 'hello-dev' as upstream:\n%s", string(stagingStage))
+	}
+	if !strings.Contains(string(prodStage), "hello-staging") {
+		t.Errorf("prod Stage should reference 'hello-staging' as upstream:\n%s", string(prodStage))
+	}
+}
+
+func TestPublishKargoCRs_UnboundEnvSkipped(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: false}, // unbound
+	}
+
+	p := newTestPublisher(t)
+	if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishKargoCRsForTest: %v", err)
+	}
+
+	kargoDir := filepath.Join(dir, "gitops-output", "_infra", "kargo")
+
+	// staging is bound → should have a Stage file
+	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-staging-stage.yaml")); os.IsNotExist(err) {
+		t.Error("expected staging Stage file to exist for bound env")
+	}
+
+	// prod is unbound → must NOT have a Stage file
+	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-prod-stage.yaml")); !os.IsNotExist(err) {
+		t.Error("unbound prod env should NOT produce a Stage file")
+	}
+
+	// staging should be the first stage (direct) since prod is not in the chain
+	stagingStage, err := os.ReadFile(filepath.Join(kargoDir, "demo-hello-staging-stage.yaml"))
+	if err != nil {
+		t.Fatalf("read staging stage: %v", err)
+	}
+	if !strings.Contains(string(stagingStage), "direct: true") {
+		t.Errorf("staging Stage should be direct (only bound stage):\n%s", string(stagingStage))
+	}
+}
+
+func TestPublishKargoCRs_AllUnboundProducesWarehouseOnly(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	// Both envs are unbound — only Warehouse + Project CR should be written, no Stage files.
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: false},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: false},
+	}
+
+	p := newTestPublisher(t)
+	if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishKargoCRsForTest: %v", err)
+	}
+
+	kargoDir := filepath.Join(dir, "gitops-output", "_infra", "kargo")
+
+	// Warehouse should still be written (it's env-independent)
+	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-warehouse.yaml")); os.IsNotExist(err) {
+		t.Error("warehouse file should exist even when all envs are unbound")
+	}
+
+	// No Stage files
+	for _, envName := range []string{"staging", "prod"} {
+		stageFile := filepath.Join(kargoDir, "demo-hello-"+envName+"-stage.yaml")
+		if _, err := os.Stat(stageFile); !os.IsNotExist(err) {
+			t.Errorf("unbound env %q should not produce a Stage file", envName)
+		}
 	}
 }

@@ -155,6 +155,11 @@ func (s *ServiceBackedAppStore) DeleteAppEnvironment(ctx context.Context, projec
 	return s.primary.DeleteAppEnvironment(ctx, projectName, appName, envName)
 }
 
+// DeleteApp delegates to the primary AppStore.
+func (s *ServiceBackedAppStore) DeleteApp(ctx context.Context, projectName, appName string) error {
+	return s.primary.DeleteApp(ctx, projectName, appName)
+}
+
 // ── fallback helpers ──────────────────────────────────────────────────────────
 
 func (s *ServiceBackedAppStore) listAppsFromServices(ctx context.Context, projectName string) ([]*domain.App, error) {

@@ -71,6 +71,9 @@ type AppStore interface {
 	// by project and/or app. Pass an empty string to skip that filter.
 	ListAppPreviews(ctx context.Context, projectName, appName string) ([]*AppEnvironment, error)
 
+	// DeleteApp removes an app and all its environment instances from a project.
+	// Returns an error if the app does not exist.
+	DeleteApp(ctx context.Context, projectName, appName string) error
 	// SaveApp upserts an app definition within a project. Implementations
 	// should return an error if the project does not exist. The ProjectName
 	// field on app is set by the implementation to projectName.

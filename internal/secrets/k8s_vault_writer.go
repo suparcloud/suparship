@@ -37,6 +37,8 @@ func (w *K8sVaultWriter) secretName(scope Scope) string {
 		return AppLevelSecretName(scope.Project, scope.App)
 	case LevelAppEnv:
 		return AppEnvSecretName(scope.Project, scope.App, scope.Env)
+	case LevelCluster:
+		return ClusterSecretName(scope.Cluster)
 	default:
 		return fmt.Sprintf("secrets-%s", scope.Level)
 	}
@@ -122,6 +124,15 @@ func (w *K8sVaultWriter) DeleteKey(ctx context.Context, _ EnvBinding, scope Scop
 		return ItemMeta{}, fmt.Errorf("updating secret %s/%s: %w", w.ns, name, err)
 	}
 	return ItemMeta{Version: updated.ResourceVersion}, nil
+}
+
+func (w *K8sVaultWriter) DeleteItem(ctx context.Context, _ EnvBinding, scope Scope) error {
+	name := w.secretName(scope)
+	err := w.client.CoreV1().Secrets(w.ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func (w *K8sVaultWriter) Probe(ctx context.Context, _ EnvBinding) error {

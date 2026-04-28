@@ -58,6 +58,21 @@ export function fetchProjects(): Promise<ProjectsResponse> {
   return api.get<ProjectsResponse>("/projects");
 }
 
+// ── Org Namespace Naming ──────────────────────────────────────────────────────
+
+export interface OrgNaming {
+  projectNamespace?: string;
+  appNamespace?: string;
+}
+
+export function getOrgNaming(): Promise<OrgNaming> {
+  return api.get<OrgNaming>("/org/naming");
+}
+
+export function updateOrgNaming(naming: OrgNaming): Promise<OrgNaming> {
+  return api.put<OrgNaming>("/org/naming", naming);
+}
+
 export interface CreateProjectRequest {
   name: string;
   displayName?: string;

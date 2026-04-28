@@ -82,6 +82,12 @@ type ProjectSpec struct {
 	// EnvConfig holds env vars and secret refs that apply to all apps within
 	// this project (Project level of the hierarchy).
 	EnvConfig envconfig.EnvConfig `yaml:"envConfig,omitempty"`
+	// NamespacePattern overrides the org-level default for namespace naming.
+	// Controls both the project's own Kubernetes namespace (when apps use
+	// NamespaceScopeProject) and the fallback for app namespaces.
+	// Tokens: {org}, {project}, {env}.
+	// Empty = inherit from OrgEnvironment.NamespacePattern or org ResourceNaming.
+	NamespacePattern string `yaml:"namespacePattern,omitempty"`
 }
 
 // Environment represents a deployment target in the promotion chain.

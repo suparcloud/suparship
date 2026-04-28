@@ -11,8 +11,13 @@ import (
 // are vendor-neutral — no "suparship" prefix.
 type ResourceNaming struct {
 	// AppResource is the K8s ExternalSecret + target Secret name in app-env
-	// namespaces. Tokens: {project} {app} {env}. Default: "{app}".
+	// namespaces. Tokens: {project} {app} {env}. Default: "{app}-secrets".
 	AppResource string `json:"appResource,omitempty" yaml:"appResource,omitempty"`
+
+	// AppConfigMap is the K8s ConfigMap name written by the GitOps publisher
+	// to hold non-secret env vars for the app in each env namespace.
+	// Tokens: {project} {app} {env}. Default: "{app}-config".
+	AppConfigMap string `json:"appConfigMap,omitempty" yaml:"appConfigMap,omitempty"`
 
 	// ClusterSecretStore is the ClusterSecretStore name pattern.
 	// Tokens: {provider} {env} {org}. Default: "{provider}-{env}".
@@ -20,27 +25,44 @@ type ResourceNaming struct {
 
 	// VaultItem holds per-scope vault item title patterns.
 	VaultItem ItemNaming `json:"vaultItem,omitempty" yaml:"vaultItem,omitempty"`
+
+	// ProjectNamespace is the org-wide default pattern for project-level
+	// Kubernetes namespaces. Tokens: {org}, {project}, {env}.
+	// Empty: topology-aware default is applied at resolution time.
+	//   Shared cluster:    "{project}-{env}" → "myproject-staging"
+	//   Dedicated cluster: "{project}"       → "myproject"
+	ProjectNamespace string `json:"projectNamespace,omitempty" yaml:"projectNamespace,omitempty"`
+
+	// AppNamespace is the org-wide default pattern for app-level
+	// Kubernetes namespaces. Tokens: {org}, {project}, {app}, {env}.
+	// Empty: topology-aware default is applied at resolution time.
+	//   Shared cluster:    "{project}-{app}-{env}" → "myproject-api-staging"
+	//   Dedicated cluster: "{project}-{app}"       → "myproject-api"
+	AppNamespace string `json:"appNamespace,omitempty" yaml:"appNamespace,omitempty"`
 }
 
 // ItemNaming holds configurable patterns for vault item titles, one per
-// hierarchy scope. Tokens available: {org} {env} {project} {app}.
+// hierarchy scope. Tokens available: {org} {env} {project} {app} {cluster}.
 type ItemNaming struct {
 	Org     string `json:"org,omitempty" yaml:"org,omitempty"`         // default: "org"
 	EnvType string `json:"envType,omitempty" yaml:"envType,omitempty"` // default: "env-{env}"
 	Project string `json:"project,omitempty" yaml:"project,omitempty"` // default: "{project}"
 	App     string `json:"app,omitempty" yaml:"app,omitempty"`         // default: "{project}-{app}"
 	AppEnv  string `json:"appEnv,omitempty" yaml:"appEnv,omitempty"`   // default: "{project}-{app}-{env}"
+	Cluster string `json:"cluster,omitempty" yaml:"cluster,omitempty"` // default: "cluster-{cluster}"
 }
 
 // Default patterns for each naming slot.
 const (
-	DefaultAppResource        = "{app}"
+	DefaultAppResource        = "{app}-secrets"
+	DefaultAppConfigMap       = "{app}-config"
 	DefaultClusterSecretStore = "{provider}-{env}"
 	DefaultItemOrg            = "org"
 	DefaultItemEnvType        = "env-{env}"
 	DefaultItemProject        = "{project}"
 	DefaultItemApp            = "{project}-{app}"
 	DefaultItemAppEnv         = "{project}-{app}-{env}"
+	DefaultItemCluster        = "cluster-{cluster}"
 )
 
 // ── Hardcoded conventions (1Password SA-driven flow) ──────────────────────
@@ -59,6 +81,7 @@ type NamingParams struct {
 	Project  string
 	App      string
 	Provider string // e.g. "1password"
+	Cluster  string // registered cluster name (used for {cluster} token)
 }
 
 // dns1123 validates K8s resource names (lowercase, alphanumeric, '-').
@@ -72,6 +95,7 @@ func RenderPattern(pattern string, params NamingParams) string {
 		"{project}", params.Project,
 		"{app}", params.App,
 		"{provider}", params.Provider,
+		"{cluster}", params.Cluster,
 	)
 	return r.Replace(pattern)
 }
@@ -98,6 +122,19 @@ func ValidateRenderedDNS1123(rendered, context string) error {
 	return nil
 }
 
+// ValidateRenderedNamespace validates a rendered Kubernetes namespace name.
+// Extends ValidateRenderedDNS1123 with the 63-character limit imposed by
+// RFC 1123 for DNS label components.
+func ValidateRenderedNamespace(rendered, context string) error {
+	if err := ValidateRenderedDNS1123(rendered, context); err != nil {
+		return err
+	}
+	if len(rendered) > 63 {
+		return fmt.Errorf("naming: %s exceeds 63-char Kubernetes limit: %q (%d chars)", context, rendered, len(rendered))
+	}
+	return nil
+}
+
 // ── Effective getters ──────────────────────────────────────────────────────
 
 func (n ResourceNaming) EffectiveAppResource() string {
@@ -107,11 +144,30 @@ func (n ResourceNaming) EffectiveAppResource() string {
 	return DefaultAppResource
 }
 
+func (n ResourceNaming) EffectiveAppConfigMap() string {
+	if n.AppConfigMap != "" {
+		return n.AppConfigMap
+	}
+	return DefaultAppConfigMap
+}
+
 func (n ResourceNaming) EffectiveClusterSecretStore() string {
 	if n.ClusterSecretStore != "" {
 		return n.ClusterSecretStore
 	}
 	return DefaultClusterSecretStore
+}
+
+// EffectiveProjectNamespace returns the org-wide project namespace pattern.
+// Empty string means no org default is set; topology decides at resolution time.
+func (n ResourceNaming) EffectiveProjectNamespace() string {
+	return n.ProjectNamespace
+}
+
+// EffectiveAppNamespace returns the org-wide app namespace pattern.
+// Empty string means no org default is set; topology decides at resolution time.
+func (n ResourceNaming) EffectiveAppNamespace() string {
+	return n.AppNamespace
 }
 
 func (n ItemNaming) EffectiveOrg() string {
@@ -149,11 +205,23 @@ func (n ItemNaming) EffectiveAppEnv() string {
 	return DefaultItemAppEnv
 }
 
+func (n ItemNaming) EffectiveCluster() string {
+	if n.Cluster != "" {
+		return n.Cluster
+	}
+	return DefaultItemCluster
+}
+
 // ── Render helpers ─────────────────────────────────────────────────────────
 
 // RenderAppResource renders the K8s resource name for an app-env namespace.
 func (n ResourceNaming) RenderAppResource(params NamingParams) string {
 	return RenderPattern(n.EffectiveAppResource(), params)
+}
+
+// RenderAppConfigMap renders the K8s ConfigMap name for an app-env namespace.
+func (n ResourceNaming) RenderAppConfigMap(params NamingParams) string {
+	return RenderPattern(n.EffectiveAppConfigMap(), params)
 }
 
 // RenderClusterSecretStore renders the ClusterSecretStore name.
@@ -175,6 +243,8 @@ func (n ResourceNaming) RenderVaultItem(level string, params NamingParams) strin
 		pattern = n.VaultItem.EffectiveApp()
 	case LevelAppEnv:
 		pattern = n.VaultItem.EffectiveAppEnv()
+	case LevelCluster:
+		pattern = n.VaultItem.EffectiveCluster()
 	default:
 		return level
 	}
@@ -190,17 +260,34 @@ func (n ResourceNaming) Validate() error {
 		Project:  "acme",
 		App:      "web",
 		Provider: "1password",
+		Cluster:  "prod-us-east",
 	}
 
 	if err := ValidateRenderedDNS1123(n.RenderAppResource(sample), "appResource"); err != nil {
+		return err
+	}
+	if err := ValidateRenderedDNS1123(n.RenderAppConfigMap(sample), "appConfigMap"); err != nil {
 		return err
 	}
 	if err := ValidateRenderedDNS1123(n.RenderClusterSecretStore(sample), "clusterSecretStore"); err != nil {
 		return err
 	}
 
+	if n.ProjectNamespace != "" {
+		r := RenderPattern(n.ProjectNamespace, sample)
+		if err := ValidateRenderedNamespace(r, "projectNamespace"); err != nil {
+			return err
+		}
+	}
+	if n.AppNamespace != "" {
+		r := RenderPattern(n.AppNamespace, sample)
+		if err := ValidateRenderedNamespace(r, "appNamespace"); err != nil {
+			return err
+		}
+	}
+
 	// Vault item titles don't need DNS-1123, just non-empty/no-whitespace.
-	levels := []string{LevelOrg, LevelEnvironment, LevelProject, LevelApp, LevelAppEnv}
+	levels := []string{LevelOrg, LevelEnvironment, LevelProject, LevelApp, LevelAppEnv, LevelCluster}
 	rendered := make(map[string]string, len(levels))
 	for _, l := range levels {
 		r := n.RenderVaultItem(l, sample)

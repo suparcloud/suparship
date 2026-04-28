@@ -156,6 +156,12 @@ func BuildArgoAppProject(projectName string, opts AppProjectOptions) *AppProject
 		spec.ClusterResourceWhitelist = []GroupKind{
 			{Group: "*", Kind: "*"},
 		}
+	} else {
+		// Restricted mode: allow only Namespace so CreateNamespace=true sync
+		// option works without opening full cluster-admin access.
+		spec.ClusterResourceWhitelist = []GroupKind{
+			{Group: "", Kind: "Namespace"},
+		}
 	}
 
 	return &AppProject{

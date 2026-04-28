@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -66,12 +67,14 @@ func promoteTestApp(projectName string) *domain.App {
 }
 
 // seedFullPromotionChain seeds preview → staging → prod environments for "my-app".
+// Order values: staging=1, prod=2. Preview envs have Order=0 (excluded from chain).
 func seedFullPromotionChain(store *memAppStore, projectName string) {
 	ctx := context.Background()
 	_ = store.SaveAppEnvironment(ctx, projectName, &domain.AppEnvironment{
 		AppName:   "my-app",
 		EnvName:   "pr-1",
 		EnvType:   domain.AppEnvPreview,
+		Order:     0,
 		Namespace: "my-app-pr-1",
 		Release:   &domain.AppReleaseRef{Tag: "pr-1-abc"},
 		Status:    domain.AppRuntimeStatus{Phase: domain.StatusHealthy},
@@ -80,6 +83,7 @@ func seedFullPromotionChain(store *memAppStore, projectName string) {
 		AppName:   "my-app",
 		EnvName:   "staging",
 		EnvType:   domain.AppEnvStaging,
+		Order:     1,
 		Namespace: "my-app-staging",
 		Release:   &domain.AppReleaseRef{Tag: "v0.9.0"},
 		Status:    domain.AppRuntimeStatus{Phase: domain.StatusHealthy},
@@ -88,6 +92,7 @@ func seedFullPromotionChain(store *memAppStore, projectName string) {
 		AppName:   "my-app",
 		EnvName:   "prod",
 		EnvType:   domain.AppEnvProd,
+		Order:     2,
 		Namespace: "my-app-prod",
 		Status:    domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
@@ -185,6 +190,7 @@ func TestAppPromoteSourceDeterminismMultiplePreviews(t *testing.T) {
 		AppName:   "my-app",
 		EnvName:   "staging",
 		EnvType:   domain.AppEnvStaging,
+		Order:     1,
 		Namespace: "my-app-staging",
 		Status:    domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
@@ -269,16 +275,17 @@ func TestAppPromoteAppNotFound(t *testing.T) {
 }
 
 // TestAppPromoteNoSourceEnvironment verifies that promoting to prod when no
-// staging environment exists returns 400 (no source available).
+// earlier environment exists returns 400 (no source available).
 func TestAppPromoteNoSourceEnvironment(t *testing.T) {
 	mux, ah, store := newTestAppPromoteMux(testProject)
 	store.addApp(promoteTestApp(testProject))
 
-	// Seed only a prod environment — no staging to promote from.
+	// Seed only a prod environment (Order=2) — no lower-Order env to promote from.
 	_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
 		AppName:   "my-app",
 		EnvName:   "prod",
 		EnvType:   domain.AppEnvProd,
+		Order:     2,
 		Namespace: "my-app-prod",
 		Status:    domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
@@ -291,22 +298,23 @@ func TestAppPromoteNoSourceEnvironment(t *testing.T) {
 	}
 	var errResp errorResponse
 	_ = json.NewDecoder(rec.Body).Decode(&errResp)
-	if !contains(errResp.Error, "staging") {
-		t.Errorf("expected 'staging' in error message, got %q", errResp.Error)
+	if !contains(errResp.Error, "no environment found") {
+		t.Errorf("expected 'no environment found' in error message, got %q", errResp.Error)
 	}
 }
 
 // TestAppPromoteNoPreviewForStaging verifies that promoting to staging when
-// no preview environment exists returns 400.
+// no source environment exists returns 400.
 func TestAppPromoteNoPreviewForStaging(t *testing.T) {
 	mux, ah, store := newTestAppPromoteMux(testProject)
 	store.addApp(promoteTestApp(testProject))
 
-	// Seed only a staging environment — no preview to promote from.
+	// Seed only a staging environment (Order=1) — no lower-Order env or preview to promote from.
 	_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
 		AppName:   "my-app",
 		EnvName:   "staging",
 		EnvType:   domain.AppEnvStaging,
+		Order:     1,
 		Namespace: "my-app-staging",
 		Status:    domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	})
@@ -319,8 +327,8 @@ func TestAppPromoteNoPreviewForStaging(t *testing.T) {
 	}
 	var errResp errorResponse
 	_ = json.NewDecoder(rec.Body).Decode(&errResp)
-	if !contains(errResp.Error, "preview") {
-		t.Errorf("expected 'preview' in error message, got %q", errResp.Error)
+	if !contains(errResp.Error, "no environment found") {
+		t.Errorf("expected 'no environment found' in error message, got %q", errResp.Error)
 	}
 }
 
@@ -469,11 +477,12 @@ func TestAppPromoteNoReleaseFails(t *testing.T) {
 	store.addApp(promoteTestApp(testProject))
 
 	ctx := context.Background()
-	// Seed staging with no release.
+	// Seed staging (Order=1) with no release; prod (Order=2) as target.
 	_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
 		AppName:   "my-app",
 		EnvName:   "staging",
 		EnvType:   domain.AppEnvStaging,
+		Order:     1,
 		Namespace: "my-app-staging",
 		// Release intentionally nil.
 	})
@@ -481,6 +490,7 @@ func TestAppPromoteNoReleaseFails(t *testing.T) {
 		AppName:   "my-app",
 		EnvName:   "prod",
 		EnvType:   domain.AppEnvProd,
+		Order:     2,
 		Namespace: "my-app-prod",
 	})
 
@@ -494,5 +504,161 @@ func TestAppPromoteNoReleaseFails(t *testing.T) {
 	_ = json.NewDecoder(rec.Body).Decode(&errResp)
 	if !contains(errResp.Error, "no release") {
 		t.Errorf("expected 'no release' in error, got %q", errResp.Error)
+	}
+}
+
+// TestAppPromoteThreeEnvChain verifies that in a dev(Order=1) → staging(Order=2) →
+// prod(Order=3) pipeline, promoting to staging selects dev as source, and
+// promoting to prod selects staging (highest Order < prod.Order) as source.
+func TestAppPromoteThreeEnvChain(t *testing.T) {
+	mux, ah, store := newTestAppPromoteMux(testProject)
+	store.addApp(promoteTestApp(testProject))
+
+	ctx := context.Background()
+	_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
+		AppName:   "my-app",
+		EnvName:   "dev",
+		EnvType:   domain.AppEnvStaging,
+		Order:     1,
+		Namespace: "my-app-dev",
+		Release:   &domain.AppReleaseRef{Tag: "dev-sha"},
+		Status:    domain.AppRuntimeStatus{Phase: domain.StatusHealthy},
+	})
+	_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
+		AppName:   "my-app",
+		EnvName:   "staging",
+		EnvType:   domain.AppEnvStaging,
+		Order:     2,
+		Namespace: "my-app-staging",
+		Release:   &domain.AppReleaseRef{Tag: "staging-sha"},
+		Status:    domain.AppRuntimeStatus{Phase: domain.StatusHealthy},
+	})
+	_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
+		AppName:   "my-app",
+		EnvName:   "prod",
+		EnvType:   domain.AppEnvProd,
+		Order:     3,
+		Namespace: "my-app-prod",
+		Status:    domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
+	})
+
+	// Promote to staging → source should be dev (Order=1, closest below Order=2).
+	recStaging := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "staging"})
+	if recStaging.Code != http.StatusOK {
+		t.Fatalf("staging promote: expected 200, got %d: %s", recStaging.Code, recStaging.Body.String())
+	}
+	var respStaging AppPromoteResponse
+	_ = json.NewDecoder(recStaging.Body).Decode(&respStaging)
+	if respStaging.Source != "dev" {
+		t.Errorf("staging promote source = %q, want %q", respStaging.Source, "dev")
+	}
+
+	// Promote to prod → source should be staging (Order=2, closest below Order=3).
+	recProd := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+	if recProd.Code != http.StatusOK {
+		t.Fatalf("prod promote: expected 200, got %d: %s", recProd.Code, recProd.Body.String())
+	}
+	var respProd AppPromoteResponse
+	_ = json.NewDecoder(recProd.Body).Decode(&respProd)
+	if respProd.Source != "staging" {
+		t.Errorf("prod promote source = %q, want %q", respProd.Source, "staging")
+	}
+}
+
+// --- PublishAppEnv is called on promote ---
+
+// recordingPublisher is a GitOpsPublisher stub that records PublishAppEnv calls.
+type recordingPublisher struct {
+	publishedEnvs []string
+}
+
+func (r *recordingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*domain.AppEnvironment) error {
+	return nil
+}
+func (r *recordingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, env *domain.AppEnvironment) error {
+	r.publishedEnvs = append(r.publishedEnvs, env.EnvName)
+	return nil
+}
+func (r *recordingPublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }
+
+// newTestAppPromoteMuxWithPublisher wires an appHandler for promotion tests
+// with a GitOpsPublisher injected.
+func newTestAppPromoteMuxWithPublisher(projectName string, pub GitOpsPublisher) (*http.ServeMux, *authHandler, *memAppStore) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	store := newMemAppStore()
+	store.mu.Lock()
+	store.apps[projectName] = make(map[string]*domain.App)
+	store.mu.Unlock()
+
+	appH := newAppHandler(store, nil, nil)
+	appH.gitOpsPublisher = pub
+
+	rh := &rbacHandler{
+		auth:        ah,
+		orgStore: &staticOrgProvider{org: testRBACOrg()},
+		appHandler:  appH,
+	}
+	rh.registerRoutes(mux)
+
+	return mux, ah, store
+}
+
+// TestPromote_CallsPublishAppEnv verifies that handlePromoteApp calls
+// GitOpsPublisher.PublishAppEnv for the target environment before returning.
+func TestPromote_CallsPublishAppEnv(t *testing.T) {
+	rec := &recordingPublisher{}
+	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, rec)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	// Promote to prod (from staging which has a release).
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	if len(rec.publishedEnvs) == 0 {
+		t.Fatal("expected PublishAppEnv to be called, but no calls were recorded")
+	}
+	if rec.publishedEnvs[0] != "prod" {
+		t.Errorf("expected PublishAppEnv called with env=prod, got %q", rec.publishedEnvs[0])
+	}
+}
+
+// TestPromote_PublishAppEnvFailureContinues verifies that a PublishAppEnv
+// failure does not abort the promotion — the promote response is still 200.
+type failingPublisher struct{}
+
+func (f *failingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*domain.AppEnvironment) error {
+	return nil
+}
+func (f *failingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, _ *domain.AppEnvironment) error {
+	return fmt.Errorf("simulated publish failure")
+}
+func (f *failingPublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }
+
+func TestPromote_PublishAppEnvFailureContinues(t *testing.T) {
+	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, &failingPublisher{})
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	// Promotion should succeed even though file publishing failed.
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 even with publish failure, got %d: %s", resp.Code, resp.Body.String())
 	}
 }

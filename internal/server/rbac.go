@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
@@ -33,6 +34,10 @@ type rbacHandler struct {
 	appHandler       *appHandler       // optional: enables app read endpoints
 	envConfigHandler *envConfigHandler // optional: enables env config endpoints
 	secretsHandler   *secretsHandler   // optional: enables simple secret management
+	// vaultItemWriter and appStore are optional — used to backfill vault items
+	// when an env is first bound to a cluster (so existing apps get their items).
+	vaultItemWriter VaultItemWriter  // optional: backfill vault items on env bind
+	vaultAppStore   domain.AppStore // optional: list apps for backfill
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -86,6 +91,10 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/org/environments/{env}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleUpdateOrgEnvironment)))
 	mux.HandleFunc("DELETE /api/v1/org/environments/{env}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteOrgEnvironment)))
 
+	// Org-level namespace naming patterns — reads for all; writes require org_admin.
+	mux.HandleFunc("GET /api/v1/org/naming", rh.auth.requireAuth(rh.handleGetOrgNaming))
+	mux.HandleFunc("PUT /api/v1/org/naming", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgNaming)))
+
 	// Project-scoped endpoints — role-based access.
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(rh.handleGetProject))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
@@ -96,6 +105,10 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/projects/{project}/environments", manageProject(rh.handleCreateProjectEnvironment))
 	mux.HandleFunc("PUT /api/v1/projects/{project}/environments/{env}", manageProject(rh.handleUpdateProjectEnvironment))
 	mux.HandleFunc("DELETE /api/v1/projects/{project}/environments/{env}", manageProject(rh.handleDeleteProjectEnvironment))
+
+	// Project namespace naming pattern.
+	mux.HandleFunc("GET /api/v1/projects/{project}/naming", viewProject(rh.handleGetProjectNaming))
+	mux.HandleFunc("PUT /api/v1/projects/{project}/naming", manageProject(rh.handlePutProjectNaming))
 	// --- Legacy service-oriented routes (compatibility) ---
 	//
 	// The routes below are deprecated. They are retained for backwards
@@ -146,6 +159,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// Project level — project_admin writes, viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig", viewProject(ec.handleGetProjectEnvConfig))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/envconfig", manageProject(ec.handlePutProjectEnvConfig))
+		// Cluster level — org_admin writes, any-auth reads. Platform escape hatch.
+		mux.HandleFunc("GET /api/v1/clusters/{cluster}/envconfig", rh.auth.requireAuth(ec.handleGetClusterEnvConfig))
+		mux.HandleFunc("PUT /api/v1/clusters/{cluster}/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutClusterEnvConfig)))
 		// App level — developer writes (202 async), viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envconfig", viewProject(ec.handleGetAppEnvConfig))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envconfig", devProject(ec.handlePutAppEnvConfig))
@@ -169,6 +185,13 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/org/secret-backend/vaults", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListVaults)))
 		mux.HandleFunc("POST /api/v1/org/secret-backend/bindings", requireOrgAdmin(rh.requireOrgAdmin(sh.handleAddBinding)))
 		mux.HandleFunc("DELETE /api/v1/org/secret-backend/bindings/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRemoveBinding)))
+		// Platform-shared vault: operator picks the vault they created manually
+		// in 1Password (SAs can't create vaults). Org and project secret
+		// writes route here.
+		mux.HandleFunc("PUT /api/v1/org/secret-backend/platform-vault", requireOrgAdmin(rh.requireOrgAdmin(sh.handleSetPlatformVault)))
+		// One-shot migration: copy upper-level K8s Secrets into the 1Password
+		// vaults after flipping the org backend. Idempotent.
+		mux.HandleFunc("POST /api/v1/org/secret-backend/migrate-to-onepassword", requireOrgAdmin(rh.requireOrgAdmin(sh.handleMigrateToOnePassword)))
 		// Org-level secrets CRUD — org_admin writes, any-auth reads.
 		mux.HandleFunc("GET /api/v1/org/secrets", rh.auth.requireAuth(sh.handleListOrgSecrets))
 		mux.HandleFunc("POST /api/v1/org/secrets", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertOrgSecrets)))
@@ -181,6 +204,10 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/projects/{project}/secrets", viewProject(sh.handleListProjectSecrets))
 		mux.HandleFunc("POST /api/v1/projects/{project}/secrets", manageProject(sh.handleUpsertProjectSecrets))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/secrets/{key}", manageProject(sh.handleDeleteProjectSecret))
+		// Cluster-level secrets CRUD — org_admin writes, any-auth reads.
+		mux.HandleFunc("GET /api/v1/clusters/{cluster}/secrets", rh.auth.requireAuth(sh.handleListClusterSecrets))
+		mux.HandleFunc("POST /api/v1/clusters/{cluster}/secrets", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertClusterSecrets)))
+		mux.HandleFunc("DELETE /api/v1/clusters/{cluster}/secrets/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteClusterSecret)))
 		// App-level secrets CRUD — developer writes, viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets", viewProject(sh.handleListAppSecrets))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets", devProject(sh.handleUpsertAppSecrets))
@@ -198,6 +225,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	if rh.appHandler != nil {
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps", viewProject(rh.appHandler.handleListApps))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}", viewProject(rh.appHandler.handleGetApp))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}", manageProject(rh.appHandler.handleDeleteApp))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments", viewProject(rh.appHandler.handleListAppEnvironments))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}", viewProject(rh.appHandler.handleGetAppEnvironment))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/previews", viewProject(rh.appHandler.handleListAppPreviews))

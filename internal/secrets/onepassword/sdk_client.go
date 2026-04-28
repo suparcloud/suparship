@@ -174,7 +174,14 @@ func (c *SDKClient) UpsertItem(ctx context.Context, vaultID, title string, field
 		if f.Type == "concealed" {
 			ft = onepasswordsdk.ItemFieldTypeConcealed
 		}
+		// 1Password requires a unique ID per field; the SDK won't generate
+		// one on update (Items().Put), so leaving ID empty causes Put to
+		// fail with "item contained duplicate field ids" as soon as the
+		// item has more than one field. Use the label as the ID — labels
+		// are unique within our merged map by construction, and we treat
+		// the label as the canonical key anyway.
 		sdkFields[i] = onepasswordsdk.ItemField{
+			ID:        f.Label,
 			Title:     f.Label,
 			Value:     f.Value,
 			FieldType: ft,

@@ -27,8 +27,11 @@ import (
 	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var serverCmd = &cobra.Command{
@@ -122,6 +125,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		clusterStore            domain.ClusterStore
 		secretBackend           secrets.Backend
 		upperLevelSecretWriter  secrets.UpperLevelWriter
+		vaultItemWriter         server.VaultItemWriter
 		templates               []*tpl.Template
 		readinessProbers        []server.ReadinessProber
 		kargoPromoter           server.KargoPromoter
@@ -241,10 +245,61 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		clusterStore = kubeDeps.ClusterStore
 		secretBackend = secrets.NewK8sBackend(client)
 		upperLevelSecretWriter = secrets.NewUpperLevelSecretWriter(client)
+
+		// Wire 1Password vault item writer + upper-level writer when the org
+		// backend is configured for 1Password. The SA token must already be
+		// stored in the K8s Secret created by the provision flow. Failure is
+		// non-fatal — log and continue without it.
+		if orgProvider != nil {
+			if org, orgErr := orgProvider.GetOrg(cmd.Context()); orgErr == nil && org != nil {
+				if org.SecretBackend.Effective() == secrets.Backend1Password && org.SecretBackend.OnePassword != nil {
+					saTokenRaw, tokenErr := func() (string, error) {
+						sec, err := client.CoreV1().Secrets("suparship-system").Get(
+							cmd.Context(), secrets.SATokenSecretName, metav1.GetOptions{},
+						)
+						if err != nil {
+							return "", err
+						}
+						return string(sec.Data[secrets.SATokenSecretKey]), nil
+					}()
+					if tokenErr != nil {
+						logger.Warn("vault item writer: could not read SA token — 1Password vault items will not be created automatically",
+							"secret", secrets.SATokenSecretName, "error", tokenErr)
+					} else if saTokenRaw != "" {
+						saClient, saErr := onepassword.NewSDKClient(cmd.Context(), saTokenRaw)
+						if saErr != nil {
+							logger.Warn("vault item writer: SA client init failed — vault item auto-create disabled",
+								"error", saErr)
+						} else {
+							saWriter := onepassword.NewSAVaultWriter(saClient)
+							vaultItemWriter = server.NewSAVaultItemWriter(saWriter, org.SecretBackend.OnePassword.Bindings)
+							logger.Info("vault item writer: 1Password SA client enabled — vault items created on app create")
+
+							// Build a cluster→env resolver from the org snapshot.
+							envForCluster := buildEnvForClusterResolver(org.Environments)
+							upperLevelSecretWriter = onepassword.NewSAUpperLevelWriter(onepassword.SAUpperLevelWriterConfig{
+								Client:          saClient,
+								PlatformVaultID: org.SecretBackend.OnePassword.PlatformVaultID,
+								Bindings:        org.SecretBackend.OnePassword.Bindings,
+								OrgName:         org.Name,
+								Naming:          org.ResourceNaming,
+								EnvForCluster:   envForCluster,
+							})
+							if org.SecretBackend.OnePassword.PlatformVaultID == "" {
+								logger.Warn("upper-level writer: 1Password platform vault not provisioned — org/project secret writes will fail until SA token is re-pasted",
+									"hint", "Settings > Secrets > paste the SA token to auto-create the platform vault")
+							} else {
+								logger.Info("upper-level writer: 1Password backend enabled — org/project secrets land in platform vault, env-type/cluster in env vault",
+									"platformVaultID", org.SecretBackend.OnePassword.PlatformVaultID)
+							}
+						}
+					}
+				}
+			}
+		}
 		gitopsConfigStore = gitops.NewConfigStore(client)
 		templateRegistryStore = tpl.NewRegistryStore(client)
 		registryStore = registry.NewStore(client)
-
 		// Build the per-cluster client pool so sealing certs can be fetched
 		// directly from each registered cluster's kubeseal controller.
 		clusterPool = k8s.NewClusterClientPool(kubeDeps.ClusterStore)
@@ -318,9 +373,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				logger.Warn("gitops publisher disabled", "reason", err.Error())
 			} else {
 				gitOpsPublisher = &gitOpsPublisherAdapter{
-					inner:        pub,
-					orgProvider:  orgProvider,
-					clusterStore: clusterStore,
+					inner:           pub,
+					orgProvider:     orgProvider,
+					clusterStore:    clusterStore,
+					upperWriter:     upperLevelSecretWriter,
+					backend:         secretBackend,
+					appNamespaceFor: appStoreNamespaceResolver(appStore),
 				}
 				sealPublisherHolder.Swap(pub)
 				logger.Info("gitops publisher enabled",
@@ -424,9 +482,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 			// 4. Hot-swap the live publisher so new app creates/promotes use it.
 			publisherHolder.Swap(&gitOpsPublisherAdapter{
-				inner:        pub,
-				orgProvider:  orgProvider,
-				clusterStore: clusterStore,
+				inner:           pub,
+				orgProvider:     orgProvider,
+				clusterStore:    clusterStore,
+				upperWriter:     upperLevelSecretWriter,
+				backend:         secretBackend,
+				appNamespaceFor: appStoreNamespaceResolver(appStore),
 			})
 			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
@@ -455,6 +516,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		ClusterStore:            clusterStore,
 		SecretBackend:           secretBackend,
 		UpperLevelSecretWriter:  upperLevelSecretWriter,
+		VaultItemWriter:         vaultItemWriter,
 		GitOpsPublisher:         publisherHolder,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,
@@ -503,6 +565,19 @@ type gitOpsPublisherAdapter struct {
 	inner        *gitops.Publisher
 	orgProvider  rbac.OrgProvider
 	clusterStore domain.ClusterStore
+	// upperWriter and backend are used to populate AppPublishEnv.ScopeKeys —
+	// which scope levels actually have keys in the vault — so the collapsed
+	// ExternalSecret omits dataFrom entries for empty scopes (ESO would
+	// otherwise error trying to extract from a missing item).
+	//
+	// Both are optional: when nil, the publisher's collapsed builder still
+	// works but every scope is included.
+	upperWriter secrets.UpperLevelWriter
+	backend     secrets.Backend
+	// appNamespaceFor resolves the app-env K8s namespace from app + env. Used
+	// to read app/app-env secret keys from the right namespace when populating
+	// ScopeKeys.
+	appNamespaceFor func(ctx context.Context, projectName, appName, envName string) (string, error)
 }
 
 // envResolved holds the resolved cluster and domain info for one environment.
@@ -510,6 +585,11 @@ type envResolved struct {
 	clusterServer    string
 	baseDomain       string
 	namespacePattern string
+	// bound is true when the org environment has a non-empty ClusterRef that
+	// maps to a known cluster. GitOps artifacts are only published for bound
+	// environments; unbound envs are tracked in the store so the UI can prompt
+	// the operator to assign a cluster.
+	bound bool
 }
 
 // resolveEnvs builds a map of envName → resolved cluster info from org config
@@ -537,6 +617,8 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 		}
 
 		// Resolve the cluster API server from the cluster store.
+		// An env is bound when it has a non-empty ClusterRef that resolves to a
+		// known cluster. Unbound envs are skipped during GitOps publishing.
 		if orgEnv.ClusterRef != "" && a.clusterStore != nil {
 			cluster, err := a.clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
 			if err != nil {
@@ -545,8 +627,10 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 			} else if cluster.APIServer == "" {
 				slog.Warn("resolveEnvs: cluster has empty apiServer, falling back to in-cluster default",
 					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
+				res.bound = true // ClusterRef is valid even if apiServer defaults
 			} else {
 				res.clusterServer = cluster.APIServer
+				res.bound = true
 			}
 		}
 
@@ -632,40 +716,169 @@ func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, project
 func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
 	resolved := a.resolveEnvs(ctx)
 
+	// Load org config once for naming and backend info.
+	var org *rbac.Org
+	if a.orgProvider != nil {
+		org, _ = a.orgProvider.GetOrg(ctx)
+	}
+
 	appSetEnvs := make([]gitops.AppSetEnv, 0, len(envs))
 	pubEnvs := make([]gitops.AppPublishEnv, 0, len(envs))
 
 	for _, env := range envs {
 		res, ok := resolved[env.EnvName]
 		if !ok {
-			// Environment not in org config — use safe defaults.
+			// Environment not in org config — treat as unbound so we don't
+			// accidentally publish to a stale or undefined cluster.
 			res = envResolved{
 				clusterServer: "https://kubernetes.default.svc",
 				baseDomain:    "localhost",
+				bound:         false,
 			}
 		}
 
-		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
-			EnvName:          env.EnvName,
-			ClusterServer:    res.clusterServer,
-			NamespacePattern: res.namespacePattern,
-			BaseDomain:       res.baseDomain,
-		})
-		pubEnvs = append(pubEnvs, gitops.AppPublishEnv{
+		// Only include bound environments in the ApplicationSet so ArgoCD
+		// doesn't try to connect to a cluster that hasn't been registered.
+		if res.bound {
+			appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
+				EnvName:       env.EnvName,
+				ClusterServer: res.clusterServer,
+				BaseDomain:    res.baseDomain,
+			})
+		}
+
+		pub := gitops.AppPublishEnv{
 			EnvName:    env.EnvName,
 			EnvType:    env.EnvType,
+			Order:      env.Order,
+			Bound:      res.bound,
 			BaseDomain: res.baseDomain,
-		})
+			Namespace:  env.Namespace,
+		}
+
+		// Populate secret-store info from org backend config.
+		if org != nil {
+			a.enrichPubEnvWithSecrets(ctx, org, app, env.EnvName, &pub)
+		}
+
+		pubEnvs = append(pubEnvs, pub)
 	}
 
-	// Write appset.yaml + appproject.yaml for each environment so ArgoCD can
-	// discover apps through its Git File generator. This is idempotent.
+	// Write appset.yaml + appproject.yaml for each bound environment so ArgoCD
+	// can discover apps through its Git File generator. This is idempotent.
 	if err := a.inner.PublishEnvInfra(ctx, app.ProjectName, appSetEnvs); err != nil {
 		return fmt.Errorf("publish env infra: %w", err)
 	}
 
-	// Write app.yaml + values.yaml for each environment.
+	// Write app.yaml + values.yaml for each bound environment.
 	return a.inner.PublishApp(ctx, app, pubEnvs)
+}
+
+// enrichPubEnvWithSecrets adds StoreName, VaultItemTitle, ClusterRef, and
+// ScopeKeys to pub based on the org's secret backend config and naming
+// patterns. ScopeKeys reflects which scope levels actually have keys in the
+// vault so the collapsed ExternalSecret skips dataFrom entries for empty
+// scopes — ESO would otherwise error trying to extract from a missing item.
+func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, org *rbac.Org, app *domain.App, envName string, pub *gitops.AppPublishEnv) {
+	naming := org.ResourceNaming
+	orgName := org.Name
+	if orgName == "" {
+		orgName = "default"
+	}
+
+	np := secrets.NamingParams{
+		Org:      orgName,
+		Env:      envName,
+		Project:  app.ProjectName,
+		App:      app.Name,
+		Provider: string(org.SecretBackend.Effective()),
+	}
+
+	pub.StoreName = naming.RenderClusterSecretStore(np)
+	pub.VaultItemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
+
+	// Resolve the cluster bound to this env from the org config so the
+	// publisher can render the cluster-scope item title.
+	for _, e := range org.Environments {
+		if e.Name == envName {
+			pub.ClusterRef = e.ClusterRef
+			break
+		}
+	}
+
+	pub.ScopeKeys = a.collectScopeKeys(ctx, app, envName, pub.ClusterRef)
+}
+
+// collectScopeKeys probes each scope level and reports which ones currently
+// have at least one key in the vault. Errors are swallowed (treated as "no
+// keys") because the resolved view is best-effort during a publish — partial
+// information is better than failing the entire commit.
+func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *domain.App, envName, clusterRef string) map[string]bool {
+	out := make(map[string]bool, 6)
+
+	if a.upperWriter != nil {
+		if entries, err := a.upperWriter.ReadOrgSecretKeys(ctx); err == nil && len(entries) > 0 {
+			out[secrets.LevelOrg] = true
+		}
+		if entries, err := a.upperWriter.ReadEnvTypeSecretKeys(ctx, envName); err == nil && len(entries) > 0 {
+			out[secrets.LevelEnvironment] = true
+		}
+		if entries, err := a.upperWriter.ReadProjectSecretKeys(ctx, app.ProjectName); err == nil && len(entries) > 0 {
+			out[secrets.LevelProject] = true
+		}
+		if clusterRef != "" {
+			if entries, err := a.upperWriter.ReadClusterSecretKeys(ctx, clusterRef); err == nil && len(entries) > 0 {
+				out[secrets.LevelCluster] = true
+			}
+		}
+	}
+
+	if a.backend != nil && a.appNamespaceFor != nil {
+		// App-level secrets live in the same namespace as any app-env secret;
+		// passing the env name is fine here because the app-level Secret name
+		// is keyed by project+app, not env.
+		if ns, err := a.appNamespaceFor(ctx, app.ProjectName, app.Name, envName); err == nil && ns != "" {
+			if entries, err := a.backend.ListKeys(ctx, ns, secrets.AppLevelSecretName(app.ProjectName, app.Name)); err == nil && len(entries) > 0 {
+				out[secrets.LevelApp] = true
+			}
+			if entries, err := a.backend.ListKeys(ctx, ns, secrets.AppEnvSecretName(app.ProjectName, app.Name, envName)); err == nil && len(entries) > 0 {
+				out[secrets.LevelAppEnv] = true
+			}
+		}
+	}
+
+	return out
+}
+
+// PublishAppEnv implements server.GitOpsPublisher by resolving cluster info for
+// the single environment and writing its app.yaml + values.yaml to the GitOps
+// repo. Called on every explicit promotion so the target env's files exist
+// before Kargo / ArgoCD act.
+func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error {
+	resolved := a.resolveEnvs(ctx)
+	res, ok := resolved[env.EnvName]
+	if !ok {
+		res = envResolved{
+			clusterServer: "https://kubernetes.default.svc",
+			baseDomain:    "localhost",
+			bound:         false,
+		}
+	}
+	pub := gitops.AppPublishEnv{
+		EnvName:    env.EnvName,
+		EnvType:    env.EnvType,
+		Order:      env.Order,
+		Bound:      res.bound,
+		BaseDomain: res.baseDomain,
+		Namespace:  env.Namespace,
+	}
+	return a.inner.PublishAppEnv(ctx, app, pub)
+}
+
+// UnpublishApp implements server.GitOpsPublisher by removing all gitops-output
+// directories for the given app and committing the deletion.
+func (a *gitOpsPublisherAdapter) UnpublishApp(ctx context.Context, projectName, appName string) error {
+	return a.inner.UnpublishApp(ctx, projectName, appName)
 }
 
 // argoCDHistoryAdapter bridges kube.ArgoCDStatusReader.GetAppDeploymentHistory
@@ -742,6 +955,14 @@ func publishInitialEnvInfra(
 		return
 	}
 
+	// Update the publisher with the current org config so ClusterSecretStores
+	// and naming patterns are consistent when PublishEnvInfra runs.
+	orgName := org.Name
+	if orgName == "" {
+		orgName = "default"
+	}
+	pub.SetOrgConfig(orgName, org.ResourceNaming, &org.SecretBackend)
+
 	appSetEnvs := make([]gitops.AppSetEnv, 0, len(org.Environments))
 	for _, orgEnv := range org.Environments {
 		clusterServer := "https://kubernetes.default.svc"
@@ -762,10 +983,9 @@ func publishInitialEnvInfra(
 			baseDomain = "localhost"
 		}
 		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
-			EnvName:          orgEnv.Name,
-			ClusterServer:    clusterServer,
-			NamespacePattern: orgEnv.NamespacePattern,
-			BaseDomain:       baseDomain,
+			EnvName:       orgEnv.Name,
+			ClusterServer: clusterServer,
+			BaseDomain:    baseDomain,
 		})
 	}
 
@@ -791,5 +1011,44 @@ func publishInitialEnvInfra(
 		} else {
 			logger.Info("initial env infra: published", "project", name)
 		}
+	}
+}
+
+// buildEnvForClusterResolver returns a closure that maps a registered cluster
+// name to the env-name that has that cluster as its ClusterRef in the org
+// config. Used by the 1Password upper-level writer to find the correct env
+// vault for cluster-scope items. Returns "" for unknown clusters.
+//
+// The resolver captures envs by value at construction time. Restart suparship
+// to pick up env-binding changes — same lifecycle as the rest of the
+// 1Password wiring (SA client + bindings).
+func buildEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string {
+	clusterToEnv := make(map[string]string, len(envs))
+	for _, e := range envs {
+		if e.ClusterRef != "" {
+			clusterToEnv[e.ClusterRef] = e.Name
+		}
+	}
+	return func(cluster string) string {
+		return clusterToEnv[cluster]
+	}
+}
+
+// appStoreNamespaceResolver returns a function that looks up the resolved K8s
+// namespace for an app-env from the AppStore. Returns "" when the env is not
+// persisted (e.g. apps created before AppEnvironment was introduced) so that
+// callers can treat the lookup as best-effort.
+func appStoreNamespaceResolver(store domain.AppStore) func(ctx context.Context, projectName, appName, envName string) (string, error) {
+	if store == nil {
+		return func(context.Context, string, string, string) (string, error) {
+			return "", nil
+		}
+	}
+	return func(ctx context.Context, projectName, appName, envName string) (string, error) {
+		env, err := store.GetAppEnvironment(ctx, projectName, appName, envName)
+		if err != nil {
+			return "", err
+		}
+		return env.Namespace, nil
 	}
 }

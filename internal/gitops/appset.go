@@ -1,9 +1,5 @@
 package gitops
 
-import (
-	"strings"
-)
-
 // AppSetEnv parameterises one environment in an ApplicationSet.
 // Each instance maps to one cluster in the env/cluster-centric Model B layout.
 type AppSetEnv struct {
@@ -12,9 +8,6 @@ type AppSetEnv struct {
 	// ClusterServer is the Kubernetes API server URL for this environment's cluster.
 	// Written as spec.destination.server in generated Applications.
 	ClusterServer string
-	// NamespacePattern is the domain.Environment.NamespacePattern value.
-	// Tokens: {app}, {env}, {project}. Empty → default "{app}-{env}".
-	NamespacePattern string
 	// BaseDomain is the ingress base domain for apps in this environment,
 	// e.g. "staging.acme.com". Used in values.yaml generation, not in the AppSet itself.
 	BaseDomain string
@@ -84,27 +77,6 @@ type ApplicationSetAppSpec struct {
 	SyncPolicy  *SyncPolicy                 `yaml:"syncPolicy,omitempty"`
 }
 
-// resolveAppSetNamespace translates a domain NamespacePattern into an AppSet
-// destination.namespace template string.
-//
-// Token mapping:
-//
-//	{app}      → {{name}}          (Git File generator parameter)
-//	{env}      → literal envName   (constant within one per-cluster AppSet)
-//	{project}  → {{project}}       (Git File generator parameter)
-//
-// An empty pattern falls back to "{app}-{env}" which maps to "{{name}}-{envName}".
-func resolveAppSetNamespace(pattern, envName string) string {
-	if pattern == "" {
-		pattern = "{app}-{env}"
-	}
-	result := pattern
-	result = strings.ReplaceAll(result, "{app}", "{{name}}")
-	result = strings.ReplaceAll(result, "{env}", envName)
-	result = strings.ReplaceAll(result, "{project}", "{{project}}")
-	return result
-}
-
 // BuildArgoAppSet generates the per-cluster stable-environment ApplicationSet
 // for one environment directory (Model B layout).
 //
@@ -115,7 +87,9 @@ func resolveAppSetNamespace(pattern, envName string) string {
 //     "charts/{{template}}", the other is a ref source pointing at the
 //     per-app values directory for "$appvalues/values.yaml".
 //   - Hardcodes spec.destination.server to env.ClusterServer (constant per AppSet).
-//   - Derives spec.destination.namespace from env.NamespacePattern.
+//   - Uses "{{namespace}}" as spec.destination.namespace — the resolved
+//     namespace is written into each app's app.yaml at publish time, so each
+//     app can have a different namespace within the same ApplicationSet.
 //
 // BuildArgoAppSet is a pure function — identical inputs produce identical output.
 func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *ApplicationSet {
@@ -128,8 +102,6 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	if env.ClusterServer == "" {
 		env.ClusterServer = defaultDestination
 	}
-
-	nsTemplate := resolveAppSetNamespace(env.NamespacePattern, env.EnvName)
 
 	// Source 1: values ref — checks out the ENTIRE gitops repo so $appvalues
 	// resolves to the repo root. No `path` is set intentionally: when `path` is
@@ -157,7 +129,13 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	var syncPolicy *SyncPolicy
 	if opts.SyncAutomated {
 		syncPolicy = &SyncPolicy{
-			Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			SyncOptions: []string{"CreateNamespace=true"},
+		}
+	} else {
+		// Always create the destination namespace even without auto-sync so
+		// ArgoCD can deploy into the correct namespace on the first manual sync.
+		syncPolicy = &SyncPolicy{
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	}
@@ -204,7 +182,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 			Spec: ApplicationSetAppSpec{
 				Project:     "{{project}}",
 				Sources:     []ApplicationSource{valuesRefSource, chartSource},
-				Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: nsTemplate},
+				Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: "{{namespace}}"},
 				SyncPolicy:  syncPolicy,
 			},
 		},
@@ -248,7 +226,11 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 	var syncPolicy *SyncPolicy
 	if opts.SyncAutomated {
 		syncPolicy = &SyncPolicy{
-			Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			SyncOptions: []string{"CreateNamespace=true"},
+		}
+	} else {
+		syncPolicy = &SyncPolicy{
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	}
@@ -304,9 +286,13 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 // AppMetadata is written as app.yaml for each app in each env directory.
 // The Git File generator reads these fields as template parameters.
 type AppMetadata struct {
-	Name     string `yaml:"name"`
-	Project  string `yaml:"project"`
-	Template string `yaml:"template"`
+	Name      string `yaml:"name"`
+	Project   string `yaml:"project"`
+	Template  string `yaml:"template"`
+	// Namespace is the resolved Kubernetes namespace for this app+env instance.
+	// Resolved at publish time by ResolveNamespace so each app can have a
+	// different namespace even within the same ApplicationSet.
+	Namespace string `yaml:"namespace"`
 }
 
 // PreviewAppMetadata is written as app.yaml for each preview instance.

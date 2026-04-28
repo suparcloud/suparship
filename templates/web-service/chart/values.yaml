@@ -56,3 +56,12 @@ autoscaling:
   minReplicas: 1
   maxReplicas: 10
   targetCPUUtilization: 80
+
+# -- Platform-managed secrets and config.
+# When managedByPlatform is true (the default), suparship writes a ConfigMap
+# named "{app.name}-config" and an ExternalSecret named "{app.name}-secrets"
+# to the GitOps repo. The chart's envFrom block references these by name.
+# Set managedByPlatform: false to opt out and manage ConfigMaps / ExternalSecrets
+# in this chart directly (legacy behaviour — preserved for backward compatibility).
+secrets:
+  managedByPlatform: true

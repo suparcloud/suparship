@@ -258,6 +258,40 @@ func TestUpperLevelWriter_ProjectSecrets(t *testing.T) {
 	}
 }
 
+func TestUpperLevelWriter_ClusterSecrets(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	w := NewUpperLevelSecretWriter(client)
+	ctx := context.Background()
+
+	err := w.WriteClusterSecrets(ctx, "prod-us", map[string][]byte{
+		"FEATURE_FLAG": []byte("off"),
+	})
+	if err != nil {
+		t.Fatalf("WriteClusterSecrets: %v", err)
+	}
+
+	secret, err := client.CoreV1().Secrets(SystemNamespace).Get(ctx, ClusterSecretName("prod-us"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got, want := secret.Annotations[replicatorMatchingAnnotation], "suparship.io/cluster=prod-us"; got != want {
+		t.Errorf("replicator-matching annotation = %q, want %q", got, want)
+	}
+
+	keys, _ := w.ReadClusterSecretKeys(ctx, "prod-us")
+	if len(keys) != 1 || keys[0].Key != "FEATURE_FLAG" {
+		t.Errorf("unexpected keys: %v", keys)
+	}
+
+	if err := w.DeleteClusterSecretKey(ctx, "prod-us", "FEATURE_FLAG"); err != nil {
+		t.Fatalf("DeleteClusterSecretKey: %v", err)
+	}
+	keys, _ = w.ReadClusterSecretKeys(ctx, "prod-us")
+	if len(keys) != 0 {
+		t.Errorf("expected 0 keys after delete, got %d", len(keys))
+	}
+}
+
 func TestUpperLevelWriter_MergeExisting(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	w := NewUpperLevelSecretWriter(client)

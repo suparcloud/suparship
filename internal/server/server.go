@@ -47,12 +47,19 @@ func (a *clusterPoolAdapter) GetKubeClient(ctx context.Context, clusterName stri
 // app creation only persists to the store and no git commit is performed.
 // Implementations must be safe for concurrent use.
 type GitOpsPublisher interface {
-	// PublishApp writes app.yaml and values.yaml for each environment to the
-	// GitOps repo. BaseDomain controls the routing.host value in values.yaml;
-	// it is taken from the environment's cluster registration (defaults to
-	// "localhost" when the environment has no cluster or when the cluster has
-	// no configured base domain).
+	// PublishApp writes app.yaml and values.yaml for the first bound stable
+	// environment (and all preview environments) to the GitOps repo on initial
+	// app creation. Higher stable environments receive their files only when an
+	// explicit promotion is triggered via PublishAppEnv.
 	PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error
+	// PublishAppEnv writes app.yaml and values.yaml for a single environment to
+	// the GitOps repo. Called on every explicit promotion so the target env's
+	// files are present before Kargo / ArgoCD act on the promotion.
+	PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error
+	// UnpublishApp removes all GitOps files for an app (all stable-env
+	// directories) and commits + pushes the deletion. It is a no-op if no
+	// files exist for the app.
+	UnpublishApp(ctx context.Context, projectName, appName string) error
 }
 
 // KargoPromoter creates Kargo Promotion CRs to advance freight through the
@@ -142,6 +149,20 @@ type DeploymentHistoryReader interface {
 	GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]DeploymentHistoryEntry, error)
 }
 
+// VaultItemWriter creates and deletes per-app vault items in an external vault
+// (1Password). Used by the app and preview create/delete handlers to ensure
+// a vault item skeleton exists before ArgoCD syncs the ExternalSecret.
+// When nil, vault item management is skipped (K8s-native mode).
+type VaultItemWriter interface {
+	// UpsertAppItem creates or updates the vault item for the app+env scope.
+	// The implementation resolves the vault binding for envName internally.
+	// No-op (returns nil) when no binding exists for the env.
+	UpsertAppItem(ctx context.Context, org, project, app, env string) error
+	// DeleteAppItem removes the vault item for the app+env scope.
+	// No-op when the item does not exist or no binding exists for the env.
+	DeleteAppItem(ctx context.Context, org, project, app, env string) error
+}
+
 // ReadinessProber is a named readiness check injected into the server.
 // Each prober is called by GET /readyz; any non-nil error marks the
 // server as not ready.
@@ -191,6 +212,30 @@ func (h *PublisherHolder) PublishApp(ctx context.Context, app *domain.App, envs 
 	return p.PublishApp(ctx, app, envs)
 }
 
+// PublishAppEnv implements GitOpsPublisher. It delegates to the currently held
+// publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.PublishAppEnv(ctx, app, env)
+}
+
+// UnpublishApp implements GitOpsPublisher. It delegates to the currently held
+// publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) UnpublishApp(ctx context.Context, projectName, appName string) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.UnpublishApp(ctx, projectName, appName)
+}
+
 // Swap replaces the inner publisher atomically. Subsequent PublishApp calls
 // will use the new publisher. Any in-flight call completes against the old one.
 func (h *PublisherHolder) Swap(p GitOpsPublisher) {
@@ -233,6 +278,17 @@ func (h *SealPublisherHolder) DeleteSealedReadToken(ctx context.Context, params 
 	return p.DeleteSealedReadToken(ctx, params)
 }
 
+// RefreshSecretStore implements SealedTokenPublisher.
+func (h *SealPublisherHolder) RefreshSecretStore(ctx context.Context, params gitops.RefreshSecretStoreParams) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.RefreshSecretStore(ctx, params)
+}
+
 // Swap replaces the inner publisher atomically.
 func (h *SealPublisherHolder) Swap(p SealedTokenPublisher) {
 	h.mu.Lock()
@@ -262,6 +318,7 @@ type Config struct {
 	SecretBackend        secrets.Backend           // optional: enables simple app-env secret CRUD
 	UpperLevelSecretWriter secrets.UpperLevelWriter // optional: enables org/envtype/project-level secret CRUD
 	SecretsAuditor       *secrets.Auditor           // optional: enables audit logging for secret ops
+	VaultItemWriter      VaultItemWriter            // optional: creates 1Password vault items on app/preview create
 	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
 	CookieSecure    bool                 // true for production (HTTPS)
 	Logger          *slog.Logger
@@ -331,6 +388,10 @@ func New(cfg Config) *Server {
 			orgStore:     cfg.OrgProvider,
 			projectStore: cfg.ProjectStore,
 		}
+		if cfg.VaultItemWriter != nil {
+			rh.vaultItemWriter = cfg.VaultItemWriter
+			rh.vaultAppStore = cfg.AppStore
+		}
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
 			cfg.Logger.Info("service creation endpoint enabled")
@@ -389,10 +450,13 @@ func New(cfg Config) *Server {
 				rh.appHandler.deploymentHistoryReader = cfg.DeploymentHistoryReader
 				cfg.Logger.Info("deployment history reader enabled — history endpoint active")
 			}
+			if cfg.VaultItemWriter != nil {
+				rh.appHandler.vaultWriter = cfg.VaultItemWriter
+				cfg.Logger.Info("vault item writer enabled — 1Password items created on app/preview create")
+			}
 			cfg.Logger.Info("app endpoints enabled")
 		}
-		if cfg.AppStore != nil && cfg.ProjectStore != nil {
-			ech := &envConfigHandler{
+		if cfg.AppStore != nil && cfg.ProjectStore != nil {			ech := &envConfigHandler{
 				orgStore:         cfg.OrgProvider,
 				projectStore:     cfg.ProjectStore,
 				appStore:         cfg.AppStore,
@@ -418,6 +482,10 @@ func New(cfg Config) *Server {
 					return onepassword.NewSDKClient(ctx, token)
 				}
 				rh.secretsHandler.certCache = seal.NewK8sCertCache(cfg.KubeClient)
+				// Always keep a K8s upper-level writer around, even when the
+				// active backend is 1Password — used as the migration source
+				// when copying suparship-system Secrets into vaults.
+				rh.secretsHandler.k8sUpperWriter = secrets.NewUpperLevelSecretWriter(cfg.KubeClient)
 			}
 			if cfg.ClusterPool != nil {
 				rh.secretsHandler.clusterPool = &clusterPoolAdapter{pool: cfg.ClusterPool}

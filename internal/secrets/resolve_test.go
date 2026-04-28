@@ -6,7 +6,7 @@ import (
 )
 
 func TestResolveSecretLayers_Empty(t *testing.T) {
-	resolved := ResolveSecretLayers(nil, nil, nil, nil, nil)
+	resolved := ResolveSecretLayers(nil, nil, nil, nil, nil, nil)
 	if len(resolved) != 0 {
 		t.Errorf("expected empty resolved, got %d entries", len(resolved))
 	}
@@ -15,7 +15,7 @@ func TestResolveSecretLayers_Empty(t *testing.T) {
 func TestResolveSecretLayers_SingleLevel(t *testing.T) {
 	resolved := ResolveSecretLayers(
 		[]string{"DB_URL"},
-		nil, nil, nil, nil,
+		nil, nil, nil, nil, nil,
 	)
 	if len(resolved) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(resolved))
@@ -32,6 +32,7 @@ func TestResolveSecretLayers_LastWins(t *testing.T) {
 		[]string{"DB_URL", "PROJ_KEY"},
 		[]string{"APP_KEY"},
 		[]string{"DB_URL", "APP_ENV_KEY"},
+		nil,
 	)
 
 	tests := []struct {
@@ -60,22 +61,45 @@ func TestResolveSecretLayers_LastWins(t *testing.T) {
 }
 
 func TestResolveSecretLayers_OverridePrecedence(t *testing.T) {
-	// Same key at all 5 levels — app-env must win.
+	// Same key at all 6 levels — cluster must win.
 	resolved := ResolveSecretLayers(
+		[]string{"KEY"},
 		[]string{"KEY"},
 		[]string{"KEY"},
 		[]string{"KEY"},
 		[]string{"KEY"},
 		[]string{"KEY"},
 	)
-	if resolved["KEY"].Source != LevelAppEnv {
-		t.Errorf("KEY source = %q, want %q", resolved["KEY"].Source, LevelAppEnv)
+	if resolved["KEY"].Source != LevelCluster {
+		t.Errorf("KEY source = %q, want %q", resolved["KEY"].Source, LevelCluster)
+	}
+}
+
+func TestResolveSecretLayers_ClusterOverridesAppEnv(t *testing.T) {
+	// Cluster wins over app-env (platform escape hatch beats app team's most-specific layer).
+	resolved := ResolveSecretLayers(
+		nil, nil, nil, nil,
+		[]string{"FEATURE_FLAG"},
+		[]string{"FEATURE_FLAG"},
+	)
+	if resolved["FEATURE_FLAG"].Source != LevelCluster {
+		t.Errorf("FEATURE_FLAG source = %q, want %q", resolved["FEATURE_FLAG"].Source, LevelCluster)
+	}
+}
+
+func TestResolveSecretLayers_ClusterOnly(t *testing.T) {
+	resolved := ResolveSecretLayers(
+		nil, nil, nil, nil, nil,
+		[]string{"CLUSTER_ONLY"},
+	)
+	if resolved["CLUSTER_ONLY"].Source != LevelCluster {
+		t.Errorf("CLUSTER_ONLY source = %q, want %q", resolved["CLUSTER_ONLY"].Source, LevelCluster)
 	}
 }
 
 func TestResolveSecretLayers_KeyFieldSet(t *testing.T) {
 	resolved := ResolveSecretLayers(
-		[]string{"A"}, nil, nil, nil, []string{"B"},
+		[]string{"A"}, nil, nil, nil, []string{"B"}, nil,
 	)
 	if resolved["A"].Key != "A" {
 		t.Errorf("expected Key field to be set to %q, got %q", "A", resolved["A"].Key)
@@ -93,6 +117,7 @@ func TestResolveSecretLayers_Deterministic(t *testing.T) {
 			nil,
 			[]string{"A"},
 			[]string{"Z"},
+			nil,
 		)
 		keys := make([]string, 0, len(resolved))
 		for k := range resolved {

@@ -33,6 +33,11 @@ export interface OnePasswordConfig {
   groupName: string;
   connect: ConnectStatus;
   bindings: EnvBinding[];
+  // Platform-shared vault provisioned on SA token paste. When empty, org-
+  // and project-scope writes have nowhere to land — UI surfaces a re-paste
+  // prompt.
+  platformVaultId?: string;
+  platformVaultName?: string;
 }
 
 export interface SecretBackendConfig {
@@ -118,6 +123,47 @@ export function removeBinding(env: string): Promise<void> {
   );
 }
 
+// ── Platform vault picker ──────────────────────────────────────────────────────
+
+export interface SetPlatformVaultResponse {
+  vaultId: string;
+  vaultName: string;
+}
+
+export function setPlatformVault(
+  vaultId: string,
+  vaultName?: string,
+): Promise<SetPlatformVaultResponse> {
+  return api.put<SetPlatformVaultResponse>(
+    "/org/secret-backend/platform-vault",
+    { vaultId, vaultName: vaultName || "" },
+  );
+}
+
+// ── Migration to 1Password ─────────────────────────────────────────────────────
+
+export interface MigrateToOnePasswordRequest {
+  envTypes?: string[];
+  projects?: string[];
+  clusters?: string[];
+}
+
+export interface MigrateToOnePasswordResponse {
+  orgKeys: number;
+  envTypeKeys: Record<string, number>;
+  projectKeys: Record<string, number>;
+  clusterKeys: Record<string, number>;
+}
+
+export function migrateToOnePassword(
+  req: MigrateToOnePasswordRequest,
+): Promise<MigrateToOnePasswordResponse> {
+  return api.post<MigrateToOnePasswordResponse>(
+    "/org/secret-backend/migrate-to-onepassword",
+    req,
+  );
+}
+
 // ── Secret sync ────────────────────────────────────────────────────────────────
 
 export function syncSecrets(
@@ -170,6 +216,35 @@ export function deleteEnvTypeSecretKey(
 ): Promise<void> {
   return api.del(
     `/org/secrets/envtype/${encodeURIComponent(envType)}/${encodeURIComponent(key)}`,
+  );
+}
+
+// ── Cluster-level secrets CRUD ─────────────────────────────────────────────────
+
+export function listClusterSecretKeys(
+  cluster: string,
+): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(
+    `/clusters/${encodeURIComponent(cluster)}/secrets`,
+  );
+}
+
+export function upsertClusterSecrets(
+  cluster: string,
+  entries: Record<string, string>,
+): Promise<void> {
+  return api.post(
+    `/clusters/${encodeURIComponent(cluster)}/secrets`,
+    { entries },
+  );
+}
+
+export function deleteClusterSecretKey(
+  cluster: string,
+  key: string,
+): Promise<void> {
+  return api.del(
+    `/clusters/${encodeURIComponent(cluster)}/secrets/${encodeURIComponent(key)}`,
   );
 }
 

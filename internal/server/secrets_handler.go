@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -70,6 +71,11 @@ type SAClientFactory func(ctx context.Context, token string) (onepassword.SAClie
 type SealedTokenPublisher interface {
 	PublishSealedReadToken(ctx context.Context, params gitops.SealedReadTokenPublishParams) error
 	DeleteSealedReadToken(ctx context.Context, params gitops.DeleteSealedReadTokenParams) error
+	// RefreshSecretStore rewrites only store.yaml for an existing binding
+	// (no Connect-token reseal). Used to propagate a new PlatformVaultID
+	// into stores deployed via per-cluster ArgoCD Applications without
+	// forcing operators to re-paste each Connect token.
+	RefreshSecretStore(ctx context.Context, params gitops.RefreshSecretStoreParams) error
 }
 
 // ClusterKubeBuilder builds a Kubernetes client for a registered cluster.
@@ -88,7 +94,6 @@ type secretsHandler struct {
 	orgStore        rbac.OrgStore
 	appStore        domain.AppStore
 	backend         secrets.Backend
-	upperWriter     secrets.UpperLevelWriter
 	auditor         *secrets.Auditor
 	logger          *slog.Logger
 	saTokenStore    SATokenStore
@@ -100,6 +105,72 @@ type secretsHandler struct {
 	// fetching. When set, fetchOrLoadCert will auto-fetch the sealing cert
 	// from the target cluster on cache miss instead of returning an error.
 	clusterPool sealClientPool
+	// k8sUpperWriter is always the K8s implementation regardless of the
+	// active backend. Used as the migration *source* when copying upper-level
+	// secrets from suparship-system K8s Secrets into a 1Password vault
+	// (the current upperWriter may already be the 1Password writer post-switch).
+	k8sUpperWriter *secrets.UpperLevelSecretWriter
+
+	// upperWriter holds the active upper-level writer. Guarded by upperWriterMu
+	// so it can be hot-swapped when the operator picks a new platform vault
+	// (otherwise the cached 1Password writer keeps PlatformVaultID="" from
+	// startup and org/project writes fail with "platform vault not provisioned").
+	// Always access via currentUpperWriter() / replaceUpperWriter().
+	upperWriterMu sync.RWMutex
+	upperWriter   secrets.UpperLevelWriter
+}
+
+// currentUpperWriter returns the active upper-level writer under a read-lock.
+// Callers should not retain the returned value across goroutines without
+// re-fetching.
+func (h *secretsHandler) currentUpperWriter() secrets.UpperLevelWriter {
+	h.upperWriterMu.RLock()
+	defer h.upperWriterMu.RUnlock()
+	return h.upperWriter
+}
+
+// replaceUpperWriter swaps the active writer atomically. Used by handlers that
+// observe an org-config change requiring a writer rebuild (most importantly
+// the platform-vault picker — the upper-level writer is built once at startup
+// from the org's PlatformVaultID; without a swap, every subsequent org/project
+// write fails until the server is restarted).
+func (h *secretsHandler) replaceUpperWriter(w secrets.UpperLevelWriter) {
+	h.upperWriterMu.Lock()
+	defer h.upperWriterMu.Unlock()
+	h.upperWriter = w
+}
+
+// build1PasswordUpperWriter constructs an SAUpperLevelWriter from the current
+// org config + saved SA token. Returns an error when prerequisites are not
+// met (no SA token, no client factory, backend not 1Password) — callers
+// decide whether that's fatal or a no-op.
+func (h *secretsHandler) build1PasswordUpperWriter(ctx context.Context, org *rbac.Org) (secrets.UpperLevelWriter, error) {
+	if h.saTokenStore == nil || h.saClientFactory == nil {
+		return nil, fmt.Errorf("1Password client factory not configured")
+	}
+	if org == nil || org.SecretBackend.Effective() != secrets.Backend1Password || org.SecretBackend.OnePassword == nil {
+		return nil, fmt.Errorf("org backend is not 1Password")
+	}
+	token, err := h.saTokenStore.LoadToken(ctx)
+	if err != nil || token == "" {
+		return nil, fmt.Errorf("SA token not saved")
+	}
+	saClient, err := h.saClientFactory(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("init SA client: %w", err)
+	}
+	orgName := org.Name
+	if orgName == "" {
+		orgName = "default"
+	}
+	return onepassword.NewSAUpperLevelWriter(onepassword.SAUpperLevelWriterConfig{
+		Client:          saClient,
+		PlatformVaultID: org.SecretBackend.OnePassword.PlatformVaultID,
+		Bindings:        org.SecretBackend.OnePassword.Bindings,
+		OrgName:         orgName,
+		Naming:          org.ResourceNaming,
+		EnvForCluster:   buildOrgEnvForClusterResolver(org.Environments),
+	}), nil
 }
 
 // ── Org backend config ────────────────────────────────────────────────────────
@@ -241,6 +312,285 @@ func (h *secretsHandler) handlePostSAToken(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, SATokenResponse{Valid: true})
+}
+
+// MigrateToOnePasswordRequest is the JSON body for the migration endpoint.
+//
+// All three lists are inventories the operator wants migrated. Empty lists
+// skip that scope's migration entirely (the helper only iterates the inputs
+// it's given). The org scope is always attempted because there's only one
+// org-level item — no inventory to enumerate.
+type MigrateToOnePasswordRequest struct {
+	EnvTypes []string `json:"envTypes,omitempty"`
+	Projects []string `json:"projects,omitempty"`
+	Clusters []string `json:"clusters,omitempty"`
+}
+
+// MigrateToOnePasswordResponse reports per-scope counts of keys copied. Useful
+// for the UI to surface "moved 3 staging keys, 1 prod key" feedback.
+type MigrateToOnePasswordResponse struct {
+	OrgKeys     int            `json:"orgKeys"`
+	EnvTypeKeys map[string]int `json:"envTypeKeys"`
+	ProjectKeys map[string]int `json:"projectKeys"`
+	ClusterKeys map[string]int `json:"clusterKeys"`
+}
+
+// handleMigrateToOnePassword copies upper-level secrets (org / env-type /
+// project / cluster) from the K8s suparship-system Secrets into the
+// configured 1Password vaults. App and app-env secrets are NOT migrated by
+// this endpoint — they live in env-bound K8s namespaces and follow a
+// different lifecycle.
+//
+// Preconditions: org backend is 1Password, the SA token has been pasted, and
+// the platform vault is provisioned (see handlePostSAToken). The migration
+// is idempotent — re-running picks up new keys without clobbering values
+// already entered directly into the destination vaults.
+func (h *secretsHandler) handleMigrateToOnePassword(w http.ResponseWriter, r *http.Request) {
+	if h.k8sUpperWriter == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{
+			Error: "migration source unavailable — suparship is not running on a Kubernetes cluster",
+		})
+		return
+	}
+	if h.saTokenStore == nil || h.saClientFactory == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{
+			Error: "1Password client not configured",
+		})
+		return
+	}
+
+	var req MigrateToOnePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+
+	ctx := r.Context()
+	org, err := h.orgStore.GetOrg(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	if org.SecretBackend.Effective() != secrets.Backend1Password || org.SecretBackend.OnePassword == nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "org backend must be set to 1Password before running migration",
+		})
+		return
+	}
+	if org.SecretBackend.OnePassword.PlatformVaultID == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "platform vault not provisioned — re-paste the SA token in Settings first",
+		})
+		return
+	}
+
+	token, err := h.saTokenStore.LoadToken(ctx)
+	if err != nil || token == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "SA token not saved yet"})
+		return
+	}
+	saClient, err := h.saClientFactory(ctx, token)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to create 1Password client: " + err.Error()})
+		return
+	}
+
+	orgName := org.Name
+	if orgName == "" {
+		orgName = "default"
+	}
+	envForCluster := buildOrgEnvForClusterResolver(org.Environments)
+	dst := onepassword.NewSAUpperLevelWriter(onepassword.SAUpperLevelWriterConfig{
+		Client:          saClient,
+		PlatformVaultID: org.SecretBackend.OnePassword.PlatformVaultID,
+		Bindings:        org.SecretBackend.OnePassword.Bindings,
+		OrgName:         orgName,
+		Naming:          org.ResourceNaming,
+		EnvForCluster:   envForCluster,
+	})
+
+	res, migErr := secrets.MigrateUpperLevelSecrets(ctx, h.k8sUpperWriter, dst, secrets.MigrateUpperLevelInput{
+		EnvTypes: req.EnvTypes,
+		Projects: req.Projects,
+		Clusters: req.Clusters,
+	})
+	if migErr != nil {
+		// Return what we managed to copy plus the error so the operator can
+		// see partial progress and retry.
+		h.logger.Error("upper-level migration failed mid-run",
+			"copied", res, "err", migErr)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{
+			Error: fmt.Sprintf("migration failed after partial progress (%d org / %d env-type / %d project / %d cluster keys copied): %v",
+				res.OrgKeys, len(res.EnvTypeKeys), len(res.ProjectKeys), len(res.ClusterKeys), migErr),
+		})
+		return
+	}
+
+	h.logger.Info("upper-level migration to 1Password complete",
+		"orgKeys", res.OrgKeys,
+		"envTypes", len(res.EnvTypeKeys),
+		"projects", len(res.ProjectKeys),
+		"clusters", len(res.ClusterKeys),
+	)
+	writeJSON(w, http.StatusOK, MigrateToOnePasswordResponse{
+		OrgKeys:     res.OrgKeys,
+		EnvTypeKeys: res.EnvTypeKeys,
+		ProjectKeys: res.ProjectKeys,
+		ClusterKeys: res.ClusterKeys,
+	})
+}
+
+// buildOrgEnvForClusterResolver returns a closure that maps a registered
+// cluster name to the env-name that has it as ClusterRef. Mirrors the helper
+// in cmd/suparship/server.go but inlined here so the secrets handler doesn't
+// import that package.
+func buildOrgEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string {
+	clusterToEnv := make(map[string]string, len(envs))
+	for _, e := range envs {
+		if e.ClusterRef != "" {
+			clusterToEnv[e.ClusterRef] = e.Name
+		}
+	}
+	return func(cluster string) string {
+		return clusterToEnv[cluster]
+	}
+}
+
+// SetPlatformVaultRequest is the JSON body for the platform-vault picker
+// endpoint. The operator supplies a vault ID they created manually in the
+// 1Password console (1Password Service Accounts cannot create vaults, so
+// suparShip cannot auto-provision one).
+type SetPlatformVaultRequest struct {
+	// VaultID is the 1Password vault UUID the operator picked from the
+	// dropdown populated by listVaults. Required.
+	VaultID string `json:"vaultId"`
+	// VaultName is informational — the operator-visible title carried from
+	// the listVaults response. Persisted alongside the ID for UI display.
+	VaultName string `json:"vaultName,omitempty"`
+}
+
+// handleSetPlatformVault persists the operator's choice of platform-shared
+// vault. The vault must already exist in 1Password and be visible to the
+// stored SA token; this handler validates that with a GetVault call before
+// saving so a typo can't leave org config pointing at a non-existent vault.
+//
+// Note: org/project writes won't actually start landing in the chosen vault
+// until the suparShip server is restarted — the upper-level writer is
+// constructed once at startup using the persisted PlatformVaultID. Hot-reload
+// is a follow-up.
+func (h *secretsHandler) handleSetPlatformVault(w http.ResponseWriter, r *http.Request) {
+	var req SetPlatformVaultRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.VaultID == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "vaultId is required"})
+		return
+	}
+
+	ctx := r.Context()
+	org, err := h.orgStore.GetOrg(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	if org.SecretBackend.Effective() != secrets.Backend1Password {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "platform vault can only be set when the 1Password backend is selected",
+		})
+		return
+	}
+
+	// Validate the vault exists and is accessible to the stored SA token.
+	if h.saTokenStore == nil || h.saClientFactory == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "1Password client not configured"})
+		return
+	}
+	token, err := h.saTokenStore.LoadToken(ctx)
+	if err != nil || token == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "SA token not saved yet — paste it first"})
+		return
+	}
+	client, err := h.saClientFactory(ctx, token)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to create 1Password client: " + err.Error()})
+		return
+	}
+	info, err := client.GetVault(ctx, req.VaultID)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "vault not accessible to the stored SA token: " + err.Error(),
+		})
+		return
+	}
+	resolvedName := info.Title
+	if req.VaultName != "" {
+		resolvedName = req.VaultName
+	}
+
+	if org.SecretBackend.OnePassword == nil {
+		org.SecretBackend.OnePassword = &secrets.OnePasswordConfig{}
+	}
+	org.SecretBackend.OnePassword.PlatformVaultID = info.ID
+	org.SecretBackend.OnePassword.PlatformVaultName = resolvedName
+	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist org"})
+		return
+	}
+
+	// Hot-swap the upper-level writer so subsequent org/project writes
+	// pick up the new PlatformVaultID without a server restart. The
+	// previous writer was constructed at startup with PlatformVaultID="";
+	// every WriteOrgSecrets/WriteProjectSecrets call against it would
+	// return "platform vault not provisioned".
+	if newWriter, err := h.build1PasswordUpperWriter(ctx, org); err != nil {
+		h.logger.Warn("upper-level writer rebuild failed — server restart required for org/project writes to use the new platform vault",
+			"err", err)
+	} else {
+		h.replaceUpperWriter(newWriter)
+		h.logger.Info("upper-level writer rebuilt against new platform vault",
+			"vaultID", info.ID,
+		)
+	}
+
+	// Refresh existing per-env ClusterSecretStore manifests in the GitOps
+	// repo so the deployed stores pick up the new platform vault on the
+	// next ArgoCD sync. The store is rewritten without re-sealing the
+	// Connect token, so operators don't need to re-paste anything. Each
+	// failure is logged but doesn't fail the whole save — the operator
+	// can re-bind the affected env to refresh manually.
+	if h.sealPublisher != nil && org.SecretBackend.OnePassword != nil {
+		for _, b := range org.SecretBackend.OnePassword.Bindings {
+			if !b.Provisioned || b.VaultID == "" {
+				continue
+			}
+			refreshErr := h.sealPublisher.RefreshSecretStore(ctx, gitops.RefreshSecretStoreParams{
+				Env:             b.Env,
+				VaultID:         b.VaultID,
+				OrgName:         org.Name,
+				ConnectEndpoint: b.ConnectEndpoint,
+				PlatformVaultID: info.ID,
+			})
+			if refreshErr != nil {
+				h.logger.Warn("refresh secret store failed for env — re-bind to refresh manually",
+					"env", b.Env,
+					"err", refreshErr,
+				)
+			} else {
+				h.logger.Info("refreshed secret store for env", "env", b.Env, "platformVaultID", info.ID)
+			}
+		}
+	}
+
+	h.logger.Info("platform vault set",
+		"vaultID", info.ID,
+		"vaultTitle", resolvedName,
+	)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"vaultId":   info.ID,
+		"vaultName": resolvedName,
+	})
 }
 
 // ── Vault listing ───────────────────────────────────────────────────────────
@@ -402,6 +752,10 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 			return
 		}
 
+		var platformVaultID string
+		if op := org.SecretBackend.OnePassword; op != nil {
+			platformVaultID = op.PlatformVaultID
+		}
 		publishErr := h.sealPublisher.PublishSealedReadToken(ctx, gitops.SealedReadTokenPublishParams{
 			Env:               req.Env,
 			VaultID:           req.VaultID,
@@ -412,6 +766,7 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 			ClusterName:       clusterName,
 			ESONamespace:      cluster.EffectiveESONamespace(),
 			ConnectEndpoint:   resolveConnectEndpoint(req.ConnectEndpoint, org),
+			PlatformVaultID:   platformVaultID,
 		})
 		if publishErr != nil {
 			h.logger.Error("failed to publish sealed token", "env", req.Env, "err", publishErr)
@@ -609,10 +964,10 @@ func resolveConnectEndpoint(reqEndpoint string, org *rbac.Org) string {
 // ── Org-level secrets CRUD ──────────────────────────────────────────────────
 
 func (h *secretsHandler) handleListOrgSecrets(w http.ResponseWriter, r *http.Request) {
-	entries, err := h.upperWriter.ReadOrgSecretKeys(r.Context())
+	entries, err := h.currentUpperWriter().ReadOrgSecretKeys(r.Context())
 	if err != nil {
 		h.logger.Error("failed to list org secret keys", "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.OrgSecretName()))
@@ -623,9 +978,9 @@ func (h *secretsHandler) handleUpsertOrgSecrets(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	if err := h.upperWriter.WriteOrgSecrets(r.Context(), toByteMap(req.Entries)); err != nil {
+	if err := h.currentUpperWriter().WriteOrgSecrets(r.Context(), toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert org secrets", "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -633,9 +988,9 @@ func (h *secretsHandler) handleUpsertOrgSecrets(w http.ResponseWriter, r *http.R
 
 func (h *secretsHandler) handleDeleteOrgSecret(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	if err := h.upperWriter.DeleteOrgSecretKey(r.Context(), key); err != nil {
+	if err := h.currentUpperWriter().DeleteOrgSecretKey(r.Context(), key); err != nil {
 		h.logger.Error("failed to delete org secret key", "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -645,10 +1000,10 @@ func (h *secretsHandler) handleDeleteOrgSecret(w http.ResponseWriter, r *http.Re
 
 func (h *secretsHandler) handleListEnvTypeSecrets(w http.ResponseWriter, r *http.Request) {
 	envType := r.PathValue("envtype")
-	entries, err := h.upperWriter.ReadEnvTypeSecretKeys(r.Context(), envType)
+	entries, err := h.currentUpperWriter().ReadEnvTypeSecretKeys(r.Context(), envType)
 	if err != nil {
 		h.logger.Error("failed to list env-type secret keys", "envtype", envType, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.EnvTypeSecretName(envType)))
@@ -660,9 +1015,9 @@ func (h *secretsHandler) handleUpsertEnvTypeSecrets(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	if err := h.upperWriter.WriteEnvTypeSecrets(r.Context(), envType, toByteMap(req.Entries)); err != nil {
+	if err := h.currentUpperWriter().WriteEnvTypeSecrets(r.Context(), envType, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert env-type secrets", "envtype", envType, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -671,9 +1026,9 @@ func (h *secretsHandler) handleUpsertEnvTypeSecrets(w http.ResponseWriter, r *ht
 func (h *secretsHandler) handleDeleteEnvTypeSecret(w http.ResponseWriter, r *http.Request) {
 	envType := r.PathValue("envtype")
 	key := r.PathValue("key")
-	if err := h.upperWriter.DeleteEnvTypeSecretKey(r.Context(), envType, key); err != nil {
+	if err := h.currentUpperWriter().DeleteEnvTypeSecretKey(r.Context(), envType, key); err != nil {
 		h.logger.Error("failed to delete env-type secret key", "envtype", envType, "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -683,10 +1038,10 @@ func (h *secretsHandler) handleDeleteEnvTypeSecret(w http.ResponseWriter, r *htt
 
 func (h *secretsHandler) handleListProjectSecrets(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
-	entries, err := h.upperWriter.ReadProjectSecretKeys(r.Context(), project)
+	entries, err := h.currentUpperWriter().ReadProjectSecretKeys(r.Context(), project)
 	if err != nil {
 		h.logger.Error("failed to list project secret keys", "project", project, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.ProjectSecretName(project)))
@@ -698,9 +1053,9 @@ func (h *secretsHandler) handleUpsertProjectSecrets(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	if err := h.upperWriter.WriteProjectSecrets(r.Context(), project, toByteMap(req.Entries)); err != nil {
+	if err := h.currentUpperWriter().WriteProjectSecrets(r.Context(), project, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert project secrets", "project", project, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -709,34 +1064,70 @@ func (h *secretsHandler) handleUpsertProjectSecrets(w http.ResponseWriter, r *ht
 func (h *secretsHandler) handleDeleteProjectSecret(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	key := r.PathValue("key")
-	if err := h.upperWriter.DeleteProjectSecretKey(r.Context(), project, key); err != nil {
+	if err := h.currentUpperWriter().DeleteProjectSecretKey(r.Context(), project, key); err != nil {
 		h.logger.Error("failed to delete project secret key", "project", project, "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ── Cluster-level secrets CRUD ──────────────────────────────────────────────
+
+func (h *secretsHandler) handleListClusterSecrets(w http.ResponseWriter, r *http.Request) {
+	cluster := r.PathValue("cluster")
+	entries, err := h.currentUpperWriter().ReadClusterSecretKeys(r.Context(), cluster)
+	if err != nil {
+		h.logger.Error("failed to list cluster secret keys", "cluster", cluster, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.ClusterSecretName(cluster)))
+}
+
+func (h *secretsHandler) handleUpsertClusterSecrets(w http.ResponseWriter, r *http.Request) {
+	cluster := r.PathValue("cluster")
+	req, ok := h.decodeUpsertRequest(w, r)
+	if !ok {
+		return
+	}
+	if err := h.currentUpperWriter().WriteClusterSecrets(r.Context(), cluster, toByteMap(req.Entries)); err != nil {
+		h.logger.Error("failed to upsert cluster secrets", "cluster", cluster, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *secretsHandler) handleDeleteClusterSecret(w http.ResponseWriter, r *http.Request) {
+	cluster := r.PathValue("cluster")
+	key := r.PathValue("key")
+	if err := h.currentUpperWriter().DeleteClusterSecretKey(r.Context(), cluster, key); err != nil {
+		h.logger.Error("failed to delete cluster secret key", "cluster", cluster, "key", key, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // ── App-level secrets CRUD ──────────────────────────────────────────────────
+//
+// Routes through currentUpperWriter() so writes follow the active backend:
+// 1Password backend → platform-shared vault item; K8s backend → K8s Secret in
+// suparship-system with a Stakater replicator annotation matching project+app
+// labels. Either way, the operator can save before the app namespace exists.
 
 func (h *secretsHandler) handleListAppSecrets(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	appName := r.PathValue("app")
 
-	ns, err := h.resolveAnyAppNamespace(r, project, appName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppLevelSecretName(project, appName)
-	entries, err := h.backend.ListKeys(r.Context(), ns, secretName)
+	entries, err := h.currentUpperWriter().ReadAppSecretKeys(r.Context(), project, appName)
 	if err != nil {
 		h.logger.Error("failed to list app secret keys", "project", project, "app", appName, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secretName))
+	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.AppLevelSecretName(project, appName)))
 }
 
 func (h *secretsHandler) handleUpsertAppSecrets(w http.ResponseWriter, r *http.Request) {
@@ -748,16 +1139,9 @@ func (h *secretsHandler) handleUpsertAppSecrets(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	ns, err := h.resolveAnyAppNamespace(r, project, appName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppLevelSecretName(project, appName)
-	if err := h.backend.Upsert(r.Context(), ns, secretName, toByteMap(req.Entries)); err != nil {
+	if err := h.currentUpperWriter().WriteAppSecrets(r.Context(), project, appName, toByteMap(req.Entries)); err != nil {
 		h.logger.Error("failed to upsert app secrets", "project", project, "app", appName, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -768,43 +1152,32 @@ func (h *secretsHandler) handleDeleteAppSecret(w http.ResponseWriter, r *http.Re
 	appName := r.PathValue("app")
 	key := r.PathValue("key")
 
-	ns, err := h.resolveAnyAppNamespace(r, project, appName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppLevelSecretName(project, appName)
-	if err := h.backend.DeleteKey(r.Context(), ns, secretName, key); err != nil {
+	if err := h.currentUpperWriter().DeleteAppSecretKey(r.Context(), project, appName, key); err != nil {
 		h.logger.Error("failed to delete app secret key", "project", project, "app", appName, "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // ── App-env secrets CRUD ────────────────────────────────────────────────────
+//
+// Routes through currentUpperWriter() so writes follow the active backend:
+// 1Password backend → env vault item; K8s backend → K8s Secret in
+// suparship-system with replicate-to matching the env namespace by name.
 
 func (h *secretsHandler) handleListSecrets(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	appName := r.PathValue("app")
 	envName := r.PathValue("env")
 
-	ns, err := h.resolveNamespace(r, project, appName, envName)
+	entries, err := h.currentUpperWriter().ReadAppEnvSecretKeys(r.Context(), project, appName, envName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
+		h.logger.Error("failed to list app-env secret keys", "project", project, "app", appName, "env", envName, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets: " + err.Error()})
 		return
 	}
-
-	secretName := secrets.AppEnvSecretName(project, appName, envName)
-
-	entries, err := h.backend.ListKeys(r.Context(), ns, secretName)
-	if err != nil {
-		h.logger.Error("failed to list secret keys", "ns", ns, "secret", secretName, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
-		return
-	}
-	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secretName))
+	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.AppEnvSecretName(project, appName, envName)))
 }
 
 func (h *secretsHandler) handleUpsertSecrets(w http.ResponseWriter, r *http.Request) {
@@ -817,17 +1190,15 @@ func (h *secretsHandler) handleUpsertSecrets(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	ns, err := h.resolveNamespace(r, project, appName, envName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppEnvSecretName(project, appName, envName)
-
-	if err := h.backend.Upsert(r.Context(), ns, secretName, toByteMap(req.Entries)); err != nil {
-		h.logger.Error("failed to upsert secrets", "ns", ns, "secret", secretName, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+	// Resolve the env namespace as a hint for the K8s backend's replicator
+	// target. The 1Password backend ignores it. Best-effort: if the namespace
+	// can't be resolved (env unbound, app not yet persisted), the K8s impl
+	// writes the Secret to suparship-system without a replicator target so
+	// the save still succeeds.
+	ns, _ := h.resolveNamespace(r, project, appName, envName)
+	if err := h.currentUpperWriter().WriteAppEnvSecrets(r.Context(), project, appName, envName, ns, toByteMap(req.Entries)); err != nil {
+		h.logger.Error("failed to upsert app-env secrets", "project", project, "app", appName, "env", envName, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -839,17 +1210,9 @@ func (h *secretsHandler) handleDeleteSecret(w http.ResponseWriter, r *http.Reque
 	envName := r.PathValue("env")
 	key := r.PathValue("key")
 
-	ns, err := h.resolveNamespace(r, project, appName, envName)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: err.Error()})
-		return
-	}
-
-	secretName := secrets.AppEnvSecretName(project, appName, envName)
-
-	if err := h.backend.DeleteKey(r.Context(), ns, secretName, key); err != nil {
-		h.logger.Error("failed to delete secret key", "ns", ns, "secret", secretName, "key", key, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+	if err := h.currentUpperWriter().DeleteAppEnvSecretKey(r.Context(), project, appName, envName, key); err != nil {
+		h.logger.Error("failed to delete app-env secret key", "project", project, "app", appName, "env", envName, "key", key, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -864,7 +1227,7 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 
 	ctx := r.Context()
 
-	orgKeys, err := h.upperWriter.ReadOrgSecretKeys(ctx)
+	orgKeys, err := h.currentUpperWriter().ReadOrgSecretKeys(ctx)
 	if err != nil {
 		h.logger.Error("failed to read org secret keys", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
@@ -872,37 +1235,42 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 	}
 
 	envType := h.resolveEnvType(r, project, appName, envName)
-	envTypeKeys, err := h.upperWriter.ReadEnvTypeSecretKeys(ctx, envType)
+	envTypeKeys, err := h.currentUpperWriter().ReadEnvTypeSecretKeys(ctx, envType)
 	if err != nil {
 		h.logger.Error("failed to read env-type secret keys", "envtype", envType, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
 		return
 	}
 
-	projectKeys, err := h.upperWriter.ReadProjectSecretKeys(ctx, project)
+	projectKeys, err := h.currentUpperWriter().ReadProjectSecretKeys(ctx, project)
 	if err != nil {
 		h.logger.Error("failed to read project secret keys", "project", project, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
 		return
 	}
 
-	appNs, _ := h.resolveAnyAppNamespace(r, project, appName)
-	var appKeys []secrets.SecretEntry
-	if appNs != "" {
-		appKeys, err = h.backend.ListKeys(ctx, appNs, secrets.AppLevelSecretName(project, appName))
-		if err != nil {
-			h.logger.Error("failed to read app secret keys", "project", project, "app", appName, "err", err)
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
-			return
-		}
+	// App-level and app-env keys come from the active upper-level writer —
+	// 1Password vault items on 1Password backend, K8s Secrets in
+	// suparship-system on K8s backend.
+	appKeys, err := h.currentUpperWriter().ReadAppSecretKeys(ctx, project, appName)
+	if err != nil {
+		h.logger.Error("failed to read app secret keys", "project", project, "app", appName, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
+		return
 	}
 
-	ns, _ := h.resolveNamespace(r, project, appName, envName)
-	var appEnvKeys []secrets.SecretEntry
-	if ns != "" {
-		appEnvKeys, err = h.backend.ListKeys(ctx, ns, secrets.AppEnvSecretName(project, appName, envName))
+	appEnvKeys, err := h.currentUpperWriter().ReadAppEnvSecretKeys(ctx, project, appName, envName)
+	if err != nil {
+		h.logger.Error("failed to read app-env secret keys", "project", project, "app", appName, "env", envName, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
+		return
+	}
+
+	var clusterKeys []secrets.SecretEntry
+	if clusterRef := h.resolveClusterRef(r, envName); clusterRef != "" {
+		clusterKeys, err = h.currentUpperWriter().ReadClusterSecretKeys(ctx, clusterRef)
 		if err != nil {
-			h.logger.Error("failed to read app-env secret keys", "project", project, "app", appName, "env", envName, "err", err)
+			h.logger.Error("failed to read cluster secret keys", "cluster", clusterRef, "err", err)
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
 			return
 		}
@@ -914,6 +1282,7 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 		entriesToKeys(projectKeys),
 		entriesToKeys(appKeys),
 		entriesToKeys(appEnvKeys),
+		entriesToKeys(clusterKeys),
 	)
 
 	sortedKeys := make([]string, 0, len(resolved))
@@ -992,6 +1361,25 @@ func (h *secretsHandler) resolveEnvType(r *http.Request, project, appName, envNa
 		return envName
 	}
 	return string(env.EnvType)
+}
+
+// resolveClusterRef returns the registered cluster name bound to envName via
+// the org config, or "" when the env is unbound or the org cannot be loaded.
+// The returned name is the key used by cluster-scope secret/env-var endpoints.
+func (h *secretsHandler) resolveClusterRef(r *http.Request, envName string) string {
+	if h.orgStore == nil {
+		return ""
+	}
+	org, err := h.orgStore.GetOrg(r.Context())
+	if err != nil || org == nil {
+		return ""
+	}
+	for _, e := range org.Environments {
+		if e.Name == envName {
+			return e.ClusterRef
+		}
+	}
+	return ""
 }
 
 func (h *secretsHandler) decodeUpsertRequest(w http.ResponseWriter, r *http.Request) (UpsertSecretsRequest, bool) {

@@ -55,11 +55,11 @@ org
   previews, and promotes. Top-level navigation object within a project.
 - **Environment** – a runtime context for an app (`staging`, `prod`, or an
   ephemeral `preview-*`). An environment is a lens on an app, not a top-level
-  container.
+  container. Environments are defined at the org level and shared by all projects.
 - **Component** – an internal runtime process within an app (`web`, `worker`,
   `cron`). Hidden from the default UI; surfaced in advanced views only.
-- **Project** – a team / product boundary that groups apps and defines the
-  ordered promotion chain (`dev → staging → prod`).
+- **Project** – a team / product boundary that groups apps. All projects inherit
+  the org's ordered environment list for their promotion pipelines.
 - **Template** – a golden path (Helm chart + input schema) for creating apps.
 
 Developers think in:
@@ -223,7 +223,7 @@ custom dev identity.
 | Login | `admin@local` / `admin123` |
 | Org | `default` — My Organization |
 | Project | `demo` — Demo Project |
-| Environments | `staging`, `prod` |
+| Environments | `staging` (Order=1), `prod` (Order=2) — seeded from org config |
 | Service | `hello` (web-service template) |
 | Preview | `pr-42` |
 | Runtime status | `healthy` with fake ingress URLs |
@@ -337,6 +337,17 @@ Higher roles implicitly satisfy lower role requirements.
 name: default
 displayName: My Organization
 createdAt: "2026-03-27T00:00:00Z"
+environments:
+  - name: staging
+    displayName: Staging
+    order: 1
+    clusterRef: in-cluster        # registered cluster name
+    baseDomain: staging.example.com
+  - name: prod
+    displayName: Production
+    order: 2
+    clusterRef: prod-cluster      # empty = not yet bound to a cluster
+    baseDomain: prod.example.com
 teams:
   - name: admins
     displayName: Administrators
@@ -352,6 +363,24 @@ roleBindings:
     team: backend
     role: developer
 ```
+
+### Org environments and promotion pipeline
+
+Org environments are the **single source of truth** for which environments an app
+is deployed to and in what order.
+
+- `staging` + `prod` are **seeded by default** during installation. Operators may
+  add, rename, or remove environments via `POST/PUT/DELETE /api/v1/org/environments`.
+- `order` drives the Kargo Stage chain: the env with the lowest `order` pulls
+  directly from the Warehouse; each subsequent env gates on the previous one.
+- A single-env org produces one Kargo Stage with no upstream; no `prod` stage is
+  silently created.
+- Creating an app when **no environments are registered** returns 400 with an
+  actionable error pointing to the environment registration endpoint.
+- `clusterRef` references a registered cluster (via `suparship cluster add`).
+  When empty the environment is defined but not yet bound to a cluster.
+- Preview environments are out-of-band (not registered in org envs) and always
+  sit before the first stable env in promotions.
 
 ### Role resolution
 
@@ -421,7 +450,7 @@ spec:
 |-------|-------------|
 | Org | Single organization (from RBAC model) |
 | Project | Logical grouping with its own environments |
-| Environment | Ordered deployment target (dev → staging → prod) |
+| Environment | Ordered deployment target, driven by org `Order` field (e.g. dev → staging → prod) |
 | App | Deployable workload referencing a template (stored as `service` in legacy YAML) |
 
 ### App fields (stored as `service` in legacy YAML)
@@ -469,22 +498,23 @@ target project. Listing previews is available to any authenticated user.
 ### App promotion
 
 The `POST /api/v1/projects/{project}/apps/{app}/promote` endpoint
-promotes an app from one environment to the next in the project's
-ordered environment chain (e.g. staging → prod).
+promotes an app from one environment to the next in the org's environment pipeline.
+
+**Promotion pipeline** is driven by `OrgEnvironment.Order`: the environment with the
+highest `Order` strictly below the target's `Order` is chosen as the source (closest
+predecessor). Preview environments fall back to any earlier stable env that has been
+deployed.
 
 **Request body**: `{ "targetEnvironment": "prod" }`
 
 The handler validates that both the project and app exist, the target
-environment is defined in the project, and it is not the lowest-order
-environment (there must be a source to promote from). The source is
-automatically determined as the environment immediately preceding the
-target in the ordering.
+environment is defined and is not a preview, and a source environment exists.
+The source is automatically determined from the `Order` field — no hardcoded
+`staging → prod` assumption.
 
 **Authorization**: requires `project_admin` role or above on the project.
 
-In MVP, the endpoint returns a structured result confirming the promotion
-intent. When Kargo is integrated, this will trigger a Kargo Stage
-promotion.
+When Kargo is integrated, this triggers a Kargo Stage promotion CR.
 
 ### Container logs
 
