@@ -236,11 +236,75 @@ func (h *secretsHandler) handlePostSAToken(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, http.StatusOK, SATokenResponse{Valid: false, Error: err.Error()})
 			return
 		}
+
+		// Idempotently provision the org-wide platform-shared vault and persist
+		// its ID. This is the source of truth for org/project secrets when the
+		// 1Password backend is active. Failure is non-fatal — the token is
+		// still valid; the operator can retry the paste to recover.
+		if err := h.ensurePlatformVault(r.Context(), client); err != nil {
+			h.logger.Warn("platform vault provision failed — org/project secret writes will be unavailable until resolved",
+				"err", err)
+		}
+
 		writeJSON(w, http.StatusOK, SATokenResponse{Valid: true, VaultCount: count})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, SATokenResponse{Valid: true})
+}
+
+// ensurePlatformVault creates (idempotently) the org-wide platform-shared
+// vault and persists its ID into org.SecretBackend.OnePassword.PlatformVaultID.
+// Safe to call repeatedly: existing vaults with the platform name are reused,
+// and the persisted ID is only updated when it changes.
+//
+// The vault is the source of truth for org and project secrets when the
+// 1Password backend is active. Bindings (per-env vaults) are still created
+// separately via handleAddBinding.
+func (h *secretsHandler) ensurePlatformVault(ctx context.Context, client onepassword.SAClient) error {
+	if h.orgStore == nil {
+		return fmt.Errorf("org store not configured")
+	}
+	org, err := h.orgStore.GetOrg(ctx)
+	if err != nil {
+		return fmt.Errorf("load org: %w", err)
+	}
+	// Only provision when the org has selected the 1Password backend; for K8s
+	// orgs this would needlessly create a vault.
+	if org.SecretBackend.Effective() != secrets.Backend1Password {
+		return nil
+	}
+
+	orgName := org.Name
+	if orgName == "" {
+		orgName = "default"
+	}
+	title := secrets.PlatformVaultName(orgName)
+
+	vault, err := client.CreateVault(ctx, title, "Platform-shared vault: org and project secrets, read-only from every cluster")
+	if err != nil {
+		return fmt.Errorf("create platform vault %q: %w", title, err)
+	}
+
+	if org.SecretBackend.OnePassword == nil {
+		org.SecretBackend.OnePassword = &secrets.OnePasswordConfig{}
+	}
+	if org.SecretBackend.OnePassword.PlatformVaultID == vault.ID &&
+		org.SecretBackend.OnePassword.PlatformVaultName == vault.Title {
+		// Already persisted — nothing to write.
+		return nil
+	}
+	org.SecretBackend.OnePassword.PlatformVaultID = vault.ID
+	org.SecretBackend.OnePassword.PlatformVaultName = vault.Title
+
+	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
+		return fmt.Errorf("persist platform vault id: %w", err)
+	}
+	h.logger.Info("platform vault provisioned",
+		"vaultID", vault.ID,
+		"vaultTitle", vault.Title,
+	)
+	return nil
 }
 
 // ── Vault listing ───────────────────────────────────────────────────────────

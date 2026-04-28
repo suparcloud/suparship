@@ -22,6 +22,7 @@ import (
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
 )
 
@@ -644,5 +645,103 @@ func TestAddBinding_ClusterEmptyAPIServer(t *testing.T) {
 
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422 for empty apiServer, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ── ensurePlatformVault ─────────────────────────────────────────────────────
+
+func TestEnsurePlatformVault_CreatesAndPersistsID(t *testing.T) {
+	org := &rbac.Org{
+		Name:        "default",
+		DisplayName: "Default",
+		SecretBackend: secrets.BackendConfig{
+			Type: secrets.Backend1Password,
+		},
+	}
+	store := &staticOrgProvider{org: org}
+	sh := &secretsHandler{
+		orgStore: store,
+		logger:   slog.Default(),
+	}
+	client := onepassword.NewFakeClient()
+
+	if err := sh.ensurePlatformVault(context.Background(), client); err != nil {
+		t.Fatalf("ensurePlatformVault: %v", err)
+	}
+
+	if store.org.SecretBackend.OnePassword == nil {
+		t.Fatal("OnePassword config was not initialised")
+	}
+	if store.org.SecretBackend.OnePassword.PlatformVaultID == "" {
+		t.Errorf("PlatformVaultID was not persisted")
+	}
+	if got, want := store.org.SecretBackend.OnePassword.PlatformVaultName, secrets.PlatformVaultName("default"); got != want {
+		t.Errorf("PlatformVaultName = %q, want %q", got, want)
+	}
+}
+
+func TestEnsurePlatformVault_Idempotent(t *testing.T) {
+	org := &rbac.Org{
+		Name:          "default",
+		SecretBackend: secrets.BackendConfig{Type: secrets.Backend1Password},
+	}
+	store := &staticOrgProvider{org: org}
+	sh := &secretsHandler{
+		orgStore: store,
+		logger:   slog.Default(),
+	}
+	client := onepassword.NewFakeClient()
+
+	if err := sh.ensurePlatformVault(context.Background(), client); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	firstID := store.org.SecretBackend.OnePassword.PlatformVaultID
+
+	if err := sh.ensurePlatformVault(context.Background(), client); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if store.org.SecretBackend.OnePassword.PlatformVaultID != firstID {
+		t.Errorf("vault ID changed on second call: %s -> %s",
+			firstID, store.org.SecretBackend.OnePassword.PlatformVaultID)
+	}
+	// Only one vault should exist with that title.
+	vaults, _ := client.ListVaults(context.Background())
+	count := 0
+	for _, v := range vaults {
+		if v.Title == secrets.PlatformVaultName("default") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected 1 platform vault, got %d", count)
+	}
+}
+
+func TestEnsurePlatformVault_SkipsForK8sBackend(t *testing.T) {
+	// K8s backend should not provision a platform vault even if a SA client
+	// is wired (e.g., during a backend-type switch). The 1Password vault
+	// should only appear when 1Password is the effective backend.
+	org := &rbac.Org{
+		Name:          "default",
+		SecretBackend: secrets.BackendConfig{Type: secrets.BackendK8s},
+	}
+	store := &staticOrgProvider{org: org}
+	sh := &secretsHandler{
+		orgStore: store,
+		logger:   slog.Default(),
+	}
+	client := onepassword.NewFakeClient()
+
+	if err := sh.ensurePlatformVault(context.Background(), client); err != nil {
+		t.Fatalf("ensurePlatformVault: %v", err)
+	}
+
+	if store.org.SecretBackend.OnePassword != nil {
+		t.Errorf("OnePassword config should remain nil for K8s backend, got %+v",
+			store.org.SecretBackend.OnePassword)
+	}
+	vaults, _ := client.ListVaults(context.Background())
+	if len(vaults) != 0 {
+		t.Errorf("expected 0 vaults for K8s backend, got %d", len(vaults))
 	}
 }

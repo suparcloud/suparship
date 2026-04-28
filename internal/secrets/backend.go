@@ -43,6 +43,15 @@ type OnePasswordConfig struct {
 	// tooling cluster. Populated by the provision flow.
 	Connect ConnectStatus `json:"connect,omitempty" yaml:"connect,omitempty"`
 
+	// PlatformVaultID is the 1Password vault UUID that holds org-wide and
+	// project-wide items. Read-only from every cluster's ESO via a separate
+	// "platform-shared" ClusterSecretStore. Populated by the SA-token paste
+	// flow when the platform vault is auto-created.
+	PlatformVaultID string `json:"platformVaultId,omitempty" yaml:"platformVaultId,omitempty"`
+
+	// PlatformVaultName is the human-readable name of the platform vault.
+	PlatformVaultName string `json:"platformVaultName,omitempty" yaml:"platformVaultName,omitempty"`
+
 	// Bindings maps environments to provisioned vault + Connect-token
 	// state. Populated by the Provision flow.
 	Bindings []EnvBinding `json:"bindings,omitempty" yaml:"bindings,omitempty"`
@@ -210,6 +219,10 @@ const (
 	// VaultNameFmt is the naming convention for per-env vaults.
 	// Args: org, env.
 	VaultNameFmt = "suparship-%s-%s"
+	// PlatformVaultNameFmt is the naming convention for the org-wide
+	// platform-shared vault. Holds org and project scope items, read-only
+	// from every cluster's ESO. Args: org.
+	PlatformVaultNameFmt = "suparship-%s-platform"
 	// RotateGraceSeconds is the default grace window between issuing a
 	// new Connect token and revoking the old one.
 	RotateGraceSeconds = 60
@@ -218,6 +231,11 @@ const (
 // VaultName returns the conventional vault name for an org + environment.
 func VaultName(org, env string) string {
 	return fmt.Sprintf(VaultNameFmt, org, env)
+}
+
+// PlatformVaultName returns the conventional platform-shared vault name.
+func PlatformVaultName(org string) string {
+	return fmt.Sprintf(PlatformVaultNameFmt, org)
 }
 
 // ConnectTokenSecretName returns the K8s Secret name that holds the per-env

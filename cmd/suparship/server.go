@@ -246,9 +246,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		secretBackend = secrets.NewK8sBackend(client)
 		upperLevelSecretWriter = secrets.NewUpperLevelSecretWriter(client)
 
-		// Wire 1Password vault item writer when the org backend is configured for
-		// 1Password. The SA token must already be stored in the K8s Secret created
-		// by the provision flow. Failure is non-fatal — log and continue without it.
+		// Wire 1Password vault item writer + upper-level writer when the org
+		// backend is configured for 1Password. The SA token must already be
+		// stored in the K8s Secret created by the provision flow. Failure is
+		// non-fatal — log and continue without it.
 		if orgProvider != nil {
 			if org, orgErr := orgProvider.GetOrg(cmd.Context()); orgErr == nil && org != nil {
 				if org.SecretBackend.Effective() == secrets.Backend1Password && org.SecretBackend.OnePassword != nil {
@@ -273,6 +274,24 @@ func runServer(cmd *cobra.Command, _ []string) error {
 							saWriter := onepassword.NewSAVaultWriter(saClient)
 							vaultItemWriter = server.NewSAVaultItemWriter(saWriter, org.SecretBackend.OnePassword.Bindings)
 							logger.Info("vault item writer: 1Password SA client enabled — vault items created on app create")
+
+							// Build a cluster→env resolver from the org snapshot.
+							envForCluster := buildEnvForClusterResolver(org.Environments)
+							upperLevelSecretWriter = onepassword.NewSAUpperLevelWriter(onepassword.SAUpperLevelWriterConfig{
+								Client:          saClient,
+								PlatformVaultID: org.SecretBackend.OnePassword.PlatformVaultID,
+								Bindings:        org.SecretBackend.OnePassword.Bindings,
+								OrgName:         org.Name,
+								Naming:          org.ResourceNaming,
+								EnvForCluster:   envForCluster,
+							})
+							if org.SecretBackend.OnePassword.PlatformVaultID == "" {
+								logger.Warn("upper-level writer: 1Password platform vault not provisioned — org/project secret writes will fail until SA token is re-pasted",
+									"hint", "Settings > Secrets > paste the SA token to auto-create the platform vault")
+							} else {
+								logger.Info("upper-level writer: 1Password backend enabled — org/project secrets land in platform vault, env-type/cluster in env vault",
+									"platformVaultID", org.SecretBackend.OnePassword.PlatformVaultID)
+							}
 						}
 					}
 				}
@@ -918,5 +937,25 @@ func publishInitialEnvInfra(
 		} else {
 			logger.Info("initial env infra: published", "project", name)
 		}
+	}
+}
+
+// buildEnvForClusterResolver returns a closure that maps a registered cluster
+// name to the env-name that has that cluster as its ClusterRef in the org
+// config. Used by the 1Password upper-level writer to find the correct env
+// vault for cluster-scope items. Returns "" for unknown clusters.
+//
+// The resolver captures envs by value at construction time. Restart suparship
+// to pick up env-binding changes — same lifecycle as the rest of the
+// 1Password wiring (SA client + bindings).
+func buildEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string {
+	clusterToEnv := make(map[string]string, len(envs))
+	for _, e := range envs {
+		if e.ClusterRef != "" {
+			clusterToEnv[e.ClusterRef] = e.Name
+		}
+	}
+	return func(cluster string) string {
+		return clusterToEnv[cluster]
 	}
 }
