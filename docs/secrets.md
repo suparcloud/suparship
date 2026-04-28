@@ -1,14 +1,28 @@
 # Secrets Management
 
-suparShip provides a five-level secret hierarchy (org → environment-type → project → app → app-environment) with values stored in **1Password** and materialised at runtime by the [External Secrets Operator](https://external-secrets.io) (ESO).
+suparShip provides a six-level secret hierarchy (org → environment-type → project → app → app-environment → cluster) with values stored in **1Password** and materialised at runtime by the [External Secrets Operator](https://external-secrets.io) (ESO).
 
 The setup is **opinionated by design** — there is one supported way to wire 1Password into suparship. Fewer knobs, less cognitive load, easier audits.
 
 ## TL;DR
 
 - Two credential types: a **Service Account (SA) token** for suparShip to write secrets, and **per-env Connect tokens** for ESO to read them.
-- Paste the SA token, then **Add Binding** per environment (pick vault, paste Connect token). Done.
+- Paste the SA token → suparShip auto-creates a **platform-shared vault** for org / project items.
+- **Add Binding** per environment (pick env vault, paste Connect token). Grant the Connect token read access to **both** the env vault and the platform vault.
 - suparShip seals each Connect token, commits SealedSecret + ClusterSecretStore to GitOps, and saves the binding.
+
+### Scope → vault routing
+
+| Scope | Lives in | Read by |
+|---|---|---|
+| org | platform-shared vault | every cluster's ESO |
+| project | platform-shared vault | every cluster's ESO |
+| env-type | env vault | the env's cluster |
+| app | env vault | the env's cluster |
+| app-env | env vault | the env's cluster |
+| cluster | env vault | the env's cluster |
+
+> **Cluster scope is a platform-engineering escape hatch** — incident break-glass, regional tuning, per-cluster feature kill-switches. It overrides every other layer including app-env. Use sparingly.
 
 ## Architecture
 
@@ -23,13 +37,15 @@ sequenceDiagram
     participant Target as Target Cluster
 
     Admin->>OP: 1. Create env vaults (staging-apps, prod-apps)
-    Admin->>OP: 2. Create SA token with R/W to vaults
-    Admin->>OP: 3. Create Connect Server, grant vault access
-    Admin->>OP: 4. Issue per-env Connect token
-    Admin->>UI: 5. Paste SA token
+    Admin->>OP: 2. Create SA token with R/W to all suparship vaults
+    Admin->>OP: 3. Create Connect Server, grant access to env vaults
+    Admin->>OP: 4. Issue per-env Connect tokens
+    Admin->>OP: 5. Grant each Connect token read access to the platform vault
+    Admin->>UI: 6. Paste SA token
     UI->>API: POST /sa-token
-    API-->>UI: valid, 2 vaults visible
-    Admin->>UI: 6. Add binding (select vault, paste Connect token)
+    API->>OP: CreateVault(suparship-{org}-platform)
+    API-->>UI: valid, N vaults visible, platform vault provisioned
+    Admin->>UI: 7. Add binding (select env vault, paste Connect token)
     UI->>API: POST /bindings
     API->>API: Fetch sealed-secrets cert from target cluster
     API->>API: Seal Connect token
@@ -54,8 +70,8 @@ sequenceDiagram
 Before you begin, you need:
 
 1. A **1Password account** with admin access to create vaults, Service Accounts, and Connect Servers.
-2. **sealed-secrets** installed on each target cluster (suparship can install it for you — see Step 2).
-3. **External Secrets Operator** installed on each target cluster (suparship can install it for you — see Step 2).
+2. **sealed-secrets** installed on each target cluster (suparship can install it for you — see Step 3).
+3. **External Secrets Operator** installed on each target cluster (suparship can install it for you — see Step 3).
 4. **1Password Connect** deployed and accessible from target clusters.
 
 ### Step 1: Create vaults in 1Password
@@ -63,8 +79,9 @@ Before you begin, you need:
 In the 1Password web console:
 
 1. Create one vault per environment (e.g. `staging-apps`, `prod-apps`).
-2. Create a **Service Account** with Read & Write access to these vaults.
-3. Copy the SA token.
+2. Do **not** create the platform-shared vault by hand — suparShip creates it for you on SA-token paste with the conventional name `suparship-{org}-platform`.
+3. Create a **Service Account** with Read & Write access to those vaults plus permission to create new vaults (so suparShip can provision the platform vault on first run).
+4. Copy the SA token.
 
 ### Step 2: Save the SA token in suparShip
 
@@ -75,7 +92,7 @@ In the 1Password web console:
 suparship secrets sa-token --from-file=sa-token.txt
 ```
 
-suparShip validates the token and shows how many vaults are accessible. The token is stored as a Kubernetes Secret in `suparship-system/suparship-op-sa-token`.
+suparShip validates the token, **creates the platform-shared vault** (idempotently — re-pasting reuses the existing vault), and shows how many vaults are accessible. The SA token is stored as a Kubernetes Secret in `suparship-system/suparship-op-sa-token`; the platform vault ID is persisted in the org config.
 
 ### Step 3: Check cluster prerequisites
 
@@ -96,9 +113,20 @@ The installer uses pinned chart versions:
 In the 1Password web console:
 
 1. Create a **Connect Server**.
-2. Grant it access to your environment vaults.
+2. Grant it access to **all** suparship vaults — the per-env vaults *and* the platform-shared vault. (See ["Connect token scoping"](#connect-token-scoping) below for the rationale.)
 3. Deploy 1Password Connect to your tooling cluster (using the official Helm chart or Docker image).
-4. Issue **per-env Connect tokens** — one token scoped to each vault.
+4. Issue **per-env Connect tokens** — one token per env, scoped to **two vaults**: the env vault for that env and the platform-shared vault.
+
+#### Connect token scoping
+
+Each env's `ClusterSecretStore` lists both the env vault (priority 1) and the platform-shared vault (priority 2) under `spec.provider.onepassword.vaults:`. The Connect token authenticating that store must have read access to **both**:
+
+- **env vault** — holds env-type, app, app-env, and cluster items.
+- **platform-shared vault** — holds org and project items, shared across every cluster.
+
+If the Connect token is scoped only to the env vault, ESO will fail to extract org and project items at sync time and the resulting K8s `Secret` will be missing those keys. Symptom: app pods see env-specific keys but no org defaults; ESO events log `vault not found` against the platform vault ID.
+
+**Rotation:** when rotating a Connect token, ensure the new token retains access to both vaults before the old one is revoked.
 
 ### Step 5: Add bindings per environment
 
@@ -206,18 +234,20 @@ These are intentionally not configurable — they keep every install identical a
 
 ## Naming patterns
 
-| Pattern | Default | Example (`project=acme, app=web, env=prod`) |
-|---------|---------|---------------------------------------------|
+| Pattern | Default | Example (`project=acme, app=web, env=prod, cluster=kind-prod`) |
+|---------|---------|----------------------------------------------------------------|
 | K8s ExternalSecret + Secret | `{app}-secrets` | `web-secrets` |
 | K8s ConfigMap | `{app}-config` | `web-config` |
 | ClusterSecretStore | `{provider}-{env}` | `onepassword-prod` |
+| Platform vault | `suparship-{org}-platform` | `suparship-default-platform` |
 | Vault item: org | `org` | `org` |
 | Vault item: env-type | `env-{env}` | `env-prod` |
 | Vault item: project | `{project}` | `acme` |
 | Vault item: app | `{project}-{app}` | `acme-web` |
 | Vault item: app-env | `{project}-{app}-{env}` | `acme-web-prod` |
+| Vault item: cluster | `cluster-{cluster}` | `cluster-kind-prod` |
 
-All patterns are configurable via org-level `ResourceNaming` settings. The defaults above are the out-of-the-box values for every new installation.
+All patterns are configurable via org-level `ResourceNaming` settings. The defaults above are the out-of-the-box values for every new installation. The platform vault name follows the fixed `suparship-{org}-platform` convention and is not configurable — operators recognise it on sight.
 
 ## Platform-managed secrets and config (default)
 
@@ -308,7 +338,7 @@ When `managedByPlatform: false`:
 
 ## Collapsed ExternalSecret model
 
-Each app-env namespace receives **one** `ExternalSecret` (and one K8s `Secret`) named from the app resource pattern (default: `{app}-secrets`). Its `dataFrom` lists all inherited scope items in precedence order:
+Each app-env namespace receives **one** `ExternalSecret` (and one K8s `Secret`) named from the app resource pattern (default: `{app}-secrets`). Its `dataFrom` lists every inherited scope item in precedence order — org and project items live in the platform-shared vault, the rest live in the env vault, and the single `ClusterSecretStore` carries both vaults under `spec.provider.onepassword.vaults:` so ESO resolves item titles across them transparently:
 
 ```yaml
 apiVersion: external-secrets.io/v1
@@ -327,16 +357,59 @@ spec:
     name: web-secrets
     creationPolicy: Owner
   dataFrom:
-    - extract: { key: "org" }
-    - extract: { key: "env-prod" }
-    - extract: { key: "acme" }
-    - extract: { key: "acme-web" }
-    - extract: { key: "acme-web-prod" }
+    - extract: { key: "org" }                  # platform vault
+    - extract: { key: "env-prod" }             # env vault
+    - extract: { key: "acme" }                 # platform vault
+    - extract: { key: "acme-web" }             # env vault
+    - extract: { key: "acme-web-prod" }        # env vault
+    - extract: { key: "cluster-kind-prod" }    # env vault — wins last
 ```
 
-ESO merges them at sync time; later entries win on key collision (matching the hierarchy precedence). Pod templates use `envFrom: secretRef: name: web-secrets`.
+ESO merges them at sync time; later entries win on key collision (matching the hierarchy precedence — `cluster` is the platform escape hatch and overrides everything above it). Pod templates use `envFrom: secretRef: name: web-secrets`.
 
-Only scopes that actually have keys get a `dataFrom` entry — computed at publish time.
+Only scopes that actually have keys get a `dataFrom` entry — computed at publish time by probing the upper-level writer and the K8s backend. The cluster scope is omitted entirely when the env is unbound (no `ClusterRef`).
+
+The corresponding `ClusterSecretStore` carries both vaults so the same store resolves all six dataFrom entries:
+
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: onepassword-prod
+spec:
+  provider:
+    onepassword:
+      connectHost: http://onepassword-connect.onepassword-connect.svc.cluster.local:8080
+      vaults:
+        v-prod-env: 1       # env vault — env-type, app, app-env, cluster
+        v-platform: 2       # platform vault — org, project (lower priority on title collision)
+      auth:
+        secretRef:
+          connectTokenSecretRef:
+            name: op-connect-token-prod
+            key: token
+            namespace: external-secrets
+```
+
+## Cluster-scope overrides
+
+Cluster scope is the platform-engineering **escape hatch** — values that win over every other layer for apps deployed onto a specific cluster. Use it for:
+
+- Incident break-glass (disable a feature flag on one cluster while a rollout is ongoing).
+- Per-cluster regional config (DB endpoint that differs only on `prod-us-east`).
+- Cluster-specific kill-switches.
+
+**UI:** Settings → Clusters → click "Overrides" on the cluster row → edit env-vars and secrets in the inline panel. Org-admin only.
+
+**API:**
+- `GET / POST / DELETE /api/v1/clusters/{cluster}/secrets[/{key}]`
+- `GET / PUT /api/v1/clusters/{cluster}/envconfig`
+
+Storage:
+- **K8s backend:** `Secret` / `ConfigMap` in `suparship-system`, replicated by mittwald to namespaces labelled `suparship.io/cluster=<name>` (suparShip applies that label on namespaces it manages).
+- **1Password backend:** vault item `cluster-{cluster}` in the env vault for the env this cluster is bound to. The cluster→env mapping is read from `org.Environments[*].ClusterRef` at publish time.
+
+If the same cluster is shared between multiple envs (rare), cluster items live in only one of the env vaults — the title prefix `cluster-{cluster}` keeps them unambiguous regardless of which env vault they end up in.
 
 ## RBAC matrix
 
@@ -347,8 +420,9 @@ Only scopes that actually have keys get a `dataFrom` entry — computed at publi
 | project | `project_admin` for the target project |
 | app | `developer` (or higher) for the project |
 | app-env | `developer` (or higher) for the project |
+| cluster | `org_admin` |
 
-All scopes are readable by any authenticated user (`viewer` and above). Backend setup, SA token management, and bind/unbind operations are `org_admin`-only.
+All scopes are readable by any authenticated user (`viewer` and above). Backend setup, SA token management, bind/unbind operations, and cluster-scope writes are `org_admin`-only.
 
 ## Refresh and force-sync
 
@@ -358,6 +432,87 @@ All scopes are readable by any authenticated user (`viewer` and above). Backend 
 ## Preview vault scope
 
 All PR previews share the `preview` environment vault. Isolation between previews is namespace + RBAC, not vault-level. Per-PR preview vaults are a future follow-up.
+
+## Migrating from K8s backend to 1Password
+
+When an org switches `secretBackend.type` from `k8s` to `onepassword`, existing upper-level secrets (org / env-type / project / cluster) are still sitting in `suparship-system` Secrets but new writes go to the vaults. Run the migration to copy them across so every scope is satisfied from the vault.
+
+**Preconditions:**
+
+1. The org backend is set to `onepassword`.
+2. The SA token has been pasted (and the platform vault has been provisioned automatically as a side effect — see Step 2).
+3. Each env's Connect token has read access to both the env vault and the platform vault.
+
+**UI:** Settings → Secrets Backend → 1Password section → scroll to **Migrate K8s Secrets to 1Password** → tick which env-types / projects / clusters to migrate (org scope is always included) → click **Migrate to 1Password**.
+
+**API:**
+```bash
+curl -X POST $SUPARSHIP_URL/api/v1/org/secret-backend/migrate-to-onepassword \
+  -H "Cookie: session=…" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "envTypes": ["staging", "prod"],
+    "projects": ["demo", "billing"],
+    "clusters": ["kind-staging", "kind-prod"]
+  }'
+```
+
+Response:
+```json
+{
+  "orgKeys": 3,
+  "envTypeKeys": { "staging": 1, "prod": 2 },
+  "projectKeys": { "demo": 4 },
+  "clusterKeys": { "kind-staging": 1 }
+}
+```
+
+**Semantics:**
+
+- **Idempotent.** Re-running picks up new keys; values already entered directly into the vault are preserved (writers merge with existing fields).
+- **Source data is left in place.** The migration copies only — `suparship-system` Secrets are not deleted automatically. Verify the vault contents first, then clean up with `kubectl delete secret -n suparship-system suparship-secrets-*` once you're satisfied.
+- **App and app-env secrets are NOT migrated.** They live in env-bound K8s namespaces (not `suparship-system`) and follow a different lifecycle. Operators rotate those via the per-app-env UI after the backend switch.
+- **Partial progress on error.** If a write fails mid-run, the response includes counts for what was already copied. Fix the underlying issue and re-run.
+
+## Troubleshooting
+
+### App pods don't see org / project keys
+
+The Connect token for that env can't read the platform vault. ESO will succeed for env-vault items but log `vault not found` for `org` / `{project}` items. Fix:
+
+1. In the 1Password web console, open the Connect server's vault grants.
+2. Add read access to `suparship-{org}-platform` for the env's Connect token.
+3. Trigger a re-sync: `kubectl annotate externalsecret <app>-secrets suparship.io/forced-sync-at="$(date -u +%FT%TZ)" -n <ns> --overwrite`.
+
+No re-bind is needed — the same Connect token now sees both vaults.
+
+### Migration endpoint returns 422 "platform vault not provisioned"
+
+The platform vault was never created — most often because the SA token paste failed before reaching `CreateVault`, or the SA token lacked `create vault` permission at the time. Fix:
+
+1. Confirm the SA in 1Password has Read & Write on existing vaults **plus** vault-creation permission.
+2. Re-paste the SA token in Settings → Secrets Backend. The provisioning step is idempotent and runs on every paste.
+3. Re-run the migration.
+
+### `gitops: skipping publish for unbound env`
+
+The env has no `ClusterRef`, or the referenced cluster isn't registered in suparShip. The publisher writes nothing for unbound envs, including the `ExternalSecret`. Fix in Settings → Environments → assign a cluster to the env, then "Sync to Git" on the app.
+
+### "Resolved Secrets" shows org keys but they don't reach the workload
+
+Most likely the per-app `ExternalSecret` was generated before the platform vault existed (so its `dataFrom` lacks the org entry), or the upper-level writer wasn't rebuilt after restart. Fix:
+
+1. Verify `org.SecretBackend.OnePassword.PlatformVaultID` is non-empty (check via `GET /api/v1/org/secret-backend`).
+2. Restart suparShip — the upper-level writer is built once at startup; later changes to `PlatformVaultID` aren't hot-reloaded.
+3. Re-publish: `POST /api/v1/projects/{project}/apps/{app}/sync`.
+
+### Cluster-scope keys don't reach the workload (K8s backend)
+
+The mittwald replicator's `replicate-to-matching: suparship.io/cluster=<name>` annotation only matches namespaces carrying that label. Fix: confirm the namespace has the `suparship.io/cluster` label set. suparShip writes it via `BuildProjectNamespaceManifest` — namespaces created outside that path need the label applied manually:
+
+```bash
+kubectl label namespace <app-env-ns> suparship.io/cluster=<cluster-name>
+```
 
 ## How to keep going without suparship
 
@@ -373,9 +528,11 @@ Anyone can `kubectl apply` these resources (or have ArgoCD do it) without ever r
 ## Out of scope (this iteration)
 
 - Sealing-cert rotation / re-sealing on cert change.
-- Project-level vaults (schema supports it; UI is a follow-up).
-- Vault and AWS-SM `VaultWriter` implementations.
+- Per-project vaults (currently project items live in the platform-shared vault — fine for most orgs; per-project isolation is a follow-up).
+- HashiCorp Vault and AWS-SM `VaultWriter` implementations.
 - Binary / file secrets (TLS certs, kubeconfigs) — UI accepts only UTF-8 KEY=value, ≤64 KiB.
 - Per-PR preview vaults — all previews share the `preview` env vault.
 - Vault-side cleanup on binding deletion — items remain in 1Password for the admin to clean up.
+- Vault-side cleanup of `suparship-system` K8s Secrets after k8s→onepassword migration — operators run `kubectl delete` manually once they've verified the migrated content.
 - Automated Connect token issuance (blocked by 1Password SA token limitations).
+- Multi-env-per-cluster handling — cluster items currently live in one env's vault; fine when a cluster is bound to a single env (the common case).
