@@ -59,6 +59,7 @@ const (
 	envVarsOrgPrefix     = "suparship-envvars-org"
 	envVarsEnvPrefix     = "suparship-envvars-env-"
 	envVarsProjectPrefix = "suparship-envvars-project-"
+	envVarsClusterPrefix = "suparship-envvars-cluster-"
 )
 
 // OrgEnvConfigMapName returns the ConfigMap name for the Org-level env vars.
@@ -74,6 +75,13 @@ func EnvTypeEnvConfigMapName(envType string) string {
 // var set.
 func ProjectEnvConfigMapName(projectName string) string {
 	return envVarsProjectPrefix + projectName
+}
+
+// ClusterEnvConfigMapName returns the ConfigMap name for a Cluster-level env
+// var set. Stored in suparship-system, replicated to namespaces of apps
+// deployed to the named cluster.
+func ClusterEnvConfigMapName(clusterName string) string {
+	return envVarsClusterPrefix + clusterName
 }
 
 // UpperLevelEnvWriter writes the Org/Environment/Project runtime ConfigMaps to
@@ -124,6 +132,18 @@ func (w *UpperLevelEnvWriter) WriteProjectEnvConfig(ctx context.Context, project
 	return w.upsertEnvConfigMap(ctx, ProjectEnvConfigMapName(projectName), annotations, cfg.Vars)
 }
 
+// WriteClusterEnvConfig creates or updates the Cluster-level env var ConfigMap
+// in suparship-system. Annotated to replicate to namespaces carrying the label
+// "suparship.io/cluster={clusterName}", which suparship sets on app namespaces
+// at GitOps publish time. Cluster-scope overrides exist as a platform escape
+// hatch and win over every other layer (including app-env).
+func (w *UpperLevelEnvWriter) WriteClusterEnvConfig(ctx context.Context, clusterName string, cfg EnvConfig) error {
+	annotations := map[string]string{
+		ReplicatorMatchingAnnotation: fmt.Sprintf("suparship.io/cluster=%s", clusterName),
+	}
+	return w.upsertEnvConfigMap(ctx, ClusterEnvConfigMapName(clusterName), annotations, cfg.Vars)
+}
+
 // ReadOrgEnvConfig reads the Org-level env var ConfigMap from suparship-system.
 // Returns an empty EnvConfig (not an error) when the ConfigMap does not exist.
 // Note: only Vars are stored in the ConfigMap; SecretRefs must be loaded from
@@ -142,6 +162,12 @@ func (w *UpperLevelEnvWriter) ReadEnvTypeEnvConfig(ctx context.Context, envType 
 // project. Returns an empty EnvConfig when not found.
 func (w *UpperLevelEnvWriter) ReadProjectEnvConfig(ctx context.Context, projectName string) (EnvConfig, error) {
 	return w.readEnvConfigMap(ctx, ProjectEnvConfigMapName(projectName))
+}
+
+// ReadClusterEnvConfig reads the Cluster-level env var ConfigMap for the given
+// cluster. Returns an empty EnvConfig when not found.
+func (w *UpperLevelEnvWriter) ReadClusterEnvConfig(ctx context.Context, clusterName string) (EnvConfig, error) {
+	return w.readEnvConfigMap(ctx, ClusterEnvConfigMapName(clusterName))
 }
 
 // upsertEnvConfigMap creates or updates a ConfigMap in suparship-system.

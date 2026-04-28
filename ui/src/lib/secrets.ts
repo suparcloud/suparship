@@ -173,6 +173,35 @@ export function deleteEnvTypeSecretKey(
   );
 }
 
+// ── Cluster-level secrets CRUD ─────────────────────────────────────────────────
+
+export function listClusterSecretKeys(
+  cluster: string,
+): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(
+    `/clusters/${encodeURIComponent(cluster)}/secrets`,
+  );
+}
+
+export function upsertClusterSecrets(
+  cluster: string,
+  entries: Record<string, string>,
+): Promise<void> {
+  return api.post(
+    `/clusters/${encodeURIComponent(cluster)}/secrets`,
+    { entries },
+  );
+}
+
+export function deleteClusterSecretKey(
+  cluster: string,
+  key: string,
+): Promise<void> {
+  return api.del(
+    `/clusters/${encodeURIComponent(cluster)}/secrets/${encodeURIComponent(key)}`,
+  );
+}
+
 // ── Project-level secrets CRUD ─────────────────────────────────────────────────
 
 export function listProjectSecretKeys(

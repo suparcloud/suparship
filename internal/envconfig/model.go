@@ -88,6 +88,8 @@ func (c EnvConfig) IsEmpty() bool {
 // EnvLayers holds the resolved EnvConfig for each level of the hierarchy.
 // Only the App and AppEnv layers are baked into Helm values.yaml; the upper
 // three layers are replicated from suparship-system via Stakater Replicator.
+// Cluster is also replicated from suparship-system but lives outside the per-app
+// path — it overrides every other layer when present.
 type EnvLayers struct {
 	// Org is the org-wide env config.
 	Org EnvConfig
@@ -97,8 +99,11 @@ type EnvLayers struct {
 	Project EnvConfig
 	// App is the app-level env config.
 	App EnvConfig
-	// AppEnv is the app-environment-level env config (most specific).
+	// AppEnv is the app-environment-level env config (most specific app-team layer).
 	AppEnv EnvConfig
+	// Cluster is the platform-engineering escape hatch, scoped to the cluster
+	// the env is bound to. Wins over every other layer when present.
+	Cluster EnvConfig
 }
 
 // ResolvedEnvVar describes a single env var key in the fully merged
@@ -121,4 +126,5 @@ const (
 	LevelProject    = "project"
 	LevelApp        = "app"
 	LevelAppEnv     = "app-environment"
+	LevelCluster    = "cluster"
 )

@@ -159,6 +159,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// Project level — project_admin writes, viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig", viewProject(ec.handleGetProjectEnvConfig))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/envconfig", manageProject(ec.handlePutProjectEnvConfig))
+		// Cluster level — org_admin writes, any-auth reads. Platform escape hatch.
+		mux.HandleFunc("GET /api/v1/clusters/{cluster}/envconfig", rh.auth.requireAuth(ec.handleGetClusterEnvConfig))
+		mux.HandleFunc("PUT /api/v1/clusters/{cluster}/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutClusterEnvConfig)))
 		// App level — developer writes (202 async), viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envconfig", viewProject(ec.handleGetAppEnvConfig))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envconfig", devProject(ec.handlePutAppEnvConfig))
@@ -194,6 +197,10 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/projects/{project}/secrets", viewProject(sh.handleListProjectSecrets))
 		mux.HandleFunc("POST /api/v1/projects/{project}/secrets", manageProject(sh.handleUpsertProjectSecrets))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/secrets/{key}", manageProject(sh.handleDeleteProjectSecret))
+		// Cluster-level secrets CRUD — org_admin writes, any-auth reads.
+		mux.HandleFunc("GET /api/v1/clusters/{cluster}/secrets", rh.auth.requireAuth(sh.handleListClusterSecrets))
+		mux.HandleFunc("POST /api/v1/clusters/{cluster}/secrets", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertClusterSecrets)))
+		mux.HandleFunc("DELETE /api/v1/clusters/{cluster}/secrets/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteClusterSecret)))
 		// App-level secrets CRUD — developer writes, viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets", viewProject(sh.handleListAppSecrets))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets", devProject(sh.handleUpsertAppSecrets))

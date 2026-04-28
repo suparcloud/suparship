@@ -7,6 +7,17 @@ import {
   removeCluster,
 } from "../lib/clusters";
 import type { Cluster } from "../lib/clusters";
+import {
+  getClusterEnvConfig,
+  updateClusterEnvConfig,
+} from "../lib/envconfig";
+import {
+  deleteClusterSecretKey,
+  listClusterSecretKeys,
+  upsertClusterSecrets,
+} from "../lib/secrets";
+import { EnvConfigEditor } from "../components/EnvConfigEditor";
+import { SecretEditor } from "../components/SecretEditor";
 
 // ── Status badge ──────────────────────────────────────────────────────────────
 
@@ -235,6 +246,56 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
   );
 }
 
+// ── Cluster overrides section (env vars + secrets) ────────────────────────────
+//
+// Cluster-scope is the platform-engineering escape hatch — values written here
+// override every other layer (org / env-type / project / app / app-env) for
+// apps deployed onto this specific cluster. Use sparingly: incident break-glass,
+// regional tuning, per-cluster feature kill-switches.
+
+function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
+  const fetchEnv = useCallback(
+    () => getClusterEnvConfig(cluster.name),
+    [cluster.name],
+  );
+  const saveEnv = useCallback(
+    (cfg: Parameters<typeof updateClusterEnvConfig>[1]) =>
+      updateClusterEnvConfig(cluster.name, cfg),
+    [cluster.name],
+  );
+
+  return (
+    <div className="space-y-3 border-t border-gray-100 bg-gray-50 px-6 py-5">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900">
+          Cluster overrides — escape hatch
+        </h3>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Variables and secrets here override every other layer (org, env-type,
+          project, app, app-env) for apps deployed onto{" "}
+          <span className="font-mono">{cluster.name}</span>. Use for incident
+          response, regional tuning, or per-cluster kill-switches.
+        </p>
+      </div>
+      <EnvConfigEditor
+        key={`env-${cluster.name}`}
+        title={`Variables for cluster "${cluster.name}"`}
+        description="Plain-text env vars applied to every app deployed onto this cluster."
+        fetchFn={fetchEnv}
+        saveFn={saveEnv}
+      />
+      <SecretEditor
+        key={`secrets-${cluster.name}`}
+        title={`Secrets for cluster "${cluster.name}"`}
+        description="Secret values applied to every app deployed onto this cluster."
+        fetchFn={() => listClusterSecretKeys(cluster.name)}
+        upsertFn={(entries) => upsertClusterSecrets(cluster.name, entries)}
+        deleteFn={(key) => deleteClusterSecretKey(cluster.name, key)}
+      />
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export function ClusterSettings() {
@@ -245,6 +306,7 @@ export function ClusterSettings() {
   const [removingName, setRemovingName] = useState<string | null>(null);
   const [refreshingCert, setRefreshingCert] = useState<string | null>(null);
   const [certMessage, setCertMessage] = useState<Record<string, string>>({});
+  const [expandedName, setExpandedName] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -364,66 +426,88 @@ export function ClusterSettings() {
             </thead>
             <tbody className="divide-y divide-gray-50">
               {clusters.map((c) => (
-                <tr key={c.name} className="hover:bg-gray-50">
-                  <td className="px-6 py-4">
-                    <p className="text-sm font-medium text-gray-900">
-                      {c.displayName || c.name}
-                    </p>
-                    <p className="text-xs text-gray-400">{c.name}</p>
-                  </td>
-                  <td className="px-6 py-4">
-                    <p className="font-mono text-xs text-gray-600">
-                      {c.apiServer}
-                    </p>
-                    {c.esoNamespace && (
-                      <p className="mt-0.5 text-xs text-gray-400">
-                        ESO:{" "}
-                        <span className="font-mono">{c.esoNamespace}</span>
+                <>
+                  <tr key={c.name} className="hover:bg-gray-50">
+                    <td className="px-6 py-4">
+                      <p className="text-sm font-medium text-gray-900">
+                        {c.displayName || c.name}
                       </p>
-                    )}
-                  </td>
-                  <td className="px-6 py-4">
-                    <StatusBadge status={c.status} />
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex flex-col items-end gap-1">
-                      <div className="flex items-center gap-3">
-                        <button
-                          onClick={() => handleRefreshCert(c.name)}
-                          disabled={
-                            refreshingCert === c.name ||
-                            removingName === c.name
-                          }
-                          title="Re-fetch the sealed-secrets controller certificate from this cluster and update the cache"
-                          className="text-sm text-indigo-600 hover:text-indigo-700 disabled:opacity-50"
-                        >
-                          {refreshingCert === c.name
-                            ? "Refreshing…"
-                            : "Refresh cert"}
-                        </button>
-                        <button
-                          onClick={() => handleRemove(c.name)}
-                          disabled={removingName === c.name}
-                          className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50"
-                        >
-                          {removingName === c.name ? "Removing…" : "Remove"}
-                        </button>
-                      </div>
-                      {certMessage[c.name] && (
-                        <p
-                          className={`text-xs ${
-                            certMessage[c.name].toLowerCase().includes("fail") ||
-                            certMessage[c.name].toLowerCase().includes("error")
-                              ? "text-red-600"
-                              : "text-green-600"
-                          }`}
-                        >
-                          {certMessage[c.name]}
+                      <p className="text-xs text-gray-400">{c.name}</p>
+                    </td>
+                    <td className="px-6 py-4">
+                      <p className="font-mono text-xs text-gray-600">
+                        {c.apiServer}
+                      </p>
+                      {c.esoNamespace && (
+                        <p className="mt-0.5 text-xs text-gray-400">
+                          ESO:{" "}
+                          <span className="font-mono">{c.esoNamespace}</span>
                         </p>
                       )}
-                    </div>
-                  </td>
-                </tr>
+                    </td>
+                    <td className="px-6 py-4">
+                      <StatusBadge status={c.status} />
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      <div className="flex flex-col items-end gap-1">
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={() =>
+                              setExpandedName((cur) =>
+                                cur === c.name ? null : c.name,
+                              )
+                            }
+                            title="Edit cluster-scope env vars and secrets — these override every other layer for apps deployed on this cluster"
+                            className="text-sm text-gray-600 hover:text-gray-900"
+                          >
+                            {expandedName === c.name
+                              ? "Hide overrides"
+                              : "Overrides"}
+                          </button>
+                          <button
+                            onClick={() => handleRefreshCert(c.name)}
+                            disabled={
+                              refreshingCert === c.name ||
+                              removingName === c.name
+                            }
+                            title="Re-fetch the sealed-secrets controller certificate from this cluster and update the cache"
+                            className="text-sm text-indigo-600 hover:text-indigo-700 disabled:opacity-50"
+                          >
+                            {refreshingCert === c.name
+                              ? "Refreshing…"
+                              : "Refresh cert"}
+                          </button>
+                          <button
+                            onClick={() => handleRemove(c.name)}
+                            disabled={removingName === c.name}
+                            className="text-sm text-red-600 hover:text-red-700 disabled:opacity-50"
+                          >
+                            {removingName === c.name ? "Removing…" : "Remove"}
+                          </button>
+                        </div>
+                        {certMessage[c.name] && (
+                          <p
+                            className={`text-xs ${
+                              certMessage[c.name].toLowerCase().includes("fail") ||
+                              certMessage[c.name].toLowerCase().includes("error")
+                                ? "text-red-600"
+                                : "text-green-600"
+                            }`}
+                          >
+                            {certMessage[c.name]}
+                          </p>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                  {expandedName === c.name && (
+                    <tr key={`${c.name}-overrides`}>
+                      <td colSpan={4} className="p-0">
+                        <ClusterOverridesSection cluster={c} />
+                      </td>
+                    </tr>
+                  )}
+                </>
               ))}
             </tbody>
           </table>

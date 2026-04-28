@@ -26,7 +26,7 @@ func TestResolveEnvLayers_Attribution(t *testing.T) {
 		Vars: map[string]string{"LOG_LEVEL": "debug", "APPENV_ONLY": "yes"},
 	}
 
-	_, resolved := envconfig.ResolveEnvLayers(org, env, project, app, appEnv)
+	_, resolved := envconfig.ResolveEnvLayers(org, env, project, app, appEnv, envconfig.EnvConfig{})
 
 	cases := []struct {
 		key      string
@@ -64,6 +64,7 @@ func TestResolveEnvLayers_EmptyLayers(t *testing.T) {
 		envconfig.EnvConfig{},
 		envconfig.EnvConfig{},
 		envconfig.EnvConfig{},
+		envconfig.EnvConfig{},
 	)
 	if len(resolved) != 0 {
 		t.Errorf("expected empty resolved map, got %d entries", len(resolved))
@@ -73,6 +74,7 @@ func TestResolveEnvLayers_EmptyLayers(t *testing.T) {
 func TestResolveEnvLayers_LayersPreserved(t *testing.T) {
 	app := envconfig.EnvConfig{Vars: map[string]string{"K": "v"}}
 	appEnv := envconfig.EnvConfig{Vars: map[string]string{"X": "y"}}
+	cluster := envconfig.EnvConfig{Vars: map[string]string{"C": "z"}}
 
 	layers, _ := envconfig.ResolveEnvLayers(
 		envconfig.EnvConfig{},
@@ -80,6 +82,7 @@ func TestResolveEnvLayers_LayersPreserved(t *testing.T) {
 		envconfig.EnvConfig{},
 		app,
 		appEnv,
+		cluster,
 	)
 
 	if layers.App.Vars["K"] != "v" {
@@ -87,6 +90,27 @@ func TestResolveEnvLayers_LayersPreserved(t *testing.T) {
 	}
 	if layers.AppEnv.Vars["X"] != "y" {
 		t.Error("AppEnv layer Vars not preserved")
+	}
+	if layers.Cluster.Vars["C"] != "z" {
+		t.Error("Cluster layer Vars not preserved")
+	}
+}
+
+func TestResolveEnvLayers_ClusterWinsLast(t *testing.T) {
+	// Same key at every layer; cluster must win as the platform escape hatch.
+	cfg := envconfig.EnvConfig{Vars: map[string]string{"FEATURE": "x"}}
+	_, resolved := envconfig.ResolveEnvLayers(cfg, cfg, cfg, cfg, cfg, cfg)
+	if got := resolved["FEATURE"].Source; got != envconfig.LevelCluster {
+		t.Errorf("FEATURE source = %q, want %q", got, envconfig.LevelCluster)
+	}
+}
+
+func TestResolveEnvLayers_ClusterOverridesAppEnv(t *testing.T) {
+	appEnv := envconfig.EnvConfig{Vars: map[string]string{"K": "appenv"}}
+	cluster := envconfig.EnvConfig{Vars: map[string]string{"K": "cluster"}}
+	_, resolved := envconfig.ResolveEnvLayers(envconfig.EnvConfig{}, envconfig.EnvConfig{}, envconfig.EnvConfig{}, envconfig.EnvConfig{}, appEnv, cluster)
+	if got := resolved["K"].Source; got != envconfig.LevelCluster {
+		t.Errorf("K source = %q, want %q", got, envconfig.LevelCluster)
 	}
 }
 

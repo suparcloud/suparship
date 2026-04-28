@@ -37,6 +37,8 @@ func (w *K8sVaultWriter) secretName(scope Scope) string {
 		return AppLevelSecretName(scope.Project, scope.App)
 	case LevelAppEnv:
 		return AppEnvSecretName(scope.Project, scope.App, scope.Env)
+	case LevelCluster:
+		return ClusterSecretName(scope.Cluster)
 	default:
 		return fmt.Sprintf("secrets-%s", scope.Level)
 	}

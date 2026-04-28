@@ -717,6 +717,44 @@ func (h *secretsHandler) handleDeleteProjectSecret(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// ── Cluster-level secrets CRUD ──────────────────────────────────────────────
+
+func (h *secretsHandler) handleListClusterSecrets(w http.ResponseWriter, r *http.Request) {
+	cluster := r.PathValue("cluster")
+	entries, err := h.upperWriter.ReadClusterSecretKeys(r.Context(), cluster)
+	if err != nil {
+		h.logger.Error("failed to list cluster secret keys", "cluster", cluster, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list secrets"})
+		return
+	}
+	writeJSON(w, http.StatusOK, secretKeysResponseFromEntries(entries, secrets.ClusterSecretName(cluster)))
+}
+
+func (h *secretsHandler) handleUpsertClusterSecrets(w http.ResponseWriter, r *http.Request) {
+	cluster := r.PathValue("cluster")
+	req, ok := h.decodeUpsertRequest(w, r)
+	if !ok {
+		return
+	}
+	if err := h.upperWriter.WriteClusterSecrets(r.Context(), cluster, toByteMap(req.Entries)); err != nil {
+		h.logger.Error("failed to upsert cluster secrets", "cluster", cluster, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save secrets"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *secretsHandler) handleDeleteClusterSecret(w http.ResponseWriter, r *http.Request) {
+	cluster := r.PathValue("cluster")
+	key := r.PathValue("key")
+	if err := h.upperWriter.DeleteClusterSecretKey(r.Context(), cluster, key); err != nil {
+		h.logger.Error("failed to delete cluster secret key", "cluster", cluster, "key", key, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete secret"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // ── App-level secrets CRUD ──────────────────────────────────────────────────
 
 func (h *secretsHandler) handleListAppSecrets(w http.ResponseWriter, r *http.Request) {
@@ -908,12 +946,23 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 		}
 	}
 
+	var clusterKeys []secrets.SecretEntry
+	if clusterRef := h.resolveClusterRef(r, envName); clusterRef != "" {
+		clusterKeys, err = h.upperWriter.ReadClusterSecretKeys(ctx, clusterRef)
+		if err != nil {
+			h.logger.Error("failed to read cluster secret keys", "cluster", clusterRef, "err", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to resolve secrets"})
+			return
+		}
+	}
+
 	resolved := secrets.ResolveSecretLayers(
 		entriesToKeys(orgKeys),
 		entriesToKeys(envTypeKeys),
 		entriesToKeys(projectKeys),
 		entriesToKeys(appKeys),
 		entriesToKeys(appEnvKeys),
+		entriesToKeys(clusterKeys),
 	)
 
 	sortedKeys := make([]string, 0, len(resolved))
@@ -992,6 +1041,25 @@ func (h *secretsHandler) resolveEnvType(r *http.Request, project, appName, envNa
 		return envName
 	}
 	return string(env.EnvType)
+}
+
+// resolveClusterRef returns the registered cluster name bound to envName via
+// the org config, or "" when the env is unbound or the org cannot be loaded.
+// The returned name is the key used by cluster-scope secret/env-var endpoints.
+func (h *secretsHandler) resolveClusterRef(r *http.Request, envName string) string {
+	if h.orgStore == nil {
+		return ""
+	}
+	org, err := h.orgStore.GetOrg(r.Context())
+	if err != nil || org == nil {
+		return ""
+	}
+	for _, e := range org.Environments {
+		if e.Name == envName {
+			return e.ClusterRef
+		}
+	}
+	return ""
 }
 
 func (h *secretsHandler) decodeUpsertRequest(w http.ResponseWriter, r *http.Request) (UpsertSecretsRequest, bool) {

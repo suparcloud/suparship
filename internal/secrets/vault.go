@@ -5,11 +5,12 @@ import "context"
 // Scope identifies the hierarchy level and coordinates for a secret write.
 // Used by VaultWriter to determine Item naming in the external vault.
 type Scope struct {
-	Level   string // LevelOrg | LevelEnvironment | LevelProject | LevelApp | LevelAppEnv
+	Level   string // LevelOrg | LevelEnvironment | LevelProject | LevelApp | LevelAppEnv | LevelCluster
 	Org     string
 	Env     string // empty for org-level
 	Project string // empty for org/env levels
 	App     string // empty unless app/app-env
+	Cluster string // populated only for LevelCluster
 }
 
 // ItemMeta carries provider-supplied metadata about a vault item.

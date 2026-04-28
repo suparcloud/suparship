@@ -108,3 +108,15 @@ func (m *MemUpperLevelWriter) ReadProjectSecretKeys(ctx context.Context, project
 func (m *MemUpperLevelWriter) DeleteProjectSecretKey(ctx context.Context, project, key string) error {
 	return m.backend.DeleteKey(ctx, memSystemNS, ProjectSecretName(project), key)
 }
+
+func (m *MemUpperLevelWriter) WriteClusterSecrets(ctx context.Context, cluster string, data map[string][]byte) error {
+	return m.backend.Upsert(ctx, memSystemNS, ClusterSecretName(cluster), data)
+}
+
+func (m *MemUpperLevelWriter) ReadClusterSecretKeys(ctx context.Context, cluster string) ([]SecretEntry, error) {
+	return m.backend.ListKeys(ctx, memSystemNS, ClusterSecretName(cluster))
+}
+
+func (m *MemUpperLevelWriter) DeleteClusterSecretKey(ctx context.Context, cluster, key string) error {
+	return m.backend.DeleteKey(ctx, memSystemNS, ClusterSecretName(cluster), key)
+}

@@ -7,7 +7,7 @@ import (
 
 func TestResourceNaming_Defaults(t *testing.T) {
 	var n ResourceNaming
-	params := NamingParams{Org: "default", Env: "prod", Project: "acme", App: "web", Provider: "1password"}
+	params := NamingParams{Org: "default", Env: "prod", Project: "acme", App: "web", Provider: "1password", Cluster: "prod-us"}
 
 	tests := []struct {
 		name   string
@@ -22,6 +22,7 @@ func TestResourceNaming_Defaults(t *testing.T) {
 		{"VaultItem project", func() string { return n.RenderVaultItem(LevelProject, params) }, "acme"},
 		{"VaultItem app", func() string { return n.RenderVaultItem(LevelApp, params) }, "acme-web"},
 		{"VaultItem appEnv", func() string { return n.RenderVaultItem(LevelAppEnv, params) }, "acme-web-prod"},
+		{"VaultItem cluster", func() string { return n.RenderVaultItem(LevelCluster, params) }, "cluster-prod-us"},
 	}
 
 	for _, tt := range tests {

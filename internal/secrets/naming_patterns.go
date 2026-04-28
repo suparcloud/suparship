@@ -42,13 +42,14 @@ type ResourceNaming struct {
 }
 
 // ItemNaming holds configurable patterns for vault item titles, one per
-// hierarchy scope. Tokens available: {org} {env} {project} {app}.
+// hierarchy scope. Tokens available: {org} {env} {project} {app} {cluster}.
 type ItemNaming struct {
 	Org     string `json:"org,omitempty" yaml:"org,omitempty"`         // default: "org"
 	EnvType string `json:"envType,omitempty" yaml:"envType,omitempty"` // default: "env-{env}"
 	Project string `json:"project,omitempty" yaml:"project,omitempty"` // default: "{project}"
 	App     string `json:"app,omitempty" yaml:"app,omitempty"`         // default: "{project}-{app}"
 	AppEnv  string `json:"appEnv,omitempty" yaml:"appEnv,omitempty"`   // default: "{project}-{app}-{env}"
+	Cluster string `json:"cluster,omitempty" yaml:"cluster,omitempty"` // default: "cluster-{cluster}"
 }
 
 // Default patterns for each naming slot.
@@ -61,6 +62,7 @@ const (
 	DefaultItemProject        = "{project}"
 	DefaultItemApp            = "{project}-{app}"
 	DefaultItemAppEnv         = "{project}-{app}-{env}"
+	DefaultItemCluster        = "cluster-{cluster}"
 )
 
 // ── Hardcoded conventions (1Password SA-driven flow) ──────────────────────
@@ -79,6 +81,7 @@ type NamingParams struct {
 	Project  string
 	App      string
 	Provider string // e.g. "1password"
+	Cluster  string // registered cluster name (used for {cluster} token)
 }
 
 // dns1123 validates K8s resource names (lowercase, alphanumeric, '-').
@@ -92,6 +95,7 @@ func RenderPattern(pattern string, params NamingParams) string {
 		"{project}", params.Project,
 		"{app}", params.App,
 		"{provider}", params.Provider,
+		"{cluster}", params.Cluster,
 	)
 	return r.Replace(pattern)
 }
@@ -201,6 +205,13 @@ func (n ItemNaming) EffectiveAppEnv() string {
 	return DefaultItemAppEnv
 }
 
+func (n ItemNaming) EffectiveCluster() string {
+	if n.Cluster != "" {
+		return n.Cluster
+	}
+	return DefaultItemCluster
+}
+
 // ── Render helpers ─────────────────────────────────────────────────────────
 
 // RenderAppResource renders the K8s resource name for an app-env namespace.
@@ -232,6 +243,8 @@ func (n ResourceNaming) RenderVaultItem(level string, params NamingParams) strin
 		pattern = n.VaultItem.EffectiveApp()
 	case LevelAppEnv:
 		pattern = n.VaultItem.EffectiveAppEnv()
+	case LevelCluster:
+		pattern = n.VaultItem.EffectiveCluster()
 	default:
 		return level
 	}
@@ -247,6 +260,7 @@ func (n ResourceNaming) Validate() error {
 		Project:  "acme",
 		App:      "web",
 		Provider: "1password",
+		Cluster:  "prod-us-east",
 	}
 
 	if err := ValidateRenderedDNS1123(n.RenderAppResource(sample), "appResource"); err != nil {
@@ -273,7 +287,7 @@ func (n ResourceNaming) Validate() error {
 	}
 
 	// Vault item titles don't need DNS-1123, just non-empty/no-whitespace.
-	levels := []string{LevelOrg, LevelEnvironment, LevelProject, LevelApp, LevelAppEnv}
+	levels := []string{LevelOrg, LevelEnvironment, LevelProject, LevelApp, LevelAppEnv, LevelCluster}
 	rendered := make(map[string]string, len(levels))
 	for _, l := range levels {
 		r := n.RenderVaultItem(l, sample)

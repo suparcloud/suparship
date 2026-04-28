@@ -181,6 +181,26 @@ func (w *UpperLevelSecretWriter) DeleteProjectSecretKey(ctx context.Context, pro
 	return w.deleteSecretKey(ctx, ProjectSecretName(project), key)
 }
 
+// WriteClusterSecrets upserts cluster-level secrets. Replicated to namespaces
+// labelled "suparship.io/cluster={cluster}" so apps deployed onto that cluster
+// receive the override.
+func (w *UpperLevelSecretWriter) WriteClusterSecrets(ctx context.Context, cluster string, data map[string][]byte) error {
+	annotations := map[string]string{
+		replicatorMatchingAnnotation: fmt.Sprintf("suparship.io/cluster=%s", cluster),
+	}
+	return w.upsertSecret(ctx, ClusterSecretName(cluster), annotations, data)
+}
+
+// ReadClusterSecretKeys returns key names for cluster-level secrets.
+func (w *UpperLevelSecretWriter) ReadClusterSecretKeys(ctx context.Context, cluster string) ([]SecretEntry, error) {
+	return w.readSecretKeys(ctx, ClusterSecretName(cluster))
+}
+
+// DeleteClusterSecretKey removes a single key from cluster-level secrets.
+func (w *UpperLevelSecretWriter) DeleteClusterSecretKey(ctx context.Context, cluster, key string) error {
+	return w.deleteSecretKey(ctx, ClusterSecretName(cluster), key)
+}
+
 func (w *UpperLevelSecretWriter) upsertSecret(
 	ctx context.Context,
 	name string,

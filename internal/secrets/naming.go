@@ -3,11 +3,12 @@ package secrets
 import "fmt"
 
 const (
-	secretsOrgName     = "suparship-secrets-org"
-	secretsEnvPrefix   = "suparship-secrets-envtype-"
-	secretsProjPrefix  = "suparship-secrets-project-"
-	secretsAppPrefix   = "suparship-secrets-app-"
-	secretsAppEnvFmt   = "suparship-secrets-%s-%s-%s"
+	secretsOrgName       = "suparship-secrets-org"
+	secretsEnvPrefix     = "suparship-secrets-envtype-"
+	secretsProjPrefix    = "suparship-secrets-project-"
+	secretsAppPrefix     = "suparship-secrets-app-"
+	secretsClusterPrefix = "suparship-secrets-cluster-"
+	secretsAppEnvFmt     = "suparship-secrets-%s-%s-%s"
 
 	configAppEnvFmt = "suparship-config-%s-%s-%s"
 )
@@ -31,6 +32,13 @@ func ProjectSecretName(project string) string {
 // (shared across all environments of the app). Stored in suparship-system.
 func AppLevelSecretName(project, app string) string {
 	return fmt.Sprintf("%s%s-%s", secretsAppPrefix, project, app)
+}
+
+// ClusterSecretName returns the K8s Secret name for cluster-level secrets.
+// Stored in suparship-system, replicated to namespaces of apps deployed to
+// the named cluster.
+func ClusterSecretName(cluster string) string {
+	return secretsClusterPrefix + cluster
 }
 
 // AppEnvSecretName returns the deterministic K8s Secret name for an app's

@@ -645,6 +645,35 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Best-effort: upsert vault item skeletons for bound stable envs so that
+	// syncing an existing app (created before the platform-managed secret flow
+	// was introduced) also provisions the missing 1Password items.
+	if ah.vaultWriter != nil && ah.orgProvider != nil {
+		if org, orgErr := ah.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
+			orgName := org.Name
+			if orgName == "" {
+				orgName = "default"
+			}
+			// Build a fast-lookup set of org env names that have a ClusterRef
+			// (i.e. are bound to a real cluster).
+			boundEnvs := make(map[string]bool, len(org.Environments))
+			for _, orgEnv := range org.Environments {
+				if orgEnv.ClusterRef != "" {
+					boundEnvs[orgEnv.Name] = true
+				}
+			}
+			for _, env := range stableEnvs {
+				if !boundEnvs[env.EnvName] {
+					continue
+				}
+				if err := ah.vaultWriter.UpsertAppItem(r.Context(), orgName, projectName, appName, env.EnvName); err != nil {
+					slog.Error("vault: failed to upsert app item on sync — continuing",
+						"project", projectName, "app", appName, "env", env.EnvName, "error", err)
+				}
+			}
+		}
+	}
+
 	slog.Info("syncing app to gitops repo",
 		"project", projectName,
 		"app", appName,
