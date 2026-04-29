@@ -126,6 +126,29 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 		},
 	}
 
+	// Source 3: per-app platform manifests (env-configmap, external-secret,
+	// kustomization). Without this, those files are written to gitops but
+	// never reach the cluster — the chart's envFrom is `optional: true` so
+	// it silently degrades. Include filter skips app.yaml + values.yaml,
+	// which are parameter/values files for the ApplicationSet, not
+	// Kubernetes manifests.
+	//
+	// When the dir contains a kustomization.yaml ArgoCD auto-detects
+	// kustomize and applies through it; the include filter still bounds
+	// what kustomize sees. Operators wanting to extend can add files to the
+	// dir and list them in the regenerated kustomization.yaml's resources
+	// (note: kustomization.yaml is regenerated on every publish — see
+	// gitops-output/README.md for the extension story).
+	platformManifestsSource := ApplicationSource{
+		RepoURL:        repoURL,
+		Path:           "gitops-output/" + env.EnvName + "/{{project}}/{{name}}",
+		TargetRevision: opts.TargetRevision,
+		Directory: &DirectorySource{
+			Recurse: false,
+			Include: "{env-configmap.yaml,external-secret.yaml,kustomization.yaml}",
+		},
+	}
+
 	var syncPolicy *SyncPolicy
 	if opts.SyncAutomated {
 		syncPolicy = &SyncPolicy{
@@ -181,7 +204,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 			},
 			Spec: ApplicationSetAppSpec{
 				Project:     "{{project}}",
-				Sources:     []ApplicationSource{valuesRefSource, chartSource},
+				Sources:     []ApplicationSource{valuesRefSource, chartSource, platformManifestsSource},
 				Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: "{{namespace}}"},
 				SyncPolicy:  syncPolicy,
 			},

@@ -106,6 +106,25 @@ type ApplicationSource struct {
 	// Helm holds Helm-specific configuration. Omitted when the source is
 	// plain manifests rather than a Helm chart.
 	Helm *HelmSource `json:"helm,omitempty" yaml:"helm,omitempty"`
+	// Directory configures plain-manifest behaviour: include filters so
+	// only specific files in Path are applied. Used by the per-app
+	// "platform manifests" source so app.yaml + values.yaml are skipped
+	// (they're parameter/values files, not k8s manifests).
+	Directory *DirectorySource `json:"directory,omitempty" yaml:"directory,omitempty"`
+}
+
+// DirectorySource configures ArgoCD's plain-directory rendering for an
+// ApplicationSource. When kustomization.yaml is present in Path, ArgoCD
+// auto-detects kustomize and uses it instead — the Include filter still
+// limits which files kustomize considers.
+type DirectorySource struct {
+	// Recurse controls whether ArgoCD walks subdirectories. Default false:
+	// suparship-emitted dirs have no nested manifest tree.
+	Recurse bool `json:"recurse,omitempty" yaml:"recurse,omitempty"`
+	// Include is a glob expression listing the file names to consider.
+	// Single curly-brace alternation (e.g. "{a.yaml,b.yaml}") is supported
+	// by ArgoCD's directory source.
+	Include string `json:"include,omitempty" yaml:"include,omitempty"`
 }
 
 // HelmSource configures how ArgoCD renders the Helm chart at ApplicationSource.Path.

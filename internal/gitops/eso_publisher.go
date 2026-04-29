@@ -374,6 +374,35 @@ data:
 	return sb.String()
 }
 
+// BuildAppKustomizationYAML returns a kustomization.yaml that lists the
+// per-app platform manifests. Picked up automatically by ArgoCD's
+// directory source — when this file is present in the dir, ArgoCD
+// switches to kustomize mode and applies only what's listed in
+// resources, ignoring app.yaml + values.yaml (which would otherwise be
+// mistaken for k8s manifests).
+//
+// Regenerated on every publish; operator extensions to the kustomization
+// are clobbered. Operators needing extra manifests should drop them in
+// the same dir AND list them in the regenerated file (or — better — use
+// a separate ArgoCD Application that overlays this one). See
+// gitops-output/README.md for the take-over recipes.
+//
+// The order of resources matches what kustomize will emit; sorting is
+// the caller's job (BuildAppKustomizationYAML preserves insertion order
+// so the publisher controls it).
+func BuildAppKustomizationYAML(resources []string) string {
+	var sb strings.Builder
+	sb.WriteString("apiVersion: kustomize.config.k8s.io/v1beta1\n")
+	sb.WriteString("kind: Kustomization\n")
+	sb.WriteString("resources:\n")
+	for _, r := range resources {
+		sb.WriteString("  - ")
+		sb.WriteString(r)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
 // WriteAppConfigMap writes env-configmap.yaml to dir.
 // dir should be the per-app-env directory, e.g.
 // gitops-output/{envName}/{project}/{app}/ or

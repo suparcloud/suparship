@@ -567,48 +567,61 @@ func (p *Publisher) writeAppPlatformResources(
 		return fmt.Errorf("writing app ConfigMap: %w", err)
 	}
 
+	// Track which platform manifests are present so the kustomization.yaml
+	// at the end lists exactly what exists in this dir.
+	platformResources := []string{"env-configmap.yaml"}
+
 	// ExternalSecret — only when the env has an associated ClusterSecretStore.
-	if env.StoreName == "" {
-		return nil
+	if env.StoreName != "" {
+		var esCfg *ESOExternalSecretConfig
+		if p.cfg.BackendConfig != nil {
+			esCfg = BuildCollapsedExternalSecretForApp(
+				AppEnvPublishParams{
+					Project:           app.ProjectName,
+					App:               app.Name,
+					Env:               env.EnvName,
+					Namespace:         namespace,
+					Cluster:           env.ClusterRef,
+					ScopeKeys:         env.ScopeKeys,
+					PlatformStoreName: env.PlatformStoreName,
+				},
+				naming,
+				*p.cfg.BackendConfig,
+				orgName,
+				p.cfg.Branding,
+			)
+		}
+		if esCfg == nil {
+			// Fall back to the single-key path when BackendConfig is unavailable
+			// (tests / older callers) or when the collapsed builder returned nil
+			// (no scopes have keys yet).
+			secretName := naming.RenderAppResource(np)
+			itemTitle := env.VaultItemTitle
+			if itemTitle == "" {
+				itemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
+			}
+			esCfg = &ESOExternalSecretConfig{
+				Name:      secretName,
+				Namespace: namespace,
+				StoreName: env.StoreName,
+				Items:     []ESOItemRef{{Key: itemTitle, StoreName: env.StoreName}},
+				Branding:  p.cfg.Branding,
+			}
+		}
+		content := BuildCollapsedExternalSecretYAML(*esCfg)
+		if err := p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content)); err != nil {
+			return err
+		}
+		platformResources = append(platformResources, "external-secret.yaml")
 	}
 
-	var esCfg *ESOExternalSecretConfig
-	if p.cfg.BackendConfig != nil {
-		esCfg = BuildCollapsedExternalSecretForApp(
-			AppEnvPublishParams{
-				Project:           app.ProjectName,
-				App:               app.Name,
-				Env:               env.EnvName,
-				Namespace:         namespace,
-				Cluster:           env.ClusterRef,
-				ScopeKeys:         env.ScopeKeys,
-				PlatformStoreName: env.PlatformStoreName,
-			},
-			naming,
-			*p.cfg.BackendConfig,
-			orgName,
-			p.cfg.Branding,
-		)
-	}
-	if esCfg == nil {
-		// Fall back to the single-key path when BackendConfig is unavailable
-		// (tests / older callers) or when the collapsed builder returned nil
-		// (no scopes have keys yet).
-		secretName := naming.RenderAppResource(np)
-		itemTitle := env.VaultItemTitle
-		if itemTitle == "" {
-			itemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
-		}
-		esCfg = &ESOExternalSecretConfig{
-			Name:      secretName,
-			Namespace: namespace,
-			StoreName: env.StoreName,
-			Items:     []ESOItemRef{{Key: itemTitle, StoreName: env.StoreName}},
-			Branding:  p.cfg.Branding,
-		}
-	}
-	content := BuildCollapsedExternalSecretYAML(*esCfg)
-	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content))
+	// kustomization.yaml — bundles the platform manifests so ArgoCD's
+	// per-app directory source can apply them in one go (the chart's Helm
+	// source produces the workload; this kustomization produces the
+	// supporting CM/Secret). Regenerated each publish — see
+	// gitops-output/README.md for the extension story.
+	kustom := BuildAppKustomizationYAML(platformResources)
+	return p.writeFile(filepath.Join(dir, "kustomization.yaml"), []byte(kustom))
 }
 
 // syncChart materialises the Helm chart for templateName at
