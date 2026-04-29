@@ -22,6 +22,7 @@ import { ServiceDetail } from "./pages/ServiceDetail";
 import { TeamSettings } from "./pages/TeamSettings";
 import { TemplateDetail } from "./pages/TemplateDetail";
 import { TemplateImport } from "./pages/TemplateImport";
+import { TemplateSources } from "./pages/TemplateSources";
 import { Templates } from "./pages/Templates";
 
 export function App() {
@@ -65,6 +66,7 @@ export function App() {
               />
               <Route path="/templates" element={<Templates />} />
               <Route path="/templates/import" element={<TemplateImport />} />
+              <Route path="/templates/sources" element={<TemplateSources />} />
               <Route path="/templates/:name" element={<TemplateDetail />} />
               <Route path="/previews" element={<Previews />} />
               <Route path="/settings/org" element={<OrgSettings />} />

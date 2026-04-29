@@ -3,6 +3,9 @@ import type {
   TemplateDetail,
   TemplateImportPreview,
   TemplateImportResult,
+  TemplateRegistry,
+  TemplateRegistryResponse,
+  TemplateSyncResponse,
   TemplatesResponse,
 } from "../types";
 
@@ -42,4 +45,36 @@ export function importTemplate(
     fd.append("template", templateYAML);
   }
   return api.postFormData<TemplateImportResult>("/templates/import", fd);
+}
+
+// fetchTemplateRegistry returns the configured external sources + the
+// resolved sync state. response.configured is false when no registry
+// ConfigMap exists yet; the embedded registry is still safe to render
+// (empty arrays).
+export function fetchTemplateRegistry(): Promise<TemplateRegistryResponse> {
+  return api.get<TemplateRegistryResponse>("/templates/registry");
+}
+
+// updateTemplateRegistry replaces the registry document. The caller is
+// responsible for preserving fields it doesn't know about (e.g. Sources)
+// — this UI sends back what it loaded, mutated.
+export function updateTemplateRegistry(
+  registry: TemplateRegistry,
+): Promise<TemplateRegistryResponse> {
+  return api.put<TemplateRegistryResponse>("/templates/registry", registry);
+}
+
+// syncAllSources triggers a sync across every configured external repo
+// and returns per-source results inline so the UI can show partial-success
+// surfaces ("3 imported, 1 failed") without a follow-up call.
+export function syncAllSources(): Promise<TemplateSyncResponse> {
+  return api.post<TemplateSyncResponse>("/templates/registry/sync");
+}
+
+// syncSource triggers a sync on one named external repo. The {name} must
+// match an ExternalTemplateRepo.name in the registry.
+export function syncSource(name: string): Promise<TemplateSyncResponse> {
+  return api.post<TemplateSyncResponse>(
+    `/templates/registry/sources/${encodeURIComponent(name)}/sync`,
+  );
 }

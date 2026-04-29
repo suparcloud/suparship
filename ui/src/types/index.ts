@@ -125,6 +125,51 @@ export interface TemplateImportResult {
   version: string;
 }
 
+// External template repos and registry — surfaced by GET /templates/registry.
+// The shape mirrors internal/tpl/registry.go (TemplateRegistry).
+export interface ExternalTemplateRepo {
+  name: string;
+  repoURL: string;
+  ref: string;
+  path: string;
+  existingSecret?: string;
+}
+
+export interface TemplateSource {
+  name: string;
+  origin: "builtin" | "external";
+  version?: string;
+  externalRepo?: string;
+  externalRef?: string;
+  externalPath?: string;
+  syncedAt?: string;
+}
+
+export interface TemplateRegistry {
+  builtIn: string[];
+  external?: ExternalTemplateRepo[];
+  sources: TemplateSource[];
+}
+
+export interface TemplateRegistryResponse {
+  configured: boolean;
+  registry: TemplateRegistry;
+}
+
+// Per-source sync outcome returned from POST /templates/registry/sync and
+// .../sources/{name}/sync. Always 200; UI inspects each entry for partial
+// failure surfacing.
+export interface TemplateSyncResult {
+  sourceName: string;
+  templates: string[];
+  syncedAt: string;
+  error?: string;
+}
+
+export interface TemplateSyncResponse {
+  results: TemplateSyncResult[];
+}
+
 export interface TemplateInput {
   name: string;
   title: string;
