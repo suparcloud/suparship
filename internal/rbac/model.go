@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"gopkg.in/yaml.v3"
@@ -137,6 +138,12 @@ type Org struct {
 	// ResourceNaming holds configurable naming patterns for K8s resources
 	// and vault items. Allows vendor-neutral names outside suparship-system.
 	ResourceNaming secrets.ResourceNaming `yaml:"resourceNaming,omitempty"`
+	// Branding controls how the platform identifies itself in the GitOps
+	// output (label domain + label/annotation values, commit author name).
+	// Defaults — "suparship" / "suparship.io" — apply when fields are empty.
+	// SRE contractors who white-label suparship can set their own platform
+	// name without touching individual generators.
+	Branding branding.Config `yaml:"branding,omitempty"`
 }
 
 // Team represents a named group of users.

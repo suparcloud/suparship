@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/envconfig"
 )
 
@@ -24,7 +25,7 @@ var ESOStoreNames = map[string]string{
 // whenever the ESO configuration changes.
 func (p *Publisher) WriteESOInfra(repoDir string) error {
 	infraDir := filepath.Join(repoDir, "gitops-output", "_infra")
-	content := buildESOStoresYAML()
+	content := buildESOStoresYAML(p.cfg.Branding)
 	return p.writeFile(filepath.Join(infraDir, "eso-stores.yaml"), []byte(content))
 }
 
@@ -55,7 +56,7 @@ func (p *Publisher) WriteUpperLevelExternalSecrets(repoDir string, level string,
 			return fmt.Errorf("unknown secret provider %q for level %q", provider, level)
 		}
 		secretName := fmt.Sprintf("suparship-secrets-%s-%s", level, provider)
-		content := buildExternalSecretYAML(secretName, envconfig.SystemNamespace, storeName, providerRefs)
+		content := buildExternalSecretYAML(secretName, envconfig.SystemNamespace, storeName, providerRefs, p.cfg.Branding)
 		fileName := fmt.Sprintf("eso-secrets-%s-%s.yaml", level, provider)
 		if err := p.writeFile(filepath.Join(infraDir, fileName), []byte(content)); err != nil {
 			return fmt.Errorf("writing ExternalSecret %s: %w", fileName, err)
@@ -68,28 +69,31 @@ func (p *Publisher) WriteUpperLevelExternalSecrets(repoDir string, level string,
 // for the Kubernetes backend. Vault and AWS SM stores are omitted because the
 // v1 API requires a valid provider config — users should create them manually
 // when their backend is ready.
-func buildESOStoresYAML() string {
-	return buildK8sClusterSecretStore()
+func buildESOStoresYAML(brand branding.Config) string {
+	return buildK8sClusterSecretStore(brand)
 }
 
 // buildK8sClusterSecretStore returns the YAML for the demo Kubernetes backend
 // ClusterSecretStore. It reads K8s Secrets from suparship-system so that users
 // can create real Secrets there and reference them from any level's SecretRefs.
-func buildK8sClusterSecretStore() string {
-	return `apiVersion: external-secrets.io/v1
+func buildK8sClusterSecretStore(brand branding.Config) string {
+	return fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: suparship-k8s-store
   labels:
-    suparship.io/managed-by: suparship
+%s
   annotations:
-    suparship.io/description: "Kubernetes Secrets backend for demo/default use. Reads Secrets from suparship-system namespace."
+    %s/description: "Kubernetes Secrets backend for demo/default use. Reads Secrets from suparship-system namespace."
 spec:
   provider:
     kubernetes:
       remoteNamespace: suparship-system
       auth:
-        serviceAccount:
+        serviceAccount:`,
+		branding.LabelsYAML(brand.ManagedByLabels(), 4),
+		brand.EffectiveLabelDomain(),
+	) + `
           name: suparship-eso-reader
           namespace: suparship-system
 `
@@ -97,7 +101,7 @@ spec:
 
 // buildExternalSecretYAML returns the YAML for a single ExternalSecret CR
 // that pulls a set of secret refs into a K8s Secret in the given namespace.
-func buildExternalSecretYAML(secretName, namespace, storeName string, refs []envconfig.SecretRef) string {
+func buildExternalSecretYAML(secretName, namespace, storeName string, refs []envconfig.SecretRef, brand branding.Config) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ExternalSecret
@@ -105,7 +109,7 @@ metadata:
   name: %s
   namespace: %s
   labels:
-    suparship.io/managed-by: suparship
+%s
   annotations:
     # Stakater Replicator will copy the resulting K8s Secret to app namespaces.
     # The replication target annotation is added to the Secret by UpperLevelEnvWriter.
@@ -118,7 +122,7 @@ spec:
     name: %s
     creationPolicy: Owner
   data:
-`, secretName, namespace, storeName, secretName))
+`, secretName, namespace, branding.LabelsYAML(brand.ManagedByLabels(), 4), storeName, secretName))
 
 	for _, ref := range refs {
 		sb.WriteString(fmt.Sprintf(`  - secretKey: %s

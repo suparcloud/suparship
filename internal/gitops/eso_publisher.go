@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
@@ -26,6 +27,9 @@ type ESOSecretStoreConfig struct {
 	// vault are resolvable from the same store. Ignored for non-1Password
 	// backends and when empty.
 	PlatformVaultID string
+	// Branding stamps the platform identity into the generated labels.
+	// Zero value applies "suparship" / "suparship.io" defaults.
+	Branding branding.Config
 }
 
 // ESOItemRef is one dataFrom.extract entry in the collapsed ExternalSecret.
@@ -56,6 +60,9 @@ type ESOExternalSecretConfig struct {
 	// entries overwriting earlier ones for duplicate keys). Only scopes that
 	// actually have keys are included.
 	Items []ESOItemRef
+	// Branding stamps the platform identity into the generated labels.
+	// Zero value applies "suparship" / "suparship.io" defaults.
+	Branding branding.Config
 }
 
 // BuildClusterSecretStoreYAML renders a ClusterSecretStore from cfg.
@@ -66,10 +73,10 @@ kind: ClusterSecretStore
 metadata:
   name: %s
   labels:
-    app.kubernetes.io/managed-by: suparship
+%s
 spec:
   provider:
-`, cfg.Name))
+`, cfg.Name, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4)))
 
 	switch cfg.BackendType {
 	case secrets.BackendK8s:
@@ -135,7 +142,7 @@ metadata:
   name: %s
   namespace: %s
   labels:
-    app.kubernetes.io/managed-by: suparship
+%s
 spec:
   refreshInterval: 1h
   secretStoreRef:
@@ -145,7 +152,7 @@ spec:
     name: %s
     creationPolicy: Owner
   dataFrom:
-`, cfg.Name, cfg.Namespace, cfg.StoreName, cfg.Name))
+`, cfg.Name, cfg.Namespace, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), cfg.StoreName, cfg.Name))
 
 	for _, item := range cfg.Items {
 		sb.WriteString(fmt.Sprintf("  - extract:\n      key: %q\n", item.Key))
@@ -165,6 +172,7 @@ func BuildSecretStoresForConfig(
 	cfg secrets.BackendConfig,
 	naming secrets.ResourceNaming,
 	orgName string,
+	brand branding.Config,
 ) []ESOSecretStoreConfig {
 	if cfg.Effective() == secrets.BackendK8s {
 		name := naming.RenderClusterSecretStore(secrets.NamingParams{
@@ -175,6 +183,7 @@ func BuildSecretStoresForConfig(
 		return []ESOSecretStoreConfig{{
 			Name:        name,
 			BackendType: secrets.BackendK8s,
+			Branding:    brand,
 		}}
 	}
 
@@ -196,6 +205,7 @@ func BuildSecretStoresForConfig(
 			Binding:         b,
 			BackendType:     cfg.Effective(),
 			PlatformVaultID: cfg.OnePassword.PlatformVaultID,
+			Branding:        brand,
 		})
 	}
 	return stores
@@ -232,6 +242,7 @@ func BuildCollapsedExternalSecretForApp(
 	naming secrets.ResourceNaming,
 	cfg secrets.BackendConfig,
 	orgName string,
+	brand branding.Config,
 ) *ESOExternalSecretConfig {
 	np := secrets.NamingParams{
 		Org:      orgName,
@@ -291,6 +302,7 @@ func BuildCollapsedExternalSecretForApp(
 		Namespace: params.Namespace,
 		StoreName: envStoreName,
 		Items:     items,
+		Branding:  brand,
 	}
 }
 
@@ -330,7 +342,10 @@ func (p *Publisher) WriteCollapsedExternalSecret(repoDir string, cfg ESOExternal
 // BuildAppConfigMapYAML renders a ConfigMap YAML for non-secret env vars.
 // vars may be nil or empty — in that case an empty-data ConfigMap is written
 // so ArgoCD can always resolve the envFrom reference without errors.
-func BuildAppConfigMapYAML(name, namespace string, vars map[string]string) string {
+//
+// brand stamps the platform identity onto the ConfigMap labels. Zero value
+// applies "suparship" defaults so existing callers remain unchanged.
+func BuildAppConfigMapYAML(name, namespace string, vars map[string]string, brand branding.Config) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap
@@ -338,9 +353,9 @@ metadata:
   name: %s
   namespace: %s
   labels:
-    app.kubernetes.io/managed-by: suparship
+%s
 data:
-`, name, namespace))
+`, name, namespace, branding.LabelsYAML(brand.ManagedByLabels(), 4)))
 
 	if len(vars) == 0 {
 		sb.WriteString("  {}\n")
@@ -364,6 +379,6 @@ data:
 // gitops-output/{envName}/{project}/{app}/ or
 // gitops-output/previews/{project}/{previewName}/.
 func (p *Publisher) WriteAppConfigMap(dir, name, namespace string, vars map[string]string) error {
-	content := BuildAppConfigMapYAML(name, namespace, vars)
+	content := BuildAppConfigMapYAML(name, namespace, vars, p.cfg.Branding)
 	return p.writeFile(filepath.Join(dir, "env-configmap.yaml"), []byte(content))
 }

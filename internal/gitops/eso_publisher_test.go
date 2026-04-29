@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
@@ -71,7 +72,7 @@ func TestBuildSecretStoresForConfig_IncludesPlatformVault(t *testing.T) {
 			},
 		},
 	}
-	stores := BuildSecretStoresForConfig(cfg, secrets.ResourceNaming{}, "default")
+	stores := BuildSecretStoresForConfig(cfg, secrets.ResourceNaming{}, "default", branding.Config{})
 	if len(stores) != 1 {
 		t.Fatalf("expected 1 store, got %d", len(stores))
 	}
@@ -150,7 +151,7 @@ func TestBuildSecretStoresForConfig_PerEnvBinding(t *testing.T) {
 		},
 	}
 	naming := secrets.ResourceNaming{}
-	stores := BuildSecretStoresForConfig(cfg, naming, "default")
+	stores := BuildSecretStoresForConfig(cfg, naming, "default", branding.Config{})
 
 	if len(stores) != 2 {
 		t.Fatalf("expected 2 stores (one per env), got %d", len(stores))
@@ -174,7 +175,7 @@ func TestBuildSecretStoresForConfig_SkipsUnprovisioned(t *testing.T) {
 			},
 		},
 	}
-	stores := BuildSecretStoresForConfig(cfg, secrets.ResourceNaming{}, "default")
+	stores := BuildSecretStoresForConfig(cfg, secrets.ResourceNaming{}, "default", branding.Config{})
 	if len(stores) != 1 {
 		t.Fatalf("expected 1 store (only provisioned), got %d", len(stores))
 	}
@@ -200,7 +201,7 @@ func TestBuildCollapsedExternalSecretForApp(t *testing.T) {
 		},
 	}
 
-	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "default")
+	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "default", branding.Config{})
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -228,7 +229,7 @@ func TestBuildCollapsedExternalSecretForApp_SkipsMissingScopes(t *testing.T) {
 		ScopeKeys: map[string]bool{},
 	}
 
-	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "default")
+	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "default", branding.Config{})
 	if result != nil {
 		t.Error("expected nil result when no scopes have keys")
 	}
@@ -257,7 +258,7 @@ func TestBuildCollapsedExternalSecretForApp_CustomNaming(t *testing.T) {
 		},
 	}
 
-	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "myorg")
+	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "myorg", branding.Config{})
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -298,7 +299,7 @@ func TestBuildCollapsedExternalSecretForApp_PlatformStoreRoutesOrgAndProject(t *
 		},
 	}
 
-	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "default")
+	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "default", branding.Config{})
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -336,7 +337,7 @@ func TestBuildCollapsedExternalSecretForApp_OmitsClusterWhenUnbound(t *testing.T
 		},
 	}
 
-	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "default")
+	result := BuildCollapsedExternalSecretForApp(params, naming, cfg, "default", branding.Config{})
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -353,7 +354,7 @@ func TestBuildAppConfigMapYAML_WithVars(t *testing.T) {
 	yaml := BuildAppConfigMapYAML("nginx-config", "demo-nginx-staging", map[string]string{
 		"LOG_LEVEL": "info",
 		"APP_ENV":   "staging",
-	})
+	}, branding.Config{})
 
 	if !strings.Contains(yaml, "name: nginx-config") {
 		t.Error("expected name 'nginx-config'")
@@ -373,7 +374,7 @@ func TestBuildAppConfigMapYAML_WithVars(t *testing.T) {
 }
 
 func TestBuildAppConfigMapYAML_Empty(t *testing.T) {
-	yaml := BuildAppConfigMapYAML("nginx-config", "demo-nginx-prod", nil)
+	yaml := BuildAppConfigMapYAML("nginx-config", "demo-nginx-prod", nil, branding.Config{})
 
 	if !strings.Contains(yaml, "name: nginx-config") {
 		t.Error("expected name in output")
@@ -389,8 +390,8 @@ func TestBuildAppConfigMapYAML_Deterministic(t *testing.T) {
 		"A_VAR": "a",
 		"M_VAR": "m",
 	}
-	y1 := BuildAppConfigMapYAML("app-config", "ns", vars)
-	y2 := BuildAppConfigMapYAML("app-config", "ns", vars)
+	y1 := BuildAppConfigMapYAML("app-config", "ns", vars, branding.Config{})
+	y2 := BuildAppConfigMapYAML("app-config", "ns", vars, branding.Config{})
 
 	if y1 != y2 {
 		t.Error("expected deterministic output — two calls with same input should produce identical YAML")

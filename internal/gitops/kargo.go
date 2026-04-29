@@ -3,6 +3,7 @@ package gitops
 import (
 	"fmt"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/domain"
 )
 
@@ -185,6 +186,11 @@ type KargoBuildOptions struct {
 
 	// GitOpsRepoInsecure disables TLS verification for the gitops repo.
 	GitOpsRepoInsecure bool
+
+	// Branding stamps the platform identity onto every Kargo CR. Zero
+	// value applies "suparship" / "suparship.io" defaults so existing
+	// callers don't change behaviour.
+	Branding branding.Config
 }
 
 // ── Builders ─────────────────────────────────────────────────────────────────
@@ -209,14 +215,14 @@ func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehous
 		Metadata: ObjectMeta{
 			Name:      app.Name,
 			Namespace: opts.KargoNamespace,
-			Labels: map[string]string{
-				labelApp:          app.Name,
-				labelProject:      app.ProjectName,
-				labelKargoProject: opts.KargoNamespace,
-			},
-			Annotations: map[string]string{
-				"suparship.io/generator-version": "v0.1.0",
-			},
+			Labels: branding.MergeLabels(
+				opts.Branding.ManagedByLabels(),
+				map[string]string{
+					labelApp:          app.Name,
+					labelProject:      app.ProjectName,
+					labelKargoProject: opts.KargoNamespace,
+				},
+			),
 		},
 		Spec: WarehouseSpec{
 			FreightCreationPolicy: "Automatic",
@@ -308,16 +314,16 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 		Metadata: ObjectMeta{
 			Name:      stageName,
 			Namespace: opts.KargoNamespace,
-			Labels: map[string]string{
-				labelApp:          app.Name,
-				labelProject:      app.ProjectName,
-				labelEnv:          env.EnvName,
-				labelEnvType:      string(env.EnvType),
-				labelKargoProject: opts.KargoNamespace,
-			},
-			Annotations: map[string]string{
-				"suparship.io/generator-version": "v0.1.0",
-			},
+			Labels: branding.MergeLabels(
+				opts.Branding.ManagedByLabels(),
+				map[string]string{
+					labelApp:          app.Name,
+					labelProject:      app.ProjectName,
+					labelEnv:          env.EnvName,
+					labelEnvType:      string(env.EnvType),
+					labelKargoProject: opts.KargoNamespace,
+				},
+			),
 		},
 		Spec: StageSpec{
 			RequestedFreight: []FreightRequest{
@@ -375,8 +381,9 @@ type KargoPromotionPolicy struct {
 // environments. It generates PromotionPolicies for all non-preview environments,
 // enabling auto-promotion on the first (staging) environment.
 //
+// brand stamps the platform identity. Zero value applies "suparship" defaults.
 // Compatible with Kargo v0.9+. BuildKargoProject is a pure function.
-func BuildKargoProject(projectName string, envs []KargoProjectEnv) KargoProject {
+func BuildKargoProject(projectName string, envs []KargoProjectEnv, brand branding.Config) KargoProject {
 	var policies []KargoPromotionPolicy
 	for _, env := range envs {
 		policies = append(policies, KargoPromotionPolicy{
@@ -390,12 +397,10 @@ func BuildKargoProject(projectName string, envs []KargoProjectEnv) KargoProject 
 		Kind:       "Project",
 		Metadata: ObjectMeta{
 			Name: projectName,
-			Labels: map[string]string{
-				labelProject: projectName,
-			},
-			Annotations: map[string]string{
-				"suparship.io/generator-version": "v0.1.0",
-			},
+			Labels: branding.MergeLabels(
+				brand.ManagedByLabels(),
+				map[string]string{labelProject: projectName},
+			),
 		},
 		Spec: KargoProjectSpec{
 			PromotionPolicies: policies,

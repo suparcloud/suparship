@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
@@ -103,10 +104,10 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 			secrets.SATokenSecretKey: params.Token,
 		},
 		Type: "Opaque",
-		Labels: map[string]string{
-			"app.kubernetes.io/managed-by": "suparship",
-			"suparship.io/env":             params.Env,
-		},
+		Labels: branding.MergeLabels(
+			p.cfg.Branding.ManagedByLabels(),
+			map[string]string{p.cfg.Branding.LabelKey("env"): params.Env},
+		),
 	})
 	if err != nil {
 		return fmt.Errorf("seal token: %w", err)
@@ -126,6 +127,7 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 		ESONamespace:    esoNS,
 		ConnectEndpoint: params.ConnectEndpoint,
 		PlatformVaultID: params.PlatformVaultID,
+		Branding:        p.cfg.Branding,
 	})
 
 	destServer := params.ArgoCDDestination
@@ -157,7 +159,7 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 			return err
 		}
 
-		appYAML := buildSecretStoreArgoApp(params.Env, params.ClusterName, p.argoCDRepoURL(), p.cfg.Branch, destServer, esoNS)
+		appYAML := buildSecretStoreArgoApp(params.Env, params.ClusterName, p.argoCDRepoURL(), p.cfg.Branch, destServer, esoNS, p.cfg.Branding)
 		if err := p.writeFile(filepath.Join(infraDir, "secrets-"+params.ClusterName+"-app.yaml"), []byte(appYAML)); err != nil {
 			return err
 		}
@@ -245,6 +247,7 @@ func (p *Publisher) RefreshSecretStore(ctx context.Context, params RefreshSecret
 		ESONamespace:    esoNS,
 		ConnectEndpoint: params.ConnectEndpoint,
 		PlatformVaultID: params.PlatformVaultID,
+		Branding:        p.cfg.Branding,
 	})
 
 	return p.withClonedRepo(ctx, func(repoDir string) error {
@@ -270,16 +273,21 @@ func (p *Publisher) RefreshSecretStore(ctx context.Context, params RefreshSecret
 // the per-env secret-stores directory to the given target cluster.
 // The app is named secrets-{clusterName} so the name reflects the physical
 // target cluster rather than the logical environment.
-func buildSecretStoreArgoApp(env, clusterName, repoURL, branch, destServer, esoNamespace string) string {
+func buildSecretStoreArgoApp(env, clusterName, repoURL, branch, destServer, esoNamespace string, brand branding.Config) string {
+	labels := branding.MergeLabels(
+		brand.ManagedByLabels(),
+		map[string]string{
+			brand.LabelKey("env"):     env,
+			brand.LabelKey("cluster"): clusterName,
+		},
+	)
 	return fmt.Sprintf(`apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: secrets-%s
   namespace: argocd
   labels:
-    app.kubernetes.io/managed-by: suparship
-    suparship.io/env: %s
-    suparship.io/cluster: %s
+%s
 spec:
   project: suparship-system
   source:
@@ -298,5 +306,5 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
-`, clusterName, env, clusterName, repoURL, branch, env, destServer, esoNamespace)
+`, clusterName, branding.LabelsYAML(labels, 4), repoURL, branch, env, destServer, esoNamespace)
 }

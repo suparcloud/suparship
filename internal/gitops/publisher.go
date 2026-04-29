@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/helmvalues"
 	"github.com/suparcloud/suparship/internal/secrets"
@@ -67,6 +68,12 @@ type PublisherConfig struct {
 	// Optional — when nil and TemplatesDir lacks the chart, syncChart is a
 	// no-op (preserves prior behaviour).
 	ChartFetcher ChartFetcher
+	// Branding controls the platform identity stamped onto every manifest
+	// the publisher writes (label values + custom label/annotation
+	// domain). Zero value applies "suparship" / "suparship.io" defaults
+	// — SRE contractors who white-label set Org.Branding once and the
+	// publisher picks it up.
+	Branding branding.Config
 }
 
 // ChartFetcher returns the packaged Helm chart bytes for a template name, or
@@ -105,13 +112,14 @@ type Publisher struct {
 }
 
 // SetOrgConfig updates the publisher's org-scoped configuration (naming
-// patterns, backend config, and org name). Thread-safe for callers that
-// rebuild the publisher when org config changes; for concurrent use call
-// this before handing the publisher to goroutines.
-func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, backend *secrets.BackendConfig) {
+// patterns, backend config, org name, and branding). Thread-safe for
+// callers that rebuild the publisher when org config changes; for
+// concurrent use call this before handing the publisher to goroutines.
+func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, backend *secrets.BackendConfig, brand branding.Config) {
 	p.cfg.OrgName = orgName
 	p.cfg.ResourceNaming = naming
 	p.cfg.BackendConfig = backend
+	p.cfg.Branding = brand
 }
 
 // NewPublisher creates a Publisher from cfg.
@@ -224,7 +232,7 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 			if orgName == "" {
 				orgName = "default"
 			}
-			stores := BuildSecretStoresForConfig(*p.cfg.BackendConfig, p.cfg.ResourceNaming, orgName)
+			stores := BuildSecretStoresForConfig(*p.cfg.BackendConfig, p.cfg.ResourceNaming, orgName, p.cfg.Branding)
 			if err := p.WriteSecretStores(repoDir, stores); err != nil {
 				return fmt.Errorf("writing ClusterSecretStores: %w", err)
 			}
@@ -263,16 +271,30 @@ type namespaceMetadata struct {
 }
 
 // BuildProjectNamespaceManifest renders the Namespace YAML for one project
-// environment with the appropriate suparship labels. Pure function — no git
+// environment with the appropriate platform labels. Pure function — no git
 // or filesystem side effects — exposed so tests can verify label behaviour
 // without exercising the cloned-repo plumbing.
-func BuildProjectNamespaceManifest(projectName string, env ProjectNamespaceEnv) ([]byte, error) {
-	labels := map[string]string{
-		"suparship.io/project":    projectName,
-		"suparship.io/managed-by": "suparship",
-	}
+//
+// Labels written:
+//
+//	app.kubernetes.io/managed-by: <branding name>
+//	<branding domain>/generator-version: <version>
+//	<branding domain>/project: <project>
+//	<branding domain>/cluster: <cluster> (when bound)
+//
+// The project + cluster labels match the replicator selectors used by the
+// envconfig writers so that an UpperLevelEnvWriter's
+// "replicate-to-matching: <domain>/project={name}" annotation finds these
+// namespaces — keeping the platform working when an operator white-labels
+// with a custom LabelDomain (suparship → acme.io requires both writers to
+// emit the same prefix; that's why both consult the same Branding config).
+func BuildProjectNamespaceManifest(projectName string, env ProjectNamespaceEnv, brand branding.Config) ([]byte, error) {
+	labels := branding.MergeLabels(
+		brand.ManagedByLabels(),
+		map[string]string{brand.LabelKey("project"): projectName},
+	)
 	if env.ClusterRef != "" {
-		labels["suparship.io/cluster"] = env.ClusterRef
+		labels[brand.LabelKey("cluster")] = env.ClusterRef
 	}
 	manifest := namespaceManifest{
 		APIVersion: "v1",
@@ -316,7 +338,7 @@ func (p *Publisher) PublishProjectNamespaces(ctx context.Context, projectName st
 				}
 				continue
 			}
-			data, err := BuildProjectNamespaceManifest(projectName, env)
+			data, err := BuildProjectNamespaceManifest(projectName, env, p.cfg.Branding)
 			if err != nil {
 				return fmt.Errorf("marshal namespace manifest for %s/%s: %w", projectName, env.EnvName, err)
 			}
@@ -565,6 +587,7 @@ func (p *Publisher) writeAppPlatformResources(
 			naming,
 			*p.cfg.BackendConfig,
 			orgName,
+			p.cfg.Branding,
 		)
 	}
 	if esCfg == nil {
@@ -581,6 +604,7 @@ func (p *Publisher) writeAppPlatformResources(
 			Namespace: namespace,
 			StoreName: env.StoreName,
 			Items:     []ESOItemRef{{Key: itemTitle, StoreName: env.StoreName}},
+			Branding:  p.cfg.Branding,
 		}
 	}
 	content := BuildCollapsedExternalSecretYAML(*esCfg)
@@ -759,7 +783,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			IsFirstStage: i == 0,
 		})
 	}
-	proj := BuildKargoProject(projectNS, projectEnvs)
+	proj := BuildKargoProject(projectNS, projectEnvs, p.cfg.Branding)
 	projBytes, err := yaml.Marshal(proj)
 	if err != nil {
 		return fmt.Errorf("marshal kargo project: %w", err)
@@ -774,6 +798,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	// Falls back to the default ghcr.io/{project}/{app} placeholder.
 	whOpts := KargoBuildOptions{
 		InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
+		Branding:              p.cfg.Branding,
 	}
 	if repo, ok := app.Spec.Values["image_repository"].(string); ok && repo != "" {
 		whOpts.ImageRepoURL = repo
@@ -812,6 +837,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			ImageRepoURL:          whOpts.ImageRepoURL,
 			GitOpsRepoURL:         p.kargoGitRepoURL(),
 			GitOpsRepoInsecure:    p.cfg.InsecureRegistry,
+			Branding:              p.cfg.Branding,
 		}
 		stage := BuildKargoStage(app, appEnv, upstreams, stageOpts)
 		stageBytes, err := yaml.Marshal(stage)

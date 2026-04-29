@@ -3,6 +3,7 @@ package gitops
 import (
 	"fmt"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
@@ -16,13 +17,13 @@ func init() {
 // ClusterSecretStore that connects ESO to 1Password via Connect.
 // The Connect URL points to the managed Connect server in the tooling
 // cluster; the auth secret is the sealed per-env Connect token.
-func Build1PasswordClusterSecretStoreYAML(storeName, connectURL, vaultID, tokenSecretName, tokenSecretKey, tokenSecretNS string) string {
+func Build1PasswordClusterSecretStoreYAML(storeName, connectURL, vaultID, tokenSecretName, tokenSecretKey, tokenSecretNS string, brand branding.Config) string {
 	return fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
   name: %s
   labels:
-    app.kubernetes.io/managed-by: suparship
+%s
 spec:
   provider:
     onepassword:
@@ -35,12 +36,12 @@ spec:
             name: %s
             key: %s
             namespace: %s
-`, storeName, connectURL, vaultID, tokenSecretName, tokenSecretKey, tokenSecretNS)
+`, storeName, branding.LabelsYAML(brand.ManagedByLabels(), 4), connectURL, vaultID, tokenSecretName, tokenSecretKey, tokenSecretNS)
 }
 
 // Build1PasswordExternalSecretYAML returns an ExternalSecret CR that pulls
 // a set of items from a specific 1Password vault into a K8s Secret.
-func Build1PasswordExternalSecretYAML(name, namespace, vaultUUID string, keys []string) string {
+func Build1PasswordExternalSecretYAML(name, namespace, vaultUUID string, keys []string, brand branding.Config) string {
 	var dataEntries string
 	for _, key := range keys {
 		dataEntries += fmt.Sprintf(`  - secretKey: %s
@@ -56,7 +57,7 @@ metadata:
   name: %s
   namespace: %s
   labels:
-    app.kubernetes.io/managed-by: suparship
+%s
 spec:
   refreshInterval: 1h
   secretStoreRef:
@@ -66,7 +67,7 @@ spec:
     name: %s
     creationPolicy: Owner
   data:
-%s`, name, namespace, onePasswordStoreName, name, dataEntries)
+%s`, name, namespace, branding.LabelsYAML(brand.ManagedByLabels(), 4), onePasswordStoreName, name, dataEntries)
 }
 
 // DefaultConnectEndpoint is the in-cluster URL of the managed Connect

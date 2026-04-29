@@ -1070,7 +1070,7 @@ func publishInitialEnvInfra(
 	if orgName == "" {
 		orgName = "default"
 	}
-	pub.SetOrgConfig(orgName, org.ResourceNaming, &org.SecretBackend)
+	pub.SetOrgConfig(orgName, org.ResourceNaming, &org.SecretBackend, org.Branding)
 
 	appSetEnvs := make([]gitops.AppSetEnv, 0, len(org.Environments))
 	for _, orgEnv := range org.Environments {
