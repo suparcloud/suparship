@@ -304,6 +304,11 @@ type Config struct {
 	Authenticator   auth.Authenticator   // optional: enables auth endpoints when set
 	OrgProvider     rbac.OrgStore        // optional: enables RBAC-protected routes when set (write ops also require OrgStore)
 	Templates       []*tpl.Template      // optional: pre-loaded templates for /api/v1/templates
+	// ClusterTemplateLoader resolves cluster-stored templates on each
+	// request. When non-nil it is merged with Templates so newly imported
+	// charts surface in the gallery without restarting the server. Built-in
+	// names take precedence on collisions.
+	ClusterTemplateLoader ClusterTemplateLoader
 	ProjectStore    project.Store        // optional: enables service creation when set
 	RuntimeProvider runtime.Provider     // optional: enables runtime inventory when set
 	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
@@ -377,7 +382,7 @@ func New(cfg Config) *Server {
 	}
 
 	if ah != nil {
-		th := newTemplateHandler(ah, cfg.Templates)
+		th := newTemplateHandler(ah, cfg.Templates, cfg.ClusterTemplateLoader, cfg.Logger)
 		th.registerRoutes(mux)
 		cfg.Logger.Info("template endpoints enabled", "count", len(cfg.Templates))
 	}

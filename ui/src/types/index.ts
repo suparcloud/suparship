@@ -97,6 +97,34 @@ export interface TemplatesResponse {
   templates: TemplateSummary[];
 }
 
+// Returned by POST /templates/import/preview — drives the review/edit UI.
+export interface TemplateImportSummary {
+  chartName: string;
+  chartVersion: string;
+  appVersion?: string;
+  description?: string;
+  hasSchema: boolean;
+  inputCount: number;
+  mappingCount: number;
+  archiveSize: number;
+}
+
+export interface TemplateImportChartFile {
+  path: string;
+  size: number;
+}
+
+export interface TemplateImportPreview {
+  templateYAML: string;
+  summary: TemplateImportSummary;
+  chartFiles: TemplateImportChartFile[];
+}
+
+export interface TemplateImportResult {
+  name: string;
+  version: string;
+}
+
 export interface TemplateInput {
   name: string;
   title: string;

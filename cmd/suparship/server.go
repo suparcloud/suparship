@@ -519,6 +519,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		Authenticator:           authenticator,
 		OrgProvider:             orgProvider,
 		Templates:               templates,
+		ClusterTemplateLoader:   clusterTemplateLoaderFromClient(kubeClient),
 		ProjectStore:            projectStore,
 		RuntimeProvider:         runtimeProvider,
 		LogsProvider:            logsProvider,
@@ -1140,6 +1141,20 @@ func envConfigReaderFromClient(client kubernetes.Interface) *envconfig.UpperLeve
 		return nil
 	}
 	return envconfig.NewUpperLevelEnvWriter(client)
+}
+
+// clusterTemplateLoaderFromClient returns a server.ClusterTemplateLoader
+// that reads templates persisted as ConfigMaps in the suparship-system
+// namespace, so freshly imported charts surface in the gallery without a
+// restart. Returns nil in fake/local-dev mode (no client) — the templates
+// handler then serves only the disk-loaded built-ins.
+func clusterTemplateLoaderFromClient(client kubernetes.Interface) server.ClusterTemplateLoader {
+	if client == nil {
+		return nil
+	}
+	return func(ctx context.Context) ([]*tpl.Template, error) {
+		return kube.LoadTemplates(ctx, client)
+	}
 }
 
 // kubeChartFetcher implements gitops.ChartFetcher by reading chart.tgz from

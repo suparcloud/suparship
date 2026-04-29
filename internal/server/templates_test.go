@@ -59,7 +59,7 @@ func newTestTemplateMux() (*http.ServeMux, *authHandler) {
 	}
 	ah.registerRoutes(mux)
 
-	th := newTemplateHandler(ah, testTemplates())
+	th := newTemplateHandler(ah, testTemplates(), nil, nil)
 	th.registerRoutes(mux)
 
 	return mux, ah
