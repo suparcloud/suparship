@@ -16,6 +16,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/bootstrap"
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/config"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
@@ -247,7 +248,17 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		appStore = kubeDeps.AppStore
 		clusterStore = kubeDeps.ClusterStore
 		secretBackend = secrets.NewK8sBackend(client)
-		upperLevelSecretWriter = secrets.NewUpperLevelSecretWriter(client)
+		k8sUpperWriter := secrets.NewUpperLevelSecretWriter(client)
+		// Branding governs the replicator-matching label keys this writer
+		// emits (e.g. <domain>/project=...) so it must match the labels the
+		// gitops publisher puts on namespaces. Read once at startup; org
+		// config rebuilds the writer on save.
+		if orgProvider != nil {
+			if org, orgErr := orgProvider.GetOrg(cmd.Context()); orgErr == nil && org != nil {
+				k8sUpperWriter.Branding = org.Branding
+			}
+		}
+		upperLevelSecretWriter = k8sUpperWriter
 
 		// Wire 1Password vault item writer + upper-level writer when the org
 		// backend is configured for 1Password. The SA token must already be
@@ -388,7 +399,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					backend:         secretBackend,
 					appNamespaceFor: appStoreNamespaceResolver(appStore),
 					projectStore:    projectStore,
-					envConfigReader: envConfigReaderFromClient(kubeClient),
+					envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(cmd.Context(), orgProvider)),
 				}
 				sealPublisherHolder.Swap(pub)
 				logger.Info("gitops publisher enabled",
@@ -500,7 +511,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				backend:         secretBackend,
 				appNamespaceFor: appStoreNamespaceResolver(appStore),
 				projectStore:    projectStore,
-				envConfigReader: envConfigReaderFromClient(kubeClient),
+				envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(ctx, orgProvider)),
 			})
 			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
@@ -1143,14 +1154,36 @@ func buildEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string 
 	}
 }
 
+// brandingFromOrg fetches Org.Branding once at startup and returns its zero
+// value when the org isn't loadable. Used to seed Branding on writers that
+// embed it; live reload (e.g. on org-config save) requires a server restart
+// — same lifecycle as gitops.PublisherConfig.
+func brandingFromOrg(ctx context.Context, op rbac.OrgProvider) branding.Config {
+	if op == nil {
+		return branding.Config{}
+	}
+	org, err := op.GetOrg(ctx)
+	if err != nil || org == nil {
+		return branding.Config{}
+	}
+	return org.Branding
+}
+
 // envConfigReaderFromClient builds a cluster-scope env-var reader from the K8s
 // client. Returns nil when the client is unavailable (fake mode) so the adapter
 // gracefully skips the cluster layer.
-func envConfigReaderFromClient(client kubernetes.Interface) *envconfig.UpperLevelEnvWriter {
+//
+// brand is applied so writes that go through the same struct (when the env
+// writer is wired into the env-config handler) emit replicator-matching
+// annotations consistent with the namespace labels the gitops publisher
+// puts on app/project namespaces. Read paths ignore Branding.
+func envConfigReaderFromClient(client kubernetes.Interface, brand branding.Config) *envconfig.UpperLevelEnvWriter {
 	if client == nil {
 		return nil
 	}
-	return envconfig.NewUpperLevelEnvWriter(client)
+	w := envconfig.NewUpperLevelEnvWriter(client)
+	w.Branding = brand
+	return w
 }
 
 // registrySyncEngine builds the external-template sync engine, or returns

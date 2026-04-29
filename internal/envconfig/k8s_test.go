@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/envconfig"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -97,6 +98,46 @@ func TestUpperLevelEnvWriter_WriteAndReadProject(t *testing.T) {
 	wantAnnotation := "suparship.io/project=myproject"
 	if cm.Annotations[envconfig.ReplicatorMatchingAnnotation] != wantAnnotation {
 		t.Errorf("expected replicate-to-matching=%q, got %q", wantAnnotation, cm.Annotations[envconfig.ReplicatorMatchingAnnotation])
+	}
+}
+
+// TestUpperLevelEnvWriter_CustomBrandingFlipsReplicatorKey locks the
+// lockstep between this writer and gitops.BuildProjectNamespaceManifest:
+// when the operator white-labels via Branding.LabelDomain, the
+// replicator-matching annotation here MUST use the same domain as the
+// labels emitted on app/project namespaces. If this test breaks because
+// the annotation prefix diverged from the namespace label prefix,
+// replication will silently stop matching across the platform.
+func TestUpperLevelEnvWriter_CustomBrandingFlipsReplicatorKey(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	w := envconfig.NewUpperLevelEnvWriter(client)
+	w.Branding = branding.Config{Name: "acme-platform", LabelDomain: "platform.acme.io"}
+	ctx := context.Background()
+
+	if err := w.WriteProjectEnvConfig(ctx, "myproject", envconfig.EnvConfig{}); err != nil {
+		t.Fatalf("WriteProjectEnvConfig: %v", err)
+	}
+	cm, err := client.CoreV1().ConfigMaps(envconfig.SystemNamespace).Get(ctx, envconfig.ProjectEnvConfigMapName("myproject"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting ConfigMap: %v", err)
+	}
+	got := cm.Annotations[envconfig.ReplicatorMatchingAnnotation]
+	want := "platform.acme.io/project=myproject"
+	if got != want {
+		t.Errorf("custom branding: replicate-to-matching = %q, want %q", got, want)
+	}
+
+	if err := w.WriteClusterEnvConfig(ctx, "kind-staging", envconfig.EnvConfig{}); err != nil {
+		t.Fatalf("WriteClusterEnvConfig: %v", err)
+	}
+	cm, err = client.CoreV1().ConfigMaps(envconfig.SystemNamespace).Get(ctx, envconfig.ClusterEnvConfigMapName("kind-staging"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting cluster ConfigMap: %v", err)
+	}
+	got = cm.Annotations[envconfig.ReplicatorMatchingAnnotation]
+	want = "platform.acme.io/cluster=kind-staging"
+	if got != want {
+		t.Errorf("custom branding: cluster replicate-to-matching = %q, want %q", got, want)
 	}
 }
 
