@@ -1,8 +1,12 @@
 package gitops
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -56,6 +60,21 @@ type PublisherConfig struct {
 	// When non-nil and the effective backend is 1Password, PublishEnvInfra
 	// also writes ClusterSecretStore YAMLs to _infra/secret-stores/.
 	BackendConfig *secrets.BackendConfig
+	// ChartFetcher resolves a packaged Helm chart (chart.tgz) by template
+	// name when no local TemplatesDir entry exists. Used for templates
+	// imported via the BYO-chart flow, where the chart bytes live in a
+	// cluster ConfigMap rather than on the suparship pod's filesystem.
+	// Optional — when nil and TemplatesDir lacks the chart, syncChart is a
+	// no-op (preserves prior behaviour).
+	ChartFetcher ChartFetcher
+}
+
+// ChartFetcher returns the packaged Helm chart bytes for a template name, or
+// nil when no bundle exists. Implementations are free to consult any
+// backing store (cluster ConfigMap, OCI registry, …); the publisher only
+// needs the .tgz contents.
+type ChartFetcher interface {
+	LoadChartBundle(ctx context.Context, templateName string) ([]byte, error)
 }
 
 // Publisher writes GitOps manifests to the GitOps repository and commits +
@@ -380,7 +399,7 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 
 		// Sync the Helm chart into charts/{template}/ so ArgoCD's
 		// ApplicationSet can resolve the chart path.
-		if err := p.syncChart(repoDir, app.Spec.Template.Name); err != nil {
+		if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name); err != nil {
 			return fmt.Errorf("sync chart for template %s: %w", app.Spec.Template.Name, err)
 		}
 
@@ -568,52 +587,128 @@ func (p *Publisher) writeAppPlatformResources(
 	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content))
 }
 
-// syncChart copies the Helm chart for templateName from the local templates
-// directory into charts/{templateName}/ inside the cloned gitops repo.
-// This ensures ArgoCD's ApplicationSet can resolve the chart path
-// ("charts/{{template}}") for every template that has been published.
+// syncChart materialises the Helm chart for templateName at
+// charts/{templateName}/ inside the cloned gitops repo so ArgoCD's
+// ApplicationSet can resolve "charts/{{template}}".
 //
-// When TemplatesDir is not configured, syncChart is a no-op.
-// When the chart directory already exists with identical content, the
-// subsequent git commit will be a no-op (via stagedIsEmpty).
-func (p *Publisher) syncChart(repoDir, templateName string) error {
-	if p.cfg.TemplatesDir == "" {
-		return nil
-	}
-
-	srcDir := filepath.Join(p.cfg.TemplatesDir, templateName, "chart")
-	if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-		slog.Debug("gitops: no chart directory for template, skipping sync", "template", templateName)
-		return nil
-	}
-
+// Resolution order:
+//  1. Local disk: TemplatesDir/{templateName}/chart/ (built-ins & dev mode).
+//  2. Cluster bundle: ChartFetcher.LoadChartBundle(templateName), the
+//     packaged .tgz stored alongside templates imported via the BYO-chart
+//     flow.
+//
+// Both paths are no-ops when their source is missing — same as before — so
+// existing callers that don't configure ChartFetcher keep prior behaviour.
+// When the chart directory already exists with identical content the
+// subsequent git commit is a no-op via stagedIsEmpty.
+func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName string) error {
 	dstDir := filepath.Join(repoDir, "charts", templateName)
 
+	if p.cfg.TemplatesDir != "" {
+		srcDir := filepath.Join(p.cfg.TemplatesDir, templateName, "chart")
+		if _, err := os.Stat(srcDir); err == nil {
+			return p.copyChartDir(srcDir, dstDir)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat chart dir %s: %w", srcDir, err)
+		}
+	}
+
+	if p.cfg.ChartFetcher == nil {
+		slog.Debug("gitops: no local chart and no ChartFetcher configured", "template", templateName)
+		return nil
+	}
+	data, err := p.cfg.ChartFetcher.LoadChartBundle(ctx, templateName)
+	if err != nil {
+		return fmt.Errorf("fetch chart bundle for %s: %w", templateName, err)
+	}
+	if len(data) == 0 {
+		slog.Debug("gitops: no chart bundle for template, skipping sync", "template", templateName)
+		return nil
+	}
+	return p.extractChartTGZ(data, dstDir)
+}
+
+// copyChartDir copies a chart from a local directory into the gitops repo,
+// preserving subdirectory structure. Extracted from syncChart so the cluster
+// fallback path can reuse the writeFile machinery without duplicating walks.
+func (p *Publisher) copyChartDir(srcDir, dstDir string) error {
 	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-
 		rel, err := filepath.Rel(srcDir, path)
 		if err != nil {
 			return err
 		}
 		dst := filepath.Join(dstDir, rel)
-
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o755)
 		}
-
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("reading chart file %s: %w", path, err)
+			return fmt.Errorf("read chart file %s: %w", path, err)
 		}
-		if err := p.writeFile(dst, data); err != nil {
-			return err
-		}
-		return nil
+		return p.writeFile(dst, data)
 	})
 }
+
+// extractChartTGZ untars a packaged Helm chart into dstDir, stripping the
+// archive's root chart directory so files land directly under dstDir.
+//
+// Helm's `helm package` wraps everything in a top-level "<chartName>/"
+// directory; the gitops layout expects files directly under
+// charts/{templateName}/, so we rebase paths during extraction. This keeps
+// the on-repo layout identical to the local-disk path, which means existing
+// ApplicationSets keep working without changes.
+func (p *Publisher) extractChartTGZ(data []byte, dstDir string) error {
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read tar entry: %w", err)
+		}
+		// Rebase: drop the first path component (the chart's root dir).
+		clean := filepath.Clean(hdr.Name)
+		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+			return fmt.Errorf("unsafe path in chart bundle: %s", hdr.Name)
+		}
+		parts := strings.SplitN(clean, string(filepath.Separator), 2)
+		if len(parts) < 2 {
+			continue // top-level entry with no chart-internal path
+		}
+		dst := filepath.Join(dstDir, parts[1])
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(dst, 0o755); err != nil {
+				return fmt.Errorf("mkdir %s: %w", dst, err)
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			buf, err := io.ReadAll(io.LimitReader(tr, maxChartEntrySize))
+			if err != nil {
+				return fmt.Errorf("read tar entry %s: %w", hdr.Name, err)
+			}
+			if err := p.writeFile(dst, buf); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// maxChartEntrySize bounds a single tar entry to 4 MiB during extraction,
+// matching the chart-import budget. A misbehaving uploader can't fill the
+// gitops repo's tmpdir with a single oversize file.
+const maxChartEntrySize = 4 * 1024 * 1024
 
 // publishKargoCRs writes the Kargo Namespace, Warehouse, and Stage manifests
 // for app into gitops-output/_infra/kargo/ so ArgoCD syncs them to the cluster.

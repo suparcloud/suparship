@@ -206,3 +206,15 @@ func Parse(data []byte) (*Template, error) {
 	}
 	return &t, nil
 }
+
+// Marshal serializes a validated Template back to YAML.
+func Marshal(t *Template) ([]byte, error) {
+	if t == nil {
+		return nil, fmt.Errorf("nil template")
+	}
+	out, err := yaml.Marshal(t)
+	if err != nil {
+		return nil, fmt.Errorf("marshal template: %w", err)
+	}
+	return out, nil
+}

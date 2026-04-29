@@ -500,6 +500,18 @@ func New(cfg Config) *Server {
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")
+
+		if cfg.KubeClient != nil {
+			tih := &templateImportHandler{
+				client: cfg.KubeClient,
+				authMiddleware: func(next http.HandlerFunc) http.HandlerFunc {
+					return ah.requireAuth(rh.requireOrgAdmin(next))
+				},
+				logger: cfg.Logger,
+			}
+			tih.registerRoutes(mux)
+			cfg.Logger.Info("template import endpoints enabled")
+		}
 	}
 
 	if cfg.ClusterStore != nil && ah != nil {

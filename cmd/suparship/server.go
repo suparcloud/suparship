@@ -361,6 +361,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			pubCfg.RepoPassword = password
 			pubCfg.SyncAutomated = true
 			pubCfg.TemplatesDir = templatesDir
+			// ChartFetcher resolves chart bundles for templates imported via
+			// the BYO-chart flow (where the chart .tgz lives in a cluster
+			// ConfigMap rather than on disk). Built-in templates that ship
+			// with the binary still resolve through TemplatesDir first.
+			pubCfg.ChartFetcher = chartFetcherFromClient(kubeClient)
 
 			// InsecureRegistry is read from the registry ConfigMap (if configured).
 			if registryStore != nil {
@@ -478,6 +483,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				Branch:          repoCfg.Branch,
 				SyncAutomated:   true,
 				TemplatesDir:    templatesDir,
+				ChartFetcher:    chartFetcherFromClient(kubeClient),
 			})
 			if err != nil {
 				return fmt.Errorf("rebuild gitops publisher: %w", err)
@@ -1134,6 +1140,28 @@ func envConfigReaderFromClient(client kubernetes.Interface) *envconfig.UpperLeve
 		return nil
 	}
 	return envconfig.NewUpperLevelEnvWriter(client)
+}
+
+// kubeChartFetcher implements gitops.ChartFetcher by reading chart.tgz from
+// the template's ConfigMap in suparship-system. Built once per server start
+// and shared across publisher rebuilds so the underlying client stays warm.
+type kubeChartFetcher struct {
+	client kubernetes.Interface
+}
+
+// LoadChartBundle satisfies gitops.ChartFetcher.
+func (k *kubeChartFetcher) LoadChartBundle(ctx context.Context, templateName string) ([]byte, error) {
+	return kube.LoadChartBundle(ctx, k.client, templateName)
+}
+
+// chartFetcherFromClient returns a gitops.ChartFetcher backed by the cluster
+// client, or nil when running without a client (fake mode) so the publisher
+// preserves its prior "skip silently" behaviour for missing charts.
+func chartFetcherFromClient(client kubernetes.Interface) gitops.ChartFetcher {
+	if client == nil {
+		return nil
+	}
+	return &kubeChartFetcher{client: client}
 }
 
 // appStoreNamespaceResolver returns a function that looks up the resolved K8s
