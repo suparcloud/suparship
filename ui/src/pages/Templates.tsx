@@ -133,12 +133,28 @@ export function Templates() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-900">Templates</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Golden paths for deploying apps. Pick a template to see what it
-          offers.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">Templates</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Golden paths for deploying apps. Pick a template to see what it
+            offers.
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <Link
+            to="/templates/sources"
+            className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            External sources
+          </Link>
+          <Link
+            to="/templates/import"
+            className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
+          >
+            Import Helm chart
+          </Link>
+        </div>
       </div>
 
       {templates.length === 0 ? (
@@ -152,7 +168,8 @@ export function Templates() {
             No templates yet
           </h3>
           <p className="mt-1 text-sm text-gray-500">
-            Start the server with <code className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">--templates-dir</code> to load templates.
+            Import a Helm chart with the button above, or start the server
+            with <code className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono">--templates-dir</code>.
           </p>
         </div>
       ) : (

@@ -1,10 +1,18 @@
 package server
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
+	"sort"
 
 	"github.com/suparcloud/suparship/internal/tpl"
 )
+
+// ClusterTemplateLoader returns templates persisted as cluster ConfigMaps.
+// Wired by cmd/suparship/server.go to kube.LoadTemplates so freshly imported
+// charts appear in the gallery without a server restart.
+type ClusterTemplateLoader func(ctx context.Context) ([]*tpl.Template, error)
 
 // --- Template API DTO types ---
 
@@ -70,18 +78,72 @@ type PresetDTO struct {
 
 // --- Handler ---
 
-// templateHandler serves template metadata endpoints.
+// templateHandler serves template metadata endpoints. The handler holds the
+// disk/built-in templates loaded at startup and (optionally) a live loader
+// for cluster-stored templates so the BYO-chart import flow surfaces in the
+// gallery without a server restart.
+//
+// Resolution policy: built-ins take precedence on name collisions — that
+// way an operator who accidentally imports a chart named "web-service"
+// can't shadow the platform's golden path.
 type templateHandler struct {
-	auth   *authHandler
-	list   []TemplateSummaryDTO
-	byName map[string]*tpl.Template
+	auth          *authHandler
+	builtin       []*tpl.Template
+	clusterLoader ClusterTemplateLoader
+	logger        *slog.Logger
 }
 
-func newTemplateHandler(auth *authHandler, templates []*tpl.Template) *templateHandler {
-	list := make([]TemplateSummaryDTO, len(templates))
-	byName := make(map[string]*tpl.Template, len(templates))
+func newTemplateHandler(auth *authHandler, builtin []*tpl.Template, clusterLoader ClusterTemplateLoader, logger *slog.Logger) *templateHandler {
+	return &templateHandler{
+		auth:          auth,
+		builtin:       builtin,
+		clusterLoader: clusterLoader,
+		logger:        logger,
+	}
+}
 
-	for i, t := range templates {
+func (th *templateHandler) registerRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/templates", th.auth.requireAuth(th.handleList))
+	mux.HandleFunc("GET /api/v1/templates/{name}", th.auth.requireAuth(th.handleDetail))
+}
+
+// resolve merges built-ins with the current cluster list. Cluster fetch
+// errors are logged but not surfaced — the gallery should still render the
+// built-ins when the API server is misbehaving rather than 500ing entirely.
+func (th *templateHandler) resolve(ctx context.Context) ([]*tpl.Template, map[string]*tpl.Template) {
+	seen := make(map[string]bool, len(th.builtin))
+	merged := make([]*tpl.Template, 0, len(th.builtin))
+	for _, t := range th.builtin {
+		merged = append(merged, t)
+		seen[t.Metadata.Name] = true
+	}
+	if th.clusterLoader != nil {
+		cluster, err := th.clusterLoader(ctx)
+		if err != nil && th.logger != nil {
+			th.logger.Warn("template list: cluster fetch failed; serving built-ins only", "err", err)
+		}
+		for _, t := range cluster {
+			if seen[t.Metadata.Name] {
+				continue
+			}
+			merged = append(merged, t)
+			seen[t.Metadata.Name] = true
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Metadata.Name < merged[j].Metadata.Name
+	})
+	byName := make(map[string]*tpl.Template, len(merged))
+	for _, t := range merged {
+		byName[t.Metadata.Name] = t
+	}
+	return merged, byName
+}
+
+func (th *templateHandler) handleList(w http.ResponseWriter, r *http.Request) {
+	merged, _ := th.resolve(r.Context())
+	list := make([]TemplateSummaryDTO, len(merged))
+	for i, t := range merged {
 		list[i] = TemplateSummaryDTO{
 			Name:        t.Metadata.Name,
 			Version:     t.Metadata.Version,
@@ -90,29 +152,18 @@ func newTemplateHandler(auth *authHandler, templates []*tpl.Template) *templateH
 			Category:    t.Spec.Category,
 			Engine:      t.Spec.Engine.Type,
 		}
-		byName[t.Metadata.Name] = t
 	}
-
-	return &templateHandler{auth: auth, list: list, byName: byName}
-}
-
-func (th *templateHandler) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/templates", th.auth.requireAuth(th.handleList))
-	mux.HandleFunc("GET /api/v1/templates/{name}", th.auth.requireAuth(th.handleDetail))
-}
-
-func (th *templateHandler) handleList(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, TemplatesResponse{Templates: th.list})
+	writeJSON(w, http.StatusOK, TemplatesResponse{Templates: list})
 }
 
 func (th *templateHandler) handleDetail(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	t, ok := th.byName[name]
+	_, byName := th.resolve(r.Context())
+	t, ok := byName[name]
 	if !ok {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "template not found"})
 		return
 	}
-
 	writeJSON(w, http.StatusOK, templateToDetail(t))
 }
 

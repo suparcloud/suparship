@@ -29,6 +29,7 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
+	"github.com/suparcloud/suparship/internal/tpl/registrysync"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -304,6 +305,11 @@ type Config struct {
 	Authenticator   auth.Authenticator   // optional: enables auth endpoints when set
 	OrgProvider     rbac.OrgStore        // optional: enables RBAC-protected routes when set (write ops also require OrgStore)
 	Templates       []*tpl.Template      // optional: pre-loaded templates for /api/v1/templates
+	// ClusterTemplateLoader resolves cluster-stored templates on each
+	// request. When non-nil it is merged with Templates so newly imported
+	// charts surface in the gallery without restarting the server. Built-in
+	// names take precedence on collisions.
+	ClusterTemplateLoader ClusterTemplateLoader
 	ProjectStore    project.Store        // optional: enables service creation when set
 	RuntimeProvider runtime.Provider     // optional: enables runtime inventory when set
 	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
@@ -352,6 +358,10 @@ type Config struct {
 	// RegistryStore reads/writes the container registry ConfigMap.
 	// Nil disables the /api/v1/registry/* endpoints.
 	RegistryStore *registry.Store
+	// RegistrySyncEngine drives the external-template sync flow. When nil
+	// the registry's read endpoints still work; the /sync POST routes
+	// return 503.
+	RegistrySyncEngine *registrysync.Engine
 }
 
 // Server is the suparship HTTP API server.
@@ -377,7 +387,7 @@ func New(cfg Config) *Server {
 	}
 
 	if ah != nil {
-		th := newTemplateHandler(ah, cfg.Templates)
+		th := newTemplateHandler(ah, cfg.Templates, cfg.ClusterTemplateLoader, cfg.Logger)
 		th.registerRoutes(mux)
 		cfg.Logger.Info("template endpoints enabled", "count", len(cfg.Templates))
 	}
@@ -500,6 +510,18 @@ func New(cfg Config) *Server {
 		}
 		rh.registerRoutes(mux)
 		cfg.Logger.Info("RBAC-protected routes enabled")
+
+		if cfg.KubeClient != nil {
+			tih := &templateImportHandler{
+				client: cfg.KubeClient,
+				authMiddleware: func(next http.HandlerFunc) http.HandlerFunc {
+					return ah.requireAuth(rh.requireOrgAdmin(next))
+				},
+				logger: cfg.Logger,
+			}
+			tih.registerRoutes(mux)
+			cfg.Logger.Info("template import endpoints enabled")
+		}
 	}
 
 	if cfg.ClusterStore != nil && ah != nil {
@@ -548,10 +570,22 @@ func New(cfg Config) *Server {
 		trh := &templateRegistryHandler{
 			store:  cfg.TemplateRegistryStore,
 			auth:   ah,
+			engine: cfg.RegistrySyncEngine,
 			logger: cfg.Logger,
 		}
+		// When the org provider is wired we can require org_admin on the
+		// write/sync routes; without it we fall back to plain auth so test
+		// harnesses without an OrgStore keep working.
+		if cfg.OrgProvider != nil {
+			rh := &rbacHandler{auth: ah, orgStore: cfg.OrgProvider, projectStore: cfg.ProjectStore}
+			trh.authMiddleware = func(next http.HandlerFunc) http.HandlerFunc {
+				return ah.requireAuth(rh.requireOrgAdmin(next))
+			}
+		}
 		trh.registerRoutes(mux)
-		cfg.Logger.Info("template registry endpoints enabled")
+		cfg.Logger.Info("template registry endpoints enabled",
+			"sync_engine", cfg.RegistrySyncEngine != nil,
+		)
 	}
 
 	if cfg.RegistryStore != nil && ah != nil {

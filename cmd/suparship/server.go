@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
+	"github.com/suparcloud/suparship/internal/tpl/registrysync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -361,6 +363,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			pubCfg.RepoPassword = password
 			pubCfg.SyncAutomated = true
 			pubCfg.TemplatesDir = templatesDir
+			// ChartFetcher resolves chart bundles for templates imported via
+			// the BYO-chart flow (where the chart .tgz lives in a cluster
+			// ConfigMap rather than on disk). Built-in templates that ship
+			// with the binary still resolve through TemplatesDir first.
+			pubCfg.ChartFetcher = chartFetcherFromClient(kubeClient)
 
 			// InsecureRegistry is read from the registry ConfigMap (if configured).
 			if registryStore != nil {
@@ -478,6 +485,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				Branch:          repoCfg.Branch,
 				SyncAutomated:   true,
 				TemplatesDir:    templatesDir,
+				ChartFetcher:    chartFetcherFromClient(kubeClient),
 			})
 			if err != nil {
 				return fmt.Errorf("rebuild gitops publisher: %w", err)
@@ -513,6 +521,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		Authenticator:           authenticator,
 		OrgProvider:             orgProvider,
 		Templates:               templates,
+		ClusterTemplateLoader:   clusterTemplateLoaderFromClient(kubeClient),
+		RegistrySyncEngine:      registrySyncEngine(kubeClient, logger),
 		ProjectStore:            projectStore,
 		RuntimeProvider:         runtimeProvider,
 		LogsProvider:            logsProvider,
@@ -539,6 +549,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		TemplateRegistryStore:   templateRegistryStore,
 		RegistryStore:           registryStore,
 	})
+
+	startPeriodicTemplateSync(
+		cmd.Context(),
+		registrySyncEngine(kubeClient, logger),
+		templateRegistryStore,
+		logger,
+	)
 
 	if err := srv.Run(cmd.Context()); err != nil {
 		logger.Error("server exited with error", "error", err)
@@ -1134,6 +1151,145 @@ func envConfigReaderFromClient(client kubernetes.Interface) *envconfig.UpperLeve
 		return nil
 	}
 	return envconfig.NewUpperLevelEnvWriter(client)
+}
+
+// registrySyncEngine builds the external-template sync engine, or returns
+// nil when the cluster client is unavailable (fake/local-dev mode). Kept
+// in a helper so the wiring at server.New stays narrow.
+func registrySyncEngine(client kubernetes.Interface, logger *slog.Logger) *registrysync.Engine {
+	if client == nil {
+		return nil
+	}
+	return &registrysync.Engine{
+		Client:     client,
+		Logger:     logger,
+		CloneDepth: 1,
+	}
+}
+
+// startPeriodicTemplateSync runs SyncAll on a ticker so external repos
+// converge without an operator manually clicking Sync. The interval comes
+// from SUPARSHIP_TEMPLATE_SYNC_INTERVAL (Go duration string, e.g. "5m");
+// values <= 0 disable the loop entirely. Default is 5 minutes — long
+// enough that the API server isn't constantly cloning repos, short enough
+// that a tag bump shows up the same workday.
+//
+// The goroutine returns when ctx is cancelled. Each tick reads the
+// registry fresh so operator edits to External[] take effect on the next
+// run without restart.
+func startPeriodicTemplateSync(
+	ctx context.Context,
+	engine *registrysync.Engine,
+	store *tpl.RegistryStore,
+	logger *slog.Logger,
+) {
+	if engine == nil || store == nil {
+		return
+	}
+	intervalStr := envOr("SUPARSHIP_TEMPLATE_SYNC_INTERVAL", "5m")
+	interval, err := time.ParseDuration(intervalStr)
+	if err != nil {
+		logger.Warn("template sync: invalid interval, disabling periodic sync",
+			"value", intervalStr, "err", err)
+		return
+	}
+	if interval <= 0 {
+		logger.Info("template sync: periodic sync disabled (interval <= 0)")
+		return
+	}
+	logger.Info("template sync: periodic sync enabled", "interval", interval)
+
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runOneTemplateSync(ctx, engine, store, logger)
+			}
+		}
+	}()
+}
+
+// runOneTemplateSync fetches the registry, syncs each external repo, folds
+// results back via registrysync.ApplyResult, and persists. Errors are
+// logged — periodic sync is a background concern, not a request-path one.
+func runOneTemplateSync(
+	ctx context.Context,
+	engine *registrysync.Engine,
+	store *tpl.RegistryStore,
+	logger *slog.Logger,
+) {
+	reg, err := store.Get(ctx)
+	if err != nil {
+		// "Not configured yet" is a normal state during initial install —
+		// log at debug so the noise doesn't spam during onboarding.
+		logger.Debug("template sync: registry not yet configured", "err", err)
+		return
+	}
+	if len(reg.External) == 0 {
+		return
+	}
+	results := engine.SyncAll(ctx, reg)
+	for i, repo := range reg.External {
+		if i < len(results) {
+			registrysync.ApplyResult(reg, repo, results[i])
+			r := results[i]
+			if r.Err != nil {
+				logger.Warn("template sync: source failed",
+					"source", r.SourceName,
+					"imported", len(r.Templates),
+					"err", r.Err,
+				)
+			} else {
+				logger.Info("template sync: source ok",
+					"source", r.SourceName,
+					"imported", len(r.Templates),
+				)
+			}
+		}
+	}
+	if err := store.Save(ctx, reg); err != nil {
+		logger.Warn("template sync: persist registry state failed", "err", err)
+	}
+}
+
+// clusterTemplateLoaderFromClient returns a server.ClusterTemplateLoader
+// that reads templates persisted as ConfigMaps in the suparship-system
+// namespace, so freshly imported charts surface in the gallery without a
+// restart. Returns nil in fake/local-dev mode (no client) — the templates
+// handler then serves only the disk-loaded built-ins.
+func clusterTemplateLoaderFromClient(client kubernetes.Interface) server.ClusterTemplateLoader {
+	if client == nil {
+		return nil
+	}
+	return func(ctx context.Context) ([]*tpl.Template, error) {
+		return kube.LoadTemplates(ctx, client)
+	}
+}
+
+// kubeChartFetcher implements gitops.ChartFetcher by reading chart.tgz from
+// the template's ConfigMap in suparship-system. Built once per server start
+// and shared across publisher rebuilds so the underlying client stays warm.
+type kubeChartFetcher struct {
+	client kubernetes.Interface
+}
+
+// LoadChartBundle satisfies gitops.ChartFetcher.
+func (k *kubeChartFetcher) LoadChartBundle(ctx context.Context, templateName string) ([]byte, error) {
+	return kube.LoadChartBundle(ctx, k.client, templateName)
+}
+
+// chartFetcherFromClient returns a gitops.ChartFetcher backed by the cluster
+// client, or nil when running without a client (fake mode) so the publisher
+// preserves its prior "skip silently" behaviour for missing charts.
+func chartFetcherFromClient(client kubernetes.Interface) gitops.ChartFetcher {
+	if client == nil {
+		return nil
+	}
+	return &kubeChartFetcher{client: client}
 }
 
 // appStoreNamespaceResolver returns a function that looks up the resolved K8s

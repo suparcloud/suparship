@@ -232,3 +232,49 @@ Presets: `starter` (single replica, small, no ingress) and `production` (three r
 5. Document the template in this file under [Built-in templates](#built-in-templates).
 
 > **Tip:** Keep templates focused. A template that does one thing well is better than a template with 30 inputs. Use presets to cover the common cases; advanced users can override via `advancedInputs`.
+
+## Roadmap
+
+Captured here so they aren't lost between sessions. Order is rough priority,
+not dependency.
+
+### Already shipped
+
+- **BYO Helm chart wizard** — operators upload a `.tgz` via `/templates/import`; the chart is introspected (`Chart.yaml` + `values.schema.json`, with `values.yaml` fallback) and turned into a starter `template.yaml` they can edit before saving. Backend in `internal/tpl/chartimport`, UI at `/templates/import`.
+- **External chart registries** — Git-hosted chart libraries are pulled and indexed on a configurable interval (`SUPARSHIP_TEMPLATE_SYNC_INTERVAL`, default 5m). Backend in `internal/tpl/registrysync`, UI at `/templates/sources`.
+
+### Env vars as template inputs
+
+Today inputs feed `helm template` values. Two natural extensions:
+
+- **Render-into-envconfig inputs** — let a template declare an input that materialises into the merged env-config map (org → env-type → project → app → app-env → cluster), so a chart can declare `LOG_LEVEL` once and bind it across scopes.
+- **`${envvar:KEY}` references in defaults** — resolve at publish time so a template default can read an upper-scope env var.
+
+**Before implementing:** decide whether to surface inputs in two distinct categories (`buildtime` vs `runtime`) or stay flat. Mixing the two paths under one Input shape will confuse operators.
+
+### Catalog UX
+
+The gallery is currently a flat grid. Worth adding:
+
+- Search + filter by `category` and a new `tags: []` field on `TemplateSpec`.
+- Per-project "starred" templates (separate ConfigMap or annotation on the project).
+- Version history — list previous `metadata.version` values when the same template name is reimported.
+- Deprecation badge — new boolean `deprecated` + optional `deprecatedMessage` on `TemplateSpec`.
+- Render `README.md` from the chart bundle on the template-detail page (we already store `chart.tgz` in the template ConfigMap; just untar and convert).
+
+### Versioning + upgrades
+
+- Pin `app.spec.template.version` (currently `template.name` only).
+- Surface "upgrade available" on `AppDetail` when the cluster has a newer template version than the app pins.
+- Generate a dry-run diff — render Helm values before/after the version bump so the operator sees what changes before approving.
+- Schema-migration rules for inputs that change between template versions (rename/removal/type-change).
+
+### Smaller follow-ups
+
+- **Validation hooks** — let templates declare a CEL/Go validator for cross-input rules (e.g. `enable_db=true ⇒ db_size required`). Today `Required`/`Min`/`Max`/`Pattern` only validate one input at a time.
+- **Component composition** — multi-component templates today are flat. A "compose templates" mechanism (web + worker + cron in one app, each declaring its own component) would keep individual charts smaller.
+- **Test fixtures** — let a template ship example-input JSONs + golden rendered manifests so CI verifies the chart still renders cleanly. Plug into `go test ./internal/tpl/...`.
+- **Engine pluralism** — `engine.type` already hints at this. Kustomize, raw-manifest, and Crossplane Composition engines are credible alternatives for non-Helm shops.
+- **OCI-backed registries** — `registrysync` is Git-only today. Adding an OCI source would let suparship pull from ArtifactHub-indexed OCI registries directly.
+- **Built-in/external name collisions** — built-ins win in the live-merge today; a synced chart with a colliding name silently disappears. Surface this as a warning on the gallery + a server log entry.
+- **Sync error persistence** — periodic-sync errors are logged but not stored. Add per-source error fields to the registry document so `/templates/sources` can show "last sync failed: <reason>" days later.

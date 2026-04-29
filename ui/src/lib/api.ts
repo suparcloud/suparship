@@ -20,18 +20,28 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const method = options?.method ?? "GET";
   const url = `${BASE_URL}${path}`;
 
+  // Multipart bodies must NOT carry an explicit Content-Type — the browser
+  // sets it (with boundary) when it sees a FormData body. JSON bodies still
+  // get the default applied below.
+  const isFormData =
+    typeof FormData !== "undefined" && options?.body instanceof FormData;
+
   if (DEBUG) {
     const body = options?.body;
-    console.debug(`[api] --> ${method} ${url}`, body ? JSON.parse(body as string) : "");
+    if (isFormData) {
+      console.debug(`[api] --> ${method} ${url}`, "[FormData]");
+    } else {
+      console.debug(`[api] --> ${method} ${url}`, body ? JSON.parse(body as string) : "");
+    }
   }
 
   const start = performance.now();
+  const headers: HeadersInit = isFormData
+    ? { ...options?.headers }
+    : { "Content-Type": "application/json", ...options?.headers };
   const res = await fetch(url, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options?.headers,
-    },
+    headers,
   });
   const elapsed = Math.round(performance.now() - start);
 
@@ -78,6 +88,12 @@ export const api = {
       method: "POST",
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
+  },
+
+  // postFormData uploads a multipart body. The browser fills in the
+  // Content-Type header with the boundary; do not set it manually.
+  postFormData<T>(path: string, formData: FormData): Promise<T> {
+    return request<T>(path, { method: "POST", body: formData });
   },
 
   put<T>(path: string, body?: unknown): Promise<T> {

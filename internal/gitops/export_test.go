@@ -1,6 +1,16 @@
 package gitops
 
-import "github.com/suparcloud/suparship/internal/domain"
+import (
+	"context"
+
+	"github.com/suparcloud/suparship/internal/domain"
+)
+
+// SyncChartForTest exposes syncChart's local-disk + cluster-bundle resolution
+// to white-box tests that don't want to spin up a real git clone.
+func (p *Publisher) SyncChartForTest(ctx context.Context, repoDir, templateName string) error {
+	return p.syncChart(ctx, repoDir, templateName)
+}
 
 // PublishKargoCRsForTest exposes publishKargoCRs for white-box unit testing.
 // It writes Kargo Namespace, Warehouse, and Stage files into repoDir/gitops-output/_infra/kargo/

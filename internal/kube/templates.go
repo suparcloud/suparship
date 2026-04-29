@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -18,6 +20,15 @@ const (
 	// templateConfigMapKey is the data key inside the ConfigMap that holds
 	// the raw template.yaml content.
 	templateConfigMapKey = tpl.TemplateFileName
+
+	// templateChartBundleKey is the binaryData key inside the template
+	// ConfigMap that holds a packaged Helm chart (chart.tgz). Optional —
+	// templates whose charts come from SUPARSHIP_TEMPLATES_DIR don't ship one.
+	templateChartBundleKey = "chart.tgz"
+
+	// templateConfigMapPrefix is the "suparship-template-{name}" naming
+	// convention shared by all cluster-stored templates.
+	templateConfigMapPrefix = "suparship-template-"
 
 	// systemNamespace mirrors the namespace constant used by project.K8sStore
 	// and preview.K8sStore so all suparShip ConfigMaps live together.
@@ -82,4 +93,81 @@ func LoadTemplates(ctx context.Context, client kubernetes.Interface) ([]*tpl.Tem
 	})
 
 	return templates, nil
+}
+
+// TemplateConfigMapName returns the well-known ConfigMap name for a template
+// stored in the cluster. Exposed so handlers and the publisher fallback
+// agree on the lookup key.
+func TemplateConfigMapName(templateName string) string {
+	return templateConfigMapPrefix + templateName
+}
+
+// SaveTemplate persists a Template (and an optional packaged chart) into the
+// suparship-system namespace as a ConfigMap, replacing any existing entry
+// with the same name. The chart bytes are stored as binaryData["chart.tgz"]
+// — Kubernetes binaryData has a 1 MiB combined limit per ConfigMap.
+//
+// chartTGZ may be nil for templates whose charts ship out-of-band (e.g.
+// pre-existing built-ins loaded from SUPARSHIP_TEMPLATES_DIR).
+func SaveTemplate(ctx context.Context, client kubernetes.Interface, t *tpl.Template, chartTGZ []byte) error {
+	if t == nil {
+		return fmt.Errorf("nil template")
+	}
+	if err := t.Validate(); err != nil {
+		return fmt.Errorf("validate template: %w", err)
+	}
+	yamlBytes, err := tpl.Marshal(t)
+	if err != nil {
+		return fmt.Errorf("marshal template: %w", err)
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TemplateConfigMapName(t.Metadata.Name),
+			Namespace: systemNamespace,
+			Labels: map[string]string{
+				"suparship.io/type":             "template",
+				"app.kubernetes.io/managed-by": "suparship",
+			},
+		},
+		Data: map[string]string{templateConfigMapKey: string(yamlBytes)},
+	}
+	if len(chartTGZ) > 0 {
+		cm.BinaryData = map[string][]byte{templateChartBundleKey: chartTGZ}
+	}
+
+	cms := client.CoreV1().ConfigMaps(systemNamespace)
+	existing, err := cms.Get(ctx, cm.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if _, createErr := cms.Create(ctx, cm, metav1.CreateOptions{}); createErr != nil {
+			return fmt.Errorf("create template configmap: %w", createErr)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get existing template configmap: %w", err)
+	}
+	cm.ResourceVersion = existing.ResourceVersion
+	if _, updateErr := cms.Update(ctx, cm, metav1.UpdateOptions{}); updateErr != nil {
+		return fmt.Errorf("update template configmap: %w", updateErr)
+	}
+	return nil
+}
+
+// LoadChartBundle returns the packaged Helm chart bytes stored alongside the
+// template ConfigMap, or nil when the template has no bundle (i.e. chart is
+// shipped via SUPARSHIP_TEMPLATES_DIR or hasn't been imported through the
+// BYO-chart flow). Returns an error only on unexpected API failures —
+// "ConfigMap not found" is treated as "no bundle" to keep callers simple.
+func LoadChartBundle(ctx context.Context, client kubernetes.Interface, templateName string) ([]byte, error) {
+	cm, err := client.CoreV1().ConfigMaps(systemNamespace).Get(
+		ctx, TemplateConfigMapName(templateName), metav1.GetOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get template configmap %s: %w", templateName, err)
+	}
+	return cm.BinaryData[templateChartBundleKey], nil
 }
