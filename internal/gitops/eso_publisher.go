@@ -309,7 +309,7 @@ func BuildCollapsedExternalSecretForApp(
 // WriteSecretStores writes ClusterSecretStore YAML files to
 // gitops-output/_infra/secret-stores/.
 func (p *Publisher) WriteSecretStores(repoDir string, stores []ESOSecretStoreConfig) error {
-	storeDir := filepath.Join(repoDir, "gitops-output", "_infra", "secret-stores")
+	storeDir := p.outputDir(repoDir, "_infra", "secret-stores")
 
 	sort.Slice(stores, func(i, j int) bool {
 		return stores[i].Name < stores[j].Name
@@ -328,12 +328,12 @@ func (p *Publisher) WriteSecretStores(repoDir string, stores []ESOSecretStoreCon
 // WriteCollapsedExternalSecret writes a single ExternalSecret YAML to
 // gitops-output/{project}/{app}/{env}/external-secret.yaml.
 func (p *Publisher) WriteCollapsedExternalSecret(repoDir string, cfg ESOExternalSecretConfig) error {
-	dir := filepath.Join(repoDir, "gitops-output")
 	parts := strings.Split(cfg.Namespace, "-")
+	var dir string
 	if len(parts) >= 3 {
-		dir = filepath.Join(dir, parts[0], parts[1], strings.Join(parts[2:], "-"))
+		dir = p.outputDir(repoDir, parts[0], parts[1], strings.Join(parts[2:], "-"))
 	} else {
-		dir = filepath.Join(dir, cfg.Namespace)
+		dir = p.outputDir(repoDir, cfg.Namespace)
 	}
 	content := BuildCollapsedExternalSecretYAML(cfg)
 	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content))

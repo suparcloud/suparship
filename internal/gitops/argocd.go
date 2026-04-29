@@ -26,8 +26,6 @@
 package gitops
 
 import (
-	"fmt"
-
 	"github.com/suparcloud/suparship/internal/domain"
 )
 
@@ -208,6 +206,12 @@ type BuildOptions struct {
 	// Annotations are merged into the Application metadata.annotations.
 	// Values from this map are applied after the default suparship annotations.
 	Annotations map[string]string
+
+	// SubPath mirrors PublisherConfig.SubPath. Used to build the default
+	// RepoPath when RepoPath is empty so the derived path matches whatever
+	// the publisher writes. Empty SubPath places manifests at the repo
+	// root.
+	SubPath string
 }
 
 // BuildArgoApplication maps a suparship App and one of its AppEnvironments to
@@ -315,7 +319,7 @@ func applyDefaults(opts BuildOptions, app *domain.App, env domain.AppEnvironment
 		opts.TargetRevision = defaultTargetRevision
 	}
 	if opts.RepoPath == "" {
-		opts.RepoPath = defaultRepoPath(app.ProjectName, app.Name, env.EnvName)
+		opts.RepoPath = defaultRepoPath(opts.SubPath, app.ProjectName, app.Name, env.EnvName)
 	}
 	if opts.ArgoCDProject == "" {
 		opts.ArgoCDProject = app.ProjectName
@@ -345,9 +349,10 @@ func BuildArgoApplicationFromInstance(app *domain.App, inst *domain.EnvironmentI
 	return BuildArgoApplication(app, env, opts)
 }
 
-// defaultRepoPath returns the conventional gitops output path for an app env:
-//
-//	gitops-output/<project>/<app>/<env>
-func defaultRepoPath(project, app, env string) string {
-	return fmt.Sprintf("gitops-output/%s/%s/%s", project, app, env)
+// defaultRepoPath returns the conventional gitops output path for an app env,
+// honouring the publisher's configured SubPath. Empty SubPath produces
+// "<project>/<app>/<env>" (repo-root layout); a non-empty SubPath like
+// "gitops/" produces "gitops/<project>/<app>/<env>".
+func defaultRepoPath(subPath, project, app, env string) string {
+	return joinSubPath(subPath, project, app, env)
 }

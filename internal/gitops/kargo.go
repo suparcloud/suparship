@@ -191,6 +191,11 @@ type KargoBuildOptions struct {
 	// value applies "suparship" / "suparship.io" defaults so existing
 	// callers don't change behaviour.
 	Branding branding.Config
+	// SubPath mirrors PublisherConfig.SubPath so the gitRepoUpdates.helm
+	// .images[].valuesFilePath in the Stage CR points at the same
+	// values.yaml the publisher actually wrote. Empty (default) = repo
+	// root; otherwise prefixes the path with the configured sub-dir.
+	SubPath string
 }
 
 // ── Builders ─────────────────────────────────────────────────────────────────
@@ -274,7 +279,9 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 	argoAppName := ApplicationName(app.Name, env.EnvName)
 
 	// The values.yaml path within the gitops repo for this app+env.
-	valuesFilePath := fmt.Sprintf("gitops-output/%s/%s/%s/values.yaml", env.EnvName, app.ProjectName, app.Name)
+	// Built via joinSubPath so it matches whatever PublisherConfig.SubPath
+	// the publisher used when writing the file.
+	valuesFilePath := joinSubPath(opts.SubPath, env.EnvName, app.ProjectName, app.Name, "values.yaml")
 
 	pm := &PromotionMechanisms{
 		ArgoCDAppUpdates: []ArgoCDAppUpdate{

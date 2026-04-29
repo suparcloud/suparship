@@ -24,7 +24,7 @@ var ESOStoreNames = map[string]string{
 // This is idempotent and should be called once during cluster bootstrap or
 // whenever the ESO configuration changes.
 func (p *Publisher) WriteESOInfra(repoDir string) error {
-	infraDir := filepath.Join(repoDir, "gitops-output", "_infra")
+	infraDir := p.outputDir(repoDir, "_infra")
 	content := buildESOStoresYAML(p.cfg.Branding)
 	return p.writeFile(filepath.Join(infraDir, "eso-stores.yaml"), []byte(content))
 }
@@ -42,7 +42,7 @@ func (p *Publisher) WriteUpperLevelExternalSecrets(repoDir string, level string,
 	if len(refs) == 0 {
 		return nil
 	}
-	infraDir := filepath.Join(repoDir, "gitops-output", "_infra")
+	infraDir := p.outputDir(repoDir, "_infra")
 
 	// Group refs by provider.
 	byProvider := make(map[string][]envconfig.SecretRef)

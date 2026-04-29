@@ -207,7 +207,7 @@ func TestBuildKargoStage_GitRepoUpdates(t *testing.T) {
 	if img.Image != "kind-registry:5000/demo/color-app" {
 		t.Errorf("Image: got %q", img.Image)
 	}
-	if img.ValuesFilePath != "gitops-output/staging/demo/color-app/values.yaml" {
+	if img.ValuesFilePath != "staging/demo/color-app/values.yaml" {
 		t.Errorf("ValuesFilePath: got %q", img.ValuesFilePath)
 	}
 	if img.Key != "components.web.image.tag" {

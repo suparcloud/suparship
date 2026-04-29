@@ -476,6 +476,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					ArgoCDRepoURL: repoCfg.ArgoCDRepoURL,
 					RepoURL:       repoCfg.RepoURL,
 					Branch:        repoCfg.Branch,
+					SubPath:       repoCfg.SubPath,
 				}
 				if rootErr := gitops.EnsureRootApplication(ctx, dynClient, rootCfg); rootErr != nil {
 					logger.Warn("root application creation failed — ArgoCD CRD may not be available",
@@ -494,6 +495,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				ArgoCDRepoURL:   repoCfg.ArgoCDRepoURL,
 				KargoGitRepoURL: repoCfg.KargoGitRepoURL,
 				Branch:          repoCfg.Branch,
+				SubPath:         repoCfg.SubPath,
 				SyncAutomated:   true,
 				TemplatesDir:    templatesDir,
 				ChartFetcher:    chartFetcherFromClient(kubeClient),

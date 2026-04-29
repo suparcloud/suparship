@@ -12,8 +12,7 @@ import (
 )
 
 const (
-	rootAppName      = "suparship-apps"
-	rootAppInfraPath = "gitops-output/_infra"
+	rootAppName = "suparship-apps"
 
 	labelManagedBy = "suparship.io/managed-by"
 	labelRole      = "suparship.io/role"
@@ -34,6 +33,10 @@ type RootAppConfig struct {
 	RepoURL string
 	// Branch is the target revision. Defaults to "HEAD".
 	Branch string
+	// SubPath mirrors PublisherConfig.SubPath so the root app's
+	// source.path points at <SubPath>/_infra (or just _infra at the
+	// repo root when SubPath is empty).
+	SubPath string
 }
 
 // EnsureRootApplication creates or updates the ArgoCD root "App of Apps"
@@ -58,7 +61,7 @@ func EnsureRootApplication(ctx context.Context, dyn dynamic.Interface, cfg RootA
 		branch = "HEAD"
 	}
 
-	app := buildRootApp(repoURL, branch)
+	app := buildRootApp(repoURL, branch, cfg.SubPath)
 
 	existing, err := dyn.Resource(argoCDAppGVR).Namespace(ArgoCDNamespace).Get(ctx, rootAppName, metav1.GetOptions{})
 	if err != nil {
@@ -87,7 +90,7 @@ func EnsureRootApplication(ctx context.Context, dyn dynamic.Interface, cfg RootA
 
 // buildRootApp constructs the unstructured ArgoCD Application object for the
 // root "App of Apps" that watches _infra/ in the gitops repo.
-func buildRootApp(repoURL, targetRevision string) *unstructured.Unstructured {
+func buildRootApp(repoURL, targetRevision, subPath string) *unstructured.Unstructured {
 	obj := map[string]interface{}{
 		"apiVersion": "argoproj.io/v1alpha1",
 		"kind":       "Application",
@@ -107,7 +110,7 @@ func buildRootApp(repoURL, targetRevision string) *unstructured.Unstructured {
 			"source": map[string]interface{}{
 				"repoURL":        repoURL,
 				"targetRevision": targetRevision,
-				"path":           rootAppInfraPath,
+				"path":           joinSubPath(subPath, "_infra"),
 				"directory": map[string]interface{}{
 					"recurse": true,
 				},

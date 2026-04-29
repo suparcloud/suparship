@@ -245,7 +245,7 @@ func TestCreatePreview_ArgoApp_DefaultRepoPath(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	wantPath := "gitops-output/demo/hello/pr-42"
+	wantPath := "demo/hello/pr-42"
 	if result.ArgoApp.Spec.Source.Path != wantPath {
 		t.Errorf("ArgoApp Source.Path = %q, want %q", result.ArgoApp.Spec.Source.Path, wantPath)
 	}

@@ -95,7 +95,7 @@ func TestBuildArgoApplication_Defaults(t *testing.T) {
 	if got.Spec.Source.RepoURL != "https://github.com/org/gitops" {
 		t.Errorf("Source.RepoURL = %q", got.Spec.Source.RepoURL)
 	}
-	wantPath := "gitops-output/demo/hello/staging"
+	wantPath := "demo/hello/staging"
 	if got.Spec.Source.Path != wantPath {
 		t.Errorf("Source.Path = %q, want %q", got.Spec.Source.Path, wantPath)
 	}
@@ -361,7 +361,7 @@ func TestDefaultRepoPath(t *testing.T) {
 		RepoURL: "https://github.com/org/gitops",
 	})
 
-	wantPath := "gitops-output/platform/api-gateway/pr-99"
+	wantPath := "platform/api-gateway/pr-99"
 	if got.Spec.Source.Path != wantPath {
 		t.Errorf("Source.Path = %q, want %q", got.Spec.Source.Path, wantPath)
 	}
@@ -437,7 +437,7 @@ func TestBuildArgoApplicationFromInstance_PreviewNameConventions(t *testing.T) {
 		t.Errorf("Destination.Namespace = %q, want hello-pr-42", got.Spec.Destination.Namespace)
 	}
 	// Default gitops path includes the preview name
-	wantPath := "gitops-output/demo/hello/pr-42"
+	wantPath := "demo/hello/pr-42"
 	if got.Spec.Source.Path != wantPath {
 		t.Errorf("Source.Path = %q, want %q", got.Spec.Source.Path, wantPath)
 	}

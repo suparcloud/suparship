@@ -74,6 +74,17 @@ type PublisherConfig struct {
 	// — SRE contractors who white-label set Org.Branding once and the
 	// publisher picks it up.
 	Branding branding.Config
+	// SubPath is the optional sub-directory inside the gitops repo where
+	// platform-managed manifests land. Empty (default) means manifests
+	// land at the repo root (`<repo>/_infra/...`, `<repo>/{env}/...`,
+	// `<repo>/charts/...`). Operators who want to keep platform output
+	// inside a single subdirectory set e.g. "gitops/" — manifests then
+	// land at `<repo>/gitops/_infra/...` etc.
+	//
+	// Leading/trailing slashes and "." / "./" are normalised away. The
+	// publisher uses outputDir() and relativeOutputPath() to construct
+	// every file/path so a single config flip propagates everywhere.
+	SubPath string
 }
 
 // ChartFetcher returns the packaged Helm chart bytes for a template name, or
@@ -173,12 +184,13 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 		// root "App of Apps" can watch a single directory with no include/exclude
 		// filter required. Per-app data (app.yaml, values.yaml) stays in the
 		// env-specific paths where ApplicationSet git generators discover it.
-		infraDir := filepath.Join(repoDir, "gitops-output", "_infra")
+		infraDir := p.outputDir(repoDir, "_infra")
 
 		for _, env := range envs {
 			// Write {envName}-appset.yaml for this env.
 			appSet := BuildArgoAppSet(env, p.cfg.ArgoCDRepoURL, AppSetOptions{
 				SyncAutomated: p.cfg.SyncAutomated,
+				SubPath:       p.cfg.SubPath,
 			})
 			appSetBytes, err := yaml.Marshal(appSet)
 			if err != nil {
@@ -213,6 +225,7 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 		// Write previews-appset.yaml (idempotent; only changes if not present).
 		previewAppSet := BuildArgoPreviewAppSet(p.cfg.ArgoCDRepoURL, AppSetOptions{
 			SyncAutomated: p.cfg.SyncAutomated,
+			SubPath:       p.cfg.SubPath,
 		})
 		previewAppSetBytes, err := yaml.Marshal(previewAppSet)
 		if err != nil {
@@ -323,7 +336,7 @@ func BuildProjectNamespaceManifest(projectName string, env ProjectNamespaceEnv, 
 // changes.
 func (p *Publisher) PublishProjectNamespaces(ctx context.Context, projectName string, envs []ProjectNamespaceEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		infraDir := filepath.Join(repoDir, "gitops-output", "_infra")
+		infraDir := p.outputDir(repoDir, "_infra")
 		changed := false
 		for _, env := range envs {
 			filePath := filepath.Join(infraDir, projectName+"-ns-"+env.EnvName+".yaml")
@@ -489,7 +502,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if err != nil {
 			return fmt.Errorf("marshal app.yaml for env %s: %w", env.EnvName, err)
 		}
-		appMetaPath := filepath.Join(repoDir, "gitops-output", env.EnvName, app.ProjectName, app.Name, "app.yaml")
+		appMetaPath := p.outputDir(repoDir, env.EnvName, app.ProjectName, app.Name, "app.yaml")
 		if err := p.writeFile(appMetaPath, appMetaBytes); err != nil {
 			return err
 		}
@@ -505,14 +518,14 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
 		}
-		valuesPath := filepath.Join(repoDir, "gitops-output", env.EnvName, app.ProjectName, app.Name, "values.yaml")
+		valuesPath := p.outputDir(repoDir, env.EnvName, app.ProjectName, app.Name, "values.yaml")
 		if err := p.writeFile(valuesPath, hvBytes); err != nil {
 			return err
 		}
 
 		// Write platform-managed per-app resources into the same directory as
 		// app.yaml/values.yaml so ArgoCD picks them up with the same ApplicationSet.
-		appDir := filepath.Join(repoDir, "gitops-output", env.EnvName, app.ProjectName, app.Name)
+		appDir := p.outputDir(repoDir, env.EnvName, app.ProjectName, app.Name)
 		if err := p.writeAppPlatformResources(appDir, app, ns, env, naming, orgName); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
 		}
@@ -639,7 +652,7 @@ func (p *Publisher) writeAppPlatformResources(
 // When the chart directory already exists with identical content the
 // subsequent git commit is a no-op via stagedIsEmpty.
 func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName string) error {
-	dstDir := filepath.Join(repoDir, "charts", templateName)
+	dstDir := p.outputDir(repoDir, "charts", templateName)
 
 	if p.cfg.TemplatesDir != "" {
 		srcDir := filepath.Join(p.cfg.TemplatesDir, templateName, "chart")
@@ -761,7 +774,7 @@ const maxChartEntrySize = 4 * 1024 * 1024
 // Order) pulls directly from the Warehouse with auto-promotion enabled.
 func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	projectNS := KargoNamespaceForProject(app.ProjectName)
-	kargoDir := filepath.Join(repoDir, "gitops-output", "_infra", "kargo")
+	kargoDir := p.outputDir(repoDir, "_infra", "kargo")
 
 	// ── Build ordered stable env list ──────────────────────────────────────────
 	// Exclude preview envs and unbound envs; sort by Order (then Name) for determinism.
@@ -812,6 +825,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	whOpts := KargoBuildOptions{
 		InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
 		Branding:              p.cfg.Branding,
+		SubPath:               p.cfg.SubPath,
 	}
 	if repo, ok := app.Spec.Values["image_repository"].(string); ok && repo != "" {
 		whOpts.ImageRepoURL = repo
@@ -851,6 +865,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			GitOpsRepoURL:         p.kargoGitRepoURL(),
 			GitOpsRepoInsecure:    p.cfg.InsecureRegistry,
 			Branding:              p.cfg.Branding,
+			SubPath:               p.cfg.SubPath,
 		}
 		stage := BuildKargoStage(app, appEnv, upstreams, stageOpts)
 		stageBytes, err := yaml.Marshal(stage)
@@ -953,7 +968,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		if err != nil {
 			return fmt.Errorf("marshal preview app.yaml: %w", err)
 		}
-		metaPath := filepath.Join(repoDir, "gitops-output", "previews", app.ProjectName, preview.PreviewName, "app.yaml")
+		metaPath := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName, "app.yaml")
 		if err := p.writeFile(metaPath, metaBytes); err != nil {
 			return err
 		}
@@ -971,13 +986,13 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
 		}
-		valuesPath := filepath.Join(repoDir, "gitops-output", "previews", app.ProjectName, preview.PreviewName, "values.yaml")
+		valuesPath := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName, "values.yaml")
 		if err := p.writeFile(valuesPath, hvBytes); err != nil {
 			return err
 		}
 
 		// Write platform-managed ConfigMap and ExternalSecret (same as stable envs).
-		previewDir := filepath.Join(repoDir, "gitops-output", "previews", app.ProjectName, preview.PreviewName)
+		previewDir := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName)
 		previewPublishEnv := AppPublishEnv{
 			EnvName:        preview.PreviewName,
 			StoreName:      preview.StoreName,
@@ -1022,7 +1037,7 @@ type PreviewPublishSpec struct {
 // It is a no-op (without error) if the preview directory does not exist.
 func (p *Publisher) DeletePreview(ctx context.Context, projectName, previewName string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		previewDir := filepath.Join(repoDir, "gitops-output", "previews", projectName, previewName)
+		previewDir := p.outputDir(repoDir, "previews", projectName, previewName)
 		if _, err := os.Stat(previewDir); os.IsNotExist(err) {
 			slog.Debug("gitops: preview directory not found, nothing to delete", "preview", previewName)
 			return nil
@@ -1040,7 +1055,7 @@ func (p *Publisher) DeletePreview(ctx context.Context, projectName, previewName 
 // and commits + pushes the deletion. It is a no-op if no files are found.
 func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		outputDir := filepath.Join(repoDir, "gitops-output")
+		outputDir := p.outputDir(repoDir)
 
 		// Walk the top-level entries of gitops-output/ (each is an env dir or
 		// the special "previews" directory) and remove {envDir}/{project}/{app}/.
@@ -1124,17 +1139,75 @@ func (p *Publisher) withClonedRepo(ctx context.Context, fn func(repoDir string) 
 // labels, and the take-over recipe so a new SRE inheriting the repo can
 // orient themselves without reading suparship's source.
 func (p *Publisher) ensureRepoREADME(repoDir string) error {
-	path := filepath.Join(repoDir, "gitops-output", "README.md")
+	path := p.outputDir(repoDir, "README.md")
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat README: %w", err)
 	}
-	return p.writeFile(path, []byte(buildRepoREADME(p.cfg.Branding)))
+	return p.writeFile(path, []byte(buildRepoREADME(p.cfg.Branding, p.cfg.SubPath)))
+}
+
+// outputDir builds an absolute filesystem path inside the gitops output
+// area: <repoDir>/<SubPath>/<parts...>. SubPath of "" / "." / "./" puts
+// the output at the repo root; otherwise it acts as a single-level
+// containment dir. Used everywhere the publisher needs to write a file
+// so a config flip in PublisherConfig.SubPath moves the entire layout
+// in lockstep.
+func (p *Publisher) outputDir(repoDir string, parts ...string) string {
+	sub := normalizeSubPath(p.cfg.SubPath)
+	elems := []string{repoDir}
+	if sub != "" {
+		elems = append(elems, sub)
+	}
+	elems = append(elems, parts...)
+	return filepath.Join(elems...)
+}
+
+// relativeOutputPath returns "<SubPath>/<parts>" using slash separators —
+// the right shape for paths inside YAML manifests (ApplicationSet path
+// globs, ArgoCD source.path, Kargo gitRepoUpdates.helm.valuesFilePath,
+// etc.). Empty SubPath returns just the joined parts so the path is
+// repo-relative.
+func (p *Publisher) relativeOutputPath(parts ...string) string {
+	sub := normalizeSubPath(p.cfg.SubPath)
+	all := parts
+	if sub != "" {
+		all = append([]string{sub}, parts...)
+	}
+	// Use forward-slash join: Git paths are always slash-separated even
+	// on Windows, and ArgoCD parses them as URL-style.
+	return strings.Join(all, "/")
+}
+
+// normalizeSubPath strips whitespace and slashes, treating "." and "./"
+// as the empty (repo-root) form. Returns the cleaned sub-path with no
+// leading/trailing slashes — callers join slashes themselves.
+func normalizeSubPath(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "/")
+	if s == "" || s == "." {
+		return ""
+	}
+	return s
+}
+
+// joinSubPath builds a slash-separated path with the cleaned sub-path
+// prepended. Used by pure builder functions (BuildKargoStage,
+// BuildArgoAppSet, …) that don't have a *Publisher receiver but still
+// need to emit paths consistent with whatever PublisherConfig.SubPath
+// the publisher writes to.
+func joinSubPath(subPath string, parts ...string) string {
+	sub := normalizeSubPath(subPath)
+	all := parts
+	if sub != "" {
+		all = append([]string{sub}, parts...)
+	}
+	return strings.Join(all, "/")
 }
 
 // writeFile creates parent directories and writes data to path. For YAML
-// files under gitops-output/ (excluding bundled chart sources) it
+// files under the gitops output area (excluding bundled chart sources) it
 // prepends a short generated-by header so an SRE opening the file knows
 // it's regenerated on every publish and where to look to take it over.
 func (p *Publisher) writeFile(path string, data []byte) error {
@@ -1151,28 +1224,26 @@ func (p *Publisher) writeFile(path string, data []byte) error {
 }
 
 // generatedByHeader returns a YAML comment block to prepend to platform-
-// emitted YAML files, or "" when path is not eligible (non-YAML, outside
-// gitops-output, or under the bundled chart sources tree).
+// emitted YAML files, or "" when path is not eligible. Eligible:
+// path ends in .yaml/.yml AND has no `/charts/` segment.
 //
-// Chart sources under gitops-output/charts/ are intentionally excluded:
-// they are the Helm chart's own templates, not platform-generated YAML —
-// adding a "generated by" preamble would mislead operators reviewing the
-// chart and could confuse Helm tooling that parses leading comments.
+// The /charts/ carve-out keeps bundled Helm chart sources clean — they
+// are the chart's own templates, not platform-generated YAML; adding a
+// "generated by" preamble would mislead operators reviewing the chart
+// and could confuse Helm tooling that parses leading comments. Detection
+// is path-based (rather than gating on PublisherConfig.SubPath) so the
+// rule applies wherever charts/ actually lives, repo-root or under SubPath.
 func generatedByHeader(path string, brand branding.Config) string {
 	if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
 		return ""
 	}
-	idx := strings.Index(path, "/gitops-output/")
-	if idx == -1 {
-		return ""
-	}
-	rest := path[idx+len("/gitops-output/"):]
-	if strings.HasPrefix(rest, "charts/") {
+	sep := string(filepath.Separator)
+	if strings.Contains(path, sep+"charts"+sep) {
 		return ""
 	}
 	return fmt.Sprintf(
 		"# Generated by %s. Edits will be overwritten on the next publish.\n"+
-			"# Take-over recipe: see gitops-output/README.md.\n",
+			"# Take-over recipe: see the README.md at the gitops output root.\n",
 		brand.EffectiveName(),
 	)
 }
@@ -1181,9 +1252,18 @@ func generatedByHeader(path string, brand branding.Config) string {
 // branded to the configured platform identity. Written verbatim on first
 // publish; operator edits are preserved on subsequent publishes (see
 // ensureRepoREADME).
-func buildRepoREADME(brand branding.Config) string {
+func buildRepoREADME(brand branding.Config, subPath string) string {
 	name := brand.EffectiveName()
 	domain := brand.EffectiveLabelDomain()
+	// rootLabel is what appears at the top of the layout tree. Empty
+	// SubPath → "<repo root>/" so the diagram still shows a single root
+	// node. Non-empty → "<subpath>/" so the diagram matches the actual
+	// directory the operator will see in their git host.
+	rootLabel := "<repo root>/"
+	sub := normalizeSubPath(subPath)
+	if sub != "" {
+		rootLabel = sub + "/"
+	}
 	return fmt.Sprintf(`# GitOps repository
 
 This directory holds the desired-state Kubernetes manifests that ArgoCD
@@ -1194,7 +1274,7 @@ directly or detach them entirely; the platform stays out of the way.
 ## Layout
 
 `+"```"+`
-gitops-output/
+%[3]s
 ├── _infra/                                # platform glue
 │   ├── {env}-appset.yaml                  # ApplicationSet per env (cluster)
 │   ├── {project}-appproject.yaml          # ArgoCD AppProject per project
@@ -1210,7 +1290,8 @@ gitops-output/
 │           ├── app.yaml                   # ArgoCD File-generator parameters
 │           ├── values.yaml                # rendered Helm values
 │           ├── env-configmap.yaml         # merged env vars (org→cluster)
-│           └── external-secret.yaml       # platform-managed ExternalSecret
+│           ├── external-secret.yaml       # platform-managed ExternalSecret
+│           └── kustomization.yaml         # bundles the per-app manifests
 ├── previews/{project}/{previewName}/      # per-PR preview environments
 └── charts/{template}/                     # bundled Helm charts (chart sources)
 `+"```"+`
@@ -1221,7 +1302,7 @@ Every YAML file written by **%[1]s** opens with a header comment:
 
 `+"```"+`
 # Generated by %[1]s. Edits will be overwritten on the next publish.
-# Take-over recipe: see gitops-output/README.md.
+# Take-over recipe: see the README.md at the gitops output root.
 `+"```"+`
 
 Resources also carry these labels:
@@ -1250,14 +1331,14 @@ Three escalating levels of "stop using the platform for this":
 
 1. Open the platform UI and delete the app, OR
 2. Delete the cluster-side record (e.g. `+"`kubectl delete configmap -n suparship-system suparship-app-{project}-{app}`"+`)
-3. Remove `+"`gitops-output/{env}/{project}/{app}/`"+` for every env, plus
-   the matching `+"`_infra/kargo/{project}-{app}-*.yaml`"+` Kargo CRs.
+3. Remove `+"`{env}/{project}/{app}/`"+` for every env, plus the matching
+   `+"`_infra/kargo/{project}-{app}-*.yaml`"+` Kargo CRs.
 4. ArgoCD will prune the live workload on its next sync.
 
 ### Detach one project
 
 1. Remove every app under the project (steps above), then
-2. Remove `+"`gitops-output/_infra/{project}-appproject.yaml`"+` and
+2. Remove `+"`_infra/{project}-appproject.yaml`"+` and
    `+"`_infra/{project}-ns-*.yaml`"+`.
 3. Delete the project record from %[1]s's store
    (e.g. the `+"`suparship-project-{name}`"+` ConfigMap).
@@ -1278,7 +1359,7 @@ GitOps documentation (`+"`docs/gitops.md`"+` in the source tree).
 
 *This README was seeded by **%[1]s** on first publish. It is not regenerated
 — feel free to edit, replace, or delete it.*
-`, name, domain)
+`, name, domain, rootLabel)
 }
 
 // commitAndPush stages all changes, commits with msg (when there is something

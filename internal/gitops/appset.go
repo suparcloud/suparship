@@ -22,6 +22,11 @@ type AppSetOptions struct {
 	TargetRevision string
 	// SyncAutomated enables automated sync with prune and selfHeal on generated Applications.
 	SyncAutomated bool
+	// SubPath mirrors PublisherConfig.SubPath so the ApplicationSet's
+	// Git File generator path glob and per-app source.path point at the
+	// same directories the publisher writes to. Empty (default) = repo
+	// root.
+	SubPath string
 }
 
 // ApplicationSet is a minimal, serializable representation of an ArgoCD
@@ -115,10 +120,10 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 
 	// Source 2: Helm chart; reads per-app values from the repo via $appvalues.
 	// The full path is used because $appvalues resolves to the repo root (see above).
-	valuesFilePath := "$appvalues/gitops-output/" + env.EnvName + "/{{project}}/{{name}}/values.yaml"
+	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, env.EnvName, "{{project}}", "{{name}}", "values.yaml")
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           "charts/{{template}}",
+		Path:           joinSubPath(opts.SubPath, "charts", "{{template}}"),
 		TargetRevision: opts.TargetRevision,
 		Helm: &HelmSource{
 			ReleaseName: "{{name}}",
@@ -141,7 +146,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	// gitops-output/README.md for the extension story).
 	platformManifestsSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           "gitops-output/" + env.EnvName + "/{{project}}/{{name}}",
+		Path:           joinSubPath(opts.SubPath, env.EnvName, "{{project}}", "{{name}}"),
 		TargetRevision: opts.TargetRevision,
 		Directory: &DirectorySource{
 			Recurse: false,
@@ -180,7 +185,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 					RepoURL:  repoURL,
 					Revision: opts.TargetRevision,
 					Files: []GitFilePathSpec{
-						{Path: "gitops-output/" + env.EnvName + "/*/*/app.yaml"},
+						{Path: joinSubPath(opts.SubPath, env.EnvName, "*", "*", "app.yaml")},
 					},
 				},
 			},
@@ -238,11 +243,11 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           "charts/{{template}}",
+		Path:           joinSubPath(opts.SubPath, "charts", "{{template}}"),
 		TargetRevision: opts.TargetRevision,
 		Helm: &HelmSource{
 			ReleaseName: "{{appName}}",
-			ValueFiles:  []string{"$previewvalues/gitops-output/previews/{{project}}/{{name}}/values.yaml"},
+			ValueFiles:  []string{"$previewvalues/" + joinSubPath(opts.SubPath, "previews", "{{project}}", "{{name}}", "values.yaml")},
 		},
 	}
 
@@ -275,7 +280,7 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 					RepoURL:  repoURL,
 					Revision: opts.TargetRevision,
 					Files: []GitFilePathSpec{
-						{Path: "gitops-output/previews/*/*/app.yaml"},
+						{Path: joinSubPath(opts.SubPath, "previews", "*", "*", "app.yaml")},
 					},
 				},
 			},

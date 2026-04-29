@@ -76,5 +76,6 @@ func (c *RepoConfig) ToPublisherConfig() PublisherConfig {
 		ArgoCDRepoURL:   argoURL,
 		KargoGitRepoURL: kargoURL,
 		Branch:          branch,
+		SubPath:         c.SubPath,
 	}
 }
