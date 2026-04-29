@@ -502,7 +502,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if err != nil {
 			return fmt.Errorf("marshal app.yaml for env %s: %w", env.EnvName, err)
 		}
-		appMetaPath := p.outputDir(repoDir, env.EnvName, app.ProjectName, app.Name, "app.yaml")
+		appMetaPath := p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "app.yaml")
 		if err := p.writeFile(appMetaPath, appMetaBytes); err != nil {
 			return err
 		}
@@ -518,14 +518,14 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
 		}
-		valuesPath := p.outputDir(repoDir, env.EnvName, app.ProjectName, app.Name, "values.yaml")
+		valuesPath := p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "values.yaml")
 		if err := p.writeFile(valuesPath, hvBytes); err != nil {
 			return err
 		}
 
 		// Write platform-managed per-app resources into the same directory as
 		// app.yaml/values.yaml so ArgoCD picks them up with the same ApplicationSet.
-		appDir := p.outputDir(repoDir, env.EnvName, app.ProjectName, app.Name)
+		appDir := p.appEnvDir(repoDir, env, app.ProjectName, app.Name)
 		if err := p.writeAppPlatformResources(appDir, app, ns, env, naming, orgName); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
 		}
@@ -1148,6 +1148,22 @@ func (p *Publisher) ensureRepoREADME(repoDir string) error {
 	return p.writeFile(path, []byte(buildRepoREADME(p.cfg.Branding, p.cfg.SubPath)))
 }
 
+// appEnvDir builds the per-app directory for one publish env. Stable envs
+// land under "envs/{envName}/{project}/{app}/" so the top-level layout is
+// self-documenting (`envs/`, `previews/`, `_infra/`, `charts/`). Preview
+// envs keep their legacy "{previewName}/{project}/{app}/" placement —
+// publishAppFiles handles both kinds, but the dedicated PublishPreview
+// flow writes to "previews/{project}/{previewName}/" so the locations
+// differ on purpose.
+func (p *Publisher) appEnvDir(repoDir string, env AppPublishEnv, parts ...string) string {
+	if env.EnvType == domain.AppEnvPreview {
+		all := append([]string{env.EnvName}, parts...)
+		return p.outputDir(repoDir, all...)
+	}
+	all := append([]string{"envs", env.EnvName}, parts...)
+	return p.outputDir(repoDir, all...)
+}
+
 // outputDir builds an absolute filesystem path inside the gitops output
 // area: <repoDir>/<SubPath>/<parts...>. SubPath of "" / "." / "./" puts
 // the output at the repo root; otherwise it acts as a single-level
@@ -1284,14 +1300,15 @@ directly or detach them entirely; the platform stays out of the way.
 │   ├── eso-secrets-{level}-*.yaml         # upper-level ExternalSecrets
 │   ├── kargo/                             # Kargo Project / Warehouse / Stage CRs
 │   └── previews-appset.yaml               # preview ApplicationSet
-├── {env}/                                 # one dir per environment (staging, prod, …)
-│   └── {project}/
-│       └── {app}/
-│           ├── app.yaml                   # ArgoCD File-generator parameters
-│           ├── values.yaml                # rendered Helm values
-│           ├── env-configmap.yaml         # merged env vars (org→cluster)
-│           ├── external-secret.yaml       # platform-managed ExternalSecret
-│           └── kustomization.yaml         # bundles the per-app manifests
+├── envs/                                  # stable environments
+│   └── {env}/                             # staging, prod, …
+│       └── {project}/
+│           └── {app}/
+│               ├── app.yaml               # ArgoCD File-generator parameters
+│               ├── values.yaml            # rendered Helm values
+│               ├── env-configmap.yaml     # merged env vars (org→cluster)
+│               ├── external-secret.yaml   # platform-managed ExternalSecret
+│               └── kustomization.yaml     # bundles the per-app manifests
 ├── previews/{project}/{previewName}/      # per-PR preview environments
 └── charts/{template}/                     # bundled Helm charts (chart sources)
 `+"```"+`
@@ -1331,7 +1348,7 @@ Three escalating levels of "stop using the platform for this":
 
 1. Open the platform UI and delete the app, OR
 2. Delete the cluster-side record (e.g. `+"`kubectl delete configmap -n suparship-system suparship-app-{project}-{app}`"+`)
-3. Remove `+"`{env}/{project}/{app}/`"+` for every env, plus the matching
+3. Remove `+"`envs/{env}/{project}/{app}/`"+` for every env, plus the matching
    `+"`_infra/kargo/{project}-{app}-*.yaml`"+` Kargo CRs.
 4. ArgoCD will prune the live workload on its next sync.
 

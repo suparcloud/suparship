@@ -281,7 +281,7 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 	// The values.yaml path within the gitops repo for this app+env.
 	// Built via joinSubPath so it matches whatever PublisherConfig.SubPath
 	// the publisher used when writing the file.
-	valuesFilePath := joinSubPath(opts.SubPath, env.EnvName, app.ProjectName, app.Name, "values.yaml")
+	valuesFilePath := joinSubPath(opts.SubPath, "envs", env.EnvName, app.ProjectName, app.Name, "values.yaml")
 
 	pm := &PromotionMechanisms{
 		ArgoCDAppUpdates: []ArgoCDAppUpdate{

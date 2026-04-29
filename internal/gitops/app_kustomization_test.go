@@ -41,7 +41,7 @@ func TestPublishAppFiles_KustomizationListsExternalSecretWhenStoreSet(t *testing
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, "staging", "demo", "nginx", "kustomization.yaml"))
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "nginx", "kustomization.yaml"))
 	if err != nil {
 		t.Fatalf("read kustomization.yaml: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestPublishAppFiles_KustomizationOmitsExternalSecretWhenNoStore(t *testing.
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, "staging", "demo", "nginx", "kustomization.yaml"))
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "nginx", "kustomization.yaml"))
 	if err != nil {
 		t.Fatalf("read kustomization.yaml: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestBuildArgoAppSet_HasPerAppDirectorySource(t *testing.T) {
 		t.Fatalf("expected 3 sources (ref + chart + per-app manifests), got %d", len(sources))
 	}
 	manifestSrc := sources[2]
-	wantPath := "staging/{{project}}/{{name}}"
+	wantPath := "envs/staging/{{project}}/{{name}}"
 	if manifestSrc.Path != wantPath {
 		t.Errorf("per-app source path = %q, want %q", manifestSrc.Path, wantPath)
 	}

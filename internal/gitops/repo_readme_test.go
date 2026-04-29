@@ -40,7 +40,7 @@ func TestPublishAppFiles_PrependsGeneratedHeader(t *testing.T) {
 	}
 
 	for _, name := range []string{"app.yaml", "values.yaml", "env-configmap.yaml", "external-secret.yaml"} {
-		path := filepath.Join(dir, "staging", "demo", "nginx", name)
+		path := filepath.Join(dir, "envs", "staging", "demo", "nginx", name)
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -111,7 +111,7 @@ func TestPublishAppFiles_HeaderHonoursCustomBranding(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, "staging", "demo", "nginx", "values.yaml"))
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "nginx", "values.yaml"))
 	if err != nil {
 		t.Fatalf("read values.yaml: %v", err)
 	}

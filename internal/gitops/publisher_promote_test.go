@@ -119,12 +119,12 @@ func TestPublishApp_OnlyFirstEnvGetsFiles(t *testing.T) {
 	}
 
 	// staging files must exist
-	if _, err := os.Stat(filepath.Join(dir, "staging", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
 		t.Error("expected app.yaml for staging to exist after initial publish")
 	}
 
 	// prod files must NOT exist (publish-on-promote, not on create)
-	if _, err := os.Stat(filepath.Join(dir, "prod", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
 		t.Error("prod app.yaml must NOT exist after initial publish — it should only be written on promotion")
 	}
 }
@@ -152,11 +152,11 @@ func TestPublishApp_PreviewEnvPublishedOnCreate(t *testing.T) {
 		t.Error("expected preview env pr-1 app.yaml to exist after create")
 	}
 	// first stable env gets files on create
-	if _, err := os.Stat(filepath.Join(dir, "staging", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
 		t.Error("expected staging app.yaml to exist after create")
 	}
 	// higher stable env must NOT have files yet
-	if _, err := os.Stat(filepath.Join(dir, "prod", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
 		t.Error("prod app.yaml must NOT exist after create — only written on promotion")
 	}
 }
@@ -184,10 +184,10 @@ func TestPublishAppEnv_WritesTargetEnv(t *testing.T) {
 	}
 
 	// prod files must now exist (simulate promotion)
-	if _, err := os.Stat(filepath.Join(dir, "prod", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
 		t.Error("expected prod app.yaml to exist after PublishAppEnv")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "prod", "demo", "hello", "values.yaml")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "values.yaml")); os.IsNotExist(err) {
 		t.Error("expected prod values.yaml to exist after PublishAppEnv")
 	}
 }
@@ -211,7 +211,7 @@ func TestPublishAppEnv_UnboundEnvWritesNothing(t *testing.T) {
 		t.Fatalf("PublishAppEnvForTest: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, "prod", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
 		t.Error("unbound env should NOT produce app.yaml even when explicitly promoted")
 	}
 }

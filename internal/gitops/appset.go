@@ -120,7 +120,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 
 	// Source 2: Helm chart; reads per-app values from the repo via $appvalues.
 	// The full path is used because $appvalues resolves to the repo root (see above).
-	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, env.EnvName, "{{project}}", "{{name}}", "values.yaml")
+	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
 		Path:           joinSubPath(opts.SubPath, "charts", "{{template}}"),
@@ -146,7 +146,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	// gitops-output/README.md for the extension story).
 	platformManifestsSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           joinSubPath(opts.SubPath, env.EnvName, "{{project}}", "{{name}}"),
+		Path:           joinSubPath(opts.SubPath, "envs", env.EnvName, "{{project}}", "{{name}}"),
 		TargetRevision: opts.TargetRevision,
 		Directory: &DirectorySource{
 			Recurse: false,
@@ -185,7 +185,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 					RepoURL:  repoURL,
 					Revision: opts.TargetRevision,
 					Files: []GitFilePathSpec{
-						{Path: joinSubPath(opts.SubPath, env.EnvName, "*", "*", "app.yaml")},
+						{Path: joinSubPath(opts.SubPath, "envs", env.EnvName, "*", "*", "app.yaml")},
 					},
 				},
 			},
