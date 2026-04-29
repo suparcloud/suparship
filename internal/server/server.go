@@ -29,6 +29,7 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
+	"github.com/suparcloud/suparship/internal/tpl/registrysync"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -357,6 +358,10 @@ type Config struct {
 	// RegistryStore reads/writes the container registry ConfigMap.
 	// Nil disables the /api/v1/registry/* endpoints.
 	RegistryStore *registry.Store
+	// RegistrySyncEngine drives the external-template sync flow. When nil
+	// the registry's read endpoints still work; the /sync POST routes
+	// return 503.
+	RegistrySyncEngine *registrysync.Engine
 }
 
 // Server is the suparship HTTP API server.
@@ -565,10 +570,22 @@ func New(cfg Config) *Server {
 		trh := &templateRegistryHandler{
 			store:  cfg.TemplateRegistryStore,
 			auth:   ah,
+			engine: cfg.RegistrySyncEngine,
 			logger: cfg.Logger,
 		}
+		// When the org provider is wired we can require org_admin on the
+		// write/sync routes; without it we fall back to plain auth so test
+		// harnesses without an OrgStore keep working.
+		if cfg.OrgProvider != nil {
+			rh := &rbacHandler{auth: ah, orgStore: cfg.OrgProvider, projectStore: cfg.ProjectStore}
+			trh.authMiddleware = func(next http.HandlerFunc) http.HandlerFunc {
+				return ah.requireAuth(rh.requireOrgAdmin(next))
+			}
+		}
 		trh.registerRoutes(mux)
-		cfg.Logger.Info("template registry endpoints enabled")
+		cfg.Logger.Info("template registry endpoints enabled",
+			"sync_engine", cfg.RegistrySyncEngine != nil,
+		)
 	}
 
 	if cfg.RegistryStore != nil && ah != nil {
