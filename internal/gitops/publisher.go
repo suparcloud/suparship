@@ -74,6 +74,12 @@ type PublisherConfig struct {
 	// — SRE contractors who white-label set Org.Branding once and the
 	// publisher picks it up.
 	Branding branding.Config
+	// RoutingProfiles holds the org-level ingress + cert-manager profiles
+	// keyed by ExposeMode (e.g. "internal", "external"). Per-env overrides
+	// flow through AppPublishEnv.RoutingProfiles. When empty, the helmvalues
+	// mapper falls back to the legacy Expose=true → nginx shim — useful for
+	// installs that haven't migrated to the routing-profile model yet.
+	RoutingProfiles domain.RoutingProfiles
 	// SubPath is the optional sub-directory inside the gitops repo where
 	// platform-managed manifests land. Empty (default) means manifests
 	// land at the repo root (`<repo>/_infra/...`, `<repo>/{env}/...`,
@@ -123,14 +129,16 @@ type Publisher struct {
 }
 
 // SetOrgConfig updates the publisher's org-scoped configuration (naming
-// patterns, backend config, org name, and branding). Thread-safe for
-// callers that rebuild the publisher when org config changes; for
-// concurrent use call this before handing the publisher to goroutines.
-func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, backend *secrets.BackendConfig, brand branding.Config) {
+// patterns, backend config, org name, branding, and routing profiles).
+// Thread-safe for callers that rebuild the publisher when org config
+// changes; for concurrent use call this before handing the publisher to
+// goroutines.
+func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, backend *secrets.BackendConfig, brand branding.Config, routingProfiles domain.RoutingProfiles) {
 	p.cfg.OrgName = orgName
 	p.cfg.ResourceNaming = naming
 	p.cfg.BackendConfig = backend
 	p.cfg.Branding = brand
+	p.cfg.RoutingProfiles = routingProfiles
 }
 
 // NewPublisher creates a Publisher from cfg.
@@ -513,10 +521,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if p.cfg.BackendConfig != nil {
 			backend = p.cfg.BackendConfig.Effective()
 		}
-		// Routing profiles flow through PublisherConfig in PR 4; nil here
-		// triggers the legacy Expose=true → nginx-no-TLS shim in helmvalues
-		// so existing AppSpecs without ExposeMode keep rendering identically.
-		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName, backend, nil, nil)
+		// Org-level profiles come from PublisherConfig (set by SetOrgConfig
+		// from rbac.Org.RoutingProfiles); per-env overrides ride on
+		// AppPublishEnv.RoutingProfiles. When both are empty, helmvalues
+		// falls back to the legacy Expose=true → nginx shim.
+		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName, backend, p.cfg.RoutingProfiles, env.RoutingProfiles)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
@@ -941,6 +950,11 @@ type AppPublishEnv struct {
 	// model (ClusterSecretStore lists both vaults), which is the default
 	// behaviour today.
 	PlatformStoreName string
+	// RoutingProfiles is a sparse override map for this env. Entries here
+	// replace the org-level profile (PublisherConfig.RoutingProfiles) of the
+	// same name; absent names inherit the org default. Populated by the
+	// publish adapter from rbac.OrgEnvironment.RoutingProfiles when present.
+	RoutingProfiles domain.RoutingProfiles
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD
@@ -980,9 +994,10 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		if p.cfg.BackendConfig != nil {
 			previewBackend = p.cfg.BackendConfig.Effective()
 		}
-		// Routing profiles flow through PublisherConfig in PR 4; nil here
-		// activates the legacy Expose=true → nginx shim for backward compat.
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName, previewBackend, nil, nil)
+		// Org-level routing profiles apply uniformly to previews; per-env
+		// overrides don't make sense for ephemeral preview envs (their
+		// names are PR-specific and have no static config).
+		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName, previewBackend, p.cfg.RoutingProfiles, nil)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)

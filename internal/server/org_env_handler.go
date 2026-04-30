@@ -29,12 +29,16 @@ import (
 
 // OrgEnvironmentDTO is the JSON representation of an org-level environment.
 type OrgEnvironmentDTO struct {
-	Name             string `json:"name"`
-	DisplayName      string `json:"displayName,omitempty"`
-	Order            int    `json:"order"`
-	ClusterRef       string `json:"clusterRef,omitempty"`
-	BaseDomain       string `json:"baseDomain,omitempty"`
-	NamespacePattern string `json:"namespacePattern,omitempty"`
+	Name             string                 `json:"name"`
+	DisplayName      string                 `json:"displayName,omitempty"`
+	Order            int                    `json:"order"`
+	ClusterRef       string                 `json:"clusterRef,omitempty"`
+	BaseDomain       string                 `json:"baseDomain,omitempty"`
+	NamespacePattern string                 `json:"namespacePattern,omitempty"`
+	// RoutingProfiles is a sparse override map keyed by ExposeMode name.
+	// Entries here replace the org-level profile of the same name; absent
+	// names inherit the org-level profile.
+	RoutingProfiles domain.RoutingProfiles `json:"routingProfiles,omitempty"`
 }
 
 func orgEnvToDTO(e rbac.OrgEnvironment) OrgEnvironmentDTO {
@@ -45,6 +49,7 @@ func orgEnvToDTO(e rbac.OrgEnvironment) OrgEnvironmentDTO {
 		ClusterRef:       e.ClusterRef,
 		BaseDomain:       e.BaseDomain,
 		NamespacePattern: e.NamespacePattern,
+		RoutingProfiles:  e.RoutingProfiles,
 	}
 }
 
@@ -73,6 +78,12 @@ type upsertOrgEnvRequest struct {
 	// per-environment namespace pattern. Use "" to clear an existing override
 	// and fall back to the org-wide ResourceNaming.AppNamespace default.
 	NamespacePattern *string `json:"namespacePattern,omitempty"`
+	// RoutingProfiles when non-nil replaces the stored sparse override map
+	// wholesale. Send an empty map ({}) to clear all overrides; omit the
+	// field (nil) on update to leave the stored map untouched. Each entry's
+	// name must be one of "internal" or "external" and IngressClassName is
+	// required — Org.Validate enforces both.
+	RoutingProfiles *domain.RoutingProfiles `json:"routingProfiles,omitempty"`
 }
 
 func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +124,9 @@ func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http
 	}
 	if req.NamespacePattern != nil {
 		newEnv.NamespacePattern = *req.NamespacePattern
+	}
+	if req.RoutingProfiles != nil {
+		newEnv.RoutingProfiles = *req.RoutingProfiles
 	}
 	org.Environments = append(org.Environments, newEnv)
 	sortOrgEnvs(org.Environments)
@@ -157,6 +171,10 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 			// NamespacePattern is a pointer: nil = don't touch, "" = clear.
 			if req.NamespacePattern != nil {
 				org.Environments[i].NamespacePattern = *req.NamespacePattern
+			}
+			// RoutingProfiles is a pointer: nil = don't touch, {} = clear.
+			if req.RoutingProfiles != nil {
+				org.Environments[i].RoutingProfiles = *req.RoutingProfiles
 			}
 			if req.Order > 0 {
 				org.Environments[i].Order = req.Order

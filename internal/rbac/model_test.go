@@ -3,6 +3,8 @@ package rbac
 import (
 	"strings"
 	"testing"
+
+	"github.com/suparcloud/suparship/internal/domain"
 )
 
 func TestParseOrgValid(t *testing.T) {
@@ -232,6 +234,117 @@ func TestOrgEnvironment_EffectivePatterns(t *testing.T) {
 			}
 			if got := tt.env.EffectiveProjectNamespacePattern(); got != tt.wantProj {
 				t.Errorf("EffectiveProjectNamespacePattern() = %q, want %q", got, tt.wantProj)
+			}
+		})
+	}
+}
+
+func TestRoutingProfiles_RoundTrip(t *testing.T) {
+	original := &Org{
+		Name: "acme",
+		Teams: []Team{
+			{Name: "admins", DisplayName: "Admins", Members: []string{"alice"}},
+		},
+		RoleBindings: []RoleBinding{
+			{Project: "*", Team: "admins", Role: RoleOrgAdmin},
+		},
+		RoutingProfiles: domain.RoutingProfiles{
+			"internal": {IngressClassName: "nginx-internal"},
+			"external": {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod", BaseDomain: "acme.com"},
+		},
+		Environments: []OrgEnvironment{
+			{
+				Name:  "staging",
+				Order: 1,
+				RoutingProfiles: domain.RoutingProfiles{
+					"external": {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-staging"},
+				},
+			},
+		},
+	}
+
+	data, err := original.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	restored, err := ParseOrg(data)
+	if err != nil {
+		t.Fatalf("ParseOrg: %v", err)
+	}
+
+	if got := restored.RoutingProfiles["external"].ClusterIssuer; got != "letsencrypt-prod" {
+		t.Errorf("org external issuer = %q, want letsencrypt-prod", got)
+	}
+	if got := restored.Environments[0].RoutingProfiles["external"].ClusterIssuer; got != "letsencrypt-staging" {
+		t.Errorf("staging override issuer = %q, want letsencrypt-staging", got)
+	}
+}
+
+func TestValidateRoutingProfiles_Rejects(t *testing.T) {
+	tests := []struct {
+		name string
+		org  *Org
+		want string // substring of expected error
+	}{
+		{
+			name: "unknown mode name",
+			org: &Org{
+				Name: "x", Teams: []Team{{Name: "a", Members: []string{"u"}}},
+				RoleBindings: []RoleBinding{{Project: "*", Team: "a", Role: RoleOrgAdmin}},
+				RoutingProfiles: domain.RoutingProfiles{
+					"public": {IngressClassName: "nginx"},
+				},
+			},
+			want: "internal",
+		},
+		{
+			name: "disabled is not a profile name",
+			org: &Org{
+				Name: "x", Teams: []Team{{Name: "a", Members: []string{"u"}}},
+				RoleBindings: []RoleBinding{{Project: "*", Team: "a", Role: RoleOrgAdmin}},
+				RoutingProfiles: domain.RoutingProfiles{
+					"disabled": {IngressClassName: "nginx"},
+				},
+			},
+			want: "disabled",
+		},
+		{
+			name: "empty IngressClassName",
+			org: &Org{
+				Name: "x", Teams: []Team{{Name: "a", Members: []string{"u"}}},
+				RoleBindings: []RoleBinding{{Project: "*", Team: "a", Role: RoleOrgAdmin}},
+				RoutingProfiles: domain.RoutingProfiles{
+					"internal": {ClusterIssuer: "letsencrypt-prod"},
+				},
+			},
+			want: "ingressClassName",
+		},
+		{
+			name: "env override with empty IngressClassName",
+			org: &Org{
+				Name: "x", Teams: []Team{{Name: "a", Members: []string{"u"}}},
+				RoleBindings: []RoleBinding{{Project: "*", Team: "a", Role: RoleOrgAdmin}},
+				Environments: []OrgEnvironment{
+					{
+						Name:  "staging",
+						Order: 1,
+						RoutingProfiles: domain.RoutingProfiles{
+							"external": {ClusterIssuer: "letsencrypt-staging"},
+						},
+					},
+				},
+			},
+			want: "environments[staging]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.org.Validate()
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q missing substring %q", err.Error(), tt.want)
 			}
 		})
 	}

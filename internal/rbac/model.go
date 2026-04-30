@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/branding"
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"gopkg.in/yaml.v3"
@@ -98,6 +99,13 @@ type OrgEnvironment struct {
 	// EnvConfig holds env vars and secret refs that apply to all apps
 	// deployed to this environment type (Environment level of the hierarchy).
 	EnvConfig envconfig.EnvConfig `yaml:"envConfig,omitempty"`
+	// RoutingProfiles is a sparse override map keyed by ExposeMode name
+	// (e.g. "internal", "external"). Entries here replace the org-level
+	// profile of the same name for apps deployed to this environment;
+	// names not present here inherit the org default. Use this for
+	// per-env differences like "staging uses letsencrypt-staging, prod
+	// uses letsencrypt-prod".
+	RoutingProfiles domain.RoutingProfiles `yaml:"routingProfiles,omitempty"`
 }
 
 // EffectiveAppNamespacePattern returns the per-env override that applies to
@@ -144,6 +152,13 @@ type Org struct {
 	// SRE contractors who white-label suparship can set their own platform
 	// name without touching individual generators.
 	Branding branding.Config `yaml:"branding,omitempty"`
+	// RoutingProfiles maps ExposeMode names to the ingress class + cert-manager
+	// ClusterIssuer the chart should use for components targeting that tier.
+	// Per-env overrides live on OrgEnvironment.RoutingProfiles and replace
+	// matching entries by name. When empty, the helmvalues mapper falls back
+	// to a legacy Expose=true → nginx shim so existing AppSpecs without
+	// ExposeMode keep rendering identically until they are migrated.
+	RoutingProfiles domain.RoutingProfiles `yaml:"routingProfiles,omitempty"`
 }
 
 // Team represents a named group of users.
@@ -245,6 +260,42 @@ func (o *Org) Validate() error {
 		}
 	}
 
+	if err := validateRoutingProfiles("routingProfiles", o.RoutingProfiles); err != nil {
+		return err
+	}
+	for _, e := range o.Environments {
+		if err := validateRoutingProfiles(
+			fmt.Sprintf("environments[%s].routingProfiles", e.Name),
+			e.RoutingProfiles,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateRoutingProfiles enforces:
+//   - Profile names are recognised ExposeMode values (internal/external).
+//     We deliberately reject "disabled" as a profile name — disabled is the
+//     "no ingress" sentinel and never resolves to a profile lookup.
+//   - Each profile carries a non-empty IngressClassName, the only required
+//     field. ClusterIssuer and BaseDomain are optional.
+//
+// Called both for the org-level map and for every env-level override map.
+// path is included in error messages so operators can locate the bad entry
+// (e.g. "environments[prod].routingProfiles[external]: ...").
+func validateRoutingProfiles(path string, profiles domain.RoutingProfiles) error {
+	for name, p := range profiles {
+		mode := domain.ExposeMode(name)
+		if !mode.Valid() || mode == domain.ExposeDisabled {
+			return fmt.Errorf("%s[%q]: must be one of %q or %q",
+				path, name, domain.ExposeInternal, domain.ExposeExternal)
+		}
+		if p.IngressClassName == "" {
+			return fmt.Errorf("%s[%q]: ingressClassName must not be empty", path, name)
+		}
+	}
 	return nil
 }
 

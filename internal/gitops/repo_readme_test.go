@@ -106,7 +106,7 @@ func TestPublishAppFiles_HeaderHonoursCustomBranding(t *testing.T) {
 	}
 
 	p := newTestPublisher(t)
-	p.SetOrgConfig("myorg", secrets.ResourceNaming{}, nil, branding.Config{Name: "acme-platform", LabelDomain: "platform.acme.io"})
+	p.SetOrgConfig("myorg", secrets.ResourceNaming{}, nil, branding.Config{Name: "acme-platform", LabelDomain: "platform.acme.io"}, nil)
 	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}

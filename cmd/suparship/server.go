@@ -794,12 +794,13 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 		}
 
 		pub := gitops.AppPublishEnv{
-			EnvName:    env.EnvName,
-			EnvType:    env.EnvType,
-			Order:      env.Order,
-			Bound:      res.bound,
-			BaseDomain: res.baseDomain,
-			Namespace:  env.Namespace,
+			EnvName:         env.EnvName,
+			EnvType:         env.EnvType,
+			Order:           env.Order,
+			Bound:           res.bound,
+			BaseDomain:      res.baseDomain,
+			Namespace:       env.Namespace,
+			RoutingProfiles: lookupOrgEnvRoutingProfiles(org, env.EnvName),
 		}
 
 		// Populate secret-store info from org backend config.
@@ -824,6 +825,22 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 
 	// Write app.yaml + values.yaml for each bound environment.
 	return a.inner.PublishApp(ctx, app, pubEnvs)
+}
+
+// lookupOrgEnvRoutingProfiles returns the per-env RoutingProfiles override
+// map for envName, or nil when the org or env isn't found. The publisher
+// passes this to the helmvalues mapper so per-env entries replace org-level
+// profiles by name; absent names inherit the org default.
+func lookupOrgEnvRoutingProfiles(org *rbac.Org, envName string) domain.RoutingProfiles {
+	if org == nil {
+		return nil
+	}
+	for _, e := range org.Environments {
+		if e.Name == envName {
+			return e.RoutingProfiles
+		}
+	}
+	return nil
 }
 
 // enrichPubEnvWithSecrets adds StoreName, VaultItemTitle, ClusterRef, and
@@ -993,6 +1010,7 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 	if a.orgProvider != nil {
 		org, _ = a.orgProvider.GetOrg(ctx)
 	}
+	pub.RoutingProfiles = lookupOrgEnvRoutingProfiles(org, env.EnvName)
 	if org != nil {
 		a.enrichPubEnvWithSecrets(ctx, org, app, env.EnvName, &pub)
 	}
@@ -1087,7 +1105,7 @@ func publishInitialEnvInfra(
 	if orgName == "" {
 		orgName = "default"
 	}
-	pub.SetOrgConfig(orgName, org.ResourceNaming, &org.SecretBackend, org.Branding)
+	pub.SetOrgConfig(orgName, org.ResourceNaming, &org.SecretBackend, org.Branding, org.RoutingProfiles)
 
 	// Build the appSetEnvs list with the SAME bound-only filter the
 	// per-app publish path (gitOpsPublisherAdapter.PublishApp) uses.
