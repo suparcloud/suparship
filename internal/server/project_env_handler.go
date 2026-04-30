@@ -20,6 +20,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 
@@ -60,12 +61,17 @@ func (rh *rbacHandler) handleListProjectEnvironments(w http.ResponseWriter, r *h
 // ── POST /api/v1/projects/{project}/environments ──────────────────────────────
 
 type upsertEnvRequest struct {
-	Name             string `json:"name"`
-	DisplayName      string `json:"displayName,omitempty"`
-	Order            int    `json:"order"`
-	ClusterRef       string `json:"clusterRef,omitempty"`
-	BaseDomain       string `json:"baseDomain,omitempty"`
-	NamespacePattern string `json:"namespacePattern,omitempty"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+	Order       int    `json:"order"`
+	// ClusterRefs when non-nil replaces the project-level cluster set
+	// for this env. Nil means inherit from the org-level entry.
+	ClusterRefs *[]string `json:"clusterRefs,omitempty"`
+	// ActiveClusterRef when non-nil replaces the active deploy cluster
+	// for this env override. Must be a member of the resolved ClusterRefs.
+	ActiveClusterRef *string `json:"activeClusterRef,omitempty"`
+	BaseDomain       string  `json:"baseDomain,omitempty"`
+	NamespacePattern string  `json:"namespacePattern,omitempty"`
 }
 
 func (rh *rbacHandler) handleCreateProjectEnvironment(w http.ResponseWriter, r *http.Request) {
@@ -108,14 +114,24 @@ func (rh *rbacHandler) handleCreateProjectEnvironment(w http.ResponseWriter, r *
 		order = len(proj.Spec.Environments) + 1
 	}
 
-	proj.Spec.Environments = append(proj.Spec.Environments, project.Environment{
+	newEnv := project.Environment{
 		Name:             req.Name,
 		DisplayName:      req.DisplayName,
 		Order:            order,
-		ClusterRef:       req.ClusterRef,
 		BaseDomain:       req.BaseDomain,
 		NamespacePattern: req.NamespacePattern,
-	})
+	}
+	if req.ClusterRefs != nil {
+		newEnv.ClusterRefs = *req.ClusterRefs
+	}
+	if req.ActiveClusterRef != nil {
+		newEnv.ActiveClusterRef = *req.ActiveClusterRef
+	}
+	if err := validateProjectEnvActiveInRefs(newEnv); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+	proj.Spec.Environments = append(proj.Spec.Environments, newEnv)
 	sortEnvs(proj.Spec.Environments)
 
 	if err := rh.projectStore.Save(r.Context(), proj); err != nil {
@@ -123,14 +139,7 @@ func (rh *rbacHandler) handleCreateProjectEnvironment(w http.ResponseWriter, r *
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, envToDTO(projectName, project.Environment{
-		Name:             req.Name,
-		DisplayName:      req.DisplayName,
-		Order:            order,
-		ClusterRef:       req.ClusterRef,
-		BaseDomain:       req.BaseDomain,
-		NamespacePattern: req.NamespacePattern,
-	}))
+	writeJSON(w, http.StatusCreated, envToDTO(projectName, newEnv))
 }
 
 // ── PUT /api/v1/projects/{project}/environments/{env} ─────────────────────────
@@ -177,8 +186,11 @@ func (rh *rbacHandler) handleUpdateProjectEnvironment(w http.ResponseWriter, r *
 			if req.DisplayName != "" {
 				proj.Spec.Environments[i].DisplayName = req.DisplayName
 			}
-			if req.ClusterRef != "" {
-				proj.Spec.Environments[i].ClusterRef = req.ClusterRef
+			if req.ClusterRefs != nil {
+				proj.Spec.Environments[i].ClusterRefs = *req.ClusterRefs
+			}
+			if req.ActiveClusterRef != nil {
+				proj.Spec.Environments[i].ActiveClusterRef = *req.ActiveClusterRef
 			}
 			if req.BaseDomain != "" {
 				proj.Spec.Environments[i].BaseDomain = req.BaseDomain
@@ -188,6 +200,10 @@ func (rh *rbacHandler) handleUpdateProjectEnvironment(w http.ResponseWriter, r *
 			}
 			if req.Order > 0 {
 				proj.Spec.Environments[i].Order = req.Order
+			}
+			if err := validateProjectEnvActiveInRefs(proj.Spec.Environments[i]); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+				return
 			}
 			found = true
 			break
@@ -205,8 +221,11 @@ func (rh *rbacHandler) handleUpdateProjectEnvironment(w http.ResponseWriter, r *
 		if req.DisplayName != "" {
 			override.DisplayName = req.DisplayName
 		}
-		if req.ClusterRef != "" {
-			override.ClusterRef = req.ClusterRef
+		if req.ClusterRefs != nil {
+			override.ClusterRefs = *req.ClusterRefs
+		}
+		if req.ActiveClusterRef != nil {
+			override.ActiveClusterRef = *req.ActiveClusterRef
 		}
 		if req.BaseDomain != "" {
 			override.BaseDomain = req.BaseDomain
@@ -216,6 +235,10 @@ func (rh *rbacHandler) handleUpdateProjectEnvironment(w http.ResponseWriter, r *
 		}
 		if req.Order > 0 {
 			override.Order = req.Order
+		}
+		if err := validateProjectEnvActiveInRefs(override); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
 		}
 		proj.Spec.Environments = append(proj.Spec.Environments, override)
 	}
@@ -309,7 +332,8 @@ func (rh *rbacHandler) handleDeleteProjectEnvironment(w http.ResponseWriter, r *
 			Project:          projectName,
 			Namespace:        runtime.Namespace(projectName, orgEnv.Name),
 			Order:            orgEnv.Order,
-			ClusterRef:       orgEnv.ClusterRef,
+			ClusterRefs:      orgEnv.ClusterRefs,
+			ActiveClusterRef: orgEnv.ActiveClusterRef,
 			BaseDomain:       orgEnv.BaseDomain,
 			NamespacePattern: orgEnv.NamespacePattern,
 			Origin:           rbac.OriginOrg,
@@ -329,7 +353,8 @@ func envToDTO(projectName string, e project.Environment) EnvironmentDTO {
 		Project:          projectName,
 		Namespace:        runtime.Namespace(projectName, e.Name),
 		Order:            e.Order,
-		ClusterRef:       e.ClusterRef,
+		ClusterRefs:      e.ClusterRefs,
+		ActiveClusterRef: e.ActiveClusterRef,
 		BaseDomain:       e.BaseDomain,
 		NamespacePattern: e.NamespacePattern,
 	}
@@ -350,4 +375,19 @@ func sortEnvs(envs []project.Environment) {
 		}
 		return envs[i].Name < envs[j].Name
 	})
+}
+
+// validateProjectEnvActiveInRefs mirrors validateActiveInRefs for project-
+// level overrides. ActiveClusterRef must be a member of ClusterRefs (or
+// empty, in which case EffectiveClusterRef falls back to ClusterRefs[0]).
+func validateProjectEnvActiveInRefs(e project.Environment) error {
+	if e.ActiveClusterRef == "" {
+		return nil
+	}
+	for _, c := range e.ClusterRefs {
+		if c == e.ActiveClusterRef {
+			return nil
+		}
+	}
+	return fmt.Errorf("activeClusterRef %q must be present in clusterRefs %v", e.ActiveClusterRef, e.ClusterRefs)
 }

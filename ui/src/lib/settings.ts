@@ -14,7 +14,12 @@ export interface OrgEnvironment {
   name: string;
   displayName?: string;
   order: number;
-  clusterRef?: string;
+  // Every Cluster registered with this env. Today only activeClusterRef is
+  // deployed to; the rest are reserved for future multi-cluster fan-out.
+  clusterRefs?: string[];
+  // The single member of clusterRefs currently receiving deploys. Empty
+  // falls back to clusterRefs[0] at the server.
+  activeClusterRef?: string;
   baseDomain?: string;
   namespacePattern?: string;
 }

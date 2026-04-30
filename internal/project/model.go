@@ -96,9 +96,15 @@ type Environment struct {
 	DisplayName string `yaml:"displayName,omitempty"`
 	Order       int    `yaml:"order"`
 
-	// ClusterRef is the name of the registered Cluster this environment
-	// deploys to. When empty the environment is not yet bound to a cluster.
-	ClusterRef string `yaml:"clusterRef,omitempty"`
+	// ClusterRefs lists every registered Cluster this project-level env is
+	// bound to. When empty in a project override, the project inherits the
+	// org-level ClusterRefs. Today only ActiveClusterRef receives deploys.
+	ClusterRefs []string `yaml:"clusterRefs,omitempty"`
+
+	// ActiveClusterRef is the cluster from ClusterRefs that currently
+	// receives deploys. Must be a member of ClusterRefs (or empty, in which
+	// case EffectiveClusterRef falls back to ClusterRefs[0]).
+	ActiveClusterRef string `yaml:"activeClusterRef,omitempty"`
 
 	// BaseDomain is the ingress base domain for apps in this environment.
 	// App URLs are derived as: http://{app}.{baseDomain}
@@ -109,6 +115,18 @@ type Environment struct {
 	// Tokens: {app}, {env}, {project}.
 	// Default (empty string) falls back to "{app}-{env}".
 	NamespacePattern string `yaml:"namespacePattern,omitempty"`
+}
+
+// EffectiveClusterRef returns the cluster this project-level env currently
+// deploys to. Mirrors domain.Environment.EffectiveClusterRef.
+func (e Environment) EffectiveClusterRef() string {
+	if e.ActiveClusterRef != "" {
+		return e.ActiveClusterRef
+	}
+	if len(e.ClusterRefs) > 0 {
+		return e.ClusterRefs[0]
+	}
+	return ""
 }
 
 // Service describes a deployable workload (app) persisted in the legacy

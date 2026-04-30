@@ -33,14 +33,15 @@ import (
 // EnvironmentDTO describes a project environment.
 // Used by GET /api/v1/environments (legacy) and GET /api/v1/projects/{project}/apps/{app}/environments.
 type EnvironmentDTO struct {
-	Name             string `json:"name"`
-	DisplayName      string `json:"displayName,omitempty"`
-	Project          string `json:"project"`
-	Namespace        string `json:"namespace"`
-	Order            int    `json:"order"`
-	ClusterRef       string `json:"clusterRef,omitempty"`
-	BaseDomain       string `json:"baseDomain,omitempty"`
-	NamespacePattern string `json:"namespacePattern,omitempty"`
+	Name             string   `json:"name"`
+	DisplayName      string   `json:"displayName,omitempty"`
+	Project          string   `json:"project"`
+	Namespace        string   `json:"namespace"`
+	Order            int      `json:"order"`
+	ClusterRefs      []string `json:"clusterRefs,omitempty"`
+	ActiveClusterRef string   `json:"activeClusterRef,omitempty"`
+	BaseDomain       string   `json:"baseDomain,omitempty"`
+	NamespacePattern string   `json:"namespacePattern,omitempty"`
 	// Origin describes where this environment definition comes from:
 	//   "org"      — fully inherited from org defaults, no project customisation
 	//   "override" — org environment with project-level field overrides applied
@@ -168,11 +169,12 @@ func (ih *inventoryHandler) handleListEnvironments(w http.ResponseWriter, r *htt
 		if org, orgErr := ih.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
 			for _, e := range org.Environments {
 				envs = append(envs, EnvironmentDTO{
-					Name:        e.Name,
-					DisplayName: e.DisplayName,
-					Order:       e.Order,
-					ClusterRef:  e.ClusterRef,
-					BaseDomain:  e.BaseDomain,
+					Name:             e.Name,
+					DisplayName:      e.DisplayName,
+					Order:            e.Order,
+					ClusterRefs:      e.ClusterRefs,
+					ActiveClusterRef: e.ActiveClusterRef,
+					BaseDomain:       e.BaseDomain,
 				})
 			}
 		}

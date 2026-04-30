@@ -42,9 +42,18 @@ type Environment struct {
 	DisplayName string `json:"displayName,omitempty"`
 	Order       int    `json:"order"`
 
-	// ClusterRef is the name of the registered Cluster this environment
-	// deploys to. When empty the environment is not yet bound to a cluster.
-	ClusterRef string `json:"clusterRef,omitempty"`
+	// ClusterRefs lists every registered Cluster this environment is allowed
+	// to deploy to. Empty means the environment is not yet bound. Today only
+	// ActiveClusterRef receives deploys; the rest are reserved for future
+	// multi-cluster fan-out.
+	ClusterRefs []string `json:"clusterRefs,omitempty"`
+
+	// ActiveClusterRef is the single member of ClusterRefs that currently
+	// receives deploys. Must be a member of ClusterRefs (or empty, in which
+	// case EffectiveClusterRef falls back to ClusterRefs[0]). The split lets
+	// operators register a multi-cluster topology now without changing their
+	// deploy target until multi-cluster fan-out lands.
+	ActiveClusterRef string `json:"activeClusterRef,omitempty"`
 
 	// BaseDomain is the ingress base domain for apps in this environment.
 	// App URLs are derived as: http://{app}.{baseDomain}
@@ -61,6 +70,27 @@ type Environment struct {
 	// Default (empty): "{app}-{env}" — safe for shared clusters.
 	// Must always contain the {app} token.
 	NamespacePattern string `json:"namespacePattern,omitempty"`
+}
+
+// EffectiveClusterRef returns the cluster this environment currently deploys
+// to. Resolution order:
+//
+//  1. ActiveClusterRef when set (and present in ClusterRefs — callers must
+//     validate at write time).
+//  2. ClusterRefs[0] when ActiveClusterRef is empty.
+//  3. "" when no clusters are registered (env is unbound).
+//
+// All publish-side code reads through this method so the future addition of
+// a multi-cluster deploy mode only changes the publisher loop, not the call
+// sites that ask "what cluster am I targeting?".
+func (e Environment) EffectiveClusterRef() string {
+	if e.ActiveClusterRef != "" {
+		return e.ActiveClusterRef
+	}
+	if len(e.ClusterRefs) > 0 {
+		return e.ClusterRefs[0]
+	}
+	return ""
 }
 
 // Cluster represents a Kubernetes cluster registered with suparShip.

@@ -230,7 +230,8 @@ export interface EnvironmentInfo {
   project?: string;  // empty for org-level environments
   namespace?: string;
   order: number;
-  clusterRef?: string;
+  clusterRefs?: string[];
+  activeClusterRef?: string;
   baseDomain?: string;
 }
 

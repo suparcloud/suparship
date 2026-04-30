@@ -351,7 +351,7 @@ func (h *envConfigHandler) readClusterEnvConfig(ctx context.Context, envs []rbac
 	var clusterRef string
 	for _, e := range envs {
 		if e.Name == envName {
-			clusterRef = e.ClusterRef
+			clusterRef = e.EffectiveClusterRef()
 			break
 		}
 	}
@@ -727,10 +727,16 @@ func (h *envConfigHandler) scheduleRepublishClusterApps(clusterName string) {
 			h.logger.Error("republish: failed to load org for cluster fan-out", "cluster", clusterName, "err", err)
 			return
 		}
+		// Any env that has this cluster in its registered ClusterRefs is
+		// affected by a cluster-scoped config change, regardless of whether
+		// it's the active deploy target right now.
 		envNames := make(map[string]bool)
 		for _, e := range org.Environments {
-			if e.ClusterRef == clusterName {
-				envNames[e.Name] = true
+			for _, c := range e.ClusterRefs {
+				if c == clusterName {
+					envNames[e.Name] = true
+					break
+				}
 			}
 		}
 		if len(envNames) == 0 {

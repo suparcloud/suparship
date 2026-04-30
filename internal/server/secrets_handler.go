@@ -447,14 +447,15 @@ func (h *secretsHandler) handleMigrateToOnePassword(w http.ResponseWriter, r *ht
 }
 
 // buildOrgEnvForClusterResolver returns a closure that maps a registered
-// cluster name to the env-name that has it as ClusterRef. Mirrors the helper
-// in cmd/suparship/server.go but inlined here so the secrets handler doesn't
+// cluster name to the env-name that has the cluster registered (any member
+// of ClusterRefs, not just the active one). Mirrors the helper in
+// cmd/suparship/server.go but inlined here so the secrets handler doesn't
 // import that package.
 func buildOrgEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string {
 	clusterToEnv := make(map[string]string, len(envs))
 	for _, e := range envs {
-		if e.ClusterRef != "" {
-			clusterToEnv[e.ClusterRef] = e.Name
+		for _, cluster := range e.ClusterRefs {
+			clusterToEnv[cluster] = e.Name
 		}
 	}
 	return func(cluster string) string {
@@ -715,7 +716,7 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 
 	// Seal and publish to GitOps if publisher and cert cache are wired.
 	if h.sealPublisher != nil && h.certCache != nil {
-		clusterName := orgEnv.ClusterRef
+		clusterName := orgEnv.EffectiveClusterRef()
 		if clusterName == "" {
 			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
 				Error: fmt.Sprintf("environment %q has no cluster assigned; set clusterRef in Settings > Environments", req.Env),
@@ -868,7 +869,7 @@ func (h *secretsHandler) handleRemoveBinding(w http.ResponseWriter, r *http.Requ
 		var clusterName string
 		for i := range org.Environments {
 			if org.Environments[i].Name == env {
-				clusterName = org.Environments[i].ClusterRef
+				clusterName = org.Environments[i].EffectiveClusterRef()
 				break
 			}
 		}
@@ -1404,7 +1405,7 @@ func (h *secretsHandler) resolveClusterRef(r *http.Request, envName string) stri
 	}
 	for _, e := range org.Environments {
 		if e.Name == envName {
-			return e.ClusterRef
+			return e.EffectiveClusterRef()
 		}
 	}
 	return ""

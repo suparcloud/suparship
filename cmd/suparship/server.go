@@ -662,17 +662,18 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 			res.baseDomain = "localhost"
 		}
 
-		// Resolve the cluster API server from the cluster store.
-		// An env is bound when it has a non-empty ClusterRef that resolves to a
-		// known cluster. Unbound envs are skipped during GitOps publishing.
-		if orgEnv.ClusterRef != "" && a.clusterStore != nil {
-			cluster, err := a.clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
+		// Resolve the cluster API server from the cluster store. Single-cluster
+		// deploy: the env's effective (active) cluster is the one we target.
+		// Future multi-cluster fan-out will iterate over all of orgEnv.ClusterRefs.
+		activeRef := orgEnv.EffectiveClusterRef()
+		if activeRef != "" && a.clusterStore != nil {
+			cluster, err := a.clusterStore.GetCluster(ctx, activeRef)
 			if err != nil {
 				slog.Warn("resolveEnvs: cluster not found in registry, falling back to in-cluster default",
-					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef, "err", err)
+					"env", orgEnv.Name, "clusterRef", activeRef, "err", err)
 			} else if cluster.APIServer == "" {
 				slog.Warn("resolveEnvs: cluster has empty apiServer, falling back to in-cluster default",
-					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
+					"env", orgEnv.Name, "clusterRef", activeRef)
 				res.bound = true // ClusterRef is valid even if apiServer defaults
 			} else {
 				res.clusterServer = cluster.APIServer
@@ -870,7 +871,7 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, or
 	// publisher can render the cluster-scope item title.
 	for _, e := range org.Environments {
 		if e.Name == envName {
-			pub.ClusterRef = e.ClusterRef
+			pub.ClusterRef = e.EffectiveClusterRef()
 			break
 		}
 	}
@@ -1120,20 +1121,21 @@ func publishInitialEnvInfra(
 	// to authorize.
 	appSetEnvs := make([]gitops.AppSetEnv, 0, len(org.Environments))
 	for _, orgEnv := range org.Environments {
-		if orgEnv.ClusterRef == "" || clusterStore == nil {
+		activeRef := orgEnv.EffectiveClusterRef()
+		if activeRef == "" || clusterStore == nil {
 			logger.Debug("initial env infra: skipping unbound env",
 				"env", orgEnv.Name, "reason", "no clusterRef")
 			continue
 		}
-		cluster, err := clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
+		cluster, err := clusterStore.GetCluster(ctx, activeRef)
 		if err != nil {
 			logger.Warn("initial env infra: skipping env — cluster not in registry",
-				"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef, "err", err)
+				"env", orgEnv.Name, "clusterRef", activeRef, "err", err)
 			continue
 		}
 		if cluster.APIServer == "" {
 			logger.Warn("initial env infra: skipping env — cluster has empty apiServer",
-				"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
+				"env", orgEnv.Name, "clusterRef", activeRef)
 			continue
 		}
 		baseDomain := orgEnv.BaseDomain
@@ -1278,12 +1280,16 @@ func healOneEnv(
 			break
 		}
 	}
-	if orgEnv == nil || orgEnv.ClusterRef == "" {
+	activeRef := ""
+	if orgEnv != nil {
+		activeRef = orgEnv.EffectiveClusterRef()
+	}
+	if activeRef == "" {
 		return fmt.Errorf("env %q has no cluster assigned", env)
 	}
-	cluster, err := clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
+	cluster, err := clusterStore.GetCluster(ctx, activeRef)
 	if err != nil {
-		return fmt.Errorf("get cluster %q: %w", orgEnv.ClusterRef, err)
+		return fmt.Errorf("get cluster %q: %w", activeRef, err)
 	}
 	if cluster.APIServer == "" {
 		return fmt.Errorf("cluster %q has no apiServer", cluster.Name)
@@ -1331,9 +1337,11 @@ func healOneEnv(
 }
 
 // buildEnvForClusterResolver returns a closure that maps a registered cluster
-// name to the env-name that has that cluster as its ClusterRef in the org
-// config. Used by the 1Password upper-level writer to find the correct env
-// vault for cluster-scope items. Returns "" for unknown clusters.
+// name to the env-name that has that cluster registered (any member of
+// ClusterRefs, not just the active one — the 1Password cluster-scope vault
+// items live alongside the cluster regardless of which is currently being
+// deployed to). Used by the 1Password upper-level writer to find the correct
+// env vault for cluster-scope items. Returns "" for unknown clusters.
 //
 // The resolver captures envs by value at construction time. Restart suparship
 // to pick up env-binding changes — same lifecycle as the rest of the
@@ -1341,8 +1349,8 @@ func healOneEnv(
 func buildEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string {
 	clusterToEnv := make(map[string]string, len(envs))
 	for _, e := range envs {
-		if e.ClusterRef != "" {
-			clusterToEnv[e.ClusterRef] = e.Name
+		for _, cluster := range e.ClusterRefs {
+			clusterToEnv[cluster] = e.Name
 		}
 	}
 	return func(cluster string) string {

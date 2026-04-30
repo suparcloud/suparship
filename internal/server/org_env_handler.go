@@ -16,6 +16,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -29,12 +30,13 @@ import (
 
 // OrgEnvironmentDTO is the JSON representation of an org-level environment.
 type OrgEnvironmentDTO struct {
-	Name             string                 `json:"name"`
-	DisplayName      string                 `json:"displayName,omitempty"`
-	Order            int                    `json:"order"`
-	ClusterRef       string                 `json:"clusterRef,omitempty"`
-	BaseDomain       string                 `json:"baseDomain,omitempty"`
-	NamespacePattern string                 `json:"namespacePattern,omitempty"`
+	Name             string   `json:"name"`
+	DisplayName      string   `json:"displayName,omitempty"`
+	Order            int      `json:"order"`
+	ClusterRefs      []string `json:"clusterRefs,omitempty"`
+	ActiveClusterRef string   `json:"activeClusterRef,omitempty"`
+	BaseDomain       string   `json:"baseDomain,omitempty"`
+	NamespacePattern string   `json:"namespacePattern,omitempty"`
 	// RoutingProfiles is a sparse override map keyed by ExposeMode name.
 	// Entries here replace the org-level profile of the same name; absent
 	// names inherit the org-level profile.
@@ -46,7 +48,8 @@ func orgEnvToDTO(e rbac.OrgEnvironment) OrgEnvironmentDTO {
 		Name:             e.Name,
 		DisplayName:      e.DisplayName,
 		Order:            e.Order,
-		ClusterRef:       e.ClusterRef,
+		ClusterRefs:      e.ClusterRefs,
+		ActiveClusterRef: e.ActiveClusterRef,
 		BaseDomain:       e.BaseDomain,
 		NamespacePattern: e.NamespacePattern,
 		RoutingProfiles:  e.RoutingProfiles,
@@ -69,10 +72,17 @@ func (rh *rbacHandler) handleListOrgEnvironments(w http.ResponseWriter, r *http.
 // ── POST /api/v1/org/environments ────────────────────────────────────────────
 
 type upsertOrgEnvRequest struct {
-	Name             string  `json:"name"`
-	DisplayName      string  `json:"displayName,omitempty"`
-	Order            int     `json:"order"`
-	ClusterRef       string  `json:"clusterRef,omitempty"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+	Order       int    `json:"order"`
+	// ClusterRefs when non-nil replaces the registered cluster set. Send
+	// nil on update to leave it unchanged; an empty slice ([]) unbinds
+	// the env from every cluster.
+	ClusterRefs *[]string `json:"clusterRefs,omitempty"`
+	// ActiveClusterRef is the deploy target. Must be a member of
+	// ClusterRefs (or empty to unset, which falls back to ClusterRefs[0]
+	// at read time).
+	ActiveClusterRef *string `json:"activeClusterRef,omitempty"`
 	BaseDomain       string  `json:"baseDomain,omitempty"`
 	// NamespacePattern when present (including empty string) replaces the stored
 	// per-environment namespace pattern. Use "" to clear an existing override
@@ -119,14 +129,23 @@ func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http
 		Name:        req.Name,
 		DisplayName: req.DisplayName,
 		Order:       order,
-		ClusterRef:  req.ClusterRef,
 		BaseDomain:  req.BaseDomain,
+	}
+	if req.ClusterRefs != nil {
+		newEnv.ClusterRefs = *req.ClusterRefs
+	}
+	if req.ActiveClusterRef != nil {
+		newEnv.ActiveClusterRef = *req.ActiveClusterRef
 	}
 	if req.NamespacePattern != nil {
 		newEnv.NamespacePattern = *req.NamespacePattern
 	}
 	if req.RoutingProfiles != nil {
 		newEnv.RoutingProfiles = *req.RoutingProfiles
+	}
+	if err := validateActiveInRefs(newEnv); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
 	}
 	org.Environments = append(org.Environments, newEnv)
 	sortOrgEnvs(org.Environments)
@@ -162,8 +181,14 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 			if req.DisplayName != "" {
 				org.Environments[i].DisplayName = req.DisplayName
 			}
-			if req.ClusterRef != "" {
-				org.Environments[i].ClusterRef = req.ClusterRef
+			// ClusterRefs is a pointer: nil = don't touch, [] = unbind.
+			if req.ClusterRefs != nil {
+				org.Environments[i].ClusterRefs = *req.ClusterRefs
+			}
+			// ActiveClusterRef is a pointer: nil = don't touch, "" = unset
+			// (EffectiveClusterRef will fall back to ClusterRefs[0]).
+			if req.ActiveClusterRef != nil {
+				org.Environments[i].ActiveClusterRef = *req.ActiveClusterRef
 			}
 			if req.BaseDomain != "" {
 				org.Environments[i].BaseDomain = req.BaseDomain
@@ -178,6 +203,10 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 			}
 			if req.Order > 0 {
 				org.Environments[i].Order = req.Order
+			}
+			if err := validateActiveInRefs(org.Environments[i]); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+				return
 			}
 			found = true
 			break
@@ -194,10 +223,12 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Best-effort backfill: when a ClusterRef is being set on an existing env,
-	// upsert vault items for all apps so their ExternalSecrets can resolve.
-	// Run in a background goroutine to not delay the API response.
-	if req.ClusterRef != "" && rh.vaultItemWriter != nil && rh.vaultAppStore != nil {
+	// Best-effort backfill: when the cluster binding changes (either the
+	// registered set or the active cluster), upsert vault items for all
+	// apps so their ExternalSecrets can resolve. Run in a background
+	// goroutine to not delay the API response.
+	bindingChanged := req.ClusterRefs != nil || req.ActiveClusterRef != nil
+	if bindingChanged && rh.vaultItemWriter != nil && rh.vaultAppStore != nil {
 		orgName := org.Name
 		if orgName == "" {
 			orgName = "default"
@@ -259,6 +290,22 @@ func sortOrgEnvs(envs []rbac.OrgEnvironment) {
 		}
 		return envs[i].Name < envs[j].Name
 	})
+}
+
+// validateActiveInRefs ensures the env's ActiveClusterRef (if non-empty) is
+// a member of its registered ClusterRefs. Org.Validate enforces the same
+// rule at save time; this handler-level check returns a 422 before we even
+// reach Org.Validate so the user sees a tight error message.
+func validateActiveInRefs(e rbac.OrgEnvironment) error {
+	if e.ActiveClusterRef == "" {
+		return nil
+	}
+	for _, c := range e.ClusterRefs {
+		if c == e.ActiveClusterRef {
+			return nil
+		}
+	}
+	return fmt.Errorf("activeClusterRef %q must be present in clusterRefs %v", e.ActiveClusterRef, e.ClusterRefs)
 }
 
 // backfillVaultItems iterates over all apps in all projects and upserts a

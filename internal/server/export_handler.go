@@ -50,12 +50,13 @@ type helmOrg struct {
 }
 
 type helmEnvironment struct {
-	Name             string `json:"name"`
-	DisplayName      string `json:"displayName,omitempty"`
-	Order            int    `json:"order"`
-	ClusterRef       string `json:"clusterRef,omitempty"`
-	BaseDomain       string `json:"baseDomain,omitempty"`
-	NamespacePattern string `json:"namespacePattern,omitempty"`
+	Name             string   `json:"name"`
+	DisplayName      string   `json:"displayName,omitempty"`
+	Order            int      `json:"order"`
+	ClusterRefs      []string `json:"clusterRefs,omitempty"`
+	ActiveClusterRef string   `json:"activeClusterRef,omitempty"`
+	BaseDomain       string   `json:"baseDomain,omitempty"`
+	NamespacePattern string   `json:"namespacePattern,omitempty"`
 }
 
 type helmCluster struct {
@@ -165,7 +166,8 @@ func (h *exportHandler) collectOrg(ctx context.Context, vals *helmValues) {
 			Name:             env.Name,
 			DisplayName:      env.DisplayName,
 			Order:            env.Order,
-			ClusterRef:       env.ClusterRef,
+			ClusterRefs:      env.ClusterRefs,
+			ActiveClusterRef: env.ActiveClusterRef,
 			BaseDomain:       env.BaseDomain,
 			NamespacePattern: env.NamespacePattern,
 		})
@@ -308,8 +310,14 @@ func toYAML(v helmValues) string {
 				b.WriteString(fmt.Sprintf("    displayName: %s\n", yamlQ(e.DisplayName)))
 			}
 			b.WriteString(fmt.Sprintf("    order: %d\n", e.Order))
-			if e.ClusterRef != "" {
-				b.WriteString(fmt.Sprintf("    clusterRef: %s\n", yamlQ(e.ClusterRef)))
+			if len(e.ClusterRefs) > 0 {
+				b.WriteString("    clusterRefs:\n")
+				for _, c := range e.ClusterRefs {
+					b.WriteString(fmt.Sprintf("      - %s\n", yamlQ(c)))
+				}
+			}
+			if e.ActiveClusterRef != "" {
+				b.WriteString(fmt.Sprintf("    activeClusterRef: %s\n", yamlQ(e.ActiveClusterRef)))
 			}
 			if e.BaseDomain != "" {
 				b.WriteString(fmt.Sprintf("    baseDomain: %s\n", yamlQ(e.BaseDomain)))

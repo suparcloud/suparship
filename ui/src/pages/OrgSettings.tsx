@@ -78,7 +78,12 @@ interface EnvFormState {
   name: string;
   displayName: string;
   order: string;
-  clusterRef: string;
+  // Every cluster registered with this env. Today only activeClusterRef is
+  // deployed to; the rest are reserved for future multi-cluster fan-out.
+  clusterRefs: string[];
+  // The active deploy target. Must be a member of clusterRefs (or empty,
+  // which falls back to clusterRefs[0] at the server).
+  activeClusterRef: string;
   baseDomain: string;
   namespacePattern: string;
 }
@@ -87,13 +92,15 @@ const emptyEnvForm = (): EnvFormState => ({
   name: "",
   displayName: "",
   order: "",
-  clusterRef: "",
+  clusterRefs: [],
+  activeClusterRef: "",
   baseDomain: "",
   namespacePattern: "",
 });
 
 function OrgEnvironmentsSection() {
   const [envs, setEnvs] = useState<OrgEnvironment[]>([]);
+  const [clusters, setClusters] = useState<Cluster[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -104,9 +111,12 @@ function OrgEnvironmentsSection() {
 
   useEffect(() => {
     let cancelled = false;
-    listOrgEnvironments()
-      .then((res) => {
-        if (!cancelled) setEnvs(res.environments);
+    Promise.all([listOrgEnvironments(), listClusters()])
+      .then(([envRes, clusters]) => {
+        if (!cancelled) {
+          setEnvs(envRes.environments);
+          setClusters(clusters);
+        }
       })
       .catch((err) => {
         if (!cancelled)
@@ -131,7 +141,8 @@ function OrgEnvironmentsSection() {
       name: env.name,
       displayName: env.displayName ?? "",
       order: String(env.order),
-      clusterRef: env.clusterRef ?? "",
+      clusterRefs: env.clusterRefs ?? [],
+      activeClusterRef: env.activeClusterRef ?? "",
       baseDomain: env.baseDomain ?? "",
       namespacePattern: env.namespacePattern ?? "",
     });
@@ -148,10 +159,21 @@ function OrgEnvironmentsSection() {
     setSaving(true);
     setSaveError(null);
     try {
+      // Normalise: empty active when no clusters registered, and active
+      // must be a member of the registered set.
+      let activeRef = form.activeClusterRef;
+      if (form.clusterRefs.length === 0) {
+        activeRef = "";
+      } else if (activeRef && !form.clusterRefs.includes(activeRef)) {
+        // User unchecked the active one without re-picking. Drop it; the
+        // server falls back to clusterRefs[0].
+        activeRef = "";
+      }
       const payload = {
         displayName: form.displayName || undefined,
         order: form.order ? parseInt(form.order, 10) : undefined,
-        clusterRef: form.clusterRef || undefined,
+        clusterRefs: form.clusterRefs,
+        activeClusterRef: activeRef || undefined,
         baseDomain: form.baseDomain || undefined,
         namespacePattern: form.namespacePattern || undefined,
       };
@@ -177,6 +199,19 @@ function OrgEnvironmentsSection() {
     } finally {
       setSaving(false);
     }
+  }
+
+  function toggleClusterRef(name: string) {
+    setForm((f) => {
+      const has = f.clusterRefs.includes(name);
+      const nextRefs = has
+        ? f.clusterRefs.filter((c) => c !== name)
+        : [...f.clusterRefs, name];
+      // If we removed the active one, clear it so the server falls back.
+      const nextActive =
+        has && f.activeClusterRef === name ? "" : f.activeClusterRef;
+      return { ...f, clusterRefs: nextRefs, activeClusterRef: nextActive };
+    });
   }
 
   async function handleDelete(env: OrgEnvironment) {
@@ -258,7 +293,28 @@ function OrgEnvironmentsSection() {
                   )}
                 </td>
                 <td className="px-6 py-3 font-mono text-xs text-gray-600">
-                  {env.clusterRef || (
+                  {env.clusterRefs && env.clusterRefs.length > 0 ? (
+                    <div className="flex flex-wrap gap-1">
+                      {env.clusterRefs.map((c) => {
+                        const active =
+                          c === (env.activeClusterRef || env.clusterRefs?.[0]);
+                        return (
+                          <span
+                            key={c}
+                            className={
+                              active
+                                ? "rounded bg-indigo-50 px-1.5 py-0.5 text-indigo-700"
+                                : "rounded bg-gray-50 px-1.5 py-0.5 text-gray-600"
+                            }
+                            title={active ? "active deploy target" : "registered, not active"}
+                          >
+                            {c}
+                            {active && " ●"}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : (
                     <span className="text-gray-300">—</span>
                   )}
                 </td>
@@ -334,34 +390,87 @@ function OrgEnvironmentsSection() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-700">
-                    Cluster
-                  </label>
-                  <input
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                    placeholder="staging-cluster"
-                    value={form.clusterRef}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, clusterRef: e.target.value }))
-                    }
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-700">
-                    Order
-                  </label>
-                  <input
-                    type="number"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                    placeholder="1"
-                    value={form.order}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, order: e.target.value }))
-                    }
-                  />
-                </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-700">
+                  Clusters
+                </label>
+                <p className="mb-2 text-xs text-gray-400">
+                  Register one or more clusters with this environment. Today
+                  only the cluster marked <span className="font-medium">Active</span> receives deploys; the
+                  others are reserved for future multi-cluster fan-out.
+                </p>
+                {clusters.length === 0 ? (
+                  <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                    No clusters registered yet. Register a cluster under
+                    <span className="font-mono"> Settings → Clusters</span> first.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5 rounded-lg border border-gray-200 p-2">
+                    {clusters.map((c) => {
+                      const checked = form.clusterRefs.includes(c.name);
+                      const isActive =
+                        checked &&
+                        (form.activeClusterRef === c.name ||
+                          (!form.activeClusterRef &&
+                            form.clusterRefs[0] === c.name));
+                      return (
+                        <label
+                          key={c.name}
+                          className="flex items-center gap-3 rounded px-1.5 py-1 hover:bg-gray-50"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleClusterRef(c.name)}
+                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span className="flex-1 font-mono text-xs">
+                            {c.displayName ? (
+                              <>
+                                {c.displayName}
+                                <span className="ml-1.5 text-gray-400">{c.name}</span>
+                              </>
+                            ) : (
+                              c.name
+                            )}
+                          </span>
+                          {checked && (
+                            <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                              <input
+                                type="radio"
+                                name="activeClusterRef"
+                                checked={isActive}
+                                onChange={() =>
+                                  setForm((f) => ({
+                                    ...f,
+                                    activeClusterRef: c.name,
+                                  }))
+                                }
+                                className="text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <span>Active</span>
+                            </label>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-700">
+                  Order
+                </label>
+                <input
+                  type="number"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  placeholder="1"
+                  value={form.order}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, order: e.target.value }))
+                  }
+                />
               </div>
 
               <div>

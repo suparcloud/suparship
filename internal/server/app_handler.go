@@ -682,11 +682,12 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 			if orgName == "" {
 				orgName = "default"
 			}
-			// Build a fast-lookup set of org env names that have a ClusterRef
-			// (i.e. are bound to a real cluster).
+			// Build a fast-lookup set of org env names that are bound to a
+			// real cluster (any registered cluster — the active one isn't
+			// special for vault-item upsert).
 			boundEnvs := make(map[string]bool, len(org.Environments))
 			for _, orgEnv := range org.Environments {
-				if orgEnv.ClusterRef != "" {
+				if orgEnv.EffectiveClusterRef() != "" {
 					boundEnvs[orgEnv.Name] = true
 				}
 			}
@@ -751,7 +752,7 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 	// the {env} token can be omitted from namespace names for uniqueness.
 	stableRefs := make([]string, 0, len(org.Environments))
 	for _, e := range org.Environments {
-		stableRefs = append(stableRefs, e.ClusterRef)
+		stableRefs = append(stableRefs, e.EffectiveClusterRef())
 	}
 	dedicated := domain.IsDedicatedClusterTopology(stableRefs)
 
@@ -822,7 +823,7 @@ func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []
 	// Reuse the same topology and pattern lookup built inside resolveEnvNamespaces.
 	stableRefs := make([]string, 0, len(sortedOrgEnvs))
 	for _, e := range sortedOrgEnvs {
-		stableRefs = append(stableRefs, e.ClusterRef)
+		stableRefs = append(stableRefs, e.EffectiveClusterRef())
 	}
 	dedicated := domain.IsDedicatedClusterTopology(stableRefs)
 

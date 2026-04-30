@@ -73,9 +73,15 @@ type OrgEnvironment struct {
 	DisplayName string `yaml:"displayName,omitempty"`
 	// Order controls the promotion pipeline sequence (lower = earlier).
 	Order int `yaml:"order"`
-	// ClusterRef is the name of the registered Cluster this environment
-	// deploys to. When empty the environment is not yet bound to a cluster.
-	ClusterRef string `yaml:"clusterRef,omitempty"`
+	// ClusterRefs lists every registered Cluster this environment is bound
+	// to. Empty means the environment is not yet bound. Today only
+	// ActiveClusterRef receives deploys; the rest are reserved for future
+	// multi-cluster fan-out (deploy-mode = "all" or "select").
+	ClusterRefs []string `yaml:"clusterRefs,omitempty"`
+	// ActiveClusterRef is the single cluster from ClusterRefs that currently
+	// receives deploys. Validated to be a member of ClusterRefs (or empty).
+	// EffectiveClusterRef falls back to ClusterRefs[0] when empty.
+	ActiveClusterRef string `yaml:"activeClusterRef,omitempty"`
 	// BaseDomain is the ingress base domain for apps in this environment.
 	// App URLs are derived as: http://{app}.{baseDomain}
 	BaseDomain string `yaml:"baseDomain,omitempty"`
@@ -116,6 +122,20 @@ func (e OrgEnvironment) EffectiveAppNamespacePattern() string {
 		return e.AppNamespacePattern
 	}
 	return e.NamespacePattern
+}
+
+// EffectiveClusterRef returns the cluster this environment currently deploys
+// to. Mirrors domain.Environment.EffectiveClusterRef: ActiveClusterRef wins,
+// else ClusterRefs[0], else "" (env unbound). Read through this everywhere
+// instead of poking ClusterRefs / ActiveClusterRef directly.
+func (e OrgEnvironment) EffectiveClusterRef() string {
+	if e.ActiveClusterRef != "" {
+		return e.ActiveClusterRef
+	}
+	if len(e.ClusterRefs) > 0 {
+		return e.ClusterRefs[0]
+	}
+	return ""
 }
 
 // EffectiveProjectNamespacePattern returns the per-env override that applies
@@ -188,16 +208,18 @@ func NewDefaultOrg(orgName, displayName, adminUsername string) *Org {
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 		Environments: []OrgEnvironment{
 			{
-				Name:        "staging",
-				DisplayName: "Staging",
-				Order:       1,
-				ClusterRef:  "in-cluster",
+				Name:             "staging",
+				DisplayName:      "Staging",
+				Order:            1,
+				ClusterRefs:      []string{"in-cluster"},
+				ActiveClusterRef: "in-cluster",
 			},
 			{
-				Name:        "prod",
-				DisplayName: "Production",
-				Order:       2,
-				ClusterRef:  "in-cluster",
+				Name:             "prod",
+				DisplayName:      "Production",
+				Order:            2,
+				ClusterRefs:      []string{"in-cluster"},
+				ActiveClusterRef: "in-cluster",
 			},
 		},
 		Teams: []Team{
@@ -232,6 +254,21 @@ func (o *Org) Validate() error {
 			return fmt.Errorf("duplicate environment name %q", e.Name)
 		}
 		envNames[e.Name] = true
+		if e.ActiveClusterRef != "" {
+			found := false
+			for _, c := range e.ClusterRefs {
+				if c == e.ActiveClusterRef {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf(
+					"environments[%s]: activeClusterRef %q must be present in clusterRefs %v",
+					e.Name, e.ActiveClusterRef, e.ClusterRefs,
+				)
+			}
+		}
 	}
 
 	teamNames := make(map[string]bool, len(o.Teams))
