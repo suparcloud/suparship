@@ -108,10 +108,8 @@ func ValidateSingleExposedComponent(components []ComponentSpec, allowMultiple bo
 // ValidateExposeModes enforces the routing-profile contract for an app's
 // component list:
 //
-//  1. Every component's EffectiveExposeMode is one of the recognised values
-//     (disabled/internal/external). Empty + Expose-bool fallbacks already
-//     resolve to a valid mode via EffectiveExposeMode, so this is mostly a
-//     belt-and-suspenders check against future schema drift.
+//  1. Every component's ExposeMode is one of the recognised values
+//     (disabled/internal/external — empty is treated as disabled).
 //  2. Each non-disabled mode resolves against the configured org/env
 //     RoutingProfiles. Unknown modes fail loudly here at app save time
 //     rather than silently dropping the ingress at gitops publish time.
@@ -122,25 +120,23 @@ func ValidateSingleExposedComponent(components []ComponentSpec, allowMultiple bo
 //     in the chart, which is out of scope for now.
 //
 // orgProfiles and envProfiles may both be nil — the validator treats them
-// as empty maps. When both are empty, profile-lookup errors are skipped:
-// callers that haven't migrated to the routing-profile model rely on the
-// helmvalues legacy shim (Expose=true → nginx-no-TLS), and erroring here
-// would block save for every existing app on first upgrade.
+// as empty maps. When both are empty, profile-lookup errors are skipped so
+// callers that haven't yet configured profiles can still save apps whose
+// components are all ExposeDisabled.
 func ValidateExposeModes(components []ComponentSpec, orgProfiles, envProfiles RoutingProfiles) error {
 	hasProfiles := len(orgProfiles) > 0 || len(envProfiles) > 0
 
 	exposed := 0
 	for _, c := range components {
-		mode := c.EffectiveExposeMode()
-		if !mode.Valid() {
+		if !c.ExposeMode.Valid() {
 			return fmt.Errorf("component %q: invalid exposeMode %q", c.Name, c.ExposeMode)
 		}
-		if mode == ExposeDisabled {
+		if c.ExposeMode == ExposeDisabled || c.ExposeMode == "" {
 			continue
 		}
 		exposed++
 		if hasProfiles {
-			if _, err := ResolveRoutingProfile(orgProfiles, envProfiles, mode); err != nil {
+			if _, err := ResolveRoutingProfile(orgProfiles, envProfiles, c.ExposeMode); err != nil {
 				return fmt.Errorf("component %q: %w", c.Name, err)
 			}
 		}

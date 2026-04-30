@@ -29,7 +29,7 @@ type ComponentSummaryDTO struct {
 	Name           string `json:"name"`
 	Type           string `json:"type"`
 	Enabled        bool   `json:"enabled"`
-	Expose         bool   `json:"expose"`
+	ExposeMode     string `json:"exposeMode,omitempty"`
 	PreviewEnabled bool   `json:"previewEnabled"`
 }
 
@@ -165,9 +165,10 @@ type ComponentCreateDTO struct {
 	Type string `json:"type"`
 	// Enabled controls whether this component is active. Defaults to true.
 	Enabled bool `json:"enabled"`
-	// Expose indicates the component should be reachable via ingress.
-	// Defaults to true for web components, false for others.
-	Expose bool `json:"expose"`
+	// ExposeMode selects which routing profile (disabled/internal/external)
+	// the chart should use for this component. Empty is treated as
+	// "disabled" — the component runs without any ingress.
+	ExposeMode string `json:"exposeMode,omitempty"`
 	// PreviewEnabled controls whether this component is deployed in preview
 	// environments. Defaults to true for web components, false for others.
 	PreviewEnabled bool `json:"previewEnabled"`

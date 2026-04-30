@@ -175,18 +175,10 @@ type ComponentSpec struct {
 	// SizePreset selects a named resource tier (small, medium, large).
 	// Mutually exclusive with Replicas.
 	SizePreset SizePreset `json:"sizePreset,omitempty" yaml:"sizePreset,omitempty"`
-	// Expose indicates that this component should be reachable via an ingress
-	// or external service endpoint. Typically true for web components.
-	//
-	// Deprecated: prefer ExposeMode for new code. When ExposeMode is empty,
-	// Expose=true is interpreted as ExposeExternal and Expose=false as
-	// ExposeDisabled (see EffectiveExposeMode). Once all stored AppSpecs
-	// carry ExposeMode this field will be removed.
-	Expose bool `json:"expose" yaml:"expose"`
-	// ExposeMode selects which routing profile (internal/external/disabled)
-	// the chart should use for this component. When set, it takes precedence
-	// over Expose. The exact ingress class and TLS issuer come from the org's
-	// RoutingProfiles map keyed by this mode name.
+	// ExposeMode selects which routing profile (disabled/internal/external)
+	// the chart should use for this component. The exact ingress class and
+	// TLS issuer come from the org's RoutingProfiles map keyed by this name;
+	// ExposeDisabled (the zero value) means no ingress is created.
 	ExposeMode ExposeMode `json:"exposeMode,omitempty" yaml:"exposeMode,omitempty"`
 	// PreviewEnabled controls whether this component is deployed in preview
 	// environments. Heavy or non-essential components can opt out by setting
@@ -198,25 +190,6 @@ type ComponentSpec struct {
 	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
 }
 
-// EffectiveExposeMode returns the component's exposure mode, falling back to
-// the legacy Expose bool when ExposeMode is unset. Use this in any code that
-// needs the resolved value — never read ExposeMode or Expose directly.
-//
-// Mapping when ExposeMode is empty:
-//
-//	Expose=true  → ExposeExternal
-//	Expose=false → ExposeDisabled
-//
-// Once all stored AppSpecs carry ExposeMode the legacy field will be removed.
-func (c ComponentSpec) EffectiveExposeMode() ExposeMode {
-	if c.ExposeMode != "" {
-		return c.ExposeMode
-	}
-	if c.Expose {
-		return ExposeExternal
-	}
-	return ExposeDisabled
-}
 
 // AppMetadata carries optional labelling and annotation data attached to an
 // app spec. Both maps are optional; nil and empty are treated equivalently.

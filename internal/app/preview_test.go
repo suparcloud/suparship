@@ -20,7 +20,7 @@ func previewApp() *domain.App {
 				"image_tag":        "latest",
 			},
 			Components: []domain.ComponentSpec{
-				{Name: "web", Type: domain.ComponentWeb, Enabled: true, Expose: true, PreviewEnabled: true},
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal, PreviewEnabled: true},
 				{Name: "worker", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
 			},
 		},

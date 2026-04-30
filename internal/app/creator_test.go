@@ -528,8 +528,8 @@ func TestComponentsFromTemplate_FieldsFromTemplateComponent(t *testing.T) {
 	comps := ComponentsFromTemplate(templateWithComponents(), nil)
 	for _, c := range comps {
 		if c.Name == "web" {
-			if !c.Expose {
-				t.Error("web component should have Expose=true from template")
+			if c.ExposeMode != domain.ExposeExternal {
+				t.Errorf("web component ExposeMode = %q, want %q", c.ExposeMode, domain.ExposeExternal)
 			}
 			if !c.PreviewEnabled {
 				t.Error("web component should have PreviewEnabled=true from template")
@@ -539,8 +539,8 @@ func TestComponentsFromTemplate_FieldsFromTemplateComponent(t *testing.T) {
 			}
 		}
 		if c.Name == "worker" {
-			if c.Expose {
-				t.Error("worker component should have Expose=false from template")
+			if c.ExposeMode != domain.ExposeDisabled {
+				t.Errorf("worker component ExposeMode = %q, want %q", c.ExposeMode, domain.ExposeDisabled)
 			}
 			if c.PreviewEnabled {
 				t.Error("worker component should have PreviewEnabled=false from template")
@@ -563,7 +563,7 @@ func TestComponentsFromTemplate_Deterministic(t *testing.T) {
 		if got1[i].Name != got2[i].Name ||
 			got1[i].Type != got2[i].Type ||
 			got1[i].Enabled != got2[i].Enabled ||
-			got1[i].Expose != got2[i].Expose ||
+			got1[i].ExposeMode != got2[i].ExposeMode ||
 			got1[i].PreviewEnabled != got2[i].PreviewEnabled {
 			t.Errorf("non-deterministic output at index %d: %+v vs %+v", i, got1[i], got2[i])
 		}
@@ -665,7 +665,7 @@ func TestCreate_ComponentsInitialisedFromTemplate(t *testing.T) {
 		t.Fatalf("expected 1 component, got %d", len(result.App.Spec.Components))
 	}
 	c := result.App.Spec.Components[0]
-	if c.Name != "web" || !c.Enabled || !c.PreviewEnabled || !c.Expose {
+	if c.Name != "web" || !c.Enabled || !c.PreviewEnabled || c.ExposeMode != domain.ExposeExternal {
 		t.Errorf("web component fields unexpected: %+v", c)
 	}
 }

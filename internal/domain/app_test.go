@@ -179,47 +179,6 @@ func TestExposeModeValid(t *testing.T) {
 	}
 }
 
-func TestComponentSpec_EffectiveExposeMode(t *testing.T) {
-	tests := []struct {
-		name  string
-		spec  ComponentSpec
-		want  ExposeMode
-	}{
-		{
-			name: "explicit ExposeMode wins",
-			spec: ComponentSpec{ExposeMode: ExposeInternal, Expose: false},
-			want: ExposeInternal,
-		},
-		{
-			name: "explicit ExposeMode wins over legacy true",
-			spec: ComponentSpec{ExposeMode: ExposeDisabled, Expose: true},
-			want: ExposeDisabled,
-		},
-		{
-			name: "legacy Expose=true falls back to external",
-			spec: ComponentSpec{Expose: true},
-			want: ExposeExternal,
-		},
-		{
-			name: "legacy Expose=false falls back to disabled",
-			spec: ComponentSpec{Expose: false},
-			want: ExposeDisabled,
-		},
-		{
-			name: "no fields set → disabled",
-			spec: ComponentSpec{},
-			want: ExposeDisabled,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.spec.EffectiveExposeMode(); got != tt.want {
-				t.Errorf("EffectiveExposeMode() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 // contains is a small helper so the test file has no extra imports.
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||

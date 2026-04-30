@@ -100,15 +100,6 @@ type ComponentValues struct {
 	Image ImageValues `json:"image" yaml:"image"`
 	// Replicas is the desired pod replica count. Always ≥ 1 in output.
 	Replicas int32 `json:"replicas" yaml:"replicas"`
-	// Expose indicates whether the chart should create an Ingress resource
-	// for this component.
-	//
-	// Deprecated: kept for legacy chart templates that still gate ingress
-	// rendering on this bool. New chart templates should read Ingress
-	// instead — Ingress nil means "no ingress", and class/issuer come from
-	// the resolved RoutingProfile rather than being hardcoded in the chart.
-	// Once all bundled charts have migrated to Ingress this field will go.
-	Expose bool `json:"expose" yaml:"expose"`
 	// Ingress carries the resolved RoutingProfile for this component when
 	// it should be exposed via an Ingress. Nil means no ingress is created.
 	// Charts read Ingress.ClassName for the IngressClassName field, and

@@ -19,7 +19,7 @@ var helloApp = &domain.App{
 			"image_tag":        "v1.0.0",
 		},
 		Components: []domain.ComponentSpec{
-			{Name: "web", Type: domain.ComponentWeb, Enabled: true, Expose: true, PreviewEnabled: true},
+			{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal, PreviewEnabled: true},
 		},
 	},
 }

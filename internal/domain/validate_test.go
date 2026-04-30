@@ -462,7 +462,7 @@ func TestValidateComponentSpec(t *testing.T) {
 	}{
 		{
 			name:  "valid web enabled exposed",
-			input: ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, Expose: true, PreviewEnabled: true},
+			input: ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal, PreviewEnabled: true},
 		},
 		{
 			name:  "valid worker with replicas",
@@ -706,10 +706,10 @@ func TestValidateExposeModes(t *testing.T) {
 			// no orgProfiles, no envProfiles — legacy fall-through
 		},
 		{
-			name: "legacy Expose=true counted as external",
+			name: "two external rejected",
 			components: []ComponentSpec{
-				{Name: "web", Type: ComponentWeb, Enabled: true, Expose: true},
-				{Name: "api", Type: ComponentWeb, Enabled: true, Expose: true},
+				{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
+				{Name: "api", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
 			},
 			org:     orgWithBoth,
 			wantErr: "at most one is allowed",

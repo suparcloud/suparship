@@ -123,11 +123,18 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		mode, err := domain.ParseExposeMode(c.ExposeMode)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+				Error: "components[" + itoa(i) + "]: " + err.Error(),
+			})
+			return
+		}
 		explicitComponents = append(explicitComponents, domain.ComponentSpec{
 			Name:           c.Name,
 			Type:           ct,
 			Enabled:        c.Enabled,
-			Expose:         c.Expose,
+			ExposeMode:     mode,
 			PreviewEnabled: c.PreviewEnabled,
 		})
 	}
@@ -1206,7 +1213,7 @@ func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 			Name:           c.Name,
 			Type:           string(c.Type),
 			Enabled:        c.Enabled,
-			Expose:         c.Expose,
+			ExposeMode:     string(c.ExposeMode),
 			PreviewEnabled: c.PreviewEnabled,
 		})
 	}

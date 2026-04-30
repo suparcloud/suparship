@@ -48,7 +48,8 @@ const (
 //   - image     ← AppSpec.Values["image_repository"] / ["image_tag"]
 //     (shared across all components in MVP; per-component overrides future)
 //   - replicas  ← ComponentSpec.Replicas → envOverride.Replicas → default
-//   - expose    ← ComponentSpec.Expose
+//   - ingress   ← ResolveRoutingProfile(orgProfiles, envProfiles,
+//     ComponentSpec.ExposeMode); only set on the routing component
 //   - env       ← ComponentSpec.Config merged with envOverride.Config
 //     (override wins on key conflict)
 //   - resources ← ComponentSpec.SizePreset → envOverride.SizePreset
@@ -73,9 +74,10 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 //
 // When baseDomain is empty, "localhost" is used.
 //
-// Routing profiles default to nil; the mapper falls back to the legacy
-// Expose=true → nginx-no-TLS shim so existing tests and callers render
-// identically. Use MapToHelmValuesForEnv to thread real profiles.
+// Routing profiles default to nil. Components that target a non-disabled
+// ExposeMode without a configured profile will produce no Ingress; callers
+// that want strict validation should use MapToHelmValuesForEnv with real
+// profiles after running domain.ValidateExposeModes.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
 	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "", "", nil, nil)
 }
@@ -100,12 +102,9 @@ func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.A
 // from the configurable ResourceNaming patterns).
 //
 // orgProfiles and envProfiles drive the per-component IngressValues output.
-// envProfiles entries override orgProfiles by mode name (sparse). When
-// both are nil/empty the mapper falls back to a legacy shim: components
-// with the deprecated Expose=true field get IngressValues{ClassName: "nginx"}
-// with no TLS, so charts that have already migrated to read .Ingress
-// continue rendering byte-identically against existing AppSpecs that
-// haven't picked up an ExposeMode yet.
+// envProfiles entries override orgProfiles by mode name (sparse). When the
+// resolved routing component has ExposeMode==Disabled (or empty) no Ingress
+// is emitted, regardless of the profiles configured.
 func MapToHelmValuesForEnv(
 	app *domain.App,
 	envName string,
@@ -340,7 +339,6 @@ func buildComponentValues(
 			Tag:        imageTag,
 		},
 		Replicas: replicas,
-		Expose:   c.Expose,
 	}
 	if len(env) > 0 {
 		cv.Env = env
@@ -361,41 +359,19 @@ func buildComponentValues(
 }
 
 // resolveIngress turns a component's exposure intent into the IngressValues
-// that templates consume. Two paths:
+// that templates consume. Resolves c.ExposeMode against the org/env profile
+// maps via domain.ResolveRoutingProfile and emits className + clusterIssuer
+// from the resolved profile.
 //
-//  1. RoutingProfiles configured (org and/or env): resolve via
-//     domain.ResolveRoutingProfile and emit className/clusterIssuer from
-//     the resolved profile. A resolution error here drops the ingress
-//     silently — validation is the caller's job (publishers and app-save
-//     handlers run domain.ValidateExposeModes), not the mapper's. The
-//     mapper stays a pure derivation: bad config → no ingress, so chart
-//     rendering is never blocked on a transient profile lookup.
-//  2. No profiles (nil/empty): fall back to the legacy Expose=true → nginx
-//     shim so charts that already read .Ingress render identically against
-//     existing AppSpecs that haven't been updated to ExposeMode yet.
-//
-// Returns nil when the resolved mode is disabled or when neither path
-// applies — chart templates treat nil as "no ingress for this component".
+// Returns nil for disabled modes, missing profiles, and resolution errors —
+// the mapper stays a pure derivation, so a misconfigured profile drops the
+// ingress silently rather than blocking chart render. Validation is the
+// caller's job (domain.ValidateExposeModes runs in the app-save handler).
 func resolveIngress(c domain.ComponentSpec, orgProfiles, envProfiles domain.RoutingProfiles) *IngressValues {
-	mode := c.EffectiveExposeMode()
-	if mode == domain.ExposeDisabled {
+	mode := c.ExposeMode
+	if mode == domain.ExposeDisabled || mode == "" {
 		return nil
 	}
-
-	hasProfiles := len(orgProfiles) > 0 || len(envProfiles) > 0
-	if !hasProfiles {
-		// Legacy path: synthesize a minimal nginx-no-TLS Ingress so the
-		// chart can gate on .ingress without breaking pre-profile apps.
-		// Only kicks in when EffectiveExposeMode came from the legacy
-		// Expose=true mapping (ExposeExternal). New apps that set
-		// ExposeMode explicitly without configuring profiles get nothing
-		// here — that's the validation handler's problem, not ours.
-		if c.ExposeMode == "" && c.Expose {
-			return &IngressValues{ClassName: "nginx"}
-		}
-		return nil
-	}
-
 	profile, err := domain.ResolveRoutingProfile(orgProfiles, envProfiles, mode)
 	if err != nil {
 		return nil
@@ -443,16 +419,14 @@ func mergeConfig(base, override map[string]string) map[string]string {
 }
 
 // resolveRoutingComponent picks the name of the primary exposed component.
-// Reads each component's EffectiveExposeMode() so legacy Expose=true and
-// new ExposeMode=external both participate in selection without callers
-// having to know which form is in use.
 //
 // Selection order (all candidates sorted alphabetically for determinism):
-//  1. First component with EffectiveExposeMode == ExposeExternal — public
-//     face wins over internal so a mixed app routes its public component.
-//  2. First component with EffectiveExposeMode == ExposeInternal.
-//  3. First component where Type == ComponentWeb (legacy fallback for
-//     specs without any exposure intent set).
+//  1. First component with ExposeMode == ExposeExternal — public face wins
+//     over internal so a mixed app routes its public component.
+//  2. First component with ExposeMode == ExposeInternal.
+//  3. First component where Type == ComponentWeb. Used when every component
+//     is disabled — the routing host still goes into values.yaml but no
+//     ingress is emitted because resolveIngress returns nil for disabled.
 //  4. First component alphabetically (ultimate fallback).
 //
 // Returns an empty string when specs is empty.
@@ -468,12 +442,12 @@ func resolveRoutingComponent(specs []domain.ComponentSpec) string {
 	})
 
 	for _, c := range sorted {
-		if c.EffectiveExposeMode() == domain.ExposeExternal {
+		if c.ExposeMode == domain.ExposeExternal {
 			return c.Name
 		}
 	}
 	for _, c := range sorted {
-		if c.EffectiveExposeMode() == domain.ExposeInternal {
+		if c.ExposeMode == domain.ExposeInternal {
 			return c.Name
 		}
 	}
