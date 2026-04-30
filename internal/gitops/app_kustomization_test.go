@@ -11,12 +11,16 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
-// TestPublishAppFiles_KustomizationListsExternalSecretWhenStoreSet verifies
-// the per-app kustomization.yaml lists every platform manifest actually
-// emitted to the dir. With a StoreName set, both env-configmap.yaml AND
-// external-secret.yaml must appear so ArgoCD's per-app directory source
-// applies them in lockstep with the chart's Helm source.
-func TestPublishAppFiles_KustomizationListsExternalSecretWhenStoreSet(t *testing.T) {
+// TestPublishAppFiles_NoKustomizationEmitted locks in the post-incident
+// invariant: the publisher must NOT write a kustomization.yaml in per-app
+// dirs. ArgoCD's `directory:` source treats files in `Include` as plain
+// manifests and would ship the kustomization.yaml to the API server as a
+// Kustomization CRD object — which doesn't exist on workload clusters and
+// breaks sync with "could not find kustomize.config.k8s.io/Kustomization".
+//
+// If this test starts failing, you've reintroduced the kustomization-writes
+// path. The right fix is to keep relying on the include filter alone.
+func TestPublishAppFiles_NoKustomizationEmitted(t *testing.T) {
 	dir := t.TempDir()
 
 	app := &domain.App{
@@ -41,61 +45,16 @@ func TestPublishAppFiles_KustomizationListsExternalSecretWhenStoreSet(t *testing
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "nginx", "kustomization.yaml"))
-	if err != nil {
-		t.Fatalf("read kustomization.yaml: %v", err)
+	appDir := filepath.Join(dir, "envs", "staging", "demo", "nginx")
+	if _, err := os.Stat(filepath.Join(appDir, "kustomization.yaml")); !os.IsNotExist(err) {
+		t.Errorf("kustomization.yaml should NOT be written by the publisher (it breaks ArgoCD's directory mode), got err=%v", err)
 	}
-	got := string(raw)
-	for _, want := range []string{
-		"kind: Kustomization",
-		"- env-configmap.yaml",
-		"- external-secret.yaml",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("kustomization.yaml missing %q, got:\n%s", want, got)
+
+	// Sanity: the manifests the include filter applies still exist.
+	for _, name := range []string{"env-configmap.yaml", "external-secret.yaml"} {
+		if _, err := os.Stat(filepath.Join(appDir, name)); err != nil {
+			t.Errorf("expected %s in app dir, got: %v", name, err)
 		}
-	}
-	// app.yaml and values.yaml are NOT k8s manifests; kustomize would
-	// reject them. They must NEVER appear in the resource list.
-	for _, banned := range []string{"- app.yaml", "- values.yaml"} {
-		if strings.Contains(got, banned) {
-			t.Errorf("kustomization.yaml must not list %q (it's a parameter/values file), got:\n%s", banned, got)
-		}
-	}
-}
-
-// TestPublishAppFiles_KustomizationOmitsExternalSecretWhenNoStore verifies
-// the kustomization adapts to what's actually in the dir: when no store
-// is configured, only env-configmap.yaml is emitted, so the kustomization
-// must not reference a non-existent external-secret.yaml (kustomize would
-// fail to render).
-func TestPublishAppFiles_KustomizationOmitsExternalSecretWhenNoStore(t *testing.T) {
-	dir := t.TempDir()
-
-	app := &domain.App{
-		Name:        "nginx",
-		ProjectName: "demo",
-		Spec:        domain.AppSpec{Template: domain.AppTemplateRef{Name: "web-service"}},
-	}
-	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, Namespace: "demo-nginx-staging"},
-	}
-
-	p := newTestPublisher(t)
-	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
-		t.Fatalf("PublishAppFilesForTest: %v", err)
-	}
-
-	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "nginx", "kustomization.yaml"))
-	if err != nil {
-		t.Fatalf("read kustomization.yaml: %v", err)
-	}
-	got := string(raw)
-	if !strings.Contains(got, "- env-configmap.yaml") {
-		t.Errorf("kustomization missing env-configmap.yaml: %s", got)
-	}
-	if strings.Contains(got, "external-secret.yaml") {
-		t.Errorf("kustomization should not reference external-secret.yaml when no StoreName is set, got:\n%s", got)
 	}
 }
 
@@ -104,6 +63,9 @@ func TestPublishAppFiles_KustomizationOmitsExternalSecretWhenNoStore(t *testing.
 // source pointing at the per-app dir with an include filter. Without this,
 // env-configmap.yaml + external-secret.yaml are written to gitops but
 // never reach the cluster.
+//
+// The include filter must NOT reference kustomization.yaml — see
+// TestPublishAppFiles_NoKustomizationEmitted for the why.
 func TestBuildArgoAppSet_HasPerAppDirectorySource(t *testing.T) {
 	appset := gitops.BuildArgoAppSet(
 		gitops.AppSetEnv{
@@ -136,30 +98,12 @@ func TestBuildArgoAppSet_HasPerAppDirectorySource(t *testing.T) {
 	if !strings.Contains(manifestSrc.Directory.Include, "external-secret.yaml") {
 		t.Errorf("include filter missing external-secret.yaml: %q", manifestSrc.Directory.Include)
 	}
-	if !strings.Contains(manifestSrc.Directory.Include, "kustomization.yaml") {
-		t.Errorf("include filter missing kustomization.yaml: %q", manifestSrc.Directory.Include)
+	if strings.Contains(manifestSrc.Directory.Include, "kustomization.yaml") {
+		t.Errorf("include filter must NOT reference kustomization.yaml — directory mode would apply it as a Kustomization CRD; got %q", manifestSrc.Directory.Include)
 	}
-	// Sanity: the chart source still points at charts/{{template}}.
-	if !strings.HasPrefix(sources[1].Path, "charts/") {
+	// Sanity: the chart source still points at .../charts/{{template}}.
+	if !strings.HasSuffix(sources[1].Path, "charts/{{template}}") {
 		t.Errorf("expected chart source still at charts/{{template}}, got %q", sources[1].Path)
-	}
-}
-
-// TestBuildAppKustomizationYAML_IsValidKustomize verifies the generated
-// YAML matches the kustomize.config.k8s.io/v1beta1 shape kustomize and
-// ArgoCD expect — apiVersion + kind + resources list.
-func TestBuildAppKustomizationYAML_IsValidKustomize(t *testing.T) {
-	got := gitops.BuildAppKustomizationYAML([]string{"env-configmap.yaml", "external-secret.yaml"})
-	for _, want := range []string{
-		"apiVersion: kustomize.config.k8s.io/v1beta1",
-		"kind: Kustomization",
-		"resources:",
-		"- env-configmap.yaml",
-		"- external-secret.yaml",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing %q in:\n%s", want, got)
-		}
 	}
 }
 

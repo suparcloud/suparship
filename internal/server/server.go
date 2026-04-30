@@ -487,6 +487,7 @@ func New(cfg Config) *Server {
 				logger:      cfg.Logger,
 			}
 			if cfg.KubeClient != nil {
+				rh.secretsHandler.kubeClient = cfg.KubeClient
 				rh.secretsHandler.saTokenStore = NewKubeSATokenStore(cfg.KubeClient)
 				rh.secretsHandler.saClientFactory = func(ctx context.Context, token string) (onepassword.SAClient, error) {
 					return onepassword.NewSDKClient(ctx, token)

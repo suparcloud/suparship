@@ -37,7 +37,7 @@ func TestEnsureRootArgoApp_CreatesWhenAbsent(t *testing.T) {
 	dyn := newFakeDynClientForApps()
 	ctx := context.Background()
 
-	if err := kube.EnsureRootArgoApp(ctx, dyn, "http://gitea.cluster.local/gitops/gitops.git", "main", "argocd"); err != nil {
+	if err := kube.EnsureRootArgoApp(ctx, dyn, "http://gitea.cluster.local/gitops/gitops.git", "main", "argocd", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -65,24 +65,24 @@ func TestEnsureRootArgoApp_IdempotentWhenAlreadyExists(t *testing.T) {
 	dyn := newFakeDynClientForApps()
 	ctx := context.Background()
 
-	if err := kube.EnsureRootArgoApp(ctx, dyn, "http://gitea/gitops.git", "main", "argocd"); err != nil {
+	if err := kube.EnsureRootArgoApp(ctx, dyn, "http://gitea/gitops.git", "main", "argocd", ""); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 	// Second call must be a no-op — not return an error.
-	if err := kube.EnsureRootArgoApp(ctx, dyn, "http://gitea/gitops.git", "main", "argocd"); err != nil {
+	if err := kube.EnsureRootArgoApp(ctx, dyn, "http://gitea/gitops.git", "main", "argocd", ""); err != nil {
 		t.Fatalf("second call (idempotent): %v", err)
 	}
 }
 
 func TestEnsureRootArgoApp_NilClientIsNoop(t *testing.T) {
-	if err := kube.EnsureRootArgoApp(context.Background(), nil, "http://gitea/gitops.git", "main", "argocd"); err != nil {
+	if err := kube.EnsureRootArgoApp(context.Background(), nil, "http://gitea/gitops.git", "main", "argocd", ""); err != nil {
 		t.Fatalf("expected nil error for nil client, got: %v", err)
 	}
 }
 
 func TestEnsureRootArgoApp_EmptyRepoURLIsNoop(t *testing.T) {
 	dyn := newFakeDynClientForApps()
-	if err := kube.EnsureRootArgoApp(context.Background(), dyn, "", "main", "argocd"); err != nil {
+	if err := kube.EnsureRootArgoApp(context.Background(), dyn, "", "main", "argocd", ""); err != nil {
 		t.Fatalf("expected nil error for empty repoURL, got: %v", err)
 	}
 	// Nothing should have been created.
@@ -105,7 +105,7 @@ func TestEnsureRootArgoApp_ArgoCDNotInstalled(t *testing.T) {
 	})
 
 	// Non-fatal: should log a warning and return nil.
-	if err := kube.EnsureRootArgoApp(context.Background(), dyn, "http://gitea/gitops.git", "main", "argocd"); err != nil {
+	if err := kube.EnsureRootArgoApp(context.Background(), dyn, "http://gitea/gitops.git", "main", "argocd", ""); err != nil {
 		t.Fatalf("expected non-fatal nil when ArgoCD CRD absent, got: %v", err)
 	}
 }
@@ -114,7 +114,7 @@ func TestRootArgoAppExists_TrueWhenPresent(t *testing.T) {
 	dyn := newFakeDynClientForApps()
 	ctx := context.Background()
 
-	if err := kube.EnsureRootArgoApp(ctx, dyn, "http://gitea/gitops.git", "main", "argocd"); err != nil {
+	if err := kube.EnsureRootArgoApp(ctx, dyn, "http://gitea/gitops.git", "main", "argocd", ""); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 

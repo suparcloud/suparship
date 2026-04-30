@@ -580,10 +580,6 @@ func (p *Publisher) writeAppPlatformResources(
 		return fmt.Errorf("writing app ConfigMap: %w", err)
 	}
 
-	// Track which platform manifests are present so the kustomization.yaml
-	// at the end lists exactly what exists in this dir.
-	platformResources := []string{"env-configmap.yaml"}
-
 	// ExternalSecret — only when the env has an associated ClusterSecretStore.
 	if env.StoreName != "" {
 		var esCfg *ESOExternalSecretConfig
@@ -625,16 +621,16 @@ func (p *Publisher) writeAppPlatformResources(
 		if err := p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content)); err != nil {
 			return err
 		}
-		platformResources = append(platformResources, "external-secret.yaml")
 	}
 
-	// kustomization.yaml — bundles the platform manifests so ArgoCD's
-	// per-app directory source can apply them in one go (the chart's Helm
-	// source produces the workload; this kustomization produces the
-	// supporting CM/Secret). Regenerated each publish — see
-	// gitops-output/README.md for the extension story.
-	kustom := BuildAppKustomizationYAML(platformResources)
-	return p.writeFile(filepath.Join(dir, "kustomization.yaml"), []byte(kustom))
+	// Historical note: this used to also write a kustomization.yaml so
+	// ArgoCD would apply the per-app manifests via kustomize. Removed
+	// because ArgoCD's `directory:` source (with our include filter)
+	// treats every listed file as a plain manifest — it shipped the
+	// kustomization.yaml itself to the API server, which then 404'd on
+	// "no Kustomization CRD installed". The include filter is sufficient
+	// on its own; env-configmap + external-secret get applied directly.
+	return nil
 }
 
 // syncChart materialises the Helm chart for templateName at
@@ -1307,8 +1303,7 @@ directly or detach them entirely; the platform stays out of the way.
 │               ├── app.yaml               # ArgoCD File-generator parameters
 │               ├── values.yaml            # rendered Helm values
 │               ├── env-configmap.yaml     # merged env vars (org→cluster)
-│               ├── external-secret.yaml   # platform-managed ExternalSecret
-│               └── kustomization.yaml     # bundles the per-app manifests
+│               └── external-secret.yaml   # platform-managed ExternalSecret
 ├── previews/{project}/{previewName}/      # per-PR preview environments
 └── charts/{template}/                     # bundled Helm charts (chart sources)
 `+"```"+`

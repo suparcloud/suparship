@@ -29,6 +29,7 @@ import (
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/runtime"
+	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
@@ -407,6 +408,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					"argocd_repo", pubCfg.ArgoCDRepoURL,
 				)
 				go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+				go selfHealSealedTokens(context.Background(), pub, orgProvider, clusterStore, clusterPool, kubeClient, logger)
 
 			// Ensure the suparship-apps root ArgoCD Application exists.
 			// This replaces the manual `kubectl apply -f config/gitops/root-app.yaml`
@@ -420,6 +422,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					pubCfg.ArgoCDRepoURL,
 					pubCfg.Branch,
 					"argocd",
+					pubCfg.SubPath,
 				); err != nil {
 					logger.Warn("could not ensure suparship-apps root ArgoCD Application", "error", err)
 				}
@@ -522,6 +525,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			// This ensures ArgoCD ApplicationSets and AppProjects are in Git
 			// even before the first app is created.
 			go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+			go selfHealSealedTokens(context.Background(), pub, orgProvider, clusterStore, clusterPool, kubeClient, logger)
 
 			return nil
 		}
@@ -1085,20 +1089,34 @@ func publishInitialEnvInfra(
 	}
 	pub.SetOrgConfig(orgName, org.ResourceNaming, &org.SecretBackend, org.Branding)
 
+	// Build the appSetEnvs list with the SAME bound-only filter the
+	// per-app publish path (gitOpsPublisherAdapter.PublishApp) uses.
+	// Otherwise the two writers produce different destinations: lists
+	// for the same AppProject and flip-flop on every commit pair (the
+	// startup/reload run adds kubernetes.default.svc for unbound envs;
+	// the per-app run removes it; rinse, repeat).
+	//
+	// "Bound" means: ClusterRef set + cluster exists in the registry +
+	// has a non-empty APIServer. Unbound envs are intentionally skipped
+	// at the AppProject layer too — they have no destination cluster
+	// to authorize.
 	appSetEnvs := make([]gitops.AppSetEnv, 0, len(org.Environments))
 	for _, orgEnv := range org.Environments {
-		clusterServer := "https://kubernetes.default.svc"
-		if orgEnv.ClusterRef != "" && clusterStore != nil {
-			cluster, err := clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
-			if err != nil {
-				logger.Warn("initial env infra: cluster not found in registry, falling back to in-cluster default",
-					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef, "err", err)
-			} else if cluster.APIServer == "" {
-				logger.Warn("initial env infra: cluster has empty apiServer, falling back to in-cluster default",
-					"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
-			} else {
-				clusterServer = cluster.APIServer
-			}
+		if orgEnv.ClusterRef == "" || clusterStore == nil {
+			logger.Debug("initial env infra: skipping unbound env",
+				"env", orgEnv.Name, "reason", "no clusterRef")
+			continue
+		}
+		cluster, err := clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
+		if err != nil {
+			logger.Warn("initial env infra: skipping env — cluster not in registry",
+				"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef, "err", err)
+			continue
+		}
+		if cluster.APIServer == "" {
+			logger.Warn("initial env infra: skipping env — cluster has empty apiServer",
+				"env", orgEnv.Name, "clusterRef", orgEnv.ClusterRef)
+			continue
 		}
 		baseDomain := orgEnv.BaseDomain
 		if baseDomain == "" {
@@ -1106,7 +1124,7 @@ func publishInitialEnvInfra(
 		}
 		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
 			EnvName:       orgEnv.Name,
-			ClusterServer: clusterServer,
+			ClusterServer: cluster.APIServer,
 			BaseDomain:    baseDomain,
 		})
 	}
@@ -1134,6 +1152,164 @@ func publishInitialEnvInfra(
 			logger.Info("initial env infra: published", "project", name)
 		}
 	}
+}
+
+// selfHealSealedTokens reconstructs missing per-env sealed Connect token
+// files in the gitops repo from the platform's local stash. Runs once
+// per startup (after the publisher is wired) so that an operator who
+// wiped the gitops repo gets a fully recovered state without re-pasting
+// every token through the UI.
+//
+// Resilience contract:
+//   - Backend != 1Password → no-op.
+//   - No 1Password bindings configured → no-op.
+//   - Per-binding: if the gitops repo already has the sealed-token, skip
+//     (sealed-secrets are non-deterministic; re-publishing every time
+//     would produce noisy commits on every restart).
+//   - Per-binding: if the local stash is empty, log "operator must
+//     re-paste" and continue — we have no way to reconstruct without it.
+//   - Errors fetching kubeseal certs / publishing are logged per-env;
+//     other envs keep going.
+func selfHealSealedTokens(
+	ctx context.Context,
+	pub *gitops.Publisher,
+	orgProvider rbac.OrgProvider,
+	clusterStore domain.ClusterStore,
+	clusterPool *k8s.ClusterClientPool,
+	kubeClient kubernetes.Interface,
+	logger *slog.Logger,
+) {
+	if orgProvider == nil || pub == nil || kubeClient == nil {
+		return
+	}
+	org, err := orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		logger.Debug("seal self-heal: could not load org", "err", err)
+		return
+	}
+	if org.SecretBackend.Effective() != secrets.Backend1Password {
+		return
+	}
+	op := org.SecretBackend.OnePassword
+	if op == nil || len(op.Bindings) == 0 {
+		return
+	}
+
+	// Collect every env that should have a sealed-token to ask the
+	// publisher in one go.
+	envs := make([]string, 0, len(op.Bindings))
+	for _, b := range op.Bindings {
+		if b.Provisioned {
+			envs = append(envs, b.Env)
+		}
+	}
+	if len(envs) == 0 {
+		return
+	}
+
+	missing, err := pub.MissingSealedTokens(ctx, envs)
+	if err != nil {
+		logger.Warn("seal self-heal: could not list gitops sealed tokens", "err", err)
+		return
+	}
+	if len(missing) == 0 {
+		logger.Debug("seal self-heal: all sealed tokens present in gitops, nothing to do")
+		return
+	}
+	logger.Info("seal self-heal: detected missing sealed tokens",
+		"count", len(missing), "envs", missing)
+
+	// Build a CertCache once; FetchAndCache per cluster reuses it.
+	certCache := seal.NewK8sCertCache(kubeClient)
+
+	for _, env := range missing {
+		if err := healOneEnv(ctx, pub, org, env, clusterStore, clusterPool, certCache, kubeClient, logger); err != nil {
+			logger.Warn("seal self-heal: env recovery failed", "env", env, "err", err)
+		}
+	}
+}
+
+// healOneEnv handles the per-env recovery: load stashed token, find
+// cluster, fetch kubeseal cert, re-seal + publish. Pulled out of
+// selfHealSealedTokens so the per-env error handling reads linearly.
+func healOneEnv(
+	ctx context.Context,
+	pub *gitops.Publisher,
+	org *rbac.Org,
+	env string,
+	clusterStore domain.ClusterStore,
+	clusterPool *k8s.ClusterClientPool,
+	certCache seal.CertCache,
+	kubeClient kubernetes.Interface,
+	logger *slog.Logger,
+) error {
+	token, err := secrets.LoadConnectToken(ctx, kubeClient, env)
+	if err != nil {
+		return fmt.Errorf("load stash: %w", err)
+	}
+	if len(token) == 0 {
+		logger.Warn("seal self-heal: no stashed Connect token; operator must re-paste via Settings",
+			"env", env)
+		return nil
+	}
+
+	var orgEnv *rbac.OrgEnvironment
+	for i := range org.Environments {
+		if org.Environments[i].Name == env {
+			orgEnv = &org.Environments[i]
+			break
+		}
+	}
+	if orgEnv == nil || orgEnv.ClusterRef == "" {
+		return fmt.Errorf("env %q has no cluster assigned", env)
+	}
+	cluster, err := clusterStore.GetCluster(ctx, orgEnv.ClusterRef)
+	if err != nil {
+		return fmt.Errorf("get cluster %q: %w", orgEnv.ClusterRef, err)
+	}
+	if cluster.APIServer == "" {
+		return fmt.Errorf("cluster %q has no apiServer", cluster.Name)
+	}
+
+	// Fetch the workload cluster's kubeseal cert fresh — the controller
+	// rotates it, and a stale cert produces "could not decrypt" on the
+	// target. Use the workload-cluster client (not the platform's own).
+	wkClient, err := clusterPool.Get(ctx, cluster.Name)
+	if err != nil {
+		return fmt.Errorf("workload client for %q: %w", cluster.Name, err)
+	}
+	certPEM, err := seal.FetchAndCache(ctx, certCache, wkClient, cluster.Name, seal.FetchOptions{})
+	if err != nil {
+		return fmt.Errorf("fetch sealing cert: %w", err)
+	}
+
+	binding := org.SecretBackend.FindBinding(env)
+	if binding == nil {
+		return fmt.Errorf("no binding for env %q (org state drift)", env)
+	}
+
+	var platformVaultID string
+	if op := org.SecretBackend.OnePassword; op != nil {
+		platformVaultID = op.PlatformVaultID
+	}
+
+	if err := pub.PublishSealedReadToken(ctx, gitops.SealedReadTokenPublishParams{
+		Env:               env,
+		VaultID:           binding.VaultID,
+		OrgName:           org.Name,
+		Token:             token,
+		Cert:              certPEM,
+		ArgoCDDestination: cluster.APIServer,
+		ClusterName:       cluster.Name,
+		ESONamespace:      cluster.EffectiveESONamespace(),
+		ConnectEndpoint:   binding.ConnectEndpoint,
+		PlatformVaultID:   platformVaultID,
+	}); err != nil {
+		return fmt.Errorf("publish sealed token: %w", err)
+	}
+	logger.Info("seal self-heal: republished sealed token",
+		"env", env, "cluster", cluster.Name)
+	return nil
 }
 
 // buildEnvForClusterResolver returns a closure that maps a registered cluster

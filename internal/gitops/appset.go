@@ -132,25 +132,35 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	}
 
 	// Source 3: per-app platform manifests (env-configmap, external-secret,
-	// kustomization). Without this, those files are written to gitops but
-	// never reach the cluster — the chart's envFrom is `optional: true` so
-	// it silently degrades. Include filter skips app.yaml + values.yaml,
-	// which are parameter/values files for the ApplicationSet, not
-	// Kubernetes manifests.
+	// env-configmap, external-secret). Without this, those files are
+	// written to gitops but never reach the cluster — the chart's
+	// envFrom is `optional: true` so it silently degrades. Include
+	// filter skips app.yaml + values.yaml, which are parameter/values
+	// files for the ApplicationSet, not Kubernetes manifests.
 	//
-	// When the dir contains a kustomization.yaml ArgoCD auto-detects
-	// kustomize and applies through it; the include filter still bounds
-	// what kustomize sees. Operators wanting to extend can add files to the
-	// dir and list them in the regenerated kustomization.yaml's resources
-	// (note: kustomization.yaml is regenerated on every publish — see
-	// gitops-output/README.md for the extension story).
+	// Plain-manifest mode (no kustomize): we tried bundling the per-app
+	// manifests via kustomization.yaml, but ArgoCD's `directory:` source
+	// treats files in `Include` as raw manifests — it shipped the
+	// kustomization.yaml to the API server as a Kustomization CRD,
+	// which doesn't exist on workload clusters and broke sync. The
+	// include filter alone is sufficient.
+	//
+	// Extension story: operators wanting to add manifests beyond what
+	// suparship models should layer a separate ArgoCD Application that
+	// overlays this one, NOT edit files in this directory (the
+	// publisher regenerates them every publish).
 	platformManifestsSource := ApplicationSource{
 		RepoURL:        repoURL,
 		Path:           joinSubPath(opts.SubPath, "envs", env.EnvName, "{{project}}", "{{name}}"),
 		TargetRevision: opts.TargetRevision,
 		Directory: &DirectorySource{
 			Recurse: false,
-			Include: "{env-configmap.yaml,external-secret.yaml,kustomization.yaml}",
+			// Plain-manifest mode: list each file ArgoCD should apply.
+			// Do NOT include kustomization.yaml here — directory mode
+			// treats listed files as raw manifests, so a kustomization
+			// would be shipped to the API server as a Kustomization CRD
+			// (which doesn't exist, breaking sync).
+			Include: "{env-configmap.yaml,external-secret.yaml}",
 		},
 	}
 
@@ -192,7 +202,12 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 		},
 		Template: ApplicationSetTemplate{
 			Metadata: ObjectMeta{
-				Name:      "{{name}}-" + env.EnvName,
+				// Application name MUST mirror gitops.ApplicationName —
+				// {project}-{app}-{env} — so two suparship projects can
+				// each have an app called e.g. "color-app" without
+				// producing duplicate Application names that break the
+				// ApplicationSet reconciler.
+				Name:      "{{project}}-{{name}}-" + env.EnvName,
 				Namespace: opts.ArgoCDNamespace,
 				Labels: map[string]string{
 					labelApp:     "{{name}}",

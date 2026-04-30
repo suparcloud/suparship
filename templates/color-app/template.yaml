@@ -74,7 +74,16 @@ spec:
       type: number
       default: 8080
       description: >-
-        TCP port the container listens on.
+        TCP port the container listens on. Override when your image
+        listens on a non-default port (e.g. nginx → 80).
+
+    - name: health_path
+      title: Health Check Path
+      type: string
+      default: /healthz
+      description: >-
+        HTTP path for liveness and readiness probes. Override when your
+        image doesn't expose /healthz (e.g. nginx → /).
 
   advancedInputs:
     - name: replicas

@@ -2,6 +2,7 @@ package gitops
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -166,8 +167,20 @@ spec:
 	return sb.String()
 }
 
-// BuildSecretStoresForConfig generates ClusterSecretStore YAML for all bindings
-// in the backend config.
+// BuildSecretStoresForConfig generates ClusterSecretStore YAML for the
+// shared K8s backend store. Returns empty for 1Password backend — those
+// stores have to be emitted per-env by PublishSealedReadToken (in
+// internal/gitops/seal_publisher.go) because the connectTokenSecretRef
+// namespace must match the workload cluster's actual ESO install
+// namespace, which only the per-cluster code path knows.
+//
+// Historically this function also emitted 1Password stores into
+// _infra/secret-stores/ with a hardcoded "external-secrets" default,
+// which produced two competing ClusterSecretStore objects (the
+// _infra/ one and the _secret-stores/{env}/ one) and caused
+// "InvalidProviderConfig: secret not found" errors when the workload
+// cluster used a non-default ESO namespace. The _infra/ duplicates are
+// now suppressed.
 func BuildSecretStoresForConfig(
 	cfg secrets.BackendConfig,
 	naming secrets.ResourceNaming,
@@ -186,29 +199,7 @@ func BuildSecretStoresForConfig(
 			Branding:    brand,
 		}}
 	}
-
-	if cfg.OnePassword == nil {
-		return nil
-	}
-	var stores []ESOSecretStoreConfig
-	for _, b := range cfg.OnePassword.Bindings {
-		if !b.Provisioned {
-			continue
-		}
-		name := naming.RenderClusterSecretStore(secrets.NamingParams{
-			Provider: string(cfg.Effective()),
-			Env:      b.Env,
-			Org:      orgName,
-		})
-		stores = append(stores, ESOSecretStoreConfig{
-			Name:            name,
-			Binding:         b,
-			BackendType:     cfg.Effective(),
-			PlatformVaultID: cfg.OnePassword.PlatformVaultID,
-			Branding:        brand,
-		})
-	}
-	return stores
+	return nil
 }
 
 // AppEnvPublishParams captures the info needed to generate one ExternalSecret.
@@ -307,7 +298,15 @@ func BuildCollapsedExternalSecretForApp(
 }
 
 // WriteSecretStores writes ClusterSecretStore YAML files to
-// gitops-output/_infra/secret-stores/.
+// _infra/secret-stores/. Also prunes stale entries no longer in the
+// desired set, so a backend switch (e.g. 1Password → K8s) or a binding
+// removal cleanly removes the corresponding ClusterSecretStore from the
+// repo and lets ArgoCD prune it from the cluster.
+//
+// Ownership convention: _infra/secret-stores/ is owned by this writer.
+// Anything else dropped there by an operator is foreign and would be
+// nuked on the next publish; document this carve-out in the take-over
+// recipes if extensions are needed.
 func (p *Publisher) WriteSecretStores(repoDir string, stores []ESOSecretStoreConfig) error {
 	storeDir := p.outputDir(repoDir, "_infra", "secret-stores")
 
@@ -315,11 +314,35 @@ func (p *Publisher) WriteSecretStores(repoDir string, stores []ESOSecretStoreCon
 		return stores[i].Name < stores[j].Name
 	})
 
+	wanted := make(map[string]bool, len(stores))
 	for _, s := range stores {
+		wanted[s.Name+".yaml"] = true
 		content := BuildClusterSecretStoreYAML(s)
 		filename := filepath.Join(storeDir, s.Name+".yaml")
 		if err := p.writeFile(filename, []byte(content)); err != nil {
 			return fmt.Errorf("writing ClusterSecretStore %s: %w", s.Name, err)
+		}
+	}
+
+	// Prune stale .yaml files (e.g. a binding or backend was removed).
+	// Missing dir = nothing to prune — first publish for this org.
+	entries, err := os.ReadDir(storeDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read _infra/secret-stores: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".yaml") || wanted[name] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(storeDir, name)); err != nil {
+			return fmt.Errorf("prune stale ClusterSecretStore %s: %w", name, err)
 		}
 	}
 	return nil
@@ -370,35 +393,6 @@ data:
 	sort.Strings(keys)
 	for _, k := range keys {
 		sb.WriteString(fmt.Sprintf("  %s: %q\n", k, vars[k]))
-	}
-	return sb.String()
-}
-
-// BuildAppKustomizationYAML returns a kustomization.yaml that lists the
-// per-app platform manifests. Picked up automatically by ArgoCD's
-// directory source — when this file is present in the dir, ArgoCD
-// switches to kustomize mode and applies only what's listed in
-// resources, ignoring app.yaml + values.yaml (which would otherwise be
-// mistaken for k8s manifests).
-//
-// Regenerated on every publish; operator extensions to the kustomization
-// are clobbered. Operators needing extra manifests should drop them in
-// the same dir AND list them in the regenerated file (or — better — use
-// a separate ArgoCD Application that overlays this one). See
-// gitops-output/README.md for the take-over recipes.
-//
-// The order of resources matches what kustomize will emit; sorting is
-// the caller's job (BuildAppKustomizationYAML preserves insertion order
-// so the publisher controls it).
-func BuildAppKustomizationYAML(resources []string) string {
-	var sb strings.Builder
-	sb.WriteString("apiVersion: kustomize.config.k8s.io/v1beta1\n")
-	sb.WriteString("kind: Kustomization\n")
-	sb.WriteString("resources:\n")
-	for _, r := range resources {
-		sb.WriteString("  - ")
-		sb.WriteString(r)
-		sb.WriteString("\n")
 	}
 	return sb.String()
 }

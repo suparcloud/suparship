@@ -226,7 +226,7 @@ func TestCreatePreview_ArgoApp(t *testing.T) {
 	if argoApp == nil {
 		t.Fatal("ArgoApp is nil")
 	}
-	if argoApp.Metadata.Name != "hello-pr-42" {
+	if argoApp.Metadata.Name != "demo-hello-pr-42" {
 		t.Errorf("ArgoApp.Name = %q, want hello-pr-42", argoApp.Metadata.Name)
 	}
 	if argoApp.Spec.Destination.Namespace != "hello-pr-42" {

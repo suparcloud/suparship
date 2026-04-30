@@ -22,6 +22,23 @@ var applicationGVR = schema.GroupVersionResource{
 // rootAppName is the canonical name of the suparship root "App of Apps".
 const rootAppName = "suparship-apps"
 
+// normalizeRootSubPath strips whitespace + slashes and treats "."/"./"
+// as the empty (repo-root) form. Mirrors gitops.normalizeSubPath; kept
+// in this package to avoid pulling internal/gitops into the kube
+// dependency graph.
+func normalizeRootSubPath(s string) string {
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '/') {
+		s = s[1:]
+	}
+	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '/') {
+		s = s[:len(s)-1]
+	}
+	if s == "" || s == "." {
+		return ""
+	}
+	return s
+}
+
 // EnsureRootArgoApp creates the suparship-apps ArgoCD Application (the root
 // "App of Apps") if it does not already exist.
 //
@@ -39,7 +56,7 @@ const rootAppName = "suparship-apps"
 //     or the dynamic client is nil, a warning is logged and nil is returned.
 //   - Create-only: an existing Application is never modified, preserving any
 //     live sync state, custom annotations, or manual overrides.
-func EnsureRootArgoApp(ctx context.Context, dyn dynamic.Interface, repoURL, branch, argoCDNS string) error {
+func EnsureRootArgoApp(ctx context.Context, dyn dynamic.Interface, repoURL, branch, argoCDNS, subPath string) error {
 	if dyn == nil {
 		slog.Warn("argocd: dynamic client not available — skipping suparship-apps root Application check")
 		return nil
@@ -66,7 +83,7 @@ func EnsureRootArgoApp(ctx context.Context, dyn dynamic.Interface, repoURL, bran
 		return fmt.Errorf("checking suparship-apps Application: %w", err)
 	}
 
-	obj := buildRootArgoApp(repoURL, branch, argoCDNS)
+	obj := buildRootArgoApp(repoURL, branch, argoCDNS, subPath)
 	_, createErr := client.Create(ctx, obj, metav1.CreateOptions{})
 	if createErr == nil {
 		slog.Info("argocd: created suparship-apps root Application",
@@ -112,7 +129,11 @@ func RootArgoAppExists(ctx context.Context, dyn dynamic.Interface, argoCDNS stri
 // suparship root "App of Apps". The spec mirrors config/gitops/root-app.yaml
 // but substitutes live values from suparship's ConfigMap instead of requiring
 // a manual kubectl apply with placeholder substitution.
-func buildRootArgoApp(repoURL, branch, argoCDNS string) *unstructured.Unstructured {
+func buildRootArgoApp(repoURL, branch, argoCDNS, subPath string) *unstructured.Unstructured {
+	infraPath := "_infra"
+	if s := normalizeRootSubPath(subPath); s != "" {
+		infraPath = s + "/_infra"
+	}
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "argoproj.io/v1alpha1",
@@ -137,7 +158,7 @@ func buildRootArgoApp(repoURL, branch, argoCDNS string) *unstructured.Unstructur
 					// _infra/ contains AppProjects, ApplicationSets, and Kargo CRs.
 					// Per-app data (app.yaml, values.yaml) lives in env-specific paths
 					// discovered by the ApplicationSet Git File generator — not synced here.
-					"path": "gitops-output/_infra",
+					"path": infraPath,
 					"directory": map[string]interface{}{
 						"recurse": true,
 					},

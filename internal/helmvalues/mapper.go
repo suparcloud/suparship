@@ -17,12 +17,17 @@ const defaultReplicas int32 = 2
 // environments to minimise resource usage.
 const defaultPreviewReplicas int32 = 1
 
-// imageRepositoryKey and imageTagKey are the AppSpec.Values keys that carry
-// the primary container image coordinates. They mirror the template.yaml
-// input names used by the built-in web-service template.
+// AppSpec.Values keys that carry well-known overrides exposed by the
+// built-in templates' inputs. Mirrored here so the mapper can plumb
+// them through to the canonical helmvalues schema (charts read
+// `components.<name>.{image,port,healthCheck.path}`); without this
+// translation the template inputs would be set in suparship's spec but
+// silently dropped on their way to Helm.
 const (
 	imageRepositoryKey = "image_repository"
 	imageTagKey        = "image_tag"
+	portKey            = "port"
+	healthPathKey      = "health_path"
 )
 
 // MapToHelmValues derives a deterministic HelmValues from an App and a
@@ -108,10 +113,11 @@ func MapToHelmValuesForEnv(
 	envOverride := app.Spec.EnvironmentDefaults[envName] // zero value if absent
 
 	imageRepo, imageTag := extractImage(app.Spec.Values)
-
-	components := buildComponents(app.Spec.Components, envType, envOverride, imageRepo, imageTag)
+	port := extractPort(app.Spec.Values)
+	healthPath := extractHealthPath(app.Spec.Values)
 
 	routingComponent := resolveRoutingComponent(app.Spec.Components)
+	components := buildComponents(app.Spec.Components, envType, envOverride, imageRepo, imageTag, port, healthPath, routingComponent)
 	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain))
 
 	// Resource names come from the same ResourceNaming patterns the
@@ -210,12 +216,46 @@ func extractImage(values map[string]any) (repository, tag string) {
 	return
 }
 
+// extractPort pulls the container port from an AppSpec Values map.
+// Returns 0 when absent — callers treat 0 as "let chart default win".
+// YAML decoders commonly produce float64 for plain numbers, so accept
+// both.
+func extractPort(values map[string]any) int32 {
+	switch v := values[portKey].(type) {
+	case int:
+		return int32(v)
+	case int64:
+		return int32(v)
+	case float64:
+		return int32(v)
+	}
+	return 0
+}
+
+// extractHealthPath pulls the liveness/readiness probe HTTP path from
+// an AppSpec Values map. Empty string = "let chart default win" so
+// every existing app keeps using "/healthz" (or whatever the chart
+// declares) until an operator opts in.
+func extractHealthPath(values map[string]any) string {
+	if s, ok := values[healthPathKey].(string); ok {
+		return s
+	}
+	return ""
+}
+
 // buildComponents constructs the component map in sorted-name order.
+// port and healthPath are app-level inputs that we apply only to the
+// routingComponent (the externally-exposed one) — multi-component apps
+// would otherwise inherit a port that's only meaningful for one of them.
+// Empty/zero values mean "leave unset; chart's own default applies."
 func buildComponents(
 	specs []domain.ComponentSpec,
 	envType domain.AppEnvironmentType,
 	envOverride domain.EnvironmentOverride,
 	imageRepo, imageTag string,
+	port int32,
+	healthPath string,
+	routingComponent string,
 ) map[string]*ComponentValues {
 	if len(specs) == 0 {
 		return map[string]*ComponentValues{}
@@ -230,7 +270,12 @@ func buildComponents(
 
 	components := make(map[string]*ComponentValues, len(sorted))
 	for _, c := range sorted {
-		components[c.Name] = buildComponentValues(c, envType, envOverride, imageRepo, imageTag)
+		var p int32
+		var hp string
+		if c.Name == routingComponent {
+			p, hp = port, healthPath
+		}
+		components[c.Name] = buildComponentValues(c, envType, envOverride, imageRepo, imageTag, p, hp)
 	}
 	return components
 }
@@ -242,6 +287,8 @@ func buildComponentValues(
 	envType domain.AppEnvironmentType,
 	envOverride domain.EnvironmentOverride,
 	imageRepo, imageTag string,
+	port int32,
+	healthPath string,
 ) *ComponentValues {
 	enabled := c.Enabled
 	if envType == domain.AppEnvPreview && !c.PreviewEnabled {
@@ -271,6 +318,12 @@ func buildComponentValues(
 	}
 	if sizePreset != "" {
 		cv.Resources = &ResourceValues{Size: sizePreset}
+	}
+	if port > 0 {
+		cv.Port = port
+	}
+	if healthPath != "" {
+		cv.HealthCheck = &HealthCheckValues{Path: healthPath}
 	}
 	return cv
 }

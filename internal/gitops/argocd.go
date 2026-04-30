@@ -62,10 +62,17 @@ type Application struct {
 	Spec       ApplicationSpec `json:"spec"       yaml:"spec"`
 }
 
-// ApplicationName returns the canonical ArgoCD Application name for an app in
-// a given environment: "<appName>-<envName>".
-func ApplicationName(appName, envName string) string {
-	return appName + "-" + envName
+// ApplicationName returns the canonical ArgoCD Application name for an
+// app in a given environment: "<project>-<app>-<env>".
+//
+// The project prefix is REQUIRED for uniqueness: ArgoCD Applications all
+// live in the argocd namespace, so two suparship projects each with an
+// app named "color-app" would otherwise produce duplicate Application
+// names and break the ApplicationSet reconciler with "duplicate name"
+// errors. The kargo Stage namespace is per-project, so Stage names
+// don't have this problem and KargoStageName stays "{app}-{env}".
+func ApplicationName(projectName, appName, envName string) string {
+	return projectName + "-" + appName + "-" + envName
 }
 
 // ObjectMeta mirrors the Kubernetes ObjectMeta subset used by ArgoCD.
@@ -235,7 +242,7 @@ type BuildOptions struct {
 func BuildArgoApplication(app *domain.App, env domain.AppEnvironment, opts BuildOptions) *Application {
 	opts = applyDefaults(opts, app, env)
 
-	name := ApplicationName(app.Name, env.EnvName)
+	name := ApplicationName(app.ProjectName, app.Name, env.EnvName)
 
 	labels := map[string]string{
 		labelApp:     app.Name,

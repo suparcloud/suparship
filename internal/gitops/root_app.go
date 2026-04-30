@@ -14,6 +14,15 @@ import (
 const (
 	rootAppName = "suparship-apps"
 
+	// rootAppProject is the ArgoCD AppProject the root "App of Apps" is
+	// scoped to. Bootstrapping (internal/bootstrap.ReconcileArgoCD)
+	// ensures this AppProject exists with the right sourceRepos +
+	// destinations to allow the root app + its child ApplicationSets.
+	// Using "default" was a long-standing bug — the default project's
+	// allow-list locks down repo URLs and produces the cryptic
+	// "app is not allowed in project default" error in the ArgoCD UI.
+	rootAppProject = "suparship-system"
+
 	labelManagedBy = "suparship.io/managed-by"
 	labelRole      = "suparship.io/role"
 )
@@ -106,7 +115,7 @@ func buildRootApp(repoURL, targetRevision, subPath string) *unstructured.Unstruc
 			},
 		},
 		"spec": map[string]interface{}{
-			"project": "default",
+			"project": rootAppProject,
 			"source": map[string]interface{}{
 				"repoURL":        repoURL,
 				"targetRevision": targetRevision,

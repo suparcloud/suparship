@@ -276,7 +276,7 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 	// Promotion admission webhook validates against this field. The newer
 	// promotionTemplate.spec.steps API is accepted by the CRD but the webhook
 	// rejects Promotions for Stages that only declare steps.
-	argoAppName := ApplicationName(app.Name, env.EnvName)
+	argoAppName := ApplicationName(app.ProjectName, app.Name, env.EnvName)
 
 	// The values.yaml path within the gitops repo for this app+env.
 	// Built via joinSubPath so it matches whatever PublisherConfig.SubPath

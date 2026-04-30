@@ -217,6 +217,34 @@ func (p *Publisher) DeleteSealedReadToken(ctx context.Context, params DeleteSeal
 	})
 }
 
+// MissingSealedTokens reports which of the given envs do NOT have a
+// sealed-token.yaml in the gitops repo. Used by the startup self-heal
+// goroutine to decide which envs need a re-publish (so we don't churn
+// the repo with a fresh sealed-secret commit per env every restart —
+// SealedSecret encryption is non-deterministic, so re-sealing always
+// produces different bytes).
+//
+// One git clone covers all envs to avoid N round-trips when the
+// platform manages many bindings.
+func (p *Publisher) MissingSealedTokens(ctx context.Context, envs []string) ([]string, error) {
+	if len(envs) == 0 {
+		return nil, nil
+	}
+	var missing []string
+	err := p.withClonedRepo(ctx, func(repoDir string) error {
+		for _, env := range envs {
+			path := p.outputDir(repoDir, "_secret-stores", env, "sealed-token.yaml")
+			if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+				missing = append(missing, env)
+			} else if statErr != nil {
+				return fmt.Errorf("stat sealed-token for env %s: %w", env, statErr)
+			}
+		}
+		return nil
+	})
+	return missing, err
+}
+
 // RefreshSecretStore rewrites only store.yaml under gitops-output/_secret-stores/{env}/
 // without re-sealing the Connect token. Idempotent — when the rendered YAML
 // matches the file already in Git, no commit is created.
