@@ -53,8 +53,9 @@ func TestEnsureRootApplication_CreatesWhenAbsent(t *testing.T) {
 	}
 
 	path, _, _ := unstructured.NestedString(app.Object, "spec", "source", "path")
-	if path != rootAppInfraPath {
-		t.Errorf("expected path=%q, got %q", rootAppInfraPath, path)
+	// Default SubPath ("") puts _infra at the repo root.
+	if path != "_infra" {
+		t.Errorf("expected path=%q, got %q", "_infra", path)
 	}
 }
 
@@ -79,7 +80,7 @@ func TestEnsureRootApplication_UsesArgoCDRepoURL(t *testing.T) {
 }
 
 func TestEnsureRootApplication_UpdatesOwnedApp(t *testing.T) {
-	existing := buildRootApp("https://old-url.git", "HEAD")
+	existing := buildRootApp("https://old-url.git", "HEAD", "")
 	dyn := newFakeDynClient(existing)
 
 	cfg := RootAppConfig{

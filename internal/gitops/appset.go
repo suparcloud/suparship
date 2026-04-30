@@ -22,6 +22,11 @@ type AppSetOptions struct {
 	TargetRevision string
 	// SyncAutomated enables automated sync with prune and selfHeal on generated Applications.
 	SyncAutomated bool
+	// SubPath mirrors PublisherConfig.SubPath so the ApplicationSet's
+	// Git File generator path glob and per-app source.path point at the
+	// same directories the publisher writes to. Empty (default) = repo
+	// root.
+	SubPath string
 }
 
 // ApplicationSet is a minimal, serializable representation of an ArgoCD
@@ -115,14 +120,47 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 
 	// Source 2: Helm chart; reads per-app values from the repo via $appvalues.
 	// The full path is used because $appvalues resolves to the repo root (see above).
-	valuesFilePath := "$appvalues/gitops-output/" + env.EnvName + "/{{project}}/{{name}}/values.yaml"
+	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           "charts/{{template}}",
+		Path:           joinSubPath(opts.SubPath, "charts", "{{template}}"),
 		TargetRevision: opts.TargetRevision,
 		Helm: &HelmSource{
 			ReleaseName: "{{name}}",
 			ValueFiles:  []string{valuesFilePath},
+		},
+	}
+
+	// Source 3: per-app platform manifests (env-configmap, external-secret,
+	// env-configmap, external-secret). Without this, those files are
+	// written to gitops but never reach the cluster — the chart's
+	// envFrom is `optional: true` so it silently degrades. Include
+	// filter skips app.yaml + values.yaml, which are parameter/values
+	// files for the ApplicationSet, not Kubernetes manifests.
+	//
+	// Plain-manifest mode (no kustomize): we tried bundling the per-app
+	// manifests via kustomization.yaml, but ArgoCD's `directory:` source
+	// treats files in `Include` as raw manifests — it shipped the
+	// kustomization.yaml to the API server as a Kustomization CRD,
+	// which doesn't exist on workload clusters and broke sync. The
+	// include filter alone is sufficient.
+	//
+	// Extension story: operators wanting to add manifests beyond what
+	// suparship models should layer a separate ArgoCD Application that
+	// overlays this one, NOT edit files in this directory (the
+	// publisher regenerates them every publish).
+	platformManifestsSource := ApplicationSource{
+		RepoURL:        repoURL,
+		Path:           joinSubPath(opts.SubPath, "envs", env.EnvName, "{{project}}", "{{name}}"),
+		TargetRevision: opts.TargetRevision,
+		Directory: &DirectorySource{
+			Recurse: false,
+			// Plain-manifest mode: list each file ArgoCD should apply.
+			// Do NOT include kustomization.yaml here — directory mode
+			// treats listed files as raw manifests, so a kustomization
+			// would be shipped to the API server as a Kustomization CRD
+			// (which doesn't exist, breaking sync).
+			Include: "{env-configmap.yaml,external-secret.yaml}",
 		},
 	}
 
@@ -157,14 +195,19 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 					RepoURL:  repoURL,
 					Revision: opts.TargetRevision,
 					Files: []GitFilePathSpec{
-						{Path: "gitops-output/" + env.EnvName + "/*/*/app.yaml"},
+						{Path: joinSubPath(opts.SubPath, "envs", env.EnvName, "*", "*", "app.yaml")},
 					},
 				},
 			},
 		},
 		Template: ApplicationSetTemplate{
 			Metadata: ObjectMeta{
-				Name:      "{{name}}-" + env.EnvName,
+				// Application name MUST mirror gitops.ApplicationName —
+				// {project}-{app}-{env} — so two suparship projects can
+				// each have an app called e.g. "color-app" without
+				// producing duplicate Application names that break the
+				// ApplicationSet reconciler.
+				Name:      "{{project}}-{{name}}-" + env.EnvName,
 				Namespace: opts.ArgoCDNamespace,
 				Labels: map[string]string{
 					labelApp:     "{{name}}",
@@ -181,7 +224,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 			},
 			Spec: ApplicationSetAppSpec{
 				Project:     "{{project}}",
-				Sources:     []ApplicationSource{valuesRefSource, chartSource},
+				Sources:     []ApplicationSource{valuesRefSource, chartSource, platformManifestsSource},
 				Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: "{{namespace}}"},
 				SyncPolicy:  syncPolicy,
 			},
@@ -215,11 +258,11 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           "charts/{{template}}",
+		Path:           joinSubPath(opts.SubPath, "charts", "{{template}}"),
 		TargetRevision: opts.TargetRevision,
 		Helm: &HelmSource{
 			ReleaseName: "{{appName}}",
-			ValueFiles:  []string{"$previewvalues/gitops-output/previews/{{project}}/{{name}}/values.yaml"},
+			ValueFiles:  []string{"$previewvalues/" + joinSubPath(opts.SubPath, "previews", "{{project}}", "{{name}}", "values.yaml")},
 		},
 	}
 
@@ -252,7 +295,7 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 					RepoURL:  repoURL,
 					Revision: opts.TargetRevision,
 					Files: []GitFilePathSpec{
-						{Path: "gitops-output/previews/*/*/app.yaml"},
+						{Path: joinSubPath(opts.SubPath, "previews", "*", "*", "app.yaml")},
 					},
 				},
 			},

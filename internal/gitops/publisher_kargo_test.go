@@ -39,7 +39,7 @@ func TestPublishKargoCRs_WritesExpectedFiles(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	kargoDir := filepath.Join(dir, "gitops-output", "_infra", "kargo")
+	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
 	wantFiles := []string{
 		"demo-project.yaml",
@@ -73,7 +73,7 @@ func TestPublishKargoCRs_ProjectCRIsGenerated(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	content, err := os.ReadFile(filepath.Join(dir, "gitops-output", "_infra", "kargo", "demo-project.yaml"))
+	content, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-project.yaml"))
 	if err != nil {
 		t.Fatalf("read project file: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestPublishKargoCRs_ProdStageHasStagingUpstream(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	prodStage, err := os.ReadFile(filepath.Join(dir, "gitops-output", "_infra", "kargo", "demo-hello-prod-stage.yaml"))
+	prodStage, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-hello-prod-stage.yaml"))
 	if err != nil {
 		t.Fatalf("read prod stage: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestPublishKargoCRs_StagingStageIsDirect(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	stagingStage, err := os.ReadFile(filepath.Join(dir, "gitops-output", "_infra", "kargo", "demo-hello-staging-stage.yaml"))
+	stagingStage, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-hello-staging-stage.yaml"))
 	if err != nil {
 		t.Fatalf("read staging stage: %v", err)
 	}
@@ -159,9 +159,9 @@ func TestPublishKargoCRs_Idempotent(t *testing.T) {
 	}
 
 	// file should exist and have stable content
-	content1, _ := os.ReadFile(filepath.Join(dir, "gitops-output", "_infra", "kargo", "demo-hello-warehouse.yaml"))
+	content1, _ := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-hello-warehouse.yaml"))
 	p.PublishKargoCRsForTest(dir, app, envs) //nolint:errcheck
-	content2, _ := os.ReadFile(filepath.Join(dir, "gitops-output", "_infra", "kargo", "demo-hello-warehouse.yaml"))
+	content2, _ := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-hello-warehouse.yaml"))
 	if string(content1) != string(content2) {
 		t.Error("publishKargoCRs is not idempotent: warehouse YAML changed between runs")
 	}
@@ -181,7 +181,7 @@ func TestPublishKargoCRs_SingleEnvNoUpstream(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	kargoDir := filepath.Join(dir, "gitops-output", "_infra", "kargo")
+	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
 	// Only one stage file and no prod stage.
 	devStage, err := os.ReadFile(filepath.Join(kargoDir, "demo-hello-dev-stage.yaml"))
@@ -214,7 +214,7 @@ func TestPublishKargoCRs_ThreeEnvChain(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	kargoDir := filepath.Join(dir, "gitops-output", "_infra", "kargo")
+	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
 	devStage, _ := os.ReadFile(filepath.Join(kargoDir, "demo-hello-dev-stage.yaml"))
 	stagingStage, _ := os.ReadFile(filepath.Join(kargoDir, "demo-hello-staging-stage.yaml"))
@@ -244,7 +244,7 @@ func TestPublishKargoCRs_UnboundEnvSkipped(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	kargoDir := filepath.Join(dir, "gitops-output", "_infra", "kargo")
+	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
 	// staging is bound → should have a Stage file
 	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-staging-stage.yaml")); os.IsNotExist(err) {
@@ -280,7 +280,7 @@ func TestPublishKargoCRs_AllUnboundProducesWarehouseOnly(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	kargoDir := filepath.Join(dir, "gitops-output", "_infra", "kargo")
+	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
 	// Warehouse should still be written (it's env-independent)
 	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-warehouse.yaml")); os.IsNotExist(err) {

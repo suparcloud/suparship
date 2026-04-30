@@ -2,10 +2,12 @@ package gitops
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
@@ -26,6 +28,9 @@ type ESOSecretStoreConfig struct {
 	// vault are resolvable from the same store. Ignored for non-1Password
 	// backends and when empty.
 	PlatformVaultID string
+	// Branding stamps the platform identity into the generated labels.
+	// Zero value applies "suparship" / "suparship.io" defaults.
+	Branding branding.Config
 }
 
 // ESOItemRef is one dataFrom.extract entry in the collapsed ExternalSecret.
@@ -56,6 +61,9 @@ type ESOExternalSecretConfig struct {
 	// entries overwriting earlier ones for duplicate keys). Only scopes that
 	// actually have keys are included.
 	Items []ESOItemRef
+	// Branding stamps the platform identity into the generated labels.
+	// Zero value applies "suparship" / "suparship.io" defaults.
+	Branding branding.Config
 }
 
 // BuildClusterSecretStoreYAML renders a ClusterSecretStore from cfg.
@@ -66,10 +74,10 @@ kind: ClusterSecretStore
 metadata:
   name: %s
   labels:
-    app.kubernetes.io/managed-by: suparship
+%s
 spec:
   provider:
-`, cfg.Name))
+`, cfg.Name, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4)))
 
 	switch cfg.BackendType {
 	case secrets.BackendK8s:
@@ -135,7 +143,7 @@ metadata:
   name: %s
   namespace: %s
   labels:
-    app.kubernetes.io/managed-by: suparship
+%s
 spec:
   refreshInterval: 1h
   secretStoreRef:
@@ -145,7 +153,7 @@ spec:
     name: %s
     creationPolicy: Owner
   dataFrom:
-`, cfg.Name, cfg.Namespace, cfg.StoreName, cfg.Name))
+`, cfg.Name, cfg.Namespace, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), cfg.StoreName, cfg.Name))
 
 	for _, item := range cfg.Items {
 		sb.WriteString(fmt.Sprintf("  - extract:\n      key: %q\n", item.Key))
@@ -159,12 +167,25 @@ spec:
 	return sb.String()
 }
 
-// BuildSecretStoresForConfig generates ClusterSecretStore YAML for all bindings
-// in the backend config.
+// BuildSecretStoresForConfig generates ClusterSecretStore YAML for the
+// shared K8s backend store. Returns empty for 1Password backend — those
+// stores have to be emitted per-env by PublishSealedReadToken (in
+// internal/gitops/seal_publisher.go) because the connectTokenSecretRef
+// namespace must match the workload cluster's actual ESO install
+// namespace, which only the per-cluster code path knows.
+//
+// Historically this function also emitted 1Password stores into
+// _infra/secret-stores/ with a hardcoded "external-secrets" default,
+// which produced two competing ClusterSecretStore objects (the
+// _infra/ one and the _secret-stores/{env}/ one) and caused
+// "InvalidProviderConfig: secret not found" errors when the workload
+// cluster used a non-default ESO namespace. The _infra/ duplicates are
+// now suppressed.
 func BuildSecretStoresForConfig(
 	cfg secrets.BackendConfig,
 	naming secrets.ResourceNaming,
 	orgName string,
+	brand branding.Config,
 ) []ESOSecretStoreConfig {
 	if cfg.Effective() == secrets.BackendK8s {
 		name := naming.RenderClusterSecretStore(secrets.NamingParams{
@@ -175,30 +196,10 @@ func BuildSecretStoresForConfig(
 		return []ESOSecretStoreConfig{{
 			Name:        name,
 			BackendType: secrets.BackendK8s,
+			Branding:    brand,
 		}}
 	}
-
-	if cfg.OnePassword == nil {
-		return nil
-	}
-	var stores []ESOSecretStoreConfig
-	for _, b := range cfg.OnePassword.Bindings {
-		if !b.Provisioned {
-			continue
-		}
-		name := naming.RenderClusterSecretStore(secrets.NamingParams{
-			Provider: string(cfg.Effective()),
-			Env:      b.Env,
-			Org:      orgName,
-		})
-		stores = append(stores, ESOSecretStoreConfig{
-			Name:            name,
-			Binding:         b,
-			BackendType:     cfg.Effective(),
-			PlatformVaultID: cfg.OnePassword.PlatformVaultID,
-		})
-	}
-	return stores
+	return nil
 }
 
 // AppEnvPublishParams captures the info needed to generate one ExternalSecret.
@@ -232,6 +233,7 @@ func BuildCollapsedExternalSecretForApp(
 	naming secrets.ResourceNaming,
 	cfg secrets.BackendConfig,
 	orgName string,
+	brand branding.Config,
 ) *ESOExternalSecretConfig {
 	np := secrets.NamingParams{
 		Org:      orgName,
@@ -291,23 +293,56 @@ func BuildCollapsedExternalSecretForApp(
 		Namespace: params.Namespace,
 		StoreName: envStoreName,
 		Items:     items,
+		Branding:  brand,
 	}
 }
 
 // WriteSecretStores writes ClusterSecretStore YAML files to
-// gitops-output/_infra/secret-stores/.
+// _infra/secret-stores/. Also prunes stale entries no longer in the
+// desired set, so a backend switch (e.g. 1Password → K8s) or a binding
+// removal cleanly removes the corresponding ClusterSecretStore from the
+// repo and lets ArgoCD prune it from the cluster.
+//
+// Ownership convention: _infra/secret-stores/ is owned by this writer.
+// Anything else dropped there by an operator is foreign and would be
+// nuked on the next publish; document this carve-out in the take-over
+// recipes if extensions are needed.
 func (p *Publisher) WriteSecretStores(repoDir string, stores []ESOSecretStoreConfig) error {
-	storeDir := filepath.Join(repoDir, "gitops-output", "_infra", "secret-stores")
+	storeDir := p.outputDir(repoDir, "_infra", "secret-stores")
 
 	sort.Slice(stores, func(i, j int) bool {
 		return stores[i].Name < stores[j].Name
 	})
 
+	wanted := make(map[string]bool, len(stores))
 	for _, s := range stores {
+		wanted[s.Name+".yaml"] = true
 		content := BuildClusterSecretStoreYAML(s)
 		filename := filepath.Join(storeDir, s.Name+".yaml")
 		if err := p.writeFile(filename, []byte(content)); err != nil {
 			return fmt.Errorf("writing ClusterSecretStore %s: %w", s.Name, err)
+		}
+	}
+
+	// Prune stale .yaml files (e.g. a binding or backend was removed).
+	// Missing dir = nothing to prune — first publish for this org.
+	entries, err := os.ReadDir(storeDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read _infra/secret-stores: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".yaml") || wanted[name] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(storeDir, name)); err != nil {
+			return fmt.Errorf("prune stale ClusterSecretStore %s: %w", name, err)
 		}
 	}
 	return nil
@@ -316,12 +351,12 @@ func (p *Publisher) WriteSecretStores(repoDir string, stores []ESOSecretStoreCon
 // WriteCollapsedExternalSecret writes a single ExternalSecret YAML to
 // gitops-output/{project}/{app}/{env}/external-secret.yaml.
 func (p *Publisher) WriteCollapsedExternalSecret(repoDir string, cfg ESOExternalSecretConfig) error {
-	dir := filepath.Join(repoDir, "gitops-output")
 	parts := strings.Split(cfg.Namespace, "-")
+	var dir string
 	if len(parts) >= 3 {
-		dir = filepath.Join(dir, parts[0], parts[1], strings.Join(parts[2:], "-"))
+		dir = p.outputDir(repoDir, parts[0], parts[1], strings.Join(parts[2:], "-"))
 	} else {
-		dir = filepath.Join(dir, cfg.Namespace)
+		dir = p.outputDir(repoDir, cfg.Namespace)
 	}
 	content := BuildCollapsedExternalSecretYAML(cfg)
 	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content))
@@ -330,7 +365,10 @@ func (p *Publisher) WriteCollapsedExternalSecret(repoDir string, cfg ESOExternal
 // BuildAppConfigMapYAML renders a ConfigMap YAML for non-secret env vars.
 // vars may be nil or empty — in that case an empty-data ConfigMap is written
 // so ArgoCD can always resolve the envFrom reference without errors.
-func BuildAppConfigMapYAML(name, namespace string, vars map[string]string) string {
+//
+// brand stamps the platform identity onto the ConfigMap labels. Zero value
+// applies "suparship" defaults so existing callers remain unchanged.
+func BuildAppConfigMapYAML(name, namespace string, vars map[string]string, brand branding.Config) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap
@@ -338,9 +376,9 @@ metadata:
   name: %s
   namespace: %s
   labels:
-    app.kubernetes.io/managed-by: suparship
+%s
 data:
-`, name, namespace))
+`, name, namespace, branding.LabelsYAML(brand.ManagedByLabels(), 4)))
 
 	if len(vars) == 0 {
 		sb.WriteString("  {}\n")
@@ -364,6 +402,6 @@ data:
 // gitops-output/{envName}/{project}/{app}/ or
 // gitops-output/previews/{project}/{previewName}/.
 func (p *Publisher) WriteAppConfigMap(dir, name, namespace string, vars map[string]string) error {
-	content := BuildAppConfigMapYAML(name, namespace, vars)
+	content := BuildAppConfigMapYAML(name, namespace, vars, p.cfg.Branding)
 	return p.writeFile(filepath.Join(dir, "env-configmap.yaml"), []byte(content))
 }

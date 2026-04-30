@@ -9,6 +9,7 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
@@ -48,7 +49,7 @@ func TestPublishAppFiles_WritesConfigMap(t *testing.T) {
 
 	for _, envName := range []string{"staging", "prod"} {
 		ns := "demo-nginx-" + envName
-		cmPath := filepath.Join(dir, "gitops-output", envName, "demo", "nginx", "env-configmap.yaml")
+		cmPath := filepath.Join(dir, "envs", envName, "demo", "nginx", "env-configmap.yaml")
 		data, err := os.ReadFile(cmPath)
 		if err != nil {
 			t.Fatalf("env-configmap.yaml missing for env %q: %v", envName, err)
@@ -86,7 +87,7 @@ func TestPublishAppFiles_NoExternalSecretWithoutStoreName(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	esPath := filepath.Join(dir, "gitops-output", "staging", "demo", "nginx", "external-secret.yaml")
+	esPath := filepath.Join(dir, "envs", "staging", "demo", "nginx", "external-secret.yaml")
 	if _, err := os.Stat(esPath); !os.IsNotExist(err) {
 		t.Error("expected no external-secret.yaml when StoreName is empty")
 	}
@@ -116,7 +117,7 @@ func TestPublishAppFiles_WritesExternalSecretWhenStoreNameSet(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	esPath := filepath.Join(dir, "gitops-output", "staging", "demo", "nginx", "external-secret.yaml")
+	esPath := filepath.Join(dir, "envs", "staging", "demo", "nginx", "external-secret.yaml")
 	data, err := os.ReadFile(esPath)
 	if err != nil {
 		t.Fatalf("external-secret.yaml missing: %v", err)
@@ -160,13 +161,13 @@ func TestPublishAppFiles_CustomNamingPatterns(t *testing.T) {
 	p.SetOrgConfig("myorg", secrets.ResourceNaming{
 		AppResource:  "{app}-env-secrets",
 		AppConfigMap: "{app}-env-config",
-	}, nil)
+	}, nil, branding.Config{})
 
 	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	cmPath := filepath.Join(dir, "gitops-output", "prod", "billing", "api", "env-configmap.yaml")
+	cmPath := filepath.Join(dir, "envs", "prod", "billing", "api", "env-configmap.yaml")
 	cmData, err := os.ReadFile(cmPath)
 	if err != nil {
 		t.Fatalf("env-configmap.yaml missing: %v", err)
@@ -175,7 +176,7 @@ func TestPublishAppFiles_CustomNamingPatterns(t *testing.T) {
 		t.Errorf("expected custom ConfigMap name 'api-env-config', got:\n%s", cmData)
 	}
 
-	esPath := filepath.Join(dir, "gitops-output", "prod", "billing", "api", "external-secret.yaml")
+	esPath := filepath.Join(dir, "envs", "prod", "billing", "api", "external-secret.yaml")
 	esData, err := os.ReadFile(esPath)
 	if err != nil {
 		t.Fatalf("external-secret.yaml missing: %v", err)
@@ -207,7 +208,7 @@ func TestPublishAppFiles_UnboundEnvSkipsPlatformResources(t *testing.T) {
 	}
 
 	// Nothing should be written for an unbound env.
-	prodDir := filepath.Join(dir, "gitops-output", "prod")
+	prodDir := filepath.Join(dir, "envs", "prod")
 	if _, err := os.Stat(prodDir); !os.IsNotExist(err) {
 		t.Error("expected no output for unbound prod env")
 	}

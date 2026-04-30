@@ -110,6 +110,12 @@ type secretsHandler struct {
 	// secrets from suparship-system K8s Secrets into a 1Password vault
 	// (the current upperWriter may already be the 1Password writer post-switch).
 	k8sUpperWriter *secrets.UpperLevelSecretWriter
+	// kubeClient is the in-cluster Kubernetes client used for ad-hoc
+	// reads/writes against suparship-system (e.g. the per-env 1Password
+	// Connect token stash). Optional — nil disables features that
+	// depend on it; the binding flow degrades gracefully when stashing
+	// fails.
+	kubeClient kubernetes.Interface
 
 	// upperWriter holds the active upper-level writer. Guarded by upperWriterMu
 	// so it can be hot-swapped when the operator picks a new platform vault
@@ -775,6 +781,18 @@ func (h *secretsHandler) handleAddBinding(w http.ResponseWriter, r *http.Request
 			})
 			return
 		}
+
+		// Stash the plaintext token in suparship-system so the startup
+		// self-heal goroutine can re-publish if the gitops file ever goes
+		// missing (e.g. operator wipes the gitops repo). Failure is
+		// non-fatal — the binding works for this lifetime; only the
+		// recovery path is degraded.
+		if h.kubeClient != nil {
+			if stashErr := secrets.StashConnectToken(ctx, h.kubeClient, req.Env, []byte(req.ConnectToken)); stashErr != nil {
+				h.logger.Warn("failed to stash connect token (self-heal may not work for this env)",
+					"env", req.Env, "err", stashErr)
+			}
+		}
 	}
 
 	vaultName := req.VaultName
@@ -875,6 +893,16 @@ func (h *secretsHandler) handleRemoveBinding(w http.ResponseWriter, r *http.Requ
 	org.SecretBackend.RemoveBinding(env)
 	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
 		h.logger.Error("failed to save org after unbind", "err", err)
+	}
+
+	// Delete the per-env Connect token stash so we don't leak credentials
+	// for an env the platform no longer manages. Idempotent — missing
+	// stash is a no-op (stash may pre-date this feature, or the binding
+	// was added before stashing was wired in).
+	if h.kubeClient != nil {
+		if err := secrets.DeleteConnectToken(ctx, h.kubeClient, env); err != nil {
+			h.logger.Warn("failed to delete connect token stash", "env", env, "err", err)
+		}
 	}
 
 	if h.auditor != nil {

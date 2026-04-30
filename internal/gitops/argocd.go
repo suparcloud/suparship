@@ -26,8 +26,6 @@
 package gitops
 
 import (
-	"fmt"
-
 	"github.com/suparcloud/suparship/internal/domain"
 )
 
@@ -64,10 +62,17 @@ type Application struct {
 	Spec       ApplicationSpec `json:"spec"       yaml:"spec"`
 }
 
-// ApplicationName returns the canonical ArgoCD Application name for an app in
-// a given environment: "<appName>-<envName>".
-func ApplicationName(appName, envName string) string {
-	return appName + "-" + envName
+// ApplicationName returns the canonical ArgoCD Application name for an
+// app in a given environment: "<project>-<app>-<env>".
+//
+// The project prefix is REQUIRED for uniqueness: ArgoCD Applications all
+// live in the argocd namespace, so two suparship projects each with an
+// app named "color-app" would otherwise produce duplicate Application
+// names and break the ApplicationSet reconciler with "duplicate name"
+// errors. The kargo Stage namespace is per-project, so Stage names
+// don't have this problem and KargoStageName stays "{app}-{env}".
+func ApplicationName(projectName, appName, envName string) string {
+	return projectName + "-" + appName + "-" + envName
 }
 
 // ObjectMeta mirrors the Kubernetes ObjectMeta subset used by ArgoCD.
@@ -106,6 +111,25 @@ type ApplicationSource struct {
 	// Helm holds Helm-specific configuration. Omitted when the source is
 	// plain manifests rather than a Helm chart.
 	Helm *HelmSource `json:"helm,omitempty" yaml:"helm,omitempty"`
+	// Directory configures plain-manifest behaviour: include filters so
+	// only specific files in Path are applied. Used by the per-app
+	// "platform manifests" source so app.yaml + values.yaml are skipped
+	// (they're parameter/values files, not k8s manifests).
+	Directory *DirectorySource `json:"directory,omitempty" yaml:"directory,omitempty"`
+}
+
+// DirectorySource configures ArgoCD's plain-directory rendering for an
+// ApplicationSource. When kustomization.yaml is present in Path, ArgoCD
+// auto-detects kustomize and uses it instead — the Include filter still
+// limits which files kustomize considers.
+type DirectorySource struct {
+	// Recurse controls whether ArgoCD walks subdirectories. Default false:
+	// suparship-emitted dirs have no nested manifest tree.
+	Recurse bool `json:"recurse,omitempty" yaml:"recurse,omitempty"`
+	// Include is a glob expression listing the file names to consider.
+	// Single curly-brace alternation (e.g. "{a.yaml,b.yaml}") is supported
+	// by ArgoCD's directory source.
+	Include string `json:"include,omitempty" yaml:"include,omitempty"`
 }
 
 // HelmSource configures how ArgoCD renders the Helm chart at ApplicationSource.Path.
@@ -189,6 +213,12 @@ type BuildOptions struct {
 	// Annotations are merged into the Application metadata.annotations.
 	// Values from this map are applied after the default suparship annotations.
 	Annotations map[string]string
+
+	// SubPath mirrors PublisherConfig.SubPath. Used to build the default
+	// RepoPath when RepoPath is empty so the derived path matches whatever
+	// the publisher writes. Empty SubPath places manifests at the repo
+	// root.
+	SubPath string
 }
 
 // BuildArgoApplication maps a suparship App and one of its AppEnvironments to
@@ -212,7 +242,7 @@ type BuildOptions struct {
 func BuildArgoApplication(app *domain.App, env domain.AppEnvironment, opts BuildOptions) *Application {
 	opts = applyDefaults(opts, app, env)
 
-	name := ApplicationName(app.Name, env.EnvName)
+	name := ApplicationName(app.ProjectName, app.Name, env.EnvName)
 
 	labels := map[string]string{
 		labelApp:     app.Name,
@@ -296,7 +326,7 @@ func applyDefaults(opts BuildOptions, app *domain.App, env domain.AppEnvironment
 		opts.TargetRevision = defaultTargetRevision
 	}
 	if opts.RepoPath == "" {
-		opts.RepoPath = defaultRepoPath(app.ProjectName, app.Name, env.EnvName)
+		opts.RepoPath = defaultRepoPath(opts.SubPath, app.ProjectName, app.Name, env.EnvName)
 	}
 	if opts.ArgoCDProject == "" {
 		opts.ArgoCDProject = app.ProjectName
@@ -326,9 +356,10 @@ func BuildArgoApplicationFromInstance(app *domain.App, inst *domain.EnvironmentI
 	return BuildArgoApplication(app, env, opts)
 }
 
-// defaultRepoPath returns the conventional gitops output path for an app env:
-//
-//	gitops-output/<project>/<app>/<env>
-func defaultRepoPath(project, app, env string) string {
-	return fmt.Sprintf("gitops-output/%s/%s/%s", project, app, env)
+// defaultRepoPath returns the conventional gitops output path for an app env,
+// honouring the publisher's configured SubPath. Empty SubPath produces
+// "<project>/<app>/<env>" (repo-root layout); a non-empty SubPath like
+// "gitops/" produces "gitops/<project>/<app>/<env>".
+func defaultRepoPath(subPath, project, app, env string) string {
+	return joinSubPath(subPath, project, app, env)
 }

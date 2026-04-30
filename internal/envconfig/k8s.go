@@ -42,6 +42,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/suparcloud/suparship/internal/branding"
 )
 
 const (
@@ -88,11 +90,21 @@ func ClusterEnvConfigMapName(clusterName string) string {
 // suparship-system with the appropriate Stakater Replicator annotations.
 // Only Vars are written to ConfigMaps; SecretRef rendering is handled by the
 // GitOps publisher (internal/gitops/eso.go).
+//
+// Branding is consulted to compute the replicator-matching label keys
+// (e.g. <domain>/project, <domain>/cluster). Must stay in lockstep with the
+// labels emitted on app/project namespaces by the gitops publisher — that's
+// how a single Org.Branding value keeps replication wired end-to-end.
 type UpperLevelEnvWriter struct {
 	client kubernetes.Interface
+	// Branding is exported so the server entrypoint can update it after
+	// construction (e.g. on org-config save). Zero value applies the
+	// suparship.io / suparship defaults.
+	Branding branding.Config
 }
 
 // NewUpperLevelEnvWriter creates an UpperLevelEnvWriter backed by client.
+// Set Branding directly on the returned writer to enable white-labeling.
 func NewUpperLevelEnvWriter(client kubernetes.Interface) *UpperLevelEnvWriter {
 	return &UpperLevelEnvWriter{client: client}
 }
@@ -122,24 +134,24 @@ func (w *UpperLevelEnvWriter) WriteEnvTypeEnvConfig(ctx context.Context, envType
 
 // WriteProjectEnvConfig creates or updates the Project-level env var ConfigMap
 // in suparship-system. The ConfigMap is annotated to replicate to namespaces
-// that carry the label "suparship.io/project={projectName}". App namespaces must
+// that carry the label "<domain>/project={projectName}". App namespaces must
 // have this label applied when they are created (see internal/gitops/publisher.go
-// namespace generation).
+// namespace generation), with the same branded domain.
 func (w *UpperLevelEnvWriter) WriteProjectEnvConfig(ctx context.Context, projectName string, cfg EnvConfig) error {
 	annotations := map[string]string{
-		ReplicatorMatchingAnnotation: fmt.Sprintf("suparship.io/project=%s", projectName),
+		ReplicatorMatchingAnnotation: fmt.Sprintf("%s=%s", w.Branding.LabelKey("project"), projectName),
 	}
 	return w.upsertEnvConfigMap(ctx, ProjectEnvConfigMapName(projectName), annotations, cfg.Vars)
 }
 
 // WriteClusterEnvConfig creates or updates the Cluster-level env var ConfigMap
 // in suparship-system. Annotated to replicate to namespaces carrying the label
-// "suparship.io/cluster={clusterName}", which suparship sets on app namespaces
-// at GitOps publish time. Cluster-scope overrides exist as a platform escape
+// "<domain>/cluster={clusterName}", which suparship sets on app namespaces at
+// GitOps publish time. Cluster-scope overrides exist as a platform escape
 // hatch and win over every other layer (including app-env).
 func (w *UpperLevelEnvWriter) WriteClusterEnvConfig(ctx context.Context, clusterName string, cfg EnvConfig) error {
 	annotations := map[string]string{
-		ReplicatorMatchingAnnotation: fmt.Sprintf("suparship.io/cluster=%s", clusterName),
+		ReplicatorMatchingAnnotation: fmt.Sprintf("%s=%s", w.Branding.LabelKey("cluster"), clusterName),
 	}
 	return w.upsertEnvConfigMap(ctx, ClusterEnvConfigMapName(clusterName), annotations, cfg.Vars)
 }

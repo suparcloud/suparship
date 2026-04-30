@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/suparcloud/suparship/internal/branding"
 )
 
 // freshTestCertPEM generates a self-signed cert and returns the PEM bytes.
@@ -34,12 +36,9 @@ func freshTestCertPEM(t *testing.T) []byte {
 
 func TestBuildSecretStoreArgoApp(t *testing.T) {
 	yaml := buildSecretStoreArgoApp(
-		"staging",
-		"staging-aks-02-scus",
-		"https://git.example.com/org/gitops.git",
-		"main",
-		"https://10.0.0.1:6443",
-		"external-secrets-system",
+		"staging", "staging-aks-02-scus", "https://git.example.com/org/gitops.git", "main", "https://10.0.0.1:6443", "external-secrets-system",
+		branding.Config{},
+		"",
 	)
 	for _, want := range []string{
 		"apiVersion: argoproj.io/v1alpha1",
@@ -49,7 +48,7 @@ func TestBuildSecretStoreArgoApp(t *testing.T) {
 		"suparship.io/cluster: staging-aks-02-scus",
 		"namespace: argocd",
 		"project: suparship-system",
-		"path: gitops-output/_secret-stores/staging",
+		"path: _secret-stores/staging",
 		"server: https://10.0.0.1:6443",
 		"namespace: external-secrets-system",
 		"prune: true",

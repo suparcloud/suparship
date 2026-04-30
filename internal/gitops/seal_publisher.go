@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
@@ -103,10 +104,10 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 			secrets.SATokenSecretKey: params.Token,
 		},
 		Type: "Opaque",
-		Labels: map[string]string{
-			"app.kubernetes.io/managed-by": "suparship",
-			"suparship.io/env":             params.Env,
-		},
+		Labels: branding.MergeLabels(
+			p.cfg.Branding.ManagedByLabels(),
+			map[string]string{p.cfg.Branding.LabelKey("env"): params.Env},
+		),
 	})
 	if err != nil {
 		return fmt.Errorf("seal token: %w", err)
@@ -126,6 +127,7 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 		ESONamespace:    esoNS,
 		ConnectEndpoint: params.ConnectEndpoint,
 		PlatformVaultID: params.PlatformVaultID,
+		Branding:        p.cfg.Branding,
 	})
 
 	destServer := params.ArgoCDDestination
@@ -135,8 +137,8 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		// Manifests live outside _infra/ to avoid root-app double-sync.
-		storesDir := filepath.Join(repoDir, "gitops-output", "_secret-stores", params.Env)
-		infraDir := filepath.Join(repoDir, "gitops-output", "_infra")
+		storesDir := p.outputDir(repoDir, "_secret-stores", params.Env)
+		infraDir := p.outputDir(repoDir, "_infra")
 
 		// Clean up legacy paths from older suparship versions (env-named app +
 		// _infra/secret-stores/ dir) before writing the current layout, so stale
@@ -157,7 +159,7 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 			return err
 		}
 
-		appYAML := buildSecretStoreArgoApp(params.Env, params.ClusterName, p.argoCDRepoURL(), p.cfg.Branch, destServer, esoNS)
+		appYAML := buildSecretStoreArgoApp(params.Env, params.ClusterName, p.argoCDRepoURL(), p.cfg.Branch, destServer, esoNS, p.cfg.Branding, p.cfg.SubPath)
 		if err := p.writeFile(filepath.Join(infraDir, "secrets-"+params.ClusterName+"-app.yaml"), []byte(appYAML)); err != nil {
 			return err
 		}
@@ -180,13 +182,13 @@ func (p *Publisher) DeleteSealedReadToken(ctx context.Context, params DeleteSeal
 	}
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		// Current paths (cluster-named app + dedicated _secret-stores/ dir).
-		storesDir := filepath.Join(repoDir, "gitops-output", "_secret-stores", params.Env)
-		appFile := filepath.Join(repoDir, "gitops-output", "_infra", "secrets-"+params.ClusterName+"-app.yaml")
+		storesDir := p.outputDir(repoDir, "_secret-stores", params.Env)
+		appFile := p.outputDir(repoDir, "_infra", "secrets-"+params.ClusterName+"-app.yaml")
 
 		// Legacy paths created by older suparship versions: env-named app +
 		// secrets dir nested inside _infra/.
-		legacyStoresDir := filepath.Join(repoDir, "gitops-output", "_infra", "secret-stores", params.Env)
-		legacyAppFile := filepath.Join(repoDir, "gitops-output", "_infra", "secrets-"+params.Env+"-app.yaml")
+		legacyStoresDir := p.outputDir(repoDir, "_infra", "secret-stores", params.Env)
+		legacyAppFile := p.outputDir(repoDir, "_infra", "secrets-"+params.Env+"-app.yaml")
 
 		removedAny := false
 
@@ -213,6 +215,34 @@ func (p *Publisher) DeleteSealedReadToken(ctx context.Context, params DeleteSeal
 		}
 		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): remove secret-store for env=%s cluster=%s", params.Env, params.ClusterName))
 	})
+}
+
+// MissingSealedTokens reports which of the given envs do NOT have a
+// sealed-token.yaml in the gitops repo. Used by the startup self-heal
+// goroutine to decide which envs need a re-publish (so we don't churn
+// the repo with a fresh sealed-secret commit per env every restart —
+// SealedSecret encryption is non-deterministic, so re-sealing always
+// produces different bytes).
+//
+// One git clone covers all envs to avoid N round-trips when the
+// platform manages many bindings.
+func (p *Publisher) MissingSealedTokens(ctx context.Context, envs []string) ([]string, error) {
+	if len(envs) == 0 {
+		return nil, nil
+	}
+	var missing []string
+	err := p.withClonedRepo(ctx, func(repoDir string) error {
+		for _, env := range envs {
+			path := p.outputDir(repoDir, "_secret-stores", env, "sealed-token.yaml")
+			if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+				missing = append(missing, env)
+			} else if statErr != nil {
+				return fmt.Errorf("stat sealed-token for env %s: %w", env, statErr)
+			}
+		}
+		return nil
+	})
+	return missing, err
 }
 
 // RefreshSecretStore rewrites only store.yaml under gitops-output/_secret-stores/{env}/
@@ -245,10 +275,11 @@ func (p *Publisher) RefreshSecretStore(ctx context.Context, params RefreshSecret
 		ESONamespace:    esoNS,
 		ConnectEndpoint: params.ConnectEndpoint,
 		PlatformVaultID: params.PlatformVaultID,
+		Branding:        p.cfg.Branding,
 	})
 
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		path := filepath.Join(repoDir, "gitops-output", "_secret-stores", params.Env, "store.yaml")
+		path := p.outputDir(repoDir, "_secret-stores", params.Env, "store.yaml")
 		// Refuse to write if the per-env directory doesn't exist — that means
 		// no binding was ever published for this env, and creating an
 		// orphaned store.yaml without a sealed-token would yield a broken
@@ -270,22 +301,28 @@ func (p *Publisher) RefreshSecretStore(ctx context.Context, params RefreshSecret
 // the per-env secret-stores directory to the given target cluster.
 // The app is named secrets-{clusterName} so the name reflects the physical
 // target cluster rather than the logical environment.
-func buildSecretStoreArgoApp(env, clusterName, repoURL, branch, destServer, esoNamespace string) string {
+func buildSecretStoreArgoApp(env, clusterName, repoURL, branch, destServer, esoNamespace string, brand branding.Config, subPath string) string {
+	labels := branding.MergeLabels(
+		brand.ManagedByLabels(),
+		map[string]string{
+			brand.LabelKey("env"):     env,
+			brand.LabelKey("cluster"): clusterName,
+		},
+	)
+	storesPath := joinSubPath(subPath, "_secret-stores", env)
 	return fmt.Sprintf(`apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: secrets-%s
   namespace: argocd
   labels:
-    app.kubernetes.io/managed-by: suparship
-    suparship.io/env: %s
-    suparship.io/cluster: %s
+%s
 spec:
   project: suparship-system
   source:
     repoURL: %s
     targetRevision: %s
-    path: gitops-output/_secret-stores/%s
+    path: %s
     directory:
       recurse: false
       include: '{sealed-token.yaml,store.yaml}'
@@ -298,5 +335,5 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
-`, clusterName, env, clusterName, repoURL, branch, env, destServer, esoNamespace)
+`, clusterName, branding.LabelsYAML(labels, 4), repoURL, branch, storesPath, destServer, esoNamespace)
 }

@@ -85,7 +85,7 @@ func TestBuildKargoStage_DirectSource(t *testing.T) {
 		ProjectName: "demo",
 		EnvName:     "staging",
 		EnvType:     domain.AppEnvStaging,
-		Namespace:   "hello-staging",
+		Namespace:   "demo-hello-staging",
 	}
 
 	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{})
@@ -93,6 +93,10 @@ func TestBuildKargoStage_DirectSource(t *testing.T) {
 	if stage.Kind != "Stage" {
 		t.Errorf("Kind: got %q want %q", stage.Kind, "Stage")
 	}
+	// Kargo Stage name = {app}-{env}; project is encoded in the
+	// namespace (Stage.Metadata.Namespace), so it doesn't need to
+	// repeat in the name. Distinct from ArgoCD Applications, which all
+	// share the argocd namespace and thus need {project}-{app}-{env}.
 	if stage.Metadata.Name != "hello-staging" {
 		t.Errorf("Name: got %q want %q", stage.Metadata.Name, "hello-staging")
 	}
@@ -121,7 +125,7 @@ func TestBuildKargoStage_UpstreamStages(t *testing.T) {
 		ProjectName: "demo",
 		EnvName:     "prod",
 		EnvType:     domain.AppEnvProd,
-		Namespace:   "hello-prod",
+		Namespace:   "demo-hello-prod",
 	}
 
 	stage := gitops.BuildKargoStage(app, env, []string{"staging"}, gitops.KargoBuildOptions{})
@@ -148,8 +152,8 @@ func TestBuildKargoStage_PromotionMechanismsIncludesArgoApp(t *testing.T) {
 	if len(updates) == 0 {
 		t.Fatal("PromotionMechanisms has no ArgoCDAppUpdates")
 	}
-	if updates[0].AppName != "hello-staging" {
-		t.Errorf("ArgoCDAppUpdates[0].AppName: got %q want %q", updates[0].AppName, "hello-staging")
+	if updates[0].AppName != "demo-hello-staging" {
+		t.Errorf("ArgoCDAppUpdates[0].AppName: got %q want %q", updates[0].AppName, "demo-hello-staging")
 	}
 	if updates[0].AppNamespace != "argocd" {
 		t.Errorf("ArgoCDAppUpdates[0].AppNamespace: got %q want %q", updates[0].AppNamespace, "argocd")
@@ -207,7 +211,7 @@ func TestBuildKargoStage_GitRepoUpdates(t *testing.T) {
 	if img.Image != "kind-registry:5000/demo/color-app" {
 		t.Errorf("Image: got %q", img.Image)
 	}
-	if img.ValuesFilePath != "gitops-output/staging/demo/color-app/values.yaml" {
+	if img.ValuesFilePath != "envs/staging/demo/color-app/values.yaml" {
 		t.Errorf("ValuesFilePath: got %q", img.ValuesFilePath)
 	}
 	if img.Key != "components.web.image.tag" {

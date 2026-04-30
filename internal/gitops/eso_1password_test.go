@@ -3,6 +3,8 @@ package gitops
 import (
 	"strings"
 	"testing"
+
+	"github.com/suparcloud/suparship/internal/branding"
 )
 
 func TestBuild1PasswordClusterSecretStoreYAML(t *testing.T) {
@@ -13,6 +15,7 @@ func TestBuild1PasswordClusterSecretStoreYAML(t *testing.T) {
 		"op-connect-token-prod",
 		"token",
 		"external-secrets",
+		branding.Config{},
 	)
 
 	if !strings.Contains(yaml, "onepassword-prod") {
@@ -36,6 +39,7 @@ func TestBuild1PasswordExternalSecretYAML(t *testing.T) {
 	yaml := Build1PasswordExternalSecretYAML(
 		"my-secret", "my-namespace", "vault-uuid-123",
 		[]string{"DATABASE_URL", "API_KEY"},
+		branding.Config{},
 	)
 
 	if !strings.Contains(yaml, "suparship-1password-store") {

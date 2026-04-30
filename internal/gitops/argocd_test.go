@@ -25,21 +25,31 @@ var helloApp = &domain.App{
 }
 
 func TestApplicationName(t *testing.T) {
+	// {project}-{app}-{env}: project prefix is non-optional — it's how
+	// we keep two projects with the same app name from colliding in the
+	// argocd namespace. See the ApplicationName godoc.
 	tests := []struct {
-		app  string
-		env  string
-		want string
+		project string
+		app     string
+		env     string
+		want    string
 	}{
-		{"hello", "staging", "hello-staging"},
-		{"hello", "prod", "hello-prod"},
-		{"hello", "pr-42", "hello-pr-42"},
-		{"api-gateway", "staging", "api-gateway-staging"},
+		{"demo", "hello", "staging", "demo-hello-staging"},
+		{"demo", "hello", "prod", "demo-hello-prod"},
+		{"demo", "hello", "pr-42", "demo-hello-pr-42"},
+		{"acme", "api-gateway", "staging", "acme-api-gateway-staging"},
+		// Two projects sharing an app name produce different
+		// Application names — exactly what closes the duplicate-name
+		// regression.
+		{"team-a", "color-app", "staging", "team-a-color-app-staging"},
+		{"team-b", "color-app", "staging", "team-b-color-app-staging"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.want, func(t *testing.T) {
-			got := gitops.ApplicationName(tc.app, tc.env)
+			got := gitops.ApplicationName(tc.project, tc.app, tc.env)
 			if got != tc.want {
-				t.Errorf("ApplicationName(%q, %q) = %q, want %q", tc.app, tc.env, got, tc.want)
+				t.Errorf("ApplicationName(%q, %q, %q) = %q, want %q",
+					tc.project, tc.app, tc.env, got, tc.want)
 			}
 		})
 	}
@@ -51,7 +61,7 @@ func TestBuildArgoApplication_Defaults(t *testing.T) {
 		ProjectName: "demo",
 		EnvName:     "staging",
 		EnvType:     domain.AppEnvStaging,
-		Namespace:   "hello-staging",
+		Namespace:   "demo-hello-staging",
 	}
 
 	got := gitops.BuildArgoApplication(helloApp, env, gitops.BuildOptions{
@@ -67,7 +77,7 @@ func TestBuildArgoApplication_Defaults(t *testing.T) {
 	}
 
 	// Name convention: <app>-<env>
-	wantName := "hello-staging"
+	wantName := "demo-hello-staging"
 	if got.Metadata.Name != wantName {
 		t.Errorf("Metadata.Name = %q, want %q", got.Metadata.Name, wantName)
 	}
@@ -95,7 +105,7 @@ func TestBuildArgoApplication_Defaults(t *testing.T) {
 	if got.Spec.Source.RepoURL != "https://github.com/org/gitops" {
 		t.Errorf("Source.RepoURL = %q", got.Spec.Source.RepoURL)
 	}
-	wantPath := "gitops-output/demo/hello/staging"
+	wantPath := "demo/hello/staging"
 	if got.Spec.Source.Path != wantPath {
 		t.Errorf("Source.Path = %q, want %q", got.Spec.Source.Path, wantPath)
 	}
@@ -109,7 +119,7 @@ func TestBuildArgoApplication_Defaults(t *testing.T) {
 	}
 
 	// Destination
-	if got.Spec.Destination.Namespace != "hello-staging" {
+	if got.Spec.Destination.Namespace != "demo-hello-staging" {
 		t.Errorf("Destination.Namespace = %q, want hello-staging", got.Spec.Destination.Namespace)
 	}
 	if got.Spec.Destination.Server != "https://kubernetes.default.svc" {
@@ -141,8 +151,8 @@ func TestBuildArgoApplication_AllEnvTypes(t *testing.T) {
 			name:          "staging",
 			envName:       "staging",
 			envType:       domain.AppEnvStaging,
-			namespace:     "hello-staging",
-			wantArgoName:  "hello-staging",
+			namespace:     "demo-hello-staging",
+			wantArgoName:  "demo-hello-staging",
 			wantEnvLabel:  "staging",
 			wantTypeLabel: "staging",
 		},
@@ -150,8 +160,8 @@ func TestBuildArgoApplication_AllEnvTypes(t *testing.T) {
 			name:          "prod",
 			envName:       "prod",
 			envType:       domain.AppEnvProd,
-			namespace:     "hello-prod",
-			wantArgoName:  "hello-prod",
+			namespace:     "demo-hello-prod",
+			wantArgoName:  "demo-hello-prod",
 			wantEnvLabel:  "prod",
 			wantTypeLabel: "prod",
 		},
@@ -159,8 +169,8 @@ func TestBuildArgoApplication_AllEnvTypes(t *testing.T) {
 			name:          "preview",
 			envName:       "pr-42",
 			envType:       domain.AppEnvPreview,
-			namespace:     "hello-pr-42",
-			wantArgoName:  "hello-pr-42",
+			namespace:     "demo-hello-pr-42",
+			wantArgoName:  "demo-hello-pr-42",
 			wantEnvLabel:  "pr-42",
 			wantTypeLabel: "preview",
 		},
@@ -200,7 +210,7 @@ func TestBuildArgoApplication_WithValuesFiles(t *testing.T) {
 		AppName:   "hello",
 		EnvName:   "staging",
 		EnvType:   domain.AppEnvStaging,
-		Namespace: "hello-staging",
+		Namespace: "demo-hello-staging",
 	}
 
 	got := gitops.BuildArgoApplication(helloApp, env, gitops.BuildOptions{
@@ -231,7 +241,7 @@ func TestBuildArgoApplication_WithInlineValues(t *testing.T) {
 		AppName:   "hello",
 		EnvName:   "staging",
 		EnvType:   domain.AppEnvStaging,
-		Namespace: "hello-staging",
+		Namespace: "demo-hello-staging",
 	}
 
 	got := gitops.BuildArgoApplication(helloApp, env, gitops.BuildOptions{
@@ -252,7 +262,7 @@ func TestBuildArgoApplication_SyncAutomated(t *testing.T) {
 		AppName:   "hello",
 		EnvName:   "staging",
 		EnvType:   domain.AppEnvStaging,
-		Namespace: "hello-staging",
+		Namespace: "demo-hello-staging",
 	}
 
 	got := gitops.BuildArgoApplication(helloApp, env, gitops.BuildOptions{
@@ -279,7 +289,7 @@ func TestBuildArgoApplication_ExplicitOptions(t *testing.T) {
 		AppName:   "hello",
 		EnvName:   "prod",
 		EnvType:   domain.AppEnvProd,
-		Namespace: "hello-prod",
+		Namespace: "demo-hello-prod",
 	}
 
 	got := gitops.BuildArgoApplication(helloApp, env, gitops.BuildOptions{
@@ -320,7 +330,7 @@ func TestBuildArgoApplication_Determinism(t *testing.T) {
 		ProjectName: "demo",
 		EnvName:     "staging",
 		EnvType:     domain.AppEnvStaging,
-		Namespace:   "hello-staging",
+		Namespace:   "demo-hello-staging",
 	}
 	opts := gitops.BuildOptions{
 		RepoURL:      "https://github.com/org/gitops",
@@ -361,7 +371,7 @@ func TestDefaultRepoPath(t *testing.T) {
 		RepoURL: "https://github.com/org/gitops",
 	})
 
-	wantPath := "gitops-output/platform/api-gateway/pr-99"
+	wantPath := "platform/api-gateway/pr-99"
 	if got.Spec.Source.Path != wantPath {
 		t.Errorf("Source.Path = %q, want %q", got.Spec.Source.Path, wantPath)
 	}
@@ -429,15 +439,16 @@ func TestBuildArgoApplicationFromInstance_PreviewNameConventions(t *testing.T) {
 	})
 
 	// Application name: <app>-<env>
-	if got.Metadata.Name != "hello-pr-42" {
+	if got.Metadata.Name != "demo-hello-pr-42" {
 		t.Errorf("Name = %q, want hello-pr-42", got.Metadata.Name)
 	}
-	// Namespace routed to the preview Kubernetes namespace
+	// Namespace routed to the preview Kubernetes namespace —
+	// domain.GenerateNamespace returns {app}-{env}, NOT {project}-…
 	if got.Spec.Destination.Namespace != "hello-pr-42" {
 		t.Errorf("Destination.Namespace = %q, want hello-pr-42", got.Spec.Destination.Namespace)
 	}
 	// Default gitops path includes the preview name
-	wantPath := "gitops-output/demo/hello/pr-42"
+	wantPath := "demo/hello/pr-42"
 	if got.Spec.Source.Path != wantPath {
 		t.Errorf("Source.Path = %q, want %q", got.Spec.Source.Path, wantPath)
 	}

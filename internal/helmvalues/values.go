@@ -103,6 +103,16 @@ type ComponentValues struct {
 	// Expose indicates whether the chart should create an Ingress resource
 	// for this component.
 	Expose bool `json:"expose" yaml:"expose"`
+	// Port is the TCP port the container listens on. Zero means "let the
+	// chart's default kick in" so charts can declare their own sane
+	// defaults (8080, 80, etc.) without suparship having to know the
+	// runtime semantics.
+	Port int32 `json:"port,omitempty" yaml:"port,omitempty"`
+	// HealthCheck overrides the chart's default liveness/readiness probe
+	// path. Nil = chart default. Set when the operator's image doesn't
+	// serve the chart's hardcoded path (e.g. nginx serving "/" instead
+	// of "/healthz").
+	HealthCheck *HealthCheckValues `json:"healthCheck,omitempty" yaml:"healthCheck,omitempty"`
 	// Env is a flat map of environment variable key/value pairs injected
 	// into the container at runtime. Secret values MUST NOT appear here;
 	// inject them via Kubernetes SecretKeyRef at the chart level.
@@ -110,6 +120,14 @@ type ComponentValues struct {
 	// Resources is optional. When non-nil the chart uses the named size
 	// preset to select CPU/memory requests and limits.
 	Resources *ResourceValues `json:"resources,omitempty" yaml:"resources,omitempty"`
+}
+
+// HealthCheckValues lets an operator override the chart's liveness/
+// readiness probe HTTP path without forking the chart. Mirrors the
+// `components.<name>.healthCheck.path` key the built-in charts already
+// read.
+type HealthCheckValues struct {
+	Path string `json:"path" yaml:"path"`
 }
 
 // ImageValues identifies the container image for a component.

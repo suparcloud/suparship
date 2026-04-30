@@ -10,6 +10,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/suparcloud/suparship/internal/branding"
 )
 
 const (
@@ -119,8 +121,19 @@ func (b *K8sBackend) DeleteKey(ctx context.Context, ns, name, key string) error 
 // UpperLevelSecretWriter writes upper-level (Org / EnvType / Project) secrets
 // to suparship-system with Stakater Replicator annotations so they are
 // automatically replicated into app-env namespaces.
+//
+// Branding is consulted to compute replicator-matching label keys
+// (e.g. <domain>/project, <domain>/cluster, <domain>/app). These MUST
+// stay in lockstep with the labels emitted on namespaces by the gitops
+// publisher — that's how a single Org.Branding value keeps replication
+// wired end-to-end. Set Branding directly on the returned writer to
+// enable white-labeling.
 type UpperLevelSecretWriter struct {
 	client kubernetes.Interface
+	// Branding is exported so the server entrypoint can update it after
+	// construction. Zero value applies the suparship.io / suparship
+	// defaults (matching the equivalent default on the gitops publisher).
+	Branding branding.Config
 }
 
 // NewUpperLevelSecretWriter creates an UpperLevelSecretWriter backed by client.
@@ -164,10 +177,11 @@ func (w *UpperLevelSecretWriter) DeleteEnvTypeSecretKey(ctx context.Context, env
 }
 
 // WriteProjectSecrets upserts project-level secrets. Replicated to namespaces
-// with label suparship.io/project={project}.
+// with label "<domain>/project={project}", where <domain> matches the
+// branded LabelDomain emitted on namespaces by the gitops publisher.
 func (w *UpperLevelSecretWriter) WriteProjectSecrets(ctx context.Context, project string, data map[string][]byte) error {
 	annotations := map[string]string{
-		replicatorMatchingAnnotation: fmt.Sprintf("suparship.io/project=%s", project),
+		replicatorMatchingAnnotation: fmt.Sprintf("%s=%s", w.Branding.LabelKey("project"), project),
 	}
 	return w.upsertSecret(ctx, ProjectSecretName(project), annotations, data)
 }
@@ -183,11 +197,11 @@ func (w *UpperLevelSecretWriter) DeleteProjectSecretKey(ctx context.Context, pro
 }
 
 // WriteClusterSecrets upserts cluster-level secrets. Replicated to namespaces
-// labelled "suparship.io/cluster={cluster}" so apps deployed onto that cluster
+// labelled "<domain>/cluster={cluster}" so apps deployed onto that cluster
 // receive the override.
 func (w *UpperLevelSecretWriter) WriteClusterSecrets(ctx context.Context, cluster string, data map[string][]byte) error {
 	annotations := map[string]string{
-		replicatorMatchingAnnotation: fmt.Sprintf("suparship.io/cluster=%s", cluster),
+		replicatorMatchingAnnotation: fmt.Sprintf("%s=%s", w.Branding.LabelKey("cluster"), cluster),
 	}
 	return w.upsertSecret(ctx, ClusterSecretName(cluster), annotations, data)
 }
@@ -212,7 +226,7 @@ func (w *UpperLevelSecretWriter) DeleteClusterSecretKey(ctx context.Context, clu
 // Replicator annotation matching app namespaces — the same pattern used by
 // project-level secrets.
 //
-// Replicator label match: suparship.io/project={project},suparship.io/app={app}
+// Replicator label match: <domain>/project={project},<domain>/app={app}
 // (label conjunction). Namespaces created by the suparship publisher carry
 // the project label; the app label needs to be added by the chart or
 // manually for the replicator to copy across.
@@ -220,7 +234,10 @@ func (w *UpperLevelSecretWriter) DeleteClusterSecretKey(ctx context.Context, clu
 // WriteAppSecrets upserts app-level secrets to suparship-system.
 func (w *UpperLevelSecretWriter) WriteAppSecrets(ctx context.Context, project, app string, data map[string][]byte) error {
 	annotations := map[string]string{
-		replicatorMatchingAnnotation: fmt.Sprintf("suparship.io/project=%s,suparship.io/app=%s", project, app),
+		replicatorMatchingAnnotation: fmt.Sprintf("%s=%s,%s=%s",
+			w.Branding.LabelKey("project"), project,
+			w.Branding.LabelKey("app"), app,
+		),
 	}
 	return w.upsertSecret(ctx, AppLevelSecretName(project, app), annotations, data)
 }
