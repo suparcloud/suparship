@@ -164,6 +164,12 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// Verify at least one environment is registered in the org before creating
 	// the app. Deploying to unregistered environments silently would produce
 	// orphaned GitOps manifests pointing at clusters that don't exist.
+	//
+	// While we have the org loaded, also validate that every component's
+	// EffectiveExposeMode resolves against the configured RoutingProfiles.
+	// Per-env overrides are checked against each env's override map so an
+	// app declaring exposeMode=external doesn't slip through when one env
+	// removes the external profile via override.
 	if ah.orgProvider != nil {
 		org, orgErr := ah.orgProvider.GetOrg(r.Context())
 		if orgErr != nil || org == nil || len(org.Environments) == 0 {
@@ -171,6 +177,21 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 				Error: "no environments registered in the org; register at least one via POST /api/v1/org/environments before creating apps",
 			})
 			return
+		}
+		if err := domain.ValidateExposeModes(result.App.Spec.Components, org.RoutingProfiles, nil); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		for _, e := range org.Environments {
+			if len(e.RoutingProfiles) == 0 {
+				continue
+			}
+			if err := domain.ValidateExposeModes(result.App.Spec.Components, org.RoutingProfiles, e.RoutingProfiles); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+					Error: "environment " + e.Name + ": " + err.Error(),
+				})
+				return
+			}
 		}
 	}
 

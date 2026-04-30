@@ -632,3 +632,104 @@ func TestSanitizeAppNameIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateExposeModes(t *testing.T) {
+	internalProfile := RoutingProfile{IngressClassName: "nginx-internal"}
+	externalProfile := RoutingProfile{IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"}
+	orgWithBoth := RoutingProfiles{
+		string(ExposeInternal): internalProfile,
+		string(ExposeExternal): externalProfile,
+	}
+	orgInternalOnly := RoutingProfiles{
+		string(ExposeInternal): internalProfile,
+	}
+
+	tests := []struct {
+		name       string
+		components []ComponentSpec
+		org        RoutingProfiles
+		env        RoutingProfiles
+		wantErr    string // substring; "" = no error
+	}{
+		{
+			name: "single external resolves",
+			components: []ComponentSpec{
+				{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
+			},
+			org: orgWithBoth,
+		},
+		{
+			name: "single disabled is OK",
+			components: []ComponentSpec{
+				{Name: "worker", Type: ComponentWorker, Enabled: true, ExposeMode: ExposeDisabled},
+			},
+			org: orgWithBoth,
+		},
+		{
+			name: "external + worker disabled passes",
+			components: []ComponentSpec{
+				{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
+				{Name: "worker", Type: ComponentWorker, Enabled: true, ExposeMode: ExposeDisabled},
+			},
+			org: orgWithBoth,
+		},
+		{
+			name: "two non-disabled rejected",
+			components: []ComponentSpec{
+				{Name: "admin", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeInternal},
+				{Name: "api", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
+			},
+			org:     orgWithBoth,
+			wantErr: "at most one is allowed",
+		},
+		{
+			name: "external mode without profile errors",
+			components: []ComponentSpec{
+				{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
+			},
+			org:     orgInternalOnly,
+			wantErr: "no profile named \"external\"",
+		},
+		{
+			name: "env override unblocks resolution",
+			components: []ComponentSpec{
+				{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
+			},
+			org: orgInternalOnly,
+			env: RoutingProfiles{string(ExposeExternal): externalProfile},
+		},
+		{
+			name: "no profiles configured: skip lookup (legacy compat)",
+			components: []ComponentSpec{
+				{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
+			},
+			// no orgProfiles, no envProfiles — legacy fall-through
+		},
+		{
+			name: "legacy Expose=true counted as external",
+			components: []ComponentSpec{
+				{Name: "web", Type: ComponentWeb, Enabled: true, Expose: true},
+				{Name: "api", Type: ComponentWeb, Enabled: true, Expose: true},
+			},
+			org:     orgWithBoth,
+			wantErr: "at most one is allowed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateExposeModes(tt.components, tt.org, tt.env)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q missing substring %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
