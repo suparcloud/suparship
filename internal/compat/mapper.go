@@ -60,7 +60,7 @@ func MapServiceToApp(svc *domain.Service) *domain.App {
 					Name:           "web",
 					Type:           domain.ComponentWeb,
 					Enabled:        true,
-					Expose:         true,
+					ExposeMode:     domain.ExposeExternal,
 					PreviewEnabled: true,
 				},
 			},

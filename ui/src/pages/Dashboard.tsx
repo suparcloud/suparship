@@ -352,9 +352,14 @@ export function Dashboard() {
                 <span className="text-sm font-medium text-gray-900">
                   {env.displayName || env.name}
                 </span>
-                {env.clusterRef && (
+                {env.clusterRefs && env.clusterRefs.length > 0 && (
                   <span className="ml-2 font-mono text-xs text-gray-400">
-                    {env.clusterRef}
+                    {env.activeClusterRef || env.clusterRefs[0]}
+                    {env.clusterRefs.length > 1 && (
+                      <span className="ml-1 text-gray-300">
+                        +{env.clusterRefs.length - 1}
+                      </span>
+                    )}
                   </span>
                 )}
               </Link>

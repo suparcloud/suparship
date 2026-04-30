@@ -123,11 +123,18 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		mode, err := domain.ParseExposeMode(c.ExposeMode)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+				Error: "components[" + itoa(i) + "]: " + err.Error(),
+			})
+			return
+		}
 		explicitComponents = append(explicitComponents, domain.ComponentSpec{
 			Name:           c.Name,
 			Type:           ct,
 			Enabled:        c.Enabled,
-			Expose:         c.Expose,
+			ExposeMode:     mode,
 			PreviewEnabled: c.PreviewEnabled,
 		})
 	}
@@ -164,6 +171,12 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// Verify at least one environment is registered in the org before creating
 	// the app. Deploying to unregistered environments silently would produce
 	// orphaned GitOps manifests pointing at clusters that don't exist.
+	//
+	// While we have the org loaded, also validate that every component's
+	// EffectiveExposeMode resolves against the configured RoutingProfiles.
+	// Per-env overrides are checked against each env's override map so an
+	// app declaring exposeMode=external doesn't slip through when one env
+	// removes the external profile via override.
 	if ah.orgProvider != nil {
 		org, orgErr := ah.orgProvider.GetOrg(r.Context())
 		if orgErr != nil || org == nil || len(org.Environments) == 0 {
@@ -171,6 +184,21 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 				Error: "no environments registered in the org; register at least one via POST /api/v1/org/environments before creating apps",
 			})
 			return
+		}
+		if err := domain.ValidateExposeModes(result.App.Spec.Components, org.RoutingProfiles, nil); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		for _, e := range org.Environments {
+			if len(e.RoutingProfiles) == 0 {
+				continue
+			}
+			if err := domain.ValidateExposeModes(result.App.Spec.Components, org.RoutingProfiles, e.RoutingProfiles); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+					Error: "environment " + e.Name + ": " + err.Error(),
+				})
+				return
+			}
 		}
 	}
 
@@ -654,11 +682,12 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 			if orgName == "" {
 				orgName = "default"
 			}
-			// Build a fast-lookup set of org env names that have a ClusterRef
-			// (i.e. are bound to a real cluster).
+			// Build a fast-lookup set of org env names that are bound to a
+			// real cluster (any registered cluster — the active one isn't
+			// special for vault-item upsert).
 			boundEnvs := make(map[string]bool, len(org.Environments))
 			for _, orgEnv := range org.Environments {
-				if orgEnv.ClusterRef != "" {
+				if orgEnv.EffectiveClusterRef() != "" {
 					boundEnvs[orgEnv.Name] = true
 				}
 			}
@@ -723,7 +752,7 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 	// the {env} token can be omitted from namespace names for uniqueness.
 	stableRefs := make([]string, 0, len(org.Environments))
 	for _, e := range org.Environments {
-		stableRefs = append(stableRefs, e.ClusterRef)
+		stableRefs = append(stableRefs, e.EffectiveClusterRef())
 	}
 	dedicated := domain.IsDedicatedClusterTopology(stableRefs)
 
@@ -794,7 +823,7 @@ func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []
 	// Reuse the same topology and pattern lookup built inside resolveEnvNamespaces.
 	stableRefs := make([]string, 0, len(sortedOrgEnvs))
 	for _, e := range sortedOrgEnvs {
-		stableRefs = append(stableRefs, e.ClusterRef)
+		stableRefs = append(stableRefs, e.EffectiveClusterRef())
 	}
 	dedicated := domain.IsDedicatedClusterTopology(stableRefs)
 
@@ -1185,7 +1214,7 @@ func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 			Name:           c.Name,
 			Type:           string(c.Type),
 			Enabled:        c.Enabled,
-			Expose:         c.Expose,
+			ExposeMode:     string(c.ExposeMode),
 			PreviewEnabled: c.PreviewEnabled,
 		})
 	}

@@ -50,12 +50,14 @@ func MergeEnvironments(orgEnvs []OrgEnvironment, projectOverrides []project.Envi
 	for _, org := range orgEnvs {
 		orgNames[org.Name] = true
 
-		// Start from org defaults.
+		// Start from org defaults. ClusterRefs is copied so a project
+		// override that mutates the slice doesn't poison the org config.
 		merged := project.Environment{
 			Name:             org.Name,
 			DisplayName:      org.DisplayName,
 			Order:            org.Order,
-			ClusterRef:       org.ClusterRef,
+			ClusterRefs:      append([]string(nil), org.ClusterRefs...),
+			ActiveClusterRef: org.ActiveClusterRef,
 			BaseDomain:       org.BaseDomain,
 			NamespacePattern: org.NamespacePattern,
 		}
@@ -64,12 +66,18 @@ func MergeEnvironments(orgEnvs []OrgEnvironment, projectOverrides []project.Envi
 		if override, ok := projectMap[org.Name]; ok {
 			origin = OriginOverride
 			// Only apply non-zero override fields so the project entry can be
-			// a sparse patch (e.g. only overriding ClusterRef).
+			// a sparse patch (e.g. only overriding ActiveClusterRef without
+			// changing the registered set).
 			if override.DisplayName != "" {
 				merged.DisplayName = override.DisplayName
 			}
-			if override.ClusterRef != "" {
-				merged.ClusterRef = override.ClusterRef
+			if len(override.ClusterRefs) > 0 {
+				// Wholesale replace — operator who wants to scope down or
+				// add a cluster ships the full list, not a sparse merge.
+				merged.ClusterRefs = append([]string(nil), override.ClusterRefs...)
+			}
+			if override.ActiveClusterRef != "" {
+				merged.ActiveClusterRef = override.ActiveClusterRef
 			}
 			if override.BaseDomain != "" {
 				merged.BaseDomain = override.BaseDomain

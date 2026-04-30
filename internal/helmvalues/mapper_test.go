@@ -5,7 +5,12 @@ import (
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/secrets"
 )
+
+// noNaming returns the zero-value ResourceNaming used by tests that don't
+// care about envFrom names (the focus is the routing-profile output).
+func noNaming() secrets.ResourceNaming { return secrets.ResourceNaming{} }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -29,7 +34,7 @@ func webComponent(name string) domain.ComponentSpec {
 		Name:           name,
 		Type:           domain.ComponentWeb,
 		Enabled:        true,
-		Expose:         true,
+		ExposeMode:     domain.ExposeExternal,
 		PreviewEnabled: true,
 	}
 }
@@ -39,7 +44,6 @@ func workerComponent(name string) domain.ComponentSpec {
 		Name:           name,
 		Type:           domain.ComponentWorker,
 		Enabled:        true,
-		Expose:         false,
 		PreviewEnabled: false,
 	}
 }
@@ -49,7 +53,6 @@ func cronComponent(name string) domain.ComponentSpec {
 		Name:           name,
 		Type:           domain.ComponentCron,
 		Enabled:        true,
-		Expose:         false,
 		PreviewEnabled: false,
 	}
 }
@@ -207,15 +210,16 @@ func TestMapToHelmValues_ComponentReplicasTakesPrecedenceOverEnvOverride(t *test
 
 // ── expose ────────────────────────────────────────────────────────────────────
 
-func TestMapToHelmValues_ExposePropagated(t *testing.T) {
+func TestMapToHelmValues_IngressOnlyOnRoutingComponent(t *testing.T) {
+	// The legacy shim populates IngressValues for the routing component
+	// when no profiles are configured (mapper falls back to nginx-no-TLS).
+	// The worker component has ExposeMode=disabled (zero-value) and gets
+	// no Ingress regardless of profiles.
 	app := webApp("hello", webComponent("web"), workerComponent("worker"))
 	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
 
-	if !hv.Components["web"].Expose {
-		t.Error("web.Expose should be true")
-	}
-	if hv.Components["worker"].Expose {
-		t.Error("worker.Expose should be false")
+	if hv.Components["worker"].Ingress != nil {
+		t.Errorf("worker should not have Ingress, got %+v", hv.Components["worker"].Ingress)
 	}
 }
 
@@ -341,7 +345,7 @@ func TestMapToHelmValues_RoutingComponentFromExposedComponent(t *testing.T) {
 
 func TestMapToHelmValues_RoutingComponentFallsBackToWebType(t *testing.T) {
 	c := webComponent("web")
-	c.Expose = false // not explicitly exposed
+	c.ExposeMode = domain.ExposeDisabled // not explicitly exposed
 	app := webApp("hello", c, workerComponent("worker"))
 	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
 	if hv.Routing.Component != "web" {
@@ -428,6 +432,134 @@ func marshal(t *testing.T, v any) string {
 }
 
 // ── stripScheme ───────────────────────────────────────────────────────────────
+
+// ── ingress / routing profiles ────────────────────────────────────────────────
+
+func TestResolveIngress_NoProfilesYieldsNoIngress(t *testing.T) {
+	// ExposeMode set but no profiles configured: the mapper drops the
+	// ingress silently. Validation lives in domain.ValidateExposeModes,
+	// which the publisher and app-save handlers run before reaching here.
+	app := webApp("hello", webComponent("web"))
+	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
+
+	if hv.Components["web"].Ingress != nil {
+		t.Errorf("no profiles should yield nil Ingress, got %+v", hv.Components["web"].Ingress)
+	}
+}
+
+func TestResolveIngress_NeverAppliedToWorker(t *testing.T) {
+	// Worker has ExposeMode=disabled (zero value): never gets an Ingress
+	// regardless of profiles. Only the routing component receives one.
+	c := workerComponent("worker")
+	app := webApp("hello", c)
+	org := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
+	}
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", noNaming(), "", "", org, nil)
+
+	if hv.Components["worker"].Ingress != nil {
+		t.Errorf("worker should not have Ingress, got %+v", hv.Components["worker"].Ingress)
+	}
+}
+
+func TestResolveIngress_DisabledMode(t *testing.T) {
+	c := webComponent("web")
+	c.ExposeMode = domain.ExposeDisabled
+	app := webApp("hello", c)
+	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
+
+	if hv.Components["web"].Ingress != nil {
+		t.Errorf("disabled mode should produce nil Ingress, got %+v", hv.Components["web"].Ingress)
+	}
+}
+
+func TestResolveIngress_FromOrgProfile_NoTLS(t *testing.T) {
+	c := webComponent("web")
+	c.ExposeMode = domain.ExposeInternal
+	app := webApp("hello", c)
+	org := domain.RoutingProfiles{
+		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
+	}
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", noNaming(), "", "", org, nil)
+
+	got := hv.Components["web"].Ingress
+	if got == nil {
+		t.Fatal("expected Ingress from internal profile")
+	}
+	if got.ClassName != "nginx-internal" {
+		t.Errorf("ClassName = %q, want nginx-internal", got.ClassName)
+	}
+	if got.ClusterIssuer != "" {
+		t.Errorf("internal profile has no TLS; ClusterIssuer = %q, want empty", got.ClusterIssuer)
+	}
+}
+
+func TestResolveIngress_FromOrgProfile_WithTLS(t *testing.T) {
+	c := webComponent("web")
+	c.ExposeMode = domain.ExposeExternal
+	app := webApp("hello", c)
+	org := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
+	}
+	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", "", noNaming(), "", "", org, nil)
+
+	got := hv.Components["web"].Ingress
+	if got == nil {
+		t.Fatal("expected Ingress from external profile")
+	}
+	if got.ClusterIssuer != "letsencrypt-prod" {
+		t.Errorf("ClusterIssuer = %q, want letsencrypt-prod", got.ClusterIssuer)
+	}
+}
+
+func TestResolveIngress_EnvProfileOverridesOrg(t *testing.T) {
+	c := webComponent("web")
+	c.ExposeMode = domain.ExposeExternal
+	app := webApp("hello", c)
+	org := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
+	}
+	env := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "nginx-staging", ClusterIssuer: "letsencrypt-staging"},
+	}
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "staging.acme.com", "", "", noNaming(), "", "", org, env)
+
+	got := hv.Components["web"].Ingress
+	if got == nil {
+		t.Fatal("expected Ingress; got nil")
+	}
+	if got.ClusterIssuer != "letsencrypt-staging" {
+		t.Errorf("env should win: ClusterIssuer = %q, want letsencrypt-staging", got.ClusterIssuer)
+	}
+}
+
+func TestResolveIngress_UnknownModeYieldsNoIngress(t *testing.T) {
+	// Validation is the caller's responsibility — the mapper drops the
+	// ingress silently rather than blocking chart render. Documents the
+	// contract: bad config → no ingress, never a panic.
+	c := webComponent("web")
+	c.ExposeMode = domain.ExposeExternal
+	app := webApp("hello", c)
+	org := domain.RoutingProfiles{
+		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
+	}
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", noNaming(), "", "", org, nil)
+
+	if hv.Components["web"].Ingress != nil {
+		t.Errorf("unknown mode should yield nil Ingress, got %+v", hv.Components["web"].Ingress)
+	}
+}
+
+func TestResolveRoutingComponent_PrefersExternalOverInternal(t *testing.T) {
+	// admin (alphabetically first, internal) should NOT win against api
+	// (alphabetically later, external). Documents the new tier preference.
+	admin := domain.ComponentSpec{Name: "admin", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeInternal, PreviewEnabled: true}
+	api := domain.ComponentSpec{Name: "api", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal, PreviewEnabled: true}
+	got := resolveRoutingComponent([]domain.ComponentSpec{admin, api})
+	if got != "api" {
+		t.Errorf("routing component = %q, want api (external should beat internal)", got)
+	}
+}
 
 func TestStripScheme(t *testing.T) {
 	tests := []struct {

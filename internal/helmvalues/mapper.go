@@ -48,7 +48,8 @@ const (
 //   - image     ← AppSpec.Values["image_repository"] / ["image_tag"]
 //     (shared across all components in MVP; per-component overrides future)
 //   - replicas  ← ComponentSpec.Replicas → envOverride.Replicas → default
-//   - expose    ← ComponentSpec.Expose
+//   - ingress   ← ResolveRoutingProfile(orgProfiles, envProfiles,
+//     ComponentSpec.ExposeMode); only set on the routing component
 //   - env       ← ComponentSpec.Config merged with envOverride.Config
 //     (override wins on key conflict)
 //   - resources ← ComponentSpec.SizePreset → envOverride.SizePreset
@@ -72,8 +73,13 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 // generated chart values reflects the real cluster URL.
 //
 // When baseDomain is empty, "localhost" is used.
+//
+// Routing profiles default to nil. Components that target a non-disabled
+// ExposeMode without a configured profile will produce no Ingress; callers
+// that want strict validation should use MapToHelmValuesForEnv with real
+// profiles after running domain.ValidateExposeModes.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
-	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "", "")
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "", "", nil, nil)
 }
 
 // MapToHelmValuesForEnv is the canonical mapper. The naming and orgName
@@ -94,6 +100,11 @@ func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.A
 // Namespace is plumbed for backwards-compatibility (callers that have it
 // pass it; the mapper does not currently use it for naming — names come
 // from the configurable ResourceNaming patterns).
+//
+// orgProfiles and envProfiles drive the per-component IngressValues output.
+// envProfiles entries override orgProfiles by mode name (sparse). When the
+// resolved routing component has ExposeMode==Disabled (or empty) no Ingress
+// is emitted, regardless of the profiles configured.
 func MapToHelmValuesForEnv(
 	app *domain.App,
 	envName string,
@@ -102,6 +113,7 @@ func MapToHelmValuesForEnv(
 	naming secrets.ResourceNaming,
 	orgName string,
 	backend secrets.BackendType,
+	orgProfiles, envProfiles domain.RoutingProfiles,
 ) HelmValues {
 	if baseDomain == "" {
 		baseDomain = "localhost"
@@ -117,7 +129,7 @@ func MapToHelmValuesForEnv(
 	healthPath := extractHealthPath(app.Spec.Values)
 
 	routingComponent := resolveRoutingComponent(app.Spec.Components)
-	components := buildComponents(app.Spec.Components, envType, envOverride, imageRepo, imageTag, port, healthPath, routingComponent)
+	components := buildComponents(app.Spec.Components, envType, envOverride, imageRepo, imageTag, port, healthPath, routingComponent, orgProfiles, envProfiles)
 	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain))
 
 	// Resource names come from the same ResourceNaming patterns the
@@ -248,6 +260,11 @@ func extractHealthPath(values map[string]any) string {
 // routingComponent (the externally-exposed one) — multi-component apps
 // would otherwise inherit a port that's only meaningful for one of them.
 // Empty/zero values mean "leave unset; chart's own default applies."
+//
+// orgProfiles and envProfiles are forwarded verbatim to buildComponentValues
+// so each component's Ingress field reflects the resolved RoutingProfile
+// for its EffectiveExposeMode. Only the routing component gets an Ingress —
+// non-routing components never own an external entry point in MVP.
 func buildComponents(
 	specs []domain.ComponentSpec,
 	envType domain.AppEnvironmentType,
@@ -256,6 +273,7 @@ func buildComponents(
 	port int32,
 	healthPath string,
 	routingComponent string,
+	orgProfiles, envProfiles domain.RoutingProfiles,
 ) map[string]*ComponentValues {
 	if len(specs) == 0 {
 		return map[string]*ComponentValues{}
@@ -272,16 +290,24 @@ func buildComponents(
 	for _, c := range sorted {
 		var p int32
 		var hp string
-		if c.Name == routingComponent {
+		isRouting := c.Name == routingComponent
+		if isRouting {
 			p, hp = port, healthPath
 		}
-		components[c.Name] = buildComponentValues(c, envType, envOverride, imageRepo, imageTag, p, hp)
+		components[c.Name] = buildComponentValues(c, envType, envOverride, imageRepo, imageTag, p, hp, isRouting, orgProfiles, envProfiles)
 	}
 	return components
 }
 
 // buildComponentValues resolves a single ComponentSpec into ComponentValues,
 // applying env-level overrides where applicable.
+//
+// isRouting indicates whether this component is the chosen routing component
+// (only it gets an Ingress). orgProfiles and envProfiles drive the resolved
+// IngressValues; when both are nil the legacy fallback synthesises
+// IngressValues{ClassName: "nginx"} from Expose=true so charts that gate on
+// .Ingress instead of .Expose render identically against pre-RoutingProfile
+// AppSpecs.
 func buildComponentValues(
 	c domain.ComponentSpec,
 	envType domain.AppEnvironmentType,
@@ -289,6 +315,8 @@ func buildComponentValues(
 	imageRepo, imageTag string,
 	port int32,
 	healthPath string,
+	isRouting bool,
+	orgProfiles, envProfiles domain.RoutingProfiles,
 ) *ComponentValues {
 	enabled := c.Enabled
 	if envType == domain.AppEnvPreview && !c.PreviewEnabled {
@@ -311,7 +339,6 @@ func buildComponentValues(
 			Tag:        imageTag,
 		},
 		Replicas: replicas,
-		Expose:   c.Expose,
 	}
 	if len(env) > 0 {
 		cv.Env = env
@@ -325,7 +352,37 @@ func buildComponentValues(
 	if healthPath != "" {
 		cv.HealthCheck = &HealthCheckValues{Path: healthPath}
 	}
+	if isRouting {
+		cv.Ingress = resolveIngress(c, orgProfiles, envProfiles)
+	}
 	return cv
+}
+
+// resolveIngress turns a component's exposure intent into the IngressValues
+// that templates consume. Resolves c.ExposeMode against the org/env profile
+// maps via domain.ResolveRoutingProfile and emits className + clusterIssuer
+// from the resolved profile.
+//
+// Returns nil for disabled modes, missing profiles, and resolution errors —
+// the mapper stays a pure derivation, so a misconfigured profile drops the
+// ingress silently rather than blocking chart render. Validation is the
+// caller's job (domain.ValidateExposeModes runs in the app-save handler).
+func resolveIngress(c domain.ComponentSpec, orgProfiles, envProfiles domain.RoutingProfiles) *IngressValues {
+	mode := c.ExposeMode
+	if mode == domain.ExposeDisabled || mode == "" {
+		return nil
+	}
+	profile, err := domain.ResolveRoutingProfile(orgProfiles, envProfiles, mode)
+	if err != nil {
+		return nil
+	}
+	if profile.IngressClassName == "" {
+		return nil
+	}
+	return &IngressValues{
+		ClassName:     profile.IngressClassName,
+		ClusterIssuer: profile.ClusterIssuer,
+	}
 }
 
 // resolveReplicas applies the precedence chain:
@@ -364,9 +421,13 @@ func mergeConfig(base, override map[string]string) map[string]string {
 // resolveRoutingComponent picks the name of the primary exposed component.
 //
 // Selection order (all candidates sorted alphabetically for determinism):
-//  1. First component where Expose == true.
-//  2. First component where Type == ComponentWeb.
-//  3. First component alphabetically (ultimate fallback).
+//  1. First component with ExposeMode == ExposeExternal — public face wins
+//     over internal so a mixed app routes its public component.
+//  2. First component with ExposeMode == ExposeInternal.
+//  3. First component where Type == ComponentWeb. Used when every component
+//     is disabled — the routing host still goes into values.yaml but no
+//     ingress is emitted because resolveIngress returns nil for disabled.
+//  4. First component alphabetically (ultimate fallback).
 //
 // Returns an empty string when specs is empty.
 func resolveRoutingComponent(specs []domain.ComponentSpec) string {
@@ -381,7 +442,12 @@ func resolveRoutingComponent(specs []domain.ComponentSpec) string {
 	})
 
 	for _, c := range sorted {
-		if c.Expose {
+		if c.ExposeMode == domain.ExposeExternal {
+			return c.Name
+		}
+	}
+	for _, c := range sorted {
+		if c.ExposeMode == domain.ExposeInternal {
 			return c.Name
 		}
 	}

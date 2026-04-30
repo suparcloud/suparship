@@ -75,7 +75,12 @@ function EnvForm({
 
   const [name, setName] = useState(initial?.name ?? "");
   const [displayName, setDisplayName] = useState(initial?.displayName ?? "");
-  const [clusterRef, setClusterRef] = useState(initial?.clusterRef ?? "");
+  const [clusterRefs, setClusterRefs] = useState<string[]>(
+    initial?.clusterRefs ?? [],
+  );
+  const [activeClusterRef, setActiveClusterRef] = useState(
+    initial?.activeClusterRef ?? "",
+  );
   const [baseDomain, setBaseDomain] = useState(initial?.baseDomain ?? "");
   const [namespacePattern, setNamespacePattern] = useState(
     initial?.namespacePattern ?? "",
@@ -84,15 +89,36 @@ function EnvForm({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  function toggleCluster(name: string) {
+    const has = clusterRefs.includes(name);
+    if (has) {
+      setClusterRefs((prev) => prev.filter((c) => c !== name));
+      if (activeClusterRef === name) setActiveClusterRef("");
+    } else {
+      setClusterRefs((prev) => [...prev, name]);
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
     try {
+      // Drop the active when it's not in the registered set, so the server
+      // falls back to clusterRefs[0] cleanly.
+      const active =
+        activeClusterRef && clusterRefs.includes(activeClusterRef)
+          ? activeClusterRef
+          : "";
+      // Only send clusterRefs when the project is overriding the cluster
+      // binding for this env. isFirstOverride means the row was blank;
+      // sending undefined keeps inheritance from the org.
+      const refsPayload = clusterRefs.length > 0 ? clusterRefs : undefined;
       if (isEdit) {
         await updateProjectEnvironment(projectName, initial!.name, {
           displayName: displayName || undefined,
-          clusterRef: clusterRef || undefined,
+          clusterRefs: refsPayload,
+          activeClusterRef: active || undefined,
           baseDomain: baseDomain || undefined,
           namespacePattern: namespacePattern || undefined,
           order: order || undefined,
@@ -101,7 +127,8 @@ function EnvForm({
         await createProjectEnvironment(projectName, {
           name,
           displayName: displayName || undefined,
-          clusterRef: clusterRef || undefined,
+          clusterRefs: refsPayload,
+          activeClusterRef: active || undefined,
           baseDomain: baseDomain || undefined,
           namespacePattern: namespacePattern || undefined,
           order: order || undefined,
@@ -163,30 +190,64 @@ function EnvForm({
 
           <div>
             <label className="mb-1 block text-xs font-medium text-gray-700">
-              Cluster
+              Clusters
             </label>
-            {clusters.length > 0 ? (
-              <select
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                value={clusterRef}
-                onChange={(e) => setClusterRef(e.target.value)}
-              >
-                <option value="">
-                  {isFirstOverride ? "(keep org default)" : "— none —"}
-                </option>
-                {clusters.map((c) => (
-                  <option key={c.name} value={c.name}>
-                    {c.displayName || c.name}
-                  </option>
-                ))}
-              </select>
+            <p className="mb-2 text-xs text-gray-400">
+              {isFirstOverride
+                ? "Leave empty to inherit the org-level cluster binding. Otherwise, register one or more clusters; only the Active one is deployed to today."
+                : "Register one or more clusters. Today only the Active cluster receives deploys; the others are reserved for future multi-cluster fan-out."}
+            </p>
+            {clusters.length === 0 ? (
+              <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                No clusters registered yet. Register a cluster under Settings → Clusters first.
+              </p>
             ) : (
-              <input
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                placeholder={isFirstOverride ? "(leave blank to keep org default)" : "cluster-name"}
-                value={clusterRef}
-                onChange={(e) => setClusterRef(e.target.value)}
-              />
+              <div className="space-y-1.5 rounded-lg border border-gray-200 p-2">
+                {clusters.map((c) => {
+                  const checked = clusterRefs.includes(c.name);
+                  const isActive =
+                    checked &&
+                    (activeClusterRef === c.name ||
+                      (!activeClusterRef && clusterRefs[0] === c.name));
+                  return (
+                    <label
+                      key={c.name}
+                      className="flex items-center gap-3 rounded px-1.5 py-1 hover:bg-gray-50"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleCluster(c.name)}
+                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span className="flex-1 font-mono text-xs">
+                        {c.displayName ? (
+                          <>
+                            {c.displayName}
+                            <span className="ml-1.5 text-gray-400">
+                              {c.name}
+                            </span>
+                          </>
+                        ) : (
+                          c.name
+                        )}
+                      </span>
+                      {checked && (
+                        <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                          <input
+                            type="radio"
+                            name="proj-active-cluster"
+                            checked={isActive}
+                            onChange={() => setActiveClusterRef(c.name)}
+                            className="text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span>Active</span>
+                        </label>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
             )}
           </div>
 
@@ -585,7 +646,35 @@ export function ProjectSettings() {
                     </div>
                   </td>
                   <td className="px-6 py-3 font-mono text-xs text-gray-600">
-                    {env.clusterRef || <span className="text-gray-300">—</span>}
+                    {env.clusterRefs && env.clusterRefs.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {env.clusterRefs.map((c) => {
+                          const active =
+                            c ===
+                            (env.activeClusterRef || env.clusterRefs?.[0]);
+                          return (
+                            <span
+                              key={c}
+                              className={
+                                active
+                                  ? "rounded bg-indigo-50 px-1.5 py-0.5 text-indigo-700"
+                                  : "rounded bg-gray-50 px-1.5 py-0.5 text-gray-600"
+                              }
+                              title={
+                                active
+                                  ? "active deploy target"
+                                  : "registered, not active"
+                              }
+                            >
+                              {c}
+                              {active && " ●"}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <span className="text-gray-300">—</span>
+                    )}
                   </td>
                   <td className="px-6 py-3 font-mono text-xs text-gray-600">
                     {env.baseDomain || <span className="text-gray-300">—</span>}

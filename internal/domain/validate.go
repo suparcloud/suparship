@@ -105,6 +105,51 @@ func ValidateSingleExposedComponent(components []ComponentSpec, allowMultiple bo
 	return nil
 }
 
+// ValidateExposeModes enforces the routing-profile contract for an app's
+// component list:
+//
+//  1. Every component's ExposeMode is one of the recognised values
+//     (disabled/internal/external — empty is treated as disabled).
+//  2. Each non-disabled mode resolves against the configured org/env
+//     RoutingProfiles. Unknown modes fail loudly here at app save time
+//     rather than silently dropping the ingress at gitops publish time.
+//  3. At most one component is non-disabled. The MVP single-routing-component
+//     invariant (mirrored by helmvalues.resolveRoutingComponent) precludes
+//     mixed-tier apps where one component is internal and another is
+//     external; lifting that requires per-component routing.host plumbing
+//     in the chart, which is out of scope for now.
+//
+// orgProfiles and envProfiles may both be nil — the validator treats them
+// as empty maps. When both are empty, profile-lookup errors are skipped so
+// callers that haven't yet configured profiles can still save apps whose
+// components are all ExposeDisabled.
+func ValidateExposeModes(components []ComponentSpec, orgProfiles, envProfiles RoutingProfiles) error {
+	hasProfiles := len(orgProfiles) > 0 || len(envProfiles) > 0
+
+	exposed := 0
+	for _, c := range components {
+		if !c.ExposeMode.Valid() {
+			return fmt.Errorf("component %q: invalid exposeMode %q", c.Name, c.ExposeMode)
+		}
+		if c.ExposeMode == ExposeDisabled || c.ExposeMode == "" {
+			continue
+		}
+		exposed++
+		if hasProfiles {
+			if _, err := ResolveRoutingProfile(orgProfiles, envProfiles, c.ExposeMode); err != nil {
+				return fmt.Errorf("component %q: %w", c.Name, err)
+			}
+		}
+	}
+	if exposed > 1 {
+		return fmt.Errorf(
+			"app has %d components with non-disabled exposeMode; at most one is allowed",
+			exposed,
+		)
+	}
+	return nil
+}
+
 // ValidateComponentSpec checks a single ComponentSpec for field-level
 // correctness beyond name and type:
 //   - Replicas must be non-negative

@@ -555,7 +555,7 @@ func testCertPEM(t *testing.T) []byte {
 func onePasswordOrg(clusterRef string) *rbac.Org {
 	org := testRBACOrg()
 	org.Environments = []rbac.OrgEnvironment{
-		{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRef: clusterRef},
+		{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRefs: []string{clusterRef}, ActiveClusterRef: clusterRef},
 	}
 	org.SecretBackend = secrets.BackendConfig{
 		Type:        secrets.Backend1Password,
@@ -586,7 +586,7 @@ func newBindingTestMux(t *testing.T, org *rbac.Org, cs domain.ClusterStore, cert
 
 	certCache := seal.NewMemCertCache()
 	if certPEM != nil {
-		_ = certCache.Put(context.Background(), org.Environments[0].ClusterRef, certPEM)
+		_ = certCache.Put(context.Background(), org.Environments[0].EffectiveClusterRef(), certPEM)
 	}
 
 	orgProvider := &staticOrgProvider{org: org}
@@ -926,7 +926,7 @@ func TestMigrateToOnePassword_CopiesK8sSecretsIntoVaults(t *testing.T) {
 	org := &rbac.Org{
 		Name: "default",
 		Environments: []rbac.OrgEnvironment{
-			{Name: "staging", ClusterRef: "kind-staging"},
+			{Name: "staging", ClusterRefs: []string{"kind-staging"}, ActiveClusterRef: "kind-staging"},
 		},
 		SecretBackend: secrets.BackendConfig{
 			Type: secrets.Backend1Password,

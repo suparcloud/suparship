@@ -9,8 +9,15 @@ import {
   deleteOrgEnvironment,
   getOrgNaming,
   updateOrgNaming,
+  listOrgRoutingProfiles,
+  upsertOrgRoutingProfile,
+  deleteOrgRoutingProfile,
 } from "../lib/settings";
-import type { OrgNaming } from "../lib/settings";
+import type {
+  OrgNaming,
+  RoutingProfile,
+  ExposeMode,
+} from "../lib/settings";
 import {
   getOrgEnvConfig,
   updateOrgEnvConfig,
@@ -71,7 +78,12 @@ interface EnvFormState {
   name: string;
   displayName: string;
   order: string;
-  clusterRef: string;
+  // Every cluster registered with this env. Today only activeClusterRef is
+  // deployed to; the rest are reserved for future multi-cluster fan-out.
+  clusterRefs: string[];
+  // The active deploy target. Must be a member of clusterRefs (or empty,
+  // which falls back to clusterRefs[0] at the server).
+  activeClusterRef: string;
   baseDomain: string;
   namespacePattern: string;
 }
@@ -80,13 +92,15 @@ const emptyEnvForm = (): EnvFormState => ({
   name: "",
   displayName: "",
   order: "",
-  clusterRef: "",
+  clusterRefs: [],
+  activeClusterRef: "",
   baseDomain: "",
   namespacePattern: "",
 });
 
 function OrgEnvironmentsSection() {
   const [envs, setEnvs] = useState<OrgEnvironment[]>([]);
+  const [clusters, setClusters] = useState<Cluster[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -97,9 +111,12 @@ function OrgEnvironmentsSection() {
 
   useEffect(() => {
     let cancelled = false;
-    listOrgEnvironments()
-      .then((res) => {
-        if (!cancelled) setEnvs(res.environments);
+    Promise.all([listOrgEnvironments(), listClusters()])
+      .then(([envRes, clusters]) => {
+        if (!cancelled) {
+          setEnvs(envRes.environments);
+          setClusters(clusters);
+        }
       })
       .catch((err) => {
         if (!cancelled)
@@ -124,7 +141,8 @@ function OrgEnvironmentsSection() {
       name: env.name,
       displayName: env.displayName ?? "",
       order: String(env.order),
-      clusterRef: env.clusterRef ?? "",
+      clusterRefs: env.clusterRefs ?? [],
+      activeClusterRef: env.activeClusterRef ?? "",
       baseDomain: env.baseDomain ?? "",
       namespacePattern: env.namespacePattern ?? "",
     });
@@ -141,10 +159,21 @@ function OrgEnvironmentsSection() {
     setSaving(true);
     setSaveError(null);
     try {
+      // Normalise: empty active when no clusters registered, and active
+      // must be a member of the registered set.
+      let activeRef = form.activeClusterRef;
+      if (form.clusterRefs.length === 0) {
+        activeRef = "";
+      } else if (activeRef && !form.clusterRefs.includes(activeRef)) {
+        // User unchecked the active one without re-picking. Drop it; the
+        // server falls back to clusterRefs[0].
+        activeRef = "";
+      }
       const payload = {
         displayName: form.displayName || undefined,
         order: form.order ? parseInt(form.order, 10) : undefined,
-        clusterRef: form.clusterRef || undefined,
+        clusterRefs: form.clusterRefs,
+        activeClusterRef: activeRef || undefined,
         baseDomain: form.baseDomain || undefined,
         namespacePattern: form.namespacePattern || undefined,
       };
@@ -170,6 +199,19 @@ function OrgEnvironmentsSection() {
     } finally {
       setSaving(false);
     }
+  }
+
+  function toggleClusterRef(name: string) {
+    setForm((f) => {
+      const has = f.clusterRefs.includes(name);
+      const nextRefs = has
+        ? f.clusterRefs.filter((c) => c !== name)
+        : [...f.clusterRefs, name];
+      // If we removed the active one, clear it so the server falls back.
+      const nextActive =
+        has && f.activeClusterRef === name ? "" : f.activeClusterRef;
+      return { ...f, clusterRefs: nextRefs, activeClusterRef: nextActive };
+    });
   }
 
   async function handleDelete(env: OrgEnvironment) {
@@ -251,7 +293,28 @@ function OrgEnvironmentsSection() {
                   )}
                 </td>
                 <td className="px-6 py-3 font-mono text-xs text-gray-600">
-                  {env.clusterRef || (
+                  {env.clusterRefs && env.clusterRefs.length > 0 ? (
+                    <div className="flex flex-wrap gap-1">
+                      {env.clusterRefs.map((c) => {
+                        const active =
+                          c === (env.activeClusterRef || env.clusterRefs?.[0]);
+                        return (
+                          <span
+                            key={c}
+                            className={
+                              active
+                                ? "rounded bg-indigo-50 px-1.5 py-0.5 text-indigo-700"
+                                : "rounded bg-gray-50 px-1.5 py-0.5 text-gray-600"
+                            }
+                            title={active ? "active deploy target" : "registered, not active"}
+                          >
+                            {c}
+                            {active && " ●"}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : (
                     <span className="text-gray-300">—</span>
                   )}
                 </td>
@@ -327,34 +390,87 @@ function OrgEnvironmentsSection() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-700">
-                    Cluster
-                  </label>
-                  <input
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                    placeholder="staging-cluster"
-                    value={form.clusterRef}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, clusterRef: e.target.value }))
-                    }
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-700">
-                    Order
-                  </label>
-                  <input
-                    type="number"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                    placeholder="1"
-                    value={form.order}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, order: e.target.value }))
-                    }
-                  />
-                </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-700">
+                  Clusters
+                </label>
+                <p className="mb-2 text-xs text-gray-400">
+                  Register one or more clusters with this environment. Today
+                  only the cluster marked <span className="font-medium">Active</span> receives deploys; the
+                  others are reserved for future multi-cluster fan-out.
+                </p>
+                {clusters.length === 0 ? (
+                  <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                    No clusters registered yet. Register a cluster under
+                    <span className="font-mono"> Settings → Clusters</span> first.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5 rounded-lg border border-gray-200 p-2">
+                    {clusters.map((c) => {
+                      const checked = form.clusterRefs.includes(c.name);
+                      const isActive =
+                        checked &&
+                        (form.activeClusterRef === c.name ||
+                          (!form.activeClusterRef &&
+                            form.clusterRefs[0] === c.name));
+                      return (
+                        <label
+                          key={c.name}
+                          className="flex items-center gap-3 rounded px-1.5 py-1 hover:bg-gray-50"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleClusterRef(c.name)}
+                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span className="flex-1 font-mono text-xs">
+                            {c.displayName ? (
+                              <>
+                                {c.displayName}
+                                <span className="ml-1.5 text-gray-400">{c.name}</span>
+                              </>
+                            ) : (
+                              c.name
+                            )}
+                          </span>
+                          {checked && (
+                            <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                              <input
+                                type="radio"
+                                name="activeClusterRef"
+                                checked={isActive}
+                                onChange={() =>
+                                  setForm((f) => ({
+                                    ...f,
+                                    activeClusterRef: c.name,
+                                  }))
+                                }
+                                className="text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <span>Active</span>
+                            </label>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-700">
+                  Order
+                </label>
+                <input
+                  type="number"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  placeholder="1"
+                  value={form.order}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, order: e.target.value }))
+                  }
+                />
               </div>
 
               <div>
@@ -695,6 +811,254 @@ function NamespaceNamingSection() {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Routing profiles section ──────────────────────────────────────────────────
+//
+// One profile per ExposeMode tier (internal, external) maps to an
+// IngressClass + cert-manager ClusterIssuer the chart uses for components
+// that target that tier. ClusterIssuer is optional — empty means plain
+// HTTP, no cert-manager annotation, no tls block.
+
+const ROUTING_TIERS: Array<{
+  name: ExposeMode;
+  title: string;
+  description: string;
+}> = [
+  {
+    name: "internal",
+    title: "Internal tier",
+    description:
+      "For components reachable only from inside the cluster network (e.g. internal nginx, private CA). Components opt in by setting exposeMode: internal.",
+  },
+  {
+    name: "external",
+    title: "External tier",
+    description:
+      "For components reachable from the public internet. Typically points at the public ingress class and a public-facing cert-manager ClusterIssuer like letsencrypt-prod.",
+  },
+];
+
+function RoutingProfilesSection() {
+  const [profiles, setProfiles] = useState<Record<ExposeMode, RoutingProfile | undefined>>({
+    internal: undefined,
+    external: undefined,
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listOrgRoutingProfiles()
+      .then((resp) => {
+        if (cancelled) return;
+        const next: Record<ExposeMode, RoutingProfile | undefined> = {
+          internal: undefined,
+          external: undefined,
+        };
+        for (const p of resp.routingProfiles) {
+          next[p.name] = p;
+        }
+        setProfiles(next);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function applyProfile(p: RoutingProfile) {
+    setProfiles((prev) => ({ ...prev, [p.name]: p }));
+  }
+
+  function clearProfile(name: ExposeMode) {
+    setProfiles((prev) => ({ ...prev, [name]: undefined }));
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-6 py-4">
+        <h2 className="text-sm font-medium text-gray-900">Ingress &amp; TLS routing profiles</h2>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Two named tiers (<code className="font-mono">internal</code>,{" "}
+          <code className="font-mono">external</code>) map components to an
+          IngressClass and an optional cert-manager ClusterIssuer. Per-environment
+          overrides live on the env record.
+        </p>
+      </div>
+
+      <div className="px-6 py-4">
+        {loading ? (
+          <div className="h-24 animate-pulse rounded bg-gray-100" />
+        ) : error ? (
+          <p className="text-sm text-red-600">{error}</p>
+        ) : (
+          <div className="space-y-6">
+            {ROUTING_TIERS.map((tier) => (
+              <RoutingProfileEditor
+                key={tier.name}
+                tier={tier}
+                profile={profiles[tier.name]}
+                onSaved={applyProfile}
+                onCleared={() => clearProfile(tier.name)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface RoutingProfileEditorProps {
+  tier: { name: ExposeMode; title: string; description: string };
+  profile: RoutingProfile | undefined;
+  onSaved: (p: RoutingProfile) => void;
+  onCleared: () => void;
+}
+
+function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProfileEditorProps) {
+  const [ingressClassName, setIngressClassName] = useState(profile?.ingressClassName ?? "");
+  const [clusterIssuer, setClusterIssuer] = useState(profile?.clusterIssuer ?? "");
+  const [baseDomain, setBaseDomain] = useState(profile?.baseDomain ?? "");
+  const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  // Re-sync local form state when the parent profile prop changes (e.g. after
+  // an initial load completes or another tier saves).
+  useEffect(() => {
+    setIngressClassName(profile?.ingressClassName ?? "");
+    setClusterIssuer(profile?.clusterIssuer ?? "");
+    setBaseDomain(profile?.baseDomain ?? "");
+  }, [profile]);
+
+  async function handleSave() {
+    if (!ingressClassName.trim()) {
+      setSaveError("ingressClassName is required");
+      return;
+    }
+    setSaving(true);
+    setSaveError(null);
+    setSaved(false);
+    try {
+      const updated = await upsertOrgRoutingProfile(tier.name, {
+        ingressClassName: ingressClassName.trim(),
+        clusterIssuer: clusterIssuer.trim() || undefined,
+        baseDomain: baseDomain.trim() || undefined,
+      });
+      onSaved(updated);
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleRemove() {
+    if (!profile) return;
+    setRemoving(true);
+    setSaveError(null);
+    setSaved(false);
+    try {
+      await deleteOrgRoutingProfile(tier.name);
+      onCleared();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Failed to remove");
+    } finally {
+      setRemoving(false);
+    }
+  }
+
+  return (
+    <div className="rounded border border-gray-200 px-4 py-3">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-sm font-medium text-gray-900">{tier.title}</h3>
+          <p className="mt-0.5 text-xs text-gray-500">{tier.description}</p>
+        </div>
+        {profile && (
+          <span className="rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700">
+            configured
+          </span>
+        )}
+      </div>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className="block text-xs font-medium text-gray-700">
+            Ingress class name <span className="text-red-500">*</span>
+          </label>
+          <input
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            placeholder={tier.name === "internal" ? "nginx-internal" : "nginx"}
+            value={ingressClassName}
+            onChange={(e) => setIngressClassName(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-700">
+            Cert-manager ClusterIssuer
+          </label>
+          <input
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            placeholder={tier.name === "internal" ? "internal-ca (optional)" : "letsencrypt-prod (optional)"}
+            value={clusterIssuer}
+            onChange={(e) => setClusterIssuer(e.target.value)}
+          />
+          <p className="mt-1 text-xs text-gray-400">
+            Empty → plain HTTP (no TLS, no cert-manager annotation).
+          </p>
+        </div>
+        <div className="sm:col-span-2">
+          <label className="block text-xs font-medium text-gray-700">
+            Base domain override
+          </label>
+          <input
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            placeholder="leave blank to inherit env baseDomain"
+            value={baseDomain}
+            onChange={(e) => setBaseDomain(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {saveError && (
+        <p className="mt-3 rounded bg-red-50 px-3 py-2 text-xs text-red-700">{saveError}</p>
+      )}
+      {saved && (
+        <p className="mt-3 rounded bg-green-50 px-3 py-2 text-xs text-green-700">
+          {tier.title} saved.
+        </p>
+      )}
+
+      <div className="mt-3 flex justify-end gap-2">
+        {profile && (
+          <button
+            onClick={handleRemove}
+            disabled={removing || saving}
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {removing ? "Removing…" : "Remove"}
+          </button>
+        )}
+        <button
+          onClick={handleSave}
+          disabled={saving || removing}
+          className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+        >
+          {saving ? "Saving…" : profile ? "Update" : "Save"}
+        </button>
       </div>
     </div>
   );
@@ -1790,6 +2154,9 @@ export function OrgSettings() {
 
       {/* Org-wide namespace naming patterns — org_admin only */}
       <NamespaceNamingSection />
+
+      {/* Ingress class + cert-manager ClusterIssuer per routing tier */}
+      <RoutingProfilesSection />
 
       {/* Org-wide environment variables */}
       <EnvConfigEditor

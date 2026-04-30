@@ -1065,7 +1065,7 @@ func TestCreateAppSingleEnvOnlyCreatesOneEnv(t *testing.T) {
 		Name:        "test",
 		DisplayName: "Test Org",
 		Environments: []rbac.OrgEnvironment{
-			{Name: "dev", DisplayName: "Development", Order: 1, ClusterRef: "in-cluster"},
+			{Name: "dev", DisplayName: "Development", Order: 1, ClusterRefs: []string{"in-cluster"}, ActiveClusterRef: "in-cluster"},
 		},
 		Teams: []rbac.Team{
 			{Name: "admins", DisplayName: "Admins", Members: []string{"alice"}},

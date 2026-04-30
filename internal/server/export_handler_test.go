@@ -60,7 +60,7 @@ func newExportMux(t *testing.T) (*http.ServeMux, *authHandler) {
 		Name:        "testorg",
 		DisplayName: "Test Organization",
 		Environments: []rbac.OrgEnvironment{
-			{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRef: "in-cluster", BaseDomain: "staging.local"},
+			{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRefs: []string{"in-cluster"}, ActiveClusterRef: "in-cluster", BaseDomain: "staging.local"},
 			{Name: "prod", Order: 2},
 		},
 		Teams:        []rbac.Team{{Name: "admins", DisplayName: "Admins", Members: []string{"admin"}}},
@@ -214,7 +214,7 @@ func TestToYAML_FullConfig(t *testing.T) {
 	vals := helmValues{
 		Org: helmOrg{Name: "myorg", DisplayName: "My Org"},
 		Environments: []helmEnvironment{
-			{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRef: "in-cluster", BaseDomain: "staging.example.com"},
+			{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRefs: []string{"in-cluster"}, ActiveClusterRef: "in-cluster", BaseDomain: "staging.example.com"},
 			{Name: "prod", Order: 2},
 		},
 		Clusters: []helmCluster{

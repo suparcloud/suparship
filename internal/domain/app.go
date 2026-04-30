@@ -118,6 +118,43 @@ func (p SizePreset) Valid() bool {
 	return err == nil
 }
 
+// ExposeMode declares how a component is reachable from outside the cluster.
+// The exact ingress class and TLS issuer come from the org's RoutingProfiles
+// keyed by the mode name; the component only declares its tier.
+type ExposeMode string
+
+const (
+	// ExposeDisabled means no ingress is created for the component.
+	ExposeDisabled ExposeMode = "disabled"
+	// ExposeInternal routes the component through the org's "internal"
+	// routing profile (e.g. internal load balancer, internal CA).
+	ExposeInternal ExposeMode = "internal"
+	// ExposeExternal routes the component through the org's "external"
+	// routing profile (e.g. public ingress, public CA like Let's Encrypt).
+	ExposeExternal ExposeMode = "external"
+)
+
+// ParseExposeMode converts a raw string into an ExposeMode, returning an
+// error for unknown values. Empty string is treated as ExposeDisabled.
+func ParseExposeMode(s string) (ExposeMode, error) {
+	if s == "" {
+		return ExposeDisabled, nil
+	}
+	switch ExposeMode(s) {
+	case ExposeDisabled, ExposeInternal, ExposeExternal:
+		return ExposeMode(s), nil
+	default:
+		return "", fmt.Errorf("unknown expose mode %q: must be one of disabled, internal, external", s)
+	}
+}
+
+// Valid reports whether m is a recognised ExposeMode. Empty (zero value) is
+// treated as ExposeDisabled and is valid.
+func (m ExposeMode) Valid() bool {
+	_, err := ParseExposeMode(string(m))
+	return err == nil
+}
+
 // ComponentSpec describes a single runtime unit within an app (e.g. web
 // server, background worker, or scheduled job). Component topology is derived
 // from the template by default; this struct allows explicit overrides.
@@ -138,9 +175,11 @@ type ComponentSpec struct {
 	// SizePreset selects a named resource tier (small, medium, large).
 	// Mutually exclusive with Replicas.
 	SizePreset SizePreset `json:"sizePreset,omitempty" yaml:"sizePreset,omitempty"`
-	// Expose indicates that this component should be reachable via an ingress
-	// or external service endpoint. Typically true for web components.
-	Expose bool `json:"expose" yaml:"expose"`
+	// ExposeMode selects which routing profile (disabled/internal/external)
+	// the chart should use for this component. The exact ingress class and
+	// TLS issuer come from the org's RoutingProfiles map keyed by this name;
+	// ExposeDisabled (the zero value) means no ingress is created.
+	ExposeMode ExposeMode `json:"exposeMode,omitempty" yaml:"exposeMode,omitempty"`
 	// PreviewEnabled controls whether this component is deployed in preview
 	// environments. Heavy or non-essential components can opt out by setting
 	// this to false.
@@ -150,6 +189,7 @@ type ComponentSpec struct {
 	// MUST NOT appear here; use AppSpec.SecretRefs instead.
 	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
 }
+
 
 // AppMetadata carries optional labelling and annotation data attached to an
 // app spec. Both maps are optional; nil and empty are treated equivalently.

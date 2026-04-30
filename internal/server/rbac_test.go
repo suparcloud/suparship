@@ -33,8 +33,8 @@ func testRBACOrg() *rbac.Org {
 		DisplayName: "Test Org",
 		CreatedAt:   "2026-01-01T00:00:00Z",
 		Environments: []rbac.OrgEnvironment{
-			{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRef: "in-cluster"},
-			{Name: "prod", DisplayName: "Production", Order: 2, ClusterRef: "in-cluster"},
+			{Name: "staging", DisplayName: "Staging", Order: 1, ClusterRefs: []string{"in-cluster"}, ActiveClusterRef: "in-cluster"},
+			{Name: "prod", DisplayName: "Production", Order: 2, ClusterRefs: []string{"in-cluster"}, ActiveClusterRef: "in-cluster"},
 		},
 		Teams: []rbac.Team{
 			{Name: "admins", DisplayName: "Admins", Members: []string{"alice"}},

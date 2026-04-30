@@ -6,7 +6,8 @@ export interface ProjectEnvironment {
   project: string;
   namespace: string;
   order: number;
-  clusterRef?: string;
+  clusterRefs?: string[];
+  activeClusterRef?: string;
   baseDomain?: string;
   namespacePattern?: string;
   /**
@@ -26,7 +27,8 @@ export interface UpsertEnvironmentRequest {
   name?: string;
   displayName?: string;
   order?: number;
-  clusterRef?: string;
+  clusterRefs?: string[];
+  activeClusterRef?: string;
   baseDomain?: string;
   namespacePattern?: string;
 }

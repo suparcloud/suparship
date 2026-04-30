@@ -1,6 +1,7 @@
 {{- $web := .Values.components.web }}
 {{- $host := .Values.routing.host }}
-{{- if and $web.enabled $web.expose $host }}
+{{- $ing := $web.ingress }}
+{{- if and $web.enabled $ing $host }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -9,8 +10,17 @@ metadata:
     {{- include "web-service.labels" . | nindent 4 }}
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /
+    {{- with $ing.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . }}
+    {{- end }}
 spec:
-  ingressClassName: nginx
+  ingressClassName: {{ $ing.className }}
+  {{- if $ing.clusterIssuer }}
+  tls:
+    - hosts:
+        - {{ $host | quote }}
+      secretName: {{ include "web-service.fullname" . }}-tls
+  {{- end }}
   rules:
     - host: {{ $host }}
       http:

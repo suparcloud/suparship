@@ -25,7 +25,7 @@ import (
 // Mapping:
 //   - "worker" → {Name: "worker", Type: ComponentWorker, Enabled: true, PreviewEnabled: false}
 //   - "cron"   → {Name: "cron",   Type: ComponentCron,   Enabled: true, PreviewEnabled: false}
-//   - any other → {Name: "web",  Type: ComponentWeb,    Enabled: true, Expose: true, PreviewEnabled: true}
+//   - any other → {Name: "web",  Type: ComponentWeb,    Enabled: true, ExposeMode: ExposeExternal, PreviewEnabled: true}
 func DefaultComponentsFromTemplate(tmpl *tpl.Template) []domain.ComponentSpec {
 	switch tmpl.Spec.Category {
 	case "worker":
@@ -38,7 +38,7 @@ func DefaultComponentsFromTemplate(tmpl *tpl.Template) []domain.ComponentSpec {
 		}
 	default:
 		return []domain.ComponentSpec{
-			{Name: "web", Type: domain.ComponentWeb, Enabled: true, Expose: true, PreviewEnabled: true},
+			{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal, PreviewEnabled: true},
 		}
 	}
 }
@@ -69,7 +69,7 @@ func ComponentsFromTemplate(tmpl *tpl.Template, toggles map[string]bool) []domai
 			Name:           tc.Name,
 			Type:           templateComponentTypeToDomain(tc.Type),
 			Enabled:        resolveEnabled(tc, toggles),
-			Expose:         tc.Exposed,
+			ExposeMode:     templateExposedToMode(tc.Exposed),
 			PreviewEnabled: tc.PreviewEnabled,
 		})
 	}
@@ -100,6 +100,18 @@ func templateComponentTypeToDomain(t tpl.TemplateComponentType) domain.Component
 	default:
 		return domain.ComponentWeb
 	}
+}
+
+// templateExposedToMode maps the template's boolean Exposed flag to the
+// domain ExposeMode. Templates haven't been updated to declare
+// internal-vs-external; until they are, "exposed" defaults to external
+// (matching the prior Expose=true behaviour). Apps that want internal
+// routing override the field explicitly via the API after creation.
+func templateExposedToMode(exposed bool) domain.ExposeMode {
+	if exposed {
+		return domain.ExposeExternal
+	}
+	return domain.ExposeDisabled
 }
 
 // CreateRequest carries all inputs required to create a new app through the

@@ -95,6 +95,12 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/org/naming", rh.auth.requireAuth(rh.handleGetOrgNaming))
 	mux.HandleFunc("PUT /api/v1/org/naming", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgNaming)))
 
+	// Org-level routing profiles (ingress class + cert-manager ClusterIssuer
+	// per ExposeMode tier) — reads for all; writes require org_admin.
+	mux.HandleFunc("GET /api/v1/org/routing-profiles", rh.auth.requireAuth(rh.handleListOrgRoutingProfiles))
+	mux.HandleFunc("PUT /api/v1/org/routing-profiles/{name}", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgRoutingProfile)))
+	mux.HandleFunc("DELETE /api/v1/org/routing-profiles/{name}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteOrgRoutingProfile)))
+
 	// Project-scoped endpoints — role-based access.
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(rh.handleGetProject))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
