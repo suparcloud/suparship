@@ -73,6 +73,44 @@ export function updateOrgNaming(naming: OrgNaming): Promise<OrgNaming> {
   return api.put<OrgNaming>("/org/naming", naming);
 }
 
+// ── Org Routing Profiles ──────────────────────────────────────────────────────
+//
+// A routing profile maps an ExposeMode (internal/external) to the ingress
+// class + cert-manager ClusterIssuer the chart should use for components
+// targeting that tier. Per-environment overrides live on the env record;
+// these endpoints manage org-level defaults only.
+
+export type ExposeMode = "internal" | "external";
+
+export interface RoutingProfile {
+  name: ExposeMode;
+  ingressClassName: string;
+  clusterIssuer?: string;
+  baseDomain?: string;
+}
+
+export interface RoutingProfilesResponse {
+  routingProfiles: RoutingProfile[];
+}
+
+export function listOrgRoutingProfiles(): Promise<RoutingProfilesResponse> {
+  return api.get<RoutingProfilesResponse>("/org/routing-profiles");
+}
+
+export function upsertOrgRoutingProfile(
+  name: ExposeMode,
+  profile: Omit<RoutingProfile, "name">,
+): Promise<RoutingProfile> {
+  return api.put<RoutingProfile>(
+    `/org/routing-profiles/${encodeURIComponent(name)}`,
+    profile,
+  );
+}
+
+export function deleteOrgRoutingProfile(name: ExposeMode): Promise<void> {
+  return api.del(`/org/routing-profiles/${encodeURIComponent(name)}`);
+}
+
 export interface CreateProjectRequest {
   name: string;
   displayName?: string;
