@@ -1279,23 +1279,29 @@ func buildRepoREADME(brand branding.Config, subPath string) string {
 	return fmt.Sprintf(`# GitOps repository
 
 This directory holds the desired-state Kubernetes manifests that ArgoCD
-syncs to your clusters. It is written by **%[1]s** but operates as plain
-YAML — nothing here requires %[1]s to be running. An SRE can edit files
-directly or detach them entirely; the platform stays out of the way.
+syncs to your clusters. It is written by **%[1]s**, but operates as plain
+YAML on top of standard CNCF components — ArgoCD, Kargo, External Secrets
+Operator, Sealed Secrets, Stakater Replicator. Nothing here requires
+%[1]s to be running: an SRE can edit files directly, detach an app, or
+walk away from the platform entirely. The repo keeps syncing.
 
 ## Layout
 
 `+"```"+`
 %[3]s
-├── _infra/                                # platform glue
+├── _infra/                                # platform glue (root-app synced)
 │   ├── {env}-appset.yaml                  # ApplicationSet per env (cluster)
+│   ├── previews-appset.yaml               # preview ApplicationSet
 │   ├── {project}-appproject.yaml          # ArgoCD AppProject per project
 │   ├── {project}-ns-{env}.yaml            # project Namespace manifests
-│   ├── secret-stores/                     # ClusterSecretStores (ESO)
 │   ├── eso-stores.yaml                    # K8s-backend ClusterSecretStore
 │   ├── eso-secrets-{level}-*.yaml         # upper-level ExternalSecrets
-│   ├── kargo/                             # Kargo Project / Warehouse / Stage CRs
-│   └── previews-appset.yaml               # preview ApplicationSet
+│   ├── secrets-{cluster}-app.yaml         # ArgoCD Application syncing _secret-stores/{env}/
+│   └── kargo/                             # Kargo Project / Warehouse / Stage CRs
+├── _secret-stores/                        # per-env 1Password Connect (synced by secrets-{cluster})
+│   └── {env}/
+│       ├── sealed-token.yaml              # SealedSecret of the Connect read token
+│       └── store.yaml                     # ClusterSecretStore (1Password backend)
 ├── envs/                                  # stable environments
 │   └── {env}/                             # staging, prod, …
 │       └── {project}/
@@ -1305,8 +1311,27 @@ directly or detach them entirely; the platform stays out of the way.
 │               ├── env-configmap.yaml     # merged env vars (org→cluster)
 │               └── external-secret.yaml   # platform-managed ExternalSecret
 ├── previews/{project}/{previewName}/      # per-PR preview environments
-└── charts/{template}/                     # bundled Helm charts (chart sources)
+└── charts/{template}/                     # bundled Helm chart sources
 `+"```"+`
+
+The `+"`envs/`"+` wrapper makes the top-level self-documenting: stable envs
+under `+"`envs/`"+`, ephemeral previews under `+"`previews/`"+`, platform glue under
+`+"`_infra/`"+`, secret-store bootstraps under `+"`_secret-stores/`"+`. There is no
+per-app `+"`kustomization.yaml`"+` — ArgoCD's directory generator applies the
+files in each app folder directly, so adding/removing a manifest is just
+adding/removing the file.
+
+## Naming conventions
+
+- **ArgoCD Applications**: `+"`{project}-{app}-{env}`"+` — project-prefixed
+  because all Applications share the `+"`argocd`"+` namespace and would
+  collide otherwise (e.g. two projects each with an app named `+"`api`"+`).
+- **Kargo Stages**: `+"`{app}-{env}`"+` — Kargo runs each project in its own
+  namespace, so the project prefix is implicit in the location.
+- **Project namespaces**: `+"`{project}-{env}`"+` (org pattern overridable).
+- **App namespaces**: `+"`{app}-{env}`"+`.
+- **Secret-store Application**: `+"`secrets-{cluster}`"+` — one per cluster,
+  syncing `+"`_secret-stores/{env}/`"+` for every env bound to that cluster.
 
 ## What is platform-managed
 
@@ -1335,14 +1360,29 @@ The bundled chart sources under `+"`charts/`"+` are NOT regenerated — they are
 the Helm templates the platform deploys. Edit them in source control if
 you want to fork the chart for your needs.
 
+## Connect token recovery
+
+The 1Password Connect read token is stored two places:
+
+1. **Sealed in the repo** — `+"`_secret-stores/{env}/sealed-token.yaml`"+` is a
+   SealedSecret encrypted to the target cluster's `+"`sealed-secrets-controller`"+`
+   public key. Only that cluster can decrypt it.
+2. **Stashed in the platform cluster** — `+"`%[1]s-system/%[1]s-onepassword-connect-token-{env}`"+`
+   holds the plaintext token so %[1]s can re-seal it if the gitops repo is
+   wiped or a new cluster is bound to an env.
+
+If you stop using %[1]s, the in-repo SealedSecret is enough: the cluster's
+sealed-secrets-controller will keep decrypting it on every sync. The stash
+is only needed if you want %[1]s to self-heal the repo.
+
 ## Take-over recipes
 
-Three escalating levels of "stop using the platform for this":
+Four escalating levels of "stop using the platform for this":
 
 ### Detach one app
 
 1. Open the platform UI and delete the app, OR
-2. Delete the cluster-side record (e.g. `+"`kubectl delete configmap -n suparship-system suparship-app-{project}-{app}`"+`)
+2. Delete the cluster-side record (e.g. `+"`kubectl delete configmap -n %[1]s-system %[1]s-app-{project}-{app}`"+`)
 3. Remove `+"`envs/{env}/{project}/{app}/`"+` for every env, plus the matching
    `+"`_infra/kargo/{project}-{app}-*.yaml`"+` Kargo CRs.
 4. ArgoCD will prune the live workload on its next sync.
@@ -1353,19 +1393,28 @@ Three escalating levels of "stop using the platform for this":
 2. Remove `+"`_infra/{project}-appproject.yaml`"+` and
    `+"`_infra/{project}-ns-*.yaml`"+`.
 3. Delete the project record from %[1]s's store
-   (e.g. the `+"`suparship-project-{name}`"+` ConfigMap).
+   (e.g. the `+"`%[1]s-project-{name}`"+` ConfigMap).
+
+### Detach one environment
+
+1. Remove `+"`envs/{env}/`"+` and `+"`_secret-stores/{env}/`"+`.
+2. Remove `+"`_infra/{env}-appset.yaml`"+`.
+3. If no other env uses the cluster, remove `+"`_infra/secrets-{cluster}-app.yaml`"+`.
+4. Delete the env record from %[1]s's store.
 
 ### Operate the entire repo without %[1]s
 
-1. Stop publishing — disable the platform's GitOps integration, OR
+1. Stop publishing — disable the platform's GitOps integration.
 2. Take ownership of the existing files: delete the header comment on the
-   YAMLs you want to manage manually, and remove their entries from
-   %[1]s's domain stores so the platform stops regenerating them.
-3. ArgoCD doesn't care who edits the files; it keeps syncing whatever
-   `+"`{env}-appset.yaml`"+` discovers.
+   YAMLs you want to manage manually. Nothing in the manifests references
+   the platform at runtime — labels are inert, the SealedSecret decrypts
+   with the cluster's standard sealed-secrets-controller, and the
+   ApplicationSets/AppProjects are vanilla ArgoCD.
+3. ArgoCD, Kargo, ESO, Sealed Secrets, and Stakater Replicator keep
+   running on their own. They have no knowledge of %[1]s.
 
-For the full mapping of UI actions ↔ files written, see the platform's
-GitOps documentation (`+"`docs/gitops.md`"+` in the source tree).
+The bundled `+"`charts/`"+` directory is yours to keep — fork it, replace it
+with your own charts, or leave it alone.
 
 ---
 
