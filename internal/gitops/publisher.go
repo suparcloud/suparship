@@ -513,7 +513,10 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if p.cfg.BackendConfig != nil {
 			backend = p.cfg.BackendConfig.Effective()
 		}
-		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName, backend)
+		// Routing profiles flow through PublisherConfig in PR 4; nil here
+		// triggers the legacy Expose=true → nginx-no-TLS shim in helmvalues
+		// so existing AppSpecs without ExposeMode keep rendering identically.
+		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName, backend, nil, nil)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
@@ -977,7 +980,9 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		if p.cfg.BackendConfig != nil {
 			previewBackend = p.cfg.BackendConfig.Effective()
 		}
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName, previewBackend)
+		// Routing profiles flow through PublisherConfig in PR 4; nil here
+		// activates the legacy Expose=true → nginx shim for backward compat.
+		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName, previewBackend, nil, nil)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)

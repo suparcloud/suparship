@@ -102,7 +102,19 @@ type ComponentValues struct {
 	Replicas int32 `json:"replicas" yaml:"replicas"`
 	// Expose indicates whether the chart should create an Ingress resource
 	// for this component.
+	//
+	// Deprecated: kept for legacy chart templates that still gate ingress
+	// rendering on this bool. New chart templates should read Ingress
+	// instead — Ingress nil means "no ingress", and class/issuer come from
+	// the resolved RoutingProfile rather than being hardcoded in the chart.
+	// Once all bundled charts have migrated to Ingress this field will go.
 	Expose bool `json:"expose" yaml:"expose"`
+	// Ingress carries the resolved RoutingProfile for this component when
+	// it should be exposed via an Ingress. Nil means no ingress is created.
+	// Charts read Ingress.ClassName for the IngressClassName field, and
+	// Ingress.ClusterIssuer for the cert-manager annotation + tls block —
+	// an empty ClusterIssuer means plain HTTP (no annotation, no tls).
+	Ingress *IngressValues `json:"ingress,omitempty" yaml:"ingress,omitempty"`
 	// Port is the TCP port the container listens on. Zero means "let the
 	// chart's default kick in" so charts can declare their own sane
 	// defaults (8080, 80, etc.) without suparship having to know the
@@ -128,6 +140,22 @@ type ComponentValues struct {
 // read.
 type HealthCheckValues struct {
 	Path string `json:"path" yaml:"path"`
+}
+
+// IngressValues carries the resolved routing-profile fields a chart needs
+// to render its Ingress: which IngressClass to attach the route to, and
+// (optionally) which cert-manager ClusterIssuer to use for TLS. ClusterIssuer
+// is intentionally optional — orgs that don't have cert-manager installed,
+// or that run plain HTTP for internal traffic, leave it empty and charts
+// emit a non-TLS ingress.
+type IngressValues struct {
+	// ClassName is the Kubernetes IngressClass name for this route
+	// (e.g. "nginx", "nginx-internal"). Required when IngressValues is set.
+	ClassName string `json:"className" yaml:"className"`
+	// ClusterIssuer is the cert-manager ClusterIssuer name. Empty means no
+	// TLS — the chart emits a plain HTTP ingress with no cert-manager
+	// annotation and no tls block.
+	ClusterIssuer string `json:"clusterIssuer,omitempty" yaml:"clusterIssuer,omitempty"`
 }
 
 // ImageValues identifies the container image for a component.
