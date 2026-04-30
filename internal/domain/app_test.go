@@ -132,6 +132,94 @@ func TestComponentTypeErrorMessage(t *testing.T) {
 	}
 }
 
+func TestParseExposeMode(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    ExposeMode
+		wantErr bool
+	}{
+		{"disabled", ExposeDisabled, false},
+		{"internal", ExposeInternal, false},
+		{"external", ExposeExternal, false},
+		{"", ExposeDisabled, false}, // empty maps to disabled
+		{"public", "", true},
+		{"DISABLED", "", true}, // case-sensitive
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseExposeMode(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseExposeMode(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParseExposeMode(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExposeModeValid(t *testing.T) {
+	tests := []struct {
+		input ExposeMode
+		want  bool
+	}{
+		{ExposeDisabled, true},
+		{ExposeInternal, true},
+		{ExposeExternal, true},
+		{ExposeMode(""), true}, // empty is valid (treated as disabled)
+		{ExposeMode("public"), false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.input), func(t *testing.T) {
+			if got := tt.input.Valid(); got != tt.want {
+				t.Errorf("ExposeMode(%q).Valid() = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestComponentSpec_EffectiveExposeMode(t *testing.T) {
+	tests := []struct {
+		name  string
+		spec  ComponentSpec
+		want  ExposeMode
+	}{
+		{
+			name: "explicit ExposeMode wins",
+			spec: ComponentSpec{ExposeMode: ExposeInternal, Expose: false},
+			want: ExposeInternal,
+		},
+		{
+			name: "explicit ExposeMode wins over legacy true",
+			spec: ComponentSpec{ExposeMode: ExposeDisabled, Expose: true},
+			want: ExposeDisabled,
+		},
+		{
+			name: "legacy Expose=true falls back to external",
+			spec: ComponentSpec{Expose: true},
+			want: ExposeExternal,
+		},
+		{
+			name: "legacy Expose=false falls back to disabled",
+			spec: ComponentSpec{Expose: false},
+			want: ExposeDisabled,
+		},
+		{
+			name: "no fields set → disabled",
+			spec: ComponentSpec{},
+			want: ExposeDisabled,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.spec.EffectiveExposeMode(); got != tt.want {
+				t.Errorf("EffectiveExposeMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // contains is a small helper so the test file has no extra imports.
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||

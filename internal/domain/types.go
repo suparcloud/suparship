@@ -177,3 +177,34 @@ type LogLine struct {
 	Pod       string `json:"pod,omitempty"`
 	Container string `json:"container,omitempty"`
 }
+
+// RoutingProfile carries the ingress/TLS configuration for one routing tier
+// (e.g. "internal", "external"). The org defines a RoutingProfiles map keyed
+// by ExposeMode name; per-environment overrides may further refine specific
+// tiers without restating the rest.
+//
+// ClusterIssuer is optional: when empty, charts emit a plain HTTP ingress
+// with no cert-manager annotation and no tls block. Set it to a cert-manager
+// ClusterIssuer name (e.g. "letsencrypt-prod", "selfsigned-cluster-issuer")
+// to enable TLS.
+//
+// BaseDomain is optional: when set, it overrides the Environment.BaseDomain
+// for components routed through this profile (useful when internal services
+// need to live on a different DNS zone than external ones).
+type RoutingProfile struct {
+	// IngressClassName is the Kubernetes IngressClass to use for routes in
+	// this tier (e.g. "nginx", "nginx-internal"). Required.
+	IngressClassName string `json:"ingressClassName" yaml:"ingressClassName"`
+	// ClusterIssuer is the cert-manager ClusterIssuer name. Empty means no
+	// TLS — the chart will emit a plain HTTP ingress.
+	ClusterIssuer string `json:"clusterIssuer,omitempty" yaml:"clusterIssuer,omitempty"`
+	// BaseDomain overrides Environment.BaseDomain for components routed via
+	// this profile. Empty means inherit the environment's base domain.
+	BaseDomain string `json:"baseDomain,omitempty" yaml:"baseDomain,omitempty"`
+}
+
+// RoutingProfiles maps ExposeMode names to their resolved configuration.
+// Org-level profiles set the defaults; environment-level profiles override
+// individual entries by name (sparse — unspecified names inherit the org
+// value).
+type RoutingProfiles map[string]RoutingProfile
