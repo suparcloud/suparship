@@ -32,6 +32,13 @@ spec:
       exposed: true
       produces: [Deployment, Service]
       optionallyProduces: [Ingress]
+      capabilities:
+        # color-app is a demo: keep the form lean — no autoscaling
+        # input, no PDB, no replicas slider. Resources stays on so the
+        # operator can pick small/medium/large.
+        autoscaling: none
+        pdb: false
+        replicas: false
 
   inputs:
     - name: service_name
