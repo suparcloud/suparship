@@ -116,6 +116,7 @@ type helmExternalTemplateRepo struct {
 	RepoURL        string `json:"repoURL"`
 	Ref            string `json:"ref"`
 	Path           string `json:"path"`
+	Provider       string `json:"provider,omitempty"`
 	ExistingSecret string `json:"existingSecret,omitempty"`
 }
 
@@ -283,6 +284,7 @@ func (h *exportHandler) collectTemplates(ctx context.Context, vals *helmValues) 
 			RepoURL:        ext.RepoURL,
 			Ref:            ext.Ref,
 			Path:           ext.Path,
+			Provider:       ext.Provider,
 			ExistingSecret: ext.ExistingSecret,
 		})
 	}
@@ -429,6 +431,9 @@ func toYAML(v helmValues) string {
 				b.WriteString(fmt.Sprintf("      repoURL: %s\n", yamlQ(ext.RepoURL)))
 				b.WriteString(fmt.Sprintf("      ref: %s\n", yamlQ(ext.Ref)))
 				b.WriteString(fmt.Sprintf("      path: %s\n", yamlQ(ext.Path)))
+				if ext.Provider != "" {
+					b.WriteString(fmt.Sprintf("      provider: %s\n", yamlQ(ext.Provider)))
+				}
 				if ext.ExistingSecret != "" {
 					b.WriteString(fmt.Sprintf("      existingSecret: %s\n", yamlQ(ext.ExistingSecret)))
 				}

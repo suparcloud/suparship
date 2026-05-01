@@ -1,5 +1,14 @@
 package tpl
 
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrInvalidProvider is returned when ExternalTemplateRepo.Provider is
+// set to a value the credentials handler doesn't know how to shape.
+var ErrInvalidProvider = errors.New("invalid template repo provider")
+
 // TemplateSource describes where a template comes from and its sync state.
 type TemplateSource struct {
 	// Name is the template name (e.g. "web-service").
@@ -28,8 +37,30 @@ type ExternalTemplateRepo struct {
 	Ref string `json:"ref" yaml:"ref"`
 	// Path within the repo where templates live.
 	Path string `json:"path" yaml:"path"`
+	// Provider identifies the Git host: github, gitlab, gitea, bitbucket,
+	// generic. Drives the Secret-key shape the UI-managed credentials flow
+	// writes (single "token" for github/gitlab/gitea; "username"+"password"
+	// for bitbucket/generic). Empty is treated as "generic".
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
 	// ExistingSecret is the name of a K8s Secret for auth (optional).
 	ExistingSecret string `json:"existingSecret,omitempty" yaml:"existingSecret,omitempty"`
+}
+
+// Validate returns an error if the repo definition is unusable.
+func (r *ExternalTemplateRepo) Validate() error {
+	if r.Name == "" {
+		return errors.New("external template repo: name is required")
+	}
+	if r.RepoURL == "" {
+		return errors.New("external template repo: repoURL is required")
+	}
+	switch r.Provider {
+	case "github", "gitlab", "gitea", "bitbucket", "generic", "":
+		// ok
+	default:
+		return fmt.Errorf("%w: %q", ErrInvalidProvider, r.Provider)
+	}
+	return nil
 }
 
 // TemplateRegistry holds the full set of registered template sources.
