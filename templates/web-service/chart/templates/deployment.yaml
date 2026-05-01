@@ -19,6 +19,7 @@ spec:
     metadata:
       labels:
         {{- include "web-service.selectorLabels" . | nindent 8 }}
+        {{- include "suparship-common.componentNameLabel" "web" | nindent 8 }}
     spec:
       {{- if .Values.serviceAccount.create }}
       serviceAccountName: {{ include "web-service.serviceAccountName" . }}

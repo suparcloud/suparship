@@ -117,6 +117,20 @@ exception). Selectors are immutable after creation, so anything that
 changes with renames (instance), version bumps (version), or chart
 upgrades (chart) MUST NOT appear in selectors.
 
+### Per-component label
+
+Every Pod, Deployment / StatefulSet / CronJob (and their owned
+resources) MUST carry `suparship.io/component: <component-name>`.
+Single-component charts get this for free via `componentLabels`;
+multi-component charts include it explicitly via the
+`suparship-common.componentNameLabel` helper, on **both** the
+Deployment metadata labels and the pod template labels. The pod-side
+copy is what `kubectl logs -l suparship.io/component=<name>` and the
+addons-health resource walker rely on.
+
+NOT in selectors (it stays in metadata only) so the label can change
+in the future without forcing a Deployment recreate.
+
 > **Documented exception — voiceai-agent.** Each component uses
 > `app: <component-name>` instead of `app.kubernetes.io/name`. This
 > matches the prior kustomize manifests so an in-place migration from

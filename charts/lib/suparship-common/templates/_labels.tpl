@@ -50,6 +50,7 @@ app.kubernetes.io/instance: {{ $root.Release.Name }}
 app.kubernetes.io/version: {{ $imgTag | quote }}
 app.kubernetes.io/managed-by: {{ $root.Release.Service }}
 helm.sh/chart: {{ include "suparship-common.chart" $root }}
+suparship.io/component: {{ $component }}
 {{- if $root.Values.app.env }}
 suparship.io/env: {{ $root.Values.app.env }}
 {{- end }}
@@ -73,6 +74,24 @@ Usage:
 {{- $root := .root -}}
 {{- $name := .name | default (include "suparship-common.fullname" $root) -}}
 app.kubernetes.io/name: {{ $name }}
+{{- end }}
+
+{{/*
+suparship-common.componentNameLabel
+
+Just the `suparship.io/component: <name>` line, for cases where the
+caller wants the per-component label without the rest of the standard
+set. Multi-component charts use this on Pod template labels and
+optionally on Deployment metadata labels (single-component charts get
+the label for free via componentLabels).
+
+Argument: a string (the component name).
+
+Usage:
+  {{- include "suparship-common.componentNameLabel" "livekit-agent" | nindent 8 }}
+*/}}
+{{- define "suparship-common.componentNameLabel" -}}
+suparship.io/component: {{ . }}
 {{- end }}
 
 {{/*
