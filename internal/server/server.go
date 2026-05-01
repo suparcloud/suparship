@@ -29,6 +29,7 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
+	"github.com/suparcloud/suparship/internal/tpl/credstore"
 	"github.com/suparcloud/suparship/internal/tpl/registrysync"
 )
 
@@ -362,6 +363,11 @@ type Config struct {
 	// the registry's read endpoints still work; the /sync POST routes
 	// return 503.
 	RegistrySyncEngine *registrysync.Engine
+	// TemplateCredStore seals UI-submitted external-template-repo
+	// credentials into the management cluster as SealedSecret CRs. Nil
+	// disables the /credentials and /test-connection endpoints (operators
+	// must hand-create Secrets and reference them via existingSecret).
+	TemplateCredStore *credstore.Store
 }
 
 // Server is the suparship HTTP API server.
@@ -569,10 +575,12 @@ func New(cfg Config) *Server {
 
 	if cfg.TemplateRegistryStore != nil && ah != nil {
 		trh := &templateRegistryHandler{
-			store:  cfg.TemplateRegistryStore,
-			auth:   ah,
-			engine: cfg.RegistrySyncEngine,
-			logger: cfg.Logger,
+			store:      cfg.TemplateRegistryStore,
+			auth:       ah,
+			engine:     cfg.RegistrySyncEngine,
+			credStore:  cfg.TemplateCredStore,
+			kubeClient: cfg.KubeClient,
+			logger:     cfg.Logger,
 		}
 		// When the org provider is wired we can require org_admin on the
 		// write/sync routes; without it we fall back to plain auth so test

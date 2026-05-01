@@ -34,6 +34,7 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
+	"github.com/suparcloud/suparship/internal/tpl/credstore"
 	"github.com/suparcloud/suparship/internal/tpl/registrysync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -564,6 +565,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		GitOpsActivator:         gitOpsActivator,
 		SealedTokenPublisher:    sealPublisherHolder,
 		TemplateRegistryStore:   templateRegistryStore,
+		TemplateCredStore:       templateCredStore(kubeClient, dynClient, logger),
 		RegistryStore:           registryStore,
 	})
 
@@ -1401,6 +1403,21 @@ func registrySyncEngine(client kubernetes.Interface, logger *slog.Logger) *regis
 		Client:     client,
 		Logger:     logger,
 		CloneDepth: 1,
+	}
+}
+
+// templateCredStore wires the SealedSecret-backed credentials writer for
+// UI-managed external-template-repo credentials. Returns nil in fake/
+// local-dev mode (no kube clients) so the credentials endpoints respond
+// 503 rather than panicking on a nil client.
+func templateCredStore(client kubernetes.Interface, dyn dynamic.Interface, logger *slog.Logger) *credstore.Store {
+	if client == nil || dyn == nil {
+		return nil
+	}
+	return &credstore.Store{
+		Client:    client,
+		DynClient: dyn,
+		Logger:    logger,
 	}
 }
 
