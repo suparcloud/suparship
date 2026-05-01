@@ -137,6 +137,12 @@ type CreateRequest struct {
 	// entirely and uses these specs directly. Intended for legacy callers that
 	// supply fully-specified component lists.
 	ExplicitComponents []domain.ComponentSpec
+	// Addons lists managed-dependency claims (databases, caches, queues).
+	// Validated at create time via domain.ValidateAddons (DNS-label name,
+	// known type, no duplicates within an app). The publisher resolves
+	// each claim against the org/env AddonProfile catalog at publish time;
+	// claims without a configured profile are logged + skipped, not blocked.
+	Addons []domain.AddonSpec
 	// NamespaceScope controls whether the app deploys into a dedicated
 	// namespace ("app", default) or the shared project namespace ("project").
 	NamespaceScope domain.NamespaceScope
@@ -182,6 +188,9 @@ func Create(req CreateRequest) (*CreateResult, error) {
 	if err := project.ValidateAppInputs(req.Values, secretRefsForValidation, req.Template); err != nil {
 		return nil, fmt.Errorf("invalid template inputs: %w", err)
 	}
+	if err := domain.ValidateAddons(req.Addons); err != nil {
+		return nil, fmt.Errorf("invalid addon claims: %w", err)
+	}
 
 	comps := req.ExplicitComponents
 	if len(comps) == 0 {
@@ -206,6 +215,7 @@ func Create(req CreateRequest) (*CreateResult, error) {
 	if req.NamespacePattern != "" {
 		app.Spec.NamespacePattern = req.NamespacePattern
 	}
+	app.Spec.Addons = req.Addons
 
 	// Generate Helm values for each default environment.
 	hvMap := make(map[string]helmvalues.HelmValues, len(envs))

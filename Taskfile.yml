@@ -204,6 +204,48 @@ tasks:
     cmds:
       - go test -race ./...
 
+  # ── Charts ─────────────────────────────────────────────────────────────
+  # Authoring contract lives in docs/chart-conventions.md. The library
+  # chart at charts/lib/suparship-common/ is vendored into each template
+  # chart; re-run charts:vendor whenever the library changes.
+
+  charts:schema:
+    desc: "Regenerate values.schema.json for every template chart from internal/helmvalues"
+    cmds:
+      - go run ./cmd/gen-values-schema
+
+  charts:vendor:
+    desc: "Re-run helm dep update for each templates/*/chart so vendored deps stay in sync. Idempotently registers third-party Helm repos used by addon wrappers."
+    cmds:
+      - |
+        set -e
+        # Idempotent repo bootstrap. Each `helm repo add` is a no-op
+        # if the repo with the same URL is already registered.
+        helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true
+        helm repo update bitnami >/dev/null 2>&1 || true
+
+        for c in templates/*/chart; do
+          if grep -q "dependencies:" "$c/Chart.yaml" 2>/dev/null; then
+            echo "==> $c"
+            helm dep update "$c"
+          fi
+        done
+
+  charts:lint:
+    desc: "helm lint the library chart and every template chart"
+    cmds:
+      - helm lint charts/lib/suparship-common
+      - |
+        set -e
+        for c in templates/*/chart; do
+          helm lint "$c"
+        done
+
+  charts:verify:
+    desc: "CI guard: schemas in sync, vendored libs in sync, helm lint clean. Use in CI."
+    cmds:
+      - hack/charts-verify.sh
+
   reset:
     desc: "Clean local build artifacts (bin/, tmp/)"
     cmds:

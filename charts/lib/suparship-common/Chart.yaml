@@ -1,0 +1,19 @@
+apiVersion: v2
+name: suparship-common
+description: >-
+  Shared Helm template helpers for suparShip app charts. Provides
+  fullname, label, selector, resource-preset, envFrom-gating, and
+  reloader-annotation helpers so individual templates do not duplicate
+  ~50 lines of identical boilerplate per chart.
+type: library
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/suparcloud/suparship
+sources:
+  - https://github.com/suparcloud/suparship
+keywords:
+  - library
+  - helpers
+maintainers:
+  - name: suparCloud
+    url: https://github.com/suparcloud

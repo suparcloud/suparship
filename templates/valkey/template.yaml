@@ -1,0 +1,68 @@
+# suparShip Template: valkey
+#
+# Addon wrapper for the redis connection contract. K8s-local provider
+# backed by the Bitnami valkey upstream chart (vendored as a subchart).
+# Renders a StatefulSet + Service for a single-primary valkey instance
+# plus the contract Secret consumer apps pick up via the envFrom
+# hierarchy.
+#
+# Engine: Helm
+# Chart:  ./chart
+
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata:
+  name: valkey
+  version: "1.0.0"
+spec:
+  title: Valkey (redis)
+  description: >-
+    Provisions a Valkey instance and publishes a connection Secret
+    matching the suparship `redis` contract (REDIS_URL, REDIS_HOST,
+    REDIS_PORT, REDIS_PASSWORD). Bind to apps via AppSpec.Addons; the
+    consumer's components pick up the connection automatically via
+    suparship.envFromSecrets[].
+  category: addon
+  engine:
+    type: helm
+    chart: ./chart
+
+  # Wrapper templates declare addons (not components). The single
+  # entry here is the addon shape this wrapper materialises.
+  addons:
+    - name: cache
+      type: redis
+      defaultEnabled: true
+      # Contract Secret is the suparship-side guarantee chart-validate
+      # asserts. The remaining resources come from the Bitnami
+      # subchart and are listed as optional so chart-validate doesn't
+      # over-specify the wrapper's surface.
+      produces: [Secret]
+      optionallyProduces: [StatefulSet, Service, ConfigMap, ServiceAccount, PodDisruptionBudget]
+
+  inputs:
+    - name: size
+      title: Size
+      type: enum
+      options:
+        - small
+        - medium
+        - large
+      default: small
+      description: >-
+        Resource preset for the underlying valkey instance. Mapped to
+        upstream chart values when the Bitnami valkey subchart is
+        wired (step 3.5).
+
+    - name: persistence
+      title: Persistent Volume
+      type: boolean
+      default: false
+      description: >-
+        Enable a PVC for the valkey primary so data survives pod
+        restarts. Off by default for dev / preview environments.
+
+  mappings:
+    addon.size: "{{ .inputs.size }}"
+    addon.persistence: "{{ .inputs.persistence }}"
+    valkey.primary.persistence.enabled: "{{ .inputs.persistence }}"

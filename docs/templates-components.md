@@ -74,11 +74,71 @@ spec:
 | `required` | bool | `false` | When true, users cannot disable this component |
 | `defaultEnabled` | bool | `true` | Whether the component is on by default |
 | `previewEnabled` | bool | `false` | Whether this component deploys in preview environments |
-| `exposed` | bool | `false` | Whether the component receives an ingress endpoint |
+| `exposed` | bool | `false` | Whether the component receives an ingress endpoint *by default* (UI initial state) |
+| `produces` | `[]string` | `[]` | Resource Kinds the chart MUST render for this component (asserted by chart-validate) |
+| `optionallyProduces` | `[]string` | `[]` | Kinds the chart MAY render based on values (informational) |
+| `capabilities` | `ComponentCapabilities` | per type — see below | Which UI input groups apply to this component |
 
 `defaultEnabled` uses a pointer in Go (`*bool`) so an omitted YAML field is
 treated as `true` by `IsDefaultEnabled()`. Write `defaultEnabled: false`
 explicitly to opt a component out by default.
+
+### Capabilities
+
+`capabilities` declares which UI input groups apply to a component, replacing
+the prior frontend hardcoding ("every web has autoscaling, every cron has
+schedule"). Authors override only the fields that differ from the type-based
+defaults; the API resolves and serves the fully filled-in shape (no nils) at
+`GET /api/v1/templates/{name}` under `components[].capabilities`.
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `expose` | `*bool` | Show the externally-expose toggle |
+| `routing` | `"" \| "none" \| "ingress" \| "gateway"` | Which routing fabric to surface inputs for |
+| `autoscaling` | `"" \| "none" \| "hpa" \| "keda"` | Which scaling backend (drives input shape) |
+| `pdb` | `*bool` | Show PodDisruptionBudget inputs (advanced) |
+| `resources` | `*bool` | Show the small/medium/large size dropdown |
+| `replicas` | `*bool` | Show the replicas slider |
+| `schedule` | `*bool` | Show the cron schedule input |
+
+Type-based defaults (used when a field is omitted):
+
+| Type | expose | routing | autoscaling | pdb | resources | replicas | schedule |
+|------|--------|---------|-------------|-----|-----------|----------|----------|
+| `web` | true | ingress | keda | true | true | true | false |
+| `worker` | false | none | keda | true | true | true | false |
+| `cron` | false | none | none | false | true | false | true |
+
+Pointer-typed bool fields distinguish "not declared" (use type default) from
+"explicitly false" (override). String fields use the empty string for
+"not declared".
+
+Examples:
+
+```yaml
+# Web with HTTPRoute instead of Ingress
+components:
+  - name: web
+    type: web
+    capabilities:
+      routing: gateway      # surfaces parentRef inputs
+
+# Stateful worker with hardcoded resources
+components:
+  - name: livekit-agent
+    type: worker
+    capabilities:
+      resources: false      # chart owns sizing; suppress dropdown
+
+# Demo template — strip the form down
+components:
+  - name: web
+    type: web
+    capabilities:
+      autoscaling: none
+      pdb: false
+      replicas: false
+```
 
 ---
 

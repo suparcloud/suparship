@@ -101,6 +101,12 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/org/routing-profiles/{name}", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgRoutingProfile)))
 	mux.HandleFunc("DELETE /api/v1/org/routing-profiles/{name}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteOrgRoutingProfile)))
 
+	// Org-level addon profiles (which wrapper chart + provider serves
+	// each addon type). Reads for all; writes require org_admin.
+	mux.HandleFunc("GET /api/v1/org/addon-profiles", rh.auth.requireAuth(rh.handleListOrgAddonProfiles))
+	mux.HandleFunc("PUT /api/v1/org/addon-profiles/{type}", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgAddonProfile)))
+	mux.HandleFunc("DELETE /api/v1/org/addon-profiles/{type}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteOrgAddonProfile)))
+
 	// Project-scoped endpoints — role-based access.
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(rh.handleGetProject))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))

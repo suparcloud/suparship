@@ -31,6 +31,12 @@ spec:
       defaultEnabled: true
       previewEnabled: true
       exposed: true
+      produces: [Deployment, Service]
+      optionallyProduces: [Ingress, ScaledObject]
+      # All web defaults apply — expose=true, routing=ingress,
+      # autoscaling=keda, pdb=true, resources=true, replicas=true.
+      # No overrides needed; declared here for documentation only.
+      capabilities: {}
 
   inputs:
     - name: service_name

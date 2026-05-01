@@ -242,6 +242,15 @@ type AppSpec struct {
 	// individual components are surfaced in advanced views. Hidden from top-level
 	// navigation. See docs/app-model.md — "Component — internal runtime unit".
 	Components []ComponentSpec `json:"components,omitempty" yaml:"components,omitempty"`
+	// Addons declares managed dependencies (databases, caches, queues)
+	// the app consumes. Each claim is bound at publish time to an
+	// AddonProfile from the org/env catalog; the resolved provider
+	// renders a wrapper chart that produces a connection Secret
+	// matching the type's contract. Connection details flow into
+	// every component via the existing suparship.envFromSecrets[]
+	// hierarchy. See internal/addons/contracts and
+	// docs/templates-components.md.
+	Addons []AddonSpec `json:"addons,omitempty" yaml:"addons,omitempty"`
 	// EnvironmentDefaults holds per-environment overrides keyed by environment
 	// name (e.g. "staging", "prod"). Only set fields override app-level values.
 	EnvironmentDefaults map[string]EnvironmentOverride `json:"environmentDefaults,omitempty" yaml:"environmentDefaults,omitempty"`

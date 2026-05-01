@@ -1,0 +1,9 @@
+dependencies:
+- name: suparship-common
+  repository: file://../../../charts/lib/suparship-common
+  version: 0.1.0
+- name: valkey
+  repository: https://charts.bitnami.com/bitnami
+  version: 5.5.1
+digest: sha256:6187671239f4175551b378b85e0adc51c5b10906951dc126376b5fca5766df62
+generated: "2026-05-01T21:44:15.002901+05:30"

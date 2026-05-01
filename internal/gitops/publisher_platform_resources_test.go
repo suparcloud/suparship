@@ -161,7 +161,7 @@ func TestPublishAppFiles_CustomNamingPatterns(t *testing.T) {
 	p.SetOrgConfig("myorg", secrets.ResourceNaming{
 		AppResource:  "{app}-env-secrets",
 		AppConfigMap: "{app}-env-config",
-	}, nil, branding.Config{}, nil)
+	}, nil, branding.Config{}, nil, nil)
 
 	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
 		t.Fatalf("PublishAppFilesForTest: %v", err)

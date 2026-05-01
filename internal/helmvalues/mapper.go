@@ -1,6 +1,7 @@
 package helmvalues
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -79,7 +80,7 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 // that want strict validation should use MapToHelmValuesForEnv with real
 // profiles after running domain.ValidateExposeModes.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
-	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "", "", nil, nil)
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "", "", nil, nil, nil, nil)
 }
 
 // MapToHelmValuesForEnv is the canonical mapper. The naming and orgName
@@ -114,6 +115,7 @@ func MapToHelmValuesForEnv(
 	orgName string,
 	backend secrets.BackendType,
 	orgProfiles, envProfiles domain.RoutingProfiles,
+	orgAddonProfiles, envAddonProfiles domain.AddonProfiles,
 ) HelmValues {
 	if baseDomain == "" {
 		baseDomain = "localhost"
@@ -150,6 +152,14 @@ func MapToHelmValuesForEnv(
 		backend,
 	)
 
+	// Addon connection Secrets append to the consumer's envFrom hierarchy
+	// after the standard scopes. Order is alphabetical by addon name so
+	// the merge result is deterministic; rely on the chart-side
+	// "later wins" envFrom semantics so addon vars override the
+	// generic env hierarchy when they collide.
+	addonSecs, claims := buildAddonBindings(app, envAddonProfiles, orgAddonProfiles)
+	secs = append(secs, addonSecs...)
+
 	return HelmValues{
 		App: AppContext{
 			Name: app.Name,
@@ -168,7 +178,60 @@ func MapToHelmValuesForEnv(
 			EnvFromConfigMaps: cms,
 			EnvFromSecrets:    secs,
 		},
+		ServiceClaims: claims,
 	}
+}
+
+// addonSecretName returns the deterministic name of the connection
+// Secret an addon wrapper produces and the consumer app envFroms. The
+// pattern keeps the addon's contributing scope visible in the Secret
+// name itself ("foo-addon-cache-conn") so cluster operators can grep
+// for it without having to know the binding mechanism.
+func addonSecretName(appName, addonName string) string {
+	return fmt.Sprintf("%s-addon-%s-conn", appName, addonName)
+}
+
+// buildAddonBindings resolves each addon claim against the org/env
+// AddonProfiles catalog and returns:
+//
+//   - the list of connection-Secret names to append to the consumer's
+//     suparship.envFromSecrets[] (sorted by addon name).
+//   - the per-claim ServiceClaimValues, exposed in HelmValues for
+//     observability + future per-component scoping. Implicit fan-out
+//     today: every addon binds to every component, so Component is
+//     left empty in each entry.
+//
+// Claims whose type cannot be resolved are skipped silently so an
+// app save doesn't fail at render time when the org catalog hasn't
+// caught up with a new addon type — domain-level Validate enforces
+// the invariant earlier in the lifecycle.
+func buildAddonBindings(app *domain.App, envAddons, orgAddons domain.AddonProfiles) ([]string, []ServiceClaimValues) {
+	addons := app.Spec.Addons
+	if len(addons) == 0 {
+		return nil, nil
+	}
+	// Sort by name for determinism.
+	sorted := make([]domain.AddonSpec, len(addons))
+	copy(sorted, addons)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	secs := make([]string, 0, len(sorted))
+	claims := make([]ServiceClaimValues, 0, len(sorted))
+	for _, a := range sorted {
+		if _, err := domain.ResolveAddonProfile(orgAddons, envAddons, a.Type); err != nil {
+			// Unresolvable claim — skip rather than fail. App-level
+			// Validate is the gate; the mapper is best-effort.
+			continue
+		}
+		name := addonSecretName(app.Name, a.Name)
+		secs = append(secs, name)
+		claims = append(claims, ServiceClaimValues{
+			Addon:      a.Name,
+			SecretName: name,
+			Type:       a.Type,
+		})
+	}
+	return secs, claims
 }
 
 // envFromLists returns the names the chart should envFrom for this app-env.
@@ -469,4 +532,70 @@ func stripScheme(url string) string {
 		return after
 	}
 	return url
+}
+
+// MapAddonToHelmValuesForEnv returns the values shape passed to an
+// addon wrapper chart's Helm release for one (app, env, addon) tuple.
+//
+// Publisher calls this once per addon claim per env and writes the
+// result under <app>/<env>/addons/<name>/values.yaml; the existing
+// ApplicationSet generator picks it up as a parallel Application.
+//
+// Defaults from AddonProfile are merged with per-app overrides
+// (AppSpec.Addons[].Values wins on conflict). Returns an error when
+// the addon's type cannot be resolved through the org/env profile
+// catalog.
+func MapAddonToHelmValuesForEnv(
+	app *domain.App,
+	addon domain.AddonSpec,
+	envName string,
+	envType domain.AppEnvironmentType,
+	cluster string,
+	naming secrets.ResourceNaming,
+	orgName string,
+	backend secrets.BackendType,
+	orgAddons, envAddons domain.AddonProfiles,
+) (AddonInstanceValues, error) {
+	if orgName == "" {
+		orgName = "default"
+	}
+	profile, err := domain.ResolveAddonProfile(orgAddons, envAddons, addon.Type)
+	if err != nil {
+		return AddonInstanceValues{}, fmt.Errorf("addon %q: %w", addon.Name, err)
+	}
+
+	// envFrom hierarchy is shared with the consumer app — the wrapper
+	// can opt into it but isn't required to.
+	np := secrets.NamingParams{
+		Org:     orgName,
+		Env:     envName,
+		Project: app.ProjectName,
+		App:     app.Name,
+		Cluster: cluster,
+	}
+	cms, secs := envFromLists(
+		app.ProjectName, app.Name, envName, cluster,
+		naming.RenderAppResource(np),
+		naming.RenderAppConfigMap(np),
+		backend,
+	)
+
+	return AddonInstanceValues{
+		App: AppContext{
+			Name: app.Name,
+			Env:  envName,
+		},
+		Addon: AddonValues{
+			Enabled:    true,
+			Type:       addon.Type,
+			Provider:   profile.Provider,
+			Size:       addon.Size,
+			Version:    addon.Version,
+			SecretName: addonSecretName(app.Name, addon.Name),
+		},
+		Suparship: SuparshipValues{
+			EnvFromConfigMaps: cms,
+			EnvFromSecrets:    secs,
+		},
+	}, nil
 }

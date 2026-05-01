@@ -560,3 +560,127 @@ spec:
 		t.Errorf("minimal template without components should parse: %v", err)
 	}
 }
+
+// ── Capabilities ──────────────────────────────────────────────────────────────
+
+func TestResolvedCapabilities_WebDefaults(t *testing.T) {
+	c := TemplateComponent{Name: "web", Type: TemplateComponentWeb}
+	got := c.ResolvedCapabilities()
+	want := ResolvedCapabilities{
+		Expose:      true,
+		Routing:     "ingress",
+		Autoscaling: "keda",
+		PDB:         true,
+		Resources:   true,
+		Replicas:    true,
+	}
+	if got != want {
+		t.Errorf("web defaults = %+v, want %+v", got, want)
+	}
+}
+
+func TestResolvedCapabilities_WorkerDefaults(t *testing.T) {
+	c := TemplateComponent{Name: "worker", Type: TemplateComponentWorker}
+	got := c.ResolvedCapabilities()
+	if got.Expose {
+		t.Errorf("worker.Expose = true, want false")
+	}
+	if got.Routing != "none" {
+		t.Errorf("worker.Routing = %q, want none", got.Routing)
+	}
+	if got.Autoscaling != "keda" {
+		t.Errorf("worker.Autoscaling = %q, want keda", got.Autoscaling)
+	}
+	if got.Schedule {
+		t.Errorf("worker.Schedule = true, want false")
+	}
+}
+
+func TestResolvedCapabilities_CronDefaults(t *testing.T) {
+	c := TemplateComponent{Name: "nightly", Type: TemplateComponentCron}
+	got := c.ResolvedCapabilities()
+	if !got.Schedule {
+		t.Error("cron.Schedule = false, want true")
+	}
+	if got.Replicas {
+		t.Error("cron.Replicas = true, want false")
+	}
+	if got.Autoscaling != "" {
+		t.Errorf("cron.Autoscaling = %q, want empty (no scaling for cron)", got.Autoscaling)
+	}
+}
+
+func TestResolvedCapabilities_ExplicitOverridesWin(t *testing.T) {
+	off := false
+	on := true
+	c := TemplateComponent{
+		Name: "stateful-worker",
+		Type: TemplateComponentWorker,
+		Capabilities: ComponentCapabilities{
+			PDB:         &off,        // override worker default
+			Resources:   &off,        // chart bakes its own resources
+			Autoscaling: "none",      // no scaling for this stateful workload
+			Expose:      &on,         // expose a metrics port
+			Routing:     "ingress",
+		},
+	}
+	got := c.ResolvedCapabilities()
+	if got.PDB {
+		t.Error("explicit pdb=false should override worker default of true")
+	}
+	if got.Resources {
+		t.Error("explicit resources=false should override worker default of true")
+	}
+	if got.Autoscaling != "none" {
+		t.Errorf("explicit autoscaling=none should win, got %q", got.Autoscaling)
+	}
+	if !got.Expose {
+		t.Error("explicit expose=true should override worker default of false")
+	}
+	if got.Routing != "ingress" {
+		t.Errorf("explicit routing=ingress should win, got %q", got.Routing)
+	}
+}
+
+func TestParseTemplate_CapabilitiesYAML(t *testing.T) {
+	yaml := `
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata:
+  name: parse-caps
+  version: "0.1.0"
+spec:
+  title: Parse Caps
+  category: misc
+  engine:
+    type: helm
+  components:
+    - name: web
+      type: web
+      capabilities:
+        expose: false
+        autoscaling: hpa
+        pdb: false
+`
+	tmpl, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := len(tmpl.Spec.Components); got != 1 {
+		t.Fatalf("components count = %d, want 1", got)
+	}
+	c := tmpl.Spec.Components[0]
+	if c.Capabilities.Expose == nil || *c.Capabilities.Expose != false {
+		t.Errorf("Capabilities.Expose = %v, want explicit false", c.Capabilities.Expose)
+	}
+	if c.Capabilities.Autoscaling != "hpa" {
+		t.Errorf("Capabilities.Autoscaling = %q, want hpa", c.Capabilities.Autoscaling)
+	}
+	resolved := c.ResolvedCapabilities()
+	if resolved.Expose {
+		t.Error("ResolvedCapabilities should honor explicit expose=false against web default")
+	}
+	if resolved.Autoscaling != "hpa" {
+		t.Errorf("ResolvedCapabilities.Autoscaling = %q, want hpa", resolved.Autoscaling)
+	}
+}

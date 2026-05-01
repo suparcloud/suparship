@@ -178,7 +178,10 @@ func TestRenderHelmValuesWithDefaults(t *testing.T) {
 		Values:   map[string]any{"service_name": "my-api"},
 	}
 
-	result := RenderHelmValues(svc, testTemplate())
+	result, err := RenderHelmValues(svc, testTemplate())
+	if err != nil {
+		t.Fatalf("RenderHelmValues: %v", err)
+	}
 
 	if result["fullnameOverride"] != "my-api" {
 		t.Fatalf("expected fullnameOverride %q, got %v", "my-api", result["fullnameOverride"])
@@ -198,7 +201,10 @@ func TestRenderHelmValuesOverridesDefaults(t *testing.T) {
 		Values:   map[string]any{"service_name": "api", "size": "large", "replicas": 5},
 	}
 
-	result := RenderHelmValues(svc, testTemplate())
+	result, err := RenderHelmValues(svc, testTemplate())
+	if err != nil {
+		t.Fatalf("RenderHelmValues: %v", err)
+	}
 
 	if result["size"] != "large" {
 		t.Fatalf("expected size %q, got %v", "large", result["size"])
@@ -215,7 +221,10 @@ func TestRenderHelmValuesNestedKeys(t *testing.T) {
 		Values:   map[string]any{"service_name": "api", "ingress_enabled": true},
 	}
 
-	result := RenderHelmValues(svc, testTemplate())
+	result, err := RenderHelmValues(svc, testTemplate())
+	if err != nil {
+		t.Fatalf("RenderHelmValues: %v", err)
+	}
 
 	ingress, ok := result["ingress"].(map[string]any)
 	if !ok {
@@ -223,6 +232,99 @@ func TestRenderHelmValuesNestedKeys(t *testing.T) {
 	}
 	if ingress["enabled"] != true {
 		t.Fatalf("expected ingress.enabled true, got %v", ingress["enabled"])
+	}
+}
+
+// --- Mapping engine — extended Go-template features ---
+
+func TestRenderHelmValues_DefaultFn(t *testing.T) {
+	tmpl := testTemplate()
+	tmpl.Spec.Mappings["resolvedSize"] = `{{ default "small" .inputs.size }}`
+	tmpl.Spec.Mappings["fallbackEnv"] = `{{ default "prod" .inputs.unset_input }}`
+
+	svc := &Service{Name: "x", Values: map[string]any{"service_name": "x"}}
+	got, err := RenderHelmValues(svc, tmpl)
+	if err != nil {
+		t.Fatalf("RenderHelmValues: %v", err)
+	}
+	if got["resolvedSize"] != "small" {
+		t.Errorf("resolvedSize = %v, want small", got["resolvedSize"])
+	}
+	if got["fallbackEnv"] != "prod" {
+		t.Errorf("fallbackEnv = %v, want prod (default kicks in for unknown input)", got["fallbackEnv"])
+	}
+}
+
+func TestRenderHelmValues_UpperLower(t *testing.T) {
+	tmpl := testTemplate()
+	tmpl.Spec.Mappings["sizeUpper"] = `{{ .inputs.size | upper }}`
+	tmpl.Spec.Mappings["sizeLower"] = `{{ "MEDIUM" | lower }}`
+
+	svc := &Service{Name: "x", Values: map[string]any{"service_name": "x", "size": "large"}}
+	got, err := RenderHelmValues(svc, tmpl)
+	if err != nil {
+		t.Fatalf("RenderHelmValues: %v", err)
+	}
+	if got["sizeUpper"] != "LARGE" {
+		t.Errorf("sizeUpper = %v, want LARGE", got["sizeUpper"])
+	}
+	if got["sizeLower"] != "medium" {
+		t.Errorf("sizeLower = %v, want medium", got["sizeLower"])
+	}
+}
+
+func TestRenderHelmValues_Conditional(t *testing.T) {
+	tmpl := testTemplate()
+	// Add an enum input so user-provided values pass validation, then
+	// branch on it in the mapping.
+	tmpl.Spec.Inputs = append(tmpl.Spec.Inputs, tpl.Input{
+		Name: "agent_type", Type: tpl.InputTypeEnum,
+		Options: []string{"outbound", "inbound"}, Default: "outbound",
+	})
+	tmpl.Spec.Mappings["commandPath"] = `{{ if eq .inputs.agent_type "inbound" }}/bin/sip_inbound.py{{ else }}/bin/sip_outbound.py{{ end }}`
+
+	for _, tc := range []struct {
+		variant string
+		want    string
+	}{
+		{"outbound", "/bin/sip_outbound.py"},
+		{"inbound", "/bin/sip_inbound.py"},
+	} {
+		svc := &Service{Name: "x", Values: map[string]any{"service_name": "x", "agent_type": tc.variant}}
+		got, err := RenderHelmValues(svc, tmpl)
+		if err != nil {
+			t.Fatalf("variant=%s: %v", tc.variant, err)
+		}
+		if got["commandPath"] != tc.want {
+			t.Errorf("variant=%s: commandPath = %v, want %v", tc.variant, got["commandPath"], tc.want)
+		}
+	}
+}
+
+func TestRenderHelmValues_PreservesScalarTypes(t *testing.T) {
+	// Fast path: simple `{{ .inputs.replicas }}` returns the original int,
+	// not a string. This matters for charts that read `replicaCount: 2`.
+	svc := &Service{Name: "x", Values: map[string]any{"service_name": "x", "replicas": 5}}
+	got, err := RenderHelmValues(svc, testTemplate())
+	if err != nil {
+		t.Fatalf("RenderHelmValues: %v", err)
+	}
+	if got["replicaCount"] != 5 {
+		t.Errorf("replicaCount type/value = %T %v, want int 5", got["replicaCount"], got["replicaCount"])
+	}
+}
+
+func TestRenderHelmValues_BadExpressionReturnsError(t *testing.T) {
+	tmpl := testTemplate()
+	tmpl.Spec.Mappings["broken"] = `{{ this is | not valid template }}`
+
+	svc := &Service{Name: "x", Values: map[string]any{"service_name": "x"}}
+	_, err := RenderHelmValues(svc, tmpl)
+	if err == nil {
+		t.Fatal("expected error for invalid template expression, got nil")
+	}
+	if !strings.Contains(err.Error(), "broken") && !strings.Contains(err.Error(), "parse") {
+		t.Errorf("error %q should mention the broken mapping or parse failure", err.Error())
 	}
 }
 

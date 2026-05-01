@@ -300,6 +300,126 @@ Kargo CRs generated under `gitops-output/_infra/kargo/{app}/`:
 
 ---
 
+## Phase 7: Managed Addons UI
+
+Backend for managed addons (databases, caches, queues) is shipped: the
+addon catalog API (`/api/v1/org/addon-profiles`), per-env override,
+`AppSpec.Addons` in the app create/update endpoints, the valkey
+wrapper template with the Bitnami subchart, and the connection-contract
+validator. The system is fully usable end-to-end via curl.
+
+This phase delivers the UI surfaces that turn that into a self-service
+experience.
+
+### Org settings — Addons admin panel
+
+Mirror the existing Routing Profiles admin section. Operators
+configure which wrapper chart + provider serves each addon type.
+
+```
+┌─ Addon Profiles ─────────────────────────────────┐
+│  Type      Provider           Chart              │
+│  redis     bitnami-valkey     valkey      [⋯]    │
+│  postgres  cloudnative-pg     cnpg-cluster [⋯]   │
+│                                                  │
+│  + Add addon profile                             │
+└──────────────────────────────────────────────────┘
+```
+
+- Type dropdown sourced from the API's `availableTypes` (closed set
+  derived from registered connection contracts in
+  `internal/addons/contracts/`).
+- Per-environment override entries nested under each environment on
+  the existing Environments page.
+- Effort: 1–2 days.
+
+### App creation — Addons step
+
+In New App / Edit App, after Components, an Addons section. Devs see
+only the type they can claim — types the org hasn't configured don't
+appear.
+
+```
+┌─ Addons (optional) ──────────────────────────────┐
+│  cache    [redis ▼]    [small ▼]      [✕]       │
+│  primary  [postgres ▼] [medium ▼] v16 [✕]       │
+│                                                  │
+│  + Add addon                                     │
+└──────────────────────────────────────────────────┘
+```
+
+- Type dropdown filters to types with a configured AddonProfile.
+- Submitted via the existing `POST /api/v1/projects/{project}/apps`
+  body (`addons` field already accepted).
+- Effort: 1 day.
+
+### App detail — Addons display + live status
+
+Sibling section to Components on the app detail page. Shows the
+claim, the resolved provider per env, the connection-Secret name,
+and (eventually) live status from ArgoCD's resource-tree API.
+
+```
+┌─ Addons ─────────────────────────────────────────┐
+│  cache  · redis · provider=bitnami-valkey        │
+│         Secret: hello-addon-cache-conn           │
+│         Status: ● Healthy (via ArgoCD)           │
+│         Pod logs:  kubectl logs -l               │
+│                    suparship.io/addon=cache      │
+└──────────────────────────────────────────────────┘
+```
+
+- Basic version reads from `AppDetailDTO.addons` (already
+  surfaced).
+- Live-status piece pulls from ArgoCD's resource-tree API —
+  separate integration track that also benefits Components view.
+- Per-component / per-addon labels (`suparship.io/component`,
+  `suparship.io/addon-type`) already shipped as the selector hooks.
+- Effort: 1 day basic, ~3+ days with live status.
+
+### Capability-driven form generation (the unfinished tail of Phase 5/UI work)
+
+Today the UI hardcodes "web has autoscaling sliders, cron has
+schedule input" inside React. The capability data we ship at
+`GET /api/v1/templates/{name}` (`components[].capabilities`) lets
+the form render input groups dynamically:
+
+```ts
+template.components.forEach(c => {
+  if (c.capabilities.autoscaling !== "none") renderScalingInputs(c);
+  if (c.capabilities.pdb)                    renderPDBInputs(c);
+  if (c.capabilities.expose)                 renderExposeToggle(c);
+  // ...
+});
+```
+
+Adding a 6th template becomes "free" UI-wise — the form generates
+from metadata. Without it, every new template requires a hand-written
+form component.
+
+- Effort: 2–3 days.
+
+### Total scope and trade-off
+
+About a week of focused frontend work for parity with the API.
+**Without it**: addons are real, backend works, but app developers
+and operators use them via curl + YAML editing only — workable for
+internal tools, friction-tax once there are multiple users.
+
+**Sequencing note**: this is naturally a parallel track. The
+toolchain is React/TypeScript/Vite, not Go — a frontend-leaning
+contributor can move on this independently of the backend roadmap.
+Backend follow-ups for the addon arc (postgres-via-CloudNativePG
+provider as Phase 7's sibling) deliver more raw infrastructure
+value per hour for a Go-leaning contributor.
+
+**Deliverable:** an operator configures the org's addon catalog
+through the Settings page, an app developer claims `cache: redis`
+through the New App form, and the app detail page shows the running
+valkey instance with its connection details — no curl required.
+
+---
+
 ## Architecture Decisions
 
 - **ExternalSecrets backend**: suparShip writes secret values to the external vault (1Password, Vault, AWS-SM) via the `VaultWriter` interface. ESO pulls them into the cluster via generated `ExternalSecret` CRs. Git never holds secret values — only `ClusterSecretStore` and `ExternalSecret` manifests. See [docs/secrets.md](docs/secrets.md).
@@ -322,3 +442,4 @@ Kargo CRs generated under `gitops-output/_infra/kargo/{app}/`:
 | 4 | Release Trains | Multi-variant deployments |
 | 5 | Envoy Gateway Routing | Traffic splitting across trains |
 | 6 | Full Kargo Pipeline | Auto + manual promotion gates |
+| 7 | Managed Addons UI | Self-service addon claims (backend already shipped) |

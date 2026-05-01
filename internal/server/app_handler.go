@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
@@ -145,6 +146,19 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Translate addon claim DTOs → domain spec. domain.ValidateAddons
+	// runs inside Create; surface its error verbatim if it fires.
+	addons := make([]domain.AddonSpec, len(req.Addons))
+	for i, a := range req.Addons {
+		addons[i] = domain.AddonSpec{
+			Name:    a.Name,
+			Type:    a.Type,
+			Size:    a.Size,
+			Version: a.Version,
+			Values:  a.Values,
+		}
+	}
+
 	values := req.Values
 	if values == nil {
 		values = map[string]any{}
@@ -160,6 +174,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		SecretRefs:         domainSecretRefs,
 		ComponentToggles:   req.ComponentToggles,
 		ExplicitComponents: explicitComponents,
+		Addons:             addons,
 		NamespaceScope:     domain.NamespaceScope(req.NamespaceScope),
 		NamespacePattern:   req.NamespacePattern,
 	})
@@ -196,6 +211,29 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			if err := domain.ValidateExposeModes(result.App.Spec.Components, org.RoutingProfiles, e.RoutingProfiles); err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
 					Error: "environment " + e.Name + ": " + err.Error(),
+				})
+				return
+			}
+		}
+		// Each addon claim must resolve at the org level OR at every
+		// env's per-env override. A claim no env can resolve would
+		// produce an orphan publish (silent skip). Catch it at save.
+		for _, claim := range result.App.Spec.Addons {
+			if _, err := domain.ResolveAddonProfile(org.AddonProfiles, nil, claim.Type); err == nil {
+				continue
+			}
+			// Org has no profile for this type — every env must override.
+			missing := []string{}
+			for _, e := range org.Environments {
+				if _, err := domain.ResolveAddonProfile(org.AddonProfiles, e.AddonProfiles, claim.Type); err != nil {
+					missing = append(missing, e.Name)
+				}
+			}
+			if len(missing) > 0 {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+					Error: "addon " + claim.Name + " (type " + claim.Type +
+						"): no AddonProfile configured for envs " + strings.Join(missing, ", ") +
+						" — set one via PUT /api/v1/org/addon-profiles/" + claim.Type,
 				})
 				return
 			}
@@ -1163,8 +1201,23 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		Values:       values,
 		SecretRefs:   secretRefs,
 		Components:   componentDTOs(app.Spec.Components),
+		Addons:       addonDTOs(app.Spec.Addons),
 		Environments: envDTOs,
 	}
+}
+
+func addonDTOs(addons []domain.AddonSpec) []AddonClaimDTO {
+	dtos := make([]AddonClaimDTO, 0, len(addons))
+	for _, a := range addons {
+		dtos = append(dtos, AddonClaimDTO{
+			Name:    a.Name,
+			Type:    a.Type,
+			Size:    a.Size,
+			Version: a.Version,
+			Values:  a.Values,
+		})
+	}
+	return dtos
 }
 
 func appEnvToDTO(env *domain.AppEnvironment) AppEnvironmentSummaryDTO {

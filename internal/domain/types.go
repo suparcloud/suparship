@@ -238,3 +238,38 @@ type RoutingProfile struct {
 // individual entries by name (sparse — unspecified names inherit the org
 // value).
 type RoutingProfiles map[string]RoutingProfile
+
+// AddonProfile selects which provider implementation backs a given addon
+// type in an environment. App developers declare intent with
+// AppSpec.Addons (`type: redis`); ops decide here whether that's
+// served by valkey-operator (K8s-local) or Crossplane-ElastiCache
+// (managed AWS) per environment. The wrapper chart referenced by
+// `Chart` produces a Secret matching the type's connection contract
+// (see internal/addons/contracts) regardless of provider, so app code
+// remains environment-agnostic.
+type AddonProfile struct {
+	// Type matches AppSpec.Addons[].Type and a registered contract
+	// (e.g. "redis", "postgres"). Required; the same string is used
+	// as this profile's key in AddonProfiles.
+	Type string `json:"type" yaml:"type"`
+	// Provider identifies the implementation choice (e.g.
+	// "valkey-operator", "cloudnative-pg", "crossplane-rds"). Used
+	// only for human readability and observability; the actual
+	// rendering comes from Chart.
+	Provider string `json:"provider" yaml:"provider"`
+	// Chart is the suparship template name whose chart wraps the
+	// upstream/operator deployment for this provider (e.g. "valkey").
+	// Must be present in templates.builtIn or imported via
+	// chartimport.
+	Chart string `json:"chart" yaml:"chart"`
+	// Defaults are passed to the wrapper chart as additional Helm
+	// values. Per-app overrides in AppSpec.Addons[].Values win on
+	// key conflict. Secret values MUST NOT appear here; route them
+	// through the env-config hierarchy or chart-side SecretRefs.
+	Defaults map[string]any `json:"defaults,omitempty" yaml:"defaults,omitempty"`
+}
+
+// AddonProfiles maps addon types to their resolved provider/chart
+// configuration. Org-level profiles set the defaults; per-environment
+// overrides replace entries by type sparsely.
+type AddonProfiles map[string]AddonProfile

@@ -34,16 +34,32 @@ type TemplatesResponse struct {
 // TemplateDetailDTO is the full form returned by GET /api/v1/templates/{name},
 // including all inputs and presets needed for UI form generation.
 type TemplateDetailDTO struct {
-	Name           string           `json:"name"`
-	Version        string           `json:"version"`
-	Title          string           `json:"title"`
-	Description    string           `json:"description,omitempty"`
-	Category       string           `json:"category"`
-	Engine         string           `json:"engine"`
-	Inputs         []InputDTO       `json:"inputs"`
-	AdvancedInputs []InputDTO       `json:"advancedInputs"`
-	SecretInputs   []SecretInputDTO `json:"secretInputs"`
-	Presets        []PresetDTO      `json:"presets"`
+	Name           string                       `json:"name"`
+	Version        string                       `json:"version"`
+	Title          string                       `json:"title"`
+	Description    string                       `json:"description,omitempty"`
+	Category       string                       `json:"category"`
+	Engine         string                       `json:"engine"`
+	Components     []TemplateComponentDTO       `json:"components"`
+	Inputs         []InputDTO                   `json:"inputs"`
+	AdvancedInputs []InputDTO                   `json:"advancedInputs"`
+	SecretInputs   []SecretInputDTO             `json:"secretInputs"`
+	Presets        []PresetDTO                  `json:"presets"`
+}
+
+// TemplateComponentDTO mirrors tpl.TemplateComponent for the wire,
+// with capabilities resolved (no pointers, type-based defaults
+// already filled in) so the UI can drive form rendering directly.
+type TemplateComponentDTO struct {
+	Name               string                  `json:"name"`
+	Type               string                  `json:"type"`
+	Required           bool                    `json:"required"`
+	DefaultEnabled     bool                    `json:"defaultEnabled"`
+	PreviewEnabled     bool                    `json:"previewEnabled"`
+	Exposed            bool                    `json:"exposed"`
+	Produces           []string                `json:"produces,omitempty"`
+	OptionallyProduces []string                `json:"optionallyProduces,omitempty"`
+	Capabilities       tpl.ResolvedCapabilities `json:"capabilities"`
 }
 
 // InputDTO represents a template input for form generation.
@@ -177,11 +193,33 @@ func templateToDetail(t *tpl.Template) TemplateDetailDTO {
 		Description:    t.Spec.Description,
 		Category:       t.Spec.Category,
 		Engine:         t.Spec.Engine.Type,
+		Components:     componentsToTemplateDTO(t.Spec.Components),
 		Inputs:         inputsToDTO(t.Spec.Inputs),
 		AdvancedInputs: inputsToDTO(t.Spec.AdvancedInputs),
 		SecretInputs:   secretInputsToDTO(t.Spec.SecretInputs),
 		Presets:        presetsToDTO(t.Spec.Presets),
 	}
+}
+
+func componentsToTemplateDTO(components []tpl.TemplateComponent) []TemplateComponentDTO {
+	if len(components) == 0 {
+		return []TemplateComponentDTO{}
+	}
+	out := make([]TemplateComponentDTO, len(components))
+	for i, c := range components {
+		out[i] = TemplateComponentDTO{
+			Name:               c.Name,
+			Type:               string(c.Type),
+			Required:           c.Required,
+			DefaultEnabled:     c.IsDefaultEnabled(),
+			PreviewEnabled:     c.PreviewEnabled,
+			Exposed:            c.Exposed,
+			Produces:           c.Produces,
+			OptionallyProduces: c.OptionallyProduces,
+			Capabilities:       c.ResolvedCapabilities(),
+		}
+	}
+	return out
 }
 
 func inputsToDTO(inputs []tpl.Input) []InputDTO {

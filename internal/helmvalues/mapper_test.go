@@ -455,7 +455,7 @@ func TestResolveIngress_NeverAppliedToWorker(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", noNaming(), "", "", org, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", noNaming(), "", "", org, nil, nil, nil)
 
 	if hv.Components["worker"].Ingress != nil {
 		t.Errorf("worker should not have Ingress, got %+v", hv.Components["worker"].Ingress)
@@ -480,7 +480,7 @@ func TestResolveIngress_FromOrgProfile_NoTLS(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", noNaming(), "", "", org, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", noNaming(), "", "", org, nil, nil, nil)
 
 	got := hv.Components["web"].Ingress
 	if got == nil {
@@ -501,7 +501,7 @@ func TestResolveIngress_FromOrgProfile_WithTLS(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
 	}
-	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", "", noNaming(), "", "", org, nil)
+	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", "", noNaming(), "", "", org, nil, nil, nil)
 
 	got := hv.Components["web"].Ingress
 	if got == nil {
@@ -522,7 +522,7 @@ func TestResolveIngress_EnvProfileOverridesOrg(t *testing.T) {
 	env := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx-staging", ClusterIssuer: "letsencrypt-staging"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "staging.acme.com", "", "", noNaming(), "", "", org, env)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "staging.acme.com", "", "", noNaming(), "", "", org, env, nil, nil)
 
 	got := hv.Components["web"].Ingress
 	if got == nil {
@@ -543,7 +543,7 @@ func TestResolveIngress_UnknownModeYieldsNoIngress(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", noNaming(), "", "", org, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", noNaming(), "", "", org, nil, nil, nil)
 
 	if hv.Components["web"].Ingress != nil {
 		t.Errorf("unknown mode should yield nil Ingress, got %+v", hv.Components["web"].Ingress)
