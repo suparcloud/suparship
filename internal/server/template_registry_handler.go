@@ -99,13 +99,68 @@ func (h *templateRegistryHandler) handleUpdateRegistry(w http.ResponseWriter, r 
 		reg.Sources = []tpl.TemplateSource{}
 	}
 
+	// Identify UI-managed credentials about to be orphaned by this update —
+	// sources that were present and pointing at our deterministic secret
+	// name, and that are not in the new External[] list. Hand-wired
+	// existingSecret values are left alone (operator may share them
+	// across sources, or manage them via ESO/SealedSecret-by-hand).
+	orphans := orphanedManagedCreds(h.previousExternal(r.Context()), reg.External)
+
 	if err := h.store.Save(r.Context(), &reg); err != nil {
 		h.logger.Error("save template registry", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save template registry"})
 		return
 	}
 
+	// Sweep orphans after the save so a deletion failure can't leave the
+	// registry pointing at a Secret that no longer exists.
+	if h.credStore != nil {
+		for _, name := range orphans {
+			if err := h.credStore.Delete(r.Context(), name); err != nil {
+				h.logger.Warn("orphan cleanup: delete sealed credentials",
+					"source", name, "error", err)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, templateRegistryResponse{Configured: true, Registry: &reg})
+}
+
+// previousExternal returns the registry's current External[] for diffing
+// against an incoming update. Returns nil when the registry doesn't yet
+// exist (first save) or read fails — both safely degrade to "no orphans
+// to clean up", which is the right outcome.
+func (h *templateRegistryHandler) previousExternal(ctx context.Context) []tpl.ExternalTemplateRepo {
+	prev, err := h.store.Get(ctx)
+	if err != nil || prev == nil {
+		return nil
+	}
+	return prev.External
+}
+
+// orphanedManagedCreds returns the names of sources that disappear from
+// before→after AND were UI-managed (existingSecret matches the
+// deterministic credstore.SecretNameFor name). Renames count as an
+// orphan + a fresh entry, which is what we want — the renamed source's
+// new name will get its own credentials on the next /credentials call.
+func orphanedManagedCreds(before, after []tpl.ExternalTemplateRepo) []string {
+	if len(before) == 0 {
+		return nil
+	}
+	keep := make(map[string]struct{}, len(after))
+	for _, r := range after {
+		keep[r.Name] = struct{}{}
+	}
+	var orphans []string
+	for _, r := range before {
+		if _, kept := keep[r.Name]; kept {
+			continue
+		}
+		if r.ExistingSecret != "" && r.ExistingSecret == credstore.SecretNameFor(r.Name) {
+			orphans = append(orphans, r.Name)
+		}
+	}
+	return orphans
 }
 
 // handleListSources returns just the resolved source list (lighter than full registry).

@@ -196,6 +196,31 @@ func providerOrGeneric(p string) string {
 	return p
 }
 
+// Delete removes the managed SealedSecret CR for sourceName. Idempotent
+// (NotFound is treated as success) so callers can invoke it during a
+// registry-update sweep without first checking existence. The underlying
+// decrypted Secret is garbage-collected by the sealed-secrets controller
+// via ownerReferences — we don't touch it directly.
+func (s *Store) Delete(ctx context.Context, sourceName string) error {
+	if s == nil || s.DynClient == nil {
+		return errors.New("credstore: Store not configured (missing dynamic client)")
+	}
+	if sourceName == "" {
+		return errors.New("credstore: sourceName is required")
+	}
+	secretName := SecretNameFor(sourceName)
+	err := s.DynClient.Resource(sealedSecretGVR).Namespace(SystemNamespace).Delete(ctx, secretName, metav1.DeleteOptions{})
+	if err == nil || apierrors.IsNotFound(err) {
+		s.logger().Info("credstore: deleted SealedSecret for template source",
+			"source", sourceName,
+			"secret", secretName,
+			"existed", err == nil,
+		)
+		return nil
+	}
+	return fmt.Errorf("credstore: delete SealedSecret %q: %w", secretName, err)
+}
+
 // applySealedSecret creates or updates the SealedSecret CR. We use the
 // Get→Create-or-Update pattern (mirrors kube.EnsureRootArgoApp) over
 // server-side apply because the upstream SealedSecret CRD doesn't yet
