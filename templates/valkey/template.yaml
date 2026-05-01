@@ -1,0 +1,61 @@
+# suparShip Template: valkey
+#
+# Addon wrapper for the redis connection contract. K8s-local provider:
+# defers the actual valkey StatefulSet to an upstream chart added as a
+# subchart in a follow-up step (3.5). This first iteration ships the
+# contract Secret produced by the wrapper — that is the surface the
+# rest of suparship binds to and chart-validate asserts.
+#
+# Engine: Helm
+# Chart:  ./chart
+
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata:
+  name: valkey
+  version: "1.0.0"
+spec:
+  title: Valkey (redis)
+  description: >-
+    Provisions a Valkey instance and publishes a connection Secret
+    matching the suparship `redis` contract (REDIS_URL, REDIS_HOST,
+    REDIS_PORT, REDIS_PASSWORD). Bind to apps via AppSpec.Addons; the
+    consumer's components pick up the connection automatically via
+    suparship.envFromSecrets[].
+  category: addon
+  engine:
+    type: helm
+    chart: ./chart
+
+  # Wrapper templates declare addons (not components). The single
+  # entry here is the addon shape this wrapper materialises.
+  addons:
+    - name: cache
+      type: redis
+      produces: [Secret]
+      defaultEnabled: true
+
+  inputs:
+    - name: size
+      title: Size
+      type: enum
+      options:
+        - small
+        - medium
+        - large
+      default: small
+      description: >-
+        Resource preset for the underlying valkey instance. Mapped to
+        upstream chart values when the Bitnami valkey subchart is
+        wired (step 3.5).
+
+    - name: persistence
+      title: Persistent Volume
+      type: boolean
+      default: false
+      description: >-
+        Enable a PVC for the valkey master so data survives pod
+        restarts. Off by default for dev / preview environments.
+
+  mappings:
+    addon.size: "{{ .inputs.size }}"

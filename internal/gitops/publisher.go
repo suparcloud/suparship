@@ -80,6 +80,11 @@ type PublisherConfig struct {
 	// mapper falls back to the legacy Expose=true → nginx shim — useful for
 	// installs that haven't migrated to the routing-profile model yet.
 	RoutingProfiles domain.RoutingProfiles
+	// AddonProfiles holds the org-level addon catalog keyed by addon
+	// type (e.g. "redis", "postgres"). Each entry pins which wrapper
+	// chart and provider serves apps that claim that type. Per-env
+	// overrides ride on AppPublishEnv.AddonProfiles.
+	AddonProfiles domain.AddonProfiles
 	// SubPath is the optional sub-directory inside the gitops repo where
 	// platform-managed manifests land. Empty (default) means manifests
 	// land at the repo root (`<repo>/_infra/...`, `<repo>/{env}/...`,
@@ -129,16 +134,17 @@ type Publisher struct {
 }
 
 // SetOrgConfig updates the publisher's org-scoped configuration (naming
-// patterns, backend config, org name, branding, and routing profiles).
-// Thread-safe for callers that rebuild the publisher when org config
-// changes; for concurrent use call this before handing the publisher to
-// goroutines.
-func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, backend *secrets.BackendConfig, brand branding.Config, routingProfiles domain.RoutingProfiles) {
+// patterns, backend config, org name, branding, routing profiles, and
+// addon profiles). Thread-safe for callers that rebuild the publisher
+// when org config changes; for concurrent use call this before handing
+// the publisher to goroutines.
+func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, backend *secrets.BackendConfig, brand branding.Config, routingProfiles domain.RoutingProfiles, addonProfiles domain.AddonProfiles) {
 	p.cfg.OrgName = orgName
 	p.cfg.ResourceNaming = naming
 	p.cfg.BackendConfig = backend
 	p.cfg.Branding = brand
 	p.cfg.RoutingProfiles = routingProfiles
+	p.cfg.AddonProfiles = addonProfiles
 }
 
 // NewPublisher creates a Publisher from cfg.
@@ -525,7 +531,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// from rbac.Org.RoutingProfiles); per-env overrides ride on
 		// AppPublishEnv.RoutingProfiles. When both are empty, helmvalues
 		// falls back to the legacy Expose=true → nginx shim.
-		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName, backend, p.cfg.RoutingProfiles, env.RoutingProfiles)
+		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName, backend, p.cfg.RoutingProfiles, env.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
@@ -540,6 +546,14 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		appDir := p.appEnvDir(repoDir, env, app.ProjectName, app.Name)
 		if err := p.writeAppPlatformResources(appDir, app, ns, env, naming, orgName); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
+		}
+
+		// Per-addon claim: parallel ArgoCD Application alongside the
+		// main app. Each gets app.yaml + values.yaml under
+		// addons/<name>/. Existing ApplicationSet generators pick
+		// them up; no AppSet schema change.
+		if err := p.publishAppAddons(appDir, app, env, naming, orgName, backend); err != nil {
+			return fmt.Errorf("writing addon files for env %s: %w", env.EnvName, err)
 		}
 
 		slog.Debug("gitops: wrote app files", "env", env.EnvName, "app", app.Name)
@@ -955,6 +969,12 @@ type AppPublishEnv struct {
 	// same name; absent names inherit the org default. Populated by the
 	// publish adapter from rbac.OrgEnvironment.RoutingProfiles when present.
 	RoutingProfiles domain.RoutingProfiles
+	// AddonProfiles is the sparse per-env override for the addon
+	// catalog. Entries replace the org-level profile of the same type
+	// (e.g. swap valkey-operator → crossplane-elasticache for prod).
+	// Populated by the publish adapter from
+	// rbac.OrgEnvironment.AddonProfiles when present.
+	AddonProfiles domain.AddonProfiles
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD
@@ -997,7 +1017,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		// Org-level routing profiles apply uniformly to previews; per-env
 		// overrides don't make sense for ephemeral preview envs (their
 		// names are PR-specific and have no static config).
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName, previewBackend, p.cfg.RoutingProfiles, nil)
+		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName, previewBackend, p.cfg.RoutingProfiles, nil, p.cfg.AddonProfiles, nil)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
@@ -1512,4 +1532,82 @@ func marshalHelmValues(hv helmvalues.HelmValues) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// publishAppAddons writes one Application + values.yaml pair per
+// addon claim on app.Spec.Addons under
+// {appDir}/addons/<addon-name>/. Each pair is picked up by the same
+// ApplicationSet that publishes the main app, so no AppSet schema
+// change is needed — Argo just reconciles N+1 Applications instead
+// of 1 per app+env.
+//
+// Each addon's app.yaml uses Template = the resolved AddonProfile.Chart
+// so the ApplicationSet's Helm path resolves to the addon wrapper
+// chart under charts/<wrapper-template-name>/. values.yaml carries
+// the AddonInstanceValues shape (App, Addon, Suparship).
+//
+// Failure to resolve an addon's profile is logged and skipped — the
+// app save path runs Validate first; reaching publish with an
+// unresolved type is a configuration race we don't want to block on.
+func (p *Publisher) publishAppAddons(
+	appDir string,
+	app *domain.App,
+	env AppPublishEnv,
+	naming secrets.ResourceNaming,
+	orgName string,
+	backend secrets.BackendType,
+) error {
+	if len(app.Spec.Addons) == 0 {
+		return nil
+	}
+	for _, claim := range app.Spec.Addons {
+		profile, err := domain.ResolveAddonProfile(p.cfg.AddonProfiles, env.AddonProfiles, claim.Type)
+		if err != nil {
+			slog.Warn("gitops: skipping addon — no AddonProfile configured",
+				"app", app.Name, "env", env.EnvName, "addon", claim.Name, "type", claim.Type, "err", err)
+			continue
+		}
+
+		hv, err := helmvalues.MapAddonToHelmValuesForEnv(
+			app, claim, env.EnvName, env.EnvType, env.ClusterRef,
+			naming, orgName, backend,
+			p.cfg.AddonProfiles, env.AddonProfiles,
+		)
+		if err != nil {
+			return fmt.Errorf("addon %q: %w", claim.Name, err)
+		}
+
+		// addon app.yaml — same shape as the main app.yaml so the
+		// existing ApplicationSet generator picks it up. Template
+		// points at the resolved wrapper chart name.
+		ns := env.Namespace
+		if ns == "" {
+			ns = app.Name + "-" + env.EnvName
+		}
+		meta := AppMetadata{
+			Name:      fmt.Sprintf("%s-addon-%s", app.Name, claim.Name),
+			Project:   app.ProjectName,
+			Template:  profile.Chart,
+			Namespace: ns,
+		}
+		metaBytes, err := yaml.Marshal(meta)
+		if err != nil {
+			return fmt.Errorf("addon %q: marshal app.yaml: %w", claim.Name, err)
+		}
+		hvBytes, err := yaml.Marshal(hv)
+		if err != nil {
+			return fmt.Errorf("addon %q: marshal values.yaml: %w", claim.Name, err)
+		}
+
+		base := filepath.Join(appDir, "addons", claim.Name)
+		if err := p.writeFile(filepath.Join(base, "app.yaml"), metaBytes); err != nil {
+			return err
+		}
+		if err := p.writeFile(filepath.Join(base, "values.yaml"), hvBytes); err != nil {
+			return err
+		}
+		slog.Debug("gitops: wrote addon files",
+			"app", app.Name, "env", env.EnvName, "addon", claim.Name, "chart", profile.Chart)
+	}
+	return nil
 }

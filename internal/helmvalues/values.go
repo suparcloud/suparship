@@ -71,6 +71,19 @@ type HelmValues struct {
 	// Suparship holds well-known resource names that templates can reference
 	// for secret and config injection via envFrom.
 	Suparship SuparshipValues `json:"suparship" yaml:"suparship"`
+	// Addons is a map from addon name to its resolved configuration —
+	// only present in the values document the publisher renders for an
+	// *addon wrapper chart's* release. App charts never see this field
+	// (their AppSpec.Addons claims become parallel Application releases
+	// each with their own addon-shaped values). Keys are sorted
+	// alphabetically by the mapper.
+	Addons map[string]*AddonValues `json:"addons,omitempty" yaml:"addons,omitempty"`
+	// ServiceClaims describes addon→component bindings the publisher
+	// resolved for this app+env, used by the consumer chart's values
+	// (component charts) to discover which Secrets to envFrom in
+	// addition to the org/env hierarchy. Sorted by addon name then
+	// component name.
+	ServiceClaims []ServiceClaimValues `json:"serviceClaims,omitempty" yaml:"serviceClaims,omitempty"`
 }
 
 // SuparshipValues carries the precedence-ordered hierarchy of ConfigMaps and
@@ -180,4 +193,80 @@ type RoutingValues struct {
 	// Component is the name of the component that serves external traffic.
 	// Must match a key in HelmValues.Components.
 	Component string `json:"component" yaml:"component"`
+}
+
+// AddonValues holds the resolved configuration for one addon claim
+// within an app. The wrapper chart at templates/<chart-name>/chart/
+// reads this to render the upstream subchart and the connection
+// Secret matching the addon type's contract (see
+// internal/addons/contracts).
+type AddonValues struct {
+	// Enabled controls whether the wrapper chart renders the addon's
+	// resources. Disabled addons render zero resources.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Type is the connection-contract identifier ("redis", "postgres").
+	// Mirrors AppSpec.Addons[].Type.
+	Type string `json:"type" yaml:"type"`
+	// Provider records which AddonProfile provider produced this
+	// addon (e.g. "valkey-operator"). Surfaced for observability and
+	// addon-health enrichment; never read by the wrapper chart.
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
+	// Size is a chart-defined preset string (small/medium/large) the
+	// wrapper maps to provider-specific sizing.
+	Size string `json:"size,omitempty" yaml:"size,omitempty"`
+	// Version pins a major engine version when the wrapper supports it.
+	Version string `json:"version,omitempty" yaml:"version,omitempty"`
+	// SecretName is the Secret the wrapper chart MUST produce. Holds
+	// the connection-contract keys (e.g. REDIS_URL, REDIS_HOST). The
+	// publisher computes the name (`<app>-addon-<addon-name>-conn`)
+	// so consumer apps can reference it stably from
+	// suparship.envFromSecrets[].
+	SecretName string `json:"secretName" yaml:"secretName"`
+}
+
+// ServiceClaimValues describes one addon→component binding. In the
+// MVP every addon binds to every component (implicit fan-out), so
+// these entries are produced for documentation + future per-component
+// scoping. Consumer components don't read this field directly — the
+// publisher folds the bound Secret into Suparship.EnvFromSecrets so
+// the existing envFrom hierarchy plumbing handles the wiring.
+type ServiceClaimValues struct {
+	// Addon is the local addon name (AppSpec.Addons[].Name).
+	Addon string `json:"addon" yaml:"addon"`
+	// Component is the consumer component name. Empty means "all
+	// components in this app" (the implicit fan-out used today).
+	Component string `json:"component,omitempty" yaml:"component,omitempty"`
+	// SecretName is the Secret the addon publishes (mirrors
+	// AddonValues.SecretName); duplicated here so a chart that wants
+	// per-claim wiring instead of the implicit fan-out can read the
+	// claim list directly.
+	SecretName string `json:"secretName" yaml:"secretName"`
+	// Type is the addon's connection-contract type (`redis`, …).
+	// Lets a chart key behaviour off the type without re-reading the
+	// addon entry by name.
+	Type string `json:"type" yaml:"type"`
+}
+
+// AddonInstanceValues is the values shape passed to an *addon
+// wrapper chart's release* — one wrapper-chart release per addon
+// claim per app+env. Different shape from HelmValues (which targets
+// app charts) because the wrapper renders one addon's resources, not
+// a map of components.
+//
+// Publisher writes this under <app>/<env>/addons/<name>/values.yaml;
+// the existing ApplicationSet generator picks it up alongside the
+// main app's values.yaml.
+type AddonInstanceValues struct {
+	// App ties this wrapper release back to its consumer app + env.
+	// Populated for label/annotation rendering and addon-health
+	// attribution.
+	App AppContext `json:"app" yaml:"app"`
+	// Addon carries the resolved configuration for this single
+	// claim. The wrapper chart reads Addon.Type / .Size / .Version
+	// to render upstream-chart inputs and the connection Secret.
+	Addon AddonValues `json:"addon" yaml:"addon"`
+	// Suparship gives the wrapper access to the same envFrom
+	// hierarchy app charts use, so addon images can opt into the
+	// org/env config layers via the standard envFrom block helper.
+	Suparship SuparshipValues `json:"suparship" yaml:"suparship"`
 }

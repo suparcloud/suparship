@@ -1,0 +1,42 @@
+# Default values for the valkey addon wrapper chart.
+#
+# Follows the suparShip canonical AddonInstanceValues schema. The
+# publisher writes app.{name,env}, addon.{type,size,version,
+# secretName}, and suparship.envFrom* at publish time.
+
+# -- App identity (publisher-injected at deploy time).
+app:
+  name: ""
+  env: ""
+
+# -- Addon claim resolved configuration. The wrapper renders the
+# upstream chart and the connection-contract Secret from these values.
+addon:
+  enabled: true
+  type: redis           # contract identifier; do not change
+  provider: ""          # provider label (e.g. "valkey-operator")
+  size: small           # mapped to upstream resources/persistence
+  version: ""
+  # SecretName is the connection-Secret name the consumer app's
+  # components envFrom. Empty falls back to "{Release.Name}-conn"
+  # for direct local installs.
+  secretName: ""
+
+# -- Stakater Reloader auto-restart on referenced ConfigMap/Secret
+# change. Off by default for addons (the wrapper itself isn't
+# typically configured by external secrets).
+reloader: ""
+
+# -- envFrom hierarchy (publisher-injected). Wrapper containers can
+# opt into it via suparship-common.envFrom; not used yet because the
+# upstream subchart is not vendored in this iteration.
+suparship:
+  envFromConfigMaps: []
+  envFromSecrets: []
+
+# -- ServiceAccount for the wrapper's own resources. The upstream
+# subchart manages its own SA when added.
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}

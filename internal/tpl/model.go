@@ -113,11 +113,43 @@ type TemplateSpec struct {
 	// Category (backwards-compatible behaviour). When present, each entry
 	// defines defaults that the user can override at app-creation time.
 	Components     []TemplateComponent `yaml:"components,omitempty"`
+	// Addons declares the addon shapes this template materialises when
+	// installed. Wrapper templates (category=addon) declare exactly one
+	// addon entry — the connection contract their chart produces.
+	// Application templates leave this empty; addons are claimed
+	// through AppSpec.Addons and resolved per env via the org's
+	// AddonProfile catalog.
+	Addons         []TemplateAddon     `yaml:"addons,omitempty"`
 	Inputs         []Input             `yaml:"inputs,omitempty"`
 	AdvancedInputs []Input             `yaml:"advancedInputs,omitempty"`
 	SecretInputs   []SecretInput       `yaml:"secretInputs,omitempty"`
 	Mappings       map[string]string   `yaml:"mappings,omitempty"`
 	Presets        []Preset            `yaml:"presets,omitempty"`
+}
+
+// TemplateAddon declares one addon shape this template's chart
+// produces (only meaningful for wrapper templates with
+// category=addon). Mirrors TemplateComponent for symmetry — same
+// produces / optionallyProduces story so chart-validate can assert
+// the wrapper actually renders the contract Secret.
+type TemplateAddon struct {
+	// Name is the addon's identifier within the wrapper. Apps refer
+	// to it via the resolved AddonProfile's Type, not this name —
+	// kept for symmetry with TemplateComponent and for documentation.
+	Name string `yaml:"name"`
+	// Type identifies the connection contract (e.g. "redis"). Must
+	// match a registered contracts.Lookup entry.
+	Type string `yaml:"type"`
+	// DefaultEnabled mirrors TemplateComponent semantics: nil ↔ true.
+	DefaultEnabled *bool `yaml:"defaultEnabled,omitempty"`
+	// Produces lists kinds the wrapper MUST render — at minimum the
+	// "Secret" matching the type's connection contract. Chart-
+	// validate's contract pass uses contracts.Lookup(Type).RequiredKeys
+	// to assert the rendered Secret has the right contents.
+	Produces []string `yaml:"produces,omitempty"`
+	// OptionallyProduces lists kinds the wrapper MAY render
+	// (StatefulSet, Service, PVC) depending on values.
+	OptionallyProduces []string `yaml:"optionallyProduces,omitempty"`
 }
 
 // TemplateComponent declares one runtime unit within a template.

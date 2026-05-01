@@ -201,6 +201,7 @@ templates:
     - web-service
     - gateway-web-service
     - voiceai-agent
+    - valkey
     - color-app
   # -- External template repositories, pinned to a version
   external: []

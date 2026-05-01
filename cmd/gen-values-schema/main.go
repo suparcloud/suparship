@@ -95,8 +95,11 @@ func renderSchema() ([]byte, error) {
 	return append(body, '\n'), nil
 }
 
-// chartPaths returns the values.schema.json target path for every chart
-// found under templatesDir/<name>/chart/. Sorted for determinism.
+// chartPaths returns the values.schema.json target path for every
+// app-chart under templatesDir/<name>/chart/. Wrapper charts marked
+// with `suparship.io/chart-kind: addon` in Chart.yaml are skipped —
+// they use a different values shape (AddonInstanceValues) and
+// maintain their own hand-written schema. Sorted for determinism.
 func chartPaths(templatesDir, schemaName string) ([]string, error) {
 	entries, err := os.ReadDir(templatesDir)
 	if err != nil {
@@ -108,16 +111,41 @@ func chartPaths(templatesDir, schemaName string) ([]string, error) {
 			continue
 		}
 		chartDir := filepath.Join(templatesDir, e.Name(), "chart")
-		if _, err := os.Stat(filepath.Join(chartDir, "Chart.yaml")); err != nil {
+		chartYaml := filepath.Join(chartDir, "Chart.yaml")
+		body, err := os.ReadFile(chartYaml)
+		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
 			return nil, err
 		}
+		if isAddonWrapperChart(body) {
+			continue
+		}
 		out = append(out, filepath.Join(chartDir, schemaName))
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// isAddonWrapperChart reports whether the chart's Chart.yaml carries
+// the `suparship.io/chart-kind: addon` annotation. Cheap string scan;
+// avoids pulling a YAML decoder into the generator.
+func isAddonWrapperChart(chartYaml []byte) bool {
+	// Permissive matcher: handle both quoted and unquoted forms,
+	// ignore surrounding whitespace.
+	for _, line := range bytes.Split(chartYaml, []byte("\n")) {
+		t := bytes.TrimSpace(line)
+		if !bytes.HasPrefix(t, []byte("suparship.io/chart-kind:")) {
+			continue
+		}
+		val := bytes.TrimSpace(t[len("suparship.io/chart-kind:"):])
+		val = bytes.Trim(val, "\"'")
+		if bytes.Equal(val, []byte("addon")) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeIfChanged writes body to path when the existing content (if any)

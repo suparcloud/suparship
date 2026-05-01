@@ -112,6 +112,13 @@ type OrgEnvironment struct {
 	// per-env differences like "staging uses letsencrypt-staging, prod
 	// uses letsencrypt-prod".
 	RoutingProfiles domain.RoutingProfiles `yaml:"routingProfiles,omitempty"`
+	// AddonProfiles is a sparse override map keyed by addon type
+	// (e.g. "redis", "postgres"). Entries here replace the org-level
+	// addon profile of the same type for apps deployed to this
+	// environment; types not present inherit the org default. Use
+	// this for per-env provider swaps like "staging uses
+	// valkey-operator, prod uses Crossplane ElastiCache".
+	AddonProfiles domain.AddonProfiles `yaml:"addonProfiles,omitempty"`
 }
 
 // EffectiveAppNamespacePattern returns the per-env override that applies to
@@ -179,6 +186,12 @@ type Org struct {
 	// to a legacy Expose=true → nginx shim so existing AppSpecs without
 	// ExposeMode keep rendering identically until they are migrated.
 	RoutingProfiles domain.RoutingProfiles `yaml:"routingProfiles,omitempty"`
+	// AddonProfiles maps addon types (redis, postgres, …) to the
+	// wrapper chart + provider that materialises the addon at publish
+	// time. App developers declare AppSpec.Addons[].Type only; ops
+	// pin the implementation here. Per-env overrides on
+	// OrgEnvironment.AddonProfiles replace entries by type sparsely.
+	AddonProfiles domain.AddonProfiles `yaml:"addonProfiles,omitempty"`
 }
 
 // Team represents a named group of users.
