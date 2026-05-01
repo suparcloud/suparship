@@ -26,14 +26,20 @@ validate's render pass).
 {{- end }}
 
 {{/*
-Upstream Valkey master Service name. With a Bitnami valkey subchart
-wired (step 3.5) this would be `<chart-fullname>-master`; for now
-the wrapper produces only the contract Secret and the host points at
-the same conventional name so the contract is correct out of the box
-once the subchart is added.
+Upstream Valkey primary Service name.
+
+The Bitnami valkey subchart names its primary service
+`<release>-valkey-primary` in standalone mode (and replication mode).
+Wrapper Release.Name comes from the publisher pattern
+`<consumer-app>-addon-<addon-name>`, e.g. `hello-addon-cache`. The
+final service host is therefore `<consumer-app>-addon-<addon-name>-valkey-primary`.
+
+Local installs (helm install --name foo) where Release.Name doesn't
+match the publisher pattern still work — the host derives from the
+release name in either case.
 */}}
 {{- define "valkey.serviceHost" -}}
-{{- printf "%s-master" (include "valkey.fullname" .) -}}
+{{- printf "%s-valkey-primary" .Release.Name -}}
 {{- end }}
 
 {{- define "valkey.connectionURL" -}}

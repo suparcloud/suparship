@@ -1,10 +1,10 @@
 # suparShip Template: valkey
 #
-# Addon wrapper for the redis connection contract. K8s-local provider:
-# defers the actual valkey StatefulSet to an upstream chart added as a
-# subchart in a follow-up step (3.5). This first iteration ships the
-# contract Secret produced by the wrapper — that is the surface the
-# rest of suparship binds to and chart-validate asserts.
+# Addon wrapper for the redis connection contract. K8s-local provider
+# backed by the Bitnami valkey upstream chart (vendored as a subchart).
+# Renders a StatefulSet + Service for a single-primary valkey instance
+# plus the contract Secret consumer apps pick up via the envFrom
+# hierarchy.
 #
 # Engine: Helm
 # Chart:  ./chart
@@ -32,8 +32,13 @@ spec:
   addons:
     - name: cache
       type: redis
-      produces: [Secret]
       defaultEnabled: true
+      # Contract Secret is the suparship-side guarantee chart-validate
+      # asserts. The remaining resources come from the Bitnami
+      # subchart and are listed as optional so chart-validate doesn't
+      # over-specify the wrapper's surface.
+      produces: [Secret]
+      optionallyProduces: [StatefulSet, Service, ConfigMap, ServiceAccount, PodDisruptionBudget]
 
   inputs:
     - name: size
@@ -54,8 +59,10 @@ spec:
       type: boolean
       default: false
       description: >-
-        Enable a PVC for the valkey master so data survives pod
+        Enable a PVC for the valkey primary so data survives pod
         restarts. Off by default for dev / preview environments.
 
   mappings:
     addon.size: "{{ .inputs.size }}"
+    addon.persistence: "{{ .inputs.persistence }}"
+    valkey.primary.persistence.enabled: "{{ .inputs.persistence }}"

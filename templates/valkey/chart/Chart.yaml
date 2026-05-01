@@ -14,3 +14,10 @@ dependencies:
   - name: suparship-common
     version: "0.1.0"
     repository: "file://../../../charts/lib/suparship-common"
+  - name: valkey
+    version: "5.5.1"
+    repository: "https://charts.bitnami.com/bitnami"
+    # Subchart values live under the `valkey:` key in this chart's
+    # values.yaml. The wrapper translates suparship-side inputs
+    # (addon.size, addon.persistence) into upstream values there.
+    alias: valkey

@@ -119,8 +119,24 @@ type AppDetailDTO struct {
 	Values      map[string]any             `json:"values"`
 	SecretRefs  []AppSecretRefDTO          `json:"secretRefs"`
 	Components  []ComponentSummaryDTO      `json:"components"`
+	// Addons lists managed-dependency claims (databases, caches, queues).
+	// Each claim binds at publish time to an org-level AddonProfile (per-env
+	// override permitted) and produces a connection Secret consumed by every
+	// component via the standard envFrom hierarchy.
+	Addons      []AddonClaimDTO            `json:"addons"`
 	// Environments includes stable (staging, prod) and preview instances.
 	Environments []AppEnvironmentSummaryDTO `json:"environments"`
+}
+
+// AddonClaimDTO mirrors domain.AddonSpec for the wire. Per-app values
+// passed to the wrapper chart are NOT shown here for the prototype —
+// they're operator-internal and round-tripped through the spec only.
+type AddonClaimDTO struct {
+	Name    string         `json:"name"`
+	Type    string         `json:"type"`
+	Size    string         `json:"size,omitempty"`
+	Version string         `json:"version,omitempty"`
+	Values  map[string]any `json:"values,omitempty"`
 }
 
 // --- Response wrappers ---
@@ -203,6 +219,12 @@ type createAppRequest struct {
 	// templates that declare a spec.components section. When absent, the
 	// handler initialises components from the template via ComponentToggles.
 	Components []ComponentCreateDTO `json:"components,omitempty"`
+	// Addons lists managed-dependency claims for this app. Each claim is
+	// validated at app save: name must be a DNS label, type must match a
+	// registered connection contract, and an AddonProfile for that type
+	// must exist at the org or env level (otherwise publish would silently
+	// drop the claim).
+	Addons []AddonClaimDTO `json:"addons,omitempty"`
 	// NamespaceScope controls whether this app deploys into a dedicated
 	// namespace ("app", default) or the shared project namespace ("project").
 	NamespaceScope string `json:"namespaceScope,omitempty"`

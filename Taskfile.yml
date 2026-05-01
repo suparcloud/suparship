@@ -215,12 +215,17 @@ tasks:
       - go run ./cmd/gen-values-schema
 
   charts:vendor:
-    desc: "Re-run helm dep update for each templates/*/chart so the vendored suparship-common matches charts/lib/suparship-common"
+    desc: "Re-run helm dep update for each templates/*/chart so vendored deps stay in sync. Idempotently registers third-party Helm repos used by addon wrappers."
     cmds:
       - |
         set -e
+        # Idempotent repo bootstrap. Each `helm repo add` is a no-op
+        # if the repo with the same URL is already registered.
+        helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true
+        helm repo update bitnami >/dev/null 2>&1 || true
+
         for c in templates/*/chart; do
-          if grep -q "suparship-common" "$c/Chart.yaml" 2>/dev/null; then
+          if grep -q "dependencies:" "$c/Chart.yaml" 2>/dev/null; then
             echo "==> $c"
             helm dep update "$c"
           fi
