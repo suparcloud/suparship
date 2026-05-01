@@ -621,12 +621,13 @@ func New(cfg Config) *Server {
 		cfg.Logger.Info("config export endpoint enabled")
 
 		chh := &credentialHealthHandler{
-			auth:              ah,
-			kubeClient:        cfg.KubeClient,
-			orgProvider:       cfg.OrgProvider,
-			gitopsConfigStore: cfg.GitOpsConfigStore,
-			registryStore:     cfg.RegistryStore,
-			logger:            cfg.Logger,
+			auth:                  ah,
+			kubeClient:            cfg.KubeClient,
+			orgProvider:           cfg.OrgProvider,
+			gitopsConfigStore:     cfg.GitOpsConfigStore,
+			registryStore:         cfg.RegistryStore,
+			templateRegistryStore: cfg.TemplateRegistryStore,
+			logger:                cfg.Logger,
 		}
 		chh.registerRoutes(mux)
 		cfg.Logger.Info("credential health endpoint enabled")
