@@ -30,6 +30,8 @@ spec:
       defaultEnabled: true
       previewEnabled: true
       exposed: true
+      produces: [Deployment, Service]
+      optionallyProduces: [Ingress]
 
   inputs:
     - name: service_name

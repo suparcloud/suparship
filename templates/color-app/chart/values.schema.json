@@ -1,0 +1,231 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": true,
+  "description": "Generated from internal/helmvalues/values.go. Validates the publisher-injected canonical shape. Chart-specific extension fields (autoscaling, pdb, gateway, etc.) are tolerated via additionalProperties.",
+  "properties": {
+    "app": {
+      "additionalProperties": true,
+      "properties": {
+        "env": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "env",
+        "name"
+      ],
+      "type": "object"
+    },
+    "components": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "healthCheck": {
+            "additionalProperties": true,
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "image": {
+            "additionalProperties": true,
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "tag": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "repository",
+              "tag"
+            ],
+            "type": "object"
+          },
+          "ingress": {
+            "additionalProperties": true,
+            "properties": {
+              "className": {
+                "type": "string"
+              },
+              "clusterIssuer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "className"
+            ],
+            "type": "object"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "replicas": {
+            "type": "integer"
+          },
+          "resources": {
+            "additionalProperties": true,
+            "properties": {
+              "size": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "enabled",
+          "image",
+          "replicas"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "envLayers": {
+      "additionalProperties": true,
+      "properties": {
+        "app": {
+          "additionalProperties": true,
+          "properties": {
+            "secretRefs": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "envKey": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "envKey",
+                  "key",
+                  "name",
+                  "provider"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "vars": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "appEnv": {
+          "additionalProperties": true,
+          "properties": {
+            "secretRefs": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "envKey": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "envKey",
+                  "key",
+                  "name",
+                  "provider"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "vars": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "routing": {
+      "additionalProperties": true,
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "host"
+      ],
+      "type": "object"
+    },
+    "suparship": {
+      "additionalProperties": true,
+      "properties": {
+        "envFromConfigMaps": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "envFromSecrets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "app",
+    "components",
+    "routing",
+    "suparship"
+  ],
+  "title": "suparship canonical Helm values",
+  "type": "object",
+  "x-suparship-schema-version": "v1"
+}

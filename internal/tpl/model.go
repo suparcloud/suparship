@@ -145,6 +145,22 @@ type TemplateComponent struct {
 	// Exposed declares whether this component should receive an ingress
 	// endpoint by default. Typically true only for web components.
 	Exposed bool `yaml:"exposed,omitempty"`
+	// Produces lists Kubernetes resource kinds (e.g. "Deployment",
+	// "Service", "CronJob") that this component MUST render when enabled.
+	// Chart-validation at template import asserts the rendered chart
+	// produces at least one of each kind for this component.
+	//
+	// Empty omits the assertion — useful for components where the
+	// produced shape varies (e.g. an addon wrapper that delegates to
+	// different upstream charts depending on env binding). New web /
+	// worker / cron components SHOULD declare this; absence is tolerated
+	// for backwards compatibility.
+	Produces []string `yaml:"produces,omitempty"`
+	// OptionallyProduces lists kinds the chart MAY render based on
+	// values (Ingress / HTTPRoute / ScaledObject / PodDisruptionBudget).
+	// Documents what's possible without enforcing presence. Used by the
+	// UI to render capability-aware input groups.
+	OptionallyProduces []string `yaml:"optionallyProduces,omitempty"`
 }
 
 // IsDefaultEnabled returns true when the component is enabled by default.

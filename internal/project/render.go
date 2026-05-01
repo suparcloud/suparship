@@ -1,9 +1,11 @@
 package project
 
 import (
+	"bytes"
 	"fmt"
 	"regexp"
 	"strings"
+	"text/template"
 
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -143,7 +145,11 @@ func toFloat64(v any) (float64, bool) {
 // override map. Template defaults are merged with user-provided values, then
 // mappings are resolved. Dotted keys like "image.repository" are expanded
 // into nested maps: {"image": {"repository": "..."}}.
-func RenderHelmValues(svc *Service, tmpl *tpl.Template) map[string]any {
+//
+// Returns an error when any mapping expression fails to parse or execute —
+// bad mappings are template-authoring bugs and should surface to the
+// template-import flow rather than silently dropping values.
+func RenderHelmValues(svc *Service, tmpl *tpl.Template) (map[string]any, error) {
 	merged := make(map[string]any)
 
 	allInputs := make([]tpl.Input, 0, len(tmpl.Spec.Inputs)+len(tmpl.Spec.AdvancedInputs))
@@ -160,25 +166,108 @@ func RenderHelmValues(svc *Service, tmpl *tpl.Template) map[string]any {
 
 	result := make(map[string]any)
 	for helmKey, expr := range tmpl.Spec.Mappings {
-		val := resolveMapping(expr, merged)
+		val, err := resolveMapping(expr, merged)
+		if err != nil {
+			return nil, fmt.Errorf("mapping %q (-> %s): %w", expr, helmKey, err)
+		}
 		if val != nil {
 			setNestedValue(result, helmKey, val)
 		}
 	}
 
-	return result
+	return result, nil
 }
 
-func resolveMapping(expr string, values map[string]any) any {
+// simpleInputRef matches a mapping that is exactly `{{ .inputs.NAME }}` —
+// no filters, no conditionals, just a single input reference. The fast
+// path returns the raw input value (preserving int / bool / etc), so a
+// mapping like `replicaCount: "{{ .inputs.replicas }}"` produces an
+// integer in the rendered values, not a string.
+var simpleInputRef = regexp.MustCompile(`^\{\{-?\s*\.inputs\.(\w+)\s*-?\}\}$`)
+
+// resolveMapping evaluates one mapping expression against the input
+// context. Two paths:
+//
+//	Fast path (`{{ .inputs.foo }}`)         → returns raw input value;
+//	                                          nil when the input is unset
+//	                                          so the mapping is dropped.
+//	General path (anything else)            → executed via text/template
+//	                                          with a sealed FuncMap; the
+//	                                          rendered string is returned.
+//
+// The sealed FuncMap covers the common authoring needs (default, upper,
+// lower, quote, trim, join, replace) without pulling in Sprig as a
+// dependency. Authors get conditionals (`if`, `with`), comparisons (`eq`,
+// `ne`, `lt`, `gt`), and boolean ops (`and`, `or`, `not`) from the
+// stdlib template engine itself.
+func resolveMapping(expr string, values map[string]any) (any, error) {
 	expr = strings.TrimSpace(expr)
-	if strings.HasPrefix(expr, "{{") && strings.HasSuffix(expr, "}}") {
-		inner := strings.TrimSpace(expr[2 : len(expr)-2])
-		if strings.HasPrefix(inner, ".inputs.") {
-			name := strings.TrimPrefix(inner, ".inputs.")
-			return values[name]
-		}
+
+	// Fast path: single `.inputs.NAME` reference, preserve type.
+	if m := simpleInputRef.FindStringSubmatch(expr); m != nil {
+		return values[m[1]], nil
 	}
-	return expr
+
+	tmpl, err := template.New("mapping").
+		Option("missingkey=zero").
+		Funcs(mappingFuncs).
+		Parse(expr)
+	if err != nil {
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, map[string]any{"inputs": values}); err != nil {
+		return nil, fmt.Errorf("execute: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// mappingFuncs is the sealed function set available inside a mapping
+// expression. Kept small on purpose — every function adds documentation
+// surface and a behavioural footprint we'd later have to support.
+var mappingFuncs = template.FuncMap{
+	// default returns d when v is nil / empty / false / zero.
+	"default": func(d, v any) any {
+		if isEmptyValue(v) {
+			return d
+		}
+		return v
+	},
+	"upper":   strings.ToUpper,
+	"lower":   strings.ToLower,
+	"trim":    strings.TrimSpace,
+	"replace": strings.ReplaceAll,
+	"contains": strings.Contains,
+	"hasPrefix": strings.HasPrefix,
+	"hasSuffix": strings.HasSuffix,
+	"join": func(sep string, items []string) string { return strings.Join(items, sep) },
+	"quote": func(v any) string {
+		return fmt.Sprintf("%q", fmt.Sprintf("%v", v))
+	},
+}
+
+// isEmptyValue mirrors `default`'s "empty" definition: nil, "", false,
+// 0, and empty slices / maps.
+func isEmptyValue(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case string:
+		return x == ""
+	case bool:
+		return !x
+	case int:
+		return x == 0
+	case int64:
+		return x == 0
+	case float64:
+		return x == 0
+	case []any:
+		return len(x) == 0
+	case map[string]any:
+		return len(x) == 0
+	}
+	return false
 }
 
 func setNestedValue(m map[string]any, dottedKey string, val any) {

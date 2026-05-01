@@ -31,3 +31,13 @@ serviceAccount:
   create: true
   name: ""
   annotations: {}
+
+# Stakater Reloader auto-restart on Secret/ConfigMap change.
+# Set to "" to disable.
+reloader: "true"
+
+# envFrom hierarchy — populated by the suparShip publisher per app-env.
+# The chart suppresses the envFrom block when both lists are empty.
+suparship:
+  envFromConfigMaps: []
+  envFromSecrets: []

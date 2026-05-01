@@ -1,3 +1,5 @@
+//go:generate go run ../../cmd/gen-values-schema
+
 // Package helmvalues defines the canonical Helm values structure for
 // suparShip app charts and the mapper that derives it from an AppSpec.
 //
@@ -159,9 +161,14 @@ type ImageValues struct {
 
 // ResourceValues selects a named resource tier for a component. The chart
 // maps the size string to concrete CPU/memory requests and limits.
+//
+// Size is optional in the canonical schema: workloads with chart-specific
+// resources (e.g. voiceai-agent's capacity-manager declaring explicit
+// requests/limits) leave it empty and let the chart's `_helpers.tpl`
+// produce the resources block directly.
 type ResourceValues struct {
 	// Size is one of "small", "medium", or "large".
-	Size string `json:"size" yaml:"size"`
+	Size string `json:"size,omitempty" yaml:"size,omitempty"`
 }
 
 // RoutingValues declares the primary public entry point for the deployment.

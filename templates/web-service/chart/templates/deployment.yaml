@@ -7,9 +7,7 @@ metadata:
   labels:
     {{- include "web-service.labels" . | nindent 4 }}
   annotations:
-    # Stakater Reloader: trigger rolling restart when any referenced
-    # ConfigMap or Secret changes (covers ESO secret rotation).
-    reloader.stakater.com/auto: "true"
+    {{- include "suparship-common.reloaderAnnotation" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ $web.replicas | default 2 }}
@@ -51,25 +49,7 @@ spec:
             failureThreshold: 3
           resources:
             {{- include "web-service.resources" . | nindent 12 }}
-          # envFrom loads the full hierarchy of ConfigMaps + Secrets that
-          # suparship's publisher computed for this app-env. Order is
-          # precedence-aware (org → env-type → project → app → app-env →
-          # cluster); later entries win on key collision per Kubernetes
-          # envFrom semantics. The chart does no name construction —
-          # naming patterns and backend choice live in the publisher.
-          # All entries are optional so pods start even when a level has
-          # no config yet.
-          envFrom:
-            {{- range .Values.suparship.envFromConfigMaps }}
-            - configMapRef:
-                name: {{ . }}
-                optional: true
-            {{- end }}
-            {{- range .Values.suparship.envFromSecrets }}
-            - secretRef:
-                name: {{ . }}
-                optional: true
-            {{- end }}
+          {{- include "suparship-common.envFrom" . | nindent 10 }}
           {{- if $web.env }}
           # ComponentSpec.Config: direct env entries — override all envFrom levels above.
           env:

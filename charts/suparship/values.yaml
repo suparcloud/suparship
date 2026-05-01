@@ -199,6 +199,8 @@ templates:
   # -- Built-in templates to seed into the gitops repo on initialization
   builtIn:
     - web-service
+    - gateway-web-service
+    - voiceai-agent
     - color-app
   # -- External template repositories, pinned to a version
   external: []

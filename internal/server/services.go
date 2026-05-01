@@ -15,6 +15,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/suparcloud/suparship/internal/project"
@@ -173,7 +174,11 @@ func (sh *serviceHandler) handleCreateService(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	helmValues := project.RenderHelmValues(&svc, tmpl)
+	helmValues, err := project.RenderHelmValues(&svc, tmpl)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: fmt.Sprintf("render template mappings: %v", err)})
+		return
+	}
 
 	writeJSON(w, http.StatusCreated, createServiceResponse{
 		Service: serviceResponseDTO{
