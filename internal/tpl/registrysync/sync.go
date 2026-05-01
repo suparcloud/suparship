@@ -211,9 +211,19 @@ func (e *Engine) importOne(ctx context.Context, chartDir string) (string, error)
 	return tmpl.Metadata.Name, nil
 }
 
-// readAuth reads username/password from a K8s Secret. Returns empty
-// strings (no error) when the secret name is empty so public repos work
-// without configuration.
+// readAuth reads credentials from a K8s Secret. Returns empty strings
+// (no error) when the secret name is empty so public repos work without
+// configuration.
+//
+// Two key shapes are supported:
+//   - data["token"]                 — a PAT (GitHub/GitLab/Gitea). Used as
+//     the password with "x-access-token" as the username; this is the form
+//     all three providers accept for HTTPS Basic auth.
+//   - data["username"] + data["password"] — generic Basic auth (Bitbucket,
+//     self-hosted Git, anything else).
+//
+// "token" wins when both are present so an operator can rotate to a PAT
+// without first deleting the old keys.
 func (e *Engine) readAuth(ctx context.Context, secretName string) (string, string, error) {
 	if secretName == "" {
 		return "", "", nil
@@ -227,6 +237,9 @@ func (e *Engine) readAuth(ctx context.Context, secretName string) (string, strin
 	}
 	if err != nil {
 		return "", "", err
+	}
+	if tok := string(sec.Data["token"]); tok != "" {
+		return "x-access-token", tok, nil
 	}
 	return string(sec.Data["username"]), string(sec.Data["password"]), nil
 }
@@ -268,11 +281,41 @@ func findChartDirs(root string) ([]string, error) {
 // packageChart tars + gzips a chart directory in the layout `helm package`
 // produces (top-level "<chartName>/" folder). Re-implemented inline so the
 // sync engine doesn't depend on the helm CLI being on PATH.
+//
+// suparship-flavoured template repos ship a sibling layout:
+//
+//	templates/<name>/
+//	  template.yaml          ← suparship metadata (inputs, mappings, presets)
+//	  chart/
+//	    Chart.yaml
+//	    ...
+//
+// When packageChart is invoked on `chart/`, it also looks for a
+// `template.yaml` in the parent directory and, when present, includes
+// it in the tarball at "<chartName>/template.yaml". chartimport.
+// ParseArchive picks it up so the chart imports with the operator's
+// hand-authored template instead of the best-effort inferred one.
 func packageChart(chartDir string) ([]byte, error) {
 	chartName := filepath.Base(chartDir)
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
+
+	// Pick up a sibling template.yaml if the operator shipped one.
+	if data, ok := readSiblingTemplateYAML(chartDir); ok {
+		hdr := &tar.Header{
+			Name:     filepath.ToSlash(filepath.Join(chartName, "template.yaml")),
+			Mode:     0o644,
+			Size:     int64(len(data)),
+			Typeflag: tar.TypeReg,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return nil, err
+		}
+		if _, err := io.Copy(tw, bytes.NewReader(data)); err != nil {
+			return nil, err
+		}
+	}
 
 	err := filepath.WalkDir(chartDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
