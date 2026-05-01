@@ -1456,6 +1456,11 @@ func startPeriodicTemplateSync(
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
+		// Eager first run so a freshly installed cluster doesn't sit with
+		// an empty template gallery for `interval` before the first sync.
+		// runOneTemplateSync silently no-ops when the registry is empty,
+		// so this is safe to always run — no extra guards needed.
+		runOneTemplateSync(ctx, engine, store, logger)
 		for {
 			select {
 			case <-ctx.Done():
