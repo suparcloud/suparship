@@ -379,6 +379,29 @@ func packageChart(chartDir string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// readSiblingTemplateYAML returns the contents of `<parent>/template.yaml`
+// when chartDir matches the suparship-flavoured layout (a dir named
+// "chart" with template.yaml as its sibling). Returns (nil, false) on
+// any miss — wrong layout, no sibling, or read error — so callers can
+// silently fall through to the inferred-template path.
+//
+// The "chart" name guard is important: a multi-chart library repo can
+// legitimately have a template.yaml at the parent level for entirely
+// unrelated reasons (Helm itself, downstream tooling). We only honor
+// the sibling when the layout matches the convention documented on
+// packageChart.
+func readSiblingTemplateYAML(chartDir string) ([]byte, bool) {
+	if filepath.Base(chartDir) != "chart" {
+		return nil, false
+	}
+	sibling := filepath.Join(filepath.Dir(chartDir), "template.yaml")
+	data, err := os.ReadFile(sibling)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
 // embedCredentials inserts user:password into HTTP/HTTPS URLs so `git clone`
 // doesn't prompt interactively. Mirrors the gitops publisher's helper —
 // kept private here to avoid pulling that whole package into the dep graph
