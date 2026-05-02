@@ -16,7 +16,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/tpl"
-	"github.com/suparcloud/suparship/internal/tpl/chartimport"
 	"github.com/suparcloud/suparship/internal/tpl/fetcher"
 )
 
@@ -76,7 +75,7 @@ func (f *ociFetcher) Fetch(ctx context.Context, source any) (fetcher.FetchResult
 		return fetcher.FetchResult{}, fmt.Errorf("pull %s/%s@%s: %w", repo.RepoURL, repo.Chart, repo.Version, err)
 	}
 
-	rt, err := f.resolvePulledChart(bundle)
+	rt, err := resolvePulledChart(bundle)
 	if err != nil {
 		// Per-template error rather than top-level: one source = one
 		// chart, but surfacing it as PartialError keeps the result
@@ -87,22 +86,6 @@ func (f *ociFetcher) Fetch(ctx context.Context, source any) (fetcher.FetchResult
 		}, nil
 	}
 	return fetcher.FetchResult{Templates: []fetcher.ResolvedTemplate{rt}}, nil
-}
-
-// resolvePulledChart hands the pulled .tgz to the existing chartimport
-// pipeline. If the chart ships a bundled template.yaml at <chart>/template.yaml
-// inside the archive, ParseArchive picks it up; otherwise ToTemplate
-// generates an inferred template from Chart.yaml + values.schema.json.
-func (f *ociFetcher) resolvePulledChart(bundle []byte) (fetcher.ResolvedTemplate, error) {
-	arc, err := chartimport.ParseArchive(bundle)
-	if err != nil {
-		return fetcher.ResolvedTemplate{}, fmt.Errorf("parse: %w", err)
-	}
-	tmpl, err := chartimport.ToTemplate(arc)
-	if err != nil {
-		return fetcher.ResolvedTemplate{}, fmt.Errorf("to template: %w", err)
-	}
-	return fetcher.ResolvedTemplate{Template: tmpl, ChartBytes: bundle}, nil
 }
 
 // readOCIAuth reads username/password from the same K8s Secret shape

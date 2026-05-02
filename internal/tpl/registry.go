@@ -118,15 +118,19 @@ func (r *ExternalTemplateRepo) Validate() error {
 	case SourceTypeGit:
 		// Path defaults to repo root; Ref defaults to "main" — both
 		// optional. Nothing else to enforce.
-	case SourceTypeOCI:
+	case SourceTypeOCI, SourceTypeChartMuseum:
+		// Registry-pull sources name a single chart at a single version.
 		if r.Chart == "" {
-			return fmt.Errorf("external template repo: chart is required for type %q", SourceTypeOCI)
+			return fmt.Errorf("external template repo: chart is required for type %q", r.EffectiveType())
 		}
 		if r.Version == "" {
-			return fmt.Errorf("external template repo: version is required for type %q", SourceTypeOCI)
+			return fmt.Errorf("external template repo: version is required for type %q", r.EffectiveType())
 		}
-	case SourceTypeChartMuseum, SourceTypeGitTgz:
-		return fmt.Errorf("%w: %q", ErrUnsupportedSourceType, r.Type)
+	case SourceTypeGitTgz:
+		// gittgz reads a .tgz at a known path inside a git repo.
+		if r.Path == "" {
+			return fmt.Errorf("external template repo: path is required for type %q (point at the .tgz file inside the repo)", SourceTypeGitTgz)
+		}
 	default:
 		return fmt.Errorf("%w: %q", ErrInvalidSourceType, r.Type)
 	}

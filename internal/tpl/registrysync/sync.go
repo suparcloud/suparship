@@ -358,8 +358,10 @@ func (e *Engine) fetcherForType(sourceType string, logger *slog.Logger) (fetcher
 		return newGitFetcher(e.Client, logger, e.CloneDepth), nil
 	case tpl.SourceTypeOCI:
 		return newOCIFetcher(e.Client, logger), nil
-	case tpl.SourceTypeChartMuseum, tpl.SourceTypeGitTgz:
-		return nil, fmt.Errorf("%w: %q", tpl.ErrUnsupportedSourceType, sourceType)
+	case tpl.SourceTypeChartMuseum:
+		return newChartMuseumFetcher(e.Client, logger), nil
+	case tpl.SourceTypeGitTgz:
+		return newGitTgzFetcher(e.Client, logger, e.CloneDepth), nil
 	default:
 		return nil, fmt.Errorf("%w: %q", tpl.ErrInvalidSourceType, sourceType)
 	}

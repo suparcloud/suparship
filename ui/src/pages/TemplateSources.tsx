@@ -58,12 +58,9 @@ const emptyRepo: ExternalTemplateRepo = {
   existingSecret: "",
 };
 
-// Source-type dropdown options. chartmuseum / gittgz are intentionally
-// omitted — the backend rejects them with ErrUnsupportedSourceType, so
-// surfacing them in the form would let operators register sources that
-// can never sync.
+// Source-type dropdown options. Each maps to a fetcher in registrysync.
 const SOURCE_TYPES: ReadonlyArray<{
-  value: "git" | "oci";
+  value: "git" | "oci" | "chartmuseum" | "gittgz";
   label: string;
   description: string;
 }> = [
@@ -77,16 +74,31 @@ const SOURCE_TYPES: ReadonlyArray<{
     label: "OCI chart",
     description: "Pull a single chart from an OCI registry by name+version. The chart's bundled template.yaml drives metadata when present.",
   },
+  {
+    value: "chartmuseum",
+    label: "Helm HTTP repo",
+    description: "Pull a single chart from a classic Helm HTTP repository (ChartMuseum, GitHub Pages-served, JFrog).",
+  },
+  {
+    value: "gittgz",
+    label: "Chart .tgz in git",
+    description: "Read a packaged chart .tgz at a known path inside a git repo. Useful when charts are version-controlled rather than published to a registry.",
+  },
 ];
 
-// usesGit returns true when ref/path apply (git-type sources).
+// usesGit returns true when ref+path apply (git-type sources).
 function usesGit(t: ExternalTemplateRepo["type"]): boolean {
   return !t || t === "git";
 }
 
-// usesChart returns true when chart/version apply (registry-type sources).
+// usesChart returns true when chart+version apply (registry-type sources).
 function usesChart(t: ExternalTemplateRepo["type"]): boolean {
-  return t === "oci";
+  return t === "oci" || t === "chartmuseum";
+}
+
+// usesGitTgz returns true when ref+path-to-tgz apply.
+function usesGitTgz(t: ExternalTemplateRepo["type"]): boolean {
+  return t === "gittgz";
 }
 
 const inputClass =
@@ -223,7 +235,11 @@ export function TemplateSources() {
       return;
     }
     if (usesChart(draft.type) && (!draft.chart?.trim() || !draft.version?.trim())) {
-      toast.error("Chart and Version are required for OCI sources");
+      toast.error("Chart and Version are required for registry-pull sources");
+      return;
+    }
+    if (usesGitTgz(draft.type) && !draft.path.trim()) {
+      toast.error("Path to the .tgz file is required for git-tgz sources");
       return;
     }
     if ((registry.external ?? []).some((r) => r.name === draft.name)) {
@@ -379,7 +395,12 @@ export function TemplateSources() {
                         {usesChart(repo.type) ? (
                           <span>
                             {repo.chart || "?"}@{repo.version || "?"}
-                            {" · oci"}
+                            {" · "}{repo.type}
+                          </span>
+                        ) : usesGitTgz(repo.type) ? (
+                          <span>
+                            {repo.ref || "main"} · {repo.path || "?"}
+                            {" · gittgz"}
                           </span>
                         ) : (
                           <span>
@@ -475,6 +496,7 @@ function AddSourceForm({
   const sourceType = draft.type || "git";
   const showGitFields = usesGit(sourceType);
   const showChartFields = usesChart(sourceType);
+  const showGitTgzFields = usesGitTgz(sourceType);
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-6">
       <h2 className="text-base font-semibold text-gray-900">Add source</h2>
@@ -506,9 +528,11 @@ function AddSourceForm({
         <Field
           label="Repository URL"
           help={
-            showChartFields
+            sourceType === "oci"
               ? "OCI registry root, e.g. oci://ghcr.io/myorg/charts"
-              : "HTTPS or SSH URL for git clone."
+              : sourceType === "chartmuseum"
+                ? "HTTPS root of a Helm HTTP repo, e.g. https://charts.acme.io"
+                : "HTTPS or SSH URL for git clone."
           }
         >
           <input
@@ -516,9 +540,11 @@ function AddSourceForm({
             value={draft.repoURL}
             onChange={(e) => set({ repoURL: e.target.value })}
             placeholder={
-              showChartFields
+              sourceType === "oci"
                 ? "oci://ghcr.io/myorg/charts"
-                : "https://github.com/myorg/charts.git"
+                : sourceType === "chartmuseum"
+                  ? "https://charts.acme.io"
+                  : "https://github.com/myorg/charts.git"
             }
           />
         </Field>
@@ -552,6 +578,29 @@ function AddSourceForm({
                 value={draft.path}
                 onChange={(e) => set({ path: e.target.value })}
                 placeholder="templates"
+              />
+            </Field>
+          </>
+        )}
+        {showGitTgzFields && (
+          <>
+            <Field label="Ref" help="Git tag, branch, or commit. Defaults to main.">
+              <input
+                className={inputClass}
+                value={draft.ref}
+                onChange={(e) => set({ ref: e.target.value })}
+                placeholder="main"
+              />
+            </Field>
+            <Field
+              label="Path"
+              help="Path to the chart .tgz file inside the repo, e.g. charts/web-service-1.2.0.tgz."
+            >
+              <input
+                className={inputClass}
+                value={draft.path}
+                onChange={(e) => set({ path: e.target.value })}
+                placeholder="charts/web-service-1.2.0.tgz"
               />
             </Field>
           </>
