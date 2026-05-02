@@ -1,11 +1,14 @@
 import { api } from "./api";
 import type {
+  TemplateCredentialsRequest,
+  TemplateCredentialsResponse,
   TemplateDetail,
   TemplateImportPreview,
   TemplateImportResult,
   TemplateRegistry,
   TemplateRegistryResponse,
   TemplateSyncResponse,
+  TemplateTestConnectionResult,
   TemplatesResponse,
 } from "../types";
 
@@ -76,5 +79,33 @@ export function syncAllSources(): Promise<TemplateSyncResponse> {
 export function syncSource(name: string): Promise<TemplateSyncResponse> {
   return api.post<TemplateSyncResponse>(
     `/templates/registry/sources/${encodeURIComponent(name)}/sync`,
+  );
+}
+
+// setSourceCredentials seals the supplied credentials into a managed
+// SealedSecret in suparship-system, points the source at it, and verifies
+// against the live repo before sealing — the response carries the test
+// result so the UI can show "saved & verified" in one round-trip.
+export function setSourceCredentials(
+  name: string,
+  req: TemplateCredentialsRequest,
+): Promise<TemplateCredentialsResponse> {
+  return api.post<TemplateCredentialsResponse>(
+    `/templates/registry/sources/${encodeURIComponent(name)}/credentials`,
+    req,
+  );
+}
+
+// testSourceConnection runs git ls-remote against the source's repoURL.
+// When req carries plaintext creds those are used; otherwise the server
+// falls back to credentials already stored under existingSecret. Returns
+// 200 even on auth failure — `success` reports the auth outcome.
+export function testSourceConnection(
+  name: string,
+  req: TemplateCredentialsRequest = {},
+): Promise<TemplateTestConnectionResult> {
+  return api.post<TemplateTestConnectionResult>(
+    `/templates/registry/sources/${encodeURIComponent(name)}/test-connection`,
+    req,
   );
 }

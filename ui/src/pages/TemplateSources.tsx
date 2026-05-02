@@ -5,15 +5,44 @@ import { toast } from "sonner";
 import { ApiError } from "../lib/api";
 import {
   fetchTemplateRegistry,
+  setSourceCredentials,
   syncAllSources,
   syncSource,
+  testSourceConnection,
   updateTemplateRegistry,
 } from "../lib/templates";
 import type {
   ExternalTemplateRepo,
+  TemplateCredentialsRequest,
   TemplateRegistry,
+  TemplateRepoProvider,
   TemplateSyncResult,
+  TemplateTestConnectionResult,
 } from "../types";
+
+// Deterministic prefix used by credstore.SecretNameFor on the backend.
+// Knowing this lets us label rows as "managed" vs "hand-wired" at a
+// glance without an extra API call.
+const MANAGED_SECRET_PREFIX = "suparship-tpl-credentials-";
+
+const PROVIDERS: ReadonlyArray<{ value: TemplateRepoProvider; label: string }> =
+  [
+    { value: "github", label: "GitHub" },
+    { value: "gitlab", label: "GitLab" },
+    { value: "gitea", label: "Gitea" },
+    { value: "bitbucket", label: "Bitbucket" },
+    { value: "generic", label: "Generic (HTTPS Basic)" },
+  ];
+
+// usesToken returns true when the provider authenticates via a single
+// PAT (token field), false when it needs username + password.
+function usesToken(provider: TemplateRepoProvider | "" | undefined): boolean {
+  return provider === "github" || provider === "gitlab" || provider === "gitea";
+}
+
+function isManagedSecret(repo: ExternalTemplateRepo): boolean {
+  return repo.existingSecret === `${MANAGED_SECRET_PREFIX}${repo.name}`;
+}
 
 // emptyRepo seeds the inline "add source" form. Lives outside the component
 // because react re-creates it on every render otherwise, which would reset
@@ -67,6 +96,7 @@ export function TemplateSources() {
   const [syncingOne, setSyncingOne] = useState<string | null>(null);
   const [draft, setDraft] = useState<ExternalTemplateRepo>(emptyRepo);
   const [showAdd, setShowAdd] = useState(false);
+  const [credsFor, setCredsFor] = useState<ExternalTemplateRepo | null>(null);
 
   // sourceState maps repo name → { lastSynced, templateCount } derived from
   // registry.sources. Recomputed when the registry changes; useMemo means
@@ -149,7 +179,11 @@ export function TemplateSources() {
     }
   }
 
-  async function handleAdd() {
+  // handleAdd persists the source. When `thenSetCredentials` is true the
+  // credentials dialog opens against the freshly saved row — that's the
+  // path operators take for private repos so they don't have to find the
+  // per-row "Set credentials" button after saving.
+  async function handleAdd(thenSetCredentials: boolean) {
     if (!draft.name.trim() || !draft.repoURL.trim()) {
       toast.error("Name and Repo URL are required");
       return;
@@ -160,15 +194,22 @@ export function TemplateSources() {
     }
     setSavingRepo(true);
     try {
+      const saved: ExternalTemplateRepo = { ...draft };
       const next: TemplateRegistry = {
         ...registry,
-        external: [...(registry.external ?? []), { ...draft }],
+        external: [...(registry.external ?? []), saved],
       };
       const res = await updateTemplateRegistry(next);
       setRegistry(res.registry);
       setDraft(emptyRepo);
       setShowAdd(false);
-      toast.success(`Added source ${draft.name}`);
+      toast.success(`Added source ${saved.name}`);
+      if (thenSetCredentials) {
+        // Use the saved draft directly; the registry response also
+        // contains the row but lookup-by-name would have to handle the
+        // case where the server normalised something. Direct is simpler.
+        setCredsFor(saved);
+      }
     } catch (err) {
       toast.error(extractError(err, "Save failed"));
     } finally {
@@ -258,7 +299,8 @@ export function TemplateSources() {
         <AddSourceForm
           draft={draft}
           onChange={setDraft}
-          onSubmit={handleAdd}
+          onSubmit={() => handleAdd(false)}
+          onSubmitWithCredentials={() => handleAdd(true)}
           saving={savingRepo}
         />
       )}
@@ -297,7 +339,13 @@ export function TemplateSources() {
                       <div className="font-mono text-xs">{repo.repoURL}</div>
                       <div className="mt-1 text-xs text-gray-400">
                         {repo.ref || "main"} · {repo.path || "/"}
-                        {repo.existingSecret ? ` · auth: ${repo.existingSecret}` : ""}
+                        {repo.existingSecret ? (
+                          isManagedSecret(repo) ? (
+                            <span> · auth: managed (sealed)</span>
+                          ) : (
+                            <span> · auth: {repo.existingSecret}</span>
+                          )
+                        ) : null}
                       </div>
                     </td>
                     <td className="px-4 py-3 align-top text-gray-600">
@@ -317,6 +365,13 @@ export function TemplateSources() {
                       </button>
                       <button
                         type="button"
+                        onClick={() => setCredsFor(repo)}
+                        className="ml-2 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                      >
+                        {repo.existingSecret ? "Update credentials" : "Set credentials"}
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => handleRemove(repo.name)}
                         className="ml-2 rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
                       >
@@ -330,6 +385,27 @@ export function TemplateSources() {
           </table>
         </div>
       )}
+
+      {credsFor && (
+        <CredentialsDialog
+          source={credsFor}
+          onClose={() => setCredsFor(null)}
+          onSaved={(updated) => {
+            // Optimistic local update so the row reflects the new
+            // existingSecret immediately; followed by a refetch so the
+            // sources list (next sync result) is authoritative.
+            setRegistry((reg) => ({
+              ...reg,
+              external: (reg.external ?? []).map((r) =>
+                r.name === updated.name ? updated : r,
+              ),
+            }));
+            fetchTemplateRegistry()
+              .then((res) => setRegistry(res.registry))
+              .catch((err) => toast.error(extractError(err, "Refresh failed")));
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -338,11 +414,13 @@ function AddSourceForm({
   draft,
   onChange,
   onSubmit,
+  onSubmitWithCredentials,
   saving,
 }: {
   draft: ExternalTemplateRepo;
   onChange: (next: ExternalTemplateRepo) => void;
   onSubmit: () => void;
+  onSubmitWithCredentials: () => void;
   saving: boolean;
 }) {
   const set = (partial: Partial<ExternalTemplateRepo>) =>
@@ -403,14 +481,26 @@ function AddSourceForm({
           />
         </Field>
       </div>
-      <div className="mt-5 flex justify-end">
+      <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+        <p className="mr-auto text-xs text-gray-500">
+          Public repo? Save source. Private? Save &amp; set credentials seals
+          a PAT for the source in one step.
+        </p>
         <button
           type="button"
           onClick={onSubmit}
           disabled={saving}
-          className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+          className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
         >
           {saving ? "Saving…" : "Save source"}
+        </button>
+        <button
+          type="button"
+          onClick={onSubmitWithCredentials}
+          disabled={saving}
+          className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save & set credentials"}
         </button>
       </div>
     </div>
@@ -432,5 +522,213 @@ function Field({
       <div className="mt-1">{children}</div>
       {help && <p className="mt-1 text-xs text-gray-400">{help}</p>}
     </label>
+  );
+}
+
+function CredentialsDialog({
+  source,
+  onClose,
+  onSaved,
+}: {
+  source: ExternalTemplateRepo;
+  onClose: () => void;
+  onSaved: (updated: ExternalTemplateRepo) => void;
+}) {
+  // Default to the source's stored provider when known, else github
+  // (most common case for the public-stdlib + private-fork pattern).
+  const initialProvider: TemplateRepoProvider =
+    (source.provider as TemplateRepoProvider) || "github";
+  const [provider, setProvider] = useState<TemplateRepoProvider>(initialProvider);
+  const [token, setToken] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<TemplateTestConnectionResult | null>(null);
+
+  // Build a request payload from current form state. Used by both
+  // Test connection and Save so they exercise the same shape.
+  function buildReq(): TemplateCredentialsRequest {
+    if (usesToken(provider)) {
+      return { provider, token };
+    }
+    return { provider, username, password };
+  }
+
+  function hasInputs(): boolean {
+    if (usesToken(provider)) return token.trim().length > 0;
+    return username.trim().length > 0 || password.trim().length > 0;
+  }
+
+  async function handleTest() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      // When the form is empty the backend falls back to credentials
+      // already stored for this source — handy for "are my saved
+      // credentials still good?" without re-pasting the PAT.
+      const req = hasInputs() ? buildReq() : {};
+      const res = await testSourceConnection(source.name, req);
+      setTestResult(res);
+    } catch (err) {
+      setTestResult({
+        success: false,
+        message: extractError(err, "Test failed"),
+        durationMs: 0,
+      });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!hasInputs()) {
+      toast.error(
+        usesToken(provider) ? "Token is required" : "Username and password are required",
+      );
+      return;
+    }
+    setSaving(true);
+    setTestResult(null);
+    try {
+      const res = await setSourceCredentials(source.name, buildReq());
+      if (res.testResult) setTestResult(res.testResult);
+      toast.success(`Credentials sealed for ${source.name}`);
+      onSaved(res.source);
+      onClose();
+    } catch (err) {
+      // The backend returns 400 with the test result inline when
+      // verification fails. Try to surface the message; fall back to
+      // a generic toast.
+      if (err instanceof ApiError) {
+        toast.error(err.message);
+      } else {
+        toast.error(extractError(err, "Save failed"));
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+        <h3 className="text-base font-semibold text-gray-900">
+          Credentials for {source.name}
+        </h3>
+        <p className="mt-1 text-xs text-gray-500">
+          suparship seals the credentials into a SealedSecret in
+          suparship-system; the plaintext never lands on the cluster as
+          a regular Secret. Verified against{" "}
+          <span className="font-mono">{source.repoURL}</span> before saving.
+        </p>
+
+        <div className="mt-4 space-y-4">
+          <Field label="Provider" help="Determines the credential format and how git authenticates.">
+            <select
+              className={inputClass}
+              value={provider}
+              onChange={(e) => {
+                setProvider(e.target.value as TemplateRepoProvider);
+                setTestResult(null);
+              }}
+            >
+              {PROVIDERS.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          {usesToken(provider) ? (
+            <Field
+              label="Personal access token"
+              help="Read access to the templates repo is enough. Don't reuse the gitops PAT — that one has write access to your fleet."
+            >
+              <input
+                type="password"
+                className={inputClass}
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="ghp_… / glpat-… / etc."
+                autoComplete="off"
+              />
+            </Field>
+          ) : (
+            <>
+              <Field label="Username">
+                <input
+                  className={inputClass}
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  autoComplete="off"
+                />
+              </Field>
+              <Field
+                label={provider === "bitbucket" ? "App password" : "Password"}
+                help={
+                  provider === "bitbucket"
+                    ? "Bitbucket app password (account settings → app passwords)."
+                    : undefined
+                }
+              >
+                <input
+                  type="password"
+                  className={inputClass}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="off"
+                />
+              </Field>
+            </>
+          )}
+
+          {testResult && (
+            <div
+              className={`rounded-md border p-3 text-xs ${
+                testResult.success
+                  ? "border-green-200 bg-green-50 text-green-800"
+                  : "border-red-200 bg-red-50 text-red-800"
+              }`}
+            >
+              <div className="font-medium">
+                {testResult.success ? "Verified" : "Failed"} · {testResult.durationMs}ms
+              </div>
+              <div className="mt-1 break-words">{testResult.message}</div>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-6 flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={handleTest}
+            disabled={testing || saving}
+            className="rounded-md border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {testing ? "Testing…" : "Test connection"}
+          </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={saving}
+              className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+            >
+              {saving ? "Sealing…" : "Save"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

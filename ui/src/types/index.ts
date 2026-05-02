@@ -132,8 +132,22 @@ export interface ExternalTemplateRepo {
   repoURL: string;
   ref: string;
   path: string;
+  // Provider drives the credentials data-key shape: token for github/
+  // gitlab/gitea, username+password for bitbucket/generic. Empty defaults
+  // to generic.
+  provider?: TemplateRepoProvider | "";
+  // existingSecret is a K8s Secret name in suparship-system. UI-managed
+  // credentials write to a deterministic name (suparship-tpl-credentials-
+  // <source>); operators may also point at a hand-managed Secret.
   existingSecret?: string;
 }
+
+export type TemplateRepoProvider =
+  | "github"
+  | "gitlab"
+  | "gitea"
+  | "bitbucket"
+  | "generic";
 
 export interface TemplateSource {
   name: string;
@@ -168,6 +182,28 @@ export interface TemplateSyncResult {
 
 export interface TemplateSyncResponse {
   results: TemplateSyncResult[];
+}
+
+// Credentials sealing flow for a single source.
+// Provider may be omitted to fall back to the source's stored value;
+// when set, it overrides (useful for correcting a misclassified entry).
+export interface TemplateCredentialsRequest {
+  provider?: TemplateRepoProvider | "";
+  token?: string;
+  username?: string;
+  password?: string;
+}
+
+export interface TemplateTestConnectionResult {
+  success: boolean;
+  message: string;
+  durationMs: number;
+}
+
+export interface TemplateCredentialsResponse {
+  source: ExternalTemplateRepo;
+  sealedSecretName: string;
+  testResult?: TemplateTestConnectionResult;
 }
 
 export interface TemplateInput {
