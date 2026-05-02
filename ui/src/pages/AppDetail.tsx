@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp, deleteApp } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp, deleteApp, upgradeAppTemplate } from "../lib/apps";
+import { listTemplateVersions } from "../lib/templates";
+import type { TemplateVersionInfo } from "../types";
 import { createPreview, deletePreview } from "../lib/previews";
 import {
   getAppEnvConfig,
@@ -781,6 +783,12 @@ export function AppDetail() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  // Template upgrade
+  const [templateVersions, setTemplateVersions] = useState<TemplateVersionInfo[]>([]);
+  const [showUpgradeDialog, setShowUpgradeDialog] = useState(false);
+  const [upgradeTarget, setUpgradeTarget] = useState<string>("");
+  const [upgrading, setUpgrading] = useState(false);
+
   useEffect(() => {
     if (!project || !appName) return;
     let cancelled = false;
@@ -807,6 +815,25 @@ export function AppDetail() {
       cancelled = true;
     };
   }, [project, appName]);
+
+  // Pull the available versions for this app's template so we can surface
+  // an "Upgrade available" affordance + populate the upgrade picker.
+  // Silently no-ops on error: built-in templates have no archives, the
+  // endpoint returns []; broken cluster fetch shouldn't break app detail.
+  useEffect(() => {
+    if (!data?.template?.name) return;
+    let cancelled = false;
+    listTemplateVersions(data.template.name)
+      .then((res) => {
+        if (!cancelled) setTemplateVersions(res.versions ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setTemplateVersions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [data?.template?.name]);
 
   // When the user switches environments, fetch the specific env detail for
   // fresh runtime data. Errors are silently swallowed; the embedded summary
@@ -921,6 +948,24 @@ export function AppDetail() {
                 </span>
               )}
             </Link>
+            {(() => {
+              const latest = templateVersions[0]?.version;
+              if (!latest || !data.template.version) return null;
+              if (latest === data.template.version) return null;
+              return (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUpgradeTarget(latest);
+                    setShowUpgradeDialog(true);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                  title={`Upgrade available: v${latest}`}
+                >
+                  upgrade → v{latest}
+                </button>
+              );
+            })()}
             {data.description && (
               <span className="text-gray-400">{data.description}</span>
             )}
@@ -1257,6 +1302,82 @@ export function AppDetail() {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Template upgrade dialog */}
+      {showUpgradeDialog && data && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-semibold text-gray-900">
+              Upgrade template
+            </h3>
+            <p className="mt-1 text-sm text-gray-500">
+              Pin {appName} to a different version of{" "}
+              <span className="font-mono">{data.template.name}</span> and re-publish.
+              ArgoCD will roll the new chart bytes out on its next sync.
+            </p>
+            <p className="mt-2 text-xs text-amber-700">
+              No values migration is performed. If the new version's input schema
+              differs from{" "}
+              <span className="font-mono">v{data.template.version}</span>, edit
+              the app's values via the existing flow before upgrading.
+            </p>
+            <label className="mt-4 block">
+              <span className="text-sm font-medium text-gray-700">Target version</span>
+              <select
+                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-gray-500 focus:ring-1 focus:ring-gray-500"
+                value={upgradeTarget}
+                onChange={(e) => setUpgradeTarget(e.target.value)}
+              >
+                {templateVersions.map((v) => (
+                  <option key={v.version} value={v.version}>
+                    v{v.version}
+                    {v.version === data.template.version ? " (current)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowUpgradeDialog(false)}
+                disabled={upgrading}
+                className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={
+                  upgrading ||
+                  !upgradeTarget ||
+                  upgradeTarget === data.template.version
+                }
+                onClick={async () => {
+                  if (!project || !appName) return;
+                  setUpgrading(true);
+                  try {
+                    const res = await upgradeAppTemplate(project, appName, upgradeTarget);
+                    toast.success(
+                      `Upgraded ${appName}: v${res.fromVersion ?? "?"} → v${res.toVersion ?? upgradeTarget}`,
+                    );
+                    setShowUpgradeDialog(false);
+                    // Refresh app detail so the version pin reflects the new state.
+                    const refreshed = await getApp(project, appName);
+                    setData(refreshed.app);
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Upgrade failed");
+                  } finally {
+                    setUpgrading(false);
+                  }
+                }}
+                className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+              >
+                {upgrading ? "Upgrading…" : "Upgrade"}
+              </button>
+            </div>
           </div>
         </div>
       )}

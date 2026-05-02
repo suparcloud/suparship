@@ -105,12 +105,15 @@ type PublisherConfig struct {
 	SubPath string
 }
 
-// ChartFetcher returns the packaged Helm chart bytes for a template name, or
-// nil when no bundle exists. Implementations are free to consult any
-// backing store (cluster ConfigMap, OCI registry, …); the publisher only
-// needs the .tgz contents.
+// ChartFetcher returns the packaged Helm chart bytes for a template at a
+// specific pinned version, or nil when no bundle exists. Implementations
+// are free to consult any backing store (cluster ConfigMap, OCI registry,
+// …); the publisher only needs the .tgz contents.
+//
+// Empty version means "whatever the current alias points at" — preserves
+// behaviour for legacy apps that don't have Template.Version captured.
 type ChartFetcher interface {
-	LoadChartBundle(ctx context.Context, templateName string) ([]byte, error)
+	LoadChartBundle(ctx context.Context, templateName, version string) ([]byte, error)
 }
 
 // TemplateLoader returns the template definition for a given name. Used by
@@ -470,9 +473,12 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 		mode, _ := p.resolveTemplateChartMode(app.Spec.Template.Name)
 		if mode == AppMetadataChartTypeInline {
 			// Sync the Helm chart into charts/{template}/ so ArgoCD's
-			// ApplicationSet can resolve the chart path.
-			if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name); err != nil {
-				return fmt.Errorf("sync chart for template %s: %w", app.Spec.Template.Name, err)
+			// ApplicationSet can resolve the chart path. The version
+			// the app was created against is honored — bumping the
+			// templates registry doesn't silently re-version every
+			// running app's chart bytes.
+			if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name, app.Spec.Template.Version); err != nil {
+				return fmt.Errorf("sync chart for template %s@%s: %w", app.Spec.Template.Name, app.Spec.Template.Version, err)
 			}
 		}
 
@@ -703,20 +709,24 @@ func (p *Publisher) writeAppPlatformResources(
 //
 // Resolution order:
 //  1. Local disk: TemplatesDir/{templateName}/chart/ (built-ins & dev mode).
-//  2. Cluster bundle: ChartFetcher.LoadChartBundle(templateName), the
-//     packaged .tgz stored alongside templates imported via the BYO-chart
-//     flow.
+//  2. Cluster bundle: ChartFetcher.LoadChartBundle(templateName, version),
+//     the packaged .tgz stored alongside templates imported via the
+//     BYO-chart flow. When version is empty (legacy apps without a pinned
+//     Template.Version), the fetcher resolves to the current alias.
 //
 // Both paths are no-ops when their source is missing — same as before — so
 // existing callers that don't configure ChartFetcher keep prior behaviour.
 // When the chart directory already exists with identical content the
 // subsequent git commit is a no-op via stagedIsEmpty.
-func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName string) error {
+func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName, version string) error {
 	dstDir := p.outputDir(repoDir, "charts", templateName)
 
 	if p.cfg.TemplatesDir != "" {
 		srcDir := filepath.Join(p.cfg.TemplatesDir, templateName, "chart")
 		if _, err := os.Stat(srcDir); err == nil {
+			// Disk-based templates are dev-mode only; we don't keep
+			// per-version snapshots on disk. Whatever's at templatesDir
+			// is what gets copied — version arg is informational here.
 			return p.copyChartDir(srcDir, dstDir)
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("stat chart dir %s: %w", srcDir, err)
@@ -727,9 +737,9 @@ func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName string)
 		slog.Debug("gitops: no local chart and no ChartFetcher configured", "template", templateName)
 		return nil
 	}
-	data, err := p.cfg.ChartFetcher.LoadChartBundle(ctx, templateName)
+	data, err := p.cfg.ChartFetcher.LoadChartBundle(ctx, templateName, version)
 	if err != nil {
-		return fmt.Errorf("fetch chart bundle for %s: %w", templateName, err)
+		return fmt.Errorf("fetch chart bundle for %s@%s: %w", templateName, version, err)
 	}
 	if len(data) == 0 {
 		slog.Debug("gitops: no chart bundle for template, skipping sync", "template", templateName)

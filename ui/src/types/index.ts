@@ -202,6 +202,18 @@ export interface TemplateSyncResponse {
   results: TemplateSyncResult[];
 }
 
+// Per-version archive entry for a template, returned by
+// GET /api/v1/templates/{name}/versions. Sorted descending by SemVer
+// on the wire when the version strings parse cleanly.
+export interface TemplateVersionInfo {
+  version: string;
+  createdAt?: string;
+}
+
+export interface TemplateVersionsResponse {
+  versions: TemplateVersionInfo[];
+}
+
 // Credentials sealing flow for a single source.
 // Provider may be omitted to fall back to the source's stored value;
 // when set, it overrides (useful for correcting a misclassified entry).

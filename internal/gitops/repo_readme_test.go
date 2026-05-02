@@ -75,7 +75,7 @@ func TestSyncChart_ChartSourcesAreNotHeadered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
 	}
-	if err := p.SyncChartForTest(t.Context(), repoDir, "demo"); err != nil {
+	if err := p.SyncChartForTest(t.Context(), repoDir, "demo", ""); err != nil {
 		t.Fatalf("SyncChart: %v", err)
 	}
 

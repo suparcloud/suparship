@@ -1544,9 +1544,12 @@ type kubeChartFetcher struct {
 	client kubernetes.Interface
 }
 
-// LoadChartBundle satisfies gitops.ChartFetcher.
-func (k *kubeChartFetcher) LoadChartBundle(ctx context.Context, templateName string) ([]byte, error) {
-	return kube.LoadChartBundle(ctx, k.client, templateName)
+// LoadChartBundle satisfies gitops.ChartFetcher. Resolves the per-version
+// archive when version is non-empty (with a fall-back to the alias when
+// the archive is missing — covers templates persisted before versioned
+// naming landed). Empty version reads the alias directly.
+func (k *kubeChartFetcher) LoadChartBundle(ctx context.Context, templateName, version string) ([]byte, error) {
+	return kube.LoadChartBundleVersion(ctx, k.client, templateName, version)
 }
 
 // chartFetcherFromClient returns a gitops.ChartFetcher backed by the cluster

@@ -9,6 +9,7 @@ import type {
   TemplateRegistryResponse,
   TemplateSyncResponse,
   TemplateTestConnectionResult,
+  TemplateVersionsResponse,
   TemplatesResponse,
 } from "../types";
 
@@ -26,6 +27,17 @@ export function fetchTemplate(name: string): Promise<TemplateDetail> {
 // calling.
 export function deleteTemplate(name: string): Promise<void> {
   return api.del(`/templates/${encodeURIComponent(name)}`);
+}
+
+// listTemplateVersions returns every persisted version of a template,
+// descending by SemVer. Empty array for built-in templates that don't
+// have archives.
+export function listTemplateVersions(
+  name: string,
+): Promise<TemplateVersionsResponse> {
+  return api.get<TemplateVersionsResponse>(
+    `/templates/${encodeURIComponent(name)}/versions`,
+  );
 }
 
 // importTemplatePreview uploads a Helm chart .tgz and gets back a generated

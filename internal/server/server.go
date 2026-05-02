@@ -441,6 +441,7 @@ func New(cfg Config) *Server {
 		}
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
+			rh.appHandler.kubeClient = cfg.KubeClient
 			if cfg.OrgProvider != nil {
 				rh.appHandler.orgProvider = cfg.OrgProvider
 			}

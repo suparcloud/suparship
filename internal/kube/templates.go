@@ -357,6 +357,57 @@ func LoadChartBundle(ctx context.Context, client kubernetes.Interface, templateN
 	return cm.BinaryData[templateChartBundleKey], nil
 }
 
+// TemplateVersion describes one persisted version of a template — the
+// suparship-template-{name}-{version} archive ConfigMap.
+type TemplateVersion struct {
+	// Version is the metadata.version declared on the persisted template.yaml.
+	Version string
+	// CreatedAt is when the archive ConfigMap was first persisted (the
+	// ConfigMap's CreationTimestamp). Operators use this to tell archives
+	// apart when SemVer alone isn't enough (e.g. pre-release retries).
+	CreatedAt string
+}
+
+// ListTemplateVersions returns every persisted version of a template by
+// listing per-version archive ConfigMaps. The current alias is included
+// when its template-version label is set (writes after PR1.4) so the
+// caller doesn't have to merge two queries.
+//
+// Results are returned in the order the API returns them; callers that
+// need SemVer ordering sort at their layer.
+func ListTemplateVersions(ctx context.Context, client kubernetes.Interface, templateName string) ([]TemplateVersion, error) {
+	if templateName == "" {
+		return nil, fmt.Errorf("template name is required")
+	}
+	selector := "suparship.io/template-name=" + templateName
+	cms, err := client.CoreV1().ConfigMaps(systemNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list template versions for %s: %w", templateName, err)
+	}
+	out := make([]TemplateVersion, 0, len(cms.Items))
+	seen := make(map[string]struct{}, len(cms.Items))
+	for _, cm := range cms.Items {
+		// The current alias and its archive both carry the same
+		// template-version label after PR1.4 — dedupe by version so
+		// the caller sees one entry per persisted version.
+		v := cm.Labels["suparship.io/template-version"]
+		if v == "" {
+			continue
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, TemplateVersion{
+			Version:   v,
+			CreatedAt: cm.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	return out, nil
+}
+
 // LoadChartBundleVersion returns the chart bytes for a specific pinned
 // (templateName, version). Falls back to the unversioned alias when no
 // archive exists for that version — this keeps the caller working

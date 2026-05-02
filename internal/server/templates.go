@@ -141,7 +141,113 @@ func (th *templateHandler) adminOrAuth() func(http.HandlerFunc) http.HandlerFunc
 func (th *templateHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/templates", th.auth.requireAuth(th.handleList))
 	mux.HandleFunc("GET /api/v1/templates/{name}", th.auth.requireAuth(th.handleDetail))
+	mux.HandleFunc("GET /api/v1/templates/{name}/versions", th.auth.requireAuth(th.handleListVersions))
 	mux.HandleFunc("DELETE /api/v1/templates/{name}", th.adminOrAuth()(th.handleDelete))
+}
+
+// TemplateVersionDTO mirrors kube.TemplateVersion on the wire so the UI
+// can render an upgrade picker.
+type TemplateVersionDTO struct {
+	Version   string `json:"version"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+// TemplateVersionsResponse wraps the list for GET .../versions.
+type TemplateVersionsResponse struct {
+	Versions []TemplateVersionDTO `json:"versions"`
+}
+
+// handleListVersions returns every persisted version of a template
+// (per-version archive ConfigMaps). Built-in templates loaded from disk
+// don't have archives — they return an empty list so the UI can flag
+// them as "not version-managed" rather than 404.
+//
+// Sorted descending by SemVer when the strings parse cleanly; falls
+// back to the lex order when not (so non-SemVer tags don't crash the
+// endpoint, just appear in surprising order).
+func (th *templateHandler) handleListVersions(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name required"})
+		return
+	}
+	if th.kubeClient == nil {
+		writeJSON(w, http.StatusOK, TemplateVersionsResponse{Versions: []TemplateVersionDTO{}})
+		return
+	}
+	versions, err := kube.ListTemplateVersions(r.Context(), th.kubeClient, name)
+	if err != nil {
+		if th.logger != nil {
+			th.logger.Error("list template versions", "name", name, "err", err)
+		}
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list template versions"})
+		return
+	}
+	sort.Slice(versions, func(i, j int) bool {
+		return semverGreater(versions[i].Version, versions[j].Version)
+	})
+	dto := make([]TemplateVersionDTO, 0, len(versions))
+	for _, v := range versions {
+		dto = append(dto, TemplateVersionDTO{Version: v.Version, CreatedAt: v.CreatedAt})
+	}
+	writeJSON(w, http.StatusOK, TemplateVersionsResponse{Versions: dto})
+}
+
+// semverGreater returns true if a > b under SemVer ordering. Falls back
+// to string comparison when either side doesn't parse — keeps the
+// endpoint stable in the face of non-SemVer tags an operator might
+// experiment with.
+func semverGreater(a, b string) bool {
+	pa, okA := parseSemVer(a)
+	pb, okB := parseSemVer(b)
+	if !okA || !okB {
+		return a > b
+	}
+	for i := 0; i < 3; i++ {
+		if pa[i] != pb[i] {
+			return pa[i] > pb[i]
+		}
+	}
+	return false
+}
+
+// parseSemVer returns [major, minor, patch] from "X.Y.Z" (ignoring
+// any pre-release / build suffix). Returns ok=false when the input
+// can't be parsed cleanly.
+func parseSemVer(s string) ([3]int, bool) {
+	// Strip pre-release / build (everything after first '-' or '+').
+	for i, c := range s {
+		if c == '-' || c == '+' {
+			s = s[:i]
+			break
+		}
+	}
+	parts := [3]int{}
+	idx := 0
+	cur := 0
+	hasDigit := false
+	for _, c := range s {
+		if c == '.' {
+			if !hasDigit || idx >= 2 {
+				return [3]int{}, false
+			}
+			parts[idx] = cur
+			idx++
+			cur = 0
+			hasDigit = false
+			continue
+		}
+		if c < '0' || c > '9' {
+			return [3]int{}, false
+		}
+		cur = cur*10 + int(c-'0')
+		hasDigit = true
+	}
+	if !hasDigit || idx != 2 {
+		return [3]int{}, false
+	}
+	parts[2] = cur
+	return parts, true
 }
 
 // handleDelete removes a template's cluster ConfigMap. Returns 204 on
