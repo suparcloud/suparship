@@ -19,6 +19,7 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/helmvalues"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/tpl"
 	"gopkg.in/yaml.v3"
 )
 
@@ -68,6 +69,12 @@ type PublisherConfig struct {
 	// Optional — when nil and TemplatesDir lacks the chart, syncChart is a
 	// no-op (preserves prior behaviour).
 	ChartFetcher ChartFetcher
+	// TemplateLoader resolves a template's metadata (engine.chart shape,
+	// version, etc.) by name. Used to detect external-mode templates so
+	// the publisher can route them to envs-external/... and skip
+	// syncChart. Optional — when nil, the publisher treats every
+	// template as inline-mode (today's behaviour, back-compat).
+	TemplateLoader TemplateLoader
 	// Branding controls the platform identity stamped onto every manifest
 	// the publisher writes (label values + custom label/annotation
 	// domain). Zero value applies "suparship" / "suparship.io" defaults
@@ -104,6 +111,16 @@ type PublisherConfig struct {
 // needs the .tgz contents.
 type ChartFetcher interface {
 	LoadChartBundle(ctx context.Context, templateName string) ([]byte, error)
+}
+
+// TemplateLoader returns the template definition for a given name. Used by
+// the publisher to detect external-mode templates (engine.chart points at
+// a Helm registry) so it can route them to a separate gitops layout that
+// the BuildArgoExternalAppSet picks up. Implementations should treat
+// "not found" as a returned (nil, nil) rather than an error so the
+// publisher can fall back to inline-mode behaviour without crashing.
+type TemplateLoader interface {
+	LoadTemplate(ctx context.Context, name string) (*tpl.Template, error)
 }
 
 // Publisher writes GitOps manifests to the GitOps repository and commits +
@@ -446,10 +463,17 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 			return err
 		}
 
-		// Sync the Helm chart into charts/{template}/ so ArgoCD's
-		// ApplicationSet can resolve the chart path.
-		if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name); err != nil {
-			return fmt.Errorf("sync chart for template %s: %w", app.Spec.Template.Name, err)
+		// External-mode templates have no local chart bytes — Argo's
+		// repo-server pulls fresh from the Helm registry. Skip the
+		// gitops-repo chart copy so we don't bloat history with bytes
+		// nobody reads.
+		mode, _ := p.resolveTemplateChartMode(app.Spec.Template.Name)
+		if mode == AppMetadataChartTypeInline {
+			// Sync the Helm chart into charts/{template}/ so ArgoCD's
+			// ApplicationSet can resolve the chart path.
+			if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name); err != nil {
+				return fmt.Errorf("sync chart for template %s: %w", app.Spec.Template.Name, err)
+			}
 		}
 
 		// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
@@ -491,6 +515,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		orgName = "default"
 	}
 
+	// Resolve the template once per call so external-mode routing is
+	// consistent across all envs. TemplateLoader is optional — when nil
+	// the publisher treats every template as inline-mode (back-compat).
+	chartMode, chartRef := p.resolveTemplateChartMode(app.Spec.Template.Name)
+
 	for _, env := range envs {
 		if !env.Bound {
 			slog.Warn("gitops: skipping publish for unbound env — assign a cluster via Settings > Environments",
@@ -512,11 +541,20 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			Template:  app.Spec.Template.Name,
 			Namespace: ns,
 		}
+		// External-mode apps carry the chart locator in app.yaml so
+		// BuildArgoExternalAppSet's generator can render
+		// {{chartRepoURL}}, {{chartName}}, {{chartVersion}} per app.
+		if chartMode == AppMetadataChartTypeExternal && chartRef != nil {
+			appMeta.ChartType = ChartTypeExternal
+			appMeta.ChartRepoURL = chartRef.Repository
+			appMeta.ChartName = chartRef.Name
+			appMeta.ChartVersion = chartRef.Version
+		}
 		appMetaBytes, err := yaml.Marshal(appMeta)
 		if err != nil {
 			return fmt.Errorf("marshal app.yaml for env %s: %w", env.EnvName, err)
 		}
-		appMetaPath := p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "app.yaml")
+		appMetaPath := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name, "app.yaml")
 		if err := p.writeFile(appMetaPath, appMetaBytes); err != nil {
 			return err
 		}
@@ -536,14 +574,14 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
 		}
-		valuesPath := p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "values.yaml")
+		valuesPath := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name, "values.yaml")
 		if err := p.writeFile(valuesPath, hvBytes); err != nil {
 			return err
 		}
 
 		// Write platform-managed per-app resources into the same directory as
 		// app.yaml/values.yaml so ArgoCD picks them up with the same ApplicationSet.
-		appDir := p.appEnvDir(repoDir, env, app.ProjectName, app.Name)
+		appDir := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name)
 		if err := p.writeAppPlatformResources(appDir, app, ns, env, naming, orgName); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
 		}
@@ -1198,6 +1236,78 @@ func (p *Publisher) appEnvDir(repoDir string, env AppPublishEnv, parts ...string
 	}
 	all := append([]string{"envs", env.EnvName}, parts...)
 	return p.outputDir(repoDir, all...)
+}
+
+// appEnvDirExternal mirrors appEnvDir but routes external-mode apps to
+// envs-external/{envName}/{project}/{app}/. The path glob is what
+// BuildArgoExternalAppSet's Git File generator picks up; keeping it
+// disjoint from the inline-mode envs/ glob means each app belongs to
+// exactly one ApplicationSet without parameter selectors.
+//
+// Preview envs always use the inline path — external-mode previews are
+// out of scope for PR2.
+func (p *Publisher) appEnvDirExternal(repoDir string, env AppPublishEnv, parts ...string) string {
+	if env.EnvType == domain.AppEnvPreview {
+		return p.appEnvDir(repoDir, env, parts...)
+	}
+	all := append([]string{"envs-external", env.EnvName}, parts...)
+	return p.outputDir(repoDir, all...)
+}
+
+// AppMetadataChartType is an internal flag the publisher uses to route
+// per-app file writes between inline-mode and external-mode paths.
+// Distinct from the wire-format AppMetadata.ChartType string so the
+// publisher's call sites don't have to compare against magic strings.
+type AppMetadataChartType int
+
+const (
+	// AppMetadataChartTypeInline is the default — chart bytes live in
+	// the gitops repo at charts/{template}/, app.yaml lives at
+	// envs/{env}/{project}/{app}/.
+	AppMetadataChartTypeInline AppMetadataChartType = iota
+	// AppMetadataChartTypeExternal — chart lives in a Helm registry,
+	// app.yaml lives at envs-external/{env}/{project}/{app}/, no chart
+	// bytes touched by the publisher.
+	AppMetadataChartTypeExternal
+)
+
+// envAppDir routes per-app file writes between the inline and external
+// path globs based on the resolved chart mode for the current template.
+// Inline-mode → appEnvDir; external-mode → appEnvDirExternal.
+func (p *Publisher) envAppDir(mode AppMetadataChartType, repoDir string, env AppPublishEnv, parts ...string) string {
+	if mode == AppMetadataChartTypeExternal {
+		return p.appEnvDirExternal(repoDir, env, parts...)
+	}
+	return p.appEnvDir(repoDir, env, parts...)
+}
+
+// resolveTemplateChartMode looks up the template via TemplateLoader and
+// returns the resolved chart mode plus, for external-mode templates,
+// the chart locator (so the publisher can populate AppMetadata's chart
+// fields without re-loading).
+//
+// Falls back to inline-mode when:
+//   - TemplateLoader is nil (back-compat).
+//   - Lookup returns a non-fatal error or nil template.
+//   - The template's engine.chart isn't external (bundled or inline ./chart).
+//
+// The fallback is silent because external-mode is opt-in; treating an
+// unresolvable template as a fatal publish error would break every app
+// when the template store is briefly unavailable.
+func (p *Publisher) resolveTemplateChartMode(templateName string) (AppMetadataChartType, *tpl.ChartRef) {
+	if p.cfg.TemplateLoader == nil {
+		return AppMetadataChartTypeInline, nil
+	}
+	tmpl, err := p.cfg.TemplateLoader.LoadTemplate(context.Background(), templateName)
+	if err != nil {
+		slog.Warn("gitops: TemplateLoader failed; falling back to inline-mode publish",
+			"template", templateName, "err", err)
+		return AppMetadataChartTypeInline, nil
+	}
+	if tmpl == nil || !tmpl.Spec.Engine.Chart.IsExternal() {
+		return AppMetadataChartTypeInline, nil
+	}
+	return AppMetadataChartTypeExternal, tmpl.Spec.Engine.Chart.Ref
 }
 
 // outputDir builds an absolute filesystem path inside the gitops output

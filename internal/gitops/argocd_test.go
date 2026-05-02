@@ -1,7 +1,10 @@
 package gitops_test
 
 import (
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
@@ -563,5 +566,137 @@ func TestBuildArgoPreviewAppSet_NamespaceIsTemplateVar(t *testing.T) {
 	ns := appSet.Spec.Template.Spec.Destination.Namespace
 	if ns != "{{namespace}}" {
 		t.Errorf("preview AppSet destination.namespace = %q, want {{namespace}}", ns)
+	}
+}
+
+// ── BuildArgoExternalAppSet — multi-source, registry-chart shape ─────────────
+
+// TestBuildArgoExternalAppSet_NameDistinctFromInline ensures the external
+// AppSet has a different metadata.name from the inline AppSet for the same
+// env, so both can coexist in the argocd namespace without collision.
+func TestBuildArgoExternalAppSet_NameDistinctFromInline(t *testing.T) {
+	env := gitops.AppSetEnv{
+		EnvName:       "staging",
+		ClusterServer: "https://kubernetes.default.svc",
+	}
+	repo := "https://gitea.local/gitops/gitops"
+	inline := gitops.BuildArgoAppSet(env, repo, gitops.AppSetOptions{})
+	external := gitops.BuildArgoExternalAppSet(env, repo, gitops.AppSetOptions{})
+	if inline.Metadata.Name == external.Metadata.Name {
+		t.Errorf("inline and external AppSets have the same name %q; they must be distinct to coexist in the argocd namespace", inline.Metadata.Name)
+	}
+}
+
+// TestBuildArgoExternalAppSet_GeneratorPathSeparate verifies the external
+// AppSet's Git File generator points at envs-external/... rather than
+// envs/... — the publisher routes external-mode app.yaml files to that
+// path so each app belongs to exactly one AppSet without parameter
+// selectors.
+func TestBuildArgoExternalAppSet_GeneratorPathSeparate(t *testing.T) {
+	env := gitops.AppSetEnv{EnvName: "staging", ClusterServer: "https://kubernetes.default.svc"}
+	appSet := gitops.BuildArgoExternalAppSet(env, "https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
+
+	if len(appSet.Spec.Generators) != 1 || appSet.Spec.Generators[0].Git == nil {
+		t.Fatalf("expected one git generator, got %+v", appSet.Spec.Generators)
+	}
+	gitGen := appSet.Spec.Generators[0].Git
+	if len(gitGen.Files) != 1 {
+		t.Fatalf("expected one Files entry, got %d", len(gitGen.Files))
+	}
+	if !strings.Contains(gitGen.Files[0].Path, "envs-external/staging") {
+		t.Errorf("generator path = %q, want it to contain envs-external/staging", gitGen.Files[0].Path)
+	}
+	if strings.Contains(gitGen.Files[0].Path, "envs/staging") {
+		t.Errorf("generator path = %q, must NOT match the inline AppSet's envs/ glob", gitGen.Files[0].Path)
+	}
+}
+
+// TestBuildArgoExternalAppSet_ChartSourceShape verifies the chart source
+// uses repoURL+chart+targetRevision parameters for a Helm-registry pull
+// rather than the inline-mode source.path pattern.
+func TestBuildArgoExternalAppSet_ChartSourceShape(t *testing.T) {
+	env := gitops.AppSetEnv{EnvName: "staging", ClusterServer: "https://kubernetes.default.svc"}
+	appSet := gitops.BuildArgoExternalAppSet(env, "https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
+
+	// Find the chart source — it's the one whose RepoURL is the
+	// templated chartRepoURL parameter.
+	var chartSrc *gitops.ApplicationSource
+	for i := range appSet.Spec.Template.Spec.Sources {
+		s := &appSet.Spec.Template.Spec.Sources[i]
+		if s.Chart != "" {
+			chartSrc = s
+			break
+		}
+	}
+	if chartSrc == nil {
+		t.Fatalf("no source with Chart field; sources=%+v", appSet.Spec.Template.Spec.Sources)
+	}
+	if chartSrc.RepoURL != "{{chartRepoURL}}" {
+		t.Errorf("chartSrc.RepoURL = %q, want {{chartRepoURL}}", chartSrc.RepoURL)
+	}
+	if chartSrc.Chart != "{{chartName}}" {
+		t.Errorf("chartSrc.Chart = %q, want {{chartName}}", chartSrc.Chart)
+	}
+	if chartSrc.TargetRevision != "{{chartVersion}}" {
+		t.Errorf("chartSrc.TargetRevision = %q, want {{chartVersion}}", chartSrc.TargetRevision)
+	}
+	if chartSrc.Path != "" {
+		t.Errorf("chartSrc.Path = %q, want empty (Helm-registry sources must not set path)", chartSrc.Path)
+	}
+	if chartSrc.Helm == nil {
+		t.Fatalf("chartSrc.Helm is nil; need ReleaseName + ValueFiles for the values overlay")
+	}
+	if chartSrc.Helm.ReleaseName != "{{name}}" {
+		t.Errorf("Helm.ReleaseName = %q, want {{name}}", chartSrc.Helm.ReleaseName)
+	}
+	if len(chartSrc.Helm.ValueFiles) != 1 || !strings.HasPrefix(chartSrc.Helm.ValueFiles[0], "$appvalues/") {
+		t.Errorf("Helm.ValueFiles = %v, want one entry starting with $appvalues/ so values overlay from gitops repo works", chartSrc.Helm.ValueFiles)
+	}
+}
+
+// TestBuildArgoExternalAppSet_MultiSource verifies the AppSet emits
+// multi-source Applications: values ref + chart from registry +
+// per-app platform manifests.
+func TestBuildArgoExternalAppSet_MultiSource(t *testing.T) {
+	env := gitops.AppSetEnv{EnvName: "staging", ClusterServer: "https://kubernetes.default.svc"}
+	appSet := gitops.BuildArgoExternalAppSet(env, "https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
+
+	sources := appSet.Spec.Template.Spec.Sources
+	if len(sources) != 3 {
+		t.Fatalf("expected 3 sources (values ref, chart, platform manifests), got %d: %+v", len(sources), sources)
+	}
+	var sawRef, sawChart, sawDir bool
+	for _, s := range sources {
+		switch {
+		case s.Ref != "":
+			sawRef = true
+		case s.Chart != "":
+			sawChart = true
+		case s.Directory != nil:
+			sawDir = true
+		}
+	}
+	if !sawRef || !sawChart || !sawDir {
+		t.Errorf("missing sources: ref=%v chart=%v dir=%v", sawRef, sawChart, sawDir)
+	}
+}
+
+// TestBuildArgoExternalAppSet_Determinism guards against the AppSet
+// shape drifting on identical inputs.
+func TestBuildArgoExternalAppSet_Determinism(t *testing.T) {
+	env := gitops.AppSetEnv{EnvName: "staging", ClusterServer: "https://kubernetes.default.svc"}
+	repo := "https://gitea.local/gitops/gitops"
+	a := gitops.BuildArgoExternalAppSet(env, repo, gitops.AppSetOptions{SyncAutomated: true})
+	b := gitops.BuildArgoExternalAppSet(env, repo, gitops.AppSetOptions{SyncAutomated: true})
+	aBytes, err := yaml.Marshal(a)
+	if err != nil {
+		t.Fatalf("marshal a: %v", err)
+	}
+	bBytes, err := yaml.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal b: %v", err)
+	}
+	if string(aBytes) != string(bBytes) {
+		t.Errorf("non-deterministic output:\n--- a ---\n%s\n--- b ---\n%s", aBytes, bBytes)
 	}
 }

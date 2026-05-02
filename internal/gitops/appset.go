@@ -233,6 +233,133 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	}
 }
 
+// BuildArgoExternalAppSet generates the per-cluster ApplicationSet for
+// external-mode apps — those whose template's engine.chart references a
+// Helm registry rather than a chart bundled in the gitops repo.
+//
+// Differences from BuildArgoAppSet:
+//
+//   - The chart source uses source.repoURL + source.chart + source.targetRevision
+//     to point at the Helm registry, instead of source.path pointing at
+//     a charts/ directory in the gitops repo. ArgoCD's repo-server pulls
+//     fresh from the registry; chart bytes never land in the gitops repo.
+//
+//   - The Git File generator's path glob is envs-external/{env}/{project}/{app}/
+//     so this AppSet picks up only external-mode apps. The publisher
+//     writes external-mode app.yaml files to that path and inline-mode
+//     ones to envs/{env}/... — no overlap, so each app belongs to
+//     exactly one AppSet without needing parameter selectors.
+//
+//   - Per-app platform manifests (env-configmap, external-secret) are
+//     still written in the same env-relative directory, so the
+//     directory source includes them the same way as inline-mode apps.
+//
+// Pure function — identical inputs produce identical output.
+func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *ApplicationSet {
+	if opts.ArgoCDNamespace == "" {
+		opts.ArgoCDNamespace = defaultArgoCDNS
+	}
+	if opts.TargetRevision == "" {
+		opts.TargetRevision = defaultTargetRevision
+	}
+	if env.ClusterServer == "" {
+		env.ClusterServer = defaultDestination
+	}
+
+	// Source 1: values ref — same shape as inline-mode AppSet. Lets the
+	// chart source overlay $appvalues onto the env-specific values.yaml.
+	valuesRefSource := ApplicationSource{
+		RepoURL:        repoURL,
+		TargetRevision: opts.TargetRevision,
+		Ref:            "appvalues",
+	}
+
+	// Source 2: chart from the Helm registry, parameterised per app.
+	// chartRepoURL/chartName/chartVersion come from the per-app app.yaml
+	// (AppMetadata.ChartRepoURL etc.) which the Git File generator
+	// flattens into template parameters.
+	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs-external", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
+	chartSource := ApplicationSource{
+		RepoURL:        "{{chartRepoURL}}",
+		Chart:          "{{chartName}}",
+		TargetRevision: "{{chartVersion}}",
+		Helm: &HelmSource{
+			ReleaseName: "{{name}}",
+			ValueFiles:  []string{valuesFilePath},
+		},
+	}
+
+	// Source 3: per-app platform manifests, same as inline-mode AppSet.
+	platformManifestsSource := ApplicationSource{
+		RepoURL:        repoURL,
+		Path:           joinSubPath(opts.SubPath, "envs-external", env.EnvName, "{{project}}", "{{name}}"),
+		TargetRevision: opts.TargetRevision,
+		Directory: &DirectorySource{
+			Recurse: false,
+			Include: "{env-configmap.yaml,external-secret.yaml}",
+		},
+	}
+
+	var syncPolicy *SyncPolicy
+	if opts.SyncAutomated {
+		syncPolicy = &SyncPolicy{
+			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			SyncOptions: []string{"CreateNamespace=true"},
+		}
+	} else {
+		syncPolicy = &SyncPolicy{
+			SyncOptions: []string{"CreateNamespace=true"},
+		}
+	}
+
+	return &ApplicationSet{
+		APIVersion: argoAppSetAPIVersion,
+		Kind:       "ApplicationSet",
+		Metadata: ObjectMeta{
+			// Distinct name from the inline AppSet so both can coexist
+			// in the argocd namespace targeting the same env.
+			Name:      env.EnvName + "-external",
+			Namespace: opts.ArgoCDNamespace,
+			Annotations: map[string]string{
+				syncWaveAnnotation: "0",
+			},
+		},
+		Spec: ApplicationSetSpec{
+			Generators: []ApplicationSetGenerator{
+				{
+					Git: &GitFileGenerator{
+						RepoURL:  repoURL,
+						Revision: opts.TargetRevision,
+						Files: []GitFilePathSpec{
+							{Path: joinSubPath(opts.SubPath, "envs-external", env.EnvName, "*", "*", "app.yaml")},
+						},
+					},
+				},
+			},
+			Template: ApplicationSetTemplate{
+				Metadata: ObjectMeta{
+					Name:      "{{project}}-{{name}}-" + env.EnvName,
+					Namespace: opts.ArgoCDNamespace,
+					Labels: map[string]string{
+						labelApp:     "{{name}}",
+						labelProject: "{{project}}",
+						labelEnv:     env.EnvName,
+					},
+					Annotations: map[string]string{
+						"kargo.akuity.io/authorized-stage": "{{project}}:{{name}}-" + env.EnvName,
+					},
+				},
+				Spec: ApplicationSetAppSpec{
+					Project:     "{{project}}",
+					Sources:     []ApplicationSource{valuesRefSource, chartSource, platformManifestsSource},
+					Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: "{{namespace}}"},
+					SyncPolicy:  syncPolicy,
+				},
+			},
+		},
+	}
+}
+
 // BuildArgoPreviewAppSet generates the previews ApplicationSet for a GitOps repo.
 //
 // The generated ApplicationSet:
@@ -328,6 +455,22 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 
 // AppMetadata is written as app.yaml for each app in each env directory.
 // The Git File generator reads these fields as template parameters.
+//
+// Two chart-source modes are routed via the optional ChartType /
+// ChartRepoURL / ChartName / ChartVersion fields:
+//
+//   - Inline mode (today's behaviour): ChartType is "inline" or empty.
+//     The chart lives at charts/{template}/ in the gitops repo; the
+//     existing ApplicationSet (BuildArgoAppSet) renders an Application
+//     whose source.path points there.
+//   - External mode: ChartType is "external" with the chart fields
+//     populated. The chart lives in a Helm registry, never in the
+//     gitops repo; the parallel ApplicationSet (BuildArgoExternalAppSet)
+//     renders a multi-source Application with source.repoURL +
+//     source.chart + source.targetRevision pointing at the registry.
+//
+// Each ApplicationSet's generator filters on chartType so an app's
+// app.yaml is consumed by exactly one AppSet.
 type AppMetadata struct {
 	Name      string `yaml:"name"`
 	Project   string `yaml:"project"`
@@ -336,7 +479,26 @@ type AppMetadata struct {
 	// Resolved at publish time by ResolveNamespace so each app can have a
 	// different namespace even within the same ApplicationSet.
 	Namespace string `yaml:"namespace"`
+
+	// ChartType selects the chart-source flavour: "inline" (default,
+	// omitted) or "external". Drives which ApplicationSet picks up this
+	// app's app.yaml via generator selectors.
+	ChartType string `yaml:"chartType,omitempty"`
+	// ChartRepoURL is the Helm registry URL for external-mode apps.
+	// Examples: "oci://ghcr.io/myorg/charts", "https://charts.acme.io".
+	// Empty for inline-mode apps.
+	ChartRepoURL string `yaml:"chartRepoURL,omitempty"`
+	// ChartName is the chart name within the registry. Empty for inline.
+	ChartName string `yaml:"chartName,omitempty"`
+	// ChartVersion is the chart version pin. Empty for inline.
+	ChartVersion string `yaml:"chartVersion,omitempty"`
 }
+
+// Constants for the ChartType values to keep callers consistent.
+const (
+	ChartTypeInline   = "inline"
+	ChartTypeExternal = "external"
+)
 
 // PreviewAppMetadata is written as app.yaml for each preview instance.
 // The previews ApplicationSet reads clusterServer and namespace from here.
