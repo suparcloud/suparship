@@ -20,6 +20,14 @@ export function fetchTemplate(name: string): Promise<TemplateDetail> {
   return api.get<TemplateDetail>(`/templates/${encodeURIComponent(name)}`);
 }
 
+// deleteTemplate removes a cluster-stored template. Built-in templates
+// shipped with the binary return 409; templates synced from an external
+// repo will be re-created on the next sync tick — the UI warns before
+// calling.
+export function deleteTemplate(name: string): Promise<void> {
+  return api.del(`/templates/${encodeURIComponent(name)}`);
+}
+
 // importTemplatePreview uploads a Helm chart .tgz and gets back a generated
 // template.yaml plus a summary of what was detected — no persistence. Used
 // to drive the review step in the BYO-chart wizard before the operator

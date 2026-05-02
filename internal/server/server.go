@@ -394,6 +394,16 @@ func New(cfg Config) *Server {
 
 	if ah != nil {
 		th := newTemplateHandler(ah, cfg.Templates, cfg.ClusterTemplateLoader, cfg.Logger)
+		th.kubeClient = cfg.KubeClient
+		// Same admin-gating shape as the registry handler: when the org
+		// provider is wired we require org_admin on DELETE; without it we
+		// fall back to plain auth so harnesses without an OrgStore work.
+		if cfg.OrgProvider != nil {
+			rh := &rbacHandler{auth: ah, orgStore: cfg.OrgProvider, projectStore: cfg.ProjectStore}
+			th.authMiddleware = func(next http.HandlerFunc) http.HandlerFunc {
+				return ah.requireAuth(rh.requireOrgAdmin(next))
+			}
+		}
 		th.registerRoutes(mux)
 		cfg.Logger.Info("template endpoints enabled", "count", len(cfg.Templates))
 	}

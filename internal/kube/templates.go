@@ -154,6 +154,26 @@ func SaveTemplate(ctx context.Context, client kubernetes.Interface, t *tpl.Templ
 	return nil
 }
 
+// DeleteTemplate removes the cluster ConfigMap for a template. Returns
+// (false, nil) when the template ConfigMap doesn't exist — built-in
+// templates loaded from --templates-dir live on disk, not in the cluster,
+// and have nothing to remove. Other errors propagate so handlers can
+// distinguish "not deletable" from "delete failed".
+func DeleteTemplate(ctx context.Context, client kubernetes.Interface, templateName string) (bool, error) {
+	if templateName == "" {
+		return false, fmt.Errorf("template name is required")
+	}
+	name := TemplateConfigMapName(templateName)
+	err := client.CoreV1().ConfigMaps(systemNamespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if err == nil {
+		return true, nil
+	}
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("delete template configmap %s: %w", name, err)
+}
+
 // LoadChartBundle returns the packaged Helm chart bytes stored alongside the
 // template ConfigMap, or nil when the template has no bundle (i.e. chart is
 // shipped via SUPARSHIP_TEMPLATES_DIR or hasn't been imported through the

@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"sort"
 
+	"k8s.io/client-go/kubernetes"
+
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
@@ -106,7 +109,14 @@ type templateHandler struct {
 	auth          *authHandler
 	builtin       []*tpl.Template
 	clusterLoader ClusterTemplateLoader
-	logger        *slog.Logger
+	// kubeClient lets DELETE /templates/{name} drop the cluster ConfigMap
+	// for imported / externally synced templates. Nil disables the route.
+	kubeClient kubernetes.Interface
+	// authMiddleware composes auth + org_admin enforcement for the
+	// destructive route. Nil falls back to plain auth so test harnesses
+	// without an OrgStore keep working.
+	authMiddleware func(http.HandlerFunc) http.HandlerFunc
+	logger         *slog.Logger
 }
 
 func newTemplateHandler(auth *authHandler, builtin []*tpl.Template, clusterLoader ClusterTemplateLoader, logger *slog.Logger) *templateHandler {
@@ -118,9 +128,63 @@ func newTemplateHandler(auth *authHandler, builtin []*tpl.Template, clusterLoade
 	}
 }
 
+// adminOrAuth returns the org_admin middleware when wired, falling back
+// to plain auth so test harnesses without an OrgStore keep working.
+// Mirrors templateRegistryHandler.adminOrAuth.
+func (th *templateHandler) adminOrAuth() func(http.HandlerFunc) http.HandlerFunc {
+	if th.authMiddleware != nil {
+		return th.authMiddleware
+	}
+	return th.auth.requireAuth
+}
+
 func (th *templateHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/templates", th.auth.requireAuth(th.handleList))
 	mux.HandleFunc("GET /api/v1/templates/{name}", th.auth.requireAuth(th.handleDetail))
+	mux.HandleFunc("DELETE /api/v1/templates/{name}", th.adminOrAuth()(th.handleDelete))
+}
+
+// handleDelete removes a template's cluster ConfigMap. Returns 204 on
+// success, 404 when the template isn't cluster-stored (built-ins shipped
+// via --templates-dir live on disk and can't be deleted from the API),
+// and 409 when the name shadows a built-in (deletion would re-expose the
+// built-in, which is confusing — operator should rename the built-in
+// instead).
+//
+// Note: for templates synced from an external repo, deletion succeeds
+// but the next sync tick re-creates the ConfigMap. The UI surfaces a
+// warning before calling this; callers running scripts should be aware.
+func (th *templateHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name required"})
+		return
+	}
+	for _, t := range th.builtin {
+		if t.Metadata.Name == name {
+			writeJSON(w, http.StatusConflict, errorResponse{
+				Error: "template " + name + " is built-in and shipped with the binary; cluster ConfigMaps with the same name are shadowed and can't be deleted via this endpoint",
+			})
+			return
+		}
+	}
+	if th.kubeClient == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "cluster client not configured"})
+		return
+	}
+	deleted, err := kube.DeleteTemplate(r.Context(), th.kubeClient, name)
+	if err != nil {
+		if th.logger != nil {
+			th.logger.Error("delete template", "name", name, "err", err)
+		}
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete template"})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "template " + name + " not found in cluster"})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // resolve merges built-ins with the current cluster list. Cluster fetch
