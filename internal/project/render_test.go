@@ -16,7 +16,7 @@ func testTemplate() *tpl.Template {
 		Spec: tpl.TemplateSpec{
 			Title:    "Web Service",
 			Category: "web",
-			Engine:   tpl.Engine{Type: tpl.EngineHelm, Chart: "./chart"},
+			Engine:   tpl.Engine{Type: tpl.EngineHelm, Chart: tpl.ChartLocator{Path: "./chart"}},
 			Inputs: []tpl.Input{
 				{Name: "service_name", Title: "Service Name", Type: tpl.InputTypeString, Required: true, Pattern: "^[a-z][a-z0-9-]+$"},
 				{Name: "port", Title: "Port", Type: tpl.InputTypeNumber, Default: 8080, Min: &min1, Max: &max10},

@@ -356,8 +356,94 @@ func (c TemplateComponent) IsDefaultEnabled() bool {
 
 // Engine specifies the rendering backend for the template.
 type Engine struct {
-	Type  string `yaml:"type"`
-	Chart string `yaml:"chart,omitempty"`
+	Type  string       `yaml:"type"`
+	Chart ChartLocator `yaml:"chart,omitempty"`
+}
+
+// ChartLocator is a oneOf describing where the Helm chart for this template
+// lives. Three legal shapes (the field is omitted from YAML in the bundled
+// case via IsZero):
+//
+//   - Bundled  (zero value):  The chart is the .tgz this template was loaded
+//     from. Used when a chart author ships a template.yaml inside their chart
+//     and it gets pulled from a registry, or when the BYO upload flow imports
+//     a chart that ships its own template.yaml.
+//   - Inline   (Path != ""):  Relative path (e.g. "./chart") inside the
+//     templates repo this template was loaded from. Today's convention.
+//   - External (Ref != nil): Reference to a chart in a Helm registry. The
+//     publisher emits an Argo-native multi-source Application; the chart is
+//     never copied into the gitops repo.
+//
+// At most one of Path / Ref may be set; the validator enforces this.
+//
+// The custom YAML marshaller emits the right shape for each mode and accepts
+// either a scalar (string → Path) or a mapping (→ Ref) on parse.
+type ChartLocator struct {
+	Path string
+	Ref  *ChartRef
+}
+
+// ChartRef is the registry-ref form of a chart locator.
+type ChartRef struct {
+	// Repository is the chart registry URL. Examples:
+	//   oci://ghcr.io/myorg/charts
+	//   https://charts.acme.io
+	Repository string `yaml:"repository" json:"repository"`
+	// Name is the chart name within the registry.
+	Name string `yaml:"name" json:"name"`
+	// Version pins the chart to a specific release. SemVer string.
+	Version string `yaml:"version" json:"version"`
+}
+
+// IsBundled reports whether the locator is the bundled (zero) form.
+func (l ChartLocator) IsBundled() bool { return l.Path == "" && l.Ref == nil }
+
+// IsInline reports whether the locator is the relative-path form.
+func (l ChartLocator) IsInline() bool { return l.Path != "" }
+
+// IsExternal reports whether the locator is the registry-ref form.
+func (l ChartLocator) IsExternal() bool { return l.Ref != nil }
+
+// IsZero satisfies yaml.IsZeroer so `omitempty` drops the field for bundled
+// locators. Without this the encoder emits `chart: {}` for the zero struct.
+func (l ChartLocator) IsZero() bool { return l.IsBundled() }
+
+// MarshalYAML emits the locator in the right shape for its current mode.
+// Bundled is handled by omitempty + IsZero (this method isn't called for
+// the zero value).
+func (l ChartLocator) MarshalYAML() (any, error) {
+	if l.IsExternal() {
+		return l.Ref, nil
+	}
+	if l.IsInline() {
+		return l.Path, nil
+	}
+	// Defensive: shouldn't be reached because IsZero covers bundled.
+	return nil, nil
+}
+
+// UnmarshalYAML accepts either a scalar (relative path) or a mapping
+// (ChartRef). An absent field leaves the locator zero (bundled).
+func (l *ChartLocator) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		// Empty scalar → treat as bundled. Lets `chart:` (with nothing
+		// after the colon) parse as bundled rather than as path "".
+		if node.Tag == "!!null" || node.Value == "" {
+			return nil
+		}
+		l.Path = node.Value
+		return nil
+	case yaml.MappingNode:
+		var ref ChartRef
+		if err := node.Decode(&ref); err != nil {
+			return fmt.Errorf("engine.chart: %w", err)
+		}
+		l.Ref = &ref
+		return nil
+	default:
+		return fmt.Errorf("engine.chart: expected string or mapping, got node kind %d", node.Kind)
+	}
 }
 
 // Input defines a user-configurable parameter.

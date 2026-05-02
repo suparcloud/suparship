@@ -21,7 +21,7 @@ func testTemplates() []*tpl.Template {
 			Spec: tpl.TemplateSpec{
 				Title:    "API Service",
 				Category: "web",
-				Engine:   tpl.Engine{Type: tpl.EngineHelm, Chart: "./chart"},
+				Engine:   tpl.Engine{Type: tpl.EngineHelm, Chart: tpl.ChartLocator{Path: "./chart"}},
 				Inputs: []tpl.Input{
 					{Name: "image", Title: "Image", Type: tpl.InputTypeString, Required: true},
 					{Name: "replicas", Title: "Replicas", Type: tpl.InputTypeNumber, Default: 2, Min: &min1, Max: &max10},

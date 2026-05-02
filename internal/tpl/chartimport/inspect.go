@@ -244,8 +244,12 @@ func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 			// most common chart shape and matches the existing built-ins.
 			Category: "web",
 			Engine: tpl.Engine{
-				Type:  tpl.EngineHelm,
-				Chart: "./chart",
+				Type: tpl.EngineHelm,
+				// Inferred-template path: chart sits at ./chart relative
+				// to the generated template.yaml. A bundled-template
+				// chart (one shipping its own template.yaml inside the
+				// .tgz) takes a different path and never reaches here.
+				Chart: tpl.ChartLocator{Path: "./chart"},
 			},
 			Components: []tpl.TemplateComponent{
 				{
