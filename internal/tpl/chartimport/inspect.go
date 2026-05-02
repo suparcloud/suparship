@@ -45,6 +45,10 @@ type ChartArchive struct {
 	// Schema is the parsed values.schema.json. Nil when the chart does not
 	// ship one; ToTemplate falls back to walking Values in that case.
 	Schema *ValuesSchema
+	// TemplateYAML holds the raw bytes of an embedded "<root>/template.yaml"
+	// when the chart author shipped one. ToTemplate prefers this over the
+	// best-effort inference path. Nil when the chart doesn't ship one.
+	TemplateYAML []byte
 	// Raw preserves the original tarball bytes so callers can persist them
 	// to the cluster bundle without re-tarring.
 	Raw []byte
@@ -153,6 +157,8 @@ func ParseArchive(data []byte) (*ChartArchive, error) {
 			valuesYAMLContent, err = readCapped(tr, &readBudget)
 		case "values.schema.json":
 			schemaContent, err = readCapped(tr, &readBudget)
+		case tpl.TemplateFileName:
+			arc.TemplateYAML, err = readCapped(tr, &readBudget)
 		default:
 			// Other files (templates/, README, helpers, ...) are not parsed
 			// here but still count toward the read budget so we can't be
@@ -221,6 +227,31 @@ func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 	}
 	if arc.Chart.Name == "" {
 		return nil, fmt.Errorf("chart name is empty")
+	}
+
+	// Bundled-template mode: chart author shipped a template.yaml at
+	// <root>/template.yaml. Prefer it over inference so the operator's
+	// hand-authored metadata wins. The template's engine.chart should
+	// be omitted (bundled — chart IS the artifact); we don't enforce
+	// that here so an author can also opt for an inline-style "./chart"
+	// path if they really want.
+	if len(arc.TemplateYAML) > 0 {
+		bundled, err := tpl.Parse(arc.TemplateYAML)
+		if err != nil {
+			return nil, fmt.Errorf("parse bundled template.yaml: %w", err)
+		}
+		// Ensure the parsed template carries a sane name+version even
+		// if the bundled file omitted them — fall back to Chart.yaml.
+		if bundled.Metadata.Name == "" {
+			bundled.Metadata.Name = sanitizeName(arc.Chart.Name)
+		}
+		if bundled.Metadata.Version == "" {
+			bundled.Metadata.Version = firstNonEmpty(arc.Chart.Version, "0.1.0")
+		}
+		if err := bundled.Validate(); err != nil {
+			return nil, fmt.Errorf("bundled template.yaml failed validation: %w", err)
+		}
+		return bundled, nil
 	}
 
 	inputs, mappings := buildInputs(arc)

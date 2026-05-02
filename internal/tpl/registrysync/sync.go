@@ -79,11 +79,16 @@ func (e *Engine) SyncOne(ctx context.Context, repo tpl.ExternalTemplateRepo) Syn
 	res := SyncResult{SourceName: repo.Name, SyncedAt: time.Now().UTC()}
 	logger := e.logger()
 
-	// Phase 1 — fetch: resolve the repo declaration into ResolvedTemplate
-	// pairs. Per-template parse failures land in result.PartialErrs;
-	// catastrophic failures (clone, missing path) come back as fetchErr.
-	f := newGitFetcher(e.Client, logger, e.CloneDepth)
-	result, fetchErr := f.fetchRepo(ctx, repo)
+	// Phase 1 — fetch: route to the right fetcher based on source type.
+	// Per-template parse failures land in result.PartialErrs;
+	// catastrophic failures (clone, registry unreachable) come back as
+	// fetchErr.
+	f, fetcherErr := e.fetcherForType(repo.EffectiveType(), logger)
+	if fetcherErr != nil {
+		res.Err = fetcherErr
+		return res
+	}
+	result, fetchErr := f.Fetch(ctx, repo)
 	if fetchErr != nil {
 		res.Err = fetchErr
 		return res
@@ -340,6 +345,24 @@ func (f *gitFetcher) readAuth(ctx context.Context, secretName string) (string, s
 		return "x-access-token", tok, nil
 	}
 	return string(sec.Data["username"]), string(sec.Data["password"]), nil
+}
+
+// fetcherForType selects the fetcher implementation for a given source
+// type. Returns ErrUnsupportedSourceType for types whose fetchers
+// haven't shipped yet (chartmuseum, gittgz) — surfaces a clean
+// per-source error instead of a panic when an operator registers a
+// reserved type ahead of its implementation.
+func (e *Engine) fetcherForType(sourceType string, logger *slog.Logger) (fetcher.Fetcher, error) {
+	switch sourceType {
+	case tpl.SourceTypeGit:
+		return newGitFetcher(e.Client, logger, e.CloneDepth), nil
+	case tpl.SourceTypeOCI:
+		return newOCIFetcher(e.Client, logger), nil
+	case tpl.SourceTypeChartMuseum, tpl.SourceTypeGitTgz:
+		return nil, fmt.Errorf("%w: %q", tpl.ErrUnsupportedSourceType, sourceType)
+	default:
+		return nil, fmt.Errorf("%w: %q", tpl.ErrInvalidSourceType, sourceType)
+	}
 }
 
 func (e *Engine) logger() *slog.Logger {

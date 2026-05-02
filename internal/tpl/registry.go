@@ -9,6 +9,34 @@ import (
 // set to a value the credentials handler doesn't know how to shape.
 var ErrInvalidProvider = errors.New("invalid template repo provider")
 
+// ErrInvalidSourceType is returned when ExternalTemplateRepo.Type is
+// set to a value the fetcher dispatch doesn't recognise.
+var ErrInvalidSourceType = errors.New("invalid template source type")
+
+// ErrUnsupportedSourceType is returned when the fetcher dispatch
+// recognises Type but no implementation has shipped yet (e.g.
+// "chartmuseum" / "gittgz" before their fetchers land).
+var ErrUnsupportedSourceType = errors.New("template source type not yet supported")
+
+// Source-type values for ExternalTemplateRepo.Type. Empty == SourceTypeGit
+// for back-compat — earlier sources have no Type field.
+const (
+	// SourceTypeGit clones a git templates repo. The repo can mix
+	// inline-mode templates (chart/ sibling) and external-mode
+	// templates (template.yaml only, engine.chart points at a registry).
+	SourceTypeGit = "git"
+	// SourceTypeOCI pulls a single chart from an OCI registry. The
+	// chart's bundled template.yaml drives the template metadata when
+	// present; chartimport's inferred fallback runs otherwise.
+	SourceTypeOCI = "oci"
+	// SourceTypeChartMuseum pulls from a classic Helm HTTP repo (not
+	// yet implemented; reserved for a parallel fetcher).
+	SourceTypeChartMuseum = "chartmuseum"
+	// SourceTypeGitTgz reads a chart .tgz at a path inside a git repo
+	// (not yet implemented; reserved for a parallel fetcher).
+	SourceTypeGitTgz = "gittgz"
+)
+
 // TemplateSource describes where a template comes from and its sync state.
 type TemplateSource struct {
 	// Name is the template name (e.g. "web-service").
@@ -31,19 +59,45 @@ type TemplateSource struct {
 type ExternalTemplateRepo struct {
 	// Name identifies this external source.
 	Name string `json:"name" yaml:"name"`
-	// RepoURL is the Git repository URL.
+	// Type selects the fetcher: git (default), oci, chartmuseum, gittgz.
+	// Empty == git for back-compat with sources persisted before this
+	// field was introduced.
+	Type string `json:"type,omitempty" yaml:"type,omitempty"`
+	// RepoURL is the source URL. For git types this is the clone URL;
+	// for oci/chartmuseum types it's the registry root (e.g.
+	// "oci://ghcr.io/myorg/charts" or "https://charts.acme.io").
 	RepoURL string `json:"repoURL" yaml:"repoURL"`
-	// Ref is the pinned Git ref (tag, branch, or commit SHA).
-	Ref string `json:"ref" yaml:"ref"`
-	// Path within the repo where templates live.
-	Path string `json:"path" yaml:"path"`
+	// Ref is the pinned git ref (tag, branch, or commit SHA). Required
+	// for git-type sources; ignored for oci/chartmuseum (use Version).
+	Ref string `json:"ref,omitempty" yaml:"ref,omitempty"`
+	// Path within the repo where templates live. Required for git-type
+	// sources; ignored for oci/chartmuseum (the registry's root and
+	// Chart name describe the location).
+	Path string `json:"path,omitempty" yaml:"path,omitempty"`
+	// Chart names a single chart to pull. Required for oci/chartmuseum/
+	// gittgz; ignored for git (which discovers all charts under Path).
+	Chart string `json:"chart,omitempty" yaml:"chart,omitempty"`
+	// Version pins the chart to a specific release. Required for
+	// oci/chartmuseum/gittgz; ignored for git (use Ref instead).
+	Version string `json:"version,omitempty" yaml:"version,omitempty"`
 	// Provider identifies the Git host: github, gitlab, gitea, bitbucket,
 	// generic. Drives the Secret-key shape the UI-managed credentials flow
 	// writes (single "token" for github/gitlab/gitea; "username"+"password"
-	// for bitbucket/generic). Empty is treated as "generic".
+	// for bitbucket/generic). Empty is treated as "generic". Only
+	// meaningful for git-type sources.
 	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
 	// ExistingSecret is the name of a K8s Secret for auth (optional).
 	ExistingSecret string `json:"existingSecret,omitempty" yaml:"existingSecret,omitempty"`
+}
+
+// EffectiveType returns Type with the empty default normalized to "git".
+// Callers branching on the source type should prefer this over
+// inspecting Type directly.
+func (r *ExternalTemplateRepo) EffectiveType() string {
+	if r.Type == "" {
+		return SourceTypeGit
+	}
+	return r.Type
 }
 
 // Validate returns an error if the repo definition is unusable.
@@ -59,6 +113,22 @@ func (r *ExternalTemplateRepo) Validate() error {
 		// ok
 	default:
 		return fmt.Errorf("%w: %q", ErrInvalidProvider, r.Provider)
+	}
+	switch r.EffectiveType() {
+	case SourceTypeGit:
+		// Path defaults to repo root; Ref defaults to "main" — both
+		// optional. Nothing else to enforce.
+	case SourceTypeOCI:
+		if r.Chart == "" {
+			return fmt.Errorf("external template repo: chart is required for type %q", SourceTypeOCI)
+		}
+		if r.Version == "" {
+			return fmt.Errorf("external template repo: version is required for type %q", SourceTypeOCI)
+		}
+	case SourceTypeChartMuseum, SourceTypeGitTgz:
+		return fmt.Errorf("%w: %q", ErrUnsupportedSourceType, r.Type)
+	default:
+		return fmt.Errorf("%w: %q", ErrInvalidSourceType, r.Type)
 	}
 	return nil
 }
