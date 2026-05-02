@@ -49,11 +49,45 @@ function isManagedSecret(repo: ExternalTemplateRepo): boolean {
 // the form mid-typing if we ever passed it as a memoized default.
 const emptyRepo: ExternalTemplateRepo = {
   name: "",
+  type: "git",
   repoURL: "",
   ref: "main",
   path: "",
+  chart: "",
+  version: "",
   existingSecret: "",
 };
+
+// Source-type dropdown options. chartmuseum / gittgz are intentionally
+// omitted — the backend rejects them with ErrUnsupportedSourceType, so
+// surfacing them in the form would let operators register sources that
+// can never sync.
+const SOURCE_TYPES: ReadonlyArray<{
+  value: "git" | "oci";
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "git",
+    label: "Git templates repo",
+    description: "Clone a repo and discover templates under a path. Mixes inline charts and external (registry-ref) wrapper templates.",
+  },
+  {
+    value: "oci",
+    label: "OCI chart",
+    description: "Pull a single chart from an OCI registry by name+version. The chart's bundled template.yaml drives metadata when present.",
+  },
+];
+
+// usesGit returns true when ref/path apply (git-type sources).
+function usesGit(t: ExternalTemplateRepo["type"]): boolean {
+  return !t || t === "git";
+}
+
+// usesChart returns true when chart/version apply (registry-type sources).
+function usesChart(t: ExternalTemplateRepo["type"]): boolean {
+  return t === "oci";
+}
 
 const inputClass =
   "block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-gray-500 focus:ring-1 focus:ring-gray-500";
@@ -186,6 +220,10 @@ export function TemplateSources() {
   async function handleAdd(thenSetCredentials: boolean) {
     if (!draft.name.trim() || !draft.repoURL.trim()) {
       toast.error("Name and Repo URL are required");
+      return;
+    }
+    if (usesChart(draft.type) && (!draft.chart?.trim() || !draft.version?.trim())) {
+      toast.error("Chart and Version are required for OCI sources");
       return;
     }
     if ((registry.external ?? []).some((r) => r.name === draft.name)) {
@@ -338,7 +376,16 @@ export function TemplateSources() {
                     <td className="px-4 py-3 align-top text-gray-700">
                       <div className="font-mono text-xs">{repo.repoURL}</div>
                       <div className="mt-1 text-xs text-gray-400">
-                        {repo.ref || "main"} · {repo.path || "/"}
+                        {usesChart(repo.type) ? (
+                          <span>
+                            {repo.chart || "?"}@{repo.version || "?"}
+                            {" · oci"}
+                          </span>
+                        ) : (
+                          <span>
+                            {repo.ref || "main"} · {repo.path || "/"}
+                          </span>
+                        )}
                         {repo.existingSecret ? (
                           isManagedSecret(repo) ? (
                             <span> · auth: managed (sealed)</span>
@@ -425,24 +472,60 @@ function AddSourceForm({
 }) {
   const set = (partial: Partial<ExternalTemplateRepo>) =>
     onChange({ ...draft, ...partial });
+  const sourceType = draft.type || "git";
+  const showGitFields = usesGit(sourceType);
+  const showChartFields = usesChart(sourceType);
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-6">
       <h2 className="text-base font-semibold text-gray-900">Add source</h2>
       <p className="mt-1 text-xs text-gray-500">
-        suparship clones the repo at <code>ref</code>, walks{" "}
-        <code>path</code> for <code>Chart.yaml</code> directories, and imports
-        each as a template.
+        Pick a source type below; fields adjust to match. Git sources walk a
+        repo path for templates; OCI sources pull a single chart by name and
+        version.
       </p>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <Field label="Source type" help="Git for a templates repo; OCI for a single Helm-registry chart.">
+          <select
+            className={inputClass}
+            value={sourceType}
+            onChange={(e) => set({ type: e.target.value as ExternalTemplateRepo["type"] })}
+          >
+            {SOURCE_TYPES.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </Field>
         <Field label="Name" help="Unique identifier shown in this list.">
           <input
             className={inputClass}
             value={draft.name}
             onChange={(e) => set({ name: e.target.value })}
-            placeholder="myorg-charts"
+            placeholder={showChartFields ? "web-service-stdlib" : "myorg-charts"}
           />
         </Field>
-        <Field label="Existing auth secret" help="K8s Secret in suparship-system with username/password keys. Empty for public repos.">
+        <Field
+          label="Repository URL"
+          help={
+            showChartFields
+              ? "OCI registry root, e.g. oci://ghcr.io/myorg/charts"
+              : "HTTPS or SSH URL for git clone."
+          }
+        >
+          <input
+            className={inputClass}
+            value={draft.repoURL}
+            onChange={(e) => set({ repoURL: e.target.value })}
+            placeholder={
+              showChartFields
+                ? "oci://ghcr.io/myorg/charts"
+                : "https://github.com/myorg/charts.git"
+            }
+          />
+        </Field>
+        <Field
+          label="Existing auth secret"
+          help="K8s Secret in suparship-system with token (or username+password) keys. Empty for public sources."
+        >
           <input
             className={inputClass}
             value={draft.existingSecret ?? ""}
@@ -450,41 +533,54 @@ function AddSourceForm({
             placeholder="(optional)"
           />
         </Field>
-        <Field
-          label="Repository URL"
-          help="HTTPS or SSH URL for git clone."
-        >
-          <input
-            className={inputClass}
-            value={draft.repoURL}
-            onChange={(e) => set({ repoURL: e.target.value })}
-            placeholder="https://github.com/myorg/charts.git"
-          />
-        </Field>
-        <Field label="Ref" help="Git tag, branch, or commit. Defaults to main.">
-          <input
-            className={inputClass}
-            value={draft.ref}
-            onChange={(e) => set({ ref: e.target.value })}
-            placeholder="main"
-          />
-        </Field>
-        <Field
-          label="Path"
-          help="Directory under the repo containing Chart.yaml folders. Empty for repo root."
-        >
-          <input
-            className={inputClass}
-            value={draft.path}
-            onChange={(e) => set({ path: e.target.value })}
-            placeholder="charts"
-          />
-        </Field>
+        {showGitFields && (
+          <>
+            <Field label="Ref" help="Git tag, branch, or commit. Defaults to main.">
+              <input
+                className={inputClass}
+                value={draft.ref}
+                onChange={(e) => set({ ref: e.target.value })}
+                placeholder="main"
+              />
+            </Field>
+            <Field
+              label="Path"
+              help="Directory under the repo containing template folders. Empty for repo root."
+            >
+              <input
+                className={inputClass}
+                value={draft.path}
+                onChange={(e) => set({ path: e.target.value })}
+                placeholder="templates"
+              />
+            </Field>
+          </>
+        )}
+        {showChartFields && (
+          <>
+            <Field label="Chart" help="Chart name within the registry.">
+              <input
+                className={inputClass}
+                value={draft.chart ?? ""}
+                onChange={(e) => set({ chart: e.target.value })}
+                placeholder="web-service"
+              />
+            </Field>
+            <Field label="Version" help="Pinned chart version (SemVer).">
+              <input
+                className={inputClass}
+                value={draft.version ?? ""}
+                onChange={(e) => set({ version: e.target.value })}
+                placeholder="1.2.0"
+              />
+            </Field>
+          </>
+        )}
       </div>
       <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
         <p className="mr-auto text-xs text-gray-500">
-          Public repo? Save source. Private? Save &amp; set credentials seals
-          a PAT for the source in one step.
+          Public source? Save source. Private? Save &amp; set credentials seals
+          a token for the source in one step.
         </p>
         <button
           type="button"
