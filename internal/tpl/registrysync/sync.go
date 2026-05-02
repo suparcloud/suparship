@@ -30,6 +30,7 @@ import (
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/tpl"
 	"github.com/suparcloud/suparship/internal/tpl/chartimport"
+	"github.com/suparcloud/suparship/internal/tpl/fetcher"
 )
 
 // systemNamespace is where suparship reads its own ConfigMaps and Secrets
@@ -78,68 +79,41 @@ func (e *Engine) SyncOne(ctx context.Context, repo tpl.ExternalTemplateRepo) Syn
 	res := SyncResult{SourceName: repo.Name, SyncedAt: time.Now().UTC()}
 	logger := e.logger()
 
-	tmp, err := os.MkdirTemp("", "suparship-tplsync-*")
-	if err != nil {
-		res.Err = fmt.Errorf("mktemp: %w", err)
+	// Phase 1 — fetch: resolve the repo declaration into ResolvedTemplate
+	// pairs. Per-template parse failures land in result.PartialErrs;
+	// catastrophic failures (clone, missing path) come back as fetchErr.
+	f := newGitFetcher(e.Client, logger, e.CloneDepth)
+	result, fetchErr := f.fetchRepo(ctx, repo)
+	if fetchErr != nil {
+		res.Err = fetchErr
 		return res
 	}
-	defer os.RemoveAll(tmp)
-
-	// Auth (optional): username/password live in a K8s Secret keyed by
-	// ExistingSecret. Convention mirrors the gitops repo Secret format
-	// (data["username"], data["password"]).
-	user, pass, err := e.readAuth(ctx, repo.ExistingSecret)
-	if err != nil {
-		res.Err = fmt.Errorf("read auth: %w", err)
-		return res
-	}
-
-	cloneURL := embedCredentials(repo.RepoURL, user, pass)
-	repoDir := filepath.Join(tmp, "repo")
-	args := []string{"clone"}
-	if e.CloneDepth > 0 {
-		args = append(args, "--depth", fmt.Sprint(e.CloneDepth))
-	}
-	args = append(args, "--branch", refOrDefault(repo.Ref), cloneURL, repoDir)
-	if err := runGit(ctx, tmp, args...); err != nil {
-		res.Err = fmt.Errorf("clone %s: %w", repo.RepoURL, err)
-		return res
+	for _, pe := range result.PartialErrs {
+		logger.Warn("registrysync: chart import failed; skipping",
+			"source", repo.Name,
+			"chart", pe.Name,
+			"err", pe.Err,
+		)
+		// Record the most-recent error but keep going so successes
+		// alongside still surface to the operator.
+		res.Err = pe.Err
 	}
 
-	chartDir := filepath.Join(repoDir, strings.TrimPrefix(repo.Path, "/"))
-	if info, err := os.Stat(chartDir); err != nil || !info.IsDir() {
-		res.Err = fmt.Errorf("path %q not found in repo", repo.Path)
-		return res
-	}
-
-	chartPaths, err := findChartDirs(chartDir)
-	if err != nil {
-		res.Err = fmt.Errorf("walk %s: %w", chartDir, err)
-		return res
-	}
-	if len(chartPaths) == 0 {
-		// Empty path is technically valid (operator may not have added
-		// charts yet) — return success with no templates rather than an
-		// error, so the source's last-synced timestamp still updates.
-		logger.Info("registrysync: no charts found", "source", repo.Name, "path", repo.Path)
-		return res
-	}
-
-	for _, dir := range chartPaths {
-		name, err := e.importOne(ctx, dir)
-		if err != nil {
-			logger.Warn("registrysync: chart import failed; skipping",
+	// Phase 2 — persist: write each resolved template to the cluster.
+	// kube.SaveTemplate accepts nil chartTGZ for templates whose chart
+	// is shipped out-of-band (today: never; future: registry-ref mode).
+	for _, rt := range result.Templates {
+		if err := kube.SaveTemplate(ctx, e.Client, rt.Template, rt.ChartBytes); err != nil {
+			logger.Warn("registrysync: persist template failed; skipping",
 				"source", repo.Name,
-				"chart", filepath.Base(dir),
+				"template", rt.Template.Metadata.Name,
 				"err", err,
 			)
-			// Record the most-recent error but keep going so we collect a
-			// full set of successes alongside.
 			res.Err = err
 			continue
 		}
-		res.Templates = append(res.Templates, name)
-		logger.Info("registrysync: imported chart", "source", repo.Name, "template", name)
+		res.Templates = append(res.Templates, rt.Template.Metadata.Name)
+		logger.Info("registrysync: imported chart", "source", repo.Name, "template", rt.Template.Metadata.Name)
 	}
 	return res
 }
@@ -190,48 +164,124 @@ func ApplyResult(reg *tpl.TemplateRegistry, repo tpl.ExternalTemplateRepo, resul
 	reg.Sources = fresh
 }
 
-// importOne packages a single chart directory and persists it via the
-// existing chartimport pipeline. Returns the template name on success.
-func (e *Engine) importOne(ctx context.Context, chartDir string) (string, error) {
+// gitFetcher resolves a templates-repo source declaration into
+// ResolvedTemplate pairs. Implements fetcher.Fetcher (via Fetch); the
+// concrete fetchRepo method is exposed so SyncOne can pass through a
+// strongly typed ExternalTemplateRepo without going through the any-typed
+// Fetcher interface.
+type gitFetcher struct {
+	client     kubernetes.Interface
+	logger     *slog.Logger
+	cloneDepth int
+}
+
+func newGitFetcher(client kubernetes.Interface, logger *slog.Logger, cloneDepth int) *gitFetcher {
+	return &gitFetcher{client: client, logger: logger, cloneDepth: cloneDepth}
+}
+
+// Fetch satisfies fetcher.Fetcher. Source must be tpl.ExternalTemplateRepo.
+func (f *gitFetcher) Fetch(ctx context.Context, source any) (fetcher.FetchResult, error) {
+	repo, ok := source.(tpl.ExternalTemplateRepo)
+	if !ok {
+		return fetcher.FetchResult{}, fmt.Errorf("gitFetcher: expected tpl.ExternalTemplateRepo, got %T", source)
+	}
+	return f.fetchRepo(ctx, repo)
+}
+
+// fetchRepo clones the repo, walks for charts, and parses each into a
+// ResolvedTemplate. The chart bytes are packaged into a .tgz so the
+// downstream persistence path is identical regardless of which fetcher
+// produced them.
+//
+// Catastrophic failures (clone, auth, missing path) come back as the
+// error return; per-chart failures land in FetchResult.PartialErrs so
+// callers can surface "3 imported, 1 failed" without losing either signal.
+func (f *gitFetcher) fetchRepo(ctx context.Context, repo tpl.ExternalTemplateRepo) (fetcher.FetchResult, error) {
+	tmp, err := os.MkdirTemp("", "suparship-tplsync-*")
+	if err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("mktemp: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	user, pass, err := f.readAuth(ctx, repo.ExistingSecret)
+	if err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("read auth: %w", err)
+	}
+
+	cloneURL := embedCredentials(repo.RepoURL, user, pass)
+	repoDir := filepath.Join(tmp, "repo")
+	args := []string{"clone"}
+	if f.cloneDepth > 0 {
+		args = append(args, "--depth", fmt.Sprint(f.cloneDepth))
+	}
+	args = append(args, "--branch", refOrDefault(repo.Ref), cloneURL, repoDir)
+	if err := runGit(ctx, tmp, args...); err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("clone %s: %w", repo.RepoURL, err)
+	}
+
+	chartDir := filepath.Join(repoDir, strings.TrimPrefix(repo.Path, "/"))
+	if info, err := os.Stat(chartDir); err != nil || !info.IsDir() {
+		return fetcher.FetchResult{}, fmt.Errorf("path %q not found in repo", repo.Path)
+	}
+
+	chartPaths, err := findChartDirs(chartDir)
+	if err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("walk %s: %w", chartDir, err)
+	}
+	if len(chartPaths) == 0 {
+		// Empty path is technically valid (operator may not have added
+		// charts yet) — return success with no templates so the source's
+		// last-synced timestamp still updates.
+		f.logger.Info("registrysync: no charts found", "source", repo.Name, "path", repo.Path)
+		return fetcher.FetchResult{}, nil
+	}
+
+	out := fetcher.FetchResult{}
+	for _, dir := range chartPaths {
+		rt, err := f.resolveChart(dir)
+		if err != nil {
+			out.PartialErrs = append(out.PartialErrs, fetcher.PartialError{
+				Name: filepath.Base(dir),
+				Err:  err,
+			})
+			continue
+		}
+		out.Templates = append(out.Templates, rt)
+	}
+	return out, nil
+}
+
+// resolveChart packages a single chart directory and runs it through the
+// existing chartimport pipeline. Returns a ResolvedTemplate ready for
+// persistence — the chart bytes are the packaged .tgz.
+func (f *gitFetcher) resolveChart(chartDir string) (fetcher.ResolvedTemplate, error) {
 	bundle, err := packageChart(chartDir)
 	if err != nil {
-		return "", fmt.Errorf("package: %w", err)
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("package: %w", err)
 	}
 	arc, err := chartimport.ParseArchive(bundle)
 	if err != nil {
-		return "", fmt.Errorf("parse: %w", err)
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("parse: %w", err)
 	}
 	tmpl, err := chartimport.ToTemplate(arc)
 	if err != nil {
-		return "", fmt.Errorf("to template: %w", err)
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("to template: %w", err)
 	}
-	if err := kube.SaveTemplate(ctx, e.Client, tmpl, bundle); err != nil {
-		return "", fmt.Errorf("save: %w", err)
-	}
-	return tmpl.Metadata.Name, nil
+	return fetcher.ResolvedTemplate{Template: tmpl, ChartBytes: bundle}, nil
 }
 
-// readAuth reads credentials from a K8s Secret. Returns empty strings
-// (no error) when the secret name is empty so public repos work without
-// configuration.
-//
-// Two key shapes are supported:
-//   - data["token"]                 — a PAT (GitHub/GitLab/Gitea). Used as
-//     the password with "x-access-token" as the username; this is the form
-//     all three providers accept for HTTPS Basic auth.
-//   - data["username"] + data["password"] — generic Basic auth (Bitbucket,
-//     self-hosted Git, anything else).
-//
-// "token" wins when both are present so an operator can rotate to a PAT
-// without first deleting the old keys.
-func (e *Engine) readAuth(ctx context.Context, secretName string) (string, string, error) {
+// readAuth reads credentials from the same K8s Secret shape Engine.readAuth
+// uses (data["token"] for PAT-style, falling back to data["username"] +
+// data["password"]). Duplicated here so gitFetcher is self-contained;
+// callers can wire it without an Engine.
+func (f *gitFetcher) readAuth(ctx context.Context, secretName string) (string, string, error) {
 	if secretName == "" {
 		return "", "", nil
 	}
-	if e.Client == nil {
+	if f.client == nil {
 		return "", "", fmt.Errorf("auth secret %q referenced but no cluster client configured", secretName)
 	}
-	sec, err := e.Client.CoreV1().Secrets(systemNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	sec, err := f.client.CoreV1().Secrets(systemNamespace).Get(ctx, secretName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return "", "", fmt.Errorf("auth secret %q not found in %s", secretName, systemNamespace)
 	}
