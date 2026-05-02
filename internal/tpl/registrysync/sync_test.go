@@ -201,3 +201,154 @@ func TestSyncOne_BadRepoURL(t *testing.T) {
 		t.Errorf("expected no templates on clone failure, got %v", res.Templates)
 	}
 }
+
+// --- External-mode template discovery (PR3.1) ---
+
+const externalTemplateYAML = `apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata:
+  name: valkey
+  version: "1.0.0"
+spec:
+  title: Valkey
+  description: Managed Valkey via Bitnami chart.
+  category: data
+  engine:
+    type: helm
+    chart:
+      repository: oci://registry-1.docker.io/bitnamicharts
+      name: valkey
+      version: 1.2.3
+  inputs: []
+`
+
+func TestSyncOne_ImportsExternalTemplateWithoutChartDir(t *testing.T) {
+	requireGit(t)
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+
+	// Repo layout — pure external template (no sibling chart/):
+	//   templates/
+	//     valkey/
+	//       template.yaml      (engine.chart points at OCI registry)
+	writeFile(t, filepath.Join(repoDir, "templates/valkey/template.yaml"), externalTemplateYAML)
+	gitCommit(t, repoDir, "initial")
+
+	client := k8sfake.NewClientset()
+	eng := &registrysync.Engine{Client: client}
+	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
+		Name:    "demo",
+		RepoURL: repoDir,
+		Ref:     "main",
+		Path:    "templates",
+	})
+	if res.Err != nil {
+		t.Fatalf("SyncOne returned error: %v", res.Err)
+	}
+	if len(res.Templates) != 1 || res.Templates[0] != "valkey" {
+		t.Fatalf("expected [valkey], got %v", res.Templates)
+	}
+
+	// The persisted ConfigMap should NOT carry a chart.tgz bundle —
+	// external-mode templates resolve at publish time via Argo's
+	// repo-server. The alias and the per-version archive both exist
+	// (PR1.4) so we verify the alias here.
+	cm, err := client.CoreV1().ConfigMaps("suparship-system").Get(
+		context.Background(), "suparship-template-valkey", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get configmap: %v", err)
+	}
+	if _, ok := cm.Data["template.yaml"]; !ok {
+		t.Error("missing template.yaml in ConfigMap")
+	}
+	if len(cm.BinaryData["chart.tgz"]) != 0 {
+		t.Errorf("external-mode template ConfigMap must not carry chart.tgz bytes; got %d bytes", len(cm.BinaryData["chart.tgz"]))
+	}
+}
+
+func TestSyncOne_RejectsTemplateYAMLWithoutChartOrRegistryRef(t *testing.T) {
+	// A template.yaml without a sibling chart/ AND without a registry
+	// ref is a malformed source — there's nothing to render. Surface
+	// the failure as a per-template PartialError, not a top-level error.
+	requireGit(t)
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+
+	const brokenYAML = `apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata: { name: broken, version: "1.0.0" }
+spec:
+  title: Broken
+  category: web
+  engine:
+    type: helm
+    # No chart field, and no sibling chart/ — neither bundled nor
+    # external-mode is satisfied.
+  inputs: []
+`
+	writeFile(t, filepath.Join(repoDir, "templates/broken/template.yaml"), brokenYAML)
+	// Add a valid external template alongside to confirm it still imports.
+	writeFile(t, filepath.Join(repoDir, "templates/valkey/template.yaml"), externalTemplateYAML)
+	gitCommit(t, repoDir, "initial")
+
+	client := k8sfake.NewClientset()
+	eng := &registrysync.Engine{Client: client}
+	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
+		Name: "demo", RepoURL: repoDir, Ref: "main", Path: "templates",
+	})
+	// Top-level err carries the most-recent partial err — but the valid
+	// template still imports.
+	if res.Err == nil {
+		t.Error("expected per-template error to surface on Result.Err")
+	}
+	if len(res.Templates) != 1 || res.Templates[0] != "valkey" {
+		t.Fatalf("expected only valkey to import, got %v", res.Templates)
+	}
+}
+
+func TestSyncOne_MixedInlineAndExternal(t *testing.T) {
+	requireGit(t)
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+
+	// Inline template + external template in the same repo.
+	writeFile(t, filepath.Join(repoDir, "templates/inline/chart/Chart.yaml"),
+		"apiVersion: v2\nname: inline\nversion: 1.0.0\n")
+	writeFile(t, filepath.Join(repoDir, "templates/inline/chart/values.yaml"), "{}\n")
+	writeFile(t, filepath.Join(repoDir, "templates/external/template.yaml"), externalTemplateYAML)
+	gitCommit(t, repoDir, "initial")
+
+	client := k8sfake.NewClientset()
+	eng := &registrysync.Engine{Client: client}
+	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
+		Name: "demo", RepoURL: repoDir, Ref: "main", Path: "templates",
+	})
+	if res.Err != nil {
+		t.Fatalf("SyncOne: %v", res.Err)
+	}
+	if len(res.Templates) != 2 {
+		t.Fatalf("expected 2 templates, got %v", res.Templates)
+	}
+
+	// Inline ConfigMap carries chart.tgz; external one does not.
+	inlineCM, err := client.CoreV1().ConfigMaps("suparship-system").Get(
+		context.Background(), "suparship-template-inline", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get inline: %v", err)
+	}
+	if len(inlineCM.BinaryData["chart.tgz"]) == 0 {
+		t.Error("inline ConfigMap missing chart.tgz")
+	}
+
+	externalCM, err := client.CoreV1().ConfigMaps("suparship-system").Get(
+		context.Background(), "suparship-template-valkey", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get valkey: %v", err)
+	}
+	if len(externalCM.BinaryData["chart.tgz"]) != 0 {
+		t.Errorf("external ConfigMap unexpectedly carries chart.tgz (%d bytes)", len(externalCM.BinaryData["chart.tgz"]))
+	}
+}

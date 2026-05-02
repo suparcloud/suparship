@@ -228,20 +228,41 @@ func (f *gitFetcher) fetchRepo(ctx context.Context, repo tpl.ExternalTemplateRep
 	if err != nil {
 		return fetcher.FetchResult{}, fmt.Errorf("walk %s: %w", chartDir, err)
 	}
-	if len(chartPaths) == 0 {
+	externalTemplates, err := findExternalTemplates(chartDir)
+	if err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("walk for external templates %s: %w", chartDir, err)
+	}
+	if len(chartPaths) == 0 && len(externalTemplates) == 0 {
 		// Empty path is technically valid (operator may not have added
-		// charts yet) — return success with no templates so the source's
-		// last-synced timestamp still updates.
-		f.logger.Info("registrysync: no charts found", "source", repo.Name, "path", repo.Path)
+		// templates yet) — return success with no templates so the
+		// source's last-synced timestamp still updates.
+		f.logger.Info("registrysync: no templates found", "source", repo.Name, "path", repo.Path)
 		return fetcher.FetchResult{}, nil
 	}
 
 	out := fetcher.FetchResult{}
+	// Inline-mode templates: <name>/chart/Chart.yaml present. The
+	// existing chartimport pipeline handles bundled-template-yaml
+	// pickup and inferred-template fallback.
 	for _, dir := range chartPaths {
 		rt, err := f.resolveChart(dir)
 		if err != nil {
 			out.PartialErrs = append(out.PartialErrs, fetcher.PartialError{
 				Name: filepath.Base(dir),
+				Err:  err,
+			})
+			continue
+		}
+		out.Templates = append(out.Templates, rt)
+	}
+	// External-mode templates: <name>/template.yaml present, no
+	// sibling chart/. Engine.chart must be a registry ref since there
+	// are no local chart bytes to package.
+	for _, path := range externalTemplates {
+		rt, err := f.resolveExternalTemplate(path)
+		if err != nil {
+			out.PartialErrs = append(out.PartialErrs, fetcher.PartialError{
+				Name: filepath.Base(filepath.Dir(path)),
 				Err:  err,
 			})
 			continue
@@ -268,6 +289,33 @@ func (f *gitFetcher) resolveChart(chartDir string) (fetcher.ResolvedTemplate, er
 		return fetcher.ResolvedTemplate{}, fmt.Errorf("to template: %w", err)
 	}
 	return fetcher.ResolvedTemplate{Template: tmpl, ChartBytes: bundle}, nil
+}
+
+// resolveExternalTemplate parses a template.yaml file that has no sibling
+// chart/ directory. The template's engine.chart must be a registry ref —
+// the publisher resolves the chart at sync time via Argo's repo-server.
+// ChartBytes is nil because there are no local bytes to package; this is
+// what marks the template as external-mode for the publisher.
+func (f *gitFetcher) resolveExternalTemplate(templatePath string) (fetcher.ResolvedTemplate, error) {
+	data, err := os.ReadFile(templatePath)
+	if err != nil {
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("read %s: %w", templatePath, err)
+	}
+	tmpl, err := tpl.Parse(data)
+	if err != nil {
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("parse %s: %w", templatePath, err)
+	}
+	if !tmpl.Spec.Engine.Chart.IsExternal() {
+		// A template.yaml without a sibling chart/ MUST declare a
+		// registry ref; otherwise the publisher has nothing to point
+		// Argo at. Surface this as a per-template error so other
+		// templates in the same repo still sync.
+		return fetcher.ResolvedTemplate{}, fmt.Errorf(
+			"template %q has no sibling chart/ directory and engine.chart is not a registry ref — declare engine.chart: {repository, name, version} or add a chart/ sibling",
+			tmpl.Metadata.Name,
+		)
+	}
+	return fetcher.ResolvedTemplate{Template: tmpl, ChartBytes: nil}, nil
 }
 
 // readAuth reads credentials from the same K8s Secret shape Engine.readAuth
@@ -299,6 +347,41 @@ func (e *Engine) logger() *slog.Logger {
 		return e.Logger
 	}
 	return slog.Default()
+}
+
+// findExternalTemplates returns every template.yaml file under root whose
+// directory has no sibling chart/Chart.yaml (i.e. external-mode templates,
+// where the chart lives in a Helm registry rather than next to the
+// template). Templates whose template.yaml has a sibling chart/ are
+// handled by findChartDirs + packageChart's bundled-template pickup.
+//
+// Helm dependency caches under nested "charts/" subdirs are skipped so
+// vendored sub-charts don't get scanned.
+func findExternalTemplates(root string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if d.Name() == "charts" && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != tpl.TemplateFileName {
+			return nil
+		}
+		// Skip when the directory also contains a chart/ — that's the
+		// inline-mode layout, handled by findChartDirs.
+		siblingChart := filepath.Join(filepath.Dir(path), "chart", "Chart.yaml")
+		if _, err := os.Stat(siblingChart); err == nil {
+			return nil
+		}
+		out = append(out, path)
+		return nil
+	})
+	return out, err
 }
 
 // findChartDirs returns every immediate-or-nested directory under root that
