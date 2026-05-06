@@ -71,10 +71,10 @@ RUN set -eux; \
 
 WORKDIR /app
 COPY --from=go-builder /out/suparship /usr/local/bin/suparship
-COPY --from=ui-builder /ui/dist /app/ui/dist
+COPY --from=ui-builder /ui/dist /app/ui
 
 USER suparship
-ENV SUPARSHIP_UI_DIR=/app/ui/dist \
+ENV SUPARSHIP_UI_DIR=/app/ui \
     SUPARSHIP_ADDR=:8080
 EXPOSE 8080
 
