@@ -1,5 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
+# tonistiigi/xx provides xx-go / xx-apk wrappers that select the right
+# cross-toolchain (CC, AR, GOOS/GOARCH) for $TARGETPLATFORM, so we can
+# run the build on $BUILDPLATFORM (host arch) and emit a binary for the
+# target arch — no QEMU required.
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.5.0 AS xx
+
 # ── Stage 1: build the React/Vite frontend ─────────────────────────────
 FROM --platform=$BUILDPLATFORM node:22-alpine AS ui-builder
 WORKDIR /ui
@@ -9,25 +15,30 @@ COPY ui/ ./
 RUN npm run build
 
 # ── Stage 2: build the Go binary ───────────────────────────────────────
-# CGO is required by the 1Password SDK, so this stage runs natively on
-# $TARGETPLATFORM (under QEMU when emulating). Builder + runtime are both
-# alpine/musl, so dynamic linking against musl is ABI-compatible.
-FROM golang:1.25-alpine AS go-builder
+# CGO is required by the 1Password SDK. xx-go cross-compiles against the
+# target platform's musl headers fetched by `xx-apk add`, so a single
+# invocation on the build host produces both linux/amd64 and linux/arm64
+# binaries without QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS go-builder
+COPY --from=xx / /
+ARG TARGETPLATFORM
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
-RUN apk add --no-cache gcc musl-dev
+RUN apk add --no-cache clang lld
+RUN xx-apk add --no-cache musl-dev gcc
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=1 go build \
+RUN CGO_ENABLED=1 xx-go build \
       -trimpath \
       -ldflags="-s -w \
         -X github.com/suparcloud/suparship/internal/version.Version=${VERSION} \
         -X github.com/suparcloud/suparship/internal/version.Commit=${COMMIT} \
         -X github.com/suparcloud/suparship/internal/version.Date=${DATE}" \
-      -o /out/suparship ./cmd/suparship
+      -o /out/suparship ./cmd/suparship && \
+    xx-verify /out/suparship
 
 # ── Stage 3: runtime image ─────────────────────────────────────────────
 # Includes git, helm, and kubeseal because the binary shells out to all
