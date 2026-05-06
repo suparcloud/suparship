@@ -9,17 +9,19 @@ COPY ui/ ./
 RUN npm run build
 
 # ── Stage 2: build the Go binary ───────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS go-builder
-ARG TARGETOS
-ARG TARGETARCH
+# CGO is required by the 1Password SDK, so this stage runs natively on
+# $TARGETPLATFORM (under QEMU when emulating). Builder + runtime are both
+# alpine/musl, so dynamic linking against musl is ABI-compatible.
+FROM golang:1.25-alpine AS go-builder
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
+RUN apk add --no-cache gcc musl-dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
+RUN CGO_ENABLED=1 go build \
       -trimpath \
       -ldflags="-s -w \
         -X github.com/suparcloud/suparship/internal/version.Version=${VERSION} \
