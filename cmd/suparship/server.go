@@ -34,8 +34,10 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/tpl"
+	"github.com/suparcloud/suparship/internal/tpl/credstore"
 	"github.com/suparcloud/suparship/internal/tpl/registrysync"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -380,6 +382,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			// ConfigMap rather than on disk). Built-in templates that ship
 			// with the binary still resolve through TemplatesDir first.
 			pubCfg.ChartFetcher = chartFetcherFromClient(kubeClient)
+			// TemplateLoader lets the publisher detect external-mode
+			// templates (engine.chart points at a Helm registry) so it
+			// routes per-app files to envs-external/... and skips the
+			// charts/ extract step. Inline-mode templates pass through
+			// unchanged.
+			pubCfg.TemplateLoader = templateLoaderFromClient(kubeClient)
 
 			// InsecureRegistry is read from the registry ConfigMap (if configured).
 			if registryStore != nil {
@@ -502,6 +510,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				SyncAutomated:   true,
 				TemplatesDir:    templatesDir,
 				ChartFetcher:    chartFetcherFromClient(kubeClient),
+				TemplateLoader:  templateLoaderFromClient(kubeClient),
 			})
 			if err != nil {
 				return fmt.Errorf("rebuild gitops publisher: %w", err)
@@ -564,6 +573,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		GitOpsActivator:         gitOpsActivator,
 		SealedTokenPublisher:    sealPublisherHolder,
 		TemplateRegistryStore:   templateRegistryStore,
+		TemplateCredStore:       templateCredStore(kubeClient, dynClient, logger),
 		RegistryStore:           registryStore,
 	})
 
@@ -1404,6 +1414,21 @@ func registrySyncEngine(client kubernetes.Interface, logger *slog.Logger) *regis
 	}
 }
 
+// templateCredStore wires the SealedSecret-backed credentials writer for
+// UI-managed external-template-repo credentials. Returns nil in fake/
+// local-dev mode (no kube clients) so the credentials endpoints respond
+// 503 rather than panicking on a nil client.
+func templateCredStore(client kubernetes.Interface, dyn dynamic.Interface, logger *slog.Logger) *credstore.Store {
+	if client == nil || dyn == nil {
+		return nil
+	}
+	return &credstore.Store{
+		Client:    client,
+		DynClient: dyn,
+		Logger:    logger,
+	}
+}
+
 // startPeriodicTemplateSync runs SyncAll on a ticker so external repos
 // converge without an operator manually clicking Sync. The interval comes
 // from SUPARSHIP_TEMPLATE_SYNC_INTERVAL (Go duration string, e.g. "5m");
@@ -1439,6 +1464,11 @@ func startPeriodicTemplateSync(
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
+		// Eager first run so a freshly installed cluster doesn't sit with
+		// an empty template gallery for `interval` before the first sync.
+		// runOneTemplateSync silently no-ops when the registry is empty,
+		// so this is safe to always run — no extra guards needed.
+		runOneTemplateSync(ctx, engine, store, logger)
 		for {
 			select {
 			case <-ctx.Done():
@@ -1514,9 +1544,12 @@ type kubeChartFetcher struct {
 	client kubernetes.Interface
 }
 
-// LoadChartBundle satisfies gitops.ChartFetcher.
-func (k *kubeChartFetcher) LoadChartBundle(ctx context.Context, templateName string) ([]byte, error) {
-	return kube.LoadChartBundle(ctx, k.client, templateName)
+// LoadChartBundle satisfies gitops.ChartFetcher. Resolves the per-version
+// archive when version is non-empty (with a fall-back to the alias when
+// the archive is missing — covers templates persisted before versioned
+// naming landed). Empty version reads the alias directly.
+func (k *kubeChartFetcher) LoadChartBundle(ctx context.Context, templateName, version string) ([]byte, error) {
+	return kube.LoadChartBundleVersion(ctx, k.client, templateName, version)
 }
 
 // chartFetcherFromClient returns a gitops.ChartFetcher backed by the cluster
@@ -1527,6 +1560,47 @@ func chartFetcherFromClient(client kubernetes.Interface) gitops.ChartFetcher {
 		return nil
 	}
 	return &kubeChartFetcher{client: client}
+}
+
+// kubeTemplateLoader implements gitops.TemplateLoader by reading the
+// versioned-or-current template ConfigMap from suparship-system and
+// parsing it. Used by the publisher to detect external-mode templates
+// at publish time so it can route to envs-external/ and skip syncChart.
+type kubeTemplateLoader struct {
+	client kubernetes.Interface
+}
+
+func (l *kubeTemplateLoader) LoadTemplate(ctx context.Context, name string) (*tpl.Template, error) {
+	if l.client == nil || name == "" {
+		return nil, nil
+	}
+	cm, err := l.client.CoreV1().ConfigMaps("suparship-system").Get(
+		ctx, kube.TemplateConfigMapName(name), metav1.GetOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		// Template not in cluster (e.g. disk-only built-in via
+		// SUPARSHIP_TEMPLATES_DIR). Silent fall-through — publisher
+		// treats unresolvable as inline-mode.
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	raw := cm.Data[tpl.TemplateFileName]
+	if raw == "" {
+		return nil, nil
+	}
+	return tpl.Parse([]byte(raw))
+}
+
+// templateLoaderFromClient mirrors chartFetcherFromClient: nil in fake
+// mode so the publisher falls back to inline-only behaviour without the
+// caller needing to gate the wiring.
+func templateLoaderFromClient(client kubernetes.Interface) gitops.TemplateLoader {
+	if client == nil {
+		return nil
+	}
+	return &kubeTemplateLoader{client: client}
 }
 
 // appStoreNamespaceResolver returns a function that looks up the resolved K8s

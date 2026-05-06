@@ -29,6 +29,7 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
+	"github.com/suparcloud/suparship/internal/tpl/credstore"
 	"github.com/suparcloud/suparship/internal/tpl/registrysync"
 )
 
@@ -362,6 +363,11 @@ type Config struct {
 	// the registry's read endpoints still work; the /sync POST routes
 	// return 503.
 	RegistrySyncEngine *registrysync.Engine
+	// TemplateCredStore seals UI-submitted external-template-repo
+	// credentials into the management cluster as SealedSecret CRs. Nil
+	// disables the /credentials and /test-connection endpoints (operators
+	// must hand-create Secrets and reference them via existingSecret).
+	TemplateCredStore *credstore.Store
 }
 
 // Server is the suparship HTTP API server.
@@ -388,6 +394,16 @@ func New(cfg Config) *Server {
 
 	if ah != nil {
 		th := newTemplateHandler(ah, cfg.Templates, cfg.ClusterTemplateLoader, cfg.Logger)
+		th.kubeClient = cfg.KubeClient
+		// Same admin-gating shape as the registry handler: when the org
+		// provider is wired we require org_admin on DELETE; without it we
+		// fall back to plain auth so harnesses without an OrgStore work.
+		if cfg.OrgProvider != nil {
+			rh := &rbacHandler{auth: ah, orgStore: cfg.OrgProvider, projectStore: cfg.ProjectStore}
+			th.authMiddleware = func(next http.HandlerFunc) http.HandlerFunc {
+				return ah.requireAuth(rh.requireOrgAdmin(next))
+			}
+		}
 		th.registerRoutes(mux)
 		cfg.Logger.Info("template endpoints enabled", "count", len(cfg.Templates))
 	}
@@ -425,6 +441,7 @@ func New(cfg Config) *Server {
 		}
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
+			rh.appHandler.kubeClient = cfg.KubeClient
 			if cfg.OrgProvider != nil {
 				rh.appHandler.orgProvider = cfg.OrgProvider
 			}
@@ -569,10 +586,12 @@ func New(cfg Config) *Server {
 
 	if cfg.TemplateRegistryStore != nil && ah != nil {
 		trh := &templateRegistryHandler{
-			store:  cfg.TemplateRegistryStore,
-			auth:   ah,
-			engine: cfg.RegistrySyncEngine,
-			logger: cfg.Logger,
+			store:      cfg.TemplateRegistryStore,
+			auth:       ah,
+			engine:     cfg.RegistrySyncEngine,
+			credStore:  cfg.TemplateCredStore,
+			kubeClient: cfg.KubeClient,
+			logger:     cfg.Logger,
 		}
 		// When the org provider is wired we can require org_admin on the
 		// write/sync routes; without it we fall back to plain auth so test
@@ -613,12 +632,13 @@ func New(cfg Config) *Server {
 		cfg.Logger.Info("config export endpoint enabled")
 
 		chh := &credentialHealthHandler{
-			auth:              ah,
-			kubeClient:        cfg.KubeClient,
-			orgProvider:       cfg.OrgProvider,
-			gitopsConfigStore: cfg.GitOpsConfigStore,
-			registryStore:     cfg.RegistryStore,
-			logger:            cfg.Logger,
+			auth:                  ah,
+			kubeClient:            cfg.KubeClient,
+			orgProvider:           cfg.OrgProvider,
+			gitopsConfigStore:     cfg.GitOpsConfigStore,
+			registryStore:         cfg.RegistryStore,
+			templateRegistryStore: cfg.TemplateRegistryStore,
+			logger:                cfg.Logger,
 		}
 		chh.registerRoutes(mux)
 		cfg.Logger.Info("credential health endpoint enabled")

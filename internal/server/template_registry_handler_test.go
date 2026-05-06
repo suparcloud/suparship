@@ -153,3 +153,66 @@ func TestTemplateRegistryHandler_Unauthenticated(t *testing.T) {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
 }
+
+func TestOrphanedManagedCreds(t *testing.T) {
+	managed := func(name string) tpl.ExternalTemplateRepo {
+		return tpl.ExternalTemplateRepo{Name: name, ExistingSecret: "suparship-tpl-credentials-" + name}
+	}
+	handWired := func(name, secret string) tpl.ExternalTemplateRepo {
+		return tpl.ExternalTemplateRepo{Name: name, ExistingSecret: secret}
+	}
+
+	tests := []struct {
+		name        string
+		before      []tpl.ExternalTemplateRepo
+		after       []tpl.ExternalTemplateRepo
+		wantOrphans []string
+	}{
+		{
+			name:   "managed source removed",
+			before: []tpl.ExternalTemplateRepo{managed("foo"), managed("bar")},
+			after:  []tpl.ExternalTemplateRepo{managed("foo")},
+			wantOrphans: []string{"bar"},
+		},
+		{
+			name:   "hand-wired secret left alone",
+			before: []tpl.ExternalTemplateRepo{handWired("foo", "shared-creds")},
+			after:  []tpl.ExternalTemplateRepo{},
+		},
+		{
+			name:   "rename produces an orphan",
+			before: []tpl.ExternalTemplateRepo{managed("old-name")},
+			after:  []tpl.ExternalTemplateRepo{managed("new-name")},
+			wantOrphans: []string{"old-name"},
+		},
+		{
+			name:   "no change",
+			before: []tpl.ExternalTemplateRepo{managed("foo")},
+			after:  []tpl.ExternalTemplateRepo{managed("foo")},
+		},
+		{
+			name:   "first save (no before)",
+			before: nil,
+			after:  []tpl.ExternalTemplateRepo{managed("foo")},
+		},
+		{
+			name:   "removed source with empty existingSecret",
+			before: []tpl.ExternalTemplateRepo{{Name: "foo"}},
+			after:  []tpl.ExternalTemplateRepo{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := orphanedManagedCreds(tc.before, tc.after)
+			if len(got) != len(tc.wantOrphans) {
+				t.Fatalf("got %v, want %v", got, tc.wantOrphans)
+			}
+			for i, name := range tc.wantOrphans {
+				if got[i] != name {
+					t.Errorf("orphans[%d] = %q, want %q", i, got[i], name)
+				}
+			}
+		})
+	}
+}

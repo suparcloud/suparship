@@ -546,8 +546,9 @@ function EnvironmentTypeEnvConfigSection({
 
   // Initialise selector once environments load.
   useEffect(() => {
-    if (environments.length > 0 && !selectedEnvType) {
-      setSelectedEnvType(environments[0].name);
+    const first = environments[0];
+    if (first && !selectedEnvType) {
+      setSelectedEnvType(first.name);
     }
   }, [environments, selectedEnvType]);
 

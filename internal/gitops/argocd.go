@@ -94,22 +94,29 @@ type ApplicationSpec struct {
 	SyncPolicy *SyncPolicy `json:"syncPolicy,omitempty" yaml:"syncPolicy,omitempty"`
 }
 
-// ApplicationSource describes the Git repository and path that ArgoCD
-// should sync from.
+// ApplicationSource describes one source ArgoCD pulls from. Fits both
+// git-tree sources (Path set) and Helm-registry sources (Chart set);
+// the two are mutually exclusive in ArgoCD's contract.
 type ApplicationSource struct {
-	// RepoURL is the HTTPS or SSH URL of the Git repository.
+	// RepoURL is the source URL. For git sources this is HTTPS/SSH;
+	// for Helm-registry sources it's the registry root, e.g.
+	// "oci://ghcr.io/myorg/charts" or "https://charts.acme.io".
 	RepoURL string `json:"repoURL" yaml:"repoURL"`
-	// Path is the directory within the repository that contains the
-	// Helm chart or rendered manifests for this app+env pair.
-	Path string `json:"path" yaml:"path"`
-	// TargetRevision is the Git ref (branch, tag, or SHA) to deploy.
+	// Path is the directory within a git repo. Mutually exclusive with
+	// Chart. omitempty lets Helm-registry sources omit it cleanly.
+	Path string `json:"path,omitempty" yaml:"path,omitempty"`
+	// Chart is the chart name within a Helm registry. Mutually exclusive
+	// with Path. Set by external-mode AppSets; left empty for git sources.
+	Chart string `json:"chart,omitempty" yaml:"chart,omitempty"`
+	// TargetRevision is the git ref for git sources, or the chart version
+	// for Helm-registry sources.
 	TargetRevision string `json:"targetRevision" yaml:"targetRevision"`
 	// Ref marks this source as a reference-only source. Other sources can then
 	// reference files from this source via "$ref-name/path" in their valueFiles.
 	// When set, ArgoCD does NOT sync this source to the cluster.
 	Ref string `json:"ref,omitempty" yaml:"ref,omitempty"`
-	// Helm holds Helm-specific configuration. Omitted when the source is
-	// plain manifests rather than a Helm chart.
+	// Helm holds Helm-specific configuration. Used by both git sources
+	// pointing at a chart directory and by Helm-registry sources.
 	Helm *HelmSource `json:"helm,omitempty" yaml:"helm,omitempty"`
 	// Directory configures plain-manifest behaviour: include filters so
 	// only specific files in Path are applied. Used by the per-app

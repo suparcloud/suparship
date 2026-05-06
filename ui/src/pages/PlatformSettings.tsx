@@ -129,6 +129,8 @@ const credStatusColors: Record<string, { bg: string; text: string; label: string
   not_configured: { bg: "bg-gray-100", text: "text-gray-600", label: "Not configured" },
 };
 
+const credStatusFallback = credStatusColors.missing!;
+
 const credNameLabels: Record<string, string> = {
   gitops: "GitOps Repository",
   registry: "Container Registry",
@@ -136,7 +138,7 @@ const credNameLabels: Record<string, string> = {
 };
 
 function CredentialBadge({ status }: { status: string }) {
-  const s = credStatusColors[status] ?? credStatusColors.missing;
+  const s = credStatusColors[status] ?? credStatusFallback;
   return (
     <span
       className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${s.bg} ${s.text}`}
@@ -203,7 +205,7 @@ function CredentialHealth() {
 
   if (!data) return null;
 
-  const overallColor = credStatusColors[data.overallStatus] ?? credStatusColors.missing;
+  const overallColor = credStatusColors[data.overallStatus] ?? credStatusFallback;
 
   return (
     <section className="space-y-3">

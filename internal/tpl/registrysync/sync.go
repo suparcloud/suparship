@@ -30,6 +30,7 @@ import (
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/tpl"
 	"github.com/suparcloud/suparship/internal/tpl/chartimport"
+	"github.com/suparcloud/suparship/internal/tpl/fetcher"
 )
 
 // systemNamespace is where suparship reads its own ConfigMaps and Secrets
@@ -78,68 +79,46 @@ func (e *Engine) SyncOne(ctx context.Context, repo tpl.ExternalTemplateRepo) Syn
 	res := SyncResult{SourceName: repo.Name, SyncedAt: time.Now().UTC()}
 	logger := e.logger()
 
-	tmp, err := os.MkdirTemp("", "suparship-tplsync-*")
-	if err != nil {
-		res.Err = fmt.Errorf("mktemp: %w", err)
+	// Phase 1 — fetch: route to the right fetcher based on source type.
+	// Per-template parse failures land in result.PartialErrs;
+	// catastrophic failures (clone, registry unreachable) come back as
+	// fetchErr.
+	f, fetcherErr := e.fetcherForType(repo.EffectiveType(), logger)
+	if fetcherErr != nil {
+		res.Err = fetcherErr
 		return res
 	}
-	defer os.RemoveAll(tmp)
-
-	// Auth (optional): username/password live in a K8s Secret keyed by
-	// ExistingSecret. Convention mirrors the gitops repo Secret format
-	// (data["username"], data["password"]).
-	user, pass, err := e.readAuth(ctx, repo.ExistingSecret)
-	if err != nil {
-		res.Err = fmt.Errorf("read auth: %w", err)
+	result, fetchErr := f.Fetch(ctx, repo)
+	if fetchErr != nil {
+		res.Err = fetchErr
 		return res
 	}
-
-	cloneURL := embedCredentials(repo.RepoURL, user, pass)
-	repoDir := filepath.Join(tmp, "repo")
-	args := []string{"clone"}
-	if e.CloneDepth > 0 {
-		args = append(args, "--depth", fmt.Sprint(e.CloneDepth))
-	}
-	args = append(args, "--branch", refOrDefault(repo.Ref), cloneURL, repoDir)
-	if err := runGit(ctx, tmp, args...); err != nil {
-		res.Err = fmt.Errorf("clone %s: %w", repo.RepoURL, err)
-		return res
+	for _, pe := range result.PartialErrs {
+		logger.Warn("registrysync: chart import failed; skipping",
+			"source", repo.Name,
+			"chart", pe.Name,
+			"err", pe.Err,
+		)
+		// Record the most-recent error but keep going so successes
+		// alongside still surface to the operator.
+		res.Err = pe.Err
 	}
 
-	chartDir := filepath.Join(repoDir, strings.TrimPrefix(repo.Path, "/"))
-	if info, err := os.Stat(chartDir); err != nil || !info.IsDir() {
-		res.Err = fmt.Errorf("path %q not found in repo", repo.Path)
-		return res
-	}
-
-	chartPaths, err := findChartDirs(chartDir)
-	if err != nil {
-		res.Err = fmt.Errorf("walk %s: %w", chartDir, err)
-		return res
-	}
-	if len(chartPaths) == 0 {
-		// Empty path is technically valid (operator may not have added
-		// charts yet) — return success with no templates rather than an
-		// error, so the source's last-synced timestamp still updates.
-		logger.Info("registrysync: no charts found", "source", repo.Name, "path", repo.Path)
-		return res
-	}
-
-	for _, dir := range chartPaths {
-		name, err := e.importOne(ctx, dir)
-		if err != nil {
-			logger.Warn("registrysync: chart import failed; skipping",
+	// Phase 2 — persist: write each resolved template to the cluster.
+	// kube.SaveTemplate accepts nil chartTGZ for templates whose chart
+	// is shipped out-of-band (today: never; future: registry-ref mode).
+	for _, rt := range result.Templates {
+		if err := kube.SaveTemplate(ctx, e.Client, rt.Template, rt.ChartBytes); err != nil {
+			logger.Warn("registrysync: persist template failed; skipping",
 				"source", repo.Name,
-				"chart", filepath.Base(dir),
+				"template", rt.Template.Metadata.Name,
 				"err", err,
 			)
-			// Record the most-recent error but keep going so we collect a
-			// full set of successes alongside.
 			res.Err = err
 			continue
 		}
-		res.Templates = append(res.Templates, name)
-		logger.Info("registrysync: imported chart", "source", repo.Name, "template", name)
+		res.Templates = append(res.Templates, rt.Template.Metadata.Name)
+		logger.Info("registrysync: imported chart", "source", repo.Name, "template", rt.Template.Metadata.Name)
 	}
 	return res
 }
@@ -190,45 +169,202 @@ func ApplyResult(reg *tpl.TemplateRegistry, repo tpl.ExternalTemplateRepo, resul
 	reg.Sources = fresh
 }
 
-// importOne packages a single chart directory and persists it via the
-// existing chartimport pipeline. Returns the template name on success.
-func (e *Engine) importOne(ctx context.Context, chartDir string) (string, error) {
+// gitFetcher resolves a templates-repo source declaration into
+// ResolvedTemplate pairs. Implements fetcher.Fetcher (via Fetch); the
+// concrete fetchRepo method is exposed so SyncOne can pass through a
+// strongly typed ExternalTemplateRepo without going through the any-typed
+// Fetcher interface.
+type gitFetcher struct {
+	client     kubernetes.Interface
+	logger     *slog.Logger
+	cloneDepth int
+}
+
+func newGitFetcher(client kubernetes.Interface, logger *slog.Logger, cloneDepth int) *gitFetcher {
+	return &gitFetcher{client: client, logger: logger, cloneDepth: cloneDepth}
+}
+
+// Fetch satisfies fetcher.Fetcher. Source must be tpl.ExternalTemplateRepo.
+func (f *gitFetcher) Fetch(ctx context.Context, source any) (fetcher.FetchResult, error) {
+	repo, ok := source.(tpl.ExternalTemplateRepo)
+	if !ok {
+		return fetcher.FetchResult{}, fmt.Errorf("gitFetcher: expected tpl.ExternalTemplateRepo, got %T", source)
+	}
+	return f.fetchRepo(ctx, repo)
+}
+
+// fetchRepo clones the repo, walks for charts, and parses each into a
+// ResolvedTemplate. The chart bytes are packaged into a .tgz so the
+// downstream persistence path is identical regardless of which fetcher
+// produced them.
+//
+// Catastrophic failures (clone, auth, missing path) come back as the
+// error return; per-chart failures land in FetchResult.PartialErrs so
+// callers can surface "3 imported, 1 failed" without losing either signal.
+func (f *gitFetcher) fetchRepo(ctx context.Context, repo tpl.ExternalTemplateRepo) (fetcher.FetchResult, error) {
+	tmp, err := os.MkdirTemp("", "suparship-tplsync-*")
+	if err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("mktemp: %w", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	user, pass, err := f.readAuth(ctx, repo.ExistingSecret)
+	if err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("read auth: %w", err)
+	}
+
+	cloneURL := embedCredentials(repo.RepoURL, user, pass)
+	repoDir := filepath.Join(tmp, "repo")
+	args := []string{"clone"}
+	if f.cloneDepth > 0 {
+		args = append(args, "--depth", fmt.Sprint(f.cloneDepth))
+	}
+	args = append(args, "--branch", refOrDefault(repo.Ref), cloneURL, repoDir)
+	if err := runGit(ctx, tmp, args...); err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("clone %s: %w", repo.RepoURL, err)
+	}
+
+	chartDir := filepath.Join(repoDir, strings.TrimPrefix(repo.Path, "/"))
+	if info, err := os.Stat(chartDir); err != nil || !info.IsDir() {
+		return fetcher.FetchResult{}, fmt.Errorf("path %q not found in repo", repo.Path)
+	}
+
+	chartPaths, err := findChartDirs(chartDir)
+	if err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("walk %s: %w", chartDir, err)
+	}
+	externalTemplates, err := findExternalTemplates(chartDir)
+	if err != nil {
+		return fetcher.FetchResult{}, fmt.Errorf("walk for external templates %s: %w", chartDir, err)
+	}
+	if len(chartPaths) == 0 && len(externalTemplates) == 0 {
+		// Empty path is technically valid (operator may not have added
+		// templates yet) — return success with no templates so the
+		// source's last-synced timestamp still updates.
+		f.logger.Info("registrysync: no templates found", "source", repo.Name, "path", repo.Path)
+		return fetcher.FetchResult{}, nil
+	}
+
+	out := fetcher.FetchResult{}
+	// Inline-mode templates: <name>/chart/Chart.yaml present. The
+	// existing chartimport pipeline handles bundled-template-yaml
+	// pickup and inferred-template fallback.
+	for _, dir := range chartPaths {
+		rt, err := f.resolveChart(dir)
+		if err != nil {
+			out.PartialErrs = append(out.PartialErrs, fetcher.PartialError{
+				Name: filepath.Base(dir),
+				Err:  err,
+			})
+			continue
+		}
+		out.Templates = append(out.Templates, rt)
+	}
+	// External-mode templates: <name>/template.yaml present, no
+	// sibling chart/. Engine.chart must be a registry ref since there
+	// are no local chart bytes to package.
+	for _, path := range externalTemplates {
+		rt, err := f.resolveExternalTemplate(path)
+		if err != nil {
+			out.PartialErrs = append(out.PartialErrs, fetcher.PartialError{
+				Name: filepath.Base(filepath.Dir(path)),
+				Err:  err,
+			})
+			continue
+		}
+		out.Templates = append(out.Templates, rt)
+	}
+	return out, nil
+}
+
+// resolveChart packages a single chart directory and runs it through the
+// existing chartimport pipeline. Returns a ResolvedTemplate ready for
+// persistence — the chart bytes are the packaged .tgz.
+func (f *gitFetcher) resolveChart(chartDir string) (fetcher.ResolvedTemplate, error) {
 	bundle, err := packageChart(chartDir)
 	if err != nil {
-		return "", fmt.Errorf("package: %w", err)
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("package: %w", err)
 	}
 	arc, err := chartimport.ParseArchive(bundle)
 	if err != nil {
-		return "", fmt.Errorf("parse: %w", err)
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("parse: %w", err)
 	}
 	tmpl, err := chartimport.ToTemplate(arc)
 	if err != nil {
-		return "", fmt.Errorf("to template: %w", err)
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("to template: %w", err)
 	}
-	if err := kube.SaveTemplate(ctx, e.Client, tmpl, bundle); err != nil {
-		return "", fmt.Errorf("save: %w", err)
-	}
-	return tmpl.Metadata.Name, nil
+	return fetcher.ResolvedTemplate{Template: tmpl, ChartBytes: bundle}, nil
 }
 
-// readAuth reads username/password from a K8s Secret. Returns empty
-// strings (no error) when the secret name is empty so public repos work
-// without configuration.
-func (e *Engine) readAuth(ctx context.Context, secretName string) (string, string, error) {
+// resolveExternalTemplate parses a template.yaml file that has no sibling
+// chart/ directory. The template's engine.chart must be a registry ref —
+// the publisher resolves the chart at sync time via Argo's repo-server.
+// ChartBytes is nil because there are no local bytes to package; this is
+// what marks the template as external-mode for the publisher.
+func (f *gitFetcher) resolveExternalTemplate(templatePath string) (fetcher.ResolvedTemplate, error) {
+	data, err := os.ReadFile(templatePath)
+	if err != nil {
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("read %s: %w", templatePath, err)
+	}
+	tmpl, err := tpl.Parse(data)
+	if err != nil {
+		return fetcher.ResolvedTemplate{}, fmt.Errorf("parse %s: %w", templatePath, err)
+	}
+	if !tmpl.Spec.Engine.Chart.IsExternal() {
+		// A template.yaml without a sibling chart/ MUST declare a
+		// registry ref; otherwise the publisher has nothing to point
+		// Argo at. Surface this as a per-template error so other
+		// templates in the same repo still sync.
+		return fetcher.ResolvedTemplate{}, fmt.Errorf(
+			"template %q has no sibling chart/ directory and engine.chart is not a registry ref — declare engine.chart: {repository, name, version} or add a chart/ sibling",
+			tmpl.Metadata.Name,
+		)
+	}
+	return fetcher.ResolvedTemplate{Template: tmpl, ChartBytes: nil}, nil
+}
+
+// readAuth reads credentials from the same K8s Secret shape Engine.readAuth
+// uses (data["token"] for PAT-style, falling back to data["username"] +
+// data["password"]). Duplicated here so gitFetcher is self-contained;
+// callers can wire it without an Engine.
+func (f *gitFetcher) readAuth(ctx context.Context, secretName string) (string, string, error) {
 	if secretName == "" {
 		return "", "", nil
 	}
-	if e.Client == nil {
+	if f.client == nil {
 		return "", "", fmt.Errorf("auth secret %q referenced but no cluster client configured", secretName)
 	}
-	sec, err := e.Client.CoreV1().Secrets(systemNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	sec, err := f.client.CoreV1().Secrets(systemNamespace).Get(ctx, secretName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return "", "", fmt.Errorf("auth secret %q not found in %s", secretName, systemNamespace)
 	}
 	if err != nil {
 		return "", "", err
 	}
+	if tok := string(sec.Data["token"]); tok != "" {
+		return "x-access-token", tok, nil
+	}
 	return string(sec.Data["username"]), string(sec.Data["password"]), nil
+}
+
+// fetcherForType selects the fetcher implementation for a given source
+// type. Returns ErrUnsupportedSourceType for types whose fetchers
+// haven't shipped yet (chartmuseum, gittgz) — surfaces a clean
+// per-source error instead of a panic when an operator registers a
+// reserved type ahead of its implementation.
+func (e *Engine) fetcherForType(sourceType string, logger *slog.Logger) (fetcher.Fetcher, error) {
+	switch sourceType {
+	case tpl.SourceTypeGit:
+		return newGitFetcher(e.Client, logger, e.CloneDepth), nil
+	case tpl.SourceTypeOCI:
+		return newOCIFetcher(e.Client, logger), nil
+	case tpl.SourceTypeChartMuseum:
+		return newChartMuseumFetcher(e.Client, logger), nil
+	case tpl.SourceTypeGitTgz:
+		return newGitTgzFetcher(e.Client, logger, e.CloneDepth), nil
+	default:
+		return nil, fmt.Errorf("%w: %q", tpl.ErrInvalidSourceType, sourceType)
+	}
 }
 
 func (e *Engine) logger() *slog.Logger {
@@ -236,6 +372,41 @@ func (e *Engine) logger() *slog.Logger {
 		return e.Logger
 	}
 	return slog.Default()
+}
+
+// findExternalTemplates returns every template.yaml file under root whose
+// directory has no sibling chart/Chart.yaml (i.e. external-mode templates,
+// where the chart lives in a Helm registry rather than next to the
+// template). Templates whose template.yaml has a sibling chart/ are
+// handled by findChartDirs + packageChart's bundled-template pickup.
+//
+// Helm dependency caches under nested "charts/" subdirs are skipped so
+// vendored sub-charts don't get scanned.
+func findExternalTemplates(root string) ([]string, error) {
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if d.Name() == "charts" && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != tpl.TemplateFileName {
+			return nil
+		}
+		// Skip when the directory also contains a chart/ — that's the
+		// inline-mode layout, handled by findChartDirs.
+		siblingChart := filepath.Join(filepath.Dir(path), "chart", "Chart.yaml")
+		if _, err := os.Stat(siblingChart); err == nil {
+			return nil
+		}
+		out = append(out, path)
+		return nil
+	})
+	return out, err
 }
 
 // findChartDirs returns every immediate-or-nested directory under root that
@@ -268,11 +439,41 @@ func findChartDirs(root string) ([]string, error) {
 // packageChart tars + gzips a chart directory in the layout `helm package`
 // produces (top-level "<chartName>/" folder). Re-implemented inline so the
 // sync engine doesn't depend on the helm CLI being on PATH.
+//
+// suparship-flavoured template repos ship a sibling layout:
+//
+//	templates/<name>/
+//	  template.yaml          ← suparship metadata (inputs, mappings, presets)
+//	  chart/
+//	    Chart.yaml
+//	    ...
+//
+// When packageChart is invoked on `chart/`, it also looks for a
+// `template.yaml` in the parent directory and, when present, includes
+// it in the tarball at "<chartName>/template.yaml". chartimport.
+// ParseArchive picks it up so the chart imports with the operator's
+// hand-authored template instead of the best-effort inferred one.
 func packageChart(chartDir string) ([]byte, error) {
 	chartName := filepath.Base(chartDir)
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
+
+	// Pick up a sibling template.yaml if the operator shipped one.
+	if data, ok := readSiblingTemplateYAML(chartDir); ok {
+		hdr := &tar.Header{
+			Name:     filepath.ToSlash(filepath.Join(chartName, "template.yaml")),
+			Mode:     0o644,
+			Size:     int64(len(data)),
+			Typeflag: tar.TypeReg,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return nil, err
+		}
+		if _, err := io.Copy(tw, bytes.NewReader(data)); err != nil {
+			return nil, err
+		}
+	}
 
 	err := filepath.WalkDir(chartDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -334,6 +535,29 @@ func packageChart(chartDir string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// readSiblingTemplateYAML returns the contents of `<parent>/template.yaml`
+// when chartDir matches the suparship-flavoured layout (a dir named
+// "chart" with template.yaml as its sibling). Returns (nil, false) on
+// any miss — wrong layout, no sibling, or read error — so callers can
+// silently fall through to the inferred-template path.
+//
+// The "chart" name guard is important: a multi-chart library repo can
+// legitimately have a template.yaml at the parent level for entirely
+// unrelated reasons (Helm itself, downstream tooling). We only honor
+// the sibling when the layout matches the convention documented on
+// packageChart.
+func readSiblingTemplateYAML(chartDir string) ([]byte, bool) {
+	if filepath.Base(chartDir) != "chart" {
+		return nil, false
+	}
+	sibling := filepath.Join(filepath.Dir(chartDir), "template.yaml")
+	data, err := os.ReadFile(sibling)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // embedCredentials inserts user:password into HTTP/HTTPS URLs so `git clone`

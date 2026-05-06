@@ -8,8 +8,8 @@ import (
 
 // SyncChartForTest exposes syncChart's local-disk + cluster-bundle resolution
 // to white-box tests that don't want to spin up a real git clone.
-func (p *Publisher) SyncChartForTest(ctx context.Context, repoDir, templateName string) error {
-	return p.syncChart(ctx, repoDir, templateName)
+func (p *Publisher) SyncChartForTest(ctx context.Context, repoDir, templateName, version string) error {
+	return p.syncChart(ctx, repoDir, templateName, version)
 }
 
 // PublishKargoCRsForTest exposes publishKargoCRs for white-box unit testing.

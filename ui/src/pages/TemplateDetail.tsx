@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { toast } from "sonner";
 
-import { fetchTemplate } from "../lib/templates";
+import { ApiError } from "../lib/api";
+import { deleteTemplate, fetchTemplate } from "../lib/templates";
 import type {
   TemplateDetail as TemplateDetailType,
   TemplateInput,
@@ -115,9 +117,11 @@ function PresetCard({ preset }: { preset: TemplatePreset }) {
 
 export function TemplateDetail() {
   const { name } = useParams<{ name: string }>();
+  const navigate = useNavigate();
   const [template, setTemplate] = useState<TemplateDetailType | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!name) return;
@@ -182,6 +186,40 @@ export function TemplateDetail() {
     template.advancedInputs.length +
     template.secretInputs.length;
 
+  // handleDelete drops the template's cluster ConfigMap. We confirm
+  // explicitly because the action is destructive and not reversible
+  // via the UI (operators would re-import or wait for a sync to
+  // restore an external-source template). 409s on built-ins are
+  // surfaced via ApiError.message — the user finds out why.
+  async function handleDelete() {
+    if (!template) return;
+    const confirmed = window.confirm(
+      `Delete template "${template.name}"?\n\n` +
+        "Existing apps deployed from it will keep running, but you " +
+        "won't be able to create new ones until the template is " +
+        "re-imported. If this template comes from an external source, " +
+        "the next sync will re-create it — remove the source path " +
+        "instead to make the deletion stick.",
+    );
+    if (!confirmed) return;
+    setDeleting(true);
+    try {
+      await deleteTemplate(template.name);
+      toast.success(`Deleted ${template.name}`);
+      navigate("/templates");
+    } catch (err) {
+      if (err instanceof ApiError) {
+        toast.error(err.message);
+      } else if (err instanceof Error) {
+        toast.error(err.message);
+      } else {
+        toast.error("Delete failed");
+      }
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <div className="space-y-8">
       {/* Breadcrumb */}
@@ -193,7 +231,7 @@ export function TemplateDetail() {
       </Link>
 
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-semibold text-gray-900">
@@ -209,6 +247,14 @@ export function TemplateDetail() {
             </p>
           )}
         </div>
+        <button
+          type="button"
+          onClick={handleDelete}
+          disabled={deleting}
+          className="shrink-0 rounded-md border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+        >
+          {deleting ? "Deleting…" : "Delete template"}
+        </button>
       </div>
 
       {/* Quick stats */}

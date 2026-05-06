@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"sort"
 
+	"k8s.io/client-go/kubernetes"
+
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
@@ -106,7 +109,14 @@ type templateHandler struct {
 	auth          *authHandler
 	builtin       []*tpl.Template
 	clusterLoader ClusterTemplateLoader
-	logger        *slog.Logger
+	// kubeClient lets DELETE /templates/{name} drop the cluster ConfigMap
+	// for imported / externally synced templates. Nil disables the route.
+	kubeClient kubernetes.Interface
+	// authMiddleware composes auth + org_admin enforcement for the
+	// destructive route. Nil falls back to plain auth so test harnesses
+	// without an OrgStore keep working.
+	authMiddleware func(http.HandlerFunc) http.HandlerFunc
+	logger         *slog.Logger
 }
 
 func newTemplateHandler(auth *authHandler, builtin []*tpl.Template, clusterLoader ClusterTemplateLoader, logger *slog.Logger) *templateHandler {
@@ -118,9 +128,169 @@ func newTemplateHandler(auth *authHandler, builtin []*tpl.Template, clusterLoade
 	}
 }
 
+// adminOrAuth returns the org_admin middleware when wired, falling back
+// to plain auth so test harnesses without an OrgStore keep working.
+// Mirrors templateRegistryHandler.adminOrAuth.
+func (th *templateHandler) adminOrAuth() func(http.HandlerFunc) http.HandlerFunc {
+	if th.authMiddleware != nil {
+		return th.authMiddleware
+	}
+	return th.auth.requireAuth
+}
+
 func (th *templateHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/templates", th.auth.requireAuth(th.handleList))
 	mux.HandleFunc("GET /api/v1/templates/{name}", th.auth.requireAuth(th.handleDetail))
+	mux.HandleFunc("GET /api/v1/templates/{name}/versions", th.auth.requireAuth(th.handleListVersions))
+	mux.HandleFunc("DELETE /api/v1/templates/{name}", th.adminOrAuth()(th.handleDelete))
+}
+
+// TemplateVersionDTO mirrors kube.TemplateVersion on the wire so the UI
+// can render an upgrade picker.
+type TemplateVersionDTO struct {
+	Version   string `json:"version"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+// TemplateVersionsResponse wraps the list for GET .../versions.
+type TemplateVersionsResponse struct {
+	Versions []TemplateVersionDTO `json:"versions"`
+}
+
+// handleListVersions returns every persisted version of a template
+// (per-version archive ConfigMaps). Built-in templates loaded from disk
+// don't have archives — they return an empty list so the UI can flag
+// them as "not version-managed" rather than 404.
+//
+// Sorted descending by SemVer when the strings parse cleanly; falls
+// back to the lex order when not (so non-SemVer tags don't crash the
+// endpoint, just appear in surprising order).
+func (th *templateHandler) handleListVersions(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name required"})
+		return
+	}
+	if th.kubeClient == nil {
+		writeJSON(w, http.StatusOK, TemplateVersionsResponse{Versions: []TemplateVersionDTO{}})
+		return
+	}
+	versions, err := kube.ListTemplateVersions(r.Context(), th.kubeClient, name)
+	if err != nil {
+		if th.logger != nil {
+			th.logger.Error("list template versions", "name", name, "err", err)
+		}
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list template versions"})
+		return
+	}
+	sort.Slice(versions, func(i, j int) bool {
+		return semverGreater(versions[i].Version, versions[j].Version)
+	})
+	dto := make([]TemplateVersionDTO, 0, len(versions))
+	for _, v := range versions {
+		dto = append(dto, TemplateVersionDTO{Version: v.Version, CreatedAt: v.CreatedAt})
+	}
+	writeJSON(w, http.StatusOK, TemplateVersionsResponse{Versions: dto})
+}
+
+// semverGreater returns true if a > b under SemVer ordering. Falls back
+// to string comparison when either side doesn't parse — keeps the
+// endpoint stable in the face of non-SemVer tags an operator might
+// experiment with.
+func semverGreater(a, b string) bool {
+	pa, okA := parseSemVer(a)
+	pb, okB := parseSemVer(b)
+	if !okA || !okB {
+		return a > b
+	}
+	for i := 0; i < 3; i++ {
+		if pa[i] != pb[i] {
+			return pa[i] > pb[i]
+		}
+	}
+	return false
+}
+
+// parseSemVer returns [major, minor, patch] from "X.Y.Z" (ignoring
+// any pre-release / build suffix). Returns ok=false when the input
+// can't be parsed cleanly.
+func parseSemVer(s string) ([3]int, bool) {
+	// Strip pre-release / build (everything after first '-' or '+').
+	for i, c := range s {
+		if c == '-' || c == '+' {
+			s = s[:i]
+			break
+		}
+	}
+	parts := [3]int{}
+	idx := 0
+	cur := 0
+	hasDigit := false
+	for _, c := range s {
+		if c == '.' {
+			if !hasDigit || idx >= 2 {
+				return [3]int{}, false
+			}
+			parts[idx] = cur
+			idx++
+			cur = 0
+			hasDigit = false
+			continue
+		}
+		if c < '0' || c > '9' {
+			return [3]int{}, false
+		}
+		cur = cur*10 + int(c-'0')
+		hasDigit = true
+	}
+	if !hasDigit || idx != 2 {
+		return [3]int{}, false
+	}
+	parts[2] = cur
+	return parts, true
+}
+
+// handleDelete removes a template's cluster ConfigMap. Returns 204 on
+// success, 404 when the template isn't cluster-stored (built-ins shipped
+// via --templates-dir live on disk and can't be deleted from the API),
+// and 409 when the name shadows a built-in (deletion would re-expose the
+// built-in, which is confusing — operator should rename the built-in
+// instead).
+//
+// Note: for templates synced from an external repo, deletion succeeds
+// but the next sync tick re-creates the ConfigMap. The UI surfaces a
+// warning before calling this; callers running scripts should be aware.
+func (th *templateHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name required"})
+		return
+	}
+	for _, t := range th.builtin {
+		if t.Metadata.Name == name {
+			writeJSON(w, http.StatusConflict, errorResponse{
+				Error: "template " + name + " is built-in and shipped with the binary; cluster ConfigMaps with the same name are shadowed and can't be deleted via this endpoint",
+			})
+			return
+		}
+	}
+	if th.kubeClient == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "cluster client not configured"})
+		return
+	}
+	deleted, err := kube.DeleteTemplate(r.Context(), th.kubeClient, name)
+	if err != nil {
+		if th.logger != nil {
+			th.logger.Error("delete template", "name", name, "err", err)
+		}
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete template"})
+		return
+	}
+	if !deleted {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "template " + name + " not found in cluster"})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // resolve merges built-ins with the current cluster list. Cluster fetch

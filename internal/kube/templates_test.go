@@ -9,6 +9,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/suparcloud/suparship/internal/kube"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 // validTemplateYAML is a minimal, valid template definition used across tests.
@@ -184,4 +185,176 @@ func TestLoadTemplates_UnlabelledConfigMap_Ignored(t *testing.T) {
 	if len(templates) != 0 {
 		t.Errorf("expected 0 templates (unlabelled CM ignored), got %d", len(templates))
 	}
+}
+
+// --- Versioned naming + dedupe tests (PR1.4) ---
+
+func parseTemplateOrFatal(t *testing.T, src string) *tpl.Template {
+	t.Helper()
+	tmpl, err := tpl.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse template: %v", err)
+	}
+	return tmpl
+}
+
+func TestSaveTemplate_WritesAliasAndArchive(t *testing.T) {
+	client := k8sfake.NewSimpleClientset()
+	tmpl := parseTemplateOrFatal(t, validTemplateYAML)
+
+	if err := kube.SaveTemplate(context.Background(), client, tmpl, []byte("chart-bytes")); err != nil {
+		t.Fatalf("SaveTemplate: %v", err)
+	}
+
+	// Both ConfigMaps should exist.
+	cms, err := client.CoreV1().ConfigMaps("suparship-system").List(
+		context.Background(), metav1.ListOptions{LabelSelector: "suparship.io/template-name=web-service"},
+	)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(cms.Items) != 2 {
+		t.Fatalf("expected 2 ConfigMaps (alias + archive), got %d: %+v", len(cms.Items), cmNames(cms.Items))
+	}
+
+	var sawAlias, sawArchive bool
+	for _, cm := range cms.Items {
+		switch cm.Labels["suparship.io/template-role"] {
+		case "current":
+			sawAlias = true
+			if cm.Name != "suparship-template-web-service" {
+				t.Errorf("alias name = %q, want suparship-template-web-service", cm.Name)
+			}
+		case "archive":
+			sawArchive = true
+			if cm.Name != "suparship-template-web-service-1.0.0" {
+				t.Errorf("archive name = %q, want suparship-template-web-service-1.0.0", cm.Name)
+			}
+			if cm.Labels["suparship.io/template-version"] != "1.0.0" {
+				t.Errorf("archive version label = %q, want 1.0.0", cm.Labels["suparship.io/template-version"])
+			}
+		}
+	}
+	if !sawAlias || !sawArchive {
+		t.Errorf("missing alias=%v or archive=%v", sawAlias, sawArchive)
+	}
+}
+
+func TestLoadTemplates_SkipsArchives(t *testing.T) {
+	client := k8sfake.NewSimpleClientset()
+	tmpl := parseTemplateOrFatal(t, validTemplateYAML)
+	if err := kube.SaveTemplate(context.Background(), client, tmpl, []byte("chart-bytes")); err != nil {
+		t.Fatalf("SaveTemplate: %v", err)
+	}
+
+	// Both alias and archive exist; LoadTemplates should surface only one.
+	templates, err := kube.LoadTemplates(context.Background(), client)
+	if err != nil {
+		t.Fatalf("LoadTemplates: %v", err)
+	}
+	if len(templates) != 1 {
+		t.Fatalf("expected 1 template (archive filtered), got %d", len(templates))
+	}
+	if templates[0].Metadata.Name != "web-service" {
+		t.Errorf("name = %q, want web-service", templates[0].Metadata.Name)
+	}
+}
+
+func TestLoadTemplates_LegacyUnlabeledAliasStillListed(t *testing.T) {
+	// Pre-versioning ConfigMaps lack the role label entirely. They must
+	// continue to surface in the gallery (treated as "current").
+	client := k8sfake.NewSimpleClientset()
+	mustCreateCM(t, client, templateConfigMap("legacy", validTemplateYAML))
+
+	templates, err := kube.LoadTemplates(context.Background(), client)
+	if err != nil {
+		t.Fatalf("LoadTemplates: %v", err)
+	}
+	if len(templates) != 1 {
+		t.Fatalf("expected 1 template, got %d", len(templates))
+	}
+}
+
+func TestLoadChartBundleVersion_PrefersArchive(t *testing.T) {
+	client := k8sfake.NewSimpleClientset()
+	tmpl := parseTemplateOrFatal(t, validTemplateYAML)
+	if err := kube.SaveTemplate(context.Background(), client, tmpl, []byte("v1-bytes")); err != nil {
+		t.Fatalf("SaveTemplate: %v", err)
+	}
+
+	bytes, err := kube.LoadChartBundleVersion(context.Background(), client, "web-service", "1.0.0")
+	if err != nil {
+		t.Fatalf("LoadChartBundleVersion: %v", err)
+	}
+	if string(bytes) != "v1-bytes" {
+		t.Errorf("bytes = %q, want v1-bytes", bytes)
+	}
+}
+
+func TestLoadChartBundleVersion_FallsBackToAlias(t *testing.T) {
+	// Legacy alias-only template: archive doesn't exist, version-blind
+	// fallback should still find the bytes.
+	client := k8sfake.NewSimpleClientset()
+	cm := templateConfigMap("web-service", validTemplateYAML)
+	cm.BinaryData = map[string][]byte{"chart.tgz": []byte("legacy-bytes")}
+	mustCreateCM(t, client, cm)
+
+	bytes, err := kube.LoadChartBundleVersion(context.Background(), client, "web-service", "9.9.9")
+	if err != nil {
+		t.Fatalf("LoadChartBundleVersion: %v", err)
+	}
+	if string(bytes) != "legacy-bytes" {
+		t.Errorf("bytes = %q, want legacy-bytes (alias fallback)", bytes)
+	}
+}
+
+func TestDeleteTemplate_RemovesAliasAndArchives(t *testing.T) {
+	client := k8sfake.NewSimpleClientset()
+	tmpl := parseTemplateOrFatal(t, validTemplateYAML)
+	if err := kube.SaveTemplate(context.Background(), client, tmpl, []byte("v1-bytes")); err != nil {
+		t.Fatalf("SaveTemplate: %v", err)
+	}
+
+	deleted, err := kube.DeleteTemplate(context.Background(), client, "web-service")
+	if err != nil {
+		t.Fatalf("DeleteTemplate: %v", err)
+	}
+	if !deleted {
+		t.Error("DeleteTemplate returned (false, nil); want (true, nil)")
+	}
+	cms, err := client.CoreV1().ConfigMaps("suparship-system").List(
+		context.Background(), metav1.ListOptions{LabelSelector: "suparship.io/template-name=web-service"},
+	)
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(cms.Items) != 0 {
+		t.Errorf("expected 0 ConfigMaps after delete, got %d: %+v", len(cms.Items), cmNames(cms.Items))
+	}
+}
+
+func TestTemplateConfigMapNameVersioned_SanitisesVersion(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"1.2.0", "suparship-template-foo-1.2.0"},
+		{"1.2.0-rc.1", "suparship-template-foo-1.2.0-rc.1"},
+		{"1.2.0+build.5", "suparship-template-foo-1.2.0-build.5"},
+		{"V1.0.0", "suparship-template-foo-v1.0.0"},
+		{"", "suparship-template-foo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := kube.TemplateConfigMapNameVersioned("foo", tc.in)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func cmNames(items []corev1.ConfigMap) []string {
+	out := make([]string, 0, len(items))
+	for _, cm := range items {
+		out = append(out, cm.Name)
+	}
+	return out
 }

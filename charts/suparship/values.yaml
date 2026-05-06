@@ -210,6 +210,7 @@ templates:
   #   repoURL: https://github.com/myorg/suparship-templates.git
   #   ref: v1.2.0
   #   path: templates/
+  #   provider: github           # github | gitlab | gitea | bitbucket | generic
   #   existingSecret: company-tpl-credentials
 
 # ---------------------------------------------------------------------------

@@ -89,6 +89,31 @@ export function syncApp(
   );
 }
 
+export interface UpgradeAppTemplateResponse {
+  message: string;
+  project: string;
+  app: string;
+  fromVersion?: string;
+  toVersion?: string;
+}
+
+/**
+ * Pins an app to a specific template version and re-publishes. The
+ * version must be one of those returned by GET /templates/{name}/versions.
+ * On publish failure the backend rolls the pin back so a retry sees the
+ * pre-upgrade state.
+ */
+export function upgradeAppTemplate(
+  project: string,
+  app: string,
+  version: string,
+): Promise<UpgradeAppTemplateResponse> {
+  return api.post<UpgradeAppTemplateResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/upgrade-template`,
+    { version },
+  );
+}
+
 /**
  * Polls the live status of a Kargo Promotion CR.
  * Used to track phase transitions (Pending → Running → Succeeded/Failed)

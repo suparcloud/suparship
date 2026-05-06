@@ -251,6 +251,10 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// unconditionally — returns 503 when publisher is not configured so the
 		// UI can show a clear error rather than a 404.
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/sync", devProject(rh.appHandler.handleSyncApp))
+		// Pin an app to a different template version + re-publish. Mirrors
+		// /sync's "manage" tier — bumping the chart bytes Argo deploys is a
+		// publishable change, not a read-only one.
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/upgrade-template", manageProject(rh.appHandler.handleUpgradeAppTemplate))
 		if rh.appHandler.logsProvider != nil {
 			mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/logs", viewProject(rh.appHandler.handleGetAppLogs))
 		}

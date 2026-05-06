@@ -15,6 +15,7 @@ import (
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 // credentialHealthHandler serves GET /api/v1/credentials/health which reports
@@ -25,6 +26,7 @@ type credentialHealthHandler struct {
 	orgProvider           rbac.OrgProvider
 	gitopsConfigStore     *gitops.ConfigStore
 	registryStore         *registry.Store
+	templateRegistryStore *tpl.RegistryStore
 	logger                *slog.Logger
 }
 
@@ -70,6 +72,7 @@ func (h *credentialHealthHandler) handleHealth(w http.ResponseWriter, r *http.Re
 	creds = append(creds, h.checkGitOps(ctx))
 	creds = append(creds, h.checkRegistry(ctx))
 	creds = append(creds, h.checkOnePassword(ctx))
+	creds = append(creds, h.checkTemplates(ctx)...)
 
 	overall := credStatusHealthy
 	for _, c := range creds {
@@ -212,6 +215,71 @@ func (h *credentialHealthHandler) checkOnePassword(ctx context.Context) Credenti
 	cs.Status = credStatusHealthy
 	cs.Message = "Token secret present"
 	return cs
+}
+
+// checkTemplates returns one CredentialStatus per external template
+// repository, or a single not_configured entry when no external repos
+// are registered. Per-source granularity makes the dashboard actionable
+// — operators see *which* repo's PAT is missing, not just "templates: bad".
+//
+// No expiry is reported because ExternalTemplateRepo doesn't carry an
+// expiresAt field today; status reflects whether the referenced Secret
+// exists in the management cluster. Sources without an existingSecret
+// (public repos, hand-managed off-cluster) report not_configured.
+func (h *credentialHealthHandler) checkTemplates(ctx context.Context) []CredentialStatus {
+	if h.templateRegistryStore == nil {
+		return []CredentialStatus{{
+			Name:    "templates",
+			Status:  credStatusNotConfigured,
+			Message: "Template registry not configured",
+		}}
+	}
+
+	reg, err := h.templateRegistryStore.Get(ctx)
+	if err != nil {
+		if errors.Is(err, tpl.ErrRegistryNotFound) {
+			return []CredentialStatus{{
+				Name:    "templates",
+				Status:  credStatusNotConfigured,
+				Message: "Template registry not configured",
+			}}
+		}
+		return []CredentialStatus{{
+			Name:    "templates",
+			Status:  credStatusMissing,
+			Message: "Failed to read template registry",
+		}}
+	}
+
+	if len(reg.External) == 0 {
+		return []CredentialStatus{{
+			Name:    "templates",
+			Status:  credStatusNotConfigured,
+			Message: "No external template repositories configured",
+		}}
+	}
+
+	out := make([]CredentialStatus, 0, len(reg.External))
+	for _, ext := range reg.External {
+		cs := CredentialStatus{Name: "templates/" + ext.Name}
+		if ext.ExistingSecret == "" {
+			cs.Status = credStatusNotConfigured
+			cs.Message = "Public repo or hand-managed credentials"
+			out = append(out, cs)
+			continue
+		}
+		cs.SecretRef = ext.ExistingSecret
+		if !h.secretExists(ctx, ext.ExistingSecret) {
+			cs.Status = credStatusMissing
+			cs.Message = "Secret " + ext.ExistingSecret + " not found in cluster"
+			out = append(out, cs)
+			continue
+		}
+		cs.Status = credStatusHealthy
+		cs.Message = "Credential secret present"
+		out = append(out, cs)
+	}
+	return out
 }
 
 func (h *credentialHealthHandler) secretExists(ctx context.Context, name string) bool {

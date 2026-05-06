@@ -485,18 +485,22 @@ export function ClusterSettings() {
                             {removingName === c.name ? "Removing…" : "Remove"}
                           </button>
                         </div>
-                        {certMessage[c.name] && (
-                          <p
-                            className={`text-xs ${
-                              certMessage[c.name].toLowerCase().includes("fail") ||
-                              certMessage[c.name].toLowerCase().includes("error")
-                                ? "text-red-600"
-                                : "text-green-600"
-                            }`}
-                          >
-                            {certMessage[c.name]}
-                          </p>
-                        )}
+                        {(() => {
+                          const msg = certMessage[c.name];
+                          if (!msg) return null;
+                          const lower = msg.toLowerCase();
+                          const isError =
+                            lower.includes("fail") || lower.includes("error");
+                          return (
+                            <p
+                              className={`text-xs ${
+                                isError ? "text-red-600" : "text-green-600"
+                              }`}
+                            >
+                              {msg}
+                            </p>
+                          );
+                        })()}
                       </div>
                     </td>
                   </tr>

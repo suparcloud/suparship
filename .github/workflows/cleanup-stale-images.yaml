@@ -1,0 +1,64 @@
+name: cleanup-stale-images
+
+# Weekly safety net for PR images: prunes pr-<n> tags whose last push was
+# more than MAX_AGE_DAYS ago. The cleanup-pr-image workflow already deletes
+# pr-<n> on PR close — this catches anything that slipped through (closed
+# event missed, repo renamed, etc.). GHCR exposes only `updated_at` (last
+# push), not last-pull, so "no usage" is approximated by "no rebuild".
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'   # Sunday 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prune:
+    name: Prune stale pr-* images
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MAX_AGE_DAYS: '30'
+    steps:
+      - name: Prune
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          PACKAGE="${GITHUB_REPOSITORY##*/}"
+
+          OWNER_TYPE=$(gh api "/users/${OWNER}" --jq .type)
+          if [ "$OWNER_TYPE" = "Organization" ]; then
+            BASE="/orgs/${OWNER}/packages/container/${PACKAGE}/versions"
+          else
+            BASE="/users/${OWNER}/packages/container/${PACKAGE}/versions"
+          fi
+
+          CUTOFF=$(date -u -d "${MAX_AGE_DAYS} days ago" +%s)
+          echo "Cutoff: $(date -u -d "@${CUTOFF}" --iso-8601=seconds)"
+
+          gh api --paginate "$BASE" > versions.json
+
+          jq -c '.[] | {id, updated_at, tags: (.metadata.container.tags // [])}' versions.json \
+          | while IFS= read -r row; do
+              ID=$(jq -r '.id' <<<"$row")
+              UPDATED=$(jq -r '.updated_at' <<<"$row")
+              TAGS_JSON=$(jq -c '.tags' <<<"$row")
+
+              # Require at least one pr-<digits> tag, and reject if any tag is
+              # NOT a pr-<digits> tag (so we never nuke a digest shared with main/latest).
+              HAS_PR=$(jq -r 'any(. ; test("^pr-[0-9]+$"))' <<<"$TAGS_JSON")
+              ALL_PR=$(jq -r 'all(. ; test("^pr-[0-9]+$"))' <<<"$TAGS_JSON")
+              if [ "$HAS_PR" != "true" ] || [ "$ALL_PR" != "true" ]; then
+                continue
+              fi
+
+              UPDATED_TS=$(date -u -d "$UPDATED" +%s)
+              if [ "$UPDATED_TS" -lt "$CUTOFF" ]; then
+                TAG_LIST=$(jq -r 'join(",")' <<<"$TAGS_JSON")
+                echo "Deleting id=${ID} tags=[${TAG_LIST}] updated=${UPDATED}"
+                gh api -X DELETE "${BASE}/${ID}"
+              fi
+            done

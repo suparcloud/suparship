@@ -684,3 +684,175 @@ spec:
 		t.Errorf("ResolvedCapabilities.Autoscaling = %q, want hpa", resolved.Autoscaling)
 	}
 }
+
+// --- ChartLocator round-trip tests ---
+//
+// Three accepted YAML shapes for engine.chart, plus the absent (bundled)
+// case. Round-tripping must preserve each.
+
+func TestChartLocator_ParseInline(t *testing.T) {
+	src := `
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata: { name: t, version: "1.0.0" }
+spec:
+  title: T
+  category: web
+  engine:
+    type: helm
+    chart: ./chart
+  inputs: []
+`
+	tmpl, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c := tmpl.Spec.Engine.Chart
+	if !c.IsInline() {
+		t.Fatalf("locator = %+v, want inline", c)
+	}
+	if c.Path != "./chart" {
+		t.Errorf("Path = %q, want ./chart", c.Path)
+	}
+}
+
+func TestChartLocator_ParseExternal(t *testing.T) {
+	src := `
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata: { name: t, version: "1.0.0" }
+spec:
+  title: T
+  category: web
+  engine:
+    type: helm
+    chart:
+      repository: oci://ghcr.io/suparcloud/charts
+      name: web-service
+      version: 1.2.0
+  inputs: []
+`
+	tmpl, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c := tmpl.Spec.Engine.Chart
+	if !c.IsExternal() {
+		t.Fatalf("locator = %+v, want external", c)
+	}
+	if c.Ref.Repository != "oci://ghcr.io/suparcloud/charts" || c.Ref.Name != "web-service" || c.Ref.Version != "1.2.0" {
+		t.Errorf("Ref = %+v, want repository/name/version populated", c.Ref)
+	}
+}
+
+func TestChartLocator_ParseBundled_OmittedField(t *testing.T) {
+	src := `
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata: { name: t, version: "1.0.0" }
+spec:
+  title: T
+  category: web
+  engine:
+    type: helm
+  inputs: []
+`
+	tmpl, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	c := tmpl.Spec.Engine.Chart
+	if !c.IsBundled() {
+		t.Fatalf("locator = %+v, want bundled", c)
+	}
+}
+
+func TestChartLocator_ParseBundled_NullField(t *testing.T) {
+	// `chart:` with nothing after the colon — yaml parses this as a null
+	// scalar. Should also be treated as bundled.
+	src := `
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata: { name: t, version: "1.0.0" }
+spec:
+  title: T
+  category: web
+  engine:
+    type: helm
+    chart:
+  inputs: []
+`
+	tmpl, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !tmpl.Spec.Engine.Chart.IsBundled() {
+		t.Fatalf("locator = %+v, want bundled", tmpl.Spec.Engine.Chart)
+	}
+}
+
+func TestChartLocator_RoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		in   ChartLocator
+		want string // expected substring in marshalled output (for the chart line(s))
+	}{
+		{
+			name: "bundled — field omitted",
+			in:   ChartLocator{},
+			want: "type: helm\n",
+		},
+		{
+			name: "inline",
+			in:   ChartLocator{Path: "./chart"},
+			want: "chart: ./chart",
+		},
+		{
+			name: "external",
+			in:   ChartLocator{Ref: &ChartRef{Repository: "oci://ghcr.io/x", Name: "y", Version: "1.0.0"}},
+			want: "repository: oci://ghcr.io/x",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpl := &Template{
+				APIVersion: "suparship.io/v1alpha1",
+				Kind:       "Template",
+				Metadata:   Metadata{Name: "t", Version: "1.0.0"},
+				Spec: TemplateSpec{
+					Title:    "T",
+					Category: "web",
+					Engine:   Engine{Type: EngineHelm, Chart: tc.in},
+					Inputs:   []Input{},
+				},
+			}
+			out, err := Marshal(tmpl)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Errorf("output missing %q\nfull output:\n%s", tc.want, out)
+			}
+			// For the bundled case, also assert the field is genuinely
+			// absent (not emitted as `chart: {}` or `chart: null`).
+			if tc.in.IsBundled() && strings.Contains(string(out), "chart:") {
+				t.Errorf("bundled mode should omit chart field; got:\n%s", out)
+			}
+			// Round-trip should land the same locator back.
+			parsed, err := Parse(out)
+			if err != nil {
+				t.Fatalf("re-parse: %v", err)
+			}
+			got := parsed.Spec.Engine.Chart
+			if got.Path != tc.in.Path {
+				t.Errorf("Path lost: got %q, want %q", got.Path, tc.in.Path)
+			}
+			if (got.Ref == nil) != (tc.in.Ref == nil) {
+				t.Errorf("Ref nil-ness mismatch: got %v, want %v", got.Ref, tc.in.Ref)
+			}
+			if got.Ref != nil && tc.in.Ref != nil && *got.Ref != *tc.in.Ref {
+				t.Errorf("Ref mismatch: got %+v, want %+v", *got.Ref, *tc.in.Ref)
+			}
+		})
+	}
+}

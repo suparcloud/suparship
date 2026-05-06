@@ -10,8 +10,11 @@ import (
 	"sort"
 	"strings"
 
+	"k8s.io/client-go/kubernetes"
+
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
@@ -38,6 +41,11 @@ type appHandler struct {
 	kargoPipelineReader KargoPipelineReader // optional: reads live Kargo Stage pipeline status
 	deploymentHistoryReader DeploymentHistoryReader // optional: reads ArgoCD sync history
 	vaultWriter       VaultItemWriter      // optional: creates 1Password vault items on app/preview create
+	// kubeClient lets the upgrade-template handler validate that the
+	// requested version actually exists in the cluster as an archive
+	// ConfigMap before mutating + republishing. Optional — when nil
+	// the upgrade endpoint trusts the request body and falls through.
+	kubeClient kubernetes.Interface
 }
 
 // newAppHandler creates an appHandler.
@@ -766,6 +774,143 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 		"message": "app synced to gitops repo — ArgoCD will pick it up shortly",
 		"project": projectName,
 		"app":     appName,
+	})
+}
+
+// upgradeAppTemplateRequest is the body for POST .../upgrade-template.
+type upgradeAppTemplateRequest struct {
+	// Version is the target template version. Must be one of the
+	// versions returned by GET /api/v1/templates/{name}/versions.
+	Version string `json:"version"`
+}
+
+// handleUpgradeAppTemplate pins an app to a specific template version
+// and re-publishes via the existing gitops flow. The publisher's
+// version-aware ChartFetcher then resolves to the per-version archive
+// ConfigMap, so the chart bytes Argo deploys actually change.
+//
+// This does NOT migrate values when the new version's input schema
+// differs from the old one — operators are expected to check the
+// template's input shape before upgrading and adjust values via the
+// existing app-edit flow if needed. Argo will surface render errors
+// loudly enough for now; a values-migration prompt is a follow-up.
+func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	var req upgradeAppTemplateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if strings.TrimSpace(req.Version) == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "version is required"})
+		return
+	}
+
+	if ah.gitOpsPublisher == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{
+			Error: "gitops publisher not configured — set SUPARSHIP_GITOPS_REPO_URL to enable",
+		})
+		return
+	}
+
+	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	// Validate the requested version exists as an archive ConfigMap.
+	// Skip the check when no kubeClient is wired (test harnesses,
+	// fake mode) — caller's responsibility to pass a real version.
+	if ah.kubeClient != nil {
+		versions, err := kube.ListTemplateVersions(r.Context(), ah.kubeClient, app.Spec.Template.Name)
+		if err != nil {
+			slog.Error("upgrade-template: list versions failed", "template", app.Spec.Template.Name, "err", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list template versions"})
+			return
+		}
+		var found bool
+		for _, v := range versions {
+			if v.Version == req.Version {
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeJSON(w, http.StatusBadRequest, errorResponse{
+				Error: fmt.Sprintf("template %q has no archived version %q — call GET /api/v1/templates/%s/versions to see what's available",
+					app.Spec.Template.Name, req.Version, app.Spec.Template.Name),
+			})
+			return
+		}
+	}
+
+	// No-op early-return: re-pinning to the same version is fine but
+	// don't pretend we did work. The UI shouldn't surface this button
+	// when versions match, but be safe.
+	if app.Spec.Template.Version == req.Version {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"message": "app already pinned to " + req.Version,
+			"project": projectName,
+			"app":     appName,
+			"version": req.Version,
+		})
+		return
+	}
+
+	prevVersion := app.Spec.Template.Version
+	app.Spec.Template.Version = req.Version
+	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
+		slog.Error("upgrade-template: save app failed", "project", projectName, "app", appName, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist version pin"})
+		return
+	}
+
+	// Re-publish via the same path as /sync. PublishApp's syncChart
+	// honours app.Spec.Template.Version (PR5.1), so the chart bytes in
+	// the gitops repo actually change to the new version's archive.
+	allEnvs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list app environments"})
+		return
+	}
+	var stableEnvs []*domain.AppEnvironment
+	for _, env := range allEnvs {
+		if env.EnvType != domain.AppEnvPreview {
+			stableEnvs = append(stableEnvs, env)
+		}
+	}
+	if len(stableEnvs) == 0 {
+		stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
+	}
+
+	if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
+		// Roll the version pin back so the operator can retry without
+		// the saved state being stuck on a version that didn't publish.
+		app.Spec.Template.Version = prevVersion
+		_ = ah.appStore.SaveApp(r.Context(), projectName, app)
+		slog.Error("upgrade-template: publish failed; rolled back version pin",
+			"project", projectName, "app", appName, "from", prevVersion, "to", req.Version, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{
+			Error: "publish failed; version pin rolled back: " + err.Error(),
+		})
+		return
+	}
+
+	slog.Info("app upgraded to template version",
+		"project", projectName, "app", appName,
+		"from", prevVersion, "to", req.Version,
+	)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message":     "app upgraded — ArgoCD will sync the new chart bytes shortly",
+		"project":     projectName,
+		"app":         appName,
+		"fromVersion": prevVersion,
+		"toVersion":   req.Version,
 	})
 }
 

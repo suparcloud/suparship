@@ -1,0 +1,47 @@
+# Version control
+.git/
+.gitignore
+.github/
+
+# Build artifacts
+bin/
+suparship
+ui/dist/
+ui/tsconfig.*.tsbuildinfo
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Local env / secrets — never bake into images
+.env
+.env.local
+.env.*.local
+.env.cluster
+sealedsecret.yaml
+write-token.txt
+
+# Local dev state
+tmp/
+*.log
+config/kind/registry-certs/
+config/kind/gitea-certs/
+
+# Test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+*.test
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Docs and tooling not needed in build
+*.md
+
+# Docker build context — exclude itself
+Dockerfile
+.dockerignore

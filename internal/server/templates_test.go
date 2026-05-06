@@ -21,7 +21,7 @@ func testTemplates() []*tpl.Template {
 			Spec: tpl.TemplateSpec{
 				Title:    "API Service",
 				Category: "web",
-				Engine:   tpl.Engine{Type: tpl.EngineHelm, Chart: "./chart"},
+				Engine:   tpl.Engine{Type: tpl.EngineHelm, Chart: tpl.ChartLocator{Path: "./chart"}},
 				Inputs: []tpl.Input{
 					{Name: "image", Title: "Image", Type: tpl.InputTypeString, Required: true},
 					{Name: "replicas", Title: "Replicas", Type: tpl.InputTypeNumber, Default: 2, Min: &min1, Max: &max10},
@@ -332,5 +332,57 @@ func TestGetTemplateDetail_EmptyComponentsArrayNotNull(t *testing.T) {
 	_ = json.NewDecoder(rec.Body).Decode(&raw)
 	if string(raw["components"]) == "null" {
 		t.Fatal("components should be [] not null when no components declared")
+	}
+}
+
+// --- semverGreater (PR5.2 helper) ---
+
+func TestSemverGreater(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"2.0.0", "1.9.9", true},
+		{"1.10.0", "1.9.0", true},
+		{"1.9.0", "1.10.0", false},
+		{"1.0.0", "1.0.0", false},
+		{"1.0.0-rc.1", "1.0.0-rc.0", false}, // pre-release stripped → equal → false
+		{"v1.0.0", "1.0.0", true},          // non-numeric "v" prefix falls back to lex
+		{"a.b.c", "1.0.0", true},           // unparseable falls back to lex
+	}
+	for _, tc := range cases {
+		t.Run(tc.a+">"+tc.b, func(t *testing.T) {
+			if got := semverGreater(tc.a, tc.b); got != tc.want {
+				t.Errorf("semverGreater(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseSemVer(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   [3]int
+		wantOK bool
+	}{
+		{"1.2.3", [3]int{1, 2, 3}, true},
+		{"0.0.0", [3]int{0, 0, 0}, true},
+		{"10.20.30", [3]int{10, 20, 30}, true},
+		{"1.2.3-rc.1", [3]int{1, 2, 3}, true},
+		{"1.2.3+build.5", [3]int{1, 2, 3}, true},
+		{"1.2", [3]int{}, false},
+		{"v1.2.3", [3]int{}, false},
+		{"abc", [3]int{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, ok := parseSemVer(tc.in)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if ok && got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

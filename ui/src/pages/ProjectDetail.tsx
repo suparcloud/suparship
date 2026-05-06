@@ -95,7 +95,7 @@ export function ProjectDetail() {
         setApps((prev) =>
           prev.map((app, i) => {
             const result = envResults[i];
-            if (result.status === "fulfilled") {
+            if (result && result.status === "fulfilled") {
               return {
                 ...app,
                 environments: result.value.environments,

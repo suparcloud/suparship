@@ -19,6 +19,7 @@ import (
 	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/session"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 func newCredHealthMux(t *testing.T, org *rbac.Org, objs ...runtime.Object) (*http.ServeMux, *authHandler) {
@@ -44,12 +45,13 @@ func newCredHealthMux(t *testing.T, org *rbac.Org, objs ...runtime.Object) (*htt
 	}
 
 	chh := &credentialHealthHandler{
-		auth:              ah,
-		kubeClient:        client,
-		orgProvider:       orgProv,
-		gitopsConfigStore: gitops.NewConfigStore(client),
-		registryStore:     registry.NewStore(client),
-		logger:            slog.Default(),
+		auth:                  ah,
+		kubeClient:            client,
+		orgProvider:           orgProv,
+		gitopsConfigStore:     gitops.NewConfigStore(client),
+		registryStore:         registry.NewStore(client),
+		templateRegistryStore: tpl.NewRegistryStore(client),
+		logger:                slog.Default(),
 	}
 	chh.registerRoutes(mux)
 
@@ -95,8 +97,8 @@ func TestCredentialHealth_AllNotConfigured(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if len(resp.Credentials) != 3 {
-		t.Fatalf("credentials count = %d, want 3", len(resp.Credentials))
+	if len(resp.Credentials) != 4 {
+		t.Fatalf("credentials count = %d, want 4 (gitops, registry, 1password, templates); body = %s", len(resp.Credentials), w.Body.String())
 	}
 	for _, c := range resp.Credentials {
 		if c.Status != credStatusNotConfigured {
@@ -263,6 +265,91 @@ func TestCredentialHealth_OnePasswordHealthy(t *testing.T) {
 		}
 	}
 	t.Fatal("missing 1password in response")
+}
+
+func makeTemplateRegistryCM(jsonContent string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "suparship-template-registry",
+			Namespace: envconfig.SystemNamespace,
+			Labels:    map[string]string{"suparship.io/type": "template-registry"},
+		},
+		Data: map[string]string{"registry.json": jsonContent},
+	}
+}
+
+func TestCredentialHealth_TemplatesNoExternalSources(t *testing.T) {
+	cm := makeTemplateRegistryCM(`{"builtIn":[],"external":[],"sources":[]}`)
+	mux, ah := newCredHealthMux(t, nil, cm)
+	cookie := sessionCookieFor(ah, "admin", "org_admin")
+
+	req := httptest.NewRequest("GET", "/api/v1/credentials/health", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	var resp CredentialHealthResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+
+	for _, c := range resp.Credentials {
+		if c.Name == "templates" {
+			if c.Status != credStatusNotConfigured {
+				t.Errorf("templates status = %q, want not_configured", c.Status)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing templates entry; got %+v", resp.Credentials)
+}
+
+func TestCredentialHealth_TemplatesPerSource(t *testing.T) {
+	// Two sources: one with a present Secret (healthy), one whose Secret
+	// is missing from the cluster (the operator deleted it out-of-band
+	// or the SealedSecret never decrypted).
+	cm := makeTemplateRegistryCM(`{
+        "builtIn":[],
+        "external":[
+          {"name":"acme","repoURL":"https://example.com/r","ref":"main","path":"templates","existingSecret":"suparship-tpl-credentials-acme"},
+          {"name":"public","repoURL":"https://example.com/pub","ref":"main","path":"templates"},
+          {"name":"orphan","repoURL":"https://example.com/o","ref":"main","path":"templates","existingSecret":"suparship-tpl-credentials-orphan"}
+        ],
+        "sources":[]
+    }`)
+
+	mux, ah := newCredHealthMux(t, nil, cm, makeSecret("suparship-tpl-credentials-acme"))
+	cookie := sessionCookieFor(ah, "admin", "org_admin")
+
+	req := httptest.NewRequest("GET", "/api/v1/credentials/health", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	var resp CredentialHealthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	want := map[string]string{
+		"templates/acme":   credStatusHealthy,
+		"templates/public": credStatusNotConfigured,
+		"templates/orphan": credStatusMissing,
+	}
+	got := map[string]string{}
+	for _, c := range resp.Credentials {
+		if _, ok := want[c.Name]; ok {
+			got[c.Name] = c.Status
+		}
+	}
+	for name, wantStatus := range want {
+		if got[name] != wantStatus {
+			t.Errorf("%s: status = %q, want %q", name, got[name], wantStatus)
+		}
+	}
+
+	// One missing source taints overall.
+	if resp.OverallStatus != credStatusExpired {
+		t.Errorf("overall = %q, want %q (missing template Secret should taint overall)", resp.OverallStatus, credStatusExpired)
+	}
 }
 
 func TestCredentialHealth_Unauthenticated(t *testing.T) {

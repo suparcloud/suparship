@@ -129,11 +129,43 @@ export interface TemplateImportResult {
 // The shape mirrors internal/tpl/registry.go (TemplateRegistry).
 export interface ExternalTemplateRepo {
   name: string;
+  // type selects the fetcher. Empty defaults to "git" on the backend
+  // for back-compat with sources persisted before the field was added.
+  type?: TemplateSourceType | "";
   repoURL: string;
+  // ref/path are git-only fields. Ignored for non-git source types.
   ref: string;
   path: string;
+  // chart/version are required for non-git source types (oci/chartmuseum).
+  // Ignored for git (which discovers all templates under path).
+  chart?: string;
+  version?: string;
+  // Provider drives the credentials data-key shape: token for github/
+  // gitlab/gitea, username+password for bitbucket/generic. Empty defaults
+  // to generic. Only meaningful for git-type sources.
+  provider?: TemplateRepoProvider | "";
+  // existingSecret is a K8s Secret name in suparship-system. UI-managed
+  // credentials write to a deterministic name (suparship-tpl-credentials-
+  // <source>); operators may also point at a hand-managed Secret.
   existingSecret?: string;
 }
+
+// TemplateSourceType matches internal/tpl/registry.go SourceType*
+// constants. Only "git" and "oci" are wired in the backend today;
+// "chartmuseum" / "gittgz" are reserved for future fetchers and
+// surface as ErrUnsupportedSourceType when an operator picks them.
+export type TemplateSourceType =
+  | "git"
+  | "oci"
+  | "chartmuseum"
+  | "gittgz";
+
+export type TemplateRepoProvider =
+  | "github"
+  | "gitlab"
+  | "gitea"
+  | "bitbucket"
+  | "generic";
 
 export interface TemplateSource {
   name: string;
@@ -168,6 +200,40 @@ export interface TemplateSyncResult {
 
 export interface TemplateSyncResponse {
   results: TemplateSyncResult[];
+}
+
+// Per-version archive entry for a template, returned by
+// GET /api/v1/templates/{name}/versions. Sorted descending by SemVer
+// on the wire when the version strings parse cleanly.
+export interface TemplateVersionInfo {
+  version: string;
+  createdAt?: string;
+}
+
+export interface TemplateVersionsResponse {
+  versions: TemplateVersionInfo[];
+}
+
+// Credentials sealing flow for a single source.
+// Provider may be omitted to fall back to the source's stored value;
+// when set, it overrides (useful for correcting a misclassified entry).
+export interface TemplateCredentialsRequest {
+  provider?: TemplateRepoProvider | "";
+  token?: string;
+  username?: string;
+  password?: string;
+}
+
+export interface TemplateTestConnectionResult {
+  success: boolean;
+  message: string;
+  durationMs: number;
+}
+
+export interface TemplateCredentialsResponse {
+  source: ExternalTemplateRepo;
+  sealedSecretName: string;
+  testResult?: TemplateTestConnectionResult;
 }
 
 export interface TemplateInput {
