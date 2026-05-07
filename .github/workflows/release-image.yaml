@@ -19,8 +19,37 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  changes:
+    name: Detect image-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'cmd/**'
+              - 'internal/**'
+              - 'ui/**'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Dockerfile'
+              - '.dockerignore'
+              - '.github/workflows/release-image.yaml'
+
   build:
     name: Build and push
+    needs: changes
+    # Tag pushes always build — releases must be cut even when the tag
+    # points at an already-pushed commit (zero changed files in the push
+    # event). Branch and PR builds only run when an image input actually
+    # changed.
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
