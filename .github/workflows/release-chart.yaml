@@ -1,0 +1,51 @@
+name: release-chart
+
+# Packages every chart under charts/ that has a version not yet released
+# and publishes it to the central suparcloud/charts Helm repository
+# served at https://suparcloud.github.io/charts.
+#
+# Each new chart version becomes a GitHub Release in suparcloud/charts
+# (with the .tgz attached) and an entry in the index.yaml on its
+# gh-pages branch. chart-releaser only scans direct subdirs of
+# charts_dir, so charts/lib/suparship-common (depth 2) is ignored.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'charts/**'
+      - '.github/workflows/release-chart.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Package and publish charts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      # CR_TOKEN must be a PAT (or fine-grained token) with `contents: write`
+      # on suparcloud/charts — the default GITHUB_TOKEN is scoped to this
+      # repo and can't push the index to a different repo.
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.7.0
+        with:
+          charts_dir: charts
+          config: .github/cr.yaml
+        env:
+          CR_TOKEN: ${{ secrets.CHARTS_REPO_TOKEN }}

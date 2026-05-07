@@ -1,0 +1,5 @@
+# chart-releaser config — publish to the central suparcloud/charts repo
+# served at https://suparcloud.github.io/charts.
+owner: suparcloud
+git-repo: charts
+pages-branch: gh-pages
