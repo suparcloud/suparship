@@ -90,14 +90,21 @@ org:
   name: default
   displayName: "My Organization"
 
-# -- Admin credentials.
-# The chart does NOT create the Secret. Create it externally (manually,
-# via kubeseal, External Secrets, etc.) or include it in extraObjects below.
+# -- Admin credentials. The chart does NOT create the Secret — provision it
+# externally (manually, via SealedSecrets / External Secrets, included via
+# extraObjects below, etc.) before installing, or run
+# `kubectl exec deploy/<release> -- suparship admin bootstrap` after install
+# to generate one.
 admin:
-  # -- Name of an existing Secret containing the admin password
-  existingSecret: ""
-  # -- Key within the Secret that holds the bcrypt-hashed password
-  secretKey: password
+  secret:
+    # -- Secret name. Default matches `suparship admin bootstrap` output.
+    name: suparship-admin-auth
+    # -- Namespace. Empty defaults to the chart release namespace.
+    namespace: ""
+    # -- Secret key holding the username string.
+    usernameKey: username
+    # -- Secret key holding the bcrypt-hashed password.
+    passwordHashKey: password-hash
 
 # -- GitOps repository connection
 gitops:

@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/version"
 )
 
@@ -44,4 +45,33 @@ func init() {
 
 	rootCmd.PersistentFlags().String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
 	rootCmd.PersistentFlags().String("context", "", "kubernetes context to use (default: current-context)")
+
+	rootCmd.PersistentFlags().String("admin-secret-name",
+		envOr("SUPARSHIP_ADMIN_SECRET_NAME", auth.DefaultSecretName),
+		"name of the Kubernetes Secret holding admin credentials")
+	rootCmd.PersistentFlags().String("admin-secret-namespace",
+		envOr("SUPARSHIP_ADMIN_SECRET_NAMESPACE", auth.DefaultSecretNamespace),
+		"namespace of the admin credentials Secret")
+	rootCmd.PersistentFlags().String("admin-secret-username-key",
+		envOr("SUPARSHIP_ADMIN_SECRET_USERNAME_KEY", auth.DefaultSecretKeyUser),
+		"key within the Secret that holds the admin username")
+	rootCmd.PersistentFlags().String("admin-secret-password-hash-key",
+		envOr("SUPARSHIP_ADMIN_SECRET_PASSWORD_HASH_KEY", auth.DefaultSecretKeyPasswordHash),
+		"key within the Secret that holds the bcrypt password hash")
+}
+
+// adminSecretRefFromFlags reads the admin-secret-* persistent flags into a
+// SecretRef. Empty flag values fall back to defaults via WithDefaults.
+func adminSecretRefFromFlags(cmd *cobra.Command) auth.SecretRef {
+	root := cmd.Root().PersistentFlags()
+	name, _ := root.GetString("admin-secret-name")
+	namespace, _ := root.GetString("admin-secret-namespace")
+	userKey, _ := root.GetString("admin-secret-username-key")
+	hashKey, _ := root.GetString("admin-secret-password-hash-key")
+	return auth.SecretRef{
+		Namespace:       namespace,
+		Name:            name,
+		UsernameKey:     userKey,
+		PasswordHashKey: hashKey,
+	}.WithDefaults()
 }

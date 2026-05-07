@@ -2,13 +2,51 @@ package auth
 
 import "fmt"
 
-// Kubernetes Secret coordinates for admin credentials.
+// Default Kubernetes Secret coordinates for admin credentials. These are
+// fallbacks; callers may override every field via SecretRef so operators
+// can point suparship at a Secret managed by ESO/SealedSecrets/etc.
 const (
-	SecretNamespace = "suparship-system"
-	SecretName      = "suparship-admin-auth"
-	SecretKeyUser   = "username"
-	SecretKeyHash   = "password-hash"
+	DefaultSecretNamespace       = "suparship-system"
+	DefaultSecretName            = "suparship-admin-auth"
+	DefaultSecretKeyUser         = "username"
+	DefaultSecretKeyPasswordHash = "password-hash"
 )
+
+// SecretRef locates the Kubernetes Secret that stores admin credentials
+// and names the keys within it.
+type SecretRef struct {
+	Namespace       string
+	Name            string
+	UsernameKey     string
+	PasswordHashKey string
+}
+
+// DefaultSecretRef returns a SecretRef populated entirely with defaults.
+func DefaultSecretRef() SecretRef {
+	return SecretRef{
+		Namespace:       DefaultSecretNamespace,
+		Name:            DefaultSecretName,
+		UsernameKey:     DefaultSecretKeyUser,
+		PasswordHashKey: DefaultSecretKeyPasswordHash,
+	}
+}
+
+// WithDefaults returns a copy of r with empty fields filled from defaults.
+func (r SecretRef) WithDefaults() SecretRef {
+	if r.Namespace == "" {
+		r.Namespace = DefaultSecretNamespace
+	}
+	if r.Name == "" {
+		r.Name = DefaultSecretName
+	}
+	if r.UsernameKey == "" {
+		r.UsernameKey = DefaultSecretKeyUser
+	}
+	if r.PasswordHashKey == "" {
+		r.PasswordHashKey = DefaultSecretKeyPasswordHash
+	}
+	return r
+}
 
 // Credentials holds a username and its bcrypt password hash.
 type Credentials struct {
@@ -49,37 +87,28 @@ func (c *Credentials) Verify(password string) error {
 }
 
 // SecretData returns the string data map suitable for a Kubernetes Secret's
-// stringData field.
-//
-// The expected Secret manifest is:
-//
-//	apiVersion: v1
-//	kind: Secret
-//	metadata:
-//	  name: suparship-admin-auth
-//	  namespace: suparship-system
-//	type: Opaque
-//	stringData:
-//	  username: <admin-username>
-//	  password-hash: <bcrypt-hash>
-func (c *Credentials) SecretData() map[string]string {
+// stringData field, using the key names from ref.
+func (c *Credentials) SecretData(ref SecretRef) map[string]string {
+	ref = ref.WithDefaults()
 	return map[string]string{
-		SecretKeyUser: c.Username,
-		SecretKeyHash: c.PasswordHash,
+		ref.UsernameKey:     c.Username,
+		ref.PasswordHashKey: c.PasswordHash,
 	}
 }
 
 // CredentialsFromSecretData reconstructs Credentials from a Kubernetes Secret's
-// data map (already base64-decoded values).
-func CredentialsFromSecretData(data map[string]string) (*Credentials, error) {
-	username, ok := data[SecretKeyUser]
+// data map (already base64-decoded values), using the key names from ref.
+func CredentialsFromSecretData(data map[string]string, ref SecretRef) (*Credentials, error) {
+	ref = ref.WithDefaults()
+
+	username, ok := data[ref.UsernameKey]
 	if !ok || username == "" {
-		return nil, fmt.Errorf("secret missing key %q", SecretKeyUser)
+		return nil, fmt.Errorf("secret missing key %q", ref.UsernameKey)
 	}
 
-	hash, ok := data[SecretKeyHash]
+	hash, ok := data[ref.PasswordHashKey]
 	if !ok || hash == "" {
-		return nil, fmt.Errorf("secret missing key %q", SecretKeyHash)
+		return nil, fmt.Errorf("secret missing key %q", ref.PasswordHashKey)
 	}
 
 	return &Credentials{

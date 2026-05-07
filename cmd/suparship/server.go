@@ -230,10 +230,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			logger.Info("argocd deployment history reader enabled")
 		}
 
-		authenticator = auth.NewK8sAuthenticator(client)
+		adminSecretRef := adminSecretRefFromFlags(cmd)
+		authenticator = auth.NewK8sAuthenticator(client, adminSecretRef)
 
 		adminUser := "admin"
-		creds, err := auth.GetAdminSecret(context.Background(), client)
+		creds, err := auth.GetAdminSecret(context.Background(), client, adminSecretRef)
 		if err == nil && creds != nil {
 			adminUser = creds.Username
 		}

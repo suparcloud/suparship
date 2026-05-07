@@ -44,6 +44,10 @@ spec:
             {{- if .Values.server.cookieSecure }}
             - --cookie-secure
             {{- end }}
+            - --admin-secret-name={{ .Values.admin.secret.name }}
+            - --admin-secret-namespace={{ default (include "suparship.namespace" .) .Values.admin.secret.namespace }}
+            - --admin-secret-username-key={{ .Values.admin.secret.usernameKey }}
+            - --admin-secret-password-hash-key={{ .Values.admin.secret.passwordHashKey }}
           ports:
             - name: http
               containerPort: 8080

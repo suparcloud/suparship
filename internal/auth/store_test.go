@@ -48,16 +48,17 @@ func TestSecretDataRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	data := creds.SecretData()
+	ref := DefaultSecretRef()
+	data := creds.SecretData(ref)
 
-	if data[SecretKeyUser] != "admin" {
-		t.Fatalf("expected username %q in secret data, got %q", "admin", data[SecretKeyUser])
+	if data[DefaultSecretKeyUser] != "admin" {
+		t.Fatalf("expected username %q in secret data, got %q", "admin", data[DefaultSecretKeyUser])
 	}
-	if data[SecretKeyHash] == "" {
+	if data[DefaultSecretKeyPasswordHash] == "" {
 		t.Fatal("password-hash must not be empty in secret data")
 	}
 
-	restored, err := CredentialsFromSecretData(data)
+	restored, err := CredentialsFromSecretData(data, ref)
 	if err != nil {
 		t.Fatalf("CredentialsFromSecretData: %v", err)
 	}
@@ -74,15 +75,16 @@ func TestCredentialsFromSecretDataMissingKeys(t *testing.T) {
 		name string
 		data map[string]string
 	}{
-		{"missing username", map[string]string{SecretKeyHash: "$2a$12$hash"}},
-		{"empty username", map[string]string{SecretKeyUser: "", SecretKeyHash: "$2a$12$hash"}},
-		{"missing hash", map[string]string{SecretKeyUser: "admin"}},
-		{"empty hash", map[string]string{SecretKeyUser: "admin", SecretKeyHash: ""}},
+		{"missing username", map[string]string{DefaultSecretKeyPasswordHash: "$2a$12$hash"}},
+		{"empty username", map[string]string{DefaultSecretKeyUser: "", DefaultSecretKeyPasswordHash: "$2a$12$hash"}},
+		{"missing hash", map[string]string{DefaultSecretKeyUser: "admin"}},
+		{"empty hash", map[string]string{DefaultSecretKeyUser: "admin", DefaultSecretKeyPasswordHash: ""}},
 	}
 
+	ref := DefaultSecretRef()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := CredentialsFromSecretData(tt.data)
+			_, err := CredentialsFromSecretData(tt.data, ref)
 			if err == nil {
 				t.Fatal("expected error for invalid secret data")
 			}

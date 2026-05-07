@@ -13,16 +13,16 @@ suparShip has been installed.
   Then open: http://localhost:8080
 {{- end }}
 
-{{- if not .Values.admin.existingSecret }}
+  Admin credentials are read from Secret
+  {{ default (include "suparship.namespace" .) .Values.admin.secret.namespace }}/{{ .Values.admin.secret.name }}
+  (keys: {{ .Values.admin.secret.usernameKey }}, {{ .Values.admin.secret.passwordHashKey }}).
 
-  WARNING: No admin secret configured (admin.existingSecret is empty).
-  Bootstrap admin credentials:
+  If you have not provisioned that Secret yet, bootstrap it now:
 
     kubectl exec -n {{ include "suparship.namespace" . }} deploy/{{ include "suparship.fullname" . }} -- \
       suparship admin bootstrap
 
   The generated password is shown once. Store it securely.
-{{- end }}
 
 {{- if not .Values.gitops.repoURL }}
 
