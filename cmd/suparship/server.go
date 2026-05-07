@@ -231,12 +231,28 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 
 		adminSecretRef := adminSecretRefFromFlags(cmd)
-		authenticator = auth.NewK8sAuthenticator(client, adminSecretRef)
+		logger.Info("admin auth backend configured",
+			"secret_namespace", adminSecretRef.Namespace,
+			"secret_name", adminSecretRef.Name,
+			"username_key", adminSecretRef.UsernameKey,
+			"password_hash_key", adminSecretRef.PasswordHashKey,
+		)
+		authenticator = auth.NewK8sAuthenticator(client, adminSecretRef).WithLogger(logger)
 
 		adminUser := "admin"
 		creds, err := auth.GetAdminSecret(context.Background(), client, adminSecretRef)
-		if err == nil && creds != nil {
+		if err != nil {
+			logger.Warn("could not read admin secret at startup",
+				"error", err,
+				"hint", "the Secret may not exist yet, or the configured keys may not match its keys",
+			)
+		} else if creds == nil {
+			logger.Warn("admin secret not present at startup",
+				"hint", "run `suparship admin bootstrap` to create one, or provision it via your secret store",
+			)
+		} else {
 			adminUser = creds.Username
+			logger.Info("admin secret loaded", "username", adminUser)
 		}
 
 		fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
