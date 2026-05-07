@@ -4,10 +4,10 @@ name: release-chart
 # and publishes it to the central suparcloud/charts Helm repository
 # served at https://suparcloud.github.io/charts.
 #
-# Each new chart version becomes a GitHub Release in suparcloud/charts
-# (with the .tgz attached) and an entry in the index.yaml on its
-# gh-pages branch. chart-releaser only scans direct subdirs of
-# charts_dir, so charts/lib/suparship-common (depth 2) is ignored.
+# chart-releaser-action assumes chart sources and gh-pages live in the
+# same repo, so we drive the `cr` CLI directly: package locally here,
+# then run upload + index from a side-checkout of suparcloud/charts at
+# its gh-pages branch.
 
 on:
   push:
@@ -20,6 +20,12 @@ on:
 permissions:
   contents: read
 
+env:
+  CR_VERSION: '1.7.0'
+  CHARTS_OWNER: suparcloud
+  CHARTS_REPO: charts
+  CHARTS_REPO_URL: https://suparcloud.github.io/charts
+
 jobs:
   release:
     name: Package and publish charts
@@ -29,23 +35,80 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
           version: v3.16.4
 
-      # CR_TOKEN must be a PAT (or fine-grained token) with `contents: write`
-      # on suparcloud/charts — the default GITHUB_TOKEN is scoped to this
-      # repo and can't push the index to a different repo.
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.7.0
+      - name: Install chart-releaser
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/cr.tar.gz \
+            "https://github.com/helm/chart-releaser/releases/download/v${CR_VERSION}/chart-releaser_${CR_VERSION}_linux_amd64.tar.gz"
+          sudo tar -xzf /tmp/cr.tar.gz -C /usr/local/bin cr
+          rm /tmp/cr.tar.gz
+          cr version
+
+      - name: helm dependency update
+        run: |
+          set -euo pipefail
+          for d in charts/*/; do
+            [ -f "$d/Chart.yaml" ] || continue
+            if grep -q '^dependencies:' "$d/Chart.yaml"; then
+              helm dependency update "$d"
+            fi
+          done
+
+      - name: Package charts
+        run: |
+          set -euo pipefail
+          mkdir -p .cr-release-packages
+          for d in charts/*/; do
+            [ -f "$d/Chart.yaml" ] || continue
+            cr package "$d" --package-path .cr-release-packages
+          done
+          ls -la .cr-release-packages
+
+      - name: Checkout suparcloud/charts (gh-pages)
+        uses: actions/checkout@v4
         with:
-          charts_dir: charts
-          config: .github/cr.yaml
+          repository: ${{ env.CHARTS_OWNER }}/${{ env.CHARTS_REPO }}
+          token: ${{ secrets.CHARTS_REPO_TOKEN }}
+          ref: gh-pages
+          path: .charts-repo
+          fetch-depth: 0
+
+      - name: Upload packages as GitHub Releases
+        # cr upload runs against any working tree as long as it can resolve
+        # origin/gh-pages — using the charts-repo checkout satisfies that.
+        working-directory: .charts-repo
         env:
           CR_TOKEN: ${{ secrets.CHARTS_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          cr upload \
+            --owner "$CHARTS_OWNER" \
+            --git-repo "$CHARTS_REPO" \
+            --token "$CR_TOKEN" \
+            --package-path "$GITHUB_WORKSPACE/.cr-release-packages" \
+            --skip-existing \
+            --pages-branch gh-pages
+
+      - name: Update index.yaml on gh-pages
+        working-directory: .charts-repo
+        env:
+          CR_TOKEN: ${{ secrets.CHARTS_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          cr index \
+            --owner "$CHARTS_OWNER" \
+            --git-repo "$CHARTS_REPO" \
+            --token "$CR_TOKEN" \
+            --package-path "$GITHUB_WORKSPACE/.cr-release-packages" \
+            --index-path index.yaml \
+            --charts-repo "$CHARTS_REPO_URL" \
+            --pages-branch gh-pages \
+            --push \
+            --remote origin
