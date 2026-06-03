@@ -11,63 +11,71 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// K8sVaultWriter implements VaultWriter by writing to native Kubernetes
-// Secrets. This is the demo/dev fallback when no external vault is configured.
-// It ignores VaultBinding.VaultID (the "vault" is the K8s namespace) and uses
-// Scope to derive a deterministic Secret name.
-type K8sVaultWriter struct {
+// K8sVaultStore implements VaultStore using native Kubernetes Secrets. The
+// "vault" for a scope is a dedicated namespace (VaultName(scope)); each item
+// is a Secret within it (ItemName(scope, tier, app)). ESO's per-scope
+// ClusterSecretStore reads from these namespaces and materializes the
+// <app>-global/-env/-cluster Secrets in app namespaces.
+type K8sVaultStore struct {
 	client kubernetes.Interface
-	ns     string // target namespace, typically SystemNamespace
 }
 
-// NewK8sVaultWriter creates a K8sVaultWriter that writes to ns.
-func NewK8sVaultWriter(client kubernetes.Interface, ns string) *K8sVaultWriter {
-	return &K8sVaultWriter{client: client, ns: ns}
+// NewK8sVaultStore creates a K8sVaultStore backed by client.
+func NewK8sVaultStore(client kubernetes.Interface) *K8sVaultStore {
+	return &K8sVaultStore{client: client}
 }
 
-func (w *K8sVaultWriter) secretName(scope Scope) string {
-	switch scope.Level {
-	case LevelOrg:
-		return OrgSecretName()
-	case LevelEnvironment:
-		return EnvTypeSecretName(scope.Env)
-	case LevelProject:
-		return ProjectSecretName(scope.Project)
-	case LevelApp:
-		return AppLevelSecretName(scope.Project, scope.App)
-	case LevelAppEnv:
-		return AppEnvSecretName(scope.Project, scope.App, scope.Env)
-	case LevelCluster:
-		return ClusterSecretName(scope.Cluster)
-	default:
-		return fmt.Sprintf("secrets-%s", scope.Level)
+var _ VaultStore = (*K8sVaultStore)(nil)
+
+// ensureNamespace creates the vault namespace if it does not already exist.
+func (w *K8sVaultStore) ensureNamespace(ctx context.Context, ns string) error {
+	_, err := w.client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+	if err == nil {
+		return nil
 	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("reading namespace %s: %w", ns, err)
+	}
+	_, err = w.client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   ns,
+			Labels: map[string]string{labelManagedBy: "suparship", labelType: "secret-vault"},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating namespace %s: %w", ns, err)
+	}
+	return nil
 }
 
-func (w *K8sVaultWriter) Upsert(ctx context.Context, _ EnvBinding, scope Scope, _ string, data map[string][]byte) (ItemMeta, error) {
-	name := w.secretName(scope)
-	existing, err := w.client.CoreV1().Secrets(w.ns).Get(ctx, name, metav1.GetOptions{})
+func (w *K8sVaultStore) Upsert(ctx context.Context, scope Scope, tier Tier, app string, data map[string][]byte) error {
+	ns := VaultName(scope)
+	name := ItemName(scope, tier, app)
+	if err := w.ensureNamespace(ctx, ns); err != nil {
+		return err
+	}
+
+	existing, err := w.client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
-				Namespace: w.ns,
+				Namespace: ns,
 				Labels: map[string]string{
-					"app.kubernetes.io/managed-by": "suparship",
-					labelType:                      "app-secrets",
+					labelManagedBy: "suparship",
+					labelType:      "vault-item",
 				},
 			},
 			Type: corev1.SecretTypeOpaque,
 			Data: data,
 		}
-		created, createErr := w.client.CoreV1().Secrets(w.ns).Create(ctx, secret, metav1.CreateOptions{})
-		if createErr != nil {
-			return ItemMeta{}, fmt.Errorf("creating secret %s/%s: %w", w.ns, name, createErr)
+		if _, err := w.client.CoreV1().Secrets(ns).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("creating secret %s/%s: %w", ns, name, err)
 		}
-		return ItemMeta{Version: created.ResourceVersion}, nil
+		return nil
 	}
 	if err != nil {
-		return ItemMeta{}, fmt.Errorf("reading secret %s/%s: %w", w.ns, name, err)
+		return fmt.Errorf("reading secret %s/%s: %w", ns, name, err)
 	}
 
 	if existing.Data == nil {
@@ -76,21 +84,21 @@ func (w *K8sVaultWriter) Upsert(ctx context.Context, _ EnvBinding, scope Scope, 
 	for k, v := range data {
 		existing.Data[k] = v
 	}
-	updated, err := w.client.CoreV1().Secrets(w.ns).Update(ctx, existing, metav1.UpdateOptions{})
-	if err != nil {
-		return ItemMeta{}, fmt.Errorf("updating secret %s/%s: %w", w.ns, name, err)
+	if _, err := w.client.CoreV1().Secrets(ns).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("updating secret %s/%s: %w", ns, name, err)
 	}
-	return ItemMeta{Version: updated.ResourceVersion}, nil
+	return nil
 }
 
-func (w *K8sVaultWriter) ListKeys(ctx context.Context, _ EnvBinding, scope Scope) ([]SecretEntry, ItemMeta, error) {
-	name := w.secretName(scope)
-	secret, err := w.client.CoreV1().Secrets(w.ns).Get(ctx, name, metav1.GetOptions{})
+func (w *K8sVaultStore) ListKeys(ctx context.Context, scope Scope, tier Tier, app string) ([]SecretEntry, error) {
+	ns := VaultName(scope)
+	name := ItemName(scope, tier, app)
+	secret, err := w.client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, ItemMeta{}, nil
+		return nil, nil
 	}
 	if err != nil {
-		return nil, ItemMeta{}, fmt.Errorf("reading secret %s/%s: %w", w.ns, name, err)
+		return nil, fmt.Errorf("reading secret %s/%s: %w", ns, name, err)
 	}
 
 	keys := make([]string, 0, len(secret.Data))
@@ -98,72 +106,41 @@ func (w *K8sVaultWriter) ListKeys(ctx context.Context, _ EnvBinding, scope Scope
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-
 	entries := make([]SecretEntry, len(keys))
 	for i, k := range keys {
 		entries[i] = SecretEntry{Key: k}
 	}
-	return entries, ItemMeta{Version: secret.ResourceVersion}, nil
+	return entries, nil
 }
 
-func (w *K8sVaultWriter) DeleteKey(ctx context.Context, _ EnvBinding, scope Scope, key, _ string) (ItemMeta, error) {
-	name := w.secretName(scope)
-	secret, err := w.client.CoreV1().Secrets(w.ns).Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return ItemMeta{}, nil
-	}
-	if err != nil {
-		return ItemMeta{}, fmt.Errorf("reading secret %s/%s: %w", w.ns, name, err)
-	}
-	if _, exists := secret.Data[key]; !exists {
-		return ItemMeta{Version: secret.ResourceVersion}, nil
-	}
-	delete(secret.Data, key)
-	updated, err := w.client.CoreV1().Secrets(w.ns).Update(ctx, secret, metav1.UpdateOptions{})
-	if err != nil {
-		return ItemMeta{}, fmt.Errorf("updating secret %s/%s: %w", w.ns, name, err)
-	}
-	return ItemMeta{Version: updated.ResourceVersion}, nil
-}
-
-func (w *K8sVaultWriter) DeleteItem(ctx context.Context, _ EnvBinding, scope Scope) error {
-	name := w.secretName(scope)
-	err := w.client.CoreV1().Secrets(w.ns).Delete(ctx, name, metav1.DeleteOptions{})
+func (w *K8sVaultStore) DeleteKey(ctx context.Context, scope Scope, tier Tier, app, key string) error {
+	ns := VaultName(scope)
+	name := ItemName(scope, tier, app)
+	secret, err := w.client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("reading secret %s/%s: %w", ns, name, err)
+	}
+	if _, exists := secret.Data[key]; !exists {
+		return nil
+	}
+	delete(secret.Data, key)
+	if _, err := w.client.CoreV1().Secrets(ns).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("updating secret %s/%s: %w", ns, name, err)
+	}
+	return nil
 }
 
-func (w *K8sVaultWriter) Probe(ctx context.Context, _ EnvBinding) error {
-	canary := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "suparship-vault-probe",
-			Namespace: w.ns,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "suparship",
-				labelType:                      "probe",
-			},
-		},
-		Type:       corev1.SecretTypeOpaque,
-		StringData: map[string]string{"probe": "ok"},
+func (w *K8sVaultStore) Probe(ctx context.Context, scope Scope) error {
+	ns := VaultName(scope)
+	if err := w.ensureNamespace(ctx, ns); err != nil {
+		return err
 	}
-
-	created, err := w.client.CoreV1().Secrets(w.ns).Create(ctx, canary, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("probe create failed: %w", err)
-	}
-	name := canary.Name
-	if created != nil {
-		name = created.Name
-	}
-	_, err = w.client.CoreV1().Secrets(w.ns).Get(ctx, name, metav1.GetOptions{})
+	_, err := w.client.CoreV1().Secrets(ns).List(ctx, metav1.ListOptions{Limit: 1})
 	if err != nil {
-		return fmt.Errorf("probe read failed: %w", err)
-	}
-	err = w.client.CoreV1().Secrets(w.ns).Delete(ctx, name, metav1.DeleteOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("probe delete failed: %w", err)
+		return fmt.Errorf("probe list %s: %w", ns, err)
 	}
 	return nil
 }

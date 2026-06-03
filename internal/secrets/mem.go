@@ -6,142 +6,62 @@ import (
 	"sync"
 )
 
-const memSystemNS = "suparship-system"
-
-// MemBackend is an in-memory Backend for development and testing.
-// All data is lost when the process exits.
-type MemBackend struct {
-	mu   sync.Mutex
-	data map[string]map[string]map[string][]byte // ns -> name -> key -> value
+// MemVaultStore is an in-memory VaultStore for development and testing.
+// All data is lost when the process exits. Items are keyed by
+// VaultName(scope)/ItemName(scope, tier, app), giving the same per-scope,
+// per-tier, per-app isolation as the real backends.
+type MemVaultStore struct {
+	mu    sync.Mutex
+	items map[string]map[string][]byte // "<vault>/<item>" -> key -> value
 }
 
-// NewMemBackend creates an empty in-memory secret backend.
-func NewMemBackend() *MemBackend {
-	return &MemBackend{data: make(map[string]map[string]map[string][]byte)}
+// NewMemVaultStore creates an empty in-memory vault store.
+func NewMemVaultStore() *MemVaultStore {
+	return &MemVaultStore{items: make(map[string]map[string][]byte)}
 }
 
-func (m *MemBackend) Upsert(_ context.Context, ns, name string, data map[string][]byte) error {
+var _ VaultStore = (*MemVaultStore)(nil)
+
+func memItemKey(scope Scope, tier Tier, app string) string {
+	return VaultName(scope) + "/" + ItemName(scope, tier, app)
+}
+
+func (m *MemVaultStore) Upsert(_ context.Context, scope Scope, tier Tier, app string, data map[string][]byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.data[ns] == nil {
-		m.data[ns] = make(map[string]map[string][]byte)
-	}
-	if m.data[ns][name] == nil {
-		m.data[ns][name] = make(map[string][]byte)
+	key := memItemKey(scope, tier, app)
+	if m.items[key] == nil {
+		m.items[key] = make(map[string][]byte)
 	}
 	for k, v := range data {
-		m.data[ns][name][k] = v
+		m.items[key][k] = v
 	}
 	return nil
 }
 
-func (m *MemBackend) ListKeys(_ context.Context, ns, name string) ([]SecretEntry, error) {
+func (m *MemVaultStore) ListKeys(_ context.Context, scope Scope, tier Tier, app string) ([]SecretEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	entries := m.data[ns][name]
-	keys := make([]string, 0, len(entries))
-	for k := range entries {
+	item := m.items[memItemKey(scope, tier, app)]
+	keys := make([]string, 0, len(item))
+	for k := range item {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	out := make([]SecretEntry, len(keys))
+	entries := make([]SecretEntry, len(keys))
 	for i, k := range keys {
-		out[i] = SecretEntry{Key: k}
+		entries[i] = SecretEntry{Key: k}
 	}
-	return out, nil
+	return entries, nil
 }
 
-func (m *MemBackend) DeleteKey(_ context.Context, ns, name, key string) error {
+func (m *MemVaultStore) DeleteKey(_ context.Context, scope Scope, tier Tier, app, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.data[ns] != nil && m.data[ns][name] != nil {
-		delete(m.data[ns][name], key)
+	if item := m.items[memItemKey(scope, tier, app)]; item != nil {
+		delete(item, key)
 	}
 	return nil
 }
 
-// ── MemUpperLevelWriter ─────────────────────────────────────────────────────
-
-// MemUpperLevelWriter implements UpperLevelWriter backed by a MemBackend,
-// storing upper-level secrets under a virtual "suparship-system" namespace.
-type MemUpperLevelWriter struct {
-	backend *MemBackend
-}
-
-// NewMemUpperLevelWriter creates a MemUpperLevelWriter backed by the given MemBackend.
-func NewMemUpperLevelWriter(backend *MemBackend) *MemUpperLevelWriter {
-	return &MemUpperLevelWriter{backend: backend}
-}
-
-func (m *MemUpperLevelWriter) WriteOrgSecrets(ctx context.Context, data map[string][]byte) error {
-	return m.backend.Upsert(ctx, memSystemNS, OrgSecretName(), data)
-}
-
-func (m *MemUpperLevelWriter) ReadOrgSecretKeys(ctx context.Context) ([]SecretEntry, error) {
-	return m.backend.ListKeys(ctx, memSystemNS, OrgSecretName())
-}
-
-func (m *MemUpperLevelWriter) DeleteOrgSecretKey(ctx context.Context, key string) error {
-	return m.backend.DeleteKey(ctx, memSystemNS, OrgSecretName(), key)
-}
-
-func (m *MemUpperLevelWriter) WriteEnvTypeSecrets(ctx context.Context, envType string, data map[string][]byte) error {
-	return m.backend.Upsert(ctx, memSystemNS, EnvTypeSecretName(envType), data)
-}
-
-func (m *MemUpperLevelWriter) ReadEnvTypeSecretKeys(ctx context.Context, envType string) ([]SecretEntry, error) {
-	return m.backend.ListKeys(ctx, memSystemNS, EnvTypeSecretName(envType))
-}
-
-func (m *MemUpperLevelWriter) DeleteEnvTypeSecretKey(ctx context.Context, envType, key string) error {
-	return m.backend.DeleteKey(ctx, memSystemNS, EnvTypeSecretName(envType), key)
-}
-
-func (m *MemUpperLevelWriter) WriteProjectSecrets(ctx context.Context, project string, data map[string][]byte) error {
-	return m.backend.Upsert(ctx, memSystemNS, ProjectSecretName(project), data)
-}
-
-func (m *MemUpperLevelWriter) ReadProjectSecretKeys(ctx context.Context, project string) ([]SecretEntry, error) {
-	return m.backend.ListKeys(ctx, memSystemNS, ProjectSecretName(project))
-}
-
-func (m *MemUpperLevelWriter) DeleteProjectSecretKey(ctx context.Context, project, key string) error {
-	return m.backend.DeleteKey(ctx, memSystemNS, ProjectSecretName(project), key)
-}
-
-func (m *MemUpperLevelWriter) WriteClusterSecrets(ctx context.Context, cluster string, data map[string][]byte) error {
-	return m.backend.Upsert(ctx, memSystemNS, ClusterSecretName(cluster), data)
-}
-
-func (m *MemUpperLevelWriter) ReadClusterSecretKeys(ctx context.Context, cluster string) ([]SecretEntry, error) {
-	return m.backend.ListKeys(ctx, memSystemNS, ClusterSecretName(cluster))
-}
-
-func (m *MemUpperLevelWriter) DeleteClusterSecretKey(ctx context.Context, cluster, key string) error {
-	return m.backend.DeleteKey(ctx, memSystemNS, ClusterSecretName(cluster), key)
-}
-
-func (m *MemUpperLevelWriter) WriteAppSecrets(ctx context.Context, project, app string, data map[string][]byte) error {
-	return m.backend.Upsert(ctx, memSystemNS, AppLevelSecretName(project, app), data)
-}
-
-func (m *MemUpperLevelWriter) ReadAppSecretKeys(ctx context.Context, project, app string) ([]SecretEntry, error) {
-	return m.backend.ListKeys(ctx, memSystemNS, AppLevelSecretName(project, app))
-}
-
-func (m *MemUpperLevelWriter) DeleteAppSecretKey(ctx context.Context, project, app, key string) error {
-	return m.backend.DeleteKey(ctx, memSystemNS, AppLevelSecretName(project, app), key)
-}
-
-// WriteAppEnvSecrets ignores namespace — Mem doesn't model replicator targets.
-func (m *MemUpperLevelWriter) WriteAppEnvSecrets(ctx context.Context, project, app, env, _ string, data map[string][]byte) error {
-	return m.backend.Upsert(ctx, memSystemNS, AppEnvSecretName(project, app, env), data)
-}
-
-func (m *MemUpperLevelWriter) ReadAppEnvSecretKeys(ctx context.Context, project, app, env string) ([]SecretEntry, error) {
-	return m.backend.ListKeys(ctx, memSystemNS, AppEnvSecretName(project, app, env))
-}
-
-func (m *MemUpperLevelWriter) DeleteAppEnvSecretKey(ctx context.Context, project, app, env, key string) error {
-	return m.backend.DeleteKey(ctx, memSystemNS, AppEnvSecretName(project, app, env), key)
-}
+func (m *MemVaultStore) Probe(_ context.Context, _ Scope) error { return nil }
