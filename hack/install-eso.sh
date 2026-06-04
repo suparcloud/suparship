@@ -126,8 +126,12 @@ kubectl rollout status deployment/external-secrets \
 echo ""
 
 # ── 6. Create suparship-eso-reader ServiceAccount ─────────────────────────
-# The k8s ClusterSecretStore uses this SA to read Secrets from suparship-system.
-info "ServiceAccount '${ESO_SA_NAME}' in '${SYSTEM_NAMESPACE}'..."
+# The k8s ClusterSecretStores read each scope's vault namespace
+# (suparship-secrets-global / -env-<env> / -cluster-<cluster>) by impersonating
+# this SA. Those namespaces are created on demand by the suparship server, so
+# the reader needs cluster-wide (read-only) access to Secrets — a
+# namespace-scoped Role can't cover dynamically-created namespaces.
+info "ServiceAccount '${ESO_SA_NAME}' in '${SYSTEM_NAMESPACE}' (+ cluster-wide secret read)..."
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ServiceAccount
@@ -137,13 +141,12 @@ metadata:
   labels:
     suparship.io/managed-by: suparship
   annotations:
-    suparship.io/description: "ServiceAccount used by the suparship-k8s-store ClusterSecretStore to read Secrets from ${SYSTEM_NAMESPACE}."
+    suparship.io/description: "ServiceAccount used by suparship ClusterSecretStores to read Secrets from per-scope vault namespaces."
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: ${ESO_SA_NAME}
-  namespace: ${SYSTEM_NAMESPACE}
   labels:
     suparship.io/managed-by: suparship
 rules:
@@ -152,10 +155,9 @@ rules:
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
   name: ${ESO_SA_NAME}
-  namespace: ${SYSTEM_NAMESPACE}
   labels:
     suparship.io/managed-by: suparship
 subjects:
@@ -164,10 +166,10 @@ subjects:
     namespace: ${SYSTEM_NAMESPACE}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: Role
+  kind: ClusterRole
   name: ${ESO_SA_NAME}
 EOF
-ok "ServiceAccount, Role, RoleBinding created/updated"
+ok "ServiceAccount, ClusterRole, ClusterRoleBinding created/updated"
 echo ""
 
 # ── 6b. Wait for ClusterSecretStore CRD to be fully established ───────────
@@ -183,37 +185,36 @@ kubectl wait crd/clustersecretstores.external-secrets.io \
   || die "Timed out waiting for ClusterSecretStore CRD to be established"
 echo ""
 
-# ── 7. Apply demo ClusterSecretStores ─────────────────────────────────────
-# For the demo profile, apply the k8s ClusterSecretStore. For core/full
-# profiles, the publisher generates stores from VaultBindings — users
-# configure them via `suparship secrets backend set`.
+# ── 7. Apply the demo global ClusterSecretStore ───────────────────────────
+# The k8s backend uses one ClusterSecretStore per scope (global / env / cluster)
+# reading a dedicated vault namespace. Env- and cluster-scope stores are created
+# by the suparship server as environments/clusters are added; the global store
+# is seeded here for the demo profile. The vault namespace is created on first
+# secret write, so creationPolicy tolerates it being absent initially.
 if [ "${PROFILE}" = "demo" ]; then
-  info "Applying ClusterSecretStore (k8s backend — demo profile)..."
+  info "Applying global ClusterSecretStore (k8s backend — demo profile)..."
   kubectl apply -f - <<EOF
 apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
-  name: suparship-k8s-store
+  name: suparship-store-global
   labels:
     app.kubernetes.io/managed-by: suparship
   annotations:
-    suparship.io/description: "Kubernetes Secrets backend for demo/default use. Reads Secrets from suparship-system namespace."
+    suparship.io/description: "Global-scope Kubernetes Secrets backend. Reads from the suparship-secrets-global vault namespace."
 spec:
   provider:
     kubernetes:
-      remoteNamespace: ${SYSTEM_NAMESPACE}
+      remoteNamespace: suparship-secrets-global
       auth:
         serviceAccount:
           name: ${ESO_SA_NAME}
           namespace: ${SYSTEM_NAMESPACE}
 EOF
-  ok "suparship-k8s-store applied (demo)"
+  ok "suparship-store-global applied (demo)"
 else
   info "Non-demo profile (${PROFILE}) — skipping ClusterSecretStore creation."
-  info "Configure your secret backend with:"
-  info "  suparship secrets backend set --type=1password --mode=connect --connect-host=<url> --isolation=hard"
-  info "  suparship secrets backend binding add --env=prod --vault=<uuid> --auth-secret=op-prod-token"
-  info "  suparship secrets token import --env=prod --from-file=token.txt"
+  info "Configure your secret backend in Settings > Secrets (or via 'suparship secrets')."
   ok "ESO installed — configure backend via CLI or UI"
 fi
 echo ""
