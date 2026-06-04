@@ -27,10 +27,9 @@ func TestPublishAppFiles_PrependsGeneratedHeader(t *testing.T) {
 	envs := []gitops.AppPublishEnv{
 		{
 			EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
-			Namespace:      "demo-nginx-staging",
-			StoreName:      "op-staging",
-			VaultItemTitle: "demo-nginx-staging",
-			EnvVars:        map[string]string{"X": "y"},
+			Namespace: "demo-nginx-staging",
+			EnvVars:   map[string]string{"X": "y"},
+			ScopeKeys: gitops.ScopePresence{GlobalApp: true},
 		},
 	}
 
@@ -39,7 +38,7 @@ func TestPublishAppFiles_PrependsGeneratedHeader(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	for _, name := range []string{"app.yaml", "values.yaml", "env-configmap.yaml", "external-secret.yaml"} {
+	for _, name := range []string{"app.yaml", "values.yaml", "env-configmap.yaml", "external-secret-global.yaml"} {
 		path := filepath.Join(dir, "envs", "staging", "demo", "nginx", name)
 		raw, err := os.ReadFile(path)
 		if err != nil {

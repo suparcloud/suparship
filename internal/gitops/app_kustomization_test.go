@@ -30,13 +30,12 @@ func TestPublishAppFiles_NoKustomizationEmitted(t *testing.T) {
 	}
 	envs := []gitops.AppPublishEnv{
 		{
-			EnvName:        "staging",
-			EnvType:        domain.AppEnvStaging,
-			Order:          1,
-			Bound:          true,
-			Namespace:      "demo-nginx-staging",
-			StoreName:      "op-staging",
-			VaultItemTitle: "demo-nginx-staging",
+			EnvName:   "staging",
+			EnvType:   domain.AppEnvStaging,
+			Order:     1,
+			Bound:     true,
+			Namespace: "demo-nginx-staging",
+			ScopeKeys: gitops.ScopePresence{GlobalApp: true},
 		},
 	}
 
@@ -51,7 +50,7 @@ func TestPublishAppFiles_NoKustomizationEmitted(t *testing.T) {
 	}
 
 	// Sanity: the manifests the include filter applies still exist.
-	for _, name := range []string{"env-configmap.yaml", "external-secret.yaml"} {
+	for _, name := range []string{"env-configmap.yaml", "external-secret-global.yaml"} {
 		if _, err := os.Stat(filepath.Join(appDir, name)); err != nil {
 			t.Errorf("expected %s in app dir, got: %v", name, err)
 		}

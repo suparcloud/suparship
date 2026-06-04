@@ -20,6 +20,8 @@ type AuditEvent struct {
 	Actor     string      `json:"actor"`
 	Action    AuditAction `json:"action"`
 	Scope     Scope       `json:"scope"`
+	Tier      Tier        `json:"tier"`
+	App       string      `json:"app,omitempty"`
 	Keys      []string    `json:"keys"`
 	Result    string      `json:"result"`
 	LatencyMs int64       `json:"latencyMs"`
@@ -41,11 +43,11 @@ func (a *Auditor) Log(event AuditEvent) {
 	a.logger.Info("secrets.audit",
 		"actor", event.Actor,
 		"action", string(event.Action),
-		"scope.level", event.Scope.Level,
-		"scope.org", event.Scope.Org,
+		"scope.kind", string(event.Scope.Kind),
 		"scope.env", event.Scope.Env,
-		"scope.project", event.Scope.Project,
-		"scope.app", event.Scope.App,
+		"scope.cluster", event.Scope.Cluster,
+		"tier", string(event.Tier),
+		"app", event.App,
 		"keys", event.Keys,
 		"result", event.Result,
 		"latencyMs", event.LatencyMs,

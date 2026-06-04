@@ -270,20 +270,8 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 			return err
 		}
 
-		// Write ClusterSecretStores when a secret backend is configured.
-		// For K8s backend this is the suparship-k8s-store; for 1Password it
-		// is one store per provisioned env binding. Stores are idempotent — if
-		// nothing changed git will produce no new commit.
-		if p.cfg.BackendConfig != nil {
-			orgName := p.cfg.OrgName
-			if orgName == "" {
-				orgName = "default"
-			}
-			stores := BuildSecretStoresForConfig(*p.cfg.BackendConfig, p.cfg.ResourceNaming, orgName, p.cfg.Branding)
-			if err := p.WriteSecretStores(repoDir, stores); err != nil {
-				return fmt.Errorf("writing ClusterSecretStores: %w", err)
-			}
-		}
+		// ClusterSecretStores (global + per-env + per-cluster) are provisioned
+		// by the env/cluster lifecycle hooks, not on every app publish.
 
 		return p.commitAndPush(ctx, repoDir, "feat(infra): update appsets and appprojects for "+projectName)
 	})
@@ -515,7 +503,6 @@ func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppP
 // Unbound environments are skipped with a warning log.
 // This is the inner loop extracted from PublishApp for testability.
 func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv) error {
-	naming := p.cfg.ResourceNaming
 	orgName := p.cfg.OrgName
 	if orgName == "" {
 		orgName = "default"
@@ -567,15 +554,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 
 		// Write values.yaml — Helm values with env-specific baseDomain and
 		// the resolved namespace so secretName/configName are consistent.
-		var backend secrets.BackendType
-		if p.cfg.BackendConfig != nil {
-			backend = p.cfg.BackendConfig.Effective()
-		}
 		// Org-level profiles come from PublisherConfig (set by SetOrgConfig
 		// from rbac.Org.RoutingProfiles); per-env overrides ride on
 		// AppPublishEnv.RoutingProfiles. When both are empty, helmvalues
 		// falls back to the legacy Expose=true → nginx shim.
-		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, naming, orgName, backend, p.cfg.RoutingProfiles, env.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+		hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, env.ClusterRef, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
@@ -588,7 +571,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// Write platform-managed per-app resources into the same directory as
 		// app.yaml/values.yaml so ArgoCD picks them up with the same ApplicationSet.
 		appDir := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name)
-		if err := p.writeAppPlatformResources(appDir, app, ns, env, naming, orgName); err != nil {
+		if err := p.writeAppPlatformResources(appDir, app, ns, env); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
 		}
 
@@ -596,7 +579,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// main app. Each gets app.yaml + values.yaml under
 		// addons/<name>/. Existing ApplicationSet generators pick
 		// them up; no AppSet schema change.
-		if err := p.publishAppAddons(appDir, app, env, naming, orgName, backend); err != nil {
+		if err := p.publishAppAddons(appDir, app, env, orgName); err != nil {
 			return fmt.Errorf("writing addon files for env %s: %w", env.EnvName, err)
 		}
 
@@ -634,63 +617,25 @@ func (p *Publisher) writeAppPlatformResources(
 	app *domain.App,
 	namespace string,
 	env AppPublishEnv,
-	naming secrets.ResourceNaming,
-	orgName string,
 ) error {
-	np := secrets.NamingParams{
-		Org:     orgName,
-		Env:     env.EnvName,
-		Project: app.ProjectName,
-		App:     app.Name,
-	}
-
 	// ConfigMap — written with the fully-merged map the caller passed in.
-	cmName := naming.RenderAppConfigMap(np)
+	cmName := secrets.AppConfigName(app.ProjectName, app.Name, env.EnvName)
 	if err := p.WriteAppConfigMap(dir, cmName, namespace, env.EnvVars); err != nil {
 		return fmt.Errorf("writing app ConfigMap: %w", err)
 	}
 
-	// ExternalSecret — only when the env has an associated ClusterSecretStore.
-	if env.StoreName != "" {
-		var esCfg *ESOExternalSecretConfig
-		if p.cfg.BackendConfig != nil {
-			esCfg = BuildCollapsedExternalSecretForApp(
-				AppEnvPublishParams{
-					Project:           app.ProjectName,
-					App:               app.Name,
-					Env:               env.EnvName,
-					Namespace:         namespace,
-					Cluster:           env.ClusterRef,
-					ScopeKeys:         env.ScopeKeys,
-					PlatformStoreName: env.PlatformStoreName,
-				},
-				naming,
-				*p.cfg.BackendConfig,
-				orgName,
-				p.cfg.Branding,
-			)
-		}
-		if esCfg == nil {
-			// Fall back to the single-key path when BackendConfig is unavailable
-			// (tests / older callers) or when the collapsed builder returned nil
-			// (no scopes have keys yet).
-			secretName := naming.RenderAppResource(np)
-			itemTitle := env.VaultItemTitle
-			if itemTitle == "" {
-				itemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
-			}
-			esCfg = &ESOExternalSecretConfig{
-				Name:      secretName,
-				Namespace: namespace,
-				StoreName: env.StoreName,
-				Items:     []ESOItemRef{{Key: itemTitle, StoreName: env.StoreName}},
-				Branding:  p.cfg.Branding,
-			}
-		}
-		content := BuildCollapsedExternalSecretYAML(*esCfg)
-		if err := p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(content)); err != nil {
-			return err
-		}
+	// Up to three ExternalSecrets (global/env/cluster); only scopes that have
+	// keys produce a file, and WriteWorkloadExternalSecrets prunes the rest.
+	cfgs := BuildWorkloadExternalSecrets(WorkloadExternalSecretParams{
+		App:       app.Name,
+		Namespace: namespace,
+		Env:       env.EnvName,
+		Cluster:   env.ClusterRef,
+		Presence:  env.ScopeKeys,
+		Branding:  p.cfg.Branding,
+	})
+	if err := p.WriteWorkloadExternalSecrets(dir, cfgs); err != nil {
+		return err
 	}
 
 	// Historical note: this used to also write a kustomization.yaml so
@@ -978,40 +923,18 @@ type AppPublishEnv struct {
 	// Resolved by domain.ResolveNamespace before calling PublishApp.
 	// When empty, PublishApp falls back to "{app}-{env}" for backward compatibility.
 	Namespace string
-	// StoreName is the ClusterSecretStore name for this env.
-	// When non-empty, publishAppFiles writes a platform-managed ExternalSecret YAML
-	// for this env's namespace so ESO materialises the app secrets.
-	StoreName string
-	// VaultItemTitle is the vault item title used in the ExternalSecret's dataFrom.
-	// Typically rendered as "{project}-{app}-{env}" from ResourceNaming.
-	// Ignored when StoreName is empty.
-	VaultItemTitle string
 	// EnvVars is the fully-merged env-var map the publisher writes into the
-	// per-app ConfigMap ({app}-config) for this env. The caller is expected to
-	// merge all six scope levels (org → env-type → project → app → app-env →
-	// cluster) before publishing so the committed YAML is the source-of-truth
-	// for what the pod sees — no chart-side multi-source merge.
+	// per-app ConfigMap for this env. The caller merges the global → env →
+	// cluster scopes before publishing so the committed YAML is the
+	// source-of-truth for what the pod sees — no chart-side multi-source merge.
 	EnvVars map[string]string
-	// ClusterRef is the registered cluster bound to this env. Used for the
-	// cluster-scope vault item title in the collapsed ExternalSecret. Empty
-	// when the env is unbound — the cluster scope is then omitted from the
-	// merge regardless of ScopeKeys.
+	// ClusterRef is the registered cluster bound to this env. Empty when the
+	// env is unbound — the cluster-scope ExternalSecret is then omitted.
 	ClusterRef string
-	// ScopeKeys reports which scope levels actually have keys in the vault for
-	// this app-env. Used by BuildCollapsedExternalSecretForApp to skip
-	// dataFrom entries for empty scopes, since ESO would otherwise error
-	// trying to extract from a non-existent vault item. The map keys are the
-	// secrets.Level* constants; missing entries mean "no keys present".
-	//
-	// Populated by the adapter (cmd/suparship/server.go) at publish time. When
-	// nil, every scope is included — back-compat behaviour for callers that
-	// haven't been updated yet.
-	ScopeKeys map[string]bool
-	// PlatformStoreName is the ClusterSecretStore name for the platform vault
-	// when running a separate-store deployment. Empty for the single-store
-	// model (ClusterSecretStore lists both vaults), which is the default
-	// behaviour today.
-	PlatformStoreName string
+	// ScopeKeys reports which (scope, tier) items currently have keys, so the
+	// publisher only emits ExternalSecrets/dataFrom entries that resolve.
+	// Populated by the adapter (cmd/suparship/server.go) at publish time.
+	ScopeKeys ScopePresence
 	// RoutingProfiles is a sparse override map for this env. Entries here
 	// replace the org-level profile (PublisherConfig.RoutingProfiles) of the
 	// same name; absent names inherit the org default. Populated by the
@@ -1058,14 +981,10 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		if previewOrgName == "" {
 			previewOrgName = "default"
 		}
-		var previewBackend secrets.BackendType
-		if p.cfg.BackendConfig != nil {
-			previewBackend = p.cfg.BackendConfig.Effective()
-		}
 		// Org-level routing profiles apply uniformly to previews; per-env
 		// overrides don't make sense for ephemeral preview envs (their
 		// names are PR-specific and have no static config).
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", p.cfg.ResourceNaming, previewOrgName, previewBackend, p.cfg.RoutingProfiles, nil, p.cfg.AddonProfiles, nil)
+		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, p.cfg.AddonProfiles, nil)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
@@ -1078,16 +997,11 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		// Write platform-managed ConfigMap and ExternalSecret (same as stable envs).
 		previewDir := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName)
 		previewPublishEnv := AppPublishEnv{
-			EnvName:        preview.PreviewName,
-			StoreName:      preview.StoreName,
-			VaultItemTitle: preview.VaultItemTitle,
-			EnvVars:        preview.EnvVars,
+			EnvName:   preview.PreviewName,
+			EnvVars:   preview.EnvVars,
+			ScopeKeys: preview.ScopeKeys,
 		}
-		orgName := p.cfg.OrgName
-		if orgName == "" {
-			orgName = "default"
-		}
-		if err := p.writeAppPlatformResources(previewDir, app, preview.Namespace, previewPublishEnv, p.cfg.ResourceNaming, orgName); err != nil {
+		if err := p.writeAppPlatformResources(previewDir, app, preview.Namespace, previewPublishEnv); err != nil {
 			return fmt.Errorf("writing preview platform resources: %w", err)
 		}
 
@@ -1107,14 +1021,12 @@ type PreviewPublishSpec struct {
 	// BaseDomain is used to derive routing.host in values.yaml.
 	// When empty, "localhost" is used.
 	BaseDomain string
-	// StoreName is the ClusterSecretStore name for this preview env.
-	// When non-empty, PublishPreview writes a platform-managed ExternalSecret YAML.
-	StoreName string
-	// VaultItemTitle is the vault item title used in the ExternalSecret's dataFrom.
-	VaultItemTitle string
 	// EnvVars holds per-preview variable overrides to merge into the platform-managed
 	// ConfigMap alongside app.Spec.EnvConfig.Vars.
 	EnvVars map[string]string
+	// ScopeKeys reports which (scope, tier) items have keys, so PublishPreview
+	// emits only the ExternalSecrets that resolve.
+	ScopeKeys ScopePresence
 }
 
 // DeletePreview removes the preview directory from the GitOps repo and commits.
@@ -1673,9 +1585,7 @@ func (p *Publisher) publishAppAddons(
 	appDir string,
 	app *domain.App,
 	env AppPublishEnv,
-	naming secrets.ResourceNaming,
 	orgName string,
-	backend secrets.BackendType,
 ) error {
 	if len(app.Spec.Addons) == 0 {
 		return nil
@@ -1690,7 +1600,7 @@ func (p *Publisher) publishAppAddons(
 
 		hv, err := helmvalues.MapAddonToHelmValuesForEnv(
 			app, claim, env.EnvName, env.EnvType, env.ClusterRef,
-			naming, orgName, backend,
+			orgName,
 			p.cfg.AddonProfiles, env.AddonProfiles,
 		)
 		if err != nil {

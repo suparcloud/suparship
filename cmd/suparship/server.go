@@ -29,7 +29,6 @@ import (
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/runtime"
-	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
@@ -130,9 +129,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider            runtime.LogsProvider
 		appStore                domain.AppStore
 		clusterStore            domain.ClusterStore
-		secretBackend           secrets.Backend
-		upperLevelSecretWriter  secrets.UpperLevelWriter
-		vaultItemWriter         server.VaultItemWriter
+		vaultStore              secrets.VaultStore
 		templates               []*tpl.Template
 		readinessProbers        []server.ReadinessProber
 		kargoPromoter           server.KargoPromoter
@@ -171,9 +168,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider = deps.LogsProvider
 		appStore = deps.AppStore
 		clusterStore = deps.ClusterStore
-		memBE := secrets.NewMemBackend()
-		secretBackend = memBE
-		upperLevelSecretWriter = secrets.NewMemUpperLevelWriter(memBE)
+		vaultStore = secrets.NewMemVaultStore()
 		deploymentHistoryReader = &fakeHistoryAdapter{inner: &fake.FakeDeploymentHistoryReader{}}
 
 	default: // config.ModeKubernetes
@@ -230,12 +225,29 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			logger.Info("argocd deployment history reader enabled")
 		}
 
-		authenticator = auth.NewK8sAuthenticator(client)
+		adminSecretRef := adminSecretRefFromFlags(cmd)
+		logger.Info("admin auth backend configured",
+			"secret_namespace", adminSecretRef.Namespace,
+			"secret_name", adminSecretRef.Name,
+			"username_key", adminSecretRef.UsernameKey,
+			"password_hash_key", adminSecretRef.PasswordHashKey,
+		)
+		authenticator = auth.NewK8sAuthenticator(client, adminSecretRef).WithLogger(logger)
 
 		adminUser := "admin"
-		creds, err := auth.GetAdminSecret(context.Background(), client)
-		if err == nil && creds != nil {
+		creds, err := auth.GetAdminSecret(context.Background(), client, adminSecretRef)
+		if err != nil {
+			logger.Warn("could not read admin secret at startup",
+				"error", err,
+				"hint", "the Secret may not exist yet, or the configured keys may not match its keys",
+			)
+		} else if creds == nil {
+			logger.Warn("admin secret not present at startup",
+				"hint", "run `suparship admin bootstrap` to create one, or provision it via your secret store",
+			)
+		} else {
 			adminUser = creds.Username
+			logger.Info("admin secret loaded", "username", adminUser)
 		}
 
 		fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
@@ -250,23 +262,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logsProvider = kubeDeps.LogsProvider
 		appStore = kubeDeps.AppStore
 		clusterStore = kubeDeps.ClusterStore
-		secretBackend = secrets.NewK8sBackend(client)
-		k8sUpperWriter := secrets.NewUpperLevelSecretWriter(client)
-		// Branding governs the replicator-matching label keys this writer
-		// emits (e.g. <domain>/project=...) so it must match the labels the
-		// gitops publisher puts on namespaces. Read once at startup; org
-		// config rebuilds the writer on save.
-		if orgProvider != nil {
-			if org, orgErr := orgProvider.GetOrg(cmd.Context()); orgErr == nil && org != nil {
-				k8sUpperWriter.Branding = org.Branding
-			}
-		}
-		upperLevelSecretWriter = k8sUpperWriter
+		// Default: k8s backend (vault = namespace). Overridden below when the
+		// org is configured for 1Password and an SA token is available.
+		vaultStore = secrets.NewK8sVaultStore(client)
 
-		// Wire 1Password vault item writer + upper-level writer when the org
-		// backend is configured for 1Password. The SA token must already be
-		// stored in the K8s Secret created by the provision flow. Failure is
-		// non-fatal — log and continue without it.
 		if orgProvider != nil {
 			if org, orgErr := orgProvider.GetOrg(cmd.Context()); orgErr == nil && org != nil {
 				if org.SecretBackend.Effective() == secrets.Backend1Password && org.SecretBackend.OnePassword != nil {
@@ -280,35 +279,24 @@ func runServer(cmd *cobra.Command, _ []string) error {
 						return string(sec.Data[secrets.SATokenSecretKey]), nil
 					}()
 					if tokenErr != nil {
-						logger.Warn("vault item writer: could not read SA token — 1Password vault items will not be created automatically",
+						logger.Warn("1Password backend: could not read SA token — falling back to k8s vault store",
 							"secret", secrets.SATokenSecretName, "error", tokenErr)
 					} else if saTokenRaw != "" {
 						saClient, saErr := onepassword.NewSDKClient(cmd.Context(), saTokenRaw)
 						if saErr != nil {
-							logger.Warn("vault item writer: SA client init failed — vault item auto-create disabled",
-								"error", saErr)
+							logger.Warn("1Password backend: SA client init failed — falling back to k8s vault store", "error", saErr)
 						} else {
-							saWriter := onepassword.NewSAVaultWriter(saClient)
-							vaultItemWriter = server.NewSAVaultItemWriter(saWriter, org.SecretBackend.OnePassword.Bindings)
-							logger.Info("vault item writer: 1Password SA client enabled — vault items created on app create")
-
-							// Build a cluster→env resolver from the org snapshot.
-							envForCluster := buildEnvForClusterResolver(org.Environments)
-							upperLevelSecretWriter = onepassword.NewSAUpperLevelWriter(onepassword.SAUpperLevelWriterConfig{
-								Client:          saClient,
-								PlatformVaultID: org.SecretBackend.OnePassword.PlatformVaultID,
-								Bindings:        org.SecretBackend.OnePassword.Bindings,
-								OrgName:         org.Name,
-								Naming:          org.ResourceNaming,
-								EnvForCluster:   envForCluster,
-							})
-							if org.SecretBackend.OnePassword.PlatformVaultID == "" {
-								logger.Warn("upper-level writer: 1Password platform vault not provisioned — org/project secret writes will fail until SA token is re-pasted",
-									"hint", "Settings > Secrets > paste the SA token to auto-create the platform vault")
-							} else {
-								logger.Info("upper-level writer: 1Password backend enabled — org/project secrets land in platform vault, env-type/cluster in env vault",
-									"platformVaultID", org.SecretBackend.OnePassword.PlatformVaultID)
+							// Resolver loads org config fresh so vault selections
+							// (global/env/cluster) made after startup take effect.
+							resolver := func(scope secrets.Scope) (string, error) {
+								o, err := orgProvider.GetOrg(context.Background())
+								if err != nil {
+									return "", err
+								}
+								return o.SecretBackend.VaultIDForScope(scope)
 							}
+							vaultStore = onepassword.NewSAVaultStore(saClient, resolver)
+							logger.Info("1Password vault store enabled (global/env/cluster vaults resolved from org config)")
 						}
 					}
 				}
@@ -404,9 +392,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					inner:           pub,
 					orgProvider:     orgProvider,
 					clusterStore:    clusterStore,
-					upperWriter:     upperLevelSecretWriter,
-					backend:         secretBackend,
-					appNamespaceFor: appStoreNamespaceResolver(appStore),
+					vault:           vaultStore,
 					projectStore:    projectStore,
 					envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(cmd.Context(), orgProvider)),
 				}
@@ -418,25 +404,25 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
 				go selfHealSealedTokens(context.Background(), pub, orgProvider, clusterStore, clusterPool, kubeClient, logger)
 
-			// Ensure the suparship-apps root ArgoCD Application exists.
-			// This replaces the manual `kubectl apply -f config/gitops/root-app.yaml`
-			// step by deriving the manifest from the live gitops ConfigMap.
-			// Non-fatal: a warning is logged when ArgoCD is not installed or the
-			// application already exists (idempotent create-only).
-			go func() {
-				if err := kube.EnsureRootArgoApp(
-					context.Background(),
-					dynClient,
-					pubCfg.ArgoCDRepoURL,
-					pubCfg.Branch,
-					"argocd",
-					pubCfg.SubPath,
-				); err != nil {
-					logger.Warn("could not ensure suparship-apps root ArgoCD Application", "error", err)
-				}
-			}()
+				// Ensure the suparship-apps root ArgoCD Application exists.
+				// This replaces the manual `kubectl apply -f config/gitops/root-app.yaml`
+				// step by deriving the manifest from the live gitops ConfigMap.
+				// Non-fatal: a warning is logged when ArgoCD is not installed or the
+				// application already exists (idempotent create-only).
+				go func() {
+					if err := kube.EnsureRootArgoApp(
+						context.Background(),
+						dynClient,
+						pubCfg.ArgoCDRepoURL,
+						pubCfg.Branch,
+						"argocd",
+						pubCfg.SubPath,
+					); err != nil {
+						logger.Warn("could not ensure suparship-apps root ArgoCD Application", "error", err)
+					}
+				}()
 
-			gitopsProbeURL := pubCfg.ArgoCDRepoURL
+				gitopsProbeURL := pubCfg.ArgoCDRepoURL
 				if gitopsProbeURL == "" {
 					gitopsProbeURL = repoCfg.RepoURL
 				}
@@ -521,9 +507,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				inner:           pub,
 				orgProvider:     orgProvider,
 				clusterStore:    clusterStore,
-				upperWriter:     upperLevelSecretWriter,
-				backend:         secretBackend,
-				appNamespaceFor: appStoreNamespaceResolver(appStore),
+				vault:           vaultStore,
 				projectStore:    projectStore,
 				envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(ctx, orgProvider)),
 			})
@@ -555,9 +539,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		PreviewStore:            previewStore,
 		AppStore:                appStore,
 		ClusterStore:            clusterStore,
-		SecretBackend:           secretBackend,
-		UpperLevelSecretWriter:  upperLevelSecretWriter,
-		VaultItemWriter:         vaultItemWriter,
+		VaultStore:              vaultStore,
 		GitOpsPublisher:         publisherHolder,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,
@@ -614,19 +596,10 @@ type gitOpsPublisherAdapter struct {
 	inner        *gitops.Publisher
 	orgProvider  rbac.OrgProvider
 	clusterStore domain.ClusterStore
-	// upperWriter and backend are used to populate AppPublishEnv.ScopeKeys —
-	// which scope levels actually have keys in the vault — so the collapsed
-	// ExternalSecret omits dataFrom entries for empty scopes (ESO would
-	// otherwise error trying to extract from a missing item).
-	//
-	// Both are optional: when nil, the publisher's collapsed builder still
-	// works but every scope is included.
-	upperWriter secrets.UpperLevelWriter
-	backend     secrets.Backend
-	// appNamespaceFor resolves the app-env K8s namespace from app + env. Used
-	// to read app/app-env secret keys from the right namespace when populating
-	// ScopeKeys.
-	appNamespaceFor func(ctx context.Context, projectName, appName, envName string) (string, error)
+	// vault populates AppPublishEnv.ScopeKeys — which (scope, tier) items have
+	// keys — so the publisher only emits ExternalSecrets that resolve. Optional:
+	// when nil, no scope presence is reported (no ExternalSecrets emitted).
+	vault secrets.VaultStore
 	// projectStore reads the project's own EnvConfig (project-scope env vars).
 	// Optional: when nil, the project layer contributes no vars.
 	projectStore project.Store
@@ -854,31 +827,12 @@ func lookupOrgEnvRoutingProfiles(org *rbac.Org, envName string) domain.RoutingPr
 	return nil
 }
 
-// enrichPubEnvWithSecrets adds StoreName, VaultItemTitle, ClusterRef, and
-// ScopeKeys to pub based on the org's secret backend config and naming
-// patterns. ScopeKeys reflects which scope levels actually have keys in the
-// vault so the collapsed ExternalSecret skips dataFrom entries for empty
-// scopes — ESO would otherwise error trying to extract from a missing item.
+// enrichPubEnvWithSecrets sets ClusterRef and ScopeKeys on pub. ScopeKeys
+// reports which (scope, tier) items have keys so the publisher only emits
+// ExternalSecrets that resolve — ESO errors trying to extract a missing item.
 func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, org *rbac.Org, app *domain.App, envName string, pub *gitops.AppPublishEnv) {
-	naming := org.ResourceNaming
-	orgName := org.Name
-	if orgName == "" {
-		orgName = "default"
-	}
-
-	np := secrets.NamingParams{
-		Org:      orgName,
-		Env:      envName,
-		Project:  app.ProjectName,
-		App:      app.Name,
-		Provider: string(org.SecretBackend.Effective()),
-	}
-
-	pub.StoreName = naming.RenderClusterSecretStore(np)
-	pub.VaultItemTitle = naming.RenderVaultItem(secrets.LevelAppEnv, np)
-
 	// Resolve the cluster bound to this env from the org config so the
-	// publisher can render the cluster-scope item title.
+	// publisher can emit the cluster-scope ExternalSecret.
 	for _, e := range org.Environments {
 		if e.Name == envName {
 			pub.ClusterRef = e.EffectiveClusterRef()
@@ -893,53 +847,42 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, or
 // have at least one key in the vault. Errors are swallowed (treated as "no
 // keys") because the resolved view is best-effort during a publish — partial
 // information is better than failing the entire commit.
-func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *domain.App, envName, clusterRef string) map[string]bool {
-	out := make(map[string]bool, 6)
-
-	if a.upperWriter != nil {
-		if entries, err := a.upperWriter.ReadOrgSecretKeys(ctx); err == nil && len(entries) > 0 {
-			out[secrets.LevelOrg] = true
-		}
-		if entries, err := a.upperWriter.ReadEnvTypeSecretKeys(ctx, envName); err == nil && len(entries) > 0 {
-			out[secrets.LevelEnvironment] = true
-		}
-		if entries, err := a.upperWriter.ReadProjectSecretKeys(ctx, app.ProjectName); err == nil && len(entries) > 0 {
-			out[secrets.LevelProject] = true
-		}
-		if clusterRef != "" {
-			if entries, err := a.upperWriter.ReadClusterSecretKeys(ctx, clusterRef); err == nil && len(entries) > 0 {
-				out[secrets.LevelCluster] = true
-			}
-		}
+func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *domain.App, envName, clusterRef string) gitops.ScopePresence {
+	var p gitops.ScopePresence
+	if a.vault == nil {
+		return p
+	}
+	has := func(scope secrets.Scope, tier secrets.Tier, appName string) bool {
+		entries, err := a.vault.ListKeys(ctx, scope, tier, appName)
+		return err == nil && len(entries) > 0
 	}
 
-	if a.backend != nil && a.appNamespaceFor != nil {
-		// App-level secrets live in the same namespace as any app-env secret;
-		// passing the env name is fine here because the app-level Secret name
-		// is keyed by project+app, not env.
-		if ns, err := a.appNamespaceFor(ctx, app.ProjectName, app.Name, envName); err == nil && ns != "" {
-			if entries, err := a.backend.ListKeys(ctx, ns, secrets.AppLevelSecretName(app.ProjectName, app.Name)); err == nil && len(entries) > 0 {
-				out[secrets.LevelApp] = true
-			}
-			if entries, err := a.backend.ListKeys(ctx, ns, secrets.AppEnvSecretName(app.ProjectName, app.Name, envName)); err == nil && len(entries) > 0 {
-				out[secrets.LevelAppEnv] = true
-			}
-		}
-	}
+	g := secrets.GlobalScope()
+	p.GlobalShared = has(g, secrets.TierShared, "")
+	p.GlobalApp = has(g, secrets.TierApp, app.Name)
 
-	return out
+	e := secrets.EnvScope(envName)
+	p.EnvShared = has(e, secrets.TierShared, "")
+	p.EnvApp = has(e, secrets.TierApp, app.Name)
+
+	if clusterRef != "" {
+		c := secrets.ClusterScope(clusterRef)
+		p.ClusterShared = has(c, secrets.TierShared, "")
+		p.ClusterApp = has(c, secrets.TierApp, app.Name)
+	}
+	return p
 }
 
 // mergeAllEnvVars resolves env vars across the six-scope hierarchy and returns
 // the flattened map the publisher writes into gitops-output as the per-app
 // ConfigMap. Precedence is low-to-high — later scopes overwrite earlier keys:
 //
-//	1. org           (org.EnvConfig.Vars)
-//	2. env-type      (org.Environments[envName].EnvConfig.Vars)
-//	3. project       (project.Spec.EnvConfig.Vars)
-//	4. app           (app.Spec.EnvConfig.Vars)
-//	5. app-env       (app.Spec.EnvironmentDefaults[envName].EnvConfig.Vars)
-//	6. cluster       (suparship-envvars-cluster-{name} ConfigMap data)
+//  1. org           (org.EnvConfig.Vars)
+//  2. env-type      (org.Environments[envName].EnvConfig.Vars)
+//  3. project       (project.Spec.EnvConfig.Vars)
+//  4. app           (app.Spec.EnvConfig.Vars)
+//  5. app-env       (app.Spec.EnvironmentDefaults[envName].EnvConfig.Vars)
+//  6. cluster       (suparship-envvars-cluster-{name} ConfigMap data)
 //
 // Errors at any layer are swallowed and the layer is treated as empty —
 // publishing should not fail because an upper-level ConfigMap is unreadable;
@@ -1209,141 +1152,16 @@ func selfHealSealedTokens(
 	kubeClient kubernetes.Interface,
 	logger *slog.Logger,
 ) {
-	if orgProvider == nil || pub == nil || kubeClient == nil {
-		return
-	}
-	org, err := orgProvider.GetOrg(ctx)
-	if err != nil || org == nil {
-		logger.Debug("seal self-heal: could not load org", "err", err)
-		return
-	}
-	if org.SecretBackend.Effective() != secrets.Backend1Password {
-		return
-	}
-	op := org.SecretBackend.OnePassword
-	if op == nil || len(op.Bindings) == 0 {
-		return
-	}
-
-	// Collect every env that should have a sealed-token to ask the
-	// publisher in one go.
-	envs := make([]string, 0, len(op.Bindings))
-	for _, b := range op.Bindings {
-		if b.Provisioned {
-			envs = append(envs, b.Env)
-		}
-	}
-	if len(envs) == 0 {
-		return
-	}
-
-	missing, err := pub.MissingSealedTokens(ctx, envs)
-	if err != nil {
-		logger.Warn("seal self-heal: could not list gitops sealed tokens", "err", err)
-		return
-	}
-	if len(missing) == 0 {
-		logger.Debug("seal self-heal: all sealed tokens present in gitops, nothing to do")
-		return
-	}
-	logger.Info("seal self-heal: detected missing sealed tokens",
-		"count", len(missing), "envs", missing)
-
-	// Build a CertCache once; FetchAndCache per cluster reuses it.
-	certCache := seal.NewK8sCertCache(kubeClient)
-
-	for _, env := range missing {
-		if err := healOneEnv(ctx, pub, org, env, clusterStore, clusterPool, certCache, kubeClient, logger); err != nil {
-			logger.Warn("seal self-heal: env recovery failed", "env", env, "err", err)
-		}
-	}
-}
-
-// healOneEnv handles the per-env recovery: load stashed token, find
-// cluster, fetch kubeseal cert, re-seal + publish. Pulled out of
-// selfHealSealedTokens so the per-env error handling reads linearly.
-func healOneEnv(
-	ctx context.Context,
-	pub *gitops.Publisher,
-	org *rbac.Org,
-	env string,
-	clusterStore domain.ClusterStore,
-	clusterPool *k8s.ClusterClientPool,
-	certCache seal.CertCache,
-	kubeClient kubernetes.Interface,
-	logger *slog.Logger,
-) error {
-	token, err := secrets.LoadConnectToken(ctx, kubeClient, env)
-	if err != nil {
-		return fmt.Errorf("load stash: %w", err)
-	}
-	if len(token) == 0 {
-		logger.Warn("seal self-heal: no stashed Connect token; operator must re-paste via Settings",
-			"env", env)
-		return nil
-	}
-
-	var orgEnv *rbac.OrgEnvironment
-	for i := range org.Environments {
-		if org.Environments[i].Name == env {
-			orgEnv = &org.Environments[i]
-			break
-		}
-	}
-	activeRef := ""
-	if orgEnv != nil {
-		activeRef = orgEnv.EffectiveClusterRef()
-	}
-	if activeRef == "" {
-		return fmt.Errorf("env %q has no cluster assigned", env)
-	}
-	cluster, err := clusterStore.GetCluster(ctx, activeRef)
-	if err != nil {
-		return fmt.Errorf("get cluster %q: %w", activeRef, err)
-	}
-	if cluster.APIServer == "" {
-		return fmt.Errorf("cluster %q has no apiServer", cluster.Name)
-	}
-
-	// Fetch the workload cluster's kubeseal cert fresh — the controller
-	// rotates it, and a stale cert produces "could not decrypt" on the
-	// target. Use the workload-cluster client (not the platform's own).
-	wkClient, err := clusterPool.Get(ctx, cluster.Name)
-	if err != nil {
-		return fmt.Errorf("workload client for %q: %w", cluster.Name, err)
-	}
-	certPEM, err := seal.FetchAndCache(ctx, certCache, wkClient, cluster.Name, seal.FetchOptions{})
-	if err != nil {
-		return fmt.Errorf("fetch sealing cert: %w", err)
-	}
-
-	binding := org.SecretBackend.FindBinding(env)
-	if binding == nil {
-		return fmt.Errorf("no binding for env %q (org state drift)", env)
-	}
-
-	var platformVaultID string
-	if op := org.SecretBackend.OnePassword; op != nil {
-		platformVaultID = op.PlatformVaultID
-	}
-
-	if err := pub.PublishSealedReadToken(ctx, gitops.SealedReadTokenPublishParams{
-		Env:               env,
-		VaultID:           binding.VaultID,
-		OrgName:           org.Name,
-		Token:             token,
-		Cert:              certPEM,
-		ArgoCDDestination: cluster.APIServer,
-		ClusterName:       cluster.Name,
-		ESONamespace:      cluster.EffectiveESONamespace(),
-		ConnectEndpoint:   binding.ConnectEndpoint,
-		PlatformVaultID:   platformVaultID,
-	}); err != nil {
-		return fmt.Errorf("publish sealed token: %w", err)
-	}
-	logger.Info("seal self-heal: republished sealed token",
-		"env", env, "cluster", cluster.Name)
-	return nil
+	// TODO(5b): re-seal + republish per-scope Connect tokens (env/cluster
+	// vaults) that are missing from the gitops repo, once 1Password vault
+	// provisioning is reimplemented for the 3-scope model. No-op for now.
+	_ = ctx
+	_ = pub
+	_ = orgProvider
+	_ = clusterStore
+	_ = clusterPool
+	_ = kubeClient
+	_ = logger
 }
 
 // buildEnvForClusterResolver returns a closure that maps a registered cluster

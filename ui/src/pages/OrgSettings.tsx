@@ -29,26 +29,21 @@ import {
   updateSecretsBackend,
   saveSAToken,
   listVaults,
-  addBinding,
-  removeBinding,
-  setPlatformVault,
-  listOrgSecretKeys,
-  upsertOrgSecrets,
-  deleteOrgSecretKey,
-  listEnvTypeSecretKeys,
-  upsertEnvTypeSecrets,
-  deleteEnvTypeSecretKey,
-  migrateToOnePassword,
+  setGlobalVault,
+  registerEnvVault,
+  listSharedGlobalSecretKeys,
+  upsertSharedGlobalSecrets,
+  deleteSharedGlobalSecretKey,
+  listSharedEnvSecretKeys,
+  upsertSharedEnvSecrets,
+  deleteSharedEnvSecretKey,
 } from "../lib/secrets";
 import type {
-  MigrateToOnePasswordResponse,
   SecretBackendConfig,
   VaultInfo,
 } from "../lib/secrets";
-import { fetchProjects } from "../lib/settings";
 import { listClusters } from "../lib/clusters";
 import type { Cluster } from "../lib/clusters";
-import type { Project } from "../types";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
 import type { OrgInfo, RoleBinding } from "../types";
@@ -599,11 +594,11 @@ function EnvironmentTypeEnvConfigSection({
           />
           <SecretEditor
             key={`secrets-${selectedEnvType}`}
-            title={`Secrets for "${selectedEnvType}" environments`}
-            description="Secrets applied to every app in this environment type."
-            fetchFn={() => listEnvTypeSecretKeys(selectedEnvType)}
-            upsertFn={(entries) => upsertEnvTypeSecrets(selectedEnvType, entries)}
-            deleteFn={(key) => deleteEnvTypeSecretKey(selectedEnvType, key)}
+            title={`Shared secrets for "${selectedEnvType}"`}
+            description="Shared secrets applied to every app in this environment (env scope). App-level env secrets override these."
+            fetchFn={() => listSharedEnvSecretKeys(selectedEnvType)}
+            upsertFn={(entries) => upsertSharedEnvSecrets(selectedEnvType, entries)}
+            deleteFn={(key) => deleteSharedEnvSecretKey(selectedEnvType, key)}
           />
         </>
       )}
@@ -1191,24 +1186,19 @@ function SecretsBackendSection() {
     setError(null);
     try {
       const vault = vaults.find((v) => v.id === bindVaultId);
-      const res = await addBinding(
-        bindEnv,
-        bindVaultId,
-        bindToken.trim(),
-        vault?.title,
-        bindConnectEndpoint.trim() || undefined,
-      );
-      if (res.error) {
-        setError(res.error);
-      } else {
-        const updated = await getSecretsBackend();
-        setConfig(updated);
-        setShowAddBinding(false);
-        setBindEnv("");
-        setBindVaultId("");
-        setBindToken("");
-        setBindConnectEndpoint("");
-      }
+      await registerEnvVault(bindEnv, {
+        vaultId: bindVaultId,
+        vaultName: vault?.title,
+        connectToken: bindToken.trim(),
+        connectEndpoint: bindConnectEndpoint.trim() || undefined,
+      });
+      const updated = await getSecretsBackend();
+      setConfig(updated);
+      setShowAddBinding(false);
+      setBindEnv("");
+      setBindVaultId("");
+      setBindToken("");
+      setBindConnectEndpoint("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Add binding failed");
     } finally {
@@ -1217,18 +1207,13 @@ function SecretsBackendSection() {
   }
 
   async function handleRemoveBinding(env: string) {
-    if (!confirm(`Remove binding for ${env}? The vault itself will be kept in 1Password.`)) return;
+    // Env/cluster vault de-provisioning is managed via the `suparship secrets`
+    // CLI for now (UI follow-up tracked with 1Password provisioning).
     setRemovingEnv(env);
-    setError(null);
-    try {
-      await removeBinding(env);
-      const updated = await getSecretsBackend();
-      setConfig(updated);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Remove failed");
-    } finally {
-      setRemovingEnv(null);
-    }
+    setError(
+      "Removing an env vault binding is managed via the suparship secrets CLI.",
+    );
+    setRemovingEnv(null);
   }
 
   return (
@@ -1509,7 +1494,7 @@ function SecretsBackendSection() {
                         </label>
                         {(() => {
                           const boundEnvs = new Set(
-                            (config?.onePassword?.bindings || []).map((b) => b.env),
+                            (config?.onePassword?.envVaults || []).map((v) => v.key),
                           );
                           const available = orgEnvs.filter(
                             (e) => !boundEnvs.has(e.name),
@@ -1610,7 +1595,7 @@ function SecretsBackendSection() {
                   )}
 
                   {/* Existing bindings */}
-                  {(config.onePassword?.bindings || []).length === 0 ? (
+                  {(config.onePassword?.envVaults || []).length === 0 ? (
                     <p className="text-xs text-gray-400">
                       No environment bindings yet. Click &ldquo;+ Add
                       Binding&rdquo; to connect an environment to a 1Password
@@ -1628,9 +1613,9 @@ function SecretsBackendSection() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-50">
-                        {(config.onePassword?.bindings || []).map((b) => (
-                          <tr key={b.env}>
-                            <td className="py-2 font-mono text-xs">{b.env}</td>
+                        {(config.onePassword?.envVaults || []).map((b) => (
+                          <tr key={b.key}>
+                            <td className="py-2 font-mono text-xs">{b.key}</td>
                             <td className="py-2 font-mono text-xs">
                               {b.vaultName || b.vaultId}
                             </td>
@@ -1663,11 +1648,11 @@ function SecretsBackendSection() {
                             </td>
                             <td className="py-2 text-right space-x-2">
                               <button
-                                onClick={() => handleRemoveBinding(b.env)}
-                                disabled={removingEnv === b.env}
+                                onClick={() => handleRemoveBinding(b.key || "")}
+                                disabled={removingEnv === b.key}
                                 className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
                               >
-                                {removingEnv === b.env ? "Removing…" : "Remove"}
+                                {removingEnv === b.key ? "Removing…" : "Remove"}
                               </button>
                             </td>
                           </tr>
@@ -1710,8 +1695,8 @@ function PlatformVaultPicker({
   config: SecretBackendConfig;
   onChanged: () => Promise<void>;
 }) {
-  const currentID = config.onePassword?.platformVaultId ?? "";
-  const currentName = config.onePassword?.platformVaultName ?? "";
+  const currentID = config.onePassword?.globalVault?.vaultId ?? "";
+  const currentName = config.onePassword?.globalVault?.vaultName ?? "";
   const [vaults, setVaults] = useState<VaultInfo[] | null>(null);
   const [selectedID, setSelectedID] = useState(currentID);
   const [loading, setLoading] = useState(false);
@@ -1744,9 +1729,9 @@ function PlatformVaultPicker({
     setSavedMsg(null);
     try {
       const picked = vaults?.find((v) => v.id === selectedID);
-      const res = await setPlatformVault(selectedID, picked?.title);
+      const res = await setGlobalVault(selectedID, picked?.title);
       setSavedMsg(
-        `Saved. Org / project secret writes now route to "${res.vaultName}".`,
+        `Saved. Global-scope shared secrets now route to "${res.vaultName}".`,
       );
       await onChanged();
     } catch (err) {
@@ -1832,217 +1817,10 @@ function PlatformVaultPicker({
   );
 }
 
-function MigrationPanel({ config }: { config: SecretBackendConfig }) {
-  const platformVaultID = config.onePassword?.platformVaultId ?? "";
-  const bindings = config.onePassword?.bindings ?? [];
-
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [clusters, setClusters] = useState<Cluster[]>([]);
-  const [selectedEnvs, setSelectedEnvs] = useState<Record<string, boolean>>({});
-  const [selectedProjects, setSelectedProjects] = useState<Record<string, boolean>>({});
-  const [selectedClusters, setSelectedClusters] = useState<Record<string, boolean>>({});
-  const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<MigrateToOnePasswordResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // Load inventory once.
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const [{ projects: ps }, cs] = await Promise.all([
-          fetchProjects(),
-          listClusters(),
-        ]);
-        if (cancelled) return;
-        setProjects(ps);
-        setClusters(cs);
-        // Default-select every entry — operators usually want to migrate the
-        // full inventory once. Individual rows can still be opted out.
-        const envInit: Record<string, boolean> = {};
-        for (const b of bindings) envInit[b.env] = true;
-        setSelectedEnvs(envInit);
-        const projInit: Record<string, boolean> = {};
-        for (const p of ps) projInit[p.name] = true;
-        setSelectedProjects(projInit);
-        const clusterInit: Record<string, boolean> = {};
-        for (const c of cs) clusterInit[c.name] = true;
-        setSelectedClusters(clusterInit);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load inventory");
-      }
-    }
-    load();
-    return () => {
-      cancelled = true;
-    };
-    // bindings come from `config` which is stable for the panel's lifetime;
-    // no need to re-run on every keystroke elsewhere on the page.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  if (!platformVaultID) {
-    return (
-      <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-        Migration is unavailable until the platform vault is provisioned —
-        re-paste the SA token in the section above to create it.
-      </div>
-    );
-  }
-
-  const pickedKeys = (m: Record<string, boolean>) =>
-    Object.entries(m).filter(([, v]) => v).map(([k]) => k);
-
-  async function handleMigrate() {
-    setSubmitting(true);
-    setError(null);
-    setResult(null);
-    try {
-      const res = await migrateToOnePassword({
-        envTypes: pickedKeys(selectedEnvs),
-        projects: pickedKeys(selectedProjects),
-        clusters: pickedKeys(selectedClusters),
-      });
-      setResult(res);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Migration failed");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  function toggle(setter: React.Dispatch<React.SetStateAction<Record<string, boolean>>>, key: string) {
-    setter((prev) => ({ ...prev, [key]: !prev[key] }));
-  }
-
-  return (
-    <div className="mt-6 space-y-4 rounded-lg border border-gray-200 bg-white p-5">
-      <div>
-        <h3 className="text-sm font-semibold text-gray-900">
-          Migrate K8s Secrets to 1Password
-        </h3>
-        <p className="mt-1 text-xs text-gray-500">
-          One-shot copy of org / env-type / project / cluster Secrets currently
-          stored in <code className="font-mono">suparship-system</code> into
-          your 1Password vaults. App and app-env secrets are not migrated —
-          rotate those manually after the switch. Idempotent — re-running picks
-          up new keys without clobbering values already entered directly into
-          the vault.
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <CheckboxList
-          title="Environments"
-          empty="No env bindings configured."
-          items={bindings.map((b) => ({ key: b.env, label: b.env }))}
-          selected={selectedEnvs}
-          onToggle={(k) => toggle(setSelectedEnvs, k)}
-        />
-        <CheckboxList
-          title="Projects"
-          empty="No projects yet."
-          items={projects.map((p) => ({ key: p.name, label: p.displayName || p.name }))}
-          selected={selectedProjects}
-          onToggle={(k) => toggle(setSelectedProjects, k)}
-        />
-        <CheckboxList
-          title="Clusters"
-          empty="No clusters registered."
-          items={clusters.map((c) => ({ key: c.name, label: c.displayName || c.name }))}
-          selected={selectedClusters}
-          onToggle={(k) => toggle(setSelectedClusters, k)}
-        />
-      </div>
-
-      <div className="flex items-center gap-3">
-        <button
-          onClick={handleMigrate}
-          disabled={submitting}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {submitting ? "Migrating…" : "Migrate to 1Password"}
-        </button>
-        <p className="text-xs text-gray-400">
-          Org-scope keys are always migrated.
-        </p>
-      </div>
-
-      {error && (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700">
-          {error}
-        </div>
-      )}
-
-      {result && (
-        <div className="rounded border border-green-200 bg-green-50 p-3 text-xs text-green-800">
-          <p className="font-medium">Migration complete.</p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-5">
-            <li>Org keys: {result.orgKeys}</li>
-            <li>
-              Env-types:{" "}
-              {summariseCounts(result.envTypeKeys) || "none"}
-            </li>
-            <li>
-              Projects:{" "}
-              {summariseCounts(result.projectKeys) || "none"}
-            </li>
-            <li>
-              Clusters:{" "}
-              {summariseCounts(result.clusterKeys) || "none"}
-            </li>
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface CheckboxListProps {
-  title: string;
-  empty: string;
-  items: Array<{ key: string; label: string }>;
-  selected: Record<string, boolean>;
-  onToggle: (key: string) => void;
-}
-
-function CheckboxList({ title, empty, items, selected, onToggle }: CheckboxListProps) {
-  return (
-    <div>
-      <p className="mb-2 text-xs font-medium uppercase tracking-wider text-gray-500">
-        {title}
-      </p>
-      {items.length === 0 ? (
-        <p className="text-xs text-gray-400">{empty}</p>
-      ) : (
-        <ul className="space-y-1">
-          {items.map((it) => (
-            <li key={it.key} className="flex items-center gap-2">
-              <input
-                id={`migrate-${title}-${it.key}`}
-                type="checkbox"
-                checked={!!selected[it.key]}
-                onChange={() => onToggle(it.key)}
-                className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-              />
-              <label
-                htmlFor={`migrate-${title}-${it.key}`}
-                className="text-sm text-gray-700"
-              >
-                {it.label}
-              </label>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function summariseCounts(counts: Record<string, number>): string {
-  const entries = Object.entries(counts).filter(([, n]) => n > 0);
-  if (entries.length === 0) return "";
-  return entries.map(([k, n]) => `${k} (${n})`).join(", ");
+function MigrationPanel(_props: { config: SecretBackendConfig }) {
+  // Migration to 1Password was removed in the 3-scope model (clean
+  // replacement, no legacy data migration).
+  return null;
 }
 
 // ── Main OrgSettings page ─────────────────────────────────────────────────────
@@ -2167,13 +1945,13 @@ export function OrgSettings() {
         saveFn={updateOrgEnvConfig}
       />
 
-      {/* Org-wide secrets */}
+      {/* Shared global secrets */}
       <SecretEditor
-        title="Org-wide secrets"
-        description="Secrets shared across every app in the org. Lower hierarchy levels override these."
-        fetchFn={listOrgSecretKeys}
-        upsertFn={upsertOrgSecrets}
-        deleteFn={deleteOrgSecretKey}
+        title="Shared global secrets"
+        description="Shared secrets applied to every app in every environment (global scope). App-level global secrets override these."
+        fetchFn={listSharedGlobalSecretKeys}
+        upsertFn={upsertSharedGlobalSecrets}
+        deleteFn={deleteSharedGlobalSecretKey}
       />
 
       {/* Per-environment-type variables and secrets */}

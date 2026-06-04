@@ -2,47 +2,66 @@ package secrets
 
 import "context"
 
-// Scope identifies the hierarchy level and coordinates for a secret write.
-// Used by VaultWriter to determine Item naming in the external vault.
+// ScopeKind identifies the variability axis of a secret: the same value
+// everywhere (global), one value per environment (env), or one value per
+// cluster (cluster). These three scopes replace the former 6-level hierarchy.
+type ScopeKind string
+
+const (
+	ScopeGlobal  ScopeKind = "global"
+	ScopeEnv     ScopeKind = "env"
+	ScopeCluster ScopeKind = "cluster"
+)
+
+// Scope identifies which vault a secret lives in. Env is set only for
+// ScopeEnv; Cluster only for ScopeCluster.
 type Scope struct {
-	Level   string // LevelOrg | LevelEnvironment | LevelProject | LevelApp | LevelAppEnv | LevelCluster
-	Org     string
-	Env     string // empty for org-level
-	Project string // empty for org/env levels
-	App     string // empty unless app/app-env
-	Cluster string // populated only for LevelCluster
+	Kind    ScopeKind
+	Env     string
+	Cluster string
 }
 
-// ItemMeta carries provider-supplied metadata about a vault item.
-type ItemMeta struct {
-	// Version is an opaque, provider-supplied identifier (e.g. 1Password
-	// Item version). Used for optimistic concurrency control.
-	Version string
-}
+// GlobalScope returns the global scope.
+func GlobalScope() Scope { return Scope{Kind: ScopeGlobal} }
 
-// VaultWriter abstracts write/read/delete of secret data against an external
-// vault provider (1Password via SA token) or native K8s Secrets for the
-// demo profile. Suparship writes values into the vault; ESO pulls them back
-// into the cluster at sync time.
-type VaultWriter interface {
-	// Upsert creates or merges key/value pairs into the scope's Item in the
-	// vault identified by binding. If expectedVersion is non-empty, it must
-	// match the current Item version or the call returns ErrStaleVersion.
-	Upsert(ctx context.Context, binding EnvBinding, scope Scope, expectedVersion string, data map[string][]byte) (ItemMeta, error)
+// EnvScope returns the scope for one environment.
+func EnvScope(env string) Scope { return Scope{Kind: ScopeEnv, Env: env} }
 
-	// ListKeys returns the key names stored in the scope's Item.
-	// Returns an empty slice (not an error) when the Item does not exist.
-	ListKeys(ctx context.Context, binding EnvBinding, scope Scope) ([]SecretEntry, ItemMeta, error)
+// ClusterScope returns the scope for one cluster.
+func ClusterScope(cluster string) Scope { return Scope{Kind: ScopeCluster, Cluster: cluster} }
 
-	// DeleteKey removes a single key from the scope's Item.
-	// No-op when the key or Item does not exist.
-	DeleteKey(ctx context.Context, binding EnvBinding, scope Scope, key, expectedVersion string) (ItemMeta, error)
+// Tier identifies ownership within a scope: TierShared holds org-admin,
+// platform-wide values folded into every app; TierApp holds one app's own
+// values. App values override shared values on key collision.
+type Tier string
 
-	// DeleteItem removes the entire Item for the given scope from the vault.
-	// No-op when the Item does not exist.
-	DeleteItem(ctx context.Context, binding EnvBinding, scope Scope) error
+const (
+	TierShared Tier = "shared"
+	TierApp    Tier = "app"
+)
 
-	// Probe verifies connectivity and access to the vault for the given
-	// binding.
-	Probe(ctx context.Context, binding EnvBinding) error
+// VaultStore abstracts read/write/delete of secret data against the configured
+// backend. A "vault" is a Kubernetes namespace for the k8s backend and a real
+// vault for the 1Password backend; the Scope selects which vault. Within a
+// vault, items are keyed by (tier, app): the shared tier ignores app, the app
+// tier scopes to a single app so apps never see each other's secrets.
+//
+// Suparship writes values into the vault; ESO pulls them back into app
+// namespaces at sync time. Values are never returned through this interface —
+// ListKeys returns key names only.
+type VaultStore interface {
+	// Upsert creates or merges key/value pairs into the item identified by
+	// (scope, tier, app). Existing keys not present in data are preserved.
+	Upsert(ctx context.Context, scope Scope, tier Tier, app string, data map[string][]byte) error
+
+	// ListKeys returns the key names stored in the (scope, tier, app) item.
+	// Returns an empty slice (not an error) when the item does not exist.
+	ListKeys(ctx context.Context, scope Scope, tier Tier, app string) ([]SecretEntry, error)
+
+	// DeleteKey removes a single key from the (scope, tier, app) item.
+	// No-op when the key or item does not exist.
+	DeleteKey(ctx context.Context, scope Scope, tier Tier, app, key string) error
+
+	// Probe verifies connectivity and access to the vault for the given scope.
+	Probe(ctx context.Context, scope Scope) error
 }

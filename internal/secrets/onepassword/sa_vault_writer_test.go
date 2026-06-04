@@ -2,140 +2,112 @@ package onepassword
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
-func TestSAVaultWriter_Upsert(t *testing.T) {
-	ctx := context.Background()
-	client := NewFakeClient()
-	client.CreateVault(ctx, "test-vault", "")
-	vaults, _ := client.ListVaults(ctx)
-	vaultID := vaults[0].ID
-
-	writer := NewSAVaultWriter(client)
-	binding := secrets.EnvBinding{Env: "prod", VaultID: vaultID}
-	scope := secrets.Scope{Level: "app", Org: "acme", Project: "web", App: "api", Env: "prod"}
-
-	data := map[string][]byte{
-		"DB_URL": []byte("postgres://localhost/db"),
-		"SECRET": []byte("hunter2"),
-	}
-
-	meta, err := writer.Upsert(ctx, binding, scope, "", data)
-	if err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	if meta.Version == "" {
-		t.Error("expected non-empty version")
+// resolverFor returns a VaultResolver that maps every scope to vaultID.
+func resolverFor(vaultID string) VaultResolver {
+	return func(secrets.Scope) (string, error) {
+		if vaultID == "" {
+			return "", fmt.Errorf("no vault")
+		}
+		return vaultID, nil
 	}
 }
 
-func TestSAVaultWriter_ListKeys(t *testing.T) {
+func TestSAVaultStore_Upsert(t *testing.T) {
 	ctx := context.Background()
 	client := NewFakeClient()
 	client.CreateVault(ctx, "test-vault", "")
 	vaults, _ := client.ListVaults(ctx)
 	vaultID := vaults[0].ID
 
-	writer := NewSAVaultWriter(client)
-	binding := secrets.EnvBinding{Env: "prod", VaultID: vaultID}
-	scope := secrets.Scope{Level: "app", Org: "acme", Project: "web", App: "api", Env: "prod"}
+	store := NewSAVaultStore(client, resolverFor(vaultID))
+	scope := secrets.EnvScope("prod")
 
-	// No item yet → empty list.
-	keys, _, err := writer.ListKeys(ctx, binding, scope)
-	if err != nil {
-		t.Fatalf("ListKeys empty: %v", err)
-	}
-	if len(keys) != 0 {
-		t.Errorf("expected 0 keys, got %d", len(keys))
+	if err := store.Upsert(ctx, scope, secrets.TierApp, "api", map[string][]byte{
+		"DB_URL": []byte("postgres://localhost/db"),
+		"SECRET": []byte("hunter2"),
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Upsert, then list.
-	writer.Upsert(ctx, binding, scope, "", map[string][]byte{
-		"A": []byte("1"),
-		"B": []byte("2"),
-	})
-
-	keys, meta, err := writer.ListKeys(ctx, binding, scope)
+	keys, err := store.ListKeys(ctx, scope, secrets.TierApp, "api")
 	if err != nil {
 		t.Fatalf("ListKeys: %v", err)
 	}
 	if len(keys) != 2 {
 		t.Errorf("expected 2 keys, got %d", len(keys))
 	}
-	if meta.Version == "" {
-		t.Error("expected non-empty version")
-	}
 }
 
-func TestSAVaultWriter_DeleteKey(t *testing.T) {
+func TestSAVaultStore_TierAndAppIsolation(t *testing.T) {
 	ctx := context.Background()
 	client := NewFakeClient()
 	client.CreateVault(ctx, "test-vault", "")
 	vaults, _ := client.ListVaults(ctx)
-	vaultID := vaults[0].ID
+	store := NewSAVaultStore(client, resolverFor(vaults[0].ID))
+	scope := secrets.GlobalScope()
 
-	writer := NewSAVaultWriter(client)
-	binding := secrets.EnvBinding{Env: "prod", VaultID: vaultID}
-	scope := secrets.Scope{Level: "app", Org: "acme", Env: "prod"}
+	_ = store.Upsert(ctx, scope, secrets.TierShared, "", map[string][]byte{"S": []byte("1")})
+	_ = store.Upsert(ctx, scope, secrets.TierApp, "api", map[string][]byte{"A": []byte("1")})
+	_ = store.Upsert(ctx, scope, secrets.TierApp, "web", map[string][]byte{"W": []byte("1")})
 
-	writer.Upsert(ctx, binding, scope, "", map[string][]byte{
-		"KEEP": []byte("keep"),
-		"DROP": []byte("drop"),
-	})
-
-	_, err := writer.DeleteKey(ctx, binding, scope, "DROP", "")
-	if err != nil {
-		t.Fatalf("DeleteKey: %v", err)
+	// app "api" must not see shared or web keys.
+	keys, _ := store.ListKeys(ctx, scope, secrets.TierApp, "api")
+	if len(keys) != 1 || keys[0].Key != "A" {
+		t.Fatalf("app api isolation broken: %+v", keys)
 	}
-
-	keys, _, err := writer.ListKeys(ctx, binding, scope)
-	if err != nil {
-		t.Fatalf("ListKeys after delete: %v", err)
-	}
-	if len(keys) != 1 {
-		t.Errorf("expected 1 key after delete, got %d", len(keys))
-	}
-	if keys[0].Key != "KEEP" {
-		t.Errorf("expected key KEEP, got %q", keys[0].Key)
+	shared, _ := store.ListKeys(ctx, scope, secrets.TierShared, "")
+	if len(shared) != 1 || shared[0].Key != "S" {
+		t.Fatalf("shared isolation broken: %+v", shared)
 	}
 }
 
-func TestSAVaultWriter_Probe(t *testing.T) {
+func TestSAVaultStore_DeleteKey(t *testing.T) {
+	ctx := context.Background()
+	client := NewFakeClient()
+	client.CreateVault(ctx, "test-vault", "")
+	vaults, _ := client.ListVaults(ctx)
+	store := NewSAVaultStore(client, resolverFor(vaults[0].ID))
+	scope := secrets.EnvScope("prod")
+
+	_ = store.Upsert(ctx, scope, secrets.TierApp, "api", map[string][]byte{
+		"KEEP": []byte("keep"),
+		"DROP": []byte("drop"),
+	})
+	if err := store.DeleteKey(ctx, scope, secrets.TierApp, "api", "DROP"); err != nil {
+		t.Fatalf("DeleteKey: %v", err)
+	}
+	keys, _ := store.ListKeys(ctx, scope, secrets.TierApp, "api")
+	if len(keys) != 1 || keys[0].Key != "KEEP" {
+		t.Errorf("expected only KEEP, got %+v", keys)
+	}
+}
+
+func TestSAVaultStore_Probe(t *testing.T) {
 	ctx := context.Background()
 	client := NewFakeClient()
 	v, _ := client.CreateVault(ctx, "test-vault", "")
 
-	writer := NewSAVaultWriter(client)
-
-	if err := writer.Probe(ctx, secrets.EnvBinding{VaultID: v.ID}); err != nil {
+	ok := NewSAVaultStore(client, resolverFor(v.ID))
+	if err := ok.Probe(ctx, secrets.GlobalScope()); err != nil {
 		t.Fatalf("Probe existing: %v", err)
 	}
-
-	if err := writer.Probe(ctx, secrets.EnvBinding{VaultID: "nonexistent"}); err == nil {
+	bad := NewSAVaultStore(client, resolverFor("nonexistent"))
+	if err := bad.Probe(ctx, secrets.GlobalScope()); err == nil {
 		t.Fatal("expected error for nonexistent vault")
 	}
 }
 
-func TestSAVaultWriter_EmptyVaultID(t *testing.T) {
+func TestSAVaultStore_NoVaultResolved(t *testing.T) {
 	ctx := context.Background()
-	client := NewFakeClient()
-	writer := NewSAVaultWriter(client)
-	binding := secrets.EnvBinding{VaultID: ""}
-	scope := secrets.Scope{Level: "org"}
-
-	if _, err := writer.Upsert(ctx, binding, scope, "", map[string][]byte{"k": []byte("v")}); err == nil {
-		t.Error("expected error for empty vault ID")
-	}
-	if _, _, err := writer.ListKeys(ctx, binding, scope); err == nil {
-		t.Error("expected error for empty vault ID")
-	}
-	if _, err := writer.DeleteKey(ctx, binding, scope, "k", ""); err == nil {
-		t.Error("expected error for empty vault ID")
-	}
-	if err := writer.Probe(ctx, binding); err == nil {
-		t.Error("expected error for empty vault ID")
+	store := NewSAVaultStore(NewFakeClient(), resolverFor(""))
+	scope := secrets.GlobalScope()
+	if err := store.Upsert(ctx, scope, secrets.TierShared, "", map[string][]byte{"k": []byte("v")}); err == nil {
+		t.Error("expected error when no vault resolved")
 	}
 }

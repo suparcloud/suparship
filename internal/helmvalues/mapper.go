@@ -80,7 +80,7 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 // that want strict validation should use MapToHelmValuesForEnv with real
 // profiles after running domain.ValidateExposeModes.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
-	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", secrets.ResourceNaming{}, "", "", nil, nil, nil, nil)
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", "", nil, nil, nil, nil)
 }
 
 // MapToHelmValuesForEnv is the canonical mapper. The naming and orgName
@@ -111,9 +111,7 @@ func MapToHelmValuesForEnv(
 	envName string,
 	envType domain.AppEnvironmentType,
 	baseDomain, namespace, cluster string,
-	naming secrets.ResourceNaming,
 	orgName string,
-	backend secrets.BackendType,
 	orgProfiles, envProfiles domain.RoutingProfiles,
 	orgAddonProfiles, envAddonProfiles domain.AddonProfiles,
 ) HelmValues {
@@ -134,23 +132,10 @@ func MapToHelmValuesForEnv(
 	components := buildComponents(app.Spec.Components, envType, envOverride, imageRepo, imageTag, port, healthPath, routingComponent, orgProfiles, envProfiles)
 	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain))
 
-	// Resource names come from the same ResourceNaming patterns the
-	// publisher uses, so values.yaml lines up with the K8s resources
-	// actually created — RenderAppResource → ExternalSecret target,
-	// RenderAppConfigMap → published ConfigMap.
-	np := secrets.NamingParams{
-		Org:     orgName,
-		Env:     envName,
-		Project: app.ProjectName,
-		App:     app.Name,
-		Cluster: cluster,
-	}
-	cms, secs := envFromLists(
-		app.ProjectName, app.Name, envName, cluster,
-		naming.RenderAppResource(np),
-		naming.RenderAppConfigMap(np),
-		backend,
-	)
+	// Resource names are deterministic so values.yaml lines up with the K8s
+	// resources the publisher creates: the per-app ConfigMap and the three
+	// per-scope ExternalSecret targets (<app>-global/-env/-cluster).
+	cms, secs := envFromLists(app.ProjectName, app.Name, envName, cluster)
 
 	// Addon connection Secrets append to the consumer's envFrom hierarchy
 	// after the standard scopes. Order is alphabetical by addon name so
@@ -234,47 +219,28 @@ func buildAddonBindings(app *domain.App, envAddons, orgAddons domain.AddonProfil
 	return secs, claims
 }
 
-// envFromLists returns the names the chart should envFrom for this app-env.
-// Both lists collapse to a single entry on ESO-mediated backends because the
-// publisher pre-merges all six scopes into one ConfigMap and one Secret — the
-// committed YAML in gitops-output is the audit-trail for what the pod sees.
+// envFromLists returns the names the chart should envFrom for this app-env,
+// backend-agnostic. ESO materializes three per-scope Secrets in the app
+// namespace — <app>-global, <app>-env, <app>-cluster — each merging the
+// org-admin shared item and the app's own item for that scope.
 //
-// envFromConfigMaps — always one entry: the per-app "{app}-config" ConfigMap
-// the publisher writes with org → env-type → project → app → app-env → cluster
-// merged in precedence order. There is no chart-side multi-source merge.
+// envFromConfigMaps — one entry: the per-app ConfigMap the publisher writes
+// with global → env → cluster env-vars merged in precedence order.
 //
-// envFromSecrets — backend-specific:
-//   - 1Password (and any ESO-mediated backend): ESO merges all six scopes into
-//     a single K8s Secret named by RenderAppResource (e.g. "{app}-secrets").
-//     The chart envFroms only that one Secret.
-//   - K8s: there is no ESO collapse. The K8s UpperLevelSecretWriter writes
-//     a Secret per scope into suparship-system; Stakater Replicator copies
-//     each into the env namespace under the same name. The chart envFroms
-//     all six.
-//
-// cluster=="" omits the cluster-scope tail of the K8s Secret list (env unbound).
-func envFromLists(project, app, envName, cluster, appEnvESOName, appEnvESOConfigName string, backend secrets.BackendType) ([]string, []string) {
-	cms := []string{appEnvESOConfigName}
+// envFromSecrets — the three scope Secrets in order global, env, cluster.
+// Chart-side envFrom is later-wins, so env overrides global and cluster
+// overrides env. All are mounted optional:true, so a scope with no keys (whose
+// ExternalSecret isn't created) is harmless. cluster=="" omits the cluster
+// entry (env unbound).
+func envFromLists(project, app, envName, cluster string) ([]string, []string) {
+	cms := []string{secrets.AppConfigName(project, app, envName)}
 
-	var secs []string
-	switch backend {
-	case secrets.BackendK8s:
-		// One replicated Secret per scope.
-		envvarsKey := envName
-		secs = []string{
-			"suparship-secrets-org",
-			"suparship-secrets-envtype-" + envvarsKey,
-			"suparship-secrets-project-" + project,
-			"suparship-secrets-app-" + project + "-" + app,
-			secrets.AppEnvSecretName(project, app, envName),
-		}
-		if cluster != "" {
-			secs = append(secs, "suparship-secrets-cluster-"+cluster)
-		}
-	default:
-		// 1Password / any ESO-mediated backend: ESO collapses all six
-		// scopes into a single Secret.
-		secs = []string{appEnvESOName}
+	secs := []string{
+		secrets.WorkloadGlobalSecretName(app),
+		secrets.WorkloadEnvSecretName(app),
+	}
+	if cluster != "" {
+		secs = append(secs, secrets.WorkloadClusterSecretName(app))
 	}
 	return cms, secs
 }
@@ -551,9 +517,7 @@ func MapAddonToHelmValuesForEnv(
 	envName string,
 	envType domain.AppEnvironmentType,
 	cluster string,
-	naming secrets.ResourceNaming,
 	orgName string,
-	backend secrets.BackendType,
 	orgAddons, envAddons domain.AddonProfiles,
 ) (AddonInstanceValues, error) {
 	if orgName == "" {
@@ -566,19 +530,7 @@ func MapAddonToHelmValuesForEnv(
 
 	// envFrom hierarchy is shared with the consumer app — the wrapper
 	// can opt into it but isn't required to.
-	np := secrets.NamingParams{
-		Org:     orgName,
-		Env:     envName,
-		Project: app.ProjectName,
-		App:     app.Name,
-		Cluster: cluster,
-	}
-	cms, secs := envFromLists(
-		app.ProjectName, app.Name, envName, cluster,
-		naming.RenderAppResource(np),
-		naming.RenderAppConfigMap(np),
-		backend,
-	)
+	cms, secs := envFromLists(app.ProjectName, app.Name, envName, cluster)
 
 	return AddonInstanceValues{
 		App: AppContext{

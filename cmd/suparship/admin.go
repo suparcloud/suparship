@@ -61,6 +61,7 @@ func runAdminBootstrap(cmd *cobra.Command, _ []string) error {
 	force, _ := cmd.Flags().GetBool("force")
 	kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
 	kubecontext, _ := cmd.Root().PersistentFlags().GetString("context")
+	secretRef := adminSecretRefFromFlags(cmd)
 
 	client, err := k8s.NewClientset(kubeconfig, kubecontext)
 	if err != nil {
@@ -68,13 +69,13 @@ func runAdminBootstrap(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Ensure namespace exists.
-	if err := k8s.EnsureNamespace(ctx, client, auth.SecretNamespace); err != nil {
+	if err := k8s.EnsureNamespace(ctx, client, secretRef.Namespace); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  Namespace %s ready\n", auth.SecretNamespace)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Namespace %s ready\n", secretRef.Namespace)
 
 	// Check for existing secret.
-	existing, err := auth.GetAdminSecret(ctx, client)
+	existing, err := auth.GetAdminSecret(ctx, client, secretRef)
 	if err != nil {
 		return err
 	}
@@ -94,11 +95,11 @@ func runAdminBootstrap(cmd *cobra.Command, _ []string) error {
 
 	// Create or update the secret.
 	if existing != nil {
-		if err := auth.UpdateAdminSecret(ctx, client, creds); err != nil {
+		if err := auth.UpdateAdminSecret(ctx, client, secretRef, creds); err != nil {
 			return err
 		}
 	} else {
-		if err := auth.CreateAdminSecret(ctx, client, creds); err != nil {
+		if err := auth.CreateAdminSecret(ctx, client, secretRef, creds); err != nil {
 			return err
 		}
 	}
@@ -131,13 +132,14 @@ func runAdminResetPassword(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
 	kubecontext, _ := cmd.Root().PersistentFlags().GetString("context")
+	secretRef := adminSecretRefFromFlags(cmd)
 
 	client, err := k8s.NewClientset(kubeconfig, kubecontext)
 	if err != nil {
 		return fmt.Errorf("connecting to cluster: %w", err)
 	}
 
-	existing, err := auth.GetAdminSecret(ctx, client)
+	existing, err := auth.GetAdminSecret(ctx, client, secretRef)
 	if err != nil {
 		return err
 	}
@@ -163,7 +165,7 @@ func runAdminResetPassword(cmd *cobra.Command, _ []string) error {
 		PasswordHash: hash,
 	}
 
-	if err := auth.UpdateAdminSecret(ctx, client, creds); err != nil {
+	if err := auth.UpdateAdminSecret(ctx, client, secretRef, creds); err != nil {
 		return err
 	}
 

@@ -2,80 +2,134 @@ package secrets
 
 import "fmt"
 
+// ── Vault names (physical storage) ────────────────────────────────────────
+//
+// For the k8s backend a "vault" is a namespace; for 1Password it is a real
+// vault (these helpers give the k8s namespace / the conventional 1Password
+// vault title). One global vault, one vault per environment, one per cluster.
+
 const (
-	secretsOrgName       = "suparship-secrets-org"
-	secretsEnvPrefix     = "suparship-secrets-envtype-"
-	secretsProjPrefix    = "suparship-secrets-project-"
-	secretsAppPrefix     = "suparship-secrets-app-"
-	secretsClusterPrefix = "suparship-secrets-cluster-"
-	secretsAppEnvFmt     = "suparship-secrets-%s-%s-%s"
+	globalVaultName   = "suparship-secrets-global"
+	envVaultPrefix    = "suparship-secrets-env-"
+	clusterVaultPrefix = "suparship-secrets-cluster-"
 
 	configAppEnvFmt = "suparship-config-%s-%s-%s"
 )
 
-// OrgSecretName returns the K8s Secret name for org-level secrets.
-// Stored in suparship-system, replicated to all app namespaces.
-func OrgSecretName() string { return secretsOrgName }
+// GlobalVaultName returns the vault name for global-scope secrets.
+func GlobalVaultName() string { return globalVaultName }
 
-// EnvTypeSecretName returns the K8s Secret name for environment-type secrets
-// (e.g. "staging", "prod").
-func EnvTypeSecretName(envType string) string {
-	return secretsEnvPrefix + envType
+// EnvVaultName returns the vault name for an environment's secrets.
+func EnvVaultName(env string) string { return envVaultPrefix + env }
+
+// ClusterVaultName returns the vault name for a cluster's secrets.
+func ClusterVaultName(cluster string) string { return clusterVaultPrefix + cluster }
+
+// VaultName returns the vault name for the given scope.
+func VaultName(scope Scope) string {
+	switch scope.Kind {
+	case ScopeEnv:
+		return EnvVaultName(scope.Env)
+	case ScopeCluster:
+		return ClusterVaultName(scope.Cluster)
+	default:
+		return GlobalVaultName()
+	}
 }
 
-// ProjectSecretName returns the K8s Secret name for project-level secrets.
-func ProjectSecretName(project string) string {
-	return secretsProjPrefix + project
+// ── Item names (a vault holds a shared item plus one item per app) ─────────
+
+// scopeSuffix renders the scope-specific tail used in item and store names:
+// "global", "env-<env>", or "cluster-<cluster>".
+func scopeSuffix(scope Scope) string {
+	switch scope.Kind {
+	case ScopeEnv:
+		return "env-" + scope.Env
+	case ScopeCluster:
+		return "cluster-" + scope.Cluster
+	default:
+		return "global"
+	}
 }
 
-// AppLevelSecretName returns the K8s Secret name for app-level secrets
-// (shared across all environments of the app). Stored in suparship-system.
-func AppLevelSecretName(project, app string) string {
-	return fmt.Sprintf("%s%s-%s", secretsAppPrefix, project, app)
+// SharedItemName returns the item name for the org-admin shared tier in a
+// scope's vault (e.g. "shared-global", "shared-env-staging").
+func SharedItemName(scope Scope) string {
+	return "shared-" + scopeSuffix(scope)
 }
 
-// ClusterSecretName returns the K8s Secret name for cluster-level secrets.
-// Stored in suparship-system, replicated to namespaces of apps deployed to
-// the named cluster.
-func ClusterSecretName(cluster string) string {
-	return secretsClusterPrefix + cluster
+// AppItemName returns the item name for one app's secrets in a scope's vault
+// (e.g. "myapp-global", "myapp-env-staging", "myapp-cluster-prod-us").
+func AppItemName(scope Scope, app string) string {
+	return app + "-" + scopeSuffix(scope)
 }
 
-// AppEnvSecretName returns the deterministic K8s Secret name for an app's
-// per-environment secrets. Templates reference this via
-// {{ .Values.suparship.secretName }}.
-//
-// Pattern: suparship-secrets-{project}-{app}-{env}
-func AppEnvSecretName(project, app, env string) string {
-	return fmt.Sprintf(secretsAppEnvFmt, project, app, env)
+// ItemName returns the item name for the given (scope, tier, app). For the
+// shared tier app is ignored.
+func ItemName(scope Scope, tier Tier, app string) string {
+	if tier == TierApp {
+		return AppItemName(scope, app)
+	}
+	return SharedItemName(scope)
 }
 
-// AppSecretName is an alias for AppEnvSecretName for backward compatibility.
-func AppSecretName(project, app, env string) string {
-	return AppEnvSecretName(project, app, env)
+// ── ClusterSecretStore names (one ESO store per vault/scope) ───────────────
+
+// StoreName returns the ClusterSecretStore name for the given scope.
+func StoreName(scope Scope) string {
+	return "suparship-store-" + scopeSuffix(scope)
 }
+
+// GlobalStoreName returns the ClusterSecretStore name for the global vault.
+func GlobalStoreName() string { return StoreName(GlobalScope()) }
+
+// EnvStoreName returns the ClusterSecretStore name for an env vault.
+func EnvStoreName(env string) string { return StoreName(EnvScope(env)) }
+
+// ClusterStoreName returns the ClusterSecretStore name for a cluster vault.
+func ClusterStoreName(cluster string) string { return StoreName(ClusterScope(cluster)) }
+
+// ── Workload secret names (the 3 K8s Secrets mounted into each app pod) ────
+
+// WorkloadGlobalSecretName returns the K8s Secret name ESO materializes in the
+// app namespace for global-scope secrets.
+func WorkloadGlobalSecretName(app string) string { return app + "-global" }
+
+// WorkloadEnvSecretName returns the K8s Secret name for env-scope secrets.
+func WorkloadEnvSecretName(app string) string { return app + "-env" }
+
+// WorkloadClusterSecretName returns the K8s Secret name for cluster-scope secrets.
+func WorkloadClusterSecretName(app string) string { return app + "-cluster" }
+
+// WorkloadSecretName returns the materialized K8s Secret name for the given
+// scope and app.
+func WorkloadSecretName(scope Scope, app string) string {
+	switch scope.Kind {
+	case ScopeEnv:
+		return WorkloadEnvSecretName(app)
+	case ScopeCluster:
+		return WorkloadClusterSecretName(app)
+	default:
+		return WorkloadGlobalSecretName(app)
+	}
+}
+
+// ── ConfigMap naming (non-secret env vars; unchanged) ──────────────────────
 
 // SecretNameForNamespace returns the K8s Secret name for an app's secrets
-// derived from the resolved namespace. Use this variant when the caller has
-// already resolved the Kubernetes namespace (e.g. via domain.ResolveNamespace)
-// so the secretName is consistent with the namespace name.
-//
-// Pattern: suparship-secrets-{namespace}
+// derived from the resolved namespace.
 func SecretNameForNamespace(namespace string) string {
 	return "suparship-secrets-" + namespace
 }
 
 // ConfigNameForNamespace returns the K8s ConfigMap name for an app's config
 // derived from the resolved namespace.
-//
-// Pattern: suparship-config-{namespace}
 func ConfigNameForNamespace(namespace string) string {
 	return "suparship-config-" + namespace
 }
 
 // AppConfigName returns the deterministic ConfigMap name for an app's
-// non-secret config in a given environment. Templates reference this name
-// via {{ .Values.suparship.configName }}.
+// non-secret config in a given environment.
 //
 // Pattern: suparship-config-{project}-{app}-{env}
 func AppConfigName(project, app, env string) string {
