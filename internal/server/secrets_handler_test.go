@@ -172,12 +172,13 @@ func TestResolvedSecrets(t *testing.T) {
 	}
 }
 
-// TestRegisterEnvVault_NotImplemented locks the 5b stub behavior.
-func TestRegisterEnvVault_NotImplemented(t *testing.T) {
+// TestRegisterEnvVault_RequiresOnePassword verifies env-vault registration is
+// rejected on the default k8s backend (the harness uses MemVaultStore / k8s).
+func TestRegisterEnvVault_RequiresOnePassword(t *testing.T) {
 	mux, ah := newSecretsMux()
 	rec := do(t, mux, ah, "POST", "/api/v1/org/secret-backend/vaults/env/staging", "alice", "org_admin",
-		map[string]string{"vaultId": "v1"})
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d: %s", rec.Code, rec.Body.String())
+		map[string]string{"vaultId": "v1", "connectToken": "tok"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 (1Password backend required), got %d: %s", rec.Code, rec.Body.String())
 	}
 }

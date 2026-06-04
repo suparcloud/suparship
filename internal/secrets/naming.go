@@ -9,8 +9,8 @@ import "fmt"
 // vault title). One global vault, one vault per environment, one per cluster.
 
 const (
-	globalVaultName   = "suparship-secrets-global"
-	envVaultPrefix    = "suparship-secrets-env-"
+	globalVaultName    = "suparship-secrets-global"
+	envVaultPrefix     = "suparship-secrets-env-"
 	clusterVaultPrefix = "suparship-secrets-cluster-"
 
 	configAppEnvFmt = "suparship-config-%s-%s-%s"
@@ -51,6 +51,10 @@ func scopeSuffix(scope Scope) string {
 		return "global"
 	}
 }
+
+// ScopeKey returns the scope-specific suffix used to key per-scope resources
+// (file names, sealed-token names): "global", "env-<env>", "cluster-<cluster>".
+func ScopeKey(scope Scope) string { return scopeSuffix(scope) }
 
 // SharedItemName returns the item name for the org-admin shared tier in a
 // scope's vault (e.g. "shared-global", "shared-env-staging").

@@ -265,37 +265,26 @@ func NewSealPublisherHolder(initial SealedTokenPublisher) *SealPublisherHolder {
 	return &SealPublisherHolder{p: initial}
 }
 
-// PublishSealedReadToken implements SealedTokenPublisher.
-func (h *SealPublisherHolder) PublishSealedReadToken(ctx context.Context, params gitops.SealedReadTokenPublishParams) error {
+// PublishClusterSecretStores implements SealedTokenPublisher.
+func (h *SealPublisherHolder) PublishClusterSecretStores(ctx context.Context, params gitops.ClusterSealParams) error {
 	h.mu.RLock()
 	p := h.p
 	h.mu.RUnlock()
 	if p == nil {
 		return nil
 	}
-	return p.PublishSealedReadToken(ctx, params)
+	return p.PublishClusterSecretStores(ctx, params)
 }
 
-// DeleteSealedReadToken implements SealedTokenPublisher.
-func (h *SealPublisherHolder) DeleteSealedReadToken(ctx context.Context, params gitops.DeleteSealedReadTokenParams) error {
+// DeleteClusterSecretStores implements SealedTokenPublisher.
+func (h *SealPublisherHolder) DeleteClusterSecretStores(ctx context.Context, clusterName string) error {
 	h.mu.RLock()
 	p := h.p
 	h.mu.RUnlock()
 	if p == nil {
 		return nil
 	}
-	return p.DeleteSealedReadToken(ctx, params)
-}
-
-// RefreshSecretStore implements SealedTokenPublisher.
-func (h *SealPublisherHolder) RefreshSecretStore(ctx context.Context, params gitops.RefreshSecretStoreParams) error {
-	h.mu.RLock()
-	p := h.p
-	h.mu.RUnlock()
-	if p == nil {
-		return nil
-	}
-	return p.RefreshSecretStore(ctx, params)
+	return p.DeleteClusterSecretStores(ctx, clusterName)
 }
 
 // Swap replaces the inner publisher atomically.

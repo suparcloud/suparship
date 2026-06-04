@@ -137,16 +137,25 @@ spec:
 }
 
 // BuildSecretStoresForConfig returns the full desired set of ClusterSecretStores
-// for the backend: one global store plus one per environment and per cluster.
-// For 1Password, scopes without a provisioned vault are skipped. Pass the
-// complete env/cluster lists — WriteSecretStores prunes any store not returned.
+// to publish to _infra/secret-stores/ (synced to the tooling cluster): one
+// global store plus one per environment and per cluster. Pass the complete
+// env/cluster lists — WriteSecretStores prunes any store not returned.
+//
+// Only the k8s backend emits stores here: its "vault" is a namespace on the
+// tooling cluster, so the stores belong there. 1Password stores are
+// per-workload-cluster (they reference a sealed Connect-token Secret that only
+// exists on the target cluster) and are published by PublishClusterSecretStores
+// via the per-cluster sealing flow — emitting them here would target the wrong
+// cluster.
 func BuildSecretStoresForConfig(
 	cfg secrets.BackendConfig,
 	envNames []string,
 	clusterNames []string,
 	brand branding.Config,
 ) []ESOSecretStoreConfig {
-	backend := cfg.Effective()
+	if cfg.Effective() != secrets.BackendK8s {
+		return nil
+	}
 	scopes := []secrets.Scope{secrets.GlobalScope()}
 	for _, e := range envNames {
 		scopes = append(scopes, secrets.EnvScope(e))
@@ -155,18 +164,9 @@ func BuildSecretStoresForConfig(
 		scopes = append(scopes, secrets.ClusterScope(c))
 	}
 
-	var out []ESOSecretStoreConfig
+	out := make([]ESOSecretStoreConfig, 0, len(scopes))
 	for _, scope := range scopes {
-		sc := ESOSecretStoreConfig{Scope: scope, BackendType: backend, Branding: brand}
-		if backend == secrets.Backend1Password {
-			ref := cfg.FindVault(scope)
-			if ref == nil || ref.VaultID == "" {
-				continue // no vault provisioned for this scope yet
-			}
-			sc.VaultID = ref.VaultID
-			sc.ConnectEndpoint = ref.ConnectEndpoint
-		}
-		out = append(out, sc)
+		out = append(out, ESOSecretStoreConfig{Scope: scope, BackendType: secrets.BackendK8s, Branding: brand})
 	}
 	return out
 }

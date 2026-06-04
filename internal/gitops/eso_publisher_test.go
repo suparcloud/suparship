@@ -83,14 +83,15 @@ func TestBuildSecretStoresForConfig_K8s(t *testing.T) {
 	}
 }
 
-func TestBuildSecretStoresForConfig_1PasswordSkipsUnprovisioned(t *testing.T) {
+func TestBuildSecretStoresForConfig_1PasswordEmitsNoInfraStores(t *testing.T) {
+	// 1Password stores are per-workload-cluster (published via the sealing
+	// flow), never to _infra/secret-stores/. The _infra builder must return
+	// nothing for the 1Password backend.
 	cfg := secrets.BackendConfig{Type: secrets.Backend1Password}
 	cfg.UpsertVault(secrets.GlobalScope(), secrets.VaultRef{VaultID: "g1"})
-	cfg.UpsertVault(secrets.EnvScope("prod"), secrets.VaultRef{VaultID: "e1"})
-	// env "staging" has no vault → skipped.
-	stores := BuildSecretStoresForConfig(cfg, []string{"staging", "prod"}, nil, branding.Config{})
-	if len(stores) != 2 {
-		t.Fatalf("expected 2 stores (global + prod), got %d", len(stores))
+	stores := BuildSecretStoresForConfig(cfg, []string{"staging", "prod"}, []string{"c1"}, branding.Config{})
+	if len(stores) != 0 {
+		t.Fatalf("expected 0 _infra stores for 1Password, got %d", len(stores))
 	}
 }
 

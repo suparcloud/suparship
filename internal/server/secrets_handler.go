@@ -67,11 +67,11 @@ type SATokenStore interface {
 // SAClientFactory creates an SAClient from a token. Used for validation on paste.
 type SAClientFactory func(ctx context.Context, token string) (onepassword.SAClient, error)
 
-// SealedTokenPublisher publishes sealed Connect tokens to the GitOps repo.
+// SealedTokenPublisher publishes a cluster's sealed Connect tokens +
+// ClusterSecretStores to the GitOps repo (one ArgoCD app per cluster).
 type SealedTokenPublisher interface {
-	PublishSealedReadToken(ctx context.Context, params gitops.SealedReadTokenPublishParams) error
-	DeleteSealedReadToken(ctx context.Context, params gitops.DeleteSealedReadTokenParams) error
-	RefreshSecretStore(ctx context.Context, params gitops.RefreshSecretStoreParams) error
+	PublishClusterSecretStores(ctx context.Context, params gitops.ClusterSealParams) error
+	DeleteClusterSecretStores(ctx context.Context, clusterName string) error
 }
 
 // ClusterKubeBuilder builds a Kubernetes client for a registered cluster.
@@ -264,6 +264,11 @@ func (h *secretsHandler) handleListVaults(w http.ResponseWriter, r *http.Request
 type SetGlobalVaultRequest struct {
 	VaultID   string `json:"vaultId"`
 	VaultName string `json:"vaultName,omitempty"`
+	// ConnectToken, when provided, is stashed and sealed onto every registered
+	// cluster so each cluster's ESO can read the global vault. Required for the
+	// global scope to actually resolve on the 1Password backend.
+	ConnectToken    string `json:"connectToken,omitempty"`
+	ConnectEndpoint string `json:"connectEndpoint,omitempty"`
 }
 
 // handleSetGlobalVault persists the operator's choice of global vault (the
@@ -313,13 +318,36 @@ func (h *secretsHandler) handleSetGlobalVault(w http.ResponseWriter, r *http.Req
 		resolvedName = req.VaultName
 	}
 	org.SecretBackend.UpsertVault(secrets.GlobalScope(), secrets.VaultRef{
-		VaultID:   info.ID,
-		VaultName: resolvedName,
+		VaultID:         info.ID,
+		VaultName:       resolvedName,
+		ConnectEndpoint: req.ConnectEndpoint,
+		Provisioned:     req.ConnectToken != "",
 	})
 	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist org"})
 		return
 	}
+
+	// When a Connect token is supplied, stash it and seal the global vault onto
+	// every registered cluster so each cluster's ESO can read it. Best-effort
+	// per cluster — a failure is logged, not fatal to the save.
+	if req.ConnectToken != "" {
+		if h.kubeClient != nil {
+			if err := secrets.StashConnectToken(ctx, h.kubeClient, secrets.ScopeKey(secrets.GlobalScope()), []byte(req.ConnectToken)); err != nil {
+				h.logger.Warn("global vault: token stash failed (self-heal degraded)", "error", err)
+			}
+		}
+		if h.sealPublisher != nil && h.clusterStore != nil {
+			if clusters, err := h.clusterStore.ListClusters(ctx); err == nil {
+				for _, c := range clusters {
+					if err := h.sealClusterScopes(ctx, org, c.Name); err != nil {
+						h.logger.Warn("global vault: sealing to cluster failed", "cluster", c.Name, "error", err)
+					}
+				}
+			}
+		}
+	}
+
 	h.logger.Info("global vault set", "vaultID", info.ID, "vaultTitle", resolvedName)
 	writeJSON(w, http.StatusOK, map[string]string{"vaultId": info.ID, "vaultName": resolvedName})
 }
@@ -327,7 +355,7 @@ func (h *secretsHandler) handleSetGlobalVault(w http.ResponseWriter, r *http.Req
 // ── Env/cluster vault provisioning (1Password) ──────────────────────────────
 
 // RegisterVaultRequest registers a 1Password vault for an env or cluster scope
-// and (when implemented) seals its Connect token for the target cluster.
+// and seals its Connect token onto the affected cluster(s).
 type RegisterVaultRequest struct {
 	VaultID         string `json:"vaultId"`
 	VaultName       string `json:"vaultName"`
@@ -335,28 +363,197 @@ type RegisterVaultRequest struct {
 	ConnectEndpoint string `json:"connectEndpoint,omitempty"`
 }
 
-// handleRegisterEnvVault is the env-scope vault provisioning entrypoint.
-//
-// TODO(5b): seal the Connect token with the target cluster's sealing cert and
-// publish the per-cluster ClusterSecretStore + ArgoCD Application via
-// sealPublisher, mirroring the legacy binding flow but for the env-scope vault.
+// handleRegisterEnvVault registers the env-scope vault and seals its Connect
+// token onto the cluster the environment is bound to.
 func (h *secretsHandler) handleRegisterEnvVault(w http.ResponseWriter, r *http.Request) {
-	h.stubProvisioning(w, "env", r.PathValue("env"))
+	env := r.PathValue("env")
+	h.registerVault(w, r, secrets.EnvScope(env))
 }
 
-// handleRegisterClusterVault is the cluster-scope vault provisioning entrypoint.
-//
-// TODO(5b): seal + publish the cluster-scope vault's Connect token. Cluster-scope
-// sealing is new in the 3-scope model and has no legacy equivalent.
+// handleRegisterClusterVault registers the cluster-scope vault and seals its
+// Connect token onto that cluster.
 func (h *secretsHandler) handleRegisterClusterVault(w http.ResponseWriter, r *http.Request) {
-	h.stubProvisioning(w, "cluster", r.PathValue("cluster"))
+	cluster := r.PathValue("cluster")
+	h.registerVault(w, r, secrets.ClusterScope(cluster))
 }
 
-func (h *secretsHandler) stubProvisioning(w http.ResponseWriter, scopeKind, key string) {
-	h.logger.Warn("1Password vault provisioning not yet implemented", "scope", scopeKind, "key", key)
-	writeJSON(w, http.StatusNotImplemented, errorResponse{
-		Error: "1Password Connect-token sealing/provisioning is not yet implemented in the 3-scope model (tracked as a follow-up); the k8s backend is fully supported",
+// registerVault validates a 1Password vault, persists its VaultRef, stashes the
+// Connect token, and seals it onto the affected cluster(s). For an env vault
+// the affected cluster is the env's bound cluster; for a cluster vault it is
+// that cluster.
+func (h *secretsHandler) registerVault(w http.ResponseWriter, r *http.Request, scope secrets.Scope) {
+	var req RegisterVaultRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.VaultID == "" || req.ConnectToken == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "vaultId and connectToken are required"})
+		return
+	}
+	ctx := r.Context()
+	org, err := h.orgStore.GetOrg(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	if org.SecretBackend.Effective() != secrets.Backend1Password {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "vault registration requires the 1Password backend"})
+		return
+	}
+	if h.sealPublisher == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "gitops publisher not configured"})
+		return
+	}
+
+	// Validate the vault is reachable by the stored SA token.
+	if err := h.validateVault(ctx, req.VaultID); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
+	// Persist the vault ref + stash the token (best-effort stash).
+	org.SecretBackend.UpsertVault(scope, secrets.VaultRef{
+		VaultID:                req.VaultID,
+		VaultName:              req.VaultName,
+		ConnectEndpoint:        req.ConnectEndpoint,
+		ClusterSecretStoreName: secrets.StoreName(scope),
+		Provisioned:            true,
 	})
+	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist org"})
+		return
+	}
+	if h.kubeClient != nil {
+		if err := secrets.StashConnectToken(ctx, h.kubeClient, secrets.ScopeKey(scope), []byte(req.ConnectToken)); err != nil {
+			h.logger.Warn("register vault: token stash failed (self-heal degraded)", "scope", secrets.ScopeKey(scope), "error", err)
+		}
+	}
+
+	// Determine which cluster(s) this scope's token must be sealed onto and
+	// reconcile each. Env → its bound cluster; cluster → itself.
+	var targets []string
+	switch scope.Kind {
+	case secrets.ScopeEnv:
+		if c := orgEnvCluster(org, scope.Env); c != "" {
+			targets = append(targets, c)
+		}
+	case secrets.ScopeCluster:
+		targets = append(targets, scope.Cluster)
+	}
+	if len(targets) == 0 {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"vaultId": req.VaultID,
+			"status":  "saved (no bound cluster yet; token will be sealed when a cluster is assigned)",
+		})
+		return
+	}
+	for _, cluster := range targets {
+		if err := h.sealClusterScopes(ctx, org, cluster); err != nil {
+			h.logger.Error("register vault: sealing failed", "cluster", cluster, "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "vault saved but sealing failed: " + err.Error()})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"vaultId": req.VaultID, "status": "provisioned"})
+}
+
+// validateVault confirms the vault is accessible to the stored SA token.
+func (h *secretsHandler) validateVault(ctx context.Context, vaultID string) error {
+	if h.saTokenStore == nil || h.saClientFactory == nil {
+		return fmt.Errorf("1Password client not configured")
+	}
+	token, err := h.saTokenStore.LoadToken(ctx)
+	if err != nil || token == "" {
+		return fmt.Errorf("SA token not saved yet — paste it first")
+	}
+	client, err := h.saClientFactory(ctx, token)
+	if err != nil {
+		return fmt.Errorf("failed to create 1Password client: %w", err)
+	}
+	if _, err := client.GetVault(ctx, vaultID); err != nil {
+		return fmt.Errorf("vault not accessible to the stored SA token: %w", err)
+	}
+	return nil
+}
+
+// sealClusterScopes seals, onto clusterName, the Connect tokens for every vault
+// the cluster's apps read: the global vault, the env vault of each environment
+// bound to the cluster, and the cluster's own vault. Tokens come from the
+// stash; scopes without a provisioned vault or a stashed token are skipped.
+func (h *secretsHandler) sealClusterScopes(ctx context.Context, org *rbac.Org, clusterName string) error {
+	if h.sealPublisher == nil {
+		return fmt.Errorf("seal publisher not configured")
+	}
+	if h.clusterStore == nil {
+		return fmt.Errorf("cluster store not configured")
+	}
+	cluster, err := h.clusterStore.GetCluster(ctx, clusterName)
+	if err != nil {
+		return fmt.Errorf("get cluster %q: %w", clusterName, err)
+	}
+	if cluster.APIServer == "" {
+		return fmt.Errorf("cluster %q has no apiServer", clusterName)
+	}
+	cert, err := h.fetchFreshCert(ctx, clusterName)
+	if err != nil {
+		return fmt.Errorf("fetch sealing cert for %q: %w", clusterName, err)
+	}
+
+	// Build the set of scopes this cluster reads.
+	scopes := []secrets.Scope{secrets.GlobalScope()}
+	for _, e := range org.Environments {
+		if e.EffectiveClusterRef() == clusterName {
+			scopes = append(scopes, secrets.EnvScope(e.Name))
+		}
+	}
+	scopes = append(scopes, secrets.ClusterScope(clusterName))
+
+	var tokens []gitops.ScopeToken
+	for _, scope := range scopes {
+		ref := org.SecretBackend.FindVault(scope)
+		if ref == nil || ref.VaultID == "" {
+			continue // vault not provisioned for this scope
+		}
+		var tokenBytes []byte
+		if h.kubeClient != nil {
+			if t, err := secrets.LoadConnectToken(ctx, h.kubeClient, secrets.ScopeKey(scope)); err == nil {
+				tokenBytes = t
+			}
+		}
+		if len(tokenBytes) == 0 {
+			h.logger.Warn("seal cluster: no stashed token for scope, skipping",
+				"cluster", clusterName, "scope", secrets.ScopeKey(scope))
+			continue
+		}
+		tokens = append(tokens, gitops.ScopeToken{
+			Scope:           scope,
+			VaultID:         ref.VaultID,
+			Token:           tokenBytes,
+			ConnectEndpoint: ref.ConnectEndpoint,
+		})
+	}
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	return h.sealPublisher.PublishClusterSecretStores(ctx, gitops.ClusterSealParams{
+		ClusterName:       clusterName,
+		ArgoCDDestination: cluster.APIServer,
+		ESONamespace:      cluster.EffectiveESONamespace(),
+		Cert:              cert,
+		Scopes:            tokens,
+	})
+}
+
+// orgEnvCluster returns the cluster bound to envName, or "".
+func orgEnvCluster(org *rbac.Org, envName string) string {
+	for _, e := range org.Environments {
+		if e.Name == envName {
+			return e.EffectiveClusterRef()
+		}
+	}
+	return ""
 }
 
 // ── Generic secret CRUD across scopes/tiers ──────────────────────────────────
@@ -518,17 +715,6 @@ func (h *secretsHandler) fetchOrLoadCert(ctx context.Context, clusterName string
 		return nil, fmt.Errorf("fetching sealing cert from cluster %q: %w", clusterName, err)
 	}
 	return pemBytes, nil
-}
-
-// resolveConnectEndpoint returns the Connect server URL to use for sealing.
-func resolveConnectEndpoint(reqEndpoint string, org *rbac.Org) string {
-	if reqEndpoint != "" {
-		return reqEndpoint
-	}
-	if org.SecretBackend.OnePassword != nil {
-		return org.SecretBackend.OnePassword.Connect.Endpoint
-	}
-	return ""
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
