@@ -11,11 +11,13 @@ export interface SecretKeysResponse {
   secretName: string;
 }
 
-export interface EnvBinding {
-  env: string;
+// VaultRef describes one provisioned 1Password vault (global / an env / a
+// cluster). Key is the env or cluster name, empty for the global vault.
+export interface VaultRef {
+  key?: string;
   vaultId: string;
   vaultName: string;
-  provisioned: boolean;
+  provisioned?: boolean;
   lastProvisioned?: string;
   lastError?: string;
   clusterSecretStoreName?: string;
@@ -32,12 +34,9 @@ export interface ConnectStatus {
 export interface OnePasswordConfig {
   groupName: string;
   connect: ConnectStatus;
-  bindings: EnvBinding[];
-  // Platform-shared vault provisioned on SA token paste. When empty, org-
-  // and project-scope writes have nowhere to land — UI surfaces a re-paste
-  // prompt.
-  platformVaultId?: string;
-  platformVaultName?: string;
+  globalVault?: VaultRef;
+  envVaults?: VaultRef[];
+  clusterVaults?: VaultRef[];
 }
 
 export interface SecretBackendConfig {
@@ -56,26 +55,17 @@ export interface VaultInfo {
   title: string;
 }
 
-export interface BindingResponse {
-  env: string;
-  vaultId: string;
-  vaultName: string;
-  clusterSecretStoreName: string;
-  provisioned: boolean;
-  rotated: boolean;
-  error?: string;
-}
-
 export interface ResolvedSecretEntry {
   key: string;
-  source: string;
+  source: string; // "global" | "env" | "cluster"
+  tier?: string; // "shared" | "app"
 }
 
 export interface ResolvedSecretsResponse {
   secrets: ResolvedSecretEntry[];
 }
 
-// ── Backend state (GET) ─────────────────────────────────────────────────────────
+// ── Backend state ─────────────────────────────────────────────────────────────
 
 export function getSecretsBackend(): Promise<SecretBackendConfig> {
   return api.get<SecretBackendConfig>("/org/secret-backend");
@@ -87,81 +77,47 @@ export function updateSecretsBackend(
   return api.put<SecretBackendConfig>("/org/secret-backend", cfg);
 }
 
-// ── SA Token (POST) ──────────────────────────────────────────────────────────────
-
 export function saveSAToken(token: string): Promise<SATokenResponse> {
   return api.post<SATokenResponse>("/org/secret-backend/sa-token", { token });
 }
-
-// ── Vault listing ───────────────────────────────────────────────────────────────
 
 export function listVaults(): Promise<VaultInfo[]> {
   return api.get<VaultInfo[]>("/org/secret-backend/vaults");
 }
 
-// ── Bindings (Add / Remove) ─────────────────────────────────────────────────────
+// ── Global vault picker ─────────────────────────────────────────────────────
 
-export function addBinding(
-  env: string,
-  vaultId: string,
-  connectToken: string,
-  vaultName?: string,
-  connectEndpoint?: string,
-): Promise<BindingResponse> {
-  return api.post<BindingResponse>("/org/secret-backend/bindings", {
-    env,
-    vaultId,
-    vaultName: vaultName || "",
-    connectToken,
-    connectEndpoint: connectEndpoint || "",
-  });
-}
-
-export function removeBinding(env: string): Promise<void> {
-  return api.del(
-    `/org/secret-backend/bindings/${encodeURIComponent(env)}`,
-  );
-}
-
-// ── Platform vault picker ──────────────────────────────────────────────────────
-
-export interface SetPlatformVaultResponse {
+export interface SetGlobalVaultResponse {
   vaultId: string;
   vaultName: string;
 }
 
-export function setPlatformVault(
+export function setGlobalVault(
   vaultId: string,
   vaultName?: string,
-): Promise<SetPlatformVaultResponse> {
-  return api.put<SetPlatformVaultResponse>(
-    "/org/secret-backend/platform-vault",
-    { vaultId, vaultName: vaultName || "" },
-  );
+): Promise<SetGlobalVaultResponse> {
+  return api.put<SetGlobalVaultResponse>("/org/secret-backend/global-vault", {
+    vaultId,
+    vaultName: vaultName || "",
+  });
 }
 
-// ── Migration to 1Password ─────────────────────────────────────────────────────
+// ── Env/cluster vault provisioning (1Password) ──────────────────────────────
+// NOTE: backend returns 501 until 1Password Connect-token sealing is
+// reimplemented for the 3-scope model.
 
-export interface MigrateToOnePasswordRequest {
-  envTypes?: string[];
-  projects?: string[];
-  clusters?: string[];
+export function registerEnvVault(
+  env: string,
+  body: { vaultId: string; vaultName?: string; connectToken?: string; connectEndpoint?: string },
+): Promise<void> {
+  return api.post(`/org/secret-backend/vaults/env/${encodeURIComponent(env)}`, body);
 }
 
-export interface MigrateToOnePasswordResponse {
-  orgKeys: number;
-  envTypeKeys: Record<string, number>;
-  projectKeys: Record<string, number>;
-  clusterKeys: Record<string, number>;
-}
-
-export function migrateToOnePassword(
-  req: MigrateToOnePasswordRequest,
-): Promise<MigrateToOnePasswordResponse> {
-  return api.post<MigrateToOnePasswordResponse>(
-    "/org/secret-backend/migrate-to-onepassword",
-    req,
-  );
+export function registerClusterVault(
+  cluster: string,
+  body: { vaultId: string; vaultName?: string; connectToken?: string; connectEndpoint?: string },
+): Promise<void> {
+  return api.post(`/org/secret-backend/vaults/cluster/${encodeURIComponent(cluster)}`, body);
 }
 
 // ── Secret sync ────────────────────────────────────────────────────────────────
@@ -176,172 +132,71 @@ export function syncSecrets(
   );
 }
 
-// ── Org-level secrets CRUD ─────────────────────────────────────────────────────
+// ── Shared-tier secrets (org-admin) ──────────────────────────────────────────
 
-export function listOrgSecretKeys(): Promise<SecretKeysResponse> {
-  return api.get<SecretKeysResponse>("/org/secrets");
+export function listSharedGlobalSecretKeys(): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>("/org/secrets/global");
+}
+export function upsertSharedGlobalSecrets(entries: Record<string, string>): Promise<void> {
+  return api.post("/org/secrets/global", { entries });
+}
+export function deleteSharedGlobalSecretKey(key: string): Promise<void> {
+  return api.del(`/org/secrets/global/${encodeURIComponent(key)}`);
 }
 
-export function upsertOrgSecrets(entries: Record<string, string>): Promise<void> {
-  return api.post("/org/secrets", { entries });
+export function listSharedEnvSecretKeys(env: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(`/org/secrets/env/${encodeURIComponent(env)}`);
+}
+export function upsertSharedEnvSecrets(env: string, entries: Record<string, string>): Promise<void> {
+  return api.post(`/org/secrets/env/${encodeURIComponent(env)}`, { entries });
+}
+export function deleteSharedEnvSecretKey(env: string, key: string): Promise<void> {
+  return api.del(`/org/secrets/env/${encodeURIComponent(env)}/${encodeURIComponent(key)}`);
 }
 
-export function deleteOrgSecretKey(key: string): Promise<void> {
-  return api.del(`/org/secrets/${encodeURIComponent(key)}`);
+export function listSharedClusterSecretKeys(cluster: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(`/org/secrets/cluster/${encodeURIComponent(cluster)}`);
+}
+export function upsertSharedClusterSecrets(cluster: string, entries: Record<string, string>): Promise<void> {
+  return api.post(`/org/secrets/cluster/${encodeURIComponent(cluster)}`, { entries });
+}
+export function deleteSharedClusterSecretKey(cluster: string, key: string): Promise<void> {
+  return api.del(`/org/secrets/cluster/${encodeURIComponent(cluster)}/${encodeURIComponent(key)}`);
 }
 
-// ── Env-type-level secrets CRUD ────────────────────────────────────────────────
+// ── App-tier secrets (project devs) ──────────────────────────────────────────
 
-export function listEnvTypeSecretKeys(
-  envType: string,
-): Promise<SecretKeysResponse> {
-  return api.get<SecretKeysResponse>(
-    `/org/secrets/envtype/${encodeURIComponent(envType)}`,
-  );
+const appBase = (project: string, app: string) =>
+  `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/secrets`;
+
+export function listAppGlobalSecretKeys(project: string, app: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(`${appBase(project, app)}/global`);
+}
+export function upsertAppGlobalSecrets(project: string, app: string, entries: Record<string, string>): Promise<void> {
+  return api.post(`${appBase(project, app)}/global`, { entries });
+}
+export function deleteAppGlobalSecretKey(project: string, app: string, key: string): Promise<void> {
+  return api.del(`${appBase(project, app)}/global/${encodeURIComponent(key)}`);
 }
 
-export function upsertEnvTypeSecrets(
-  envType: string,
-  entries: Record<string, string>,
-): Promise<void> {
-  return api.post(
-    `/org/secrets/envtype/${encodeURIComponent(envType)}`,
-    { entries },
-  );
+export function listAppEnvSecretKeys(project: string, app: string, env: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(`${appBase(project, app)}/env/${encodeURIComponent(env)}`);
+}
+export function upsertAppEnvSecrets(project: string, app: string, env: string, entries: Record<string, string>): Promise<void> {
+  return api.post(`${appBase(project, app)}/env/${encodeURIComponent(env)}`, { entries });
+}
+export function deleteAppEnvSecretKey(project: string, app: string, env: string, key: string): Promise<void> {
+  return api.del(`${appBase(project, app)}/env/${encodeURIComponent(env)}/${encodeURIComponent(key)}`);
 }
 
-export function deleteEnvTypeSecretKey(
-  envType: string,
-  key: string,
-): Promise<void> {
-  return api.del(
-    `/org/secrets/envtype/${encodeURIComponent(envType)}/${encodeURIComponent(key)}`,
-  );
+export function listAppClusterSecretKeys(project: string, app: string, cluster: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(`${appBase(project, app)}/cluster/${encodeURIComponent(cluster)}`);
 }
-
-// ── Cluster-level secrets CRUD ─────────────────────────────────────────────────
-
-export function listClusterSecretKeys(
-  cluster: string,
-): Promise<SecretKeysResponse> {
-  return api.get<SecretKeysResponse>(
-    `/clusters/${encodeURIComponent(cluster)}/secrets`,
-  );
+export function upsertAppClusterSecrets(project: string, app: string, cluster: string, entries: Record<string, string>): Promise<void> {
+  return api.post(`${appBase(project, app)}/cluster/${encodeURIComponent(cluster)}`, { entries });
 }
-
-export function upsertClusterSecrets(
-  cluster: string,
-  entries: Record<string, string>,
-): Promise<void> {
-  return api.post(
-    `/clusters/${encodeURIComponent(cluster)}/secrets`,
-    { entries },
-  );
-}
-
-export function deleteClusterSecretKey(
-  cluster: string,
-  key: string,
-): Promise<void> {
-  return api.del(
-    `/clusters/${encodeURIComponent(cluster)}/secrets/${encodeURIComponent(key)}`,
-  );
-}
-
-// ── Project-level secrets CRUD ─────────────────────────────────────────────────
-
-export function listProjectSecretKeys(
-  project: string,
-): Promise<SecretKeysResponse> {
-  return api.get<SecretKeysResponse>(
-    `/projects/${encodeURIComponent(project)}/secrets`,
-  );
-}
-
-export function upsertProjectSecrets(
-  project: string,
-  entries: Record<string, string>,
-): Promise<void> {
-  return api.post(
-    `/projects/${encodeURIComponent(project)}/secrets`,
-    { entries },
-  );
-}
-
-export function deleteProjectSecretKey(
-  project: string,
-  key: string,
-): Promise<void> {
-  return api.del(
-    `/projects/${encodeURIComponent(project)}/secrets/${encodeURIComponent(key)}`,
-  );
-}
-
-// ── App-level secrets CRUD ─────────────────────────────────────────────────────
-
-export function listAppSecretKeys(
-  project: string,
-  app: string,
-): Promise<SecretKeysResponse> {
-  return api.get<SecretKeysResponse>(
-    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/secrets`,
-  );
-}
-
-export function upsertAppSecrets(
-  project: string,
-  app: string,
-  entries: Record<string, string>,
-): Promise<void> {
-  return api.post(
-    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/secrets`,
-    { entries },
-  );
-}
-
-export function deleteAppSecretKey(
-  project: string,
-  app: string,
-  key: string,
-): Promise<void> {
-  return api.del(
-    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/secrets/${encodeURIComponent(key)}`,
-  );
-}
-
-// ── App-env secrets CRUD ───────────────────────────────────────────────────────
-
-export function listSecretKeys(
-  project: string,
-  app: string,
-  env: string,
-): Promise<SecretKeysResponse> {
-  return api.get<SecretKeysResponse>(
-    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/secrets`,
-  );
-}
-
-export function upsertSecrets(
-  project: string,
-  app: string,
-  env: string,
-  entries: Record<string, string>,
-): Promise<void> {
-  return api.post(
-    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/secrets`,
-    { entries },
-  );
-}
-
-export function deleteSecretKey(
-  project: string,
-  app: string,
-  env: string,
-  key: string,
-): Promise<void> {
-  return api.del(
-    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/secrets/${encodeURIComponent(key)}`,
-  );
+export function deleteAppClusterSecretKey(project: string, app: string, cluster: string, key: string): Promise<void> {
+  return api.del(`${appBase(project, app)}/cluster/${encodeURIComponent(cluster)}/${encodeURIComponent(key)}`);
 }
 
 // ── Resolved secrets ───────────────────────────────────────────────────────────

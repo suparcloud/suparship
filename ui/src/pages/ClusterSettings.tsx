@@ -12,9 +12,9 @@ import {
   updateClusterEnvConfig,
 } from "../lib/envconfig";
 import {
-  deleteClusterSecretKey,
-  listClusterSecretKeys,
-  upsertClusterSecrets,
+  deleteSharedClusterSecretKey,
+  listSharedClusterSecretKeys,
+  upsertSharedClusterSecrets,
 } from "../lib/secrets";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
@@ -286,11 +286,11 @@ function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
       />
       <SecretEditor
         key={`secrets-${cluster.name}`}
-        title={`Secrets for cluster "${cluster.name}"`}
-        description="Secret values applied to every app deployed onto this cluster."
-        fetchFn={() => listClusterSecretKeys(cluster.name)}
-        upsertFn={(entries) => upsertClusterSecrets(cluster.name, entries)}
-        deleteFn={(key) => deleteClusterSecretKey(cluster.name, key)}
+        title={`Shared cluster secrets for "${cluster.name}"`}
+        description="Shared secrets applied to every app deployed onto this cluster (cluster scope). App-level cluster secrets override these."
+        fetchFn={() => listSharedClusterSecretKeys(cluster.name)}
+        upsertFn={(entries) => upsertSharedClusterSecrets(cluster.name, entries)}
+        deleteFn={(key) => deleteSharedClusterSecretKey(cluster.name, key)}
       />
     </div>
   );
