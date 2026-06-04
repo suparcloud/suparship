@@ -336,8 +336,8 @@ func TestBuildArgoApplication_Determinism(t *testing.T) {
 		Namespace:   "demo-hello-staging",
 	}
 	opts := gitops.BuildOptions{
-		RepoURL:      "https://github.com/org/gitops",
-		ValuesFiles:  []string{"values.yaml"},
+		RepoURL:       "https://github.com/org/gitops",
+		ValuesFiles:   []string{"values.yaml"},
 		SyncAutomated: true,
 	}
 
@@ -654,18 +654,18 @@ func TestBuildArgoExternalAppSet_ChartSourceShape(t *testing.T) {
 	}
 }
 
-// TestBuildArgoExternalAppSet_MultiSource verifies the AppSet emits
-// multi-source Applications: values ref + chart from registry +
-// per-app platform manifests.
+// TestBuildArgoExternalAppSet_MultiSource verifies the external-mode AppSet
+// emits values-ref + registry-chart sources only. Platform manifests are
+// shipped by the separate platform ApplicationSet, not bundled here.
 func TestBuildArgoExternalAppSet_MultiSource(t *testing.T) {
 	env := gitops.AppSetEnv{EnvName: "staging", ClusterServer: "https://kubernetes.default.svc"}
 	appSet := gitops.BuildArgoExternalAppSet(env, "https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
 
 	sources := appSet.Spec.Template.Spec.Sources
-	if len(sources) != 3 {
-		t.Fatalf("expected 3 sources (values ref, chart, platform manifests), got %d: %+v", len(sources), sources)
+	if len(sources) != 2 {
+		t.Fatalf("expected 2 sources (values ref, registry chart), got %d: %+v", len(sources), sources)
 	}
-	var sawRef, sawChart, sawDir bool
+	var sawRef, sawChart bool
 	for _, s := range sources {
 		switch {
 		case s.Ref != "":
@@ -673,11 +673,11 @@ func TestBuildArgoExternalAppSet_MultiSource(t *testing.T) {
 		case s.Chart != "":
 			sawChart = true
 		case s.Directory != nil:
-			sawDir = true
+			t.Errorf("external AppSet must not carry a platform-manifests directory source, got %+v", s)
 		}
 	}
-	if !sawRef || !sawChart || !sawDir {
-		t.Errorf("missing sources: ref=%v chart=%v dir=%v", sawRef, sawChart, sawDir)
+	if !sawRef || !sawChart {
+		t.Errorf("missing sources: ref=%v chart=%v", sawRef, sawChart)
 	}
 }
 
