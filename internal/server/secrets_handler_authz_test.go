@@ -32,54 +32,34 @@ func TestSecretsAuthzMatrix(t *testing.T) {
 		role     string
 		wantCode int
 	}{
-		// ── Org-level writes ─────────────────────────────────────────
-		{"org upsert by org_admin", "POST", "/api/v1/org/secrets", upsertBody, "alice", "org_admin", 200},
-		{"org upsert by developer → 403", "POST", "/api/v1/org/secrets", upsertBody, "bob", "developer", 403},
-		{"org upsert by viewer → 403", "POST", "/api/v1/org/secrets", upsertBody, "carol", "viewer", 403},
-		{"org delete by org_admin", "DELETE", "/api/v1/org/secrets/K", nil, "alice", "org_admin", 200},
-		{"org delete by developer → 403", "DELETE", "/api/v1/org/secrets/K", nil, "bob", "developer", 403},
+		// ── Shared global (org_admin writes, viewer reads) ──────────
+		{"shared global upsert by org_admin", "POST", "/api/v1/org/secrets/global", upsertBody, "alice", "org_admin", 200},
+		{"shared global upsert by developer → 403", "POST", "/api/v1/org/secrets/global", upsertBody, "bob", "developer", 403},
+		{"shared global upsert by viewer → 403", "POST", "/api/v1/org/secrets/global", upsertBody, "carol", "viewer", 403},
+		{"shared global delete by org_admin", "DELETE", "/api/v1/org/secrets/global/K", nil, "alice", "org_admin", 200},
+		{"shared global list by viewer", "GET", "/api/v1/org/secrets/global", nil, "carol", "viewer", 200},
 
-		// ── Org-level reads ──────────────────────────────────────────
-		{"org list by org_admin", "GET", "/api/v1/org/secrets", nil, "alice", "org_admin", 200},
-		{"org list by developer", "GET", "/api/v1/org/secrets", nil, "bob", "developer", 200},
-		{"org list by viewer", "GET", "/api/v1/org/secrets", nil, "carol", "viewer", 200},
+		// ── Shared env (org_admin writes) ───────────────────────────
+		{"shared env upsert by org_admin", "POST", "/api/v1/org/secrets/env/staging", upsertBody, "alice", "org_admin", 200},
+		{"shared env upsert by developer → 403", "POST", "/api/v1/org/secrets/env/staging", upsertBody, "bob", "developer", 403},
+		{"shared env list by viewer", "GET", "/api/v1/org/secrets/env/staging", nil, "carol", "viewer", 200},
 
-		// ── Env-type-level writes ────────────────────────────────────
-		{"envtype upsert by org_admin", "POST", "/api/v1/org/secrets/envtype/staging", upsertBody, "alice", "org_admin", 200},
-		{"envtype upsert by developer → 403", "POST", "/api/v1/org/secrets/envtype/staging", upsertBody, "bob", "developer", 403},
-		{"envtype upsert by viewer → 403", "POST", "/api/v1/org/secrets/envtype/staging", upsertBody, "carol", "viewer", 403},
+		// ── Shared cluster (org_admin writes) ───────────────────────
+		{"shared cluster upsert by org_admin", "POST", "/api/v1/org/secrets/cluster/prod-eu", upsertBody, "alice", "org_admin", 200},
+		{"shared cluster upsert by developer → 403", "POST", "/api/v1/org/secrets/cluster/prod-eu", upsertBody, "bob", "developer", 403},
 
-		// ── Env-type-level reads ─────────────────────────────────────
-		{"envtype list by developer", "GET", "/api/v1/org/secrets/envtype/staging", nil, "bob", "developer", 200},
-		{"envtype list by viewer", "GET", "/api/v1/org/secrets/envtype/staging", nil, "carol", "viewer", 200},
+		// ── App global (developer writes, viewer reads) ─────────────
+		{"app global upsert by developer", "POST", "/api/v1/projects/api/apps/backend/secrets/global", upsertBody, "bob", "developer", 200},
+		{"app global upsert by viewer → 403", "POST", "/api/v1/projects/api/apps/backend/secrets/global", upsertBody, "carol", "viewer", 403},
+		{"app global list by viewer", "GET", "/api/v1/projects/api/apps/backend/secrets/global", nil, "carol", "viewer", 200},
 
-		// ── Project-level writes ─────────────────────────────────────
-		{"project upsert by org_admin", "POST", "/api/v1/projects/api/secrets", upsertBody, "alice", "org_admin", 200},
-		{"project upsert by developer → 403", "POST", "/api/v1/projects/api/secrets", upsertBody, "bob", "developer", 403},
-		{"project upsert by viewer → 403", "POST", "/api/v1/projects/api/secrets", upsertBody, "carol", "viewer", 403},
-
-		// ── Project-level reads ──────────────────────────────────────
-		{"project list by developer", "GET", "/api/v1/projects/api/secrets", nil, "bob", "developer", 200},
-		{"project list by viewer", "GET", "/api/v1/projects/api/secrets", nil, "carol", "viewer", 200},
-
-		// ── App-level writes ─────────────────────────────────────────
-		{"app upsert by org_admin", "POST", "/api/v1/projects/api/apps/backend/secrets", upsertBody, "alice", "org_admin", 200},
-		{"app upsert by developer", "POST", "/api/v1/projects/api/apps/backend/secrets", upsertBody, "bob", "developer", 200},
-		{"app upsert by viewer → 403", "POST", "/api/v1/projects/api/apps/backend/secrets", upsertBody, "carol", "viewer", 403},
-
-		// ── App-level reads ──────────────────────────────────────────
-		{"app list by viewer", "GET", "/api/v1/projects/api/apps/backend/secrets", nil, "carol", "viewer", 200},
-
-		// ── App-env-level writes ─────────────────────────────────────
-		{"appenv upsert by developer", "POST", "/api/v1/projects/api/apps/backend/envs/staging/secrets", upsertBody, "bob", "developer", 200},
-		{"appenv upsert by viewer → 403", "POST", "/api/v1/projects/api/apps/backend/envs/staging/secrets", upsertBody, "carol", "viewer", 403},
-
-		// ── App-env-level reads ──────────────────────────────────────
-		{"appenv list by viewer", "GET", "/api/v1/projects/api/apps/backend/envs/staging/secrets", nil, "carol", "viewer", 200},
+		// ── App env (developer writes) ──────────────────────────────
+		{"app env upsert by developer", "POST", "/api/v1/projects/api/apps/backend/secrets/env/staging", upsertBody, "bob", "developer", 200},
+		{"app env upsert by viewer → 403", "POST", "/api/v1/projects/api/apps/backend/secrets/env/staging", upsertBody, "carol", "viewer", 403},
 
 		// ── Unauthenticated ──────────────────────────────────────────
-		{"org list unauthenticated → 401", "GET", "/api/v1/org/secrets", nil, "", "", 401},
-		{"appenv list unauthenticated → 401", "GET", "/api/v1/projects/api/apps/backend/envs/staging/secrets", nil, "", "", 401},
+		{"shared global list unauthenticated → 401", "GET", "/api/v1/org/secrets/global", nil, "", "", 401},
+		{"app global list unauthenticated → 401", "GET", "/api/v1/projects/api/apps/backend/secrets/global", nil, "", "", 401},
 	}
 
 	for _, tt := range tests {
