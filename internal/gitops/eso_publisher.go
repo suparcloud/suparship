@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -187,9 +188,9 @@ type WorkloadExternalSecretParams struct {
 	Env       string
 	// Cluster is the registered cluster bound to Env. Empty skips the cluster
 	// scope regardless of presence.
-	Cluster   string
-	Presence  ScopePresence
-	Branding  branding.Config
+	Cluster  string
+	Presence ScopePresence
+	Branding branding.Config
 }
 
 // BuildWorkloadExternalSecrets returns up to three ExternalSecret configs
@@ -225,6 +226,19 @@ func BuildWorkloadExternalSecrets(p WorkloadExternalSecretParams) []ESOExternalS
 		add(secrets.ClusterScope(p.Cluster), p.Presence.ClusterShared, p.Presence.ClusterApp)
 	}
 	return out
+}
+
+// PublishSecretStores clones the gitops repo, writes the full desired set of
+// ClusterSecretStores (pruning stale ones), and commits + pushes. Idempotent —
+// no commit is produced when nothing changed. Called by the env/cluster
+// lifecycle hooks so ESO stores exist before app ExternalSecrets reference them.
+func (p *Publisher) PublishSecretStores(ctx context.Context, stores []ESOSecretStoreConfig) error {
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		if err := p.WriteSecretStores(repoDir, stores); err != nil {
+			return err
+		}
+		return p.commitAndPush(ctx, repoDir, "feat(secrets): reconcile ClusterSecretStores")
+	})
 }
 
 // WriteSecretStores writes ClusterSecretStore YAML files to

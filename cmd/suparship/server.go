@@ -843,6 +843,40 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, or
 	pub.ScopeKeys = a.collectScopeKeys(ctx, app, envName, pub.ClusterRef)
 }
 
+// ReconcileSecretStores implements server.SecretStoreReconciler. It computes the
+// full desired set of ESO ClusterSecretStores (global + one per environment +
+// one per cluster) from current org + cluster state and publishes them to the
+// gitops repo, pruning any that no longer belong.
+func (a *gitOpsPublisherAdapter) ReconcileSecretStores(ctx context.Context) error {
+	if a.inner == nil || a.orgProvider == nil {
+		return nil
+	}
+	org, err := a.orgProvider.GetOrg(ctx)
+	if err != nil {
+		return err
+	}
+	if org == nil {
+		return nil
+	}
+
+	envNames := make([]string, 0, len(org.Environments))
+	for _, e := range org.Environments {
+		envNames = append(envNames, e.Name)
+	}
+
+	var clusterNames []string
+	if a.clusterStore != nil {
+		if clusters, err := a.clusterStore.ListClusters(ctx); err == nil {
+			for _, c := range clusters {
+				clusterNames = append(clusterNames, c.Name)
+			}
+		}
+	}
+
+	stores := gitops.BuildSecretStoresForConfig(org.SecretBackend, envNames, clusterNames, org.Branding)
+	return a.inner.PublishSecretStores(ctx, stores)
+}
+
 // collectScopeKeys probes each scope level and reports which ones currently
 // have at least one key in the vault. Errors are swallowed (treated as "no
 // keys") because the resolved view is best-effort during a publish — partial
@@ -1164,28 +1198,6 @@ func selfHealSealedTokens(
 	_ = logger
 }
 
-// buildEnvForClusterResolver returns a closure that maps a registered cluster
-// name to the env-name that has that cluster registered (any member of
-// ClusterRefs, not just the active one — the 1Password cluster-scope vault
-// items live alongside the cluster regardless of which is currently being
-// deployed to). Used by the 1Password upper-level writer to find the correct
-// env vault for cluster-scope items. Returns "" for unknown clusters.
-//
-// The resolver captures envs by value at construction time. Restart suparship
-// to pick up env-binding changes — same lifecycle as the rest of the
-// 1Password wiring (SA client + bindings).
-func buildEnvForClusterResolver(envs []rbac.OrgEnvironment) func(string) string {
-	clusterToEnv := make(map[string]string, len(envs))
-	for _, e := range envs {
-		for _, cluster := range e.ClusterRefs {
-			clusterToEnv[cluster] = e.Name
-		}
-	}
-	return func(cluster string) string {
-		return clusterToEnv[cluster]
-	}
-}
-
 // brandingFromOrg fetches Org.Branding once at startup and returns its zero
 // value when the org isn't loadable. Used to seed Branding on writers that
 // embed it; live reload (e.g. on org-config save) requires a server restart
@@ -1419,23 +1431,4 @@ func templateLoaderFromClient(client kubernetes.Interface) gitops.TemplateLoader
 		return nil
 	}
 	return &kubeTemplateLoader{client: client}
-}
-
-// appStoreNamespaceResolver returns a function that looks up the resolved K8s
-// namespace for an app-env from the AppStore. Returns "" when the env is not
-// persisted (e.g. apps created before AppEnvironment was introduced) so that
-// callers can treat the lookup as best-effort.
-func appStoreNamespaceResolver(store domain.AppStore) func(ctx context.Context, projectName, appName, envName string) (string, error) {
-	if store == nil {
-		return func(context.Context, string, string, string) (string, error) {
-			return "", nil
-		}
-	}
-	return func(ctx context.Context, projectName, appName, envName string) (string, error) {
-		env, err := store.GetAppEnvironment(ctx, projectName, appName, envName)
-		if err != nil {
-			return "", err
-		}
-		return env.Namespace, nil
-	}
 }

@@ -16,11 +16,14 @@ import (
 // All write operations (POST, DELETE) require org_admin role (validated by
 // the session middleware). Read operations (GET) require any authenticated user.
 type clusterHandler struct {
-	store    domain.ClusterStore
-	auth     *authHandler
+	store     domain.ClusterStore
+	auth      *authHandler
 	certCache seal.CertCache
-	pool     sealClientPool
-	logger   *slog.Logger
+	pool      sealClientPool
+	logger    *slog.Logger
+	// storeReconciler republishes ESO ClusterSecretStores when a cluster is
+	// created. Optional; nil disables the hook.
+	storeReconciler SecretStoreReconciler
 }
 
 // registerRoutes wires cluster endpoints into mux.
@@ -127,6 +130,16 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// a separate admin step. Failures are logged but do not fail the registration.
 	go ch.tryFetchSealingCert(r.Context(), req.Name)
 
+	// Best-effort: (re)publish ESO ClusterSecretStores so the new cluster's
+	// store exists in gitops. Runs in the background to not delay the response.
+	if ch.storeReconciler != nil {
+		go func() {
+			if err := ch.storeReconciler.ReconcileSecretStores(context.Background()); err != nil {
+				ch.logger.Warn("cluster create: reconcile secret stores failed", "cluster", req.Name, "error", err)
+			}
+		}()
+	}
+
 	writeJSON(w, http.StatusCreated, cluster)
 }
 
@@ -138,6 +151,16 @@ func (ch *clusterHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "cluster not found or could not be removed"})
 		return
 	}
+
+	// Best-effort: prune the removed cluster's ESO ClusterSecretStore.
+	if ch.storeReconciler != nil {
+		go func() {
+			if err := ch.storeReconciler.ReconcileSecretStores(context.Background()); err != nil {
+				ch.logger.Warn("cluster delete: reconcile secret stores failed", "cluster", name, "error", err)
+			}
+		}()
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

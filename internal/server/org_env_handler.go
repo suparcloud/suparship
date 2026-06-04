@@ -14,8 +14,10 @@ package server
 // environment endpoints (/api/v1/projects/{project}/environments).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 
@@ -167,7 +169,23 @@ func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http
 		return
 	}
 
+	rh.reconcileSecretStores("env-create:" + newEnv.Name)
+
 	writeJSON(w, http.StatusCreated, orgEnvToDTO(newEnv))
+}
+
+// reconcileSecretStores best-effort republishes ESO ClusterSecretStores in the
+// background after an environment change, so the new env's store exists in
+// gitops. No-op when no reconciler is wired.
+func (rh *rbacHandler) reconcileSecretStores(reason string) {
+	if rh.storeReconciler == nil {
+		return
+	}
+	go func() {
+		if err := rh.storeReconciler.ReconcileSecretStores(context.Background()); err != nil {
+			slog.Warn("reconcile secret stores failed", "reason", reason, "error", err)
+		}
+	}()
 }
 
 // ── PUT /api/v1/org/environments/{env} ───────────────────────────────────────
@@ -281,6 +299,8 @@ func (rh *rbacHandler) handleDeleteOrgEnvironment(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save org: " + err.Error()})
 		return
 	}
+
+	rh.reconcileSecretStores("env-delete:" + envName)
 
 	w.WriteHeader(http.StatusNoContent)
 }

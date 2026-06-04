@@ -232,6 +232,27 @@ func (h *PublisherHolder) Swap(p GitOpsPublisher) {
 	h.mu.Unlock()
 }
 
+// SecretStoreReconciler recomputes and publishes the full set of ESO
+// ClusterSecretStores (global + per-env + per-cluster) to the gitops repo.
+// Called by the env/cluster lifecycle hooks so the stores exist before app
+// ExternalSecrets reference them.
+type SecretStoreReconciler interface {
+	ReconcileSecretStores(ctx context.Context) error
+}
+
+// ReconcileSecretStores delegates to the held publisher when it implements
+// SecretStoreReconciler; otherwise it is a no-op. This lets PublisherHolder
+// satisfy SecretStoreReconciler without widening the GitOpsPublisher interface.
+func (h *PublisherHolder) ReconcileSecretStores(ctx context.Context) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if r, ok := p.(SecretStoreReconciler); ok {
+		return r.ReconcileSecretStores(ctx)
+	}
+	return nil
+}
+
 // SealPublisherHolder wraps a SealedTokenPublisher behind an RW mutex so it
 // can be hot-swapped when GitOps config is changed via the settings UI.
 type SealPublisherHolder struct {
@@ -398,6 +419,9 @@ func New(cfg Config) *Server {
 			orgStore:     cfg.OrgProvider,
 			projectStore: cfg.ProjectStore,
 		}
+		if r, ok := cfg.GitOpsPublisher.(SecretStoreReconciler); ok {
+			rh.storeReconciler = r
+		}
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
 			cfg.Logger.Info("service creation endpoint enabled")
@@ -523,6 +547,9 @@ func New(cfg Config) *Server {
 		}
 		if cfg.ClusterPool != nil {
 			ch.pool = &clusterPoolAdapter{pool: cfg.ClusterPool}
+		}
+		if r, ok := cfg.GitOpsPublisher.(SecretStoreReconciler); ok {
+			ch.storeReconciler = r
 		}
 		ch.registerRoutes(mux)
 		cfg.Logger.Info("cluster endpoints enabled")

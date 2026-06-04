@@ -33,6 +33,9 @@ type rbacHandler struct {
 	appHandler       *appHandler       // optional: enables app read endpoints
 	envConfigHandler *envConfigHandler // optional: enables env config endpoints
 	secretsHandler   *secretsHandler   // optional: enables simple secret management
+	// storeReconciler republishes ESO ClusterSecretStores when an environment
+	// is created/changed. Optional; nil disables the hook.
+	storeReconciler SecretStoreReconciler
 }
 
 // requireRole returns middleware that enforces authentication and checks that
