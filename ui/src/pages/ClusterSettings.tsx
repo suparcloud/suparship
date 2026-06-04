@@ -249,7 +249,7 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
 // ── Cluster overrides section (env vars + secrets) ────────────────────────────
 //
 // Cluster-scope is the platform-engineering escape hatch — values written here
-// override every other layer (org / env-type / project / app / app-env) for
+// override the global and env scopes (precedence: cluster > env > global) for
 // apps deployed onto this specific cluster. Use sparingly: incident break-glass,
 // regional tuning, per-cluster feature kill-switches.
 
@@ -271,8 +271,8 @@ function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
           Cluster overrides — escape hatch
         </h3>
         <p className="mt-0.5 text-xs text-gray-500">
-          Variables and secrets here override every other layer (org, env-type,
-          project, app, app-env) for apps deployed onto{" "}
+          Variables and secrets here override the global and env scopes
+          (precedence: cluster &gt; env &gt; global) for apps deployed onto{" "}
           <span className="font-mono">{cluster.name}</span>. Use for incident
           response, regional tuning, or per-cluster kill-switches.
         </p>

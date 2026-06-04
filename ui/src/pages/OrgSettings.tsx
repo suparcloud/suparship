@@ -1282,27 +1282,30 @@ function SecretsBackendSection() {
                   {showGuide && (
                     <div className="space-y-3 border-t border-blue-100 px-4 py-3">
                       <p className="text-xs text-blue-900">
-                        <strong>Two vault tiers:</strong> a{" "}
-                        <strong>platform-shared vault</strong> for org and
-                        project secrets (read-only from every cluster), plus
-                        one <strong>env vault</strong> per environment for
-                        env-type, app, app-env, and cluster secrets. 1Password
-                        Service Accounts cannot create vaults or Connect
-                        tokens — you create both manually in the 1Password
-                        console; suparShip handles the cluster-side automation
-                        (sealing tokens, generating ClusterSecretStores,
-                        publishing to GitOps).
+                        <strong>Three vault scopes:</strong> one{" "}
+                        <strong>global vault</strong> (org-wide, read-only from
+                        every cluster), one <strong>env vault</strong> per
+                        environment, and one <strong>cluster vault</strong> per
+                        cluster. Each scope holds both org-admin (
+                        <strong>shared</strong>) and per-app secrets; precedence
+                        is <code>cluster &gt; env &gt; global</code> and{" "}
+                        <code>app &gt; shared</code>. 1Password Service Accounts
+                        cannot create vaults or Connect tokens — you create both
+                        manually in the 1Password console; suparShip handles the
+                        cluster-side automation (sealing a Connect token per
+                        scope, generating ClusterSecretStores, publishing to
+                        GitOps).
                       </p>
                       <ol className="space-y-2 text-xs text-blue-900">
                         <li>
                           <strong>
-                            1. Create the platform-shared vault and per-env
+                            1. Create the global, per-env, and per-cluster
                             vaults
                           </strong>{" "}
                           in the 1Password web console (e.g.{" "}
-                          <code>company-shared</code>,{" "}
-                          <code>staging-apps</code>,{" "}
-                          <code>prod-apps</code>).
+                          <code>company-global</code>,{" "}
+                          <code>staging-env</code>,{" "}
+                          <code>prod-eu-cluster</code>).
                         </li>
                         <li>
                           <strong>2. Create a Service Account</strong> with
@@ -1316,45 +1319,42 @@ function SecretsBackendSection() {
                           are visible.
                         </li>
                         <li>
-                          <strong>4. Pick the platform-shared vault</strong>{" "}
-                          from the dropdown that appears after the SA token
-                          is saved.
+                          <strong>4. Pick the global vault</strong> from the
+                          dropdown that appears after the SA token is saved,
+                          and paste its Connect token — suparShip seals it onto
+                          every registered cluster.
                         </li>
                         <li>
                           <strong>5. Set up a Connect Server</strong> in
                           1Password and grant it access to <strong>all</strong>{" "}
-                          suparShip vaults — every env vault <em>and</em> the
-                          platform vault.
+                          suparShip vaults.
                         </li>
                         <li>
-                          <strong>6. Deploy Connect</strong> to your tooling
-                          cluster (Helm chart or Docker).
+                          <strong>6. Deploy Connect</strong> to your workload
+                          clusters (Helm chart or Docker).
                         </li>
                         <li>
-                          <strong>7. Issue per-env Connect tokens</strong> in
-                          the 1Password console. Each token must read{" "}
-                          <strong>both vaults</strong>: its env vault{" "}
-                          <em>and</em> the platform vault. Without platform
-                          access, ESO can't resolve org/project items at sync
-                          time.
+                          <strong>7. Issue a Connect token per vault</strong>{" "}
+                          in the 1Password console — one for the global vault,
+                          one per env vault, one per cluster vault. suparShip
+                          seals each token onto the clusters whose ESO needs
+                          that scope: every cluster reads the global vault, the
+                          vaults of the envs that land on it, and its own
+                          cluster vault.
                         </li>
                         <li>
-                          <strong>8. Add bindings</strong> below — select env
-                          vault, paste the env's Connect token, for each
-                          environment. suparShip seals the token and publishes
-                          the SealedSecret + ClusterSecretStore to GitOps.
-                        </li>
-                        <li>
-                          <strong>9. (Optional) Migrate existing K8s Secrets</strong>{" "}
-                          using the &ldquo;Migrate K8s Secrets to
-                          1Password&rdquo; panel below. Idempotent; safe to
-                          re-run.
+                          <strong>8. Register env &amp; cluster vaults</strong>{" "}
+                          below — toggle the scope (Environment | Cluster), pick
+                          the vault, and paste that vault's Connect token.
+                          suparShip seals the token and publishes the
+                          SealedSecret + ClusterSecretStore to GitOps per
+                          cluster.
                         </li>
                       </ol>
                       <p className="text-xs text-blue-900">
                         Need more detail? See{" "}
-                        <code>docs/secrets.md</code> for architecture diagrams,
-                        troubleshooting, and the full RBAC matrix.
+                        <code>docs/secrets.md</code> for the architecture
+                        diagram, troubleshooting, and the full RBAC matrix.
                       </p>
                     </div>
                   )}
@@ -1368,9 +1368,9 @@ function SecretsBackendSection() {
                   <p className="text-xs text-gray-500">
                     Paste the 1Password Service Account token. It needs Read
                     &amp; Write access to every vault you want suparShip to
-                    manage — the platform-shared vault and each env vault.
-                    1Password Service Accounts cannot create vaults, so make
-                    sure these vaults already exist before pasting.
+                    manage — the global vault, each env vault, and each cluster
+                    vault. 1Password Service Accounts cannot create vaults, so
+                    make sure these vaults already exist before pasting.
                   </p>
                   <div className="flex items-end gap-3">
                     <div className="flex-1">
@@ -1395,8 +1395,8 @@ function SecretsBackendSection() {
                   )}
                 </div>
 
-                {/* Platform-shared vault picker — operator selects the vault
-                    they created manually in the 1Password console. 1Password
+                {/* Global vault picker — operator selects the vault they
+                    created manually in the 1Password console. 1Password
                     Service Accounts cannot create vaults, so suparShip cannot
                     auto-provision this. */}
                 <PlatformVaultPicker
@@ -1485,7 +1485,7 @@ function SecretsBackendSection() {
                     </button>
                   </div>
 
-                  {/* Add binding form */}
+                  {/* Add vault form (env / cluster scope) */}
                   {showAddBinding && (
                     <div className="mb-4 space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-4">
                       <div>
@@ -1735,20 +1735,15 @@ function SecretsBackendSection() {
   );
 }
 
-// ── Migration panel ──────────────────────────────────────────────────────────
-
-// ── Platform vault picker ────────────────────────────────────────────────────
+// ── Global vault picker ──────────────────────────────────────────────────────
 //
 // 1Password Service Accounts cannot create new vaults. The operator creates
-// the platform-shared vault by hand in the 1Password console; suparShip just
-// needs to know which vault it is. This component lists every vault the SA
-// token can see, lets the operator pick one, and POSTs the choice to
-// /org/secret-backend/platform-vault.
-//
-// Note: the upper-level writer in the suparShip server is built once at
-// startup using the persisted PlatformVaultID. After picking, a server
-// restart is required before org / project secret writes start landing in
-// the chosen vault — surfaced inline.
+// the global vault by hand in the 1Password console; suparShip just needs to
+// know which vault it is. This component lists every vault the SA token can
+// see, lets the operator pick one, optionally paste its Connect token, and
+// POSTs the choice to /org/secret-backend/global-vault. When a Connect token
+// is provided it is sealed onto every registered cluster so each cluster's ESO
+// can read the global vault.
 
 function PlatformVaultPicker({
   config,
@@ -1818,12 +1813,12 @@ function PlatformVaultPicker({
   return (
     <div className="space-y-2">
       <label className="block text-xs font-medium text-gray-700">
-        Platform-shared vault
+        Global vault
       </label>
       <p className="text-xs text-gray-500">
-        Pick the 1Password vault you created (manually) for org and project
-        secrets — read-only from every cluster's ESO. Per-env vaults are
-        configured separately in the bindings table below.
+        Pick the 1Password vault you created (manually) for global-scope
+        secrets — read-only from every cluster's ESO. Env and cluster vaults
+        are registered separately in the table below.
       </p>
       <div className="flex items-center gap-2">
         {currentID ? (
@@ -1835,7 +1830,7 @@ function PlatformVaultPicker({
         ) : (
           <span className="flex items-center gap-1.5 text-xs text-amber-700">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
-            Not set — org / project secret writes will fail until a vault is
+            Not set — global-scope secret writes will fail until a vault is
             picked.
           </span>
         )}
