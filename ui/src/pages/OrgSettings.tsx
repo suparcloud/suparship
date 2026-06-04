@@ -31,6 +31,7 @@ import {
   listVaults,
   setGlobalVault,
   registerEnvVault,
+  registerClusterVault,
   listSharedGlobalSecretKeys,
   upsertSharedGlobalSecrets,
   deleteSharedGlobalSecretKey,
@@ -1092,28 +1093,29 @@ function SecretsBackendSection() {
 
   // Add binding form state
   const [showAddBinding, setShowAddBinding] = useState(false);
+  const [bindScope, setBindScope] = useState<"env" | "cluster">("env");
   const [bindEnv, setBindEnv] = useState("");
+  const [bindCluster, setBindCluster] = useState("");
   const [bindVaultId, setBindVaultId] = useState("");
   const [bindToken, setBindToken] = useState("");
   const [bindConnectEndpoint, setBindConnectEndpoint] = useState("");
   const [bindBusy, setBindBusy] = useState(false);
 
-  // Remove binding state
-  const [removingEnv, setRemovingEnv] = useState<string | null>(null);
-
   // Setup guide toggle
   const [showGuide, setShowGuide] = useState(false);
 
-  // Org environments (for binding dropdown)
+  // Org environments + clusters (for the vault registration dropdowns)
   const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
+  const [orgClusters, setOrgClusters] = useState<Cluster[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getSecretsBackend(), listOrgEnvironments()])
-      .then(([cfg, envsResp]) => {
+    Promise.all([getSecretsBackend(), listOrgEnvironments(), listClusters()])
+      .then(([cfg, envsResp, clustersResp]) => {
         if (!cancelled) {
           setConfig(cfg);
           setOrgEnvs(envsResp.environments || []);
+          setOrgClusters(clustersResp || []);
         }
       })
       .catch((err) => {
@@ -1181,40 +1183,38 @@ function SecretsBackendSection() {
   }
 
   async function handleAddBinding() {
-    if (!bindEnv || !bindVaultId || !bindToken.trim()) return;
+    const target = bindScope === "env" ? bindEnv : bindCluster;
+    if (!target || !bindVaultId || !bindToken.trim()) return;
     setBindBusy(true);
     setError(null);
     try {
       const vault = vaults.find((v) => v.id === bindVaultId);
-      await registerEnvVault(bindEnv, {
+      const body = {
         vaultId: bindVaultId,
         vaultName: vault?.title,
         connectToken: bindToken.trim(),
         connectEndpoint: bindConnectEndpoint.trim() || undefined,
-      });
+      };
+      if (bindScope === "env") {
+        await registerEnvVault(bindEnv, body);
+      } else {
+        await registerClusterVault(bindCluster, body);
+      }
       const updated = await getSecretsBackend();
       setConfig(updated);
       setShowAddBinding(false);
       setBindEnv("");
+      setBindCluster("");
       setBindVaultId("");
       setBindToken("");
       setBindConnectEndpoint("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Add binding failed");
+      setError(err instanceof Error ? err.message : "Vault registration failed");
     } finally {
       setBindBusy(false);
     }
   }
 
-  async function handleRemoveBinding(env: string) {
-    // Env/cluster vault de-provisioning is managed via the `suparship secrets`
-    // CLI for now (UI follow-up tracked with 1Password provisioning).
-    setRemovingEnv(env);
-    setError(
-      "Removing an env vault binding is managed via the suparship secrets CLI.",
-    );
-    setRemovingEnv(null);
-  }
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white">
@@ -1481,7 +1481,7 @@ function SecretsBackendSection() {
                       }}
                       className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
                     >
-                      {showAddBinding ? "Cancel" : "+ Add Binding"}
+                      {showAddBinding ? "Cancel" : "+ Add Vault"}
                     </button>
                   </div>
 
@@ -1490,36 +1490,96 @@ function SecretsBackendSection() {
                     <div className="mb-4 space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-4">
                       <div>
                         <label className="mb-1 block text-xs font-medium text-gray-700">
-                          Environment
+                          Scope
                         </label>
-                        {(() => {
-                          const boundEnvs = new Set(
-                            (config?.onePassword?.envVaults || []).map((v) => v.key),
-                          );
-                          const available = orgEnvs.filter(
-                            (e) => !boundEnvs.has(e.name),
-                          );
-                          return available.length > 0 ? (
-                            <select
-                              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
-                              value={bindEnv}
-                              onChange={(e) => setBindEnv(e.target.value)}
+                        <div className="flex gap-1.5">
+                          {(["env", "cluster"] as const).map((s) => (
+                            <button
+                              key={s}
+                              type="button"
+                              onClick={() => setBindScope(s)}
+                              className={`rounded-full px-3 py-0.5 text-xs font-medium transition-colors ${
+                                bindScope === s
+                                  ? "bg-gray-900 text-white"
+                                  : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                              }`}
                             >
-                              <option value="">Select an environment…</option>
-                              {available.map((e) => (
-                                <option key={e.name} value={e.name}>
-                                  {e.name}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            <p className="text-xs text-gray-400">
-                              All environments are already bound. Create a new
-                              environment in Settings &gt; Environments first.
-                            </p>
-                          );
-                        })()}
+                              {s === "env" ? "Environment" : "Cluster"}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="mt-1 text-xs text-gray-400">
+                          Env vaults seal onto the env&apos;s bound cluster; cluster
+                          vaults seal onto that cluster.
+                        </p>
                       </div>
+                      {bindScope === "env" ? (
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-gray-700">
+                            Environment
+                          </label>
+                          {(() => {
+                            const boundEnvs = new Set(
+                              (config?.onePassword?.envVaults || []).map((v) => v.key),
+                            );
+                            const available = orgEnvs.filter(
+                              (e) => !boundEnvs.has(e.name),
+                            );
+                            return available.length > 0 ? (
+                              <select
+                                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                                value={bindEnv}
+                                onChange={(e) => setBindEnv(e.target.value)}
+                              >
+                                <option value="">Select an environment…</option>
+                                {available.map((e) => (
+                                  <option key={e.name} value={e.name}>
+                                    {e.name}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <p className="text-xs text-gray-400">
+                                All environments are already bound. Create a new
+                                environment in Settings &gt; Environments first.
+                              </p>
+                            );
+                          })()}
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-gray-700">
+                            Cluster
+                          </label>
+                          {(() => {
+                            const boundClusters = new Set(
+                              (config?.onePassword?.clusterVaults || []).map((v) => v.key),
+                            );
+                            const available = orgClusters.filter(
+                              (c) => !boundClusters.has(c.name),
+                            );
+                            return available.length > 0 ? (
+                              <select
+                                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                                value={bindCluster}
+                                onChange={(e) => setBindCluster(e.target.value)}
+                              >
+                                <option value="">Select a cluster…</option>
+                                {available.map((c) => (
+                                  <option key={c.name} value={c.name}>
+                                    {c.name}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <p className="text-xs text-gray-400">
+                                All clusters already have a vault. Register a
+                                cluster under Settings &gt; Clusters first.
+                              </p>
+                            );
+                          })()}
+                        </div>
+                      )}
                       <div>
                         <label className="mb-1 block text-xs font-medium text-gray-700">
                           Vault
@@ -1583,86 +1643,88 @@ function SecretsBackendSection() {
                         onClick={handleAddBinding}
                         disabled={
                           bindBusy ||
-                          !bindEnv ||
+                          (bindScope === "env" ? !bindEnv : !bindCluster) ||
                           !bindVaultId ||
                           !bindToken.trim()
                         }
                         className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
                       >
-                        {bindBusy ? "Saving…" : "Add Binding"}
+                        {bindBusy ? "Saving…" : "Register Vault"}
                       </button>
                     </div>
                   )}
 
-                  {/* Existing bindings */}
-                  {(config.onePassword?.envVaults || []).length === 0 ? (
-                    <p className="text-xs text-gray-400">
-                      No environment bindings yet. Click &ldquo;+ Add
-                      Binding&rdquo; to connect an environment to a 1Password
-                      vault.
-                    </p>
-                  ) : (
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
-                          <th className="py-2">Env</th>
-                          <th className="py-2">Vault</th>
-                          <th className="py-2">ClusterSecretStore</th>
-                          <th className="py-2">Status</th>
-                          <th className="py-2"></th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-50">
-                        {(config.onePassword?.envVaults || []).map((b) => (
-                          <tr key={b.key}>
-                            <td className="py-2 font-mono text-xs">{b.key}</td>
-                            <td className="py-2 font-mono text-xs">
-                              {b.vaultName || b.vaultId}
-                            </td>
-                            <td className="py-2 font-mono text-xs text-gray-500">
-                              {b.clusterSecretStoreName || "—"}
-                            </td>
-                            <td className="py-2 text-xs">
-                              {b.provisioned ? (
-                                <span className="inline-flex items-center gap-1 rounded bg-green-50 px-2 py-0.5 text-green-700">
-                                  bound
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-amber-700">
-                                  pending
-                                </span>
-                              )}
-                              {b.connectEndpoint && (
-                                <span
-                                  className="ml-2 font-mono text-xs text-gray-400"
-                                  title="Per-binding Connect endpoint override"
-                                >
-                                  {b.connectEndpoint}
-                                </span>
-                              )}
-                              {b.lastError && (
-                                <span className="ml-2 text-xs text-red-600">
-                                  {b.lastError}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-2 text-right space-x-2">
-                              <button
-                                onClick={() => handleRemoveBinding(b.key || "")}
-                                disabled={removingEnv === b.key}
-                                className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
-                              >
-                                {removingEnv === b.key ? "Removing…" : "Remove"}
-                              </button>
-                            </td>
+                  {/* Provisioned vaults across all scopes (read-only) */}
+                  {(() => {
+                    const op = config.onePassword;
+                    const rows: Array<{
+                      scope: string;
+                      key: string;
+                      vaultName?: string;
+                      vaultId: string;
+                      provisioned?: boolean;
+                      lastError?: string;
+                    }> = [];
+                    if (op?.globalVault?.vaultId) {
+                      rows.push({ scope: "global", key: "—", ...op.globalVault });
+                    }
+                    for (const v of op?.envVaults || []) {
+                      rows.push({ scope: "env", ...v, key: v.key || "" });
+                    }
+                    for (const v of op?.clusterVaults || []) {
+                      rows.push({ scope: "cluster", ...v, key: v.key || "" });
+                    }
+                    if (rows.length === 0) {
+                      return (
+                        <p className="text-xs text-gray-400">
+                          No vaults registered yet. Click &ldquo;+ Add
+                          Vault&rdquo; to register an environment or cluster
+                          vault; set the global vault above.
+                        </p>
+                      );
+                    }
+                    return (
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                            <th className="py-2">Scope</th>
+                            <th className="py-2">Key</th>
+                            <th className="py-2">Vault</th>
+                            <th className="py-2">Status</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
+                        </thead>
+                        <tbody className="divide-y divide-gray-50">
+                          {rows.map((b) => (
+                            <tr key={`${b.scope}-${b.key}`}>
+                              <td className="py-2 font-mono text-xs">{b.scope}</td>
+                              <td className="py-2 font-mono text-xs">{b.key}</td>
+                              <td className="py-2 font-mono text-xs">
+                                {b.vaultName || b.vaultId}
+                              </td>
+                              <td className="py-2 text-xs">
+                                {b.provisioned ? (
+                                  <span className="inline-flex items-center gap-1 rounded bg-green-50 px-2 py-0.5 text-green-700">
+                                    sealed
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-amber-700">
+                                    pending
+                                  </span>
+                                )}
+                                {b.lastError && (
+                                  <span className="ml-2 text-xs text-red-600">
+                                    {b.lastError}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    );
+                  })()}
                 </div>
 
-                {/* Migration panel — visible once the platform vault is ready. */}
                 <MigrationPanel config={config} />
               </div>
             )}
@@ -1699,6 +1761,7 @@ function PlatformVaultPicker({
   const currentName = config.onePassword?.globalVault?.vaultName ?? "";
   const [vaults, setVaults] = useState<VaultInfo[] | null>(null);
   const [selectedID, setSelectedID] = useState(currentID);
+  const [connectToken, setConnectToken] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1729,10 +1792,21 @@ function PlatformVaultPicker({
     setSavedMsg(null);
     try {
       const picked = vaults?.find((v) => v.id === selectedID);
-      const res = await setGlobalVault(selectedID, picked?.title);
-      setSavedMsg(
-        `Saved. Global-scope shared secrets now route to "${res.vaultName}".`,
+      const res = await setGlobalVault(
+        selectedID,
+        picked?.title,
+        connectToken.trim() || undefined,
       );
+      if (connectToken.trim()) {
+        setSavedMsg(
+          `Saved. Global vault "${res.vaultName}" set; its Connect token was sealed onto every registered cluster.`,
+        );
+      } else {
+        setSavedMsg(
+          `Saved. Global vault "${res.vaultName}" set. Provide a Connect token to seal it onto clusters so each cluster's ESO can read it.`,
+        );
+      }
+      setConnectToken("");
       await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save");
@@ -1778,37 +1852,55 @@ function PlatformVaultPicker({
             {loading ? "Loading…" : "List vaults"}
           </button>
         ) : (
-          <>
-            <select
-              value={selectedID}
-              onChange={(e) => setSelectedID(e.target.value)}
-              className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
-            >
-              <option value="">— select a vault —</option>
-              {vaults.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.title}
-                </option>
-              ))}
-            </select>
+          <div className="flex flex-1 flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedID}
+                onChange={(e) => setSelectedID(e.target.value)}
+                className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+              >
+                <option value="">— select a vault —</option>
+                {vaults.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.title}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleLoadVaults}
+                disabled={loading}
+                title="Refresh the vault list"
+                className="rounded-lg border border-gray-300 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              >
+                ⟳
+              </button>
+            </div>
+            <input
+              type="password"
+              value={connectToken}
+              onChange={(e) => setConnectToken(e.target.value)}
+              placeholder="1Password Connect token (seals onto every cluster)"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+            />
+            <p className="text-xs text-gray-400">
+              The global vault is read by every cluster, so its Connect token is
+              sealed onto each registered cluster. Required for global-scope
+              secrets to resolve; leave blank to only record the vault choice.
+            </p>
             <button
               type="button"
               onClick={handleSave}
-              disabled={saving || !selectedID || selectedID === currentID}
-              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              disabled={
+                saving ||
+                !selectedID ||
+                (selectedID === currentID && connectToken.trim() === "")
+              }
+              className="self-start rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
             >
               {saving ? "Saving…" : "Save"}
             </button>
-            <button
-              type="button"
-              onClick={handleLoadVaults}
-              disabled={loading}
-              title="Refresh the vault list"
-              className="rounded-lg border border-gray-300 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
-            >
-              ⟳
-            </button>
-          </>
+          </div>
         )}
       </div>
       {error && <p className="text-xs text-red-600">{error}</p>}

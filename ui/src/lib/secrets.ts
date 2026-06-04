@@ -95,16 +95,20 @@ export interface SetGlobalVaultResponse {
 export function setGlobalVault(
   vaultId: string,
   vaultName?: string,
+  connectToken?: string,
+  connectEndpoint?: string,
 ): Promise<SetGlobalVaultResponse> {
   return api.put<SetGlobalVaultResponse>("/org/secret-backend/global-vault", {
     vaultId,
     vaultName: vaultName || "",
+    connectToken: connectToken || "",
+    connectEndpoint: connectEndpoint || "",
   });
 }
 
 // ── Env/cluster vault provisioning (1Password) ──────────────────────────────
-// NOTE: backend returns 501 until 1Password Connect-token sealing is
-// reimplemented for the 3-scope model.
+// Registers a per-scope vault and seals its Connect token onto the relevant
+// cluster(s): env → the env's bound cluster, cluster → that cluster.
 
 export function registerEnvVault(
   env: string,
