@@ -94,7 +94,7 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 		esoNS = "external-secrets"
 	}
 
-	tokenSecretName := secrets.ConnectTokenSecretName(params.Env)
+	tokenSecretName := secrets.ConnectTokenSecretName(secrets.EnvScope(params.Env))
 
 	sealedYAML, err := seal.BuildSealedSecret(params.Cert, seal.SealedSecretInput{
 		Name:      tokenSecretName,
@@ -113,20 +113,12 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 		return fmt.Errorf("seal token: %w", err)
 	}
 
-	naming := secrets.ResourceNaming{}
-	storeName := naming.RenderClusterSecretStore(secrets.NamingParams{
-		Provider: string(secrets.Backend1Password),
-		Env:      params.Env,
-		Org:      params.OrgName,
-	})
-
 	storeYAML := BuildClusterSecretStoreYAML(ESOSecretStoreConfig{
-		Name:            storeName,
+		Scope:           secrets.EnvScope(params.Env),
 		BackendType:     secrets.Backend1Password,
-		Binding:         secrets.EnvBinding{Env: params.Env, VaultID: params.VaultID},
+		VaultID:         params.VaultID,
 		ESONamespace:    esoNS,
 		ConnectEndpoint: params.ConnectEndpoint,
-		PlatformVaultID: params.PlatformVaultID,
 		Branding:        p.cfg.Branding,
 	})
 
@@ -258,23 +250,16 @@ func (p *Publisher) RefreshSecretStore(ctx context.Context, params RefreshSecret
 		return fmt.Errorf("RefreshSecretStore: env and vaultID are required")
 	}
 
-	naming := secrets.ResourceNaming{}
-	storeName := naming.RenderClusterSecretStore(secrets.NamingParams{
-		Provider: string(secrets.Backend1Password),
-		Env:      params.Env,
-		Org:      params.OrgName,
-	})
 	esoNS := params.ESONamespace
 	if esoNS == "" {
 		esoNS = "external-secrets"
 	}
 	storeYAML := BuildClusterSecretStoreYAML(ESOSecretStoreConfig{
-		Name:            storeName,
+		Scope:           secrets.EnvScope(params.Env),
 		BackendType:     secrets.Backend1Password,
-		Binding:         secrets.EnvBinding{Env: params.Env, VaultID: params.VaultID},
+		VaultID:         params.VaultID,
 		ESONamespace:    esoNS,
 		ConnectEndpoint: params.ConnectEndpoint,
-		PlatformVaultID: params.PlatformVaultID,
 		Branding:        p.cfg.Branding,
 	})
 
