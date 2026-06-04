@@ -20,9 +20,9 @@ import (
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/preview"
-	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
@@ -149,20 +149,6 @@ type DeploymentHistoryReader interface {
 	// "{appName}-{envName}" in reverse-chronological order (most recent first).
 	// Returns an empty slice (not an error) when no history is available.
 	GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]DeploymentHistoryEntry, error)
-}
-
-// VaultItemWriter creates and deletes per-app vault items in an external vault
-// (1Password). Used by the app and preview create/delete handlers to ensure
-// a vault item skeleton exists before ArgoCD syncs the ExternalSecret.
-// When nil, vault item management is skipped (K8s-native mode).
-type VaultItemWriter interface {
-	// UpsertAppItem creates or updates the vault item for the app+env scope.
-	// The implementation resolves the vault binding for envName internally.
-	// No-op (returns nil) when no binding exists for the env.
-	UpsertAppItem(ctx context.Context, org, project, app, env string) error
-	// DeleteAppItem removes the vault item for the app+env scope.
-	// No-op when the item does not exist or no binding exists for the env.
-	DeleteAppItem(ctx context.Context, org, project, app, env string) error
 }
 
 // ReadinessProber is a named readiness check injected into the server.
@@ -300,35 +286,33 @@ func (h *SealPublisherHolder) Swap(p SealedTokenPublisher) {
 
 // Config holds server configuration.
 type Config struct {
-	Addr            string
-	UIDir           string               // optional: path to built frontend assets
-	CORSOrigins     []string             // optional: allowed CORS origins
-	Authenticator   auth.Authenticator   // optional: enables auth endpoints when set
-	OrgProvider     rbac.OrgStore        // optional: enables RBAC-protected routes when set (write ops also require OrgStore)
-	Templates       []*tpl.Template      // optional: pre-loaded templates for /api/v1/templates
+	Addr          string
+	UIDir         string             // optional: path to built frontend assets
+	CORSOrigins   []string           // optional: allowed CORS origins
+	Authenticator auth.Authenticator // optional: enables auth endpoints when set
+	OrgProvider   rbac.OrgStore      // optional: enables RBAC-protected routes when set (write ops also require OrgStore)
+	Templates     []*tpl.Template    // optional: pre-loaded templates for /api/v1/templates
 	// ClusterTemplateLoader resolves cluster-stored templates on each
 	// request. When non-nil it is merged with Templates so newly imported
 	// charts surface in the gallery without restarting the server. Built-in
 	// names take precedence on collisions.
-	ClusterTemplateLoader ClusterTemplateLoader
-	ProjectStore    project.Store        // optional: enables service creation when set
-	RuntimeProvider runtime.Provider     // optional: enables runtime inventory when set
-	LogsProvider    runtime.LogsProvider // optional: enables logs endpoint when set
-	PreviewStore    preview.Store        // optional: enables preview endpoints when set
-	AppStore        domain.AppStore      // optional: enables app read endpoints when set
-	ClusterStore    domain.ClusterStore  // optional: enables /api/v1/clusters endpoints when set
-	GitOpsPublisher GitOpsPublisher      // optional: commits app manifests to gitops repo on create
-	KargoPromoter   KargoPromoter        // optional: enables real Kargo-backed promotions
-	KargoStatusReader KargoStatusReader  // optional: enables GET promotion-status endpoint
-	KargoPipelineReader KargoPipelineReader // optional: enables GET pipeline-stages endpoint
+	ClusterTemplateLoader   ClusterTemplateLoader
+	ProjectStore            project.Store           // optional: enables service creation when set
+	RuntimeProvider         runtime.Provider        // optional: enables runtime inventory when set
+	LogsProvider            runtime.LogsProvider    // optional: enables logs endpoint when set
+	PreviewStore            preview.Store           // optional: enables preview endpoints when set
+	AppStore                domain.AppStore         // optional: enables app read endpoints when set
+	ClusterStore            domain.ClusterStore     // optional: enables /api/v1/clusters endpoints when set
+	GitOpsPublisher         GitOpsPublisher         // optional: commits app manifests to gitops repo on create
+	KargoPromoter           KargoPromoter           // optional: enables real Kargo-backed promotions
+	KargoStatusReader       KargoStatusReader       // optional: enables GET promotion-status endpoint
+	KargoPipelineReader     KargoPipelineReader     // optional: enables GET pipeline-stages endpoint
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
-	SecretBackend        secrets.Backend           // optional: enables simple app-env secret CRUD
-	UpperLevelSecretWriter secrets.UpperLevelWriter // optional: enables org/envtype/project-level secret CRUD
-	SecretsAuditor       *secrets.Auditor           // optional: enables audit logging for secret ops
-	VaultItemWriter      VaultItemWriter            // optional: creates 1Password vault items on app/preview create
-	ReadinessProbers []ReadinessProber   // optional: checked by GET /readyz
-	CookieSecure    bool                 // true for production (HTTPS)
-	Logger          *slog.Logger
+	VaultStore              secrets.VaultStore      // optional: enables secret CRUD across global/env/cluster scopes
+	SecretsAuditor          *secrets.Auditor        // optional: enables audit logging for secret ops
+	ReadinessProbers        []ReadinessProber       // optional: checked by GET /readyz
+	CookieSecure            bool                    // true for production (HTTPS)
+	Logger                  *slog.Logger
 	// UpperLevelEnvWriter, when set, writes Org/Environment/Project runtime
 	// ConfigMaps in suparship-system alongside domain-store saves. Requires a
 	// live Kubernetes client; omit in unit tests.
@@ -414,10 +398,6 @@ func New(cfg Config) *Server {
 			orgStore:     cfg.OrgProvider,
 			projectStore: cfg.ProjectStore,
 		}
-		if cfg.VaultItemWriter != nil {
-			rh.vaultItemWriter = cfg.VaultItemWriter
-			rh.vaultAppStore = cfg.AppStore
-		}
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
 			cfg.Logger.Info("service creation endpoint enabled")
@@ -477,13 +457,10 @@ func New(cfg Config) *Server {
 				rh.appHandler.deploymentHistoryReader = cfg.DeploymentHistoryReader
 				cfg.Logger.Info("deployment history reader enabled — history endpoint active")
 			}
-			if cfg.VaultItemWriter != nil {
-				rh.appHandler.vaultWriter = cfg.VaultItemWriter
-				cfg.Logger.Info("vault item writer enabled — 1Password items created on app/preview create")
-			}
 			cfg.Logger.Info("app endpoints enabled")
 		}
-		if cfg.AppStore != nil && cfg.ProjectStore != nil {			ech := &envConfigHandler{
+		if cfg.AppStore != nil && cfg.ProjectStore != nil {
+			ech := &envConfigHandler{
 				orgStore:         cfg.OrgProvider,
 				projectStore:     cfg.ProjectStore,
 				appStore:         cfg.AppStore,
@@ -494,14 +471,13 @@ func New(cfg Config) *Server {
 			rh.envConfigHandler = ech
 			cfg.Logger.Info("env config endpoints enabled")
 		}
-		if cfg.AppStore != nil && cfg.SecretBackend != nil {
+		if cfg.AppStore != nil && cfg.VaultStore != nil {
 			rh.secretsHandler = &secretsHandler{
-				orgStore:    cfg.OrgProvider,
-				appStore:    cfg.AppStore,
-				backend:     cfg.SecretBackend,
-				upperWriter: cfg.UpperLevelSecretWriter,
-				auditor:     cfg.SecretsAuditor,
-				logger:      cfg.Logger,
+				orgStore: cfg.OrgProvider,
+				appStore: cfg.AppStore,
+				vault:    cfg.VaultStore,
+				auditor:  cfg.SecretsAuditor,
+				logger:   cfg.Logger,
 			}
 			if cfg.KubeClient != nil {
 				rh.secretsHandler.kubeClient = cfg.KubeClient
@@ -510,10 +486,6 @@ func New(cfg Config) *Server {
 					return onepassword.NewSDKClient(ctx, token)
 				}
 				rh.secretsHandler.certCache = seal.NewK8sCertCache(cfg.KubeClient)
-				// Always keep a K8s upper-level writer around, even when the
-				// active backend is 1Password — used as the migration source
-				// when copying suparship-system Secrets into vaults.
-				rh.secretsHandler.k8sUpperWriter = secrets.NewUpperLevelSecretWriter(cfg.KubeClient)
 			}
 			if cfg.ClusterPool != nil {
 				rh.secretsHandler.clusterPool = &clusterPoolAdapter{pool: cfg.ClusterPool}

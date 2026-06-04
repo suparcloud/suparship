@@ -29,18 +29,17 @@ import (
 // projectStore is non-nil. The logs route is registered when logsProvider
 // is non-nil.
 type appHandler struct {
-	appStore        domain.AppStore
-	templateIdx     map[string]*tpl.Template
-	projectStore    project.Store
-	orgProvider     rbac.OrgProvider     // optional: provides org env fallback for sync
-	runtimeProvider runtime.Provider     // optional: enriches env responses with live K8s status
-	logsProvider    runtime.LogsProvider // optional: enables GET .../apps/{app}/logs
-	gitOpsPublisher   GitOpsPublisher      // optional: commits argocd manifests to gitops repo on create
-	kargoPromoter     KargoPromoter        // optional: creates Kargo Promotion CRs on promote
-	kargoStatusReader KargoStatusReader    // optional: reads live Kargo Promotion status
-	kargoPipelineReader KargoPipelineReader // optional: reads live Kargo Stage pipeline status
+	appStore                domain.AppStore
+	templateIdx             map[string]*tpl.Template
+	projectStore            project.Store
+	orgProvider             rbac.OrgProvider        // optional: provides org env fallback for sync
+	runtimeProvider         runtime.Provider        // optional: enriches env responses with live K8s status
+	logsProvider            runtime.LogsProvider    // optional: enables GET .../apps/{app}/logs
+	gitOpsPublisher         GitOpsPublisher         // optional: commits argocd manifests to gitops repo on create
+	kargoPromoter           KargoPromoter           // optional: creates Kargo Promotion CRs on promote
+	kargoStatusReader       KargoStatusReader       // optional: reads live Kargo Promotion status
+	kargoPipelineReader     KargoPipelineReader     // optional: reads live Kargo Stage pipeline status
 	deploymentHistoryReader DeploymentHistoryReader // optional: reads ArgoCD sync history
-	vaultWriter       VaultItemWriter      // optional: creates 1Password vault items on app/preview create
 	// kubeClient lets the upgrade-template handler validate that the
 	// requested version actually exists in the cluster as an archive
 	// ConfigMap before mutating + republishing. Optional — when nil
@@ -262,27 +261,6 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app environment"})
 			return
-		}
-	}
-
-	// Best-effort: create a 1Password vault item skeleton per bound stable env
-	// so the platform-managed ExternalSecret can resolve as soon as ArgoCD syncs.
-	// Unbound envs are skipped — the item will be backfilled when the env is bound.
-	if ah.vaultWriter != nil && ah.orgProvider != nil {
-		if org, orgErr := ah.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
-			orgName := org.Name
-			if orgName == "" {
-				orgName = "default"
-			}
-			for _, env := range result.Environments {
-				if env.EnvType == domain.AppEnvPreview {
-					continue // preview lifecycle is separate
-				}
-				if err := ah.vaultWriter.UpsertAppItem(r.Context(), orgName, projectName, req.Name, env.EnvName); err != nil {
-					slog.Error("vault: failed to create app item skeleton — continuing",
-						"project", projectName, "app", req.Name, "env", env.EnvName, "error", err)
-				}
-			}
 		}
 	}
 
@@ -586,21 +564,6 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Best-effort: create a 1Password vault item for this preview so the
-	// platform-managed ExternalSecret can pull secrets as soon as ArgoCD syncs.
-	if ah.vaultWriter != nil && ah.orgProvider != nil {
-		if org, orgErr := ah.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
-			orgName := org.Name
-			if orgName == "" {
-				orgName = "default"
-			}
-			if vErr := ah.vaultWriter.UpsertAppItem(r.Context(), orgName, projectName, appName, sanitized); vErr != nil {
-				slog.Error("vault: failed to create preview item — continuing",
-					"project", projectName, "app", appName, "preview", sanitized, "error", vErr)
-			}
-		}
-	}
-
 	writeJSON(w, http.StatusCreated, appPreviewToDTO(env))
 }
 
@@ -629,20 +592,6 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 	if err := ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, previewName); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete preview"})
 		return
-	}
-
-	// Best-effort: delete the 1Password vault item for this preview.
-	if ah.vaultWriter != nil && ah.orgProvider != nil {
-		if org, orgErr := ah.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
-			orgName := org.Name
-			if orgName == "" {
-				orgName = "default"
-			}
-			if vErr := ah.vaultWriter.DeleteAppItem(r.Context(), orgName, projectName, appName, previewName); vErr != nil {
-				slog.Error("vault: failed to delete preview item — continuing",
-					"project", projectName, "app", appName, "preview", previewName, "error", vErr)
-			}
-		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -716,36 +665,6 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 				"namespace", env.Namespace,
 				"error", err,
 			)
-		}
-	}
-
-	// Best-effort: upsert vault item skeletons for bound stable envs so that
-	// syncing an existing app (created before the platform-managed secret flow
-	// was introduced) also provisions the missing 1Password items.
-	if ah.vaultWriter != nil && ah.orgProvider != nil {
-		if org, orgErr := ah.orgProvider.GetOrg(r.Context()); orgErr == nil && org != nil {
-			orgName := org.Name
-			if orgName == "" {
-				orgName = "default"
-			}
-			// Build a fast-lookup set of org env names that are bound to a
-			// real cluster (any registered cluster — the active one isn't
-			// special for vault-item upsert).
-			boundEnvs := make(map[string]bool, len(org.Environments))
-			for _, orgEnv := range org.Environments {
-				if orgEnv.EffectiveClusterRef() != "" {
-					boundEnvs[orgEnv.Name] = true
-				}
-			}
-			for _, env := range stableEnvs {
-				if !boundEnvs[env.EnvName] {
-					continue
-				}
-				if err := ah.vaultWriter.UpsertAppItem(r.Context(), orgName, projectName, appName, env.EnvName); err != nil {
-					slog.Error("vault: failed to upsert app item on sync — continuing",
-						"project", projectName, "app", appName, "env", env.EnvName, "error", err)
-				}
-			}
 		}
 	}
 

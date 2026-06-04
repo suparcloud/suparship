@@ -198,26 +198,27 @@ func runSecretsStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Connect: installed=%v healthy=%v endpoint=%s\n",
 		op.Connect.Installed, op.Connect.Healthy, op.Connect.Endpoint)
 
-	if len(op.Bindings) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No environment bindings.")
-		return nil
-	}
-
-	fmt.Fprintf(cmd.OutOrStdout(), "\n%-12s  %-40s  %-14s  %-30s  %s\n", "ENV", "VAULT ID", "BOUND", "CLUSTER SECRET STORE", "LAST ERROR")
-	for _, b := range op.Bindings {
+	printVault := func(scope, key string, ref secrets.VaultRef) {
 		bound := "no"
-		if b.Provisioned {
+		if ref.Provisioned {
 			bound = "yes"
 		}
 		lastErr := "-"
-		if b.LastError != "" {
-			lastErr = b.LastError
+		if ref.LastError != "" {
+			lastErr = ref.LastError
 		}
-		cssName := "-"
-		if b.ClusterSecretStoreName != "" {
-			cssName = b.ClusterSecretStoreName
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%-12s  %-40s  %-14s  %-30s  %s\n", b.Env, b.VaultID, bound, cssName, lastErr)
+		fmt.Fprintf(cmd.OutOrStdout(), "%-10s  %-12s  %-40s  %-7s  %s\n", scope, key, ref.VaultID, bound, lastErr)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "\n%-10s  %-12s  %-40s  %-7s  %s\n", "SCOPE", "KEY", "VAULT ID", "BOUND", "LAST ERROR")
+	if op.GlobalVault.VaultID != "" {
+		printVault("global", "-", op.GlobalVault)
+	}
+	for _, ref := range op.EnvVaults {
+		printVault("env", ref.Key, ref)
+	}
+	for _, ref := range op.ClusterVaults {
+		printVault("cluster", ref.Key, ref)
 	}
 	return nil
 }
@@ -261,24 +262,18 @@ func runSecretsBind(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("bind is only available for 1Password backend (current: %s)", org.SecretBackend.Effective())
 	}
 
-	rotated := org.SecretBackend.FindBinding(env) != nil
+	scope := secrets.EnvScope(env)
+	rotated := org.SecretBackend.FindVault(scope) != nil
 	if rotated {
-		fmt.Fprintf(cmd.OutOrStdout(), "Environment %q already bound — rotating token...\n", env)
+		fmt.Fprintf(cmd.OutOrStdout(), "Environment %q already bound — updating vault...\n", env)
 	}
 
-	naming := org.ResourceNaming
-	storeName := naming.RenderClusterSecretStore(secrets.NamingParams{
-		Provider: string(secrets.Backend1Password),
-		Env:      env,
-		Org:      org.Name,
-	})
-
+	storeName := secrets.EnvStoreName(env)
 	if vaultName == "" {
 		vaultName = vaultID
 	}
 
-	org.SecretBackend.UpsertBinding(secrets.EnvBinding{
-		Env:                    env,
+	org.SecretBackend.UpsertVault(scope, secrets.VaultRef{
 		VaultID:                vaultID,
 		VaultName:              vaultName,
 		Provisioned:            true,
@@ -289,10 +284,8 @@ func runSecretsBind(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("saving org config: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Bound %s: vault=%s clusterSecretStore=%s\n", env, vaultName, storeName)
-	if rotated {
-		fmt.Fprintln(cmd.OutOrStdout(), "Token rotated. Run GitOps sync to push sealed token.")
-	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Bound env %s: vault=%s clusterSecretStore=%s\n", env, vaultName, storeName)
+	fmt.Fprintln(cmd.OutOrStdout(), "Note: Connect-token sealing/publishing is handled separately (see docs).")
 	return nil
 }
 
@@ -312,12 +305,12 @@ func runSecretsUnbind(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("loading org config: %w", err)
 	}
 
-	binding := org.SecretBackend.FindBinding(env)
-	if binding == nil {
-		return fmt.Errorf("no binding found for environment %q", env)
+	scope := secrets.EnvScope(env)
+	if org.SecretBackend.FindVault(scope) == nil {
+		return fmt.Errorf("no vault bound for environment %q", env)
 	}
 
-	org.SecretBackend.RemoveBinding(env)
+	org.SecretBackend.RemoveVault(scope)
 	if err := store.SaveOrg(ctx, org); err != nil {
 		return fmt.Errorf("saving org config: %w", err)
 	}

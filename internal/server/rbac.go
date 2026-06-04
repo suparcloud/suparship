@@ -3,7 +3,6 @@ package server
 import (
 	"net/http"
 
-	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
@@ -23,9 +22,9 @@ func ProjectFromPathValue(param string) ProjectExtractor {
 // It composes authentication (via authHandler) with authorization
 // (via rbac.OrgStore).
 type rbacHandler struct {
-	auth         *authHandler
-	orgStore     rbac.OrgStore
-	projectStore project.Store // optional: merges project store into project listing
+	auth             *authHandler
+	orgStore         rbac.OrgStore
+	projectStore     project.Store     // optional: merges project store into project listing
 	serviceHandler   *serviceHandler   // optional: enables POST .../services
 	inventoryHandler *inventoryHandler // optional: enables inventory endpoints
 	previewHandler   *previewHandler   // optional: enables preview endpoints
@@ -34,10 +33,6 @@ type rbacHandler struct {
 	appHandler       *appHandler       // optional: enables app read endpoints
 	envConfigHandler *envConfigHandler // optional: enables env config endpoints
 	secretsHandler   *secretsHandler   // optional: enables simple secret management
-	// vaultItemWriter and appStore are optional — used to backfill vault items
-	// when an env is first bound to a cluster (so existing apps get their items).
-	vaultItemWriter VaultItemWriter  // optional: backfill vault items on env bind
-	vaultAppStore   domain.AppStore // optional: list apps for backfill
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -192,45 +187,40 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// Full backend config (new schema).
 		mux.HandleFunc("GET /api/v1/org/secret-backend", rh.auth.requireAuth(sh.handleGetSecretsBackendFull))
 		mux.HandleFunc("PUT /api/v1/org/secret-backend", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePutSecretsBackendFull)))
-		// SA token, vault listing, and binding endpoints.
+		// SA token + vault listing.
 		mux.HandleFunc("POST /api/v1/org/secret-backend/sa-token", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePostSAToken)))
 		mux.HandleFunc("GET /api/v1/org/secret-backend/vaults", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListVaults)))
-		mux.HandleFunc("POST /api/v1/org/secret-backend/bindings", requireOrgAdmin(rh.requireOrgAdmin(sh.handleAddBinding)))
-		mux.HandleFunc("DELETE /api/v1/org/secret-backend/bindings/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRemoveBinding)))
-		// Platform-shared vault: operator picks the vault they created manually
-		// in 1Password (SAs can't create vaults). Org and project secret
-		// writes route here.
-		mux.HandleFunc("PUT /api/v1/org/secret-backend/platform-vault", requireOrgAdmin(rh.requireOrgAdmin(sh.handleSetPlatformVault)))
-		// One-shot migration: copy upper-level K8s Secrets into the 1Password
-		// vaults after flipping the org backend. Idempotent.
-		mux.HandleFunc("POST /api/v1/org/secret-backend/migrate-to-onepassword", requireOrgAdmin(rh.requireOrgAdmin(sh.handleMigrateToOnePassword)))
-		// Org-level secrets CRUD — org_admin writes, any-auth reads.
-		mux.HandleFunc("GET /api/v1/org/secrets", rh.auth.requireAuth(sh.handleListOrgSecrets))
-		mux.HandleFunc("POST /api/v1/org/secrets", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertOrgSecrets)))
-		mux.HandleFunc("DELETE /api/v1/org/secrets/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteOrgSecret)))
-		// Env-type-level secrets CRUD — org_admin writes, any-auth reads.
-		mux.HandleFunc("GET /api/v1/org/secrets/envtype/{envtype}", rh.auth.requireAuth(sh.handleListEnvTypeSecrets))
-		mux.HandleFunc("POST /api/v1/org/secrets/envtype/{envtype}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertEnvTypeSecrets)))
-		mux.HandleFunc("DELETE /api/v1/org/secrets/envtype/{envtype}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteEnvTypeSecret)))
-		// Project-level secrets CRUD — project_admin writes, viewer reads.
-		mux.HandleFunc("GET /api/v1/projects/{project}/secrets", viewProject(sh.handleListProjectSecrets))
-		mux.HandleFunc("POST /api/v1/projects/{project}/secrets", manageProject(sh.handleUpsertProjectSecrets))
-		mux.HandleFunc("DELETE /api/v1/projects/{project}/secrets/{key}", manageProject(sh.handleDeleteProjectSecret))
-		// Cluster-level secrets CRUD — org_admin writes, any-auth reads.
-		mux.HandleFunc("GET /api/v1/clusters/{cluster}/secrets", rh.auth.requireAuth(sh.handleListClusterSecrets))
-		mux.HandleFunc("POST /api/v1/clusters/{cluster}/secrets", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertClusterSecrets)))
-		mux.HandleFunc("DELETE /api/v1/clusters/{cluster}/secrets/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteClusterSecret)))
-		// App-level secrets CRUD — developer writes, viewer reads.
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets", viewProject(sh.handleListAppSecrets))
-		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets", devProject(sh.handleUpsertAppSecrets))
-		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/{key}", devProject(sh.handleDeleteAppSecret))
-		// App-env secret key/value CRUD — developer writes, viewer reads.
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets", viewProject(sh.handleListSecrets))
-		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets", devProject(sh.handleUpsertSecrets))
-		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets/{key}", devProject(sh.handleDeleteSecret))
-		// Resolved secrets — merged view across all 5 levels.
+		// Global vault: the 1Password vault holding global-scope items.
+		mux.HandleFunc("PUT /api/v1/org/secret-backend/global-vault", requireOrgAdmin(rh.requireOrgAdmin(sh.handleSetGlobalVault)))
+		// Env/cluster vault provisioning (1Password Connect-token sealing).
+		mux.HandleFunc("POST /api/v1/org/secret-backend/vaults/env/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRegisterEnvVault)))
+		mux.HandleFunc("POST /api/v1/org/secret-backend/vaults/cluster/{cluster}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRegisterClusterVault)))
+
+		// ── Shared-tier secrets (org-admin) across the 3 scopes ──
+		mux.HandleFunc("GET /api/v1/org/secrets/global", rh.auth.requireAuth(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/org/secrets/global", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
+		mux.HandleFunc("DELETE /api/v1/org/secrets/global/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
+		mux.HandleFunc("GET /api/v1/org/secrets/env/{env}", rh.auth.requireAuth(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/org/secrets/env/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
+		mux.HandleFunc("DELETE /api/v1/org/secrets/env/{env}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
+		mux.HandleFunc("GET /api/v1/org/secrets/cluster/{cluster}", rh.auth.requireAuth(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/org/secrets/cluster/{cluster}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
+		mux.HandleFunc("DELETE /api/v1/org/secrets/cluster/{cluster}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
+
+		// ── App-tier secrets (project devs) across the 3 scopes ──
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets/global", viewProject(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/global", devProject(sh.handleUpsertSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/global/{key}", devProject(sh.handleDeleteSecret))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets/env/{env}", viewProject(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/env/{env}", devProject(sh.handleUpsertSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/{key}", devProject(sh.handleDeleteSecret))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets/cluster/{cluster}", viewProject(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/cluster/{cluster}", devProject(sh.handleUpsertSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/cluster/{cluster}/{key}", devProject(sh.handleDeleteSecret))
+
+		// Resolved secrets — merged view (global<env<cluster, shared<app).
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets/resolved", viewProject(sh.handleGetResolvedSecrets))
-		// Force-sync: bumps ExternalSecret annotation to trigger ESO re-pull.
+		// Force-sync: triggers ESO re-pull.
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/sync", devProject(sh.handleSecretSync))
 	}
 
