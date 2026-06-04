@@ -36,14 +36,11 @@ func TestItemAndStoreAndWorkloadNames(t *testing.T) {
 	if got := StoreName(env); got != "suparship-store-env-staging" {
 		t.Errorf("StoreName = %q", got)
 	}
-	if got := WorkloadSecretName(GlobalScope(), "api"); got != "api-global" {
-		t.Errorf("WorkloadSecretName global = %q", got)
+	if got := AppSecretName("api"); got != "api-secrets" {
+		t.Errorf("AppSecretName = %q", got)
 	}
-	if got := WorkloadSecretName(env, "api"); got != "api-env" {
-		t.Errorf("WorkloadSecretName env = %q", got)
-	}
-	if got := WorkloadSecretName(ClusterScope("c1"), "api"); got != "api-cluster" {
-		t.Errorf("WorkloadSecretName cluster = %q", got)
+	if got := AppConfigMapName("api"); got != "api-config" {
+		t.Errorf("AppConfigMapName = %q", got)
 	}
 }
 

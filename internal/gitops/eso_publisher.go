@@ -38,15 +38,23 @@ type ESOSecretStoreConfig struct {
 // Name returns the ClusterSecretStore resource name for this store's scope.
 func (c ESOSecretStoreConfig) Name() string { return secrets.StoreName(c.Scope) }
 
-// ESOExternalSecretConfig captures one ExternalSecret — one per (scope, app).
-// It materializes the <app>-global/-env/-cluster Secret in the app namespace
-// by extracting the shared item then the app item (app keys win) from the
-// scope's single vault.
+// ESOItemRef is one dataFrom.extract entry: a vault item plus the
+// ClusterSecretStore it is read from. When StoreName differs from the
+// ExternalSecret's default store, a per-entry sourceRef is emitted so one
+// ExternalSecret can merge items from several stores (the per-scope stores).
+type ESOItemRef struct {
+	Key       string
+	StoreName string
+}
+
+// ESOExternalSecretConfig captures the single ExternalSecret per app-env. It
+// materializes one merged Secret (<app>-secrets) by extracting every present
+// scope/tier item in precedence order (later overwrites earlier).
 type ESOExternalSecretConfig struct {
-	Name      string   // WorkloadSecretName(scope, app)
-	Namespace string   // app namespace
-	StoreName string   // StoreName(scope)
-	ItemKeys  []string // ordered [shared item, app item]; later wins
+	Name      string // AppSecretName(app)
+	Namespace string // app namespace
+	StoreName string // default ClusterSecretStore (global store)
+	Items     []ESOItemRef
 	Branding  branding.Config
 }
 
@@ -107,9 +115,11 @@ spec:
 	return sb.String()
 }
 
-// BuildExternalSecretYAML renders one ExternalSecret. dataFrom.extract is
-// applied in ItemKeys order, so listing the shared item before the app item
-// makes the app's keys overwrite shared keys with the same name.
+// BuildExternalSecretYAML renders the single merged ExternalSecret. dataFrom
+// is applied in Items order (later overwrites earlier), and each item emits a
+// per-entry sourceRef.storeRef when its store differs from the default
+// secretStoreRef — letting one ExternalSecret pull from the global, env, and
+// cluster ClusterSecretStores into one target Secret.
 func BuildExternalSecretYAML(cfg ESOExternalSecretConfig) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1
@@ -130,8 +140,13 @@ spec:
   dataFrom:
 `, cfg.Name, cfg.Namespace, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), cfg.StoreName, cfg.Name))
 
-	for _, key := range cfg.ItemKeys {
-		sb.WriteString(fmt.Sprintf("  - extract:\n      key: %q\n", key))
+	for _, item := range cfg.Items {
+		sb.WriteString(fmt.Sprintf("  - extract:\n      key: %q\n", item.Key))
+		// Per-entry storeRef overrides the top-level secretStoreRef. Only emit
+		// when it differs so single-store output stays terse.
+		if item.StoreName != "" && item.StoreName != cfg.StoreName {
+			sb.WriteString(fmt.Sprintf("    sourceRef:\n      storeRef:\n        name: %s\n        kind: ClusterSecretStore\n", item.StoreName))
+		}
 	}
 	return sb.String()
 }
@@ -180,8 +195,8 @@ type ScopePresence struct {
 	ClusterShared, ClusterApp bool
 }
 
-// WorkloadExternalSecretParams captures the per-app-env info for the three
-// scope ExternalSecrets.
+// WorkloadExternalSecretParams captures the per-app-env info for the single
+// merged ExternalSecret.
 type WorkloadExternalSecretParams struct {
 	App       string
 	Namespace string
@@ -193,31 +208,24 @@ type WorkloadExternalSecretParams struct {
 	Branding branding.Config
 }
 
-// BuildWorkloadExternalSecrets returns up to three ExternalSecret configs
-// (global/env/cluster) for one app-env namespace. A scope is included only
-// when at least one of its tiers has keys; within a scope the shared item is
-// listed before the app item so app keys win.
-func BuildWorkloadExternalSecrets(p WorkloadExternalSecretParams) []ESOExternalSecretConfig {
-	var out []ESOExternalSecretConfig
+// BuildAppExternalSecret returns the single merged ExternalSecret config for an
+// app-env, or nil when no scope has keys. dataFrom items are ordered
+// global→env→cluster, shared-before-app within each scope, so cluster/app wins;
+// each item carries its scope's store (the global store is the default, so
+// global items omit sourceRef). Cluster items are included only when the env is
+// bound to a cluster.
+func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretConfig {
+	globalStore := secrets.StoreName(secrets.GlobalScope())
+	var items []ESOItemRef
 
 	add := func(scope secrets.Scope, shared, app bool) {
-		var keys []string
+		store := secrets.StoreName(scope)
 		if shared {
-			keys = append(keys, secrets.SharedItemName(scope))
+			items = append(items, ESOItemRef{Key: secrets.SharedItemName(scope), StoreName: store})
 		}
 		if app {
-			keys = append(keys, secrets.AppItemName(scope, p.App))
+			items = append(items, ESOItemRef{Key: secrets.AppItemName(scope, p.App), StoreName: store})
 		}
-		if len(keys) == 0 {
-			return
-		}
-		out = append(out, ESOExternalSecretConfig{
-			Name:      secrets.WorkloadSecretName(scope, p.App),
-			Namespace: p.Namespace,
-			StoreName: secrets.StoreName(scope),
-			ItemKeys:  keys,
-			Branding:  p.Branding,
-		})
 	}
 
 	add(secrets.GlobalScope(), p.Presence.GlobalShared, p.Presence.GlobalApp)
@@ -225,7 +233,17 @@ func BuildWorkloadExternalSecrets(p WorkloadExternalSecretParams) []ESOExternalS
 	if p.Cluster != "" {
 		add(secrets.ClusterScope(p.Cluster), p.Presence.ClusterShared, p.Presence.ClusterApp)
 	}
-	return out
+
+	if len(items) == 0 {
+		return nil
+	}
+	return &ESOExternalSecretConfig{
+		Name:      secrets.AppSecretName(p.App),
+		Namespace: p.Namespace,
+		StoreName: globalStore,
+		Items:     items,
+		Branding:  p.Branding,
+	}
 }
 
 // PublishSecretStores clones the gitops repo, writes the full desired set of
@@ -283,42 +301,29 @@ func (p *Publisher) WriteSecretStores(repoDir string, stores []ESOSecretStoreCon
 	return nil
 }
 
-// WriteWorkloadExternalSecrets writes the per-scope ExternalSecret YAML files
-// (external-secret-global.yaml / -env.yaml / -cluster.yaml) into dir, and
-// prunes any scope file no longer wanted (e.g. all keys removed at a scope).
-func (p *Publisher) WriteWorkloadExternalSecrets(dir string, configs []ESOExternalSecretConfig) error {
-	// Map each config to its scope-suffixed filename via the target secret name.
-	wanted := map[string]bool{}
-	for _, cfg := range configs {
-		var suffix string
-		switch {
-		case strings.HasSuffix(cfg.Name, "-global"):
-			suffix = "global"
-		case strings.HasSuffix(cfg.Name, "-cluster"):
-			suffix = "cluster"
-		default:
-			suffix = "env"
+// WriteAppExternalSecret writes the single merged ExternalSecret to
+// dir/external-secret.yaml (or removes it when cfg is nil — no scope has keys),
+// and prunes the prior layout's per-scope files for idempotent migration.
+func (p *Publisher) WriteAppExternalSecret(dir string, cfg *ESOExternalSecretConfig) error {
+	prune := func(name string) error {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			if err := os.Remove(path); err != nil {
+				return fmt.Errorf("prune stale ExternalSecret %s: %w", name, err)
+			}
 		}
-		fname := "external-secret-" + suffix + ".yaml"
-		wanted[fname] = true
-		if err := p.writeFile(filepath.Join(dir, fname), []byte(BuildExternalSecretYAML(cfg))); err != nil {
+		return nil
+	}
+	// Remove the old 3-file layout if present.
+	for _, suffix := range []string{"global", "env", "cluster"} {
+		if err := prune("external-secret-" + suffix + ".yaml"); err != nil {
 			return err
 		}
 	}
-	// Prune scope files that are no longer wanted.
-	for _, suffix := range []string{"global", "env", "cluster"} {
-		fname := "external-secret-" + suffix + ".yaml"
-		if wanted[fname] {
-			continue
-		}
-		path := filepath.Join(dir, fname)
-		if _, err := os.Stat(path); err == nil {
-			if err := os.Remove(path); err != nil {
-				return fmt.Errorf("prune stale ExternalSecret %s: %w", fname, err)
-			}
-		}
+	if cfg == nil {
+		return prune("external-secret.yaml")
 	}
-	return nil
+	return p.writeFile(filepath.Join(dir, "external-secret.yaml"), []byte(BuildExternalSecretYAML(*cfg)))
 }
 
 // BuildAppConfigMapYAML renders a ConfigMap YAML for non-secret env vars.

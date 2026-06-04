@@ -618,15 +618,15 @@ func (p *Publisher) writeAppPlatformResources(
 	namespace string,
 	env AppPublishEnv,
 ) error {
-	// ConfigMap — written with the fully-merged map the caller passed in.
-	cmName := secrets.AppConfigName(app.ProjectName, app.Name, env.EnvName)
+	// ConfigMap — single per-app object with the fully-merged map.
+	cmName := secrets.AppConfigMapName(app.Name)
 	if err := p.WriteAppConfigMap(dir, cmName, namespace, env.EnvVars); err != nil {
 		return fmt.Errorf("writing app ConfigMap: %w", err)
 	}
 
-	// Up to three ExternalSecrets (global/env/cluster); only scopes that have
-	// keys produce a file, and WriteWorkloadExternalSecrets prunes the rest.
-	cfgs := BuildWorkloadExternalSecrets(WorkloadExternalSecretParams{
+	// Single merged ExternalSecret (<app>-secrets); nil when no scope has keys.
+	// WriteAppExternalSecret prunes the prior per-scope layout.
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 		App:       app.Name,
 		Namespace: namespace,
 		Env:       env.EnvName,
@@ -634,7 +634,7 @@ func (p *Publisher) writeAppPlatformResources(
 		Presence:  env.ScopeKeys,
 		Branding:  p.cfg.Branding,
 	})
-	if err := p.WriteWorkloadExternalSecrets(dir, cfgs); err != nil {
+	if err := p.WriteAppExternalSecret(dir, cfg); err != nil {
 		return err
 	}
 

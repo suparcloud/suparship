@@ -50,7 +50,7 @@ func TestPublishAppFiles_NoKustomizationEmitted(t *testing.T) {
 	}
 
 	// Sanity: the manifests the include filter applies still exist.
-	for _, name := range []string{"env-configmap.yaml", "external-secret-global.yaml"} {
+	for _, name := range []string{"env-configmap.yaml", "external-secret.yaml"} {
 		if _, err := os.Stat(filepath.Join(appDir, name)); err != nil {
 			t.Errorf("expected %s in app dir, got: %v", name, err)
 		}

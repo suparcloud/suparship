@@ -38,7 +38,7 @@ func TestPublishAppFiles_PrependsGeneratedHeader(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	for _, name := range []string{"app.yaml", "values.yaml", "env-configmap.yaml", "external-secret-global.yaml"} {
+	for _, name := range []string{"app.yaml", "values.yaml", "env-configmap.yaml", "external-secret.yaml"} {
 		path := filepath.Join(dir, "envs", "staging", "demo", "nginx", name)
 		raw, err := os.ReadFile(path)
 		if err != nil {

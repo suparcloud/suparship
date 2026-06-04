@@ -41,22 +41,30 @@ const (
 // Mapping rules:
 //
 //   - app.name  ← app.Name
+//
 //   - app.env   ← envName
 //
 //   - For each ComponentSpec in app.Spec.Components (processed in name order):
+//
 //   - enabled   ← ComponentSpec.Enabled; additionally false when
 //     envType==preview and ComponentSpec.PreviewEnabled==false
+//
 //   - image     ← AppSpec.Values["image_repository"] / ["image_tag"]
 //     (shared across all components in MVP; per-component overrides future)
+//
 //   - replicas  ← ComponentSpec.Replicas → envOverride.Replicas → default
+//
 //   - ingress   ← ResolveRoutingProfile(orgProfiles, envProfiles,
 //     ComponentSpec.ExposeMode); only set on the routing component
+//
 //   - env       ← ComponentSpec.Config merged with envOverride.Config
 //     (override wins on key conflict)
+//
 //   - resources ← ComponentSpec.SizePreset → envOverride.SizePreset
 //     (omitted entirely when no preset is set)
 //
 //   - routing.host      ← domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain)
+//
 //   - routing.component ← first exposed component (alphabetical; falls back
 //     to first web component, then to first component overall)
 //
@@ -83,24 +91,14 @@ func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.A
 	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", "", nil, nil, nil, nil)
 }
 
-// MapToHelmValuesForEnv is the canonical mapper. The naming and orgName
-// arguments mirror what the publisher uses to render ExternalSecret /
-// ConfigMap names in gitops-output, so values.yaml's envFrom lists always
-// match the K8s resources the platform-managed publisher actually creates.
+// MapToHelmValuesForEnv is the canonical mapper. The envFrom lists reference
+// the single per-app objects the platform publisher materializes — one Secret
+// (<app>-secrets) and one ConfigMap (<app>-config) — into which all scopes
+// (global/env/cluster) are merged, so values.yaml always matches the published
+// resources regardless of backend.
 //
-// backend selects which app-env name appears in the envFrom lists:
-//   - secrets.Backend1Password → ESO-materialised target name from
-//     RenderAppResource (the only Secret that exists on this backend).
-//   - secrets.BackendK8s       → suparship-system-replicated name from
-//     AppEnvSecretName / AppConfigName (the only Secret/ConfigMap that
-//     exists on this backend).
-//
-// Cluster is used only for the cluster-scope envFrom name; pass "" for
-// unbound envs (the cluster scope is then omitted from the lists).
-//
-// Namespace is plumbed for backwards-compatibility (callers that have it
-// pass it; the mapper does not currently use it for naming — names come
-// from the configurable ResourceNaming patterns).
+// cluster and namespace are accepted for caller compatibility but no longer
+// affect the (deterministic, single-name) envFrom lists.
 //
 // orgProfiles and envProfiles drive the per-component IngressValues output.
 // envProfiles entries override orgProfiles by mode name (sparse). When the
@@ -224,24 +222,13 @@ func buildAddonBindings(app *domain.App, envAddons, orgAddons domain.AddonProfil
 // namespace — <app>-global, <app>-env, <app>-cluster — each merging the
 // org-admin shared item and the app's own item for that scope.
 //
-// envFromConfigMaps — one entry: the per-app ConfigMap the publisher writes
-// with global → env → cluster env-vars merged in precedence order.
-//
-// envFromSecrets — the three scope Secrets in order global, env, cluster.
-// Chart-side envFrom is later-wins, so env overrides global and cluster
-// overrides env. All are mounted optional:true, so a scope with no keys (whose
-// ExternalSecret isn't created) is harmless. cluster=="" omits the cluster
-// entry (env unbound).
-func envFromLists(project, app, envName, cluster string) ([]string, []string) {
-	cms := []string{secrets.AppConfigName(project, app, envName)}
-
-	secs := []string{
-		secrets.WorkloadGlobalSecretName(app),
-		secrets.WorkloadEnvSecretName(app),
-	}
-	if cluster != "" {
-		secs = append(secs, secrets.WorkloadClusterSecretName(app))
-	}
+// One ConfigMap (<app>-config) and one Secret (<app>-secrets) per app-env. The
+// platform merges all scopes (global/env/cluster) into each, so the chart
+// envFroms exactly these two names. Both are optional:true so the pod starts
+// before ESO populates the Secret.
+func envFromLists(_ /*project*/, app, _ /*envName*/, _ /*cluster*/ string) ([]string, []string) {
+	cms := []string{secrets.AppConfigMapName(app)}
+	secs := []string{secrets.AppSecretName(app)}
 	return cms, secs
 }
 

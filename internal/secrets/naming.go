@@ -1,7 +1,5 @@
 package secrets
 
-import "fmt"
-
 // ── Vault names (physical storage) ────────────────────────────────────────
 //
 // For the k8s backend a "vault" is a namespace; for 1Password it is a real
@@ -12,8 +10,6 @@ const (
 	globalVaultName    = "suparship-secrets-global"
 	envVaultPrefix     = "suparship-secrets-env-"
 	clusterVaultPrefix = "suparship-secrets-cluster-"
-
-	configAppEnvFmt = "suparship-config-%s-%s-%s"
 )
 
 // GlobalVaultName returns the vault name for global-scope secrets.
@@ -93,32 +89,21 @@ func EnvStoreName(env string) string { return StoreName(EnvScope(env)) }
 // ClusterStoreName returns the ClusterSecretStore name for a cluster vault.
 func ClusterStoreName(cluster string) string { return StoreName(ClusterScope(cluster)) }
 
-// ── Workload secret names (the 3 K8s Secrets mounted into each app pod) ────
+// ── Workload object names (one Secret + one ConfigMap per app pod) ─────────
+//
+// ESO merges all present scopes (global/env/cluster, shared+app) into a single
+// Secret; the publisher writes a single ConfigMap. Application charts envFrom
+// exactly these two names.
 
-// WorkloadGlobalSecretName returns the K8s Secret name ESO materializes in the
-// app namespace for global-scope secrets.
-func WorkloadGlobalSecretName(app string) string { return app + "-global" }
+// AppSecretName returns the single K8s Secret name ESO materializes in the app
+// namespace, merged across all scopes.
+func AppSecretName(app string) string { return app + "-secrets" }
 
-// WorkloadEnvSecretName returns the K8s Secret name for env-scope secrets.
-func WorkloadEnvSecretName(app string) string { return app + "-env" }
+// AppConfigMapName returns the single ConfigMap name the publisher writes for
+// the app's non-secret env vars.
+func AppConfigMapName(app string) string { return app + "-config" }
 
-// WorkloadClusterSecretName returns the K8s Secret name for cluster-scope secrets.
-func WorkloadClusterSecretName(app string) string { return app + "-cluster" }
-
-// WorkloadSecretName returns the materialized K8s Secret name for the given
-// scope and app.
-func WorkloadSecretName(scope Scope, app string) string {
-	switch scope.Kind {
-	case ScopeEnv:
-		return WorkloadEnvSecretName(app)
-	case ScopeCluster:
-		return WorkloadClusterSecretName(app)
-	default:
-		return WorkloadGlobalSecretName(app)
-	}
-}
-
-// ── ConfigMap naming (non-secret env vars; unchanged) ──────────────────────
+// ── ConfigMap naming (resolved-namespace variants) ────────────────────────
 
 // SecretNameForNamespace returns the K8s Secret name for an app's secrets
 // derived from the resolved namespace.
@@ -130,12 +115,4 @@ func SecretNameForNamespace(namespace string) string {
 // derived from the resolved namespace.
 func ConfigNameForNamespace(namespace string) string {
 	return "suparship-config-" + namespace
-}
-
-// AppConfigName returns the deterministic ConfigMap name for an app's
-// non-secret config in a given environment.
-//
-// Pattern: suparship-config-{project}-{app}-{env}
-func AppConfigName(project, app, env string) string {
-	return fmt.Sprintf(configAppEnvFmt, project, app, env)
 }

@@ -43,22 +43,34 @@ func TestBuildClusterSecretStoreYAML_1Password(t *testing.T) {
 
 func TestBuildExternalSecretYAML(t *testing.T) {
 	yaml := BuildExternalSecretYAML(ESOExternalSecretConfig{
-		Name:      "web-env",
+		Name:      "web-secrets",
 		Namespace: "acme-web-prod",
-		StoreName: "suparship-store-env-prod",
-		ItemKeys:  []string{"shared-env-prod", "web-env-prod"},
+		StoreName: "suparship-store-global", // default store
+		Items: []ESOItemRef{
+			{Key: "shared-global", StoreName: "suparship-store-global"},
+			{Key: "web-global", StoreName: "suparship-store-global"},
+			{Key: "shared-env-prod", StoreName: "suparship-store-env-prod"},
+			{Key: "web-env-prod", StoreName: "suparship-store-env-prod"},
+		},
 	})
-	if !strings.Contains(yaml, "name: web-env") {
-		t.Errorf("expected target name, got:\n%s", yaml)
+	if !strings.Contains(yaml, "name: web-secrets") {
+		t.Errorf("expected merged target name, got:\n%s", yaml)
 	}
-	if !strings.Contains(yaml, "name: suparship-store-env-prod") {
-		t.Errorf("expected store ref, got:\n%s", yaml)
+	if !strings.Contains(yaml, "name: suparship-store-global") {
+		t.Errorf("expected default store ref, got:\n%s", yaml)
 	}
-	// Shared listed before app so the app's keys win in ESO's ordered extract.
-	si := strings.Index(yaml, `"shared-env-prod"`)
-	ai := strings.Index(yaml, `"web-env-prod"`)
-	if si < 0 || ai < 0 || si > ai {
-		t.Errorf("expected shared item before app item, got:\n%s", yaml)
+	// Global items use the default store → no sourceRef; env items differ → sourceRef.
+	gi := strings.Index(yaml, `"web-global"`)
+	ei := strings.Index(yaml, `"web-env-prod"`)
+	if gi < 0 || ei < 0 || gi > ei {
+		t.Errorf("expected global items before env items, got:\n%s", yaml)
+	}
+	if !strings.Contains(yaml, "sourceRef:") || !strings.Contains(yaml, "name: suparship-store-env-prod") {
+		t.Errorf("expected per-entry sourceRef for the env store, got:\n%s", yaml)
+	}
+	// The global store is the default, so it must not appear as a sourceRef.
+	if strings.Contains(yaml, "name: suparship-store-global\n        kind: ClusterSecretStore") {
+		t.Errorf("did not expect a sourceRef for the default (global) store, got:\n%s", yaml)
 	}
 }
 
@@ -95,8 +107,8 @@ func TestBuildSecretStoresForConfig_1PasswordEmitsNoInfraStores(t *testing.T) {
 	}
 }
 
-func TestBuildWorkloadExternalSecrets_PresenceDriven(t *testing.T) {
-	cfgs := BuildWorkloadExternalSecrets(WorkloadExternalSecretParams{
+func TestBuildAppExternalSecret_PresenceDriven(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 		App:       "web",
 		Namespace: "acme-web-prod",
 		Env:       "prod",
@@ -107,35 +119,52 @@ func TestBuildWorkloadExternalSecrets_PresenceDriven(t *testing.T) {
 			// no cluster keys
 		},
 	})
-	if len(cfgs) != 2 {
-		t.Fatalf("expected 2 configs (global, env), got %d", len(cfgs))
+	if cfg == nil {
+		t.Fatal("expected a config")
 	}
-	byName := map[string]ESOExternalSecretConfig{}
-	for _, c := range cfgs {
-		byName[c.Name] = c
+	if cfg.Name != "web-secrets" {
+		t.Errorf("expected merged target web-secrets, got %q", cfg.Name)
 	}
-	g, ok := byName["web-global"]
-	if !ok || len(g.ItemKeys) != 1 || g.ItemKeys[0] != "web-global" {
-		t.Errorf("global config wrong: %+v", g)
+	// Ordered: global.app, env.shared, env.app (global.shared absent).
+	wantKeys := []string{"web-global", "shared-env-prod", "web-env-prod"}
+	if len(cfg.Items) != len(wantKeys) {
+		t.Fatalf("expected %d items, got %d: %+v", len(wantKeys), len(cfg.Items), cfg.Items)
 	}
-	e, ok := byName["web-env"]
-	if !ok || len(e.ItemKeys) != 2 || e.ItemKeys[0] != "shared-env-prod" || e.ItemKeys[1] != "web-env-prod" {
-		t.Errorf("env config wrong: %+v", e)
+	for i, k := range wantKeys {
+		if cfg.Items[i].Key != k {
+			t.Errorf("item %d: got %q, want %q", i, cfg.Items[i].Key, k)
+		}
+	}
+	// Global item uses the default store; env items carry the env store.
+	if cfg.Items[0].StoreName != "suparship-store-global" {
+		t.Errorf("global item store = %q", cfg.Items[0].StoreName)
+	}
+	if cfg.Items[1].StoreName != "suparship-store-env-prod" {
+		t.Errorf("env item store = %q", cfg.Items[1].StoreName)
 	}
 }
 
-func TestBuildWorkloadExternalSecrets_OmitsClusterWhenUnbound(t *testing.T) {
-	cfgs := BuildWorkloadExternalSecrets(WorkloadExternalSecretParams{
+func TestBuildAppExternalSecret_OmitsClusterWhenUnbound(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 		App:       "web",
 		Namespace: "acme-web-staging",
 		Env:       "staging",
 		Cluster:   "", // unbound
 		Presence:  ScopePresence{EnvApp: true, ClusterApp: true},
 	})
-	for _, c := range cfgs {
-		if strings.HasSuffix(c.Name, "-cluster") {
-			t.Errorf("expected no cluster ExternalSecret when unbound, got %+v", c)
+	if cfg == nil {
+		t.Fatal("expected a config")
+	}
+	for _, it := range cfg.Items {
+		if strings.Contains(it.Key, "cluster-") || strings.Contains(it.StoreName, "cluster-") {
+			t.Errorf("expected no cluster item when unbound, got %+v", it)
 		}
+	}
+}
+
+func TestBuildAppExternalSecret_NilWhenNoKeys(t *testing.T) {
+	if cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{App: "web", Env: "prod"}); cfg != nil {
+		t.Errorf("expected nil when no scope has keys, got %+v", cfg)
 	}
 }
 
