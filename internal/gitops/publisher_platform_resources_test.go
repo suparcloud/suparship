@@ -126,10 +126,13 @@ func TestPublishAppFiles_WritesMergedExternalSecret(t *testing.T) {
 			t.Errorf("expected dataFrom item %s, got:\n%s", key, es)
 		}
 	}
-	// env/cluster items must carry per-entry sourceRefs to their stores.
-	if !strings.Contains(es, "name: suparship-store-env-staging") ||
-		!strings.Contains(es, "name: suparship-store-cluster-prod-eu") {
-		t.Errorf("expected sourceRef storeRefs for env+cluster, got:\n%s", es)
+	// env AND cluster items extract from the env store — cluster-override
+	// items live inside the env vault, so no cluster store exists.
+	if !strings.Contains(es, "name: suparship-store-env-staging") {
+		t.Errorf("expected sourceRef storeRef for the env store, got:\n%s", es)
+	}
+	if strings.Contains(es, "suparship-store-cluster-") {
+		t.Errorf("did not expect a per-cluster store ref, got:\n%s", es)
 	}
 	// No separate per-scope files.
 	for _, scope := range []string{"global", "env", "cluster"} {

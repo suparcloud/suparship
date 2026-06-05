@@ -11,9 +11,10 @@ import (
 
 func TestVaultName(t *testing.T) {
 	cases := map[Scope]string{
-		GlobalScope():           "suparship-secrets-global",
-		EnvScope("staging"):     "suparship-secrets-env-staging",
-		ClusterScope("prod-eu"): "suparship-secrets-cluster-prod-eu",
+		GlobalScope():       "suparship-secrets-global",
+		EnvScope("staging"): "suparship-secrets-env-staging",
+		// Cluster overrides live in the env vault — no per-cluster vault.
+		ClusterScope("prod", "eu-1"): "suparship-secrets-env-prod",
 	}
 	for scope, want := range cases {
 		if got := VaultName(scope); got != want {
@@ -35,6 +36,18 @@ func TestItemAndStoreAndWorkloadNames(t *testing.T) {
 	}
 	if got := StoreName(env); got != "suparship-store-env-staging" {
 		t.Errorf("StoreName = %q", got)
+	}
+	// Cluster scope: items keep the cluster suffix, but vault/store resolve to
+	// the env vault/store (cluster overrides live inside the env vault).
+	cluster := ClusterScope("staging", "eu-1")
+	if got := SharedItemName(cluster); got != "shared-cluster-eu-1" {
+		t.Errorf("SharedItemName(cluster) = %q", got)
+	}
+	if got := AppItemName(cluster, "api"); got != "api-cluster-eu-1" {
+		t.Errorf("AppItemName(cluster) = %q", got)
+	}
+	if got := StoreName(cluster); got != "suparship-store-env-staging" {
+		t.Errorf("StoreName(cluster) = %q, want env store", got)
 	}
 	if got := AppSecretName("api"); got != "api-secrets" {
 		t.Errorf("AppSecretName = %q", got)
@@ -72,13 +85,19 @@ func TestBackendConfig_VaultRefs(t *testing.T) {
 	c := &BackendConfig{Type: Backend1Password}
 	c.UpsertVault(GlobalScope(), VaultRef{VaultID: "g1"})
 	c.UpsertVault(EnvScope("staging"), VaultRef{VaultID: "e1"})
-	c.UpsertVault(ClusterScope("c1"), VaultRef{VaultID: "k1"})
 
 	if id, err := c.VaultIDForScope(GlobalScope()); err != nil || id != "g1" {
 		t.Errorf("global vault id = %q, %v", id, err)
 	}
 	if id, err := c.VaultIDForScope(EnvScope("staging")); err != nil || id != "e1" {
 		t.Errorf("env vault id = %q, %v", id, err)
+	}
+	// Cluster scope delegates to the env vault.
+	if ref := c.FindVault(ClusterScope("staging", "c1")); ref == nil || ref.VaultID != "e1" {
+		t.Errorf("FindVault(cluster) = %+v, want env vault e1", ref)
+	}
+	if id, err := c.VaultIDForScope(ClusterScope("staging", "c1")); err != nil || id != "e1" {
+		t.Errorf("cluster vault id = %q, %v (want env vault e1)", id, err)
 	}
 	if _, err := c.VaultIDForScope(EnvScope("unknown")); err == nil {
 		t.Error("expected error for unprovisioned env vault")

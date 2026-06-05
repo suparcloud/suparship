@@ -17,7 +17,13 @@ environment or per cluster?"*
 |---|---|---|
 | `global` | the **global vault** (one) | every cluster's ESO |
 | `env` | the **env vault** for that env (one per environment) | the clusters that run that env |
-| `cluster` | the **cluster vault** for that cluster (one per cluster) | that one cluster |
+| `cluster` | **cluster-override items inside the env vault** (no vault of its own) | the clusters that run that env |
+
+There are only **two kinds of vaults** — global and per-env. Cluster overrides
+are per-`(env, cluster)` items inside the env vault (e.g. `web-cluster-eu-1`
+inside `suparship-secrets-env-prod`), so registering or removing a cluster never
+touches the vault layer. An override set for `staging`/`eu-1` does not affect
+`prod`/`eu-1`.
 
 **Tiers** are the ownership axis within each scope:
 
@@ -30,27 +36,30 @@ win, so a `cluster`/`app` value beats a `global`/`shared` one.
 
 > **Cluster scope is a platform-engineering escape hatch** — incident
 > break-glass, regional tuning, per-cluster feature kill-switches. It overrides
-> every other scope. Use sparingly.
+> every other scope and applies per `(env, cluster)` pair. Use sparingly.
 
 ### Vault, item, and store names
 
 For the **1Password** backend a "vault" is a real 1Password vault; for the
 **k8s** backend a "vault" is a namespace ESO reads Secrets from. Each vault holds
-one `shared-*` item plus one `<app>-*` item per app.
+one `shared-*` item plus one `<app>-*` item per app; an **env vault additionally
+holds the cluster-override items** for each cluster bound to that env.
 
 | Thing | Pattern | Example (`app=web, env=prod, cluster=eu-1`) |
 |---|---|---|
 | Global vault | `suparship-secrets-global` | `suparship-secrets-global` |
 | Env vault | `suparship-secrets-env-{env}` | `suparship-secrets-env-prod` |
-| Cluster vault | `suparship-secrets-cluster-{cluster}` | `suparship-secrets-cluster-eu-1` |
 | Shared item | `shared-{suffix}` | `shared-global`, `shared-env-prod`, `shared-cluster-eu-1` |
 | App item | `{app}-{suffix}` | `web-global`, `web-env-prod`, `web-cluster-eu-1` |
-| ClusterSecretStore | `suparship-store-{suffix}` | `suparship-store-global`, `suparship-store-env-prod`, `suparship-store-cluster-eu-1` |
+| ClusterSecretStore | `suparship-store-{global\|env-{env}}` | `suparship-store-global`, `suparship-store-env-prod` |
 | App K8s Secret | `{app}-secrets` | `web-secrets` |
 | App ConfigMap | `{app}-config` | `web-config` |
 
-…where `{suffix}` is `global`, `env-{env}`, or `cluster-{cluster}`. There is one
-ESO `ClusterSecretStore` per scope/vault.
+…where item `{suffix}` is `global`, `env-{env}`, or `cluster-{cluster}`. There is
+one ESO `ClusterSecretStore` per **vault** (global + one per env) — cluster items
+keep their `cluster-{cluster}` suffix but are read through the **env store**,
+since they live in the env vault. Example: `web-cluster-eu-1` is an item in
+`suparship-secrets-env-prod`, read via `suparship-store-env-prod`.
 
 ## Two credential types (1Password)
 
@@ -61,11 +70,16 @@ cluster-side automation: sealing a Connect token per scope, generating
 
 - **Service Account (SA) token** (stored in suparShip): used to write/read/delete
   secret items in 1Password vaults — the data plane for developer secrets.
-- **Connect token, one per scope** (sealed, deployed to each cluster): ESO uses
+- **Connect token, one per vault** (sealed, deployed to each cluster): ESO uses
   it to read secret values at runtime. Each token is scoped to one vault and
-  sealed onto the clusters whose ESO needs that scope. **Every cluster ends up
-  with the global token, the token for each env that lands on it, and its own
-  cluster token.**
+  sealed onto the clusters whose ESO needs that vault. **Every cluster ends up
+  with the global token plus the token for each env that lands on it** — the env
+  token also covers the cluster-override items, since they live in the env vault.
+
+> **Isolation note:** because Connect tokens are vault-scoped (not item-scoped),
+> every cluster bound to an env can technically read all items in that env's
+> vault — including sibling clusters' override items. This is an accepted
+> trade-off for not having to create/register a vault per cluster.
 
 > **Why two tokens?** 1Password Service Account tokens [cannot issue Connect
 > server tokens or grant Connect servers vault access](https://1password.community/discussion/167592).
@@ -83,18 +97,18 @@ sequenceDiagram
     participant Argo as ArgoCD
     participant Cluster as Workload Cluster
 
-    Admin->>OP: 1. Create global + per-env + per-cluster vaults
+    Admin->>OP: 1. Create global + per-env vaults
     Admin->>OP: 2. Create SA token with R/W to all vaults
     Admin->>OP: 3. Create Connect Server, grant access to all vaults
-    Admin->>OP: 4. Issue a Connect token per vault (global / env / cluster)
+    Admin->>OP: 4. Issue a Connect token per vault (global / env)
     Admin->>UI: 5. Paste SA token
     UI->>API: POST /sa-token
     API-->>UI: valid, N vaults visible
     Admin->>UI: 6. Pick global vault + paste its Connect token
     UI->>API: PUT /org/secret-backend/global-vault {vaultId, connectToken}
     API->>API: Seal token onto every registered cluster
-    Admin->>UI: 7. Register each env & cluster vault (+ its Connect token)
-    UI->>API: POST /org/secret-backend/vaults/{env|cluster}/{name}
+    Admin->>UI: 7. Register each env vault (+ its Connect token)
+    UI->>API: POST /org/secret-backend/vaults/env/{name}
     API->>API: Fetch sealed-secrets cert per cluster, seal token
     API->>Git: Commit SealedSecret + ClusterSecretStore (per cluster)
     Git->>Argo: Sync
@@ -120,9 +134,10 @@ Service Accounts can't create vaults, so the operator creates them by hand:
 
 1. One **global vault** (e.g. `company-global`) — org-wide secrets, read-only
    from every cluster.
-2. One **env vault** per environment (e.g. `staging-env`, `prod-env`).
-3. One **cluster vault** per cluster (e.g. `prod-eu-cluster`).
-4. A **Service Account** with Read & Write access to all of them. Copy its token.
+2. One **env vault** per environment (e.g. `staging-env`, `prod-env`). This
+   vault also carries the per-cluster override items for that env — no
+   per-cluster vault is needed.
+3. A **Service Account** with Read & Write access to all of them. Copy its token.
 
 > No vault naming convention is enforced — suparShip stores the UUID of whichever
 > vault you pick/register, not its name.
@@ -162,26 +177,23 @@ In the 1Password web console:
 
 1. Create a **Connect Server** and grant it access to **all** suparship vaults.
 2. Deploy 1Password Connect to a cluster reachable from your workloads.
-3. Issue **one Connect token per vault** — global, each env, each cluster.
+3. Issue **one Connect token per vault** — global and each env.
 
-### Step 6: Register env & cluster vaults
+### Step 6: Register env vaults
 
-**UI:** Settings → Secrets Backend → **+ Add Vault** → toggle scope
-(Environment | Cluster) → pick the vault → paste that vault's Connect token →
-Submit.
+**UI:** Settings → Secrets Backend → **+ Add Vault** → pick the environment and
+vault → paste that vault's Connect token → Submit.
 
 ```bash
 curl -X POST $SUPARSHIP_URL/api/v1/org/secret-backend/vaults/env/staging \
   -d '{"vaultId": "def-456", "connectToken": "<env vault connect token>"}'
-curl -X POST $SUPARSHIP_URL/api/v1/org/secret-backend/vaults/cluster/prod-eu \
-  -d '{"vaultId": "ghi-789", "connectToken": "<cluster vault connect token>"}'
 ```
 
 For each registration suparShip seals the Connect token against the relevant
 clusters' sealed-secrets certs and publishes, **per cluster**, a `SealedSecret` +
 `ClusterSecretStore` under `_secret-stores/{cluster}/`, driven by that cluster's
-ArgoCD Application. An env vault seals onto the env's bound cluster(s); a cluster
-vault seals onto that one cluster.
+ArgoCD Application. An env vault seals onto the env's bound cluster(s). Cluster
+overrides need no registration of their own — they ride along in the env vault.
 
 ### Rotating a Connect token
 
@@ -261,8 +273,8 @@ removed.
 Each app namespace gets **one** `ExternalSecret` named `{app}-secrets`. Its
 `dataFrom` lists every present scope/tier item in precedence order; the top-level
 `secretStoreRef` is the global store, and env/cluster items carry a per-entry
-`sourceRef.storeRef` so a single ExternalSecret pulls from the global, env, and
-cluster stores into one Secret:
+`sourceRef.storeRef` to the **env store** (cluster items live in the env vault)
+so a single ExternalSecret pulls from both stores into one Secret:
 
 ```yaml
 apiVersion: external-secrets.io/v1
@@ -287,15 +299,15 @@ spec:
     - extract: { key: "web-env-prod" }
       sourceRef:
         storeRef: { name: suparship-store-env-prod, kind: ClusterSecretStore }
-    - extract: { key: "web-cluster-eu-1" }         # wins last
+    - extract: { key: "web-cluster-eu-1" }         # wins last; env store (item lives in the env vault)
       sourceRef:
-        storeRef: { name: suparship-store-cluster-eu-1, kind: ClusterSecretStore }
+        storeRef: { name: suparship-store-env-prod, kind: ClusterSecretStore }
 ```
 
 Only scopes/tiers that actually have keys get a `dataFrom` entry — computed at
 publish time. Cluster items are included only when the env is bound to a cluster.
 
-The matching per-scope `ClusterSecretStore` (1Password) points at exactly one
+The matching per-vault `ClusterSecretStore` (1Password) points at exactly one
 vault and one sealed Connect token:
 
 ```yaml
@@ -335,7 +347,8 @@ spec:
 
 After app creation:
 
-1. Open the vault that backs the scope you want (global / env / cluster).
+1. Open the vault that backs the scope you want — the global vault, or the env
+   vault (which also holds that env's cluster-override items).
 2. Find the item suparShip created (`shared-*` for org-admin defaults,
    `{app}-*` for an app).
 3. Replace the `_placeholder` field with real `KEY = value` pairs.
@@ -360,8 +373,8 @@ The UI Save button does this for you via
 | global | app | App → Secrets → Global | `…/projects/{p}/apps/{a}/secrets/global` |
 | env | shared | Org Settings → Secrets (env) | `…/org/secrets/env/{env}` |
 | env | app | App → Secrets → Env | `…/projects/{p}/apps/{a}/secrets/env/{env}` |
-| cluster | shared | Cluster Settings → Overrides | `…/org/secrets/cluster/{cluster}` |
-| cluster | app | App → Secrets → Cluster | `…/projects/{p}/apps/{a}/secrets/cluster/{cluster}` |
+| cluster | shared | Cluster Settings → Overrides (per env) | `…/org/secrets/env/{env}/cluster/{cluster}` |
+| cluster | app | App → Secrets → Env → Cluster | `…/projects/{p}/apps/{a}/secrets/env/{env}/cluster/{cluster}` |
 
 ## RBAC matrix
 
@@ -379,7 +392,7 @@ All scopes are readable by any authenticated user (`viewer` and above).
 |---|---|
 | SA token blast radius | suparShip validates vault count on paste; scope the SA to suparship vaults only. |
 | SA token leak from cluster | K8s Secret restricted via RBAC to the suparship controller ServiceAccount. |
-| Per-scope credential blast radius | One Connect token per vault; a cluster only carries tokens for the scopes it runs. |
+| Per-vault credential blast radius | One Connect token per vault; a cluster only carries tokens for the vaults it reads (global + its envs). Clusters sharing an env vault can read each other's override items — accepted trade-off. |
 | Connect token in Git | Always sealed before commit; plaintext never crosses the suparship process boundary except during in-memory seal. |
 | Token rotation | Re-register with a new token; revoke the old one manually in 1Password. |
 | Audit trail | Every write/delete and vault registration is logged with actor, scope, vault, and result. |
@@ -395,8 +408,8 @@ easy to audit.
 | Symbol | Value |
 |---|---|
 | SA token K8s Secret | `suparship-op-sa-token` in `suparship-system` |
-| Connect token secret pattern | `op-connect-token-{suffix}` |
-| ClusterSecretStore pattern | `suparship-store-{suffix}` |
+| Connect token secret pattern | `op-connect-token-{global\|env-{env}}` |
+| ClusterSecretStore pattern | `suparship-store-{global\|env-{env}}` |
 | Remote namespace (ESO resources) | `external-secrets` |
 | Connect endpoint | `http://onepassword-connect.onepassword-connect.svc.cluster.local:8080` |
 | k8s ESO reader | ServiceAccount `suparship-eso-reader` (cluster-wide Secret read) |
@@ -424,9 +437,11 @@ merged ExternalSecret from the current vault registrations.
 
 ### Cluster-scope keys don't reach the workload
 
-Confirm the cluster vault is registered with a Connect token (Step 6) and that
-`_secret-stores/{cluster}/` carries `store-cluster-{cluster}.yaml` +
-`sealed-token-cluster-{cluster}.yaml`. Re-register the cluster vault if missing.
+Cluster-override items live in the **env vault**, so the env vault must be
+registered with a Connect token (Step 6) and `_secret-stores/{cluster}/` must
+carry `store-env-{env}.yaml` + `sealed-token-env-{env}.yaml` for the env the app
+runs in. Also confirm the override was written for the right `(env, cluster)`
+pair — an override for `staging`/`eu-1` does not apply to `prod`/`eu-1`.
 
 ## Keep going without suparship
 

@@ -31,7 +31,6 @@ import {
   listVaults,
   setGlobalVault,
   registerEnvVault,
-  registerClusterVault,
   listSharedGlobalSecretKeys,
   upsertSharedGlobalSecrets,
   deleteSharedGlobalSecretKey,
@@ -1093,9 +1092,7 @@ function SecretsBackendSection() {
 
   // Add binding form state
   const [showAddBinding, setShowAddBinding] = useState(false);
-  const [bindScope, setBindScope] = useState<"env" | "cluster">("env");
   const [bindEnv, setBindEnv] = useState("");
-  const [bindCluster, setBindCluster] = useState("");
   const [bindVaultId, setBindVaultId] = useState("");
   const [bindToken, setBindToken] = useState("");
   const [bindConnectEndpoint, setBindConnectEndpoint] = useState("");
@@ -1104,18 +1101,16 @@ function SecretsBackendSection() {
   // Setup guide toggle
   const [showGuide, setShowGuide] = useState(false);
 
-  // Org environments + clusters (for the vault registration dropdowns)
+  // Org environments (for the vault registration dropdown)
   const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
-  const [orgClusters, setOrgClusters] = useState<Cluster[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getSecretsBackend(), listOrgEnvironments(), listClusters()])
-      .then(([cfg, envsResp, clustersResp]) => {
+    Promise.all([getSecretsBackend(), listOrgEnvironments()])
+      .then(([cfg, envsResp]) => {
         if (!cancelled) {
           setConfig(cfg);
           setOrgEnvs(envsResp.environments || []);
-          setOrgClusters(clustersResp || []);
         }
       })
       .catch((err) => {
@@ -1183,28 +1178,21 @@ function SecretsBackendSection() {
   }
 
   async function handleAddBinding() {
-    const target = bindScope === "env" ? bindEnv : bindCluster;
-    if (!target || !bindVaultId || !bindToken.trim()) return;
+    if (!bindEnv || !bindVaultId || !bindToken.trim()) return;
     setBindBusy(true);
     setError(null);
     try {
       const vault = vaults.find((v) => v.id === bindVaultId);
-      const body = {
+      await registerEnvVault(bindEnv, {
         vaultId: bindVaultId,
         vaultName: vault?.title,
         connectToken: bindToken.trim(),
         connectEndpoint: bindConnectEndpoint.trim() || undefined,
-      };
-      if (bindScope === "env") {
-        await registerEnvVault(bindEnv, body);
-      } else {
-        await registerClusterVault(bindCluster, body);
-      }
+      });
       const updated = await getSecretsBackend();
       setConfig(updated);
       setShowAddBinding(false);
       setBindEnv("");
-      setBindCluster("");
       setBindVaultId("");
       setBindToken("");
       setBindConnectEndpoint("");
@@ -1282,30 +1270,29 @@ function SecretsBackendSection() {
                   {showGuide && (
                     <div className="space-y-3 border-t border-blue-100 px-4 py-3">
                       <p className="text-xs text-blue-900">
-                        <strong>Three vault scopes:</strong> one{" "}
+                        <strong>Two kinds of vaults:</strong> one{" "}
                         <strong>global vault</strong> (org-wide, read-only from
-                        every cluster), one <strong>env vault</strong> per
-                        environment, and one <strong>cluster vault</strong> per
-                        cluster. Each scope holds both org-admin (
+                        every cluster) and one <strong>env vault</strong> per
+                        environment. Per-cluster overrides are{" "}
+                        <strong>items inside the env vault</strong> (e.g.{" "}
+                        <code>myapp-cluster-eu-1</code>), so clusters need no
+                        vault of their own — adding or removing a cluster never
+                        touches 1Password. Each scope holds both org-admin (
                         <strong>shared</strong>) and per-app secrets; precedence
                         is <code>cluster &gt; env &gt; global</code> and{" "}
                         <code>app &gt; shared</code>. 1Password Service Accounts
                         cannot create vaults or Connect tokens — you create both
                         manually in the 1Password console; suparShip handles the
                         cluster-side automation (sealing a Connect token per
-                        scope, generating ClusterSecretStores, publishing to
+                        vault, generating ClusterSecretStores, publishing to
                         GitOps).
                       </p>
                       <ol className="space-y-2 text-xs text-blue-900">
                         <li>
-                          <strong>
-                            1. Create the global, per-env, and per-cluster
-                            vaults
-                          </strong>{" "}
+                          <strong>1. Create the global and per-env vaults</strong>{" "}
                           in the 1Password web console (e.g.{" "}
                           <code>company-global</code>,{" "}
-                          <code>staging-env</code>,{" "}
-                          <code>prod-eu-cluster</code>).
+                          <code>staging-env</code>).
                         </li>
                         <li>
                           <strong>2. Create a Service Account</strong> with
@@ -1335,19 +1322,18 @@ function SecretsBackendSection() {
                         </li>
                         <li>
                           <strong>7. Issue a Connect token per vault</strong>{" "}
-                          in the 1Password console — one for the global vault,
-                          one per env vault, one per cluster vault. suparShip
-                          seals each token onto the clusters whose ESO needs
-                          that scope: every cluster reads the global vault, the
-                          vaults of the envs that land on it, and its own
-                          cluster vault.
+                          in the 1Password console — one for the global vault
+                          and one per env vault. suparShip seals each token onto
+                          the clusters whose ESO needs that vault: every cluster
+                          reads the global vault plus the vaults of the envs
+                          that land on it (which also hold its cluster-override
+                          items).
                         </li>
                         <li>
-                          <strong>8. Register env &amp; cluster vaults</strong>{" "}
-                          below — toggle the scope (Environment | Cluster), pick
-                          the vault, and paste that vault's Connect token.
-                          suparShip seals the token and publishes the
-                          SealedSecret + ClusterSecretStore to GitOps per
+                          <strong>8. Register env vaults</strong> below — pick
+                          the environment and vault, and paste that vault's
+                          Connect token. suparShip seals the token and publishes
+                          the SealedSecret + ClusterSecretStore to GitOps per
                           cluster.
                         </li>
                       </ol>
@@ -1368,9 +1354,9 @@ function SecretsBackendSection() {
                   <p className="text-xs text-gray-500">
                     Paste the 1Password Service Account token. It needs Read
                     &amp; Write access to every vault you want suparShip to
-                    manage — the global vault, each env vault, and each cluster
-                    vault. 1Password Service Accounts cannot create vaults, so
-                    make sure these vaults already exist before pasting.
+                    manage — the global vault and each env vault. 1Password
+                    Service Accounts cannot create vaults, so make sure these
+                    vaults already exist before pasting.
                   </p>
                   <div className="flex items-end gap-3">
                     <div className="flex-1">
@@ -1485,101 +1471,47 @@ function SecretsBackendSection() {
                     </button>
                   </div>
 
-                  {/* Add vault form (env / cluster scope) */}
+                  {/* Add vault form (env scope; cluster overrides live inside
+                      the env vault, so there is nothing to register per cluster) */}
                   {showAddBinding && (
                     <div className="mb-4 space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-4">
                       <div>
                         <label className="mb-1 block text-xs font-medium text-gray-700">
-                          Scope
+                          Environment
                         </label>
-                        <div className="flex gap-1.5">
-                          {(["env", "cluster"] as const).map((s) => (
-                            <button
-                              key={s}
-                              type="button"
-                              onClick={() => setBindScope(s)}
-                              className={`rounded-full px-3 py-0.5 text-xs font-medium transition-colors ${
-                                bindScope === s
-                                  ? "bg-gray-900 text-white"
-                                  : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-                              }`}
+                        {(() => {
+                          const boundEnvs = new Set(
+                            (config?.onePassword?.envVaults || []).map((v) => v.key),
+                          );
+                          const available = orgEnvs.filter(
+                            (e) => !boundEnvs.has(e.name),
+                          );
+                          return available.length > 0 ? (
+                            <select
+                              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                              value={bindEnv}
+                              onChange={(e) => setBindEnv(e.target.value)}
                             >
-                              {s === "env" ? "Environment" : "Cluster"}
-                            </button>
-                          ))}
-                        </div>
+                              <option value="">Select an environment…</option>
+                              {available.map((e) => (
+                                <option key={e.name} value={e.name}>
+                                  {e.name}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <p className="text-xs text-gray-400">
+                              All environments are already bound. Create a new
+                              environment in Settings &gt; Environments first.
+                            </p>
+                          );
+                        })()}
                         <p className="mt-1 text-xs text-gray-400">
-                          Env vaults seal onto the env&apos;s bound cluster; cluster
-                          vaults seal onto that cluster.
+                          The vault&apos;s Connect token seals onto the
+                          env&apos;s bound cluster(s). Per-cluster overrides are
+                          items inside this vault — no per-cluster vault needed.
                         </p>
                       </div>
-                      {bindScope === "env" ? (
-                        <div>
-                          <label className="mb-1 block text-xs font-medium text-gray-700">
-                            Environment
-                          </label>
-                          {(() => {
-                            const boundEnvs = new Set(
-                              (config?.onePassword?.envVaults || []).map((v) => v.key),
-                            );
-                            const available = orgEnvs.filter(
-                              (e) => !boundEnvs.has(e.name),
-                            );
-                            return available.length > 0 ? (
-                              <select
-                                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
-                                value={bindEnv}
-                                onChange={(e) => setBindEnv(e.target.value)}
-                              >
-                                <option value="">Select an environment…</option>
-                                {available.map((e) => (
-                                  <option key={e.name} value={e.name}>
-                                    {e.name}
-                                  </option>
-                                ))}
-                              </select>
-                            ) : (
-                              <p className="text-xs text-gray-400">
-                                All environments are already bound. Create a new
-                                environment in Settings &gt; Environments first.
-                              </p>
-                            );
-                          })()}
-                        </div>
-                      ) : (
-                        <div>
-                          <label className="mb-1 block text-xs font-medium text-gray-700">
-                            Cluster
-                          </label>
-                          {(() => {
-                            const boundClusters = new Set(
-                              (config?.onePassword?.clusterVaults || []).map((v) => v.key),
-                            );
-                            const available = orgClusters.filter(
-                              (c) => !boundClusters.has(c.name),
-                            );
-                            return available.length > 0 ? (
-                              <select
-                                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
-                                value={bindCluster}
-                                onChange={(e) => setBindCluster(e.target.value)}
-                              >
-                                <option value="">Select a cluster…</option>
-                                {available.map((c) => (
-                                  <option key={c.name} value={c.name}>
-                                    {c.name}
-                                  </option>
-                                ))}
-                              </select>
-                            ) : (
-                              <p className="text-xs text-gray-400">
-                                All clusters already have a vault. Register a
-                                cluster under Settings &gt; Clusters first.
-                              </p>
-                            );
-                          })()}
-                        </div>
-                      )}
                       <div>
                         <label className="mb-1 block text-xs font-medium text-gray-700">
                           Vault
@@ -1643,7 +1575,7 @@ function SecretsBackendSection() {
                         onClick={handleAddBinding}
                         disabled={
                           bindBusy ||
-                          (bindScope === "env" ? !bindEnv : !bindCluster) ||
+                          !bindEnv ||
                           !bindVaultId ||
                           !bindToken.trim()
                         }
@@ -1671,15 +1603,12 @@ function SecretsBackendSection() {
                     for (const v of op?.envVaults || []) {
                       rows.push({ scope: "env", ...v, key: v.key || "" });
                     }
-                    for (const v of op?.clusterVaults || []) {
-                      rows.push({ scope: "cluster", ...v, key: v.key || "" });
-                    }
                     if (rows.length === 0) {
                       return (
                         <p className="text-xs text-gray-400">
                           No vaults registered yet. Click &ldquo;+ Add
-                          Vault&rdquo; to register an environment or cluster
-                          vault; set the global vault above.
+                          Vault&rdquo; to register an environment vault; set
+                          the global vault above.
                         </p>
                       );
                     }
@@ -1817,8 +1746,8 @@ function PlatformVaultPicker({
       </label>
       <p className="text-xs text-gray-500">
         Pick the 1Password vault you created (manually) for global-scope
-        secrets — read-only from every cluster's ESO. Env and cluster vaults
-        are registered separately in the table below.
+        secrets — read-only from every cluster's ESO. Env vaults are
+        registered separately in the table below.
       </p>
       <div className="flex items-center gap-2">
         {currentID ? (

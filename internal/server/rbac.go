@@ -195,20 +195,21 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/org/secret-backend/vaults", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListVaults)))
 		// Global vault: the 1Password vault holding global-scope items.
 		mux.HandleFunc("PUT /api/v1/org/secret-backend/global-vault", requireOrgAdmin(rh.requireOrgAdmin(sh.handleSetGlobalVault)))
-		// Env/cluster vault provisioning (1Password Connect-token sealing).
+		// Env vault provisioning (1Password Connect-token sealing). Cluster
+		// overrides live inside env vaults, so there is no cluster registration.
 		mux.HandleFunc("POST /api/v1/org/secret-backend/vaults/env/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRegisterEnvVault)))
-		mux.HandleFunc("POST /api/v1/org/secret-backend/vaults/cluster/{cluster}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRegisterClusterVault)))
 
 		// ── Shared-tier secrets (org-admin) across the 3 scopes ──
+		// Cluster scope is per-(env, cluster): routes nest cluster under env.
 		mux.HandleFunc("GET /api/v1/org/secrets/global", rh.auth.requireAuth(sh.handleListSecrets))
 		mux.HandleFunc("POST /api/v1/org/secrets/global", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
 		mux.HandleFunc("DELETE /api/v1/org/secrets/global/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
 		mux.HandleFunc("GET /api/v1/org/secrets/env/{env}", rh.auth.requireAuth(sh.handleListSecrets))
 		mux.HandleFunc("POST /api/v1/org/secrets/env/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
 		mux.HandleFunc("DELETE /api/v1/org/secrets/env/{env}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
-		mux.HandleFunc("GET /api/v1/org/secrets/cluster/{cluster}", rh.auth.requireAuth(sh.handleListSecrets))
-		mux.HandleFunc("POST /api/v1/org/secrets/cluster/{cluster}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
-		mux.HandleFunc("DELETE /api/v1/org/secrets/cluster/{cluster}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
+		mux.HandleFunc("GET /api/v1/org/secrets/env/{env}/cluster/{cluster}", rh.auth.requireAuth(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/org/secrets/env/{env}/cluster/{cluster}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
+		mux.HandleFunc("DELETE /api/v1/org/secrets/env/{env}/cluster/{cluster}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
 
 		// ── App-tier secrets (project devs) across the 3 scopes ──
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets/global", viewProject(sh.handleListSecrets))
@@ -217,9 +218,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets/env/{env}", viewProject(sh.handleListSecrets))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/env/{env}", devProject(sh.handleUpsertSecrets))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/{key}", devProject(sh.handleDeleteSecret))
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets/cluster/{cluster}", viewProject(sh.handleListSecrets))
-		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/cluster/{cluster}", devProject(sh.handleUpsertSecrets))
-		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/cluster/{cluster}/{key}", devProject(sh.handleDeleteSecret))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/cluster/{cluster}", viewProject(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/cluster/{cluster}", devProject(sh.handleUpsertSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/cluster/{cluster}/{key}", devProject(sh.handleDeleteSecret))
 
 		// Resolved secrets — merged view (global<env<cluster, shared<app).
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets/resolved", viewProject(sh.handleGetResolvedSecrets))

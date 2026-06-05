@@ -42,11 +42,12 @@ subjects:
 ---
 # ── External Secrets Operator reader ──────────────────────────────────────
 # The k8s secret backend stores each scope's secrets in its own namespace
-# (suparship-secrets-global / -env-<env> / -cluster-<cluster>), created on
-# demand by the suparship server. The generated ClusterSecretStores read those
-# namespaces by impersonating this ServiceAccount, so it needs cluster-wide
-# read on Secrets (the vault namespaces are dynamic and cannot be enumerated
-# here). Scoped to read-only on Secrets and used exclusively by ESO.
+# (suparship-secrets-global / -env-<env>; cluster-override items live inside
+# the env namespace), created on demand by the suparship server. The generated
+# ClusterSecretStores read those namespaces by impersonating this
+# ServiceAccount, so it needs cluster-wide read on Secrets (the vault
+# namespaces are dynamic and cannot be enumerated here). Scoped to read-only
+# on Secrets and used exclusively by ESO.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

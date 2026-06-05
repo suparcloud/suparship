@@ -31,7 +31,8 @@ var ValidBackendTypes = map[BackendType]bool{
 // OnePasswordConfig holds 1Password-specific org-level configuration.
 // The only admin-facing input is the SA token (pasted once in the UI and
 // stored as a K8s Secret). Vault refs are populated as the global vault is
-// set and env/cluster vaults are provisioned on environment/cluster creation.
+// set and env vaults are registered. Cluster overrides are items inside the
+// env vault, so clusters need no vault of their own.
 type OnePasswordConfig struct {
 	// GroupName is the 1Password group that owns all suparship vaults.
 	// Fixed at install time via helm values; default "Suparship".
@@ -48,10 +49,6 @@ type OnePasswordConfig struct {
 	// EnvVaults holds one vault per environment, keyed by VaultRef.Key (the
 	// environment name). Provisioned when an environment is created.
 	EnvVaults []VaultRef `json:"envVaults,omitempty" yaml:"envVaults,omitempty"`
-
-	// ClusterVaults holds one vault per cluster, keyed by VaultRef.Key (the
-	// cluster name). Provisioned when a cluster is created.
-	ClusterVaults []VaultRef `json:"clusterVaults,omitempty" yaml:"clusterVaults,omitempty"`
 }
 
 // ConnectStatus tracks the state of the managed 1Password Connect server.
@@ -66,11 +63,10 @@ type ConnectStatus struct {
 	LastProbe time.Time `json:"lastProbe,omitempty" yaml:"lastProbe,omitempty"`
 }
 
-// VaultRef tracks the provisioned state of one vault (global, an environment,
-// or a cluster).
+// VaultRef tracks the provisioned state of one vault (global or an
+// environment).
 type VaultRef struct {
-	// Key is the environment name (for EnvVaults) or cluster name (for
-	// ClusterVaults). Empty for the global vault.
+	// Key is the environment name (for EnvVaults). Empty for the global vault.
 	Key string `json:"key,omitempty" yaml:"key,omitempty"`
 	// VaultID is the 1Password vault UUID.
 	VaultID string `json:"vaultId,omitempty" yaml:"vaultId,omitempty"`
@@ -119,22 +115,18 @@ func (c BackendConfig) Validate() error {
 }
 
 // FindVault returns the VaultRef for the given scope, or nil if not set.
+// Cluster scope resolves to its environment's vault — cluster overrides are
+// items inside the env vault.
 func (c BackendConfig) FindVault(scope Scope) *VaultRef {
 	if c.OnePassword == nil {
 		return nil
 	}
 	op := c.OnePassword
 	switch scope.Kind {
-	case ScopeEnv:
+	case ScopeEnv, ScopeCluster:
 		for i := range op.EnvVaults {
 			if op.EnvVaults[i].Key == scope.Env {
 				return &op.EnvVaults[i]
-			}
-		}
-	case ScopeCluster:
-		for i := range op.ClusterVaults {
-			if op.ClusterVaults[i].Key == scope.Cluster {
-				return &op.ClusterVaults[i]
 			}
 		}
 	default:
@@ -145,7 +137,8 @@ func (c BackendConfig) FindVault(scope Scope) *VaultRef {
 	return nil
 }
 
-// UpsertVault adds or replaces the vault ref for the given scope.
+// UpsertVault adds or replaces the vault ref for the given scope. Only global
+// and env scopes have vaults of their own; cluster scope is never persisted.
 func (c *BackendConfig) UpsertVault(scope Scope, ref VaultRef) {
 	if c.OnePassword == nil {
 		c.OnePassword = &OnePasswordConfig{}
@@ -155,9 +148,6 @@ func (c *BackendConfig) UpsertVault(scope Scope, ref VaultRef) {
 	case ScopeEnv:
 		ref.Key = scope.Env
 		op.EnvVaults = upsertVaultRef(op.EnvVaults, ref)
-	case ScopeCluster:
-		ref.Key = scope.Cluster
-		op.ClusterVaults = upsertVaultRef(op.ClusterVaults, ref)
 	default:
 		ref.Key = ""
 		op.GlobalVault = ref
@@ -173,8 +163,6 @@ func (c *BackendConfig) RemoveVault(scope Scope) {
 	switch scope.Kind {
 	case ScopeEnv:
 		op.EnvVaults = removeVaultRef(op.EnvVaults, scope.Env)
-	case ScopeCluster:
-		op.ClusterVaults = removeVaultRef(op.ClusterVaults, scope.Cluster)
 	default:
 		op.GlobalVault = VaultRef{}
 	}

@@ -217,9 +217,6 @@ func runSecretsStatus(cmd *cobra.Command, _ []string) error {
 	for _, ref := range op.EnvVaults {
 		printVault("env", ref.Key, ref)
 	}
-	for _, ref := range op.ClusterVaults {
-		printVault("cluster", ref.Key, ref)
-	}
 	return nil
 }
 

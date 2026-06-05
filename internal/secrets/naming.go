@@ -4,12 +4,12 @@ package secrets
 //
 // For the k8s backend a "vault" is a namespace; for 1Password it is a real
 // vault (these helpers give the k8s namespace / the conventional 1Password
-// vault title). One global vault, one vault per environment, one per cluster.
+// vault title). One global vault plus one vault per environment. Cluster
+// overrides are items inside the env vault, not a vault of their own.
 
 const (
-	globalVaultName    = "suparship-secrets-global"
-	envVaultPrefix     = "suparship-secrets-env-"
-	clusterVaultPrefix = "suparship-secrets-cluster-"
+	globalVaultName = "suparship-secrets-global"
+	envVaultPrefix  = "suparship-secrets-env-"
 )
 
 // GlobalVaultName returns the vault name for global-scope secrets.
@@ -18,22 +18,19 @@ func GlobalVaultName() string { return globalVaultName }
 // EnvVaultName returns the vault name for an environment's secrets.
 func EnvVaultName(env string) string { return envVaultPrefix + env }
 
-// ClusterVaultName returns the vault name for a cluster's secrets.
-func ClusterVaultName(cluster string) string { return clusterVaultPrefix + cluster }
-
-// VaultName returns the vault name for the given scope.
+// VaultName returns the vault name for the given scope. Cluster-scope items
+// live in their environment's vault.
 func VaultName(scope Scope) string {
 	switch scope.Kind {
-	case ScopeEnv:
+	case ScopeEnv, ScopeCluster:
 		return EnvVaultName(scope.Env)
-	case ScopeCluster:
-		return ClusterVaultName(scope.Cluster)
 	default:
 		return GlobalVaultName()
 	}
 }
 
-// ── Item names (a vault holds a shared item plus one item per app) ─────────
+// ── Item names (a vault holds a shared item plus one item per app; an env
+// vault additionally holds cluster-override items per bound cluster) ────────
 
 // scopeSuffix renders the scope-specific tail used in item and store names:
 // "global", "env-<env>", or "cluster-<cluster>".
@@ -73,10 +70,15 @@ func ItemName(scope Scope, tier Tier, app string) string {
 	return SharedItemName(scope)
 }
 
-// ── ClusterSecretStore names (one ESO store per vault/scope) ───────────────
+// ── ClusterSecretStore names (one ESO store per vault) ─────────────────────
 
-// StoreName returns the ClusterSecretStore name for the given scope.
+// StoreName returns the ClusterSecretStore name for the given scope. Cluster
+// scope reads from its environment's store — cluster items live in the env
+// vault, so item and store suffixes intentionally diverge for cluster scope.
 func StoreName(scope Scope) string {
+	if scope.Kind == ScopeCluster {
+		return "suparship-store-" + scopeSuffix(EnvScope(scope.Env))
+	}
 	return "suparship-store-" + scopeSuffix(scope)
 }
 
@@ -85,9 +87,6 @@ func GlobalStoreName() string { return StoreName(GlobalScope()) }
 
 // EnvStoreName returns the ClusterSecretStore name for an env vault.
 func EnvStoreName(env string) string { return StoreName(EnvScope(env)) }
-
-// ClusterStoreName returns the ClusterSecretStore name for a cluster vault.
-func ClusterStoreName(cluster string) string { return StoreName(ClusterScope(cluster)) }
 
 // ── Workload object names (one Secret + one ConfigMap per app pod) ─────────
 //

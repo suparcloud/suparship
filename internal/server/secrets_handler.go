@@ -352,10 +352,11 @@ func (h *secretsHandler) handleSetGlobalVault(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]string{"vaultId": info.ID, "vaultName": resolvedName})
 }
 
-// ── Env/cluster vault provisioning (1Password) ──────────────────────────────
+// ── Env vault provisioning (1Password) ──────────────────────────────────────
 
-// RegisterVaultRequest registers a 1Password vault for an env or cluster scope
-// and seals its Connect token onto the affected cluster(s).
+// RegisterVaultRequest registers a 1Password vault for an env scope and seals
+// its Connect token onto the affected cluster(s). Cluster overrides are items
+// inside the env vault, so clusters need no vault registration of their own.
 type RegisterVaultRequest struct {
 	VaultID         string `json:"vaultId"`
 	VaultName       string `json:"vaultName"`
@@ -370,17 +371,9 @@ func (h *secretsHandler) handleRegisterEnvVault(w http.ResponseWriter, r *http.R
 	h.registerVault(w, r, secrets.EnvScope(env))
 }
 
-// handleRegisterClusterVault registers the cluster-scope vault and seals its
-// Connect token onto that cluster.
-func (h *secretsHandler) handleRegisterClusterVault(w http.ResponseWriter, r *http.Request) {
-	cluster := r.PathValue("cluster")
-	h.registerVault(w, r, secrets.ClusterScope(cluster))
-}
-
 // registerVault validates a 1Password vault, persists its VaultRef, stashes the
-// Connect token, and seals it onto the affected cluster(s). For an env vault
-// the affected cluster is the env's bound cluster; for a cluster vault it is
-// that cluster.
+// Connect token, and seals it onto the affected cluster(s) — for an env vault,
+// the env's bound cluster.
 func (h *secretsHandler) registerVault(w http.ResponseWriter, r *http.Request, scope secrets.Scope) {
 	var req RegisterVaultRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -431,15 +424,12 @@ func (h *secretsHandler) registerVault(w http.ResponseWriter, r *http.Request, s
 	}
 
 	// Determine which cluster(s) this scope's token must be sealed onto and
-	// reconcile each. Env → its bound cluster; cluster → itself.
+	// reconcile each: the env's bound cluster.
 	var targets []string
-	switch scope.Kind {
-	case secrets.ScopeEnv:
+	if scope.Kind == secrets.ScopeEnv {
 		if c := orgEnvCluster(org, scope.Env); c != "" {
 			targets = append(targets, c)
 		}
-	case secrets.ScopeCluster:
-		targets = append(targets, scope.Cluster)
 	}
 	if len(targets) == 0 {
 		writeJSON(w, http.StatusOK, map[string]string{
@@ -478,9 +468,10 @@ func (h *secretsHandler) validateVault(ctx context.Context, vaultID string) erro
 }
 
 // sealClusterScopes seals, onto clusterName, the Connect tokens for every vault
-// the cluster's apps read: the global vault, the env vault of each environment
-// bound to the cluster, and the cluster's own vault. Tokens come from the
-// stash; scopes without a provisioned vault or a stashed token are skipped.
+// the cluster's apps read: the global vault and the env vault of each
+// environment bound to the cluster (cluster overrides live inside the env
+// vaults, so no per-cluster vault exists). Tokens come from the stash; scopes
+// without a provisioned vault or a stashed token are skipped.
 func (h *secretsHandler) sealClusterScopes(ctx context.Context, org *rbac.Org, clusterName string) error {
 	if h.sealPublisher == nil {
 		return fmt.Errorf("seal publisher not configured")
@@ -507,7 +498,6 @@ func (h *secretsHandler) sealClusterScopes(ctx context.Context, org *rbac.Org, c
 			scopes = append(scopes, secrets.EnvScope(e.Name))
 		}
 	}
-	scopes = append(scopes, secrets.ClusterScope(clusterName))
 
 	var tokens []gitops.ScopeToken
 	for _, scope := range scopes {
@@ -559,9 +549,11 @@ func orgEnvCluster(org *rbac.Org, envName string) string {
 // ── Generic secret CRUD across scopes/tiers ──────────────────────────────────
 
 // scopeFromPath derives the secret Scope from the request path variables.
+// Cluster routes are nested under env ({env} is always present alongside
+// {cluster}) — cluster overrides are per-(env, cluster).
 func scopeFromPath(r *http.Request) secrets.Scope {
 	if c := r.PathValue("cluster"); c != "" {
-		return secrets.ClusterScope(c)
+		return secrets.ClusterScope(r.PathValue("env"), c)
 	}
 	if e := r.PathValue("env"); e != "" {
 		return secrets.EnvScope(e)
@@ -643,7 +635,7 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 	env := read(secrets.EnvScope(envName))
 	var cluster secrets.ScopeKeys
 	if clusterRef := h.resolveClusterRef(r, envName); clusterRef != "" {
-		cluster = read(secrets.ClusterScope(clusterRef))
+		cluster = read(secrets.ClusterScope(envName, clusterRef))
 	}
 	_ = project
 

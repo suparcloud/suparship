@@ -28,7 +28,7 @@ import {
   deleteAppClusterSecretKey,
   getResolvedSecrets,
 } from "../lib/secrets";
-import { listClusters } from "../lib/clusters";
+import { listOrgEnvironments } from "../lib/settings";
 import type { ResolvedSecretEntry } from "../lib/secrets";
 import type {
   AppDeploymentHistoryResponse,
@@ -2570,65 +2570,62 @@ function ResolvedEnvPanel({
   );
 }
 
-// AppClusterSecrets renders a cluster picker + a SecretEditor for the app's
-// cluster-scoped secrets. Clusters are listed independently since an app-env
-// summary doesn't carry a cluster name.
-function AppClusterSecrets({ project, appName }: { project: string; appName: string }) {
-  const [clusters, setClusters] = useState<string[]>([]);
-  const [active, setActive] = useState<string>("");
+// AppClusterSecrets renders one SecretEditor per cluster bound to the given
+// environment. Cluster overrides are per-(env, cluster) — the items live in
+// the env vault — so the editor needs the env context.
+function AppClusterSecrets({
+  project,
+  appName,
+  env,
+}: {
+  project: string;
+  appName: string;
+  env: string;
+}) {
+  const [boundClusters, setBoundClusters] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    listClusters()
-      .then((list) => {
+    listOrgEnvironments()
+      .then((resp) => {
         if (cancelled) return;
-        const names = list.map((c) => c.name);
-        setClusters(names);
-        setActive((cur) => cur || names[0] || "");
+        const orgEnv = (resp.environments || []).find((e) => e.name === env);
+        const refs = orgEnv?.clusterRefs?.length
+          ? orgEnv.clusterRefs
+          : orgEnv?.activeClusterRef
+            ? [orgEnv.activeClusterRef]
+            : [];
+        setBoundClusters(refs);
       })
       .catch(() => {
-        /* best-effort: no clusters listed */
+        /* best-effort: no bound clusters resolved */
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [env]);
 
-  if (clusters.length === 0) {
+  if (boundClusters.length === 0) {
     return null;
   }
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-3">
-        <span className="text-sm font-medium text-gray-700">Cluster</span>
-        <div className="flex gap-1.5">
-          {clusters.map((name) => (
-            <button
-              key={name}
-              onClick={() => setActive(name)}
-              className={`rounded-full px-3 py-0.5 text-xs font-medium transition-colors ${
-                active === name
-                  ? "bg-gray-900 text-white"
-                  : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-              }`}
-            >
-              {name}
-            </button>
-          ))}
-        </div>
-      </div>
-      {active && (
+    <>
+      {boundClusters.map((cluster) => (
         <SecretEditor
-          key={`cluster-secrets-${active}`}
-          title={`"${active}" cluster secrets`}
-          description={`Secrets for this app only when running on the ${active} cluster (cluster scope). Override global and env secrets.`}
-          fetchFn={() => listAppClusterSecretKeys(project, appName, active)}
-          upsertFn={(entries) => upsertAppClusterSecrets(project, appName, active, entries)}
-          deleteFn={(key) => deleteAppClusterSecretKey(project, appName, active, key)}
+          key={`cluster-secrets-${env}-${cluster}`}
+          title={`"${cluster}" cluster secrets in "${env}"`}
+          description={`Secrets for this app only when ${env} runs on the ${cluster} cluster (cluster scope, stored in the "${env}" env vault). Override global and env secrets.`}
+          fetchFn={() => listAppClusterSecretKeys(project, appName, env, cluster)}
+          upsertFn={(entries) =>
+            upsertAppClusterSecrets(project, appName, env, cluster, entries)
+          }
+          deleteFn={(key) =>
+            deleteAppClusterSecretKey(project, appName, env, cluster, key)
+          }
         />
-      )}
-    </div>
+      ))}
+    </>
   );
 }
 
@@ -2779,9 +2776,6 @@ function EnvVarsTab({
         deleteFn={(key) => deleteAppGlobalSecretKey(project, appName, key)}
       />
 
-      {/* Cluster-scoped secrets (per-cluster overrides) */}
-      <AppClusterSecrets project={project} appName={appName} />
-
       {/* Per-environment section */}
       <div className="space-y-3">
         <div className="flex items-center gap-3">
@@ -2819,6 +2813,13 @@ function EnvVarsTab({
               fetchFn={() => listAppEnvSecretKeys(project, appName, activeEnv)}
               upsertFn={(entries) => upsertAppEnvSecrets(project, appName, activeEnv, entries)}
               deleteFn={(key) => deleteAppEnvSecretKey(project, appName, activeEnv, key)}
+            />
+            {/* Cluster-scoped overrides for this env's bound cluster(s) */}
+            <AppClusterSecrets
+              key={`cluster-secrets-${activeEnv}`}
+              project={project}
+              appName={appName}
+              env={activeEnv}
             />
             <ResolvedEnvPanel
               key={`resolved-${activeEnv}`}

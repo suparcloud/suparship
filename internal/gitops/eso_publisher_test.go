@@ -76,10 +76,11 @@ func TestBuildExternalSecretYAML(t *testing.T) {
 
 func TestBuildSecretStoresForConfig_K8s(t *testing.T) {
 	cfg := secrets.BackendConfig{Type: secrets.BackendK8s}
-	stores := BuildSecretStoresForConfig(cfg, []string{"staging", "prod"}, []string{"c1"}, branding.Config{})
-	// global + 2 envs + 1 cluster.
-	if len(stores) != 4 {
-		t.Fatalf("expected 4 stores, got %d", len(stores))
+	stores := BuildSecretStoresForConfig(cfg, []string{"staging", "prod"}, branding.Config{})
+	// global + 2 envs; clusters get no store of their own (cluster items live
+	// in the env vault).
+	if len(stores) != 3 {
+		t.Fatalf("expected 3 stores, got %d", len(stores))
 	}
 	names := map[string]bool{}
 	for _, s := range stores {
@@ -88,7 +89,7 @@ func TestBuildSecretStoresForConfig_K8s(t *testing.T) {
 			t.Errorf("expected k8s backend, got %q", s.BackendType)
 		}
 	}
-	for _, want := range []string{"suparship-store-global", "suparship-store-env-staging", "suparship-store-env-prod", "suparship-store-cluster-c1"} {
+	for _, want := range []string{"suparship-store-global", "suparship-store-env-staging", "suparship-store-env-prod"} {
 		if !names[want] {
 			t.Errorf("missing store %q", want)
 		}
@@ -101,7 +102,7 @@ func TestBuildSecretStoresForConfig_1PasswordEmitsNoInfraStores(t *testing.T) {
 	// nothing for the 1Password backend.
 	cfg := secrets.BackendConfig{Type: secrets.Backend1Password}
 	cfg.UpsertVault(secrets.GlobalScope(), secrets.VaultRef{VaultID: "g1"})
-	stores := BuildSecretStoresForConfig(cfg, []string{"staging", "prod"}, []string{"c1"}, branding.Config{})
+	stores := BuildSecretStoresForConfig(cfg, []string{"staging", "prod"}, branding.Config{})
 	if len(stores) != 0 {
 		t.Fatalf("expected 0 _infra stores for 1Password, got %d", len(stores))
 	}
@@ -141,6 +142,36 @@ func TestBuildAppExternalSecret_PresenceDriven(t *testing.T) {
 	}
 	if cfg.Items[1].StoreName != "suparship-store-env-prod" {
 		t.Errorf("env item store = %q", cfg.Items[1].StoreName)
+	}
+}
+
+func TestBuildAppExternalSecret_ClusterItemsUseEnvStore(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App:       "web",
+		Namespace: "acme-web-prod",
+		Env:       "prod",
+		Cluster:   "c1",
+		Presence: ScopePresence{
+			EnvApp:        true,
+			ClusterShared: true, ClusterApp: true,
+		},
+	})
+	if cfg == nil {
+		t.Fatal("expected a config")
+	}
+	// Cluster items keep their cluster-suffixed names but extract from the ENV
+	// store — the items live inside the env vault.
+	wantKeys := []string{"web-env-prod", "shared-cluster-c1", "web-cluster-c1"}
+	if len(cfg.Items) != len(wantKeys) {
+		t.Fatalf("expected %d items, got %d: %+v", len(wantKeys), len(cfg.Items), cfg.Items)
+	}
+	for i, k := range wantKeys {
+		if cfg.Items[i].Key != k {
+			t.Errorf("item %d: got %q, want %q", i, cfg.Items[i].Key, k)
+		}
+		if cfg.Items[i].StoreName != "suparship-store-env-prod" {
+			t.Errorf("item %q store = %q, want env store", k, cfg.Items[i].StoreName)
+		}
 	}
 }
 

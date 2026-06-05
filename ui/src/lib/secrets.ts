@@ -11,8 +11,9 @@ export interface SecretKeysResponse {
   secretName: string;
 }
 
-// VaultRef describes one provisioned 1Password vault (global / an env / a
-// cluster). Key is the env or cluster name, empty for the global vault.
+// VaultRef describes one provisioned 1Password vault (global / an env).
+// Key is the env name, empty for the global vault. Cluster overrides are
+// items inside the env vault — clusters have no vault of their own.
 export interface VaultRef {
   key?: string;
   vaultId: string;
@@ -36,7 +37,6 @@ export interface OnePasswordConfig {
   connect: ConnectStatus;
   globalVault?: VaultRef;
   envVaults?: VaultRef[];
-  clusterVaults?: VaultRef[];
 }
 
 export interface SecretBackendConfig {
@@ -106,22 +106,16 @@ export function setGlobalVault(
   });
 }
 
-// ── Env/cluster vault provisioning (1Password) ──────────────────────────────
-// Registers a per-scope vault and seals its Connect token onto the relevant
-// cluster(s): env → the env's bound cluster, cluster → that cluster.
+// ── Env vault provisioning (1Password) ──────────────────────────────────────
+// Registers an env vault and seals its Connect token onto the env's bound
+// cluster. Cluster overrides are items inside the env vault, so clusters need
+// no registration of their own.
 
 export function registerEnvVault(
   env: string,
   body: { vaultId: string; vaultName?: string; connectToken?: string; connectEndpoint?: string },
 ): Promise<void> {
   return api.post(`/org/secret-backend/vaults/env/${encodeURIComponent(env)}`, body);
-}
-
-export function registerClusterVault(
-  cluster: string,
-  body: { vaultId: string; vaultName?: string; connectToken?: string; connectEndpoint?: string },
-): Promise<void> {
-  return api.post(`/org/secret-backend/vaults/cluster/${encodeURIComponent(cluster)}`, body);
 }
 
 // ── Secret sync ────────────────────────────────────────────────────────────────
@@ -158,14 +152,25 @@ export function deleteSharedEnvSecretKey(env: string, key: string): Promise<void
   return api.del(`/org/secrets/env/${encodeURIComponent(env)}/${encodeURIComponent(key)}`);
 }
 
-export function listSharedClusterSecretKeys(cluster: string): Promise<SecretKeysResponse> {
-  return api.get<SecretKeysResponse>(`/org/secrets/cluster/${encodeURIComponent(cluster)}`);
+// Cluster overrides are per-(env, cluster): items live in the env vault.
+export function listSharedClusterSecretKeys(env: string, cluster: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(
+    `/org/secrets/env/${encodeURIComponent(env)}/cluster/${encodeURIComponent(cluster)}`,
+  );
 }
-export function upsertSharedClusterSecrets(cluster: string, entries: Record<string, string>): Promise<void> {
-  return api.post(`/org/secrets/cluster/${encodeURIComponent(cluster)}`, { entries });
+export function upsertSharedClusterSecrets(
+  env: string,
+  cluster: string,
+  entries: Record<string, string>,
+): Promise<void> {
+  return api.post(`/org/secrets/env/${encodeURIComponent(env)}/cluster/${encodeURIComponent(cluster)}`, {
+    entries,
+  });
 }
-export function deleteSharedClusterSecretKey(cluster: string, key: string): Promise<void> {
-  return api.del(`/org/secrets/cluster/${encodeURIComponent(cluster)}/${encodeURIComponent(key)}`);
+export function deleteSharedClusterSecretKey(env: string, cluster: string, key: string): Promise<void> {
+  return api.del(
+    `/org/secrets/env/${encodeURIComponent(env)}/cluster/${encodeURIComponent(cluster)}/${encodeURIComponent(key)}`,
+  );
 }
 
 // ── App-tier secrets (project devs) ──────────────────────────────────────────
@@ -193,14 +198,39 @@ export function deleteAppEnvSecretKey(project: string, app: string, env: string,
   return api.del(`${appBase(project, app)}/env/${encodeURIComponent(env)}/${encodeURIComponent(key)}`);
 }
 
-export function listAppClusterSecretKeys(project: string, app: string, cluster: string): Promise<SecretKeysResponse> {
-  return api.get<SecretKeysResponse>(`${appBase(project, app)}/cluster/${encodeURIComponent(cluster)}`);
+// Cluster overrides are per-(env, cluster): items live in the env vault.
+export function listAppClusterSecretKeys(
+  project: string,
+  app: string,
+  env: string,
+  cluster: string,
+): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(
+    `${appBase(project, app)}/env/${encodeURIComponent(env)}/cluster/${encodeURIComponent(cluster)}`,
+  );
 }
-export function upsertAppClusterSecrets(project: string, app: string, cluster: string, entries: Record<string, string>): Promise<void> {
-  return api.post(`${appBase(project, app)}/cluster/${encodeURIComponent(cluster)}`, { entries });
+export function upsertAppClusterSecrets(
+  project: string,
+  app: string,
+  env: string,
+  cluster: string,
+  entries: Record<string, string>,
+): Promise<void> {
+  return api.post(
+    `${appBase(project, app)}/env/${encodeURIComponent(env)}/cluster/${encodeURIComponent(cluster)}`,
+    { entries },
+  );
 }
-export function deleteAppClusterSecretKey(project: string, app: string, cluster: string, key: string): Promise<void> {
-  return api.del(`${appBase(project, app)}/cluster/${encodeURIComponent(cluster)}/${encodeURIComponent(key)}`);
+export function deleteAppClusterSecretKey(
+  project: string,
+  app: string,
+  env: string,
+  cluster: string,
+  key: string,
+): Promise<void> {
+  return api.del(
+    `${appBase(project, app)}/env/${encodeURIComponent(env)}/cluster/${encodeURIComponent(cluster)}/${encodeURIComponent(key)}`,
+  );
 }
 
 // ── Resolved secrets ───────────────────────────────────────────────────────────

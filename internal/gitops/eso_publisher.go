@@ -153,8 +153,9 @@ spec:
 
 // BuildSecretStoresForConfig returns the full desired set of ClusterSecretStores
 // to publish to _infra/secret-stores/ (synced to the tooling cluster): one
-// global store plus one per environment and per cluster. Pass the complete
-// env/cluster lists — WriteSecretStores prunes any store not returned.
+// global store plus one per environment. Cluster-override items live inside the
+// env vault, so clusters get no store of their own. Pass the complete env list
+// — WriteSecretStores prunes any store not returned.
 //
 // Only the k8s backend emits stores here: its "vault" is a namespace on the
 // tooling cluster, so the stores belong there. 1Password stores are
@@ -165,7 +166,6 @@ spec:
 func BuildSecretStoresForConfig(
 	cfg secrets.BackendConfig,
 	envNames []string,
-	clusterNames []string,
 	brand branding.Config,
 ) []ESOSecretStoreConfig {
 	if cfg.Effective() != secrets.BackendK8s {
@@ -174,9 +174,6 @@ func BuildSecretStoresForConfig(
 	scopes := []secrets.Scope{secrets.GlobalScope()}
 	for _, e := range envNames {
 		scopes = append(scopes, secrets.EnvScope(e))
-	}
-	for _, c := range clusterNames {
-		scopes = append(scopes, secrets.ClusterScope(c))
 	}
 
 	out := make([]ESOSecretStoreConfig, 0, len(scopes))
@@ -212,7 +209,8 @@ type WorkloadExternalSecretParams struct {
 // app-env, or nil when no scope has keys. dataFrom items are ordered
 // global→env→cluster, shared-before-app within each scope, so cluster/app wins;
 // each item carries its scope's store (the global store is the default, so
-// global items omit sourceRef). Cluster items are included only when the env is
+// global items omit sourceRef). Cluster-override items live in the env vault,
+// so they extract from the ENV store; they are included only when the env is
 // bound to a cluster.
 func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretConfig {
 	globalStore := secrets.StoreName(secrets.GlobalScope())
@@ -231,7 +229,7 @@ func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretCo
 	add(secrets.GlobalScope(), p.Presence.GlobalShared, p.Presence.GlobalApp)
 	add(secrets.EnvScope(p.Env), p.Presence.EnvShared, p.Presence.EnvApp)
 	if p.Cluster != "" {
-		add(secrets.ClusterScope(p.Cluster), p.Presence.ClusterShared, p.Presence.ClusterApp)
+		add(secrets.ClusterScope(p.Env, p.Cluster), p.Presence.ClusterShared, p.Presence.ClusterApp)
 	}
 
 	if len(items) == 0 {

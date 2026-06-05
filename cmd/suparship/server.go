@@ -287,7 +287,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 							logger.Warn("1Password backend: SA client init failed — falling back to k8s vault store", "error", saErr)
 						} else {
 							// Resolver loads org config fresh so vault selections
-							// (global/env/cluster) made after startup take effect.
+							// (global/env) made after startup take effect. Cluster
+							// scope resolves to its env vault.
 							resolver := func(scope secrets.Scope) (string, error) {
 								o, err := orgProvider.GetOrg(context.Background())
 								if err != nil {
@@ -296,7 +297,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 								return o.SecretBackend.VaultIDForScope(scope)
 							}
 							vaultStore = onepassword.NewSAVaultStore(saClient, resolver)
-							logger.Info("1Password vault store enabled (global/env/cluster vaults resolved from org config)")
+							logger.Info("1Password vault store enabled (global/env vaults resolved from org config; cluster overrides live in env vaults)")
 						}
 					}
 				}
@@ -864,16 +865,7 @@ func (a *gitOpsPublisherAdapter) ReconcileSecretStores(ctx context.Context) erro
 		envNames = append(envNames, e.Name)
 	}
 
-	var clusterNames []string
-	if a.clusterStore != nil {
-		if clusters, err := a.clusterStore.ListClusters(ctx); err == nil {
-			for _, c := range clusters {
-				clusterNames = append(clusterNames, c.Name)
-			}
-		}
-	}
-
-	stores := gitops.BuildSecretStoresForConfig(org.SecretBackend, envNames, clusterNames, org.Branding)
+	stores := gitops.BuildSecretStoresForConfig(org.SecretBackend, envNames, org.Branding)
 	return a.inner.PublishSecretStores(ctx, stores)
 }
 
@@ -900,7 +892,7 @@ func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *doma
 	p.EnvApp = has(e, secrets.TierApp, app.Name)
 
 	if clusterRef != "" {
-		c := secrets.ClusterScope(clusterRef)
+		c := secrets.ClusterScope(envName, clusterRef)
 		p.ClusterShared = has(c, secrets.TierShared, "")
 		p.ClusterApp = has(c, secrets.TierApp, app.Name)
 	}

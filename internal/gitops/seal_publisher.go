@@ -14,7 +14,7 @@ import (
 // ScopeToken is one vault's 1Password Connect token to seal onto a workload
 // cluster, alongside the ClusterSecretStore that reads that vault.
 type ScopeToken struct {
-	// Scope identifies the vault (global, an env, or a cluster).
+	// Scope identifies the vault (global or an env).
 	Scope secrets.Scope
 	// VaultID is the 1Password vault UUID for this scope.
 	VaultID string
@@ -26,9 +26,10 @@ type ScopeToken struct {
 }
 
 // ClusterSealParams describes the full set of 1Password Connect tokens +
-// ClusterSecretStores to publish for ONE workload cluster. A cluster reads its
-// own cluster vault, the env vault(s) of the environments deployed to it, and
-// the org-wide global vault — so Scopes carries all of those.
+// ClusterSecretStores to publish for ONE workload cluster. A cluster reads the
+// env vault(s) of the environments deployed to it (which also hold its
+// cluster-override items) and the org-wide global vault — so Scopes carries
+// all of those.
 type ClusterSealParams struct {
 	// ClusterName is the registered suparship cluster name (used for the
 	// per-cluster ArgoCD Application name and the _secret-stores/{cluster}/ dir).
@@ -52,8 +53,9 @@ type ClusterSealParams struct {
 //	gitops-output/_infra/secrets-{cluster}-app.yaml                      -- ArgoCD Application
 //
 // The ArgoCD Application syncs the whole _secret-stores/{cluster}/ directory to
-// the target cluster, so its ESO can read the global / env / cluster vaults.
-// Scope files no longer in params.Scopes are pruned. Idempotent.
+// the target cluster, so its ESO can read the global / env vaults. Scope files
+// no longer in params.Scopes are pruned (including stale per-cluster-vault
+// files from the previous model). Idempotent.
 func (p *Publisher) PublishClusterSecretStores(ctx context.Context, params ClusterSealParams) error {
 	if params.ClusterName == "" {
 		return fmt.Errorf("PublishClusterSecretStores: clusterName is required")
