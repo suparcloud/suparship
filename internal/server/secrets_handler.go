@@ -140,6 +140,9 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save org"})
 		return
 	}
+	// Config changes (e.g. the org-level Connect endpoint) are baked into each
+	// cluster's unified store — republish them best-effort in the background.
+	h.resealAllClustersAsync("backend-config-updated")
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -172,6 +175,9 @@ func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save org"})
 		return
 	}
+	// Config changes (e.g. the org-level Connect endpoint) are baked into each
+	// cluster's unified store — republish them best-effort in the background.
+	h.resealAllClustersAsync("backend-config-updated")
 	writeJSON(w, http.StatusOK, cfg)
 }
 
@@ -623,6 +629,26 @@ func (h *secretsHandler) resealAllClusters(ctx context.Context, org *rbac.Org, r
 		}
 	}
 	_ = h.orgStore.SaveOrg(ctx, org)
+}
+
+// resealAllClustersAsync reloads the org in the background (so it sees the
+// just-saved config, including 1Password-only fields) and republishes every
+// cluster's unified store. No-op for non-1Password backends.
+func (h *secretsHandler) resealAllClustersAsync(reason string) {
+	if h.sealPublisher == nil || h.clusterStore == nil {
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		org, err := h.orgStore.GetOrg(ctx)
+		if err != nil || org == nil {
+			return
+		}
+		if org.SecretBackend.Effective() != secrets.Backend1Password {
+			return
+		}
+		h.resealAllClusters(ctx, org, reason)
+	}()
 }
 
 // orgEnvCluster returns the cluster bound to envName, or "".
