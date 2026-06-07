@@ -32,23 +32,35 @@ func TestPublishAppFiles_WritesConfigMap(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	cmPath := filepath.Join(dir, "envs", "staging", "demo", "nginx", "env-configmap.yaml")
-	data, err := os.ReadFile(cmPath)
+	resDir := filepath.Join(dir, "_app-resources", "staging", "demo", "nginx")
+	data, err := os.ReadFile(filepath.Join(resDir, "env-configmap.yaml"))
 	if err != nil {
-		t.Fatalf("env-configmap.yaml missing: %v", err)
+		t.Fatalf("env-configmap.yaml missing under _app-resources: %v", err)
 	}
 	yaml := string(data)
-	if !strings.Contains(yaml, "name: suparship-config-demo-nginx-staging") {
+	if !strings.Contains(yaml, "name: nginx-config") {
 		t.Errorf("expected per-app ConfigMap name, got:\n%s", yaml)
 	}
 	if !strings.Contains(yaml, `LOG_LEVEL: "info"`) {
 		t.Errorf("expected LOG_LEVEL var, got:\n%s", yaml)
 	}
+	// meta.yaml drives the platform ApplicationSet generator.
+	meta, err := os.ReadFile(filepath.Join(resDir, "meta.yaml"))
+	if err != nil {
+		t.Fatalf("meta.yaml missing: %v", err)
+	}
+	if !strings.Contains(string(meta), "namespace: demo-nginx-staging") || !strings.Contains(string(meta), "name: nginx") {
+		t.Errorf("meta.yaml missing fields:\n%s", meta)
+	}
+	// The app's chart dir must NOT carry the platform manifests anymore.
+	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "nginx", "env-configmap.yaml")); !os.IsNotExist(err) {
+		t.Error("env-configmap.yaml should not be in the app chart dir")
+	}
 }
 
-// TestPublishAppFiles_NoExternalSecretsWhenNoKeys verifies that no
-// external-secret-*.yaml files are written when no scope has keys.
-func TestPublishAppFiles_NoExternalSecretsWhenNoKeys(t *testing.T) {
+// TestPublishAppFiles_NoExternalSecretWhenNoKeys verifies the single merged
+// ExternalSecret is not written when no scope has keys.
+func TestPublishAppFiles_NoExternalSecretWhenNoKeys(t *testing.T) {
 	dir := t.TempDir()
 	app := &domain.App{
 		Name:        "nginx",
@@ -63,18 +75,16 @@ func TestPublishAppFiles_NoExternalSecretsWhenNoKeys(t *testing.T) {
 	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
-	for _, scope := range []string{"global", "env", "cluster"} {
-		path := filepath.Join(dir, "envs", "staging", "demo", "nginx", "external-secret-"+scope+".yaml")
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("expected no external-secret-%s.yaml when no keys present", scope)
-		}
+	path := filepath.Join(dir, "_app-resources", "staging", "demo", "nginx", "external-secret.yaml")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("expected no external-secret.yaml when no keys present")
 	}
 }
 
-// TestPublishAppFiles_WritesScopedExternalSecrets verifies that per-scope
-// ExternalSecrets are written for scopes with keys, targeting the
-// <app>-global/-env/-cluster Secrets.
-func TestPublishAppFiles_WritesScopedExternalSecrets(t *testing.T) {
+// TestPublishAppFiles_WritesMergedExternalSecret verifies the single merged
+// ExternalSecret targets <app>-secrets and lists all present scopes' items
+// with per-entry sourceRef for the env/cluster stores.
+func TestPublishAppFiles_WritesMergedExternalSecret(t *testing.T) {
 	dir := t.TempDir()
 	app := &domain.App{
 		Name:        "nginx",
@@ -98,30 +108,37 @@ func TestPublishAppFiles_WritesScopedExternalSecrets(t *testing.T) {
 	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
-	base := filepath.Join(dir, "envs", "staging", "demo", "nginx")
+	base := filepath.Join(dir, "_app-resources", "staging", "demo", "nginx")
 
-	global, err := os.ReadFile(filepath.Join(base, "external-secret-global.yaml"))
+	data, err := os.ReadFile(filepath.Join(base, "external-secret.yaml"))
 	if err != nil {
-		t.Fatalf("external-secret-global.yaml missing: %v", err)
+		t.Fatalf("external-secret.yaml missing: %v", err)
 	}
-	if !strings.Contains(string(global), "name: nginx-global") {
-		t.Errorf("expected target nginx-global, got:\n%s", global)
+	es := string(data)
+	if !strings.Contains(es, "name: nginx-secrets") {
+		t.Errorf("expected merged target nginx-secrets, got:\n%s", es)
 	}
-	if !strings.Contains(string(global), "name: suparship-store-global") {
-		t.Errorf("expected global store ref, got:\n%s", global)
+	if !strings.Contains(es, "name: suparship-store-global") {
+		t.Errorf("expected default global store ref, got:\n%s", es)
 	}
-
-	env, err := os.ReadFile(filepath.Join(base, "external-secret-env.yaml"))
-	if err != nil {
-		t.Fatalf("external-secret-env.yaml missing: %v", err)
+	for _, key := range []string{`"nginx-global"`, `"shared-env-staging"`, `"nginx-env-staging"`, `"nginx-cluster-prod-eu"`} {
+		if !strings.Contains(es, key) {
+			t.Errorf("expected dataFrom item %s, got:\n%s", key, es)
+		}
 	}
-	// env scope has both shared and app items, app listed last (wins).
-	if !strings.Contains(string(env), `"shared-env-staging"`) || !strings.Contains(string(env), `"nginx-env-staging"`) {
-		t.Errorf("expected shared+app dataFrom keys, got:\n%s", env)
+	// env AND cluster items extract from the env store — cluster-override
+	// items live inside the env vault, so no cluster store exists.
+	if !strings.Contains(es, "name: suparship-store-env-staging") {
+		t.Errorf("expected sourceRef storeRef for the env store, got:\n%s", es)
 	}
-
-	if _, err := os.Stat(filepath.Join(base, "external-secret-cluster.yaml")); err != nil {
-		t.Errorf("expected external-secret-cluster.yaml: %v", err)
+	if strings.Contains(es, "suparship-store-cluster-") {
+		t.Errorf("did not expect a per-cluster store ref, got:\n%s", es)
+	}
+	// No separate per-scope files.
+	for _, scope := range []string{"global", "env", "cluster"} {
+		if _, err := os.Stat(filepath.Join(base, "external-secret-"+scope+".yaml")); !os.IsNotExist(err) {
+			t.Errorf("did not expect external-secret-%s.yaml", scope)
+		}
 	}
 }
 
@@ -143,6 +160,9 @@ func TestPublishAppFiles_UnboundEnvSkipsPlatformResources(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "envs", "prod")); !os.IsNotExist(err) {
-		t.Error("expected no output for unbound prod env")
+		t.Error("expected no chart output for unbound prod env")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "prod")); !os.IsNotExist(err) {
+		t.Error("expected no platform resources for unbound prod env")
 	}
 }

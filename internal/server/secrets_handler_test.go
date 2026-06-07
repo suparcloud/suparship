@@ -92,7 +92,7 @@ func TestSharedSecrets_RoundTrip(t *testing.T) {
 	cases := []struct{ scope, path string }{
 		{"global", "/api/v1/org/secrets/global"},
 		{"env", "/api/v1/org/secrets/env/staging"},
-		{"cluster", "/api/v1/org/secrets/cluster/prod-eu"},
+		{"cluster", "/api/v1/org/secrets/env/staging/cluster/prod-eu"},
 	}
 	for _, c := range cases {
 		t.Run(c.scope, func(t *testing.T) {
@@ -131,7 +131,7 @@ func TestSharedSecrets_ForbiddenForViewer(t *testing.T) {
 func TestAppSecrets_RoundTrip(t *testing.T) {
 	mux, ah := newSecretsMux()
 	base := "/api/v1/projects/api/apps/backend/secrets"
-	for _, scopePath := range []string{base + "/global", base + "/env/staging", base + "/cluster/prod-eu"} {
+	for _, scopePath := range []string{base + "/global", base + "/env/staging", base + "/env/staging/cluster/prod-eu"} {
 		rec := do(t, mux, ah, "POST", scopePath, "bob", "developer", UpsertSecretsRequest{Entries: map[string]string{"APP_K": "v"}})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("upsert %s: expected 200, got %d: %s", scopePath, rec.Code, rec.Body.String())
@@ -150,7 +150,7 @@ func TestResolvedSecrets(t *testing.T) {
 	mux, ah := newSecretsMux()
 	// shared global, app env, and a colliding key at app cluster.
 	do(t, mux, ah, "POST", "/api/v1/org/secrets/global", "alice", "org_admin", UpsertSecretsRequest{Entries: map[string]string{"SHARED": "1", "WIN": "g"}})
-	do(t, mux, ah, "POST", "/api/v1/projects/api/apps/backend/secrets/cluster/prod-eu", "bob", "developer", UpsertSecretsRequest{Entries: map[string]string{"WIN": "c"}})
+	do(t, mux, ah, "POST", "/api/v1/projects/api/apps/backend/secrets/env/staging/cluster/prod-eu", "bob", "developer", UpsertSecretsRequest{Entries: map[string]string{"WIN": "c"}})
 
 	rec := do(t, mux, ah, "GET", "/api/v1/projects/api/apps/backend/envs/staging/secrets/resolved", "bob", "developer", nil)
 	if rec.Code != http.StatusOK {
@@ -172,12 +172,24 @@ func TestResolvedSecrets(t *testing.T) {
 	}
 }
 
-// TestRegisterEnvVault_NotImplemented locks the 5b stub behavior.
-func TestRegisterEnvVault_NotImplemented(t *testing.T) {
+// TestRegisterEnvVault_RequiresOnePassword verifies env-vault registration is
+// rejected on the default k8s backend (the harness uses MemVaultStore / k8s).
+func TestRegisterEnvVault_RequiresOnePassword(t *testing.T) {
 	mux, ah := newSecretsMux()
 	rec := do(t, mux, ah, "POST", "/api/v1/org/secret-backend/vaults/env/staging", "alice", "org_admin",
 		map[string]string{"vaultId": "v1"})
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 (1Password backend required), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSetClusterConnectToken_RequiresOnePassword verifies the per-cluster
+// Connect-token endpoint is rejected on the default k8s backend.
+func TestSetClusterConnectToken_RequiresOnePassword(t *testing.T) {
+	mux, ah := newSecretsMux()
+	rec := do(t, mux, ah, "POST", "/api/v1/org/secret-backend/clusters/prod-eu/connect-token", "alice", "org_admin",
+		map[string]string{"connectToken": "tok"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 (1Password backend required), got %d: %s", rec.Code, rec.Body.String())
 	}
 }

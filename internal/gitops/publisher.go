@@ -167,6 +167,13 @@ func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, 
 	p.cfg.AddonProfiles = addonProfiles
 }
 
+// usesUnifiedStore reports whether app ExternalSecrets should extract from the
+// single per-cluster ClusterSecretStore (1Password backend) instead of the
+// per-vault stores (k8s backend).
+func (p *Publisher) usesUnifiedStore() bool {
+	return p.cfg.BackendConfig != nil && p.cfg.BackendConfig.Effective() == secrets.Backend1Password
+}
+
 // NewPublisher creates a Publisher from cfg.
 // Returns an error when RepoURL is empty (required).
 func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
@@ -236,6 +243,21 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 			}
 			slog.Debug("gitops: wrote appset", "path", appSetPath)
 
+			// Platform-owned ApplicationSet that ships per-app ConfigMap +
+			// ExternalSecret from _app-resources/ to this env's workload cluster,
+			// decoupled from the app's chart Application.
+			platformAppSet := BuildPlatformAppSet(env, p.cfg.ArgoCDRepoURL, AppSetOptions{
+				SyncAutomated: p.cfg.SyncAutomated,
+				SubPath:       p.cfg.SubPath,
+			})
+			platformBytes, err := yaml.Marshal(platformAppSet)
+			if err != nil {
+				return fmt.Errorf("marshal platform appset for env %s: %w", env.EnvName, err)
+			}
+			if err := p.writeFile(filepath.Join(infraDir, env.EnvName+"-platform-appset.yaml"), platformBytes); err != nil {
+				return err
+			}
+
 			destinations = append(destinations, AppProjectDestination{Server: env.ClusterServer, Namespace: "*"})
 		}
 
@@ -267,6 +289,20 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 		}
 		previewAppSetPath := filepath.Join(infraDir, "previews-appset.yaml")
 		if err := p.writeFile(previewAppSetPath, previewAppSetBytes); err != nil {
+			return err
+		}
+
+		// Platform-owned previews ApplicationSet (ships preview ConfigMap +
+		// ExternalSecret from _app-resources/previews/).
+		previewPlatformAppSet := BuildPreviewPlatformAppSet(p.cfg.ArgoCDRepoURL, AppSetOptions{
+			SyncAutomated: p.cfg.SyncAutomated,
+			SubPath:       p.cfg.SubPath,
+		})
+		previewPlatformBytes, err := yaml.Marshal(previewPlatformAppSet)
+		if err != nil {
+			return fmt.Errorf("marshal previews platform appset: %w", err)
+		}
+		if err := p.writeFile(filepath.Join(infraDir, "previews-platform-appset.yaml"), previewPlatformBytes); err != nil {
 			return err
 		}
 
@@ -568,10 +604,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			return err
 		}
 
-		// Write platform-managed per-app resources into the same directory as
-		// app.yaml/values.yaml so ArgoCD picks them up with the same ApplicationSet.
+		// Platform-managed per-app resources (ConfigMap + ExternalSecret) are
+		// written to the platform-owned _app-resources/ tree and shipped by the
+		// platform ApplicationSet — NOT into the app's chart Application.
 		appDir := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name)
-		if err := p.writeAppPlatformResources(appDir, app, ns, env); err != nil {
+		if err := p.writeAppPlatformResources(repoDir, appDir, app, ns, env); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
 		}
 
@@ -588,63 +625,71 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 	return nil
 }
 
-// writeAppPlatformResources writes the platform-managed ExternalSecret and
-// ConfigMap YAML files into dir (the per-app-env directory under gitops-output).
-// These resources are consumed by the Helm chart via envFrom.
+// writeAppPlatformResources writes the platform-managed ConfigMap + ExternalSecret
+// (and a meta.yaml for the platform ApplicationSet generator) into the
+// platform-owned tree at _app-resources/{env}/{project}/{app}/, then prunes any
+// stale copies left in the app's own directory by older versions (which used to
+// ship these alongside the chart). oldAppDir is the per-app chart directory.
 //
-// ConfigMap (always written, even when empty):
-//
-//	{dir}/env-configmap.yaml  →  K8s ConfigMap named "{app}-config"
-//
-// The ConfigMap data is env.EnvVars verbatim — the caller is responsible for
-// merging org → env-type → project → app → app-env → cluster scopes before
-// publishing, so the YAML committed to git is the audit-trail for what the
-// pod will see (no chart-side multi-source merge).
-//
-// ExternalSecret (only when env.StoreName is non-empty):
-//
-//	{dir}/external-secret.yaml  →  K8s ExternalSecret named "{app}-secrets"
-//
-// When p.cfg.BackendConfig is set, the ExternalSecret is rendered as a
-// collapsed multi-scope merge across all six hierarchy levels (org → env-type
-// → project → app → app-env → cluster) using BuildCollapsedExternalSecretForApp.
-// Empty scopes are skipped (per env.ScopeKeys) so ESO doesn't error trying to
-// extract from non-existent vault items. When BackendConfig is nil — typically
-// in tests or pre-Phase-3 callers — the writer falls back to a single-key
-// dataFrom for the app-env scope only, preserving prior behaviour.
+// The ConfigMap data is env.EnvVars verbatim — the caller merges global → env →
+// cluster scopes before publishing, so the committed YAML is the audit-trail for
+// what the pod sees. The ExternalSecret merges all present scopes into one
+// <app>-secrets Secret; nil (skipped) when no scope has keys.
 func (p *Publisher) writeAppPlatformResources(
-	dir string,
+	repoDir, oldAppDir string,
 	app *domain.App,
 	namespace string,
 	env AppPublishEnv,
 ) error {
-	// ConfigMap — written with the fully-merged map the caller passed in.
-	cmName := secrets.AppConfigName(app.ProjectName, app.Name, env.EnvName)
-	if err := p.WriteAppConfigMap(dir, cmName, namespace, env.EnvVars); err != nil {
-		return fmt.Errorf("writing app ConfigMap: %w", err)
-	}
-
-	// Up to three ExternalSecrets (global/env/cluster); only scopes that have
-	// keys produce a file, and WriteWorkloadExternalSecrets prunes the rest.
-	cfgs := BuildWorkloadExternalSecrets(WorkloadExternalSecretParams{
-		App:       app.Name,
-		Namespace: namespace,
-		Env:       env.EnvName,
-		Cluster:   env.ClusterRef,
-		Presence:  env.ScopeKeys,
-		Branding:  p.cfg.Branding,
+	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
+	esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App:          app.Name,
+		Namespace:    namespace,
+		Env:          env.EnvName,
+		Cluster:      env.ClusterRef,
+		Presence:     env.ScopeKeys,
+		UnifiedStore: p.usesUnifiedStore(),
+		Branding:     p.cfg.Branding,
 	})
-	if err := p.WriteWorkloadExternalSecrets(dir, cfgs); err != nil {
+	meta := PlatformAppMeta{Name: app.Name, Project: app.ProjectName, Namespace: namespace}
+	if err := p.writePlatformDir(resDir, app.Name, namespace, env.EnvVars, esCfg, meta); err != nil {
 		return err
 	}
+	// Migration: remove platform manifests that older publishers wrote into the
+	// app's own (chart) directory.
+	return p.pruneLegacyPlatformFiles(oldAppDir)
+}
 
-	// Historical note: this used to also write a kustomization.yaml so
-	// ArgoCD would apply the per-app manifests via kustomize. Removed
-	// because ArgoCD's `directory:` source (with our include filter)
-	// treats every listed file as a plain manifest — it shipped the
-	// kustomization.yaml itself to the API server, which then 404'd on
-	// "no Kustomization CRD installed". The include filter is sufficient
-	// on its own; env-configmap + external-secret get applied directly.
+// writePlatformDir writes meta.yaml + the <app>-config ConfigMap + the
+// <app>-secrets ExternalSecret (esCfg may be nil → pruned) into resDir.
+func (p *Publisher) writePlatformDir(resDir, appName, namespace string, envVars map[string]string, esCfg *ESOExternalSecretConfig, meta PlatformAppMeta) error {
+	metaBytes, err := yaml.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal platform meta: %w", err)
+	}
+	if err := p.writeFile(filepath.Join(resDir, "meta.yaml"), metaBytes); err != nil {
+		return err
+	}
+	if err := p.WriteAppConfigMap(resDir, secrets.AppConfigMapName(appName), namespace, envVars); err != nil {
+		return fmt.Errorf("writing app ConfigMap: %w", err)
+	}
+	return p.WriteAppExternalSecret(resDir, esCfg)
+}
+
+// pruneLegacyPlatformFiles removes platform manifests that earlier publishers
+// wrote into the app's chart directory (before they moved to _app-resources/).
+func (p *Publisher) pruneLegacyPlatformFiles(appDir string) error {
+	for _, name := range []string{
+		"env-configmap.yaml", "external-secret.yaml",
+		"external-secret-global.yaml", "external-secret-env.yaml", "external-secret-cluster.yaml",
+	} {
+		path := filepath.Join(appDir, name)
+		if _, err := os.Stat(path); err == nil {
+			if err := os.Remove(path); err != nil {
+				return fmt.Errorf("prune legacy platform file %s: %w", name, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -994,15 +1039,30 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 			return err
 		}
 
-		// Write platform-managed ConfigMap and ExternalSecret (same as stable envs).
+		// Platform-managed ConfigMap + ExternalSecret go to the platform-owned
+		// _app-resources/previews/ tree (shipped by the preview platform
+		// ApplicationSet), not the preview's chart directory.
 		previewDir := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName)
-		previewPublishEnv := AppPublishEnv{
-			EnvName:   preview.PreviewName,
-			EnvVars:   preview.EnvVars,
-			ScopeKeys: preview.ScopeKeys,
+		resDir := p.outputDir(repoDir, "_app-resources", "previews", app.ProjectName, preview.PreviewName)
+		esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+			App:          app.Name,
+			Namespace:    preview.Namespace,
+			Env:          preview.PreviewName,
+			Presence:     preview.ScopeKeys,
+			UnifiedStore: p.usesUnifiedStore(),
+			Branding:     p.cfg.Branding,
+		})
+		meta := PlatformAppMeta{
+			Name:          preview.PreviewName,
+			Project:       app.ProjectName,
+			Namespace:     preview.Namespace,
+			ClusterServer: preview.ClusterServer,
 		}
-		if err := p.writeAppPlatformResources(previewDir, app, preview.Namespace, previewPublishEnv); err != nil {
+		if err := p.writePlatformDir(resDir, app.Name, preview.Namespace, preview.EnvVars, esCfg, meta); err != nil {
 			return fmt.Errorf("writing preview platform resources: %w", err)
+		}
+		if err := p.pruneLegacyPlatformFiles(previewDir); err != nil {
+			return err
 		}
 
 		commitMsg := fmt.Sprintf("feat(previews): create preview %s/%s\n\nCreated by suparShip.", app.ProjectName, preview.PreviewName)

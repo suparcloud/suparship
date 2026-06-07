@@ -31,6 +31,7 @@ import {
   listVaults,
   setGlobalVault,
   registerEnvVault,
+  setClusterConnectToken,
   listSharedGlobalSecretKeys,
   upsertSharedGlobalSecrets,
   deleteSharedGlobalSecretKey,
@@ -1094,26 +1095,24 @@ function SecretsBackendSection() {
   const [showAddBinding, setShowAddBinding] = useState(false);
   const [bindEnv, setBindEnv] = useState("");
   const [bindVaultId, setBindVaultId] = useState("");
-  const [bindToken, setBindToken] = useState("");
-  const [bindConnectEndpoint, setBindConnectEndpoint] = useState("");
   const [bindBusy, setBindBusy] = useState(false);
-
-  // Remove binding state
-  const [removingEnv, setRemovingEnv] = useState<string | null>(null);
 
   // Setup guide toggle
   const [showGuide, setShowGuide] = useState(false);
 
-  // Org environments (for binding dropdown)
+  // Org environments (for the vault registration dropdown) + clusters (for
+  // the per-cluster Connect token card)
   const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
+  const [orgClusters, setOrgClusters] = useState<Cluster[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getSecretsBackend(), listOrgEnvironments()])
-      .then(([cfg, envsResp]) => {
+    Promise.all([getSecretsBackend(), listOrgEnvironments(), listClusters()])
+      .then(([cfg, envsResp, clustersResp]) => {
         if (!cancelled) {
           setConfig(cfg);
           setOrgEnvs(envsResp.environments || []);
+          setOrgClusters(clustersResp || []);
         }
       })
       .catch((err) => {
@@ -1181,7 +1180,7 @@ function SecretsBackendSection() {
   }
 
   async function handleAddBinding() {
-    if (!bindEnv || !bindVaultId || !bindToken.trim()) return;
+    if (!bindEnv || !bindVaultId) return;
     setBindBusy(true);
     setError(null);
     try {
@@ -1189,32 +1188,19 @@ function SecretsBackendSection() {
       await registerEnvVault(bindEnv, {
         vaultId: bindVaultId,
         vaultName: vault?.title,
-        connectToken: bindToken.trim(),
-        connectEndpoint: bindConnectEndpoint.trim() || undefined,
       });
       const updated = await getSecretsBackend();
       setConfig(updated);
       setShowAddBinding(false);
       setBindEnv("");
       setBindVaultId("");
-      setBindToken("");
-      setBindConnectEndpoint("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Add binding failed");
+      setError(err instanceof Error ? err.message : "Vault registration failed");
     } finally {
       setBindBusy(false);
     }
   }
 
-  async function handleRemoveBinding(env: string) {
-    // Env/cluster vault de-provisioning is managed via the `suparship secrets`
-    // CLI for now (UI follow-up tracked with 1Password provisioning).
-    setRemovingEnv(env);
-    setError(
-      "Removing an env vault binding is managed via the suparship secrets CLI.",
-    );
-    setRemovingEnv(null);
-  }
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white">
@@ -1282,27 +1268,32 @@ function SecretsBackendSection() {
                   {showGuide && (
                     <div className="space-y-3 border-t border-blue-100 px-4 py-3">
                       <p className="text-xs text-blue-900">
-                        <strong>Two vault tiers:</strong> a{" "}
-                        <strong>platform-shared vault</strong> for org and
-                        project secrets (read-only from every cluster), plus
-                        one <strong>env vault</strong> per environment for
-                        env-type, app, app-env, and cluster secrets. 1Password
-                        Service Accounts cannot create vaults or Connect
-                        tokens — you create both manually in the 1Password
-                        console; suparShip handles the cluster-side automation
-                        (sealing tokens, generating ClusterSecretStores,
+                        <strong>Two kinds of vaults:</strong> one{" "}
+                        <strong>global vault</strong> (org-wide, read-only from
+                        every cluster) and one <strong>env vault</strong> per
+                        environment. Per-cluster overrides are{" "}
+                        <strong>items inside the env vault</strong> (e.g.{" "}
+                        <code>myapp-cluster-eu-1</code>), so clusters need no
+                        vault of their own. Each scope holds both org-admin (
+                        <strong>shared</strong>) and per-app secrets; precedence
+                        is <code>cluster &gt; env &gt; global</code> and{" "}
+                        <code>app &gt; shared</code>. Each cluster runs{" "}
+                        <strong>one ClusterSecretStore</strong> (
+                        <code>suparship-store</code>) listing every vault it
+                        reads, authenticated by{" "}
+                        <strong>one Connect token per cluster</strong>.
+                        1Password Service Accounts cannot create vaults or
+                        Connect tokens — you create both manually in the
+                        1Password console; suparShip handles the cluster-side
+                        automation (sealing the token, generating the store,
                         publishing to GitOps).
                       </p>
                       <ol className="space-y-2 text-xs text-blue-900">
                         <li>
-                          <strong>
-                            1. Create the platform-shared vault and per-env
-                            vaults
-                          </strong>{" "}
+                          <strong>1. Create the global and per-env vaults</strong>{" "}
                           in the 1Password web console (e.g.{" "}
-                          <code>company-shared</code>,{" "}
-                          <code>staging-apps</code>,{" "}
-                          <code>prod-apps</code>).
+                          <code>company-global</code>,{" "}
+                          <code>staging-env</code>).
                         </li>
                         <li>
                           <strong>2. Create a Service Account</strong> with
@@ -1316,45 +1307,38 @@ function SecretsBackendSection() {
                           are visible.
                         </li>
                         <li>
-                          <strong>4. Pick the platform-shared vault</strong>{" "}
-                          from the dropdown that appears after the SA token
-                          is saved.
+                          <strong>4. Pick the global vault</strong> from the
+                          dropdown that appears after the SA token is saved.
                         </li>
                         <li>
-                          <strong>5. Set up a Connect Server</strong> in
-                          1Password and grant it access to <strong>all</strong>{" "}
-                          suparShip vaults — every env vault <em>and</em> the
-                          platform vault.
+                          <strong>5. Register env vaults</strong> below — pick
+                          the environment and its vault.
                         </li>
                         <li>
-                          <strong>6. Deploy Connect</strong> to your tooling
-                          cluster (Helm chart or Docker).
+                          <strong>6. Set up a Connect Server</strong> in
+                          1Password, grant it access to <strong>all</strong>{" "}
+                          suparShip vaults, and deploy Connect to your workload
+                          clusters (Helm chart or Docker).
                         </li>
                         <li>
-                          <strong>7. Issue per-env Connect tokens</strong> in
-                          the 1Password console. Each token must read{" "}
-                          <strong>both vaults</strong>: its env vault{" "}
-                          <em>and</em> the platform vault. Without platform
-                          access, ESO can't resolve org/project items at sync
-                          time.
+                          <strong>7. Issue one Connect token per cluster</strong>{" "}
+                          in the 1Password console, with access to the global
+                          vault plus the env vaults of the environments that
+                          land on that cluster.
                         </li>
                         <li>
-                          <strong>8. Add bindings</strong> below — select env
-                          vault, paste the env's Connect token, for each
-                          environment. suparShip seals the token and publishes
-                          the SealedSecret + ClusterSecretStore to GitOps.
-                        </li>
-                        <li>
-                          <strong>9. (Optional) Migrate existing K8s Secrets</strong>{" "}
-                          using the &ldquo;Migrate K8s Secrets to
-                          1Password&rdquo; panel below. Idempotent; safe to
-                          re-run.
+                          <strong>8. Paste each cluster&apos;s token</strong> in
+                          the Cluster Connect Tokens section below — suparShip
+                          seals it and publishes the cluster&apos;s single
+                          SealedSecret + ClusterSecretStore to GitOps. Binding a
+                          new env to a cluster later requires a token that also
+                          covers the new env vault (re-issue + re-paste).
                         </li>
                       </ol>
                       <p className="text-xs text-blue-900">
                         Need more detail? See{" "}
-                        <code>docs/secrets.md</code> for architecture diagrams,
-                        troubleshooting, and the full RBAC matrix.
+                        <code>docs/secrets.md</code> for the architecture
+                        diagram, troubleshooting, and the full RBAC matrix.
                       </p>
                     </div>
                   )}
@@ -1368,9 +1352,9 @@ function SecretsBackendSection() {
                   <p className="text-xs text-gray-500">
                     Paste the 1Password Service Account token. It needs Read
                     &amp; Write access to every vault you want suparShip to
-                    manage — the platform-shared vault and each env vault.
-                    1Password Service Accounts cannot create vaults, so make
-                    sure these vaults already exist before pasting.
+                    manage — the global vault and each env vault. 1Password
+                    Service Accounts cannot create vaults, so make sure these
+                    vaults already exist before pasting.
                   </p>
                   <div className="flex items-end gap-3">
                     <div className="flex-1">
@@ -1395,8 +1379,8 @@ function SecretsBackendSection() {
                   )}
                 </div>
 
-                {/* Platform-shared vault picker — operator selects the vault
-                    they created manually in the 1Password console. 1Password
+                {/* Global vault picker — operator selects the vault they
+                    created manually in the 1Password console. 1Password
                     Service Accounts cannot create vaults, so suparShip cannot
                     auto-provision this. */}
                 <PlatformVaultPicker
@@ -1481,11 +1465,12 @@ function SecretsBackendSection() {
                       }}
                       className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
                     >
-                      {showAddBinding ? "Cancel" : "+ Add Binding"}
+                      {showAddBinding ? "Cancel" : "+ Add Vault"}
                     </button>
                   </div>
 
-                  {/* Add binding form */}
+                  {/* Add vault form (env scope; cluster overrides live inside
+                      the env vault, so there is nothing to register per cluster) */}
                   {showAddBinding && (
                     <div className="mb-4 space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-4">
                       <div>
@@ -1519,6 +1504,12 @@ function SecretsBackendSection() {
                             </p>
                           );
                         })()}
+                        <p className="mt-1 text-xs text-gray-400">
+                          Registration records which vault backs the env.
+                          Per-cluster overrides are items inside this vault —
+                          no per-cluster vault needed. Connect tokens are
+                          pasted per cluster below.
+                        </p>
                       </div>
                       <div>
                         <label className="mb-1 block text-xs font-medium text-gray-700">
@@ -1549,120 +1540,96 @@ function SecretsBackendSection() {
                           />
                         )}
                       </div>
-                      <div>
-                        <label className="mb-1 block text-xs font-medium text-gray-700">
-                          Connect Token
-                        </label>
-                        <input
-                          type="password"
-                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
-                          placeholder="Paste the per-env Connect token…"
-                          value={bindToken}
-                          onChange={(e) => setBindToken(e.target.value)}
-                        />
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-xs font-medium text-gray-700">
-                          Connect Server URL{" "}
-                          <span className="font-normal text-gray-400">(optional)</span>
-                        </label>
-                        <input
-                          type="text"
-                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
-                          placeholder="http://onepassword-connect.1password.svc.cluster.local:8080"
-                          value={bindConnectEndpoint}
-                          onChange={(e) => setBindConnectEndpoint(e.target.value)}
-                        />
-                        <p className="mt-1 text-xs text-gray-400">
-                          Override the 1Password Connect server URL used in the{" "}
-                          <code className="font-mono">ClusterSecretStore</code>. Leave
-                          blank to use the org default or the built-in default.
-                        </p>
-                      </div>
                       <button
                         onClick={handleAddBinding}
-                        disabled={
-                          bindBusy ||
-                          !bindEnv ||
-                          !bindVaultId ||
-                          !bindToken.trim()
-                        }
+                        disabled={bindBusy || !bindEnv || !bindVaultId}
                         className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
                       >
-                        {bindBusy ? "Saving…" : "Add Binding"}
+                        {bindBusy ? "Saving…" : "Register Vault"}
                       </button>
                     </div>
                   )}
 
-                  {/* Existing bindings */}
-                  {(config.onePassword?.envVaults || []).length === 0 ? (
-                    <p className="text-xs text-gray-400">
-                      No environment bindings yet. Click &ldquo;+ Add
-                      Binding&rdquo; to connect an environment to a 1Password
-                      vault.
-                    </p>
-                  ) : (
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
-                          <th className="py-2">Env</th>
-                          <th className="py-2">Vault</th>
-                          <th className="py-2">ClusterSecretStore</th>
-                          <th className="py-2">Status</th>
-                          <th className="py-2"></th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-50">
-                        {(config.onePassword?.envVaults || []).map((b) => (
-                          <tr key={b.key}>
-                            <td className="py-2 font-mono text-xs">{b.key}</td>
-                            <td className="py-2 font-mono text-xs">
-                              {b.vaultName || b.vaultId}
-                            </td>
-                            <td className="py-2 font-mono text-xs text-gray-500">
-                              {b.clusterSecretStoreName || "—"}
-                            </td>
-                            <td className="py-2 text-xs">
-                              {b.provisioned ? (
-                                <span className="inline-flex items-center gap-1 rounded bg-green-50 px-2 py-0.5 text-green-700">
-                                  bound
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-amber-700">
-                                  pending
-                                </span>
-                              )}
-                              {b.connectEndpoint && (
-                                <span
-                                  className="ml-2 font-mono text-xs text-gray-400"
-                                  title="Per-binding Connect endpoint override"
-                                >
-                                  {b.connectEndpoint}
-                                </span>
-                              )}
-                              {b.lastError && (
-                                <span className="ml-2 text-xs text-red-600">
-                                  {b.lastError}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-2 text-right space-x-2">
-                              <button
-                                onClick={() => handleRemoveBinding(b.key || "")}
-                                disabled={removingEnv === b.key}
-                                className="text-xs text-red-600 hover:text-red-800 disabled:opacity-50"
-                              >
-                                {removingEnv === b.key ? "Removing…" : "Remove"}
-                              </button>
-                            </td>
+                  {/* Provisioned vaults across all scopes (read-only) */}
+                  {(() => {
+                    const op = config.onePassword;
+                    const rows: Array<{
+                      scope: string;
+                      key: string;
+                      vaultName?: string;
+                      vaultId: string;
+                      provisioned?: boolean;
+                      lastError?: string;
+                    }> = [];
+                    if (op?.globalVault?.vaultId) {
+                      rows.push({ scope: "global", key: "—", ...op.globalVault });
+                    }
+                    for (const v of op?.envVaults || []) {
+                      rows.push({ scope: "env", ...v, key: v.key || "" });
+                    }
+                    if (rows.length === 0) {
+                      return (
+                        <p className="text-xs text-gray-400">
+                          No vaults registered yet. Click &ldquo;+ Add
+                          Vault&rdquo; to register an environment vault; set
+                          the global vault above.
+                        </p>
+                      );
+                    }
+                    return (
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                            <th className="py-2">Scope</th>
+                            <th className="py-2">Key</th>
+                            <th className="py-2">Vault</th>
+                            <th className="py-2">Status</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
+                        </thead>
+                        <tbody className="divide-y divide-gray-50">
+                          {rows.map((b) => (
+                            <tr key={`${b.scope}-${b.key}`}>
+                              <td className="py-2 font-mono text-xs">{b.scope}</td>
+                              <td className="py-2 font-mono text-xs">{b.key}</td>
+                              <td className="py-2 font-mono text-xs">
+                                {b.vaultName || b.vaultId}
+                              </td>
+                              <td className="py-2 text-xs">
+                                {b.provisioned ? (
+                                  <span className="inline-flex items-center gap-1 rounded bg-green-50 px-2 py-0.5 text-green-700">
+                                    registered
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-amber-700">
+                                    pending
+                                  </span>
+                                )}
+                                {b.lastError && (
+                                  <span className="ml-2 text-xs text-red-600">
+                                    {b.lastError}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    );
+                  })()}
                 </div>
 
-                {/* Migration panel — visible once the platform vault is ready. */}
+                {/* Per-cluster Connect tokens — one token per cluster,
+                    covering every vault the cluster reads. */}
+                <ClusterTokensCard
+                  config={config}
+                  clusters={orgClusters}
+                  orgEnvs={orgEnvs}
+                  onChanged={async () => {
+                    const updated = await getSecretsBackend();
+                    setConfig(updated);
+                  }}
+                />
+
                 <MigrationPanel config={config} />
               </div>
             )}
@@ -1673,20 +1640,14 @@ function SecretsBackendSection() {
   );
 }
 
-// ── Migration panel ──────────────────────────────────────────────────────────
-
-// ── Platform vault picker ────────────────────────────────────────────────────
+// ── Global vault picker ──────────────────────────────────────────────────────
 //
 // 1Password Service Accounts cannot create new vaults. The operator creates
-// the platform-shared vault by hand in the 1Password console; suparShip just
-// needs to know which vault it is. This component lists every vault the SA
-// token can see, lets the operator pick one, and POSTs the choice to
-// /org/secret-backend/platform-vault.
-//
-// Note: the upper-level writer in the suparShip server is built once at
-// startup using the persisted PlatformVaultID. After picking, a server
-// restart is required before org / project secret writes start landing in
-// the chosen vault — surfaced inline.
+// the global vault by hand in the 1Password console; suparShip just needs to
+// know which vault it is. This component lists every vault the SA token can
+// see, lets the operator pick one, and PUTs the choice to
+// /org/secret-backend/global-vault. Clusters read the vault through their own
+// per-cluster Connect token (ClusterTokensCard).
 
 function PlatformVaultPicker({
   config,
@@ -1731,7 +1692,7 @@ function PlatformVaultPicker({
       const picked = vaults?.find((v) => v.id === selectedID);
       const res = await setGlobalVault(selectedID, picked?.title);
       setSavedMsg(
-        `Saved. Global-scope shared secrets now route to "${res.vaultName}".`,
+        `Saved. Global vault "${res.vaultName}" set. Each cluster reads it through its own Connect token (pasted per cluster below).`,
       );
       await onChanged();
     } catch (err) {
@@ -1744,12 +1705,12 @@ function PlatformVaultPicker({
   return (
     <div className="space-y-2">
       <label className="block text-xs font-medium text-gray-700">
-        Platform-shared vault
+        Global vault
       </label>
       <p className="text-xs text-gray-500">
-        Pick the 1Password vault you created (manually) for org and project
-        secrets — read-only from every cluster's ESO. Per-env vaults are
-        configured separately in the bindings table below.
+        Pick the 1Password vault you created (manually) for global-scope
+        secrets — read-only from every cluster's ESO. Env vaults are
+        registered separately in the table below.
       </p>
       <div className="flex items-center gap-2">
         {currentID ? (
@@ -1761,7 +1722,7 @@ function PlatformVaultPicker({
         ) : (
           <span className="flex items-center gap-1.5 text-xs text-amber-700">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
-            Not set — org / project secret writes will fail until a vault is
+            Not set — global-scope secret writes will fail until a vault is
             picked.
           </span>
         )}
@@ -1778,41 +1739,180 @@ function PlatformVaultPicker({
             {loading ? "Loading…" : "List vaults"}
           </button>
         ) : (
-          <>
-            <select
-              value={selectedID}
-              onChange={(e) => setSelectedID(e.target.value)}
-              className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
-            >
-              <option value="">— select a vault —</option>
-              {vaults.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.title}
-                </option>
-              ))}
-            </select>
+          <div className="flex flex-1 flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedID}
+                onChange={(e) => setSelectedID(e.target.value)}
+                className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+              >
+                <option value="">— select a vault —</option>
+                {vaults.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.title}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleLoadVaults}
+                disabled={loading}
+                title="Refresh the vault list"
+                className="rounded-lg border border-gray-300 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              >
+                ⟳
+              </button>
+            </div>
             <button
               type="button"
               onClick={handleSave}
               disabled={saving || !selectedID || selectedID === currentID}
-              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              className="self-start rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
             >
               {saving ? "Saving…" : "Save"}
             </button>
-            <button
-              type="button"
-              onClick={handleLoadVaults}
-              disabled={loading}
-              title="Refresh the vault list"
-              className="rounded-lg border border-gray-300 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
-            >
-              ⟳
-            </button>
-          </>
+          </div>
         )}
       </div>
       {error && <p className="text-xs text-red-600">{error}</p>}
       {savedMsg && <p className="text-xs text-green-700">{savedMsg}</p>}
+    </div>
+  );
+}
+
+// ── Per-cluster Connect tokens ───────────────────────────────────────────────
+//
+// One Connect token per cluster, with access to every vault the cluster reads
+// (the global vault + the env vaults of the environments bound to it). Pasting
+// a token seals it and publishes the cluster's single unified
+// ClusterSecretStore (suparship-store). Binding a new env to a cluster later
+// needs a re-issued token covering the new vault — re-paste it here.
+
+function ClusterTokensCard({
+  config,
+  clusters,
+  orgEnvs,
+  onChanged,
+}: {
+  config: SecretBackendConfig;
+  clusters: Cluster[];
+  orgEnvs: OrgEnvironment[];
+  onChanged: () => Promise<void>;
+}) {
+  const [tokenInputs, setTokenInputs] = useState<Record<string, string>>({});
+  const [busyCluster, setBusyCluster] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const tokenRefs = config.onePassword?.clusterTokens || [];
+  const refFor = (name: string) => tokenRefs.find((t) => t.cluster === name);
+  const boundEnvsFor = (name: string) =>
+    orgEnvs
+      .filter(
+        (e) =>
+          e.activeClusterRef === name || (e.clusterRefs || []).includes(name),
+      )
+      .map((e) => e.name);
+
+  async function handleSaveToken(cluster: string) {
+    const token = (tokenInputs[cluster] || "").trim();
+    if (!token) return;
+    setBusyCluster(cluster);
+    setError(null);
+    try {
+      await setClusterConnectToken(cluster, { connectToken: token });
+      setTokenInputs((cur) => ({ ...cur, [cluster]: "" }));
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save token");
+      await onChanged(); // pick up LastError recorded by the server
+    } finally {
+      setBusyCluster(null);
+    }
+  }
+
+  return (
+    <div>
+      <label className="text-xs font-medium text-gray-700">
+        Cluster Connect Tokens
+      </label>
+      <p className="mb-2 mt-0.5 text-xs text-gray-500">
+        One Connect token per cluster, covering the global vault plus the env
+        vaults bound to that cluster. Pasting a token publishes the
+        cluster&apos;s single{" "}
+        <code className="font-mono">suparship-store</code> ClusterSecretStore.
+      </p>
+      {clusters.length === 0 ? (
+        <p className="text-xs text-gray-400">
+          No clusters registered yet. Register one under Settings &gt;
+          Clusters first.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {clusters.map((c) => {
+            const ref = refFor(c.name);
+            const envs = boundEnvsFor(c.name);
+            return (
+              <div
+                key={c.name}
+                className="rounded-lg border border-gray-200 bg-gray-50/50 p-3"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-mono text-sm text-gray-900">
+                      {c.name}
+                    </span>
+                    <span className="ml-2 text-xs text-gray-400">
+                      reads: global
+                      {envs.length > 0 ? `, ${envs.join(", ")}` : ""}
+                    </span>
+                  </div>
+                  {ref?.sealed ? (
+                    <span className="inline-flex items-center gap-1 rounded bg-green-50 px-2 py-0.5 text-xs text-green-700">
+                      sealed
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-700">
+                      pending token
+                    </span>
+                  )}
+                </div>
+                {ref?.lastError && (
+                  <p className="mt-1 text-xs text-red-600">{ref.lastError}</p>
+                )}
+                <div className="mt-2 flex items-end gap-2">
+                  <input
+                    type="password"
+                    className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+                    placeholder={
+                      ref?.sealed
+                        ? "Paste a new token to rotate / widen vault access…"
+                        : "Paste this cluster's Connect token…"
+                    }
+                    value={tokenInputs[c.name] || ""}
+                    onChange={(e) =>
+                      setTokenInputs((cur) => ({
+                        ...cur,
+                        [c.name]: e.target.value,
+                      }))
+                    }
+                  />
+                  <button
+                    onClick={() => handleSaveToken(c.name)}
+                    disabled={
+                      busyCluster === c.name ||
+                      !(tokenInputs[c.name] || "").trim()
+                    }
+                    className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+                  >
+                    {busyCluster === c.name ? "Sealing…" : "Seal"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
     </div>
   );
 }

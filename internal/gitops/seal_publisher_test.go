@@ -36,23 +36,20 @@ func freshTestCertPEM(t *testing.T) []byte {
 
 func TestBuildSecretStoreArgoApp(t *testing.T) {
 	yaml := buildSecretStoreArgoApp(
-		"staging", "staging-aks-02-scus", "https://git.example.com/org/gitops.git", "main", "https://10.0.0.1:6443", "external-secrets-system",
-		branding.Config{},
-		"",
+		"staging-aks-02-scus", "https://git.example.com/org/gitops.git", "main",
+		"https://10.0.0.1:6443", "external-secrets-system", branding.Config{}, "",
 	)
 	for _, want := range []string{
 		"apiVersion: argoproj.io/v1alpha1",
 		"kind: Application",
 		"name: secrets-staging-aks-02-scus",
-		"suparship.io/env: staging",
 		"suparship.io/cluster: staging-aks-02-scus",
 		"namespace: argocd",
 		"project: suparship-system",
-		"path: _secret-stores/staging",
+		"path: _secret-stores/staging-aks-02-scus",
 		"server: https://10.0.0.1:6443",
 		"namespace: external-secrets-system",
 		"prune: true",
-		"selfHeal: true",
 	} {
 		if !strings.Contains(yaml, want) {
 			t.Errorf("missing %q in:\n%s", want, yaml)
@@ -60,31 +57,28 @@ func TestBuildSecretStoreArgoApp(t *testing.T) {
 	}
 }
 
-func TestPublishSealedReadToken_ValidatesInputs(t *testing.T) {
+func TestPublishClusterSecretStore_ValidatesInputs(t *testing.T) {
 	p, err := NewPublisher(PublisherConfig{RepoURL: "https://example.com/r.git"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	certPEM := freshTestCertPEM(t)
-
-	const dest = "https://k8s:6443"
-	const cluster = "my-cluster"
+	token := []byte("x")
+	vaults := []string{"v-global", "v-env-staging"}
 
 	cases := []struct {
 		name   string
-		params SealedReadTokenPublishParams
+		params ClusterSealParams
 	}{
-		{"missing env", SealedReadTokenPublishParams{VaultID: "v1", Cert: certPEM, Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
-		{"missing vault", SealedReadTokenPublishParams{Env: "prod", Cert: certPEM, Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
-		{"missing cert", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Token: []byte("x"), ArgoCDDestination: dest, ClusterName: cluster}},
-		{"empty token", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: certPEM, ArgoCDDestination: dest, ClusterName: cluster}},
-		{"empty destination", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: certPEM, Token: []byte("x"), ClusterName: cluster}},
-		{"missing cluster", SealedReadTokenPublishParams{Env: "prod", VaultID: "v1", Cert: certPEM, Token: []byte("x"), ArgoCDDestination: dest}},
+		{"missing cluster", ClusterSealParams{ArgoCDDestination: "https://k8s:6443", Cert: certPEM, Token: token, VaultIDs: vaults}},
+		{"missing destination", ClusterSealParams{ClusterName: "c1", Cert: certPEM, Token: token, VaultIDs: vaults}},
+		{"missing cert", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Token: token, VaultIDs: vaults}},
+		{"missing token", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Cert: certPEM, VaultIDs: vaults}},
+		{"missing vaults", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Cert: certPEM, Token: token}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := p.PublishSealedReadToken(t.Context(), tc.params)
-			if err == nil {
+			if err := p.PublishClusterSecretStore(t.Context(), tc.params); err == nil {
 				t.Error("expected validation error")
 			}
 		})

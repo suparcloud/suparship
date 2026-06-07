@@ -14,13 +14,16 @@ package server
 // environment endpoints (/api/v1/projects/{project}/environments).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // ── GET /api/v1/org/environments ─────────────────────────────────────────────
@@ -167,7 +170,37 @@ func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http
 		return
 	}
 
+	rh.reconcileSecretStores("env-create:" + newEnv.Name)
+
 	writeJSON(w, http.StatusCreated, orgEnvToDTO(newEnv))
+}
+
+// reconcileSecretStores best-effort republishes ESO ClusterSecretStores in the
+// background after an environment change, so the new env's store exists in
+// gitops (k8s backend), and re-seals every cluster's unified store (1Password
+// backend — its vault list depends on env↔cluster bindings). No-op when no
+// reconciler/sealer is wired.
+func (rh *rbacHandler) reconcileSecretStores(reason string) {
+	if rh.storeReconciler != nil {
+		go func() {
+			if err := rh.storeReconciler.ReconcileSecretStores(context.Background()); err != nil {
+				slog.Warn("reconcile secret stores failed", "reason", reason, "error", err)
+			}
+		}()
+	}
+	if sh := rh.secretsHandler; sh != nil && sh.orgStore != nil {
+		go func() {
+			ctx := context.Background()
+			org, err := sh.orgStore.GetOrg(ctx)
+			if err != nil || org == nil {
+				return
+			}
+			if org.SecretBackend.Effective() != secrets.Backend1Password {
+				return
+			}
+			sh.resealAllClusters(ctx, org, reason)
+		}()
+	}
 }
 
 // ── PUT /api/v1/org/environments/{env} ───────────────────────────────────────
@@ -239,8 +272,9 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Env/cluster vault provisioning (and ClusterSecretStore publishing) is
-	// handled by the secret-backend lifecycle hooks, not here.
+	// Bindings may have changed: republish k8s stores and re-seal the 1Password
+	// unified stores (their vault lists embed the env↔cluster bindings).
+	rh.reconcileSecretStores("env-update:" + envName)
 
 	for _, e := range org.Environments {
 		if e.Name == envName {
@@ -281,6 +315,8 @@ func (rh *rbacHandler) handleDeleteOrgEnvironment(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save org: " + err.Error()})
 		return
 	}
+
+	rh.reconcileSecretStores("env-delete:" + envName)
 
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -232,6 +232,27 @@ func (h *PublisherHolder) Swap(p GitOpsPublisher) {
 	h.mu.Unlock()
 }
 
+// SecretStoreReconciler recomputes and publishes the full set of ESO
+// ClusterSecretStores (global + per-env + per-cluster) to the gitops repo.
+// Called by the env/cluster lifecycle hooks so the stores exist before app
+// ExternalSecrets reference them.
+type SecretStoreReconciler interface {
+	ReconcileSecretStores(ctx context.Context) error
+}
+
+// ReconcileSecretStores delegates to the held publisher when it implements
+// SecretStoreReconciler; otherwise it is a no-op. This lets PublisherHolder
+// satisfy SecretStoreReconciler without widening the GitOpsPublisher interface.
+func (h *PublisherHolder) ReconcileSecretStores(ctx context.Context) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if r, ok := p.(SecretStoreReconciler); ok {
+		return r.ReconcileSecretStores(ctx)
+	}
+	return nil
+}
+
 // SealPublisherHolder wraps a SealedTokenPublisher behind an RW mutex so it
 // can be hot-swapped when GitOps config is changed via the settings UI.
 type SealPublisherHolder struct {
@@ -244,37 +265,26 @@ func NewSealPublisherHolder(initial SealedTokenPublisher) *SealPublisherHolder {
 	return &SealPublisherHolder{p: initial}
 }
 
-// PublishSealedReadToken implements SealedTokenPublisher.
-func (h *SealPublisherHolder) PublishSealedReadToken(ctx context.Context, params gitops.SealedReadTokenPublishParams) error {
+// PublishClusterSecretStore implements SealedTokenPublisher.
+func (h *SealPublisherHolder) PublishClusterSecretStore(ctx context.Context, params gitops.ClusterSealParams) error {
 	h.mu.RLock()
 	p := h.p
 	h.mu.RUnlock()
 	if p == nil {
 		return nil
 	}
-	return p.PublishSealedReadToken(ctx, params)
+	return p.PublishClusterSecretStore(ctx, params)
 }
 
-// DeleteSealedReadToken implements SealedTokenPublisher.
-func (h *SealPublisherHolder) DeleteSealedReadToken(ctx context.Context, params gitops.DeleteSealedReadTokenParams) error {
+// DeleteClusterSecretStores implements SealedTokenPublisher.
+func (h *SealPublisherHolder) DeleteClusterSecretStores(ctx context.Context, clusterName string) error {
 	h.mu.RLock()
 	p := h.p
 	h.mu.RUnlock()
 	if p == nil {
 		return nil
 	}
-	return p.DeleteSealedReadToken(ctx, params)
-}
-
-// RefreshSecretStore implements SealedTokenPublisher.
-func (h *SealPublisherHolder) RefreshSecretStore(ctx context.Context, params gitops.RefreshSecretStoreParams) error {
-	h.mu.RLock()
-	p := h.p
-	h.mu.RUnlock()
-	if p == nil {
-		return nil
-	}
-	return p.RefreshSecretStore(ctx, params)
+	return p.DeleteClusterSecretStores(ctx, clusterName)
 }
 
 // Swap replaces the inner publisher atomically.
@@ -397,6 +407,9 @@ func New(cfg Config) *Server {
 			auth:         ah,
 			orgStore:     cfg.OrgProvider,
 			projectStore: cfg.ProjectStore,
+		}
+		if r, ok := cfg.GitOpsPublisher.(SecretStoreReconciler); ok {
+			rh.storeReconciler = r
 		}
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
@@ -524,6 +537,13 @@ func New(cfg Config) *Server {
 		if cfg.ClusterPool != nil {
 			ch.pool = &clusterPoolAdapter{pool: cfg.ClusterPool}
 		}
+		if r, ok := cfg.GitOpsPublisher.(SecretStoreReconciler); ok {
+			ch.storeReconciler = r
+		}
+		// Secrets cleanup wiring for cluster deletion (all optional).
+		ch.sealPublisher = cfg.SealedTokenPublisher
+		ch.orgStore = cfg.OrgProvider
+		ch.kubeClient = cfg.KubeClient
 		ch.registerRoutes(mux)
 		cfg.Logger.Info("cluster endpoints enabled")
 	}

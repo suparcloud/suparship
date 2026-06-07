@@ -4,7 +4,8 @@ import "context"
 
 // ScopeKind identifies the variability axis of a secret: the same value
 // everywhere (global), one value per environment (env), or one value per
-// cluster (cluster). These three scopes replace the former 6-level hierarchy.
+// cluster within an environment (cluster). These three scopes replace the
+// former 6-level hierarchy.
 type ScopeKind string
 
 const (
@@ -13,8 +14,9 @@ const (
 	ScopeCluster ScopeKind = "cluster"
 )
 
-// Scope identifies which vault a secret lives in. Env is set only for
-// ScopeEnv; Cluster only for ScopeCluster.
+// Scope identifies which vault a secret lives in. Env is set for ScopeEnv and
+// ScopeCluster (cluster overrides are per-(env, cluster) items stored inside
+// the env vault); Cluster only for ScopeCluster.
 type Scope struct {
 	Kind    ScopeKind
 	Env     string
@@ -27,8 +29,11 @@ func GlobalScope() Scope { return Scope{Kind: ScopeGlobal} }
 // EnvScope returns the scope for one environment.
 func EnvScope(env string) Scope { return Scope{Kind: ScopeEnv, Env: env} }
 
-// ClusterScope returns the scope for one cluster.
-func ClusterScope(cluster string) Scope { return Scope{Kind: ScopeCluster, Cluster: cluster} }
+// ClusterScope returns the scope for one cluster's overrides within one
+// environment. The items live in the env vault, named after the cluster.
+func ClusterScope(env, cluster string) Scope {
+	return Scope{Kind: ScopeCluster, Env: env, Cluster: cluster}
+}
 
 // Tier identifies ownership within a scope: TierShared holds org-admin,
 // platform-wide values folded into every app; TierApp holds one app's own

@@ -11,139 +11,91 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
-// SealedReadTokenPublishParams captures the inputs needed to publish a
-// per-environment 1Password Connect token to gitops-output.
-type SealedReadTokenPublishParams struct {
-	Env     string // e.g. "staging"
-	VaultID string // 1Password vault UUID for this env
-	OrgName string // for ClusterSecretStore naming
-	Token   []byte // plaintext Connect token (sealed; never written to Git)
-	Cert    []byte // PEM-encoded sealed-secrets controller public certificate
-	// ArgoCDDestination is the ArgoCD destination server URL for the target
-	// cluster (https://...). Required — no fallback to in-cluster default.
+// ClusterSealParams describes the single 1Password Connect token + unified
+// ClusterSecretStore to publish for ONE workload cluster. A cluster carries
+// ONE token with access to every vault it reads — the org-wide global vault
+// plus the env vault(s) of the environments deployed to it (which also hold
+// its cluster-override items) — and ONE store listing those vaults.
+type ClusterSealParams struct {
+	// ClusterName is the registered suparship cluster name (used for the
+	// per-cluster ArgoCD Application name and the _secret-stores/{cluster}/ dir).
+	ClusterName string
+	// ArgoCDDestination is the target cluster API server URL (https://...).
 	ArgoCDDestination string
-	// ClusterName is the registered suparship name of the target cluster
-	// (e.g. "staging-aks-02-scus"). Used for the ArgoCD Application name so
-	// the name reflects the physical target rather than the logical env.
-	ClusterName string
-	// ESONamespace is the namespace where External Secrets Operator is
-	// installed on the target cluster. Defaults to "external-secrets".
+	// ESONamespace is where ESO + the sealed Connect-token Secret live on the
+	// target cluster. Defaults to "external-secrets".
 	ESONamespace string
-	// ConnectEndpoint is the in-cluster URL of the 1Password Connect server.
-	// Defaults to DefaultConnectEndpoint when empty.
+	// Cert is the target cluster's sealed-secrets controller public cert (PEM).
+	Cert []byte
+	// Token is the cluster's single plaintext Connect token. It is sealed with
+	// the target cluster's cert and never written to Git in plaintext.
+	Token []byte
+	// VaultIDs are the 1Password vault UUIDs this cluster reads (global first,
+	// then env vaults). Rendered into the unified store's vaults map in order.
+	VaultIDs []string
+	// ConnectEndpoint overrides the in-cluster 1Password Connect URL.
 	ConnectEndpoint string
-	// PlatformVaultID is the org-wide platform-shared 1Password vault. When
-	// non-empty, the rendered ClusterSecretStore lists it as a priority-2
-	// vault alongside the env vault, so org/project items live in a single
-	// vault read by every cluster's ESO (matches the multi-store design from
-	// Phase 3). The Connect token must have read access to both vaults.
-	PlatformVaultID string
 }
 
-// DeleteSealedReadTokenParams captures the inputs needed to remove a
-// per-environment secret-store from gitops-output.
-type DeleteSealedReadTokenParams struct {
-	// Env is the environment name (e.g. "staging"). Used for the store path.
-	Env string
-	// ClusterName is the cluster name used in the ArgoCD Application name.
-	ClusterName string
-}
-
-// RefreshSecretStoreParams captures the inputs needed to rewrite ONLY the
-// store.yaml under gitops-output/_secret-stores/{env}/ — without re-sealing
-// the Connect token or republishing the per-cluster ArgoCD Application.
+// PublishClusterSecretStore seals the cluster's Connect token with the target
+// cluster's cert and commits, per cluster:
 //
-// Used after the operator picks a new platform-shared vault so existing
-// bindings' deployed ClusterSecretStores pick up the platform vault entry
-// without forcing the operator to re-paste each Connect token.
-type RefreshSecretStoreParams struct {
-	Env             string
-	VaultID         string
-	OrgName         string
-	ESONamespace    string
-	ConnectEndpoint string
-	PlatformVaultID string
-}
-
-// PublishSealedReadToken seals the provided Connect token using the target
-// cluster's public certificate and commits three files to gitops-output:
+//	gitops-output/_secret-stores/{cluster}/sealed-token.yaml  -- SealedSecret (op-connect-token)
+//	gitops-output/_secret-stores/{cluster}/store.yaml         -- unified ClusterSecretStore (suparship-store)
+//	gitops-output/_infra/secrets-{cluster}-app.yaml           -- ArgoCD Application
 //
-//	gitops-output/_secret-stores/{env}/sealed-token.yaml  -- SealedSecret
-//	gitops-output/_secret-stores/{env}/store.yaml         -- ClusterSecretStore
-//	gitops-output/_infra/secrets-{cluster}-app.yaml       -- ArgoCD Application (discovered by root app)
-//
-// Secret-store manifests are placed under _secret-stores/ (outside _infra/) so
-// the root app does not double-sync them alongside the dedicated secrets-{cluster}
-// Application, avoiding SharedResourceWarning.
-func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedReadTokenPublishParams) error {
-	if params.Env == "" || params.VaultID == "" {
-		return fmt.Errorf("PublishSealedReadToken: env and vaultID are required")
-	}
+// The ArgoCD Application syncs the whole _secret-stores/{cluster}/ directory to
+// the target cluster, so its ESO can read every vault the cluster needs through
+// one store. Any other files in the directory are pruned (including the legacy
+// per-scope sealed-token-{scope}.yaml / store-{scope}.yaml pairs). Idempotent.
+func (p *Publisher) PublishClusterSecretStore(ctx context.Context, params ClusterSealParams) error {
 	if params.ClusterName == "" {
-		return fmt.Errorf("PublishSealedReadToken: clusterName is required")
+		return fmt.Errorf("PublishClusterSecretStore: clusterName is required")
+	}
+	if params.ArgoCDDestination == "" {
+		return fmt.Errorf("PublishClusterSecretStore: ArgoCDDestination is required for cluster %q", params.ClusterName)
 	}
 	if len(params.Cert) == 0 {
-		return fmt.Errorf("PublishSealedReadToken: cert is required")
+		return fmt.Errorf("PublishClusterSecretStore: cert is required for cluster %q", params.ClusterName)
 	}
 	if len(params.Token) == 0 {
-		return fmt.Errorf("PublishSealedReadToken: token is empty")
+		return fmt.Errorf("PublishClusterSecretStore: token is required for cluster %q", params.ClusterName)
 	}
-
+	if len(params.VaultIDs) == 0 {
+		return fmt.Errorf("PublishClusterSecretStore: no vaults registered for cluster %q", params.ClusterName)
+	}
 	esoNS := params.ESONamespace
 	if esoNS == "" {
-		esoNS = "external-secrets"
+		esoNS = secrets.OnePasswordRemoteNamespace
 	}
 
-	tokenSecretName := secrets.ConnectTokenSecretName(secrets.EnvScope(params.Env))
-
+	// Render both files first so a sealing error aborts before any write.
 	sealedYAML, err := seal.BuildSealedSecret(params.Cert, seal.SealedSecretInput{
-		Name:      tokenSecretName,
+		Name:      secrets.ConnectTokenSecretName,
 		Namespace: esoNS,
 		Scope:     seal.ScopeNamespaceWide,
-		Data: map[string][]byte{
-			secrets.SATokenSecretKey: params.Token,
-		},
-		Type: "Opaque",
+		Data:      map[string][]byte{secrets.SATokenSecretKey: params.Token},
+		Type:      "Opaque",
 		Labels: branding.MergeLabels(
 			p.cfg.Branding.ManagedByLabels(),
-			map[string]string{p.cfg.Branding.LabelKey("env"): params.Env},
+			map[string]string{p.cfg.Branding.LabelKey("cluster"): params.ClusterName},
 		),
 	})
 	if err != nil {
-		return fmt.Errorf("seal token: %w", err)
+		return fmt.Errorf("seal token for cluster %q: %w", params.ClusterName, err)
 	}
-
-	storeYAML := BuildClusterSecretStoreYAML(ESOSecretStoreConfig{
-		Scope:           secrets.EnvScope(params.Env),
-		BackendType:     secrets.Backend1Password,
-		VaultID:         params.VaultID,
+	storeYAML := BuildUnifiedClusterSecretStoreYAML(UnifiedStoreConfig{
+		VaultIDs:        params.VaultIDs,
 		ESONamespace:    esoNS,
 		ConnectEndpoint: params.ConnectEndpoint,
 		Branding:        p.cfg.Branding,
 	})
 
-	destServer := params.ArgoCDDestination
-	if destServer == "" {
-		return fmt.Errorf("PublishSealedReadToken: ArgoCDDestination is required (resolved to empty for env %q)", params.Env)
-	}
-
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		// Manifests live outside _infra/ to avoid root-app double-sync.
-		storesDir := p.outputDir(repoDir, "_secret-stores", params.Env)
+		storesDir := p.outputDir(repoDir, "_secret-stores", params.ClusterName)
 		infraDir := p.outputDir(repoDir, "_infra")
 
-		// Clean up legacy paths from older suparship versions (env-named app +
-		// _infra/secret-stores/ dir) before writing the current layout, so stale
-		// ArgoCD Applications don't keep deploying wrong resources to the cluster.
-		legacyStoresDir := filepath.Join(infraDir, "secret-stores", params.Env)
-		legacyAppFile := filepath.Join(infraDir, "secrets-"+params.Env+"-app.yaml")
-		if _, err := os.Stat(legacyStoresDir); err == nil {
-			_ = os.RemoveAll(legacyStoresDir)
-		}
-		if _, err := os.Stat(legacyAppFile); err == nil {
-			_ = os.Remove(legacyAppFile)
-		}
-
+		wanted := map[string]bool{"sealed-token.yaml": true, "store.yaml": true}
 		if err := p.writeFile(filepath.Join(storesDir, "sealed-token.yaml"), []byte(sealedYAML)); err != nil {
 			return err
 		}
@@ -151,150 +103,63 @@ func (p *Publisher) PublishSealedReadToken(ctx context.Context, params SealedRea
 			return err
 		}
 
-		appYAML := buildSecretStoreArgoApp(params.Env, params.ClusterName, p.argoCDRepoURL(), p.cfg.Branch, destServer, esoNS, p.cfg.Branding, p.cfg.SubPath)
+		// Prune everything else — legacy per-scope sealed-token-{scope}.yaml /
+		// store-{scope}.yaml pairs from the per-vault-token model.
+		if entries, err := os.ReadDir(storesDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() || wanted[e.Name()] {
+					continue
+				}
+				_ = os.Remove(filepath.Join(storesDir, e.Name()))
+			}
+		}
+
+		appYAML := buildSecretStoreArgoApp(params.ClusterName, p.argoCDRepoURL(), p.cfg.Branch, params.ArgoCDDestination, esoNS, p.cfg.Branding, p.cfg.SubPath)
 		if err := p.writeFile(filepath.Join(infraDir, "secrets-"+params.ClusterName+"-app.yaml"), []byte(appYAML)); err != nil {
 			return err
 		}
-
-		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): provision env=%s cluster=%s", params.Env, params.ClusterName))
+		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): seal connect token for cluster=%s", params.ClusterName))
 	})
 }
-// DeleteSealedReadToken removes the per-environment secret-store directory
-// and the ArgoCD Application from the GitOps repo and commits the deletion.
-// It also removes any legacy paths written by older versions of suparship
-// (which used the env name instead of the cluster name and wrote manifests
-// under _infra/secret-stores/ rather than _secret-stores/).
-// It is a no-op if none of the paths exist.
-func (p *Publisher) DeleteSealedReadToken(ctx context.Context, params DeleteSealedReadTokenParams) error {
-	if params.Env == "" {
-		return fmt.Errorf("DeleteSealedReadToken: env is required")
-	}
-	if params.ClusterName == "" {
-		return fmt.Errorf("DeleteSealedReadToken: clusterName is required")
+
+// DeleteClusterSecretStores removes a cluster's sealed token + store and its
+// ArgoCD Application. No-op if absent.
+func (p *Publisher) DeleteClusterSecretStores(ctx context.Context, clusterName string) error {
+	if clusterName == "" {
+		return fmt.Errorf("DeleteClusterSecretStores: clusterName is required")
 	}
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		// Current paths (cluster-named app + dedicated _secret-stores/ dir).
-		storesDir := p.outputDir(repoDir, "_secret-stores", params.Env)
-		appFile := p.outputDir(repoDir, "_infra", "secrets-"+params.ClusterName+"-app.yaml")
-
-		// Legacy paths created by older suparship versions: env-named app +
-		// secrets dir nested inside _infra/.
-		legacyStoresDir := p.outputDir(repoDir, "_infra", "secret-stores", params.Env)
-		legacyAppFile := p.outputDir(repoDir, "_infra", "secrets-"+params.Env+"-app.yaml")
-
-		removedAny := false
-
-		for _, dir := range []string{storesDir, legacyStoresDir} {
-			if _, err := os.Stat(dir); err == nil {
-				if err := os.RemoveAll(dir); err != nil {
-					return fmt.Errorf("removing secret-store dir %s: %w", dir, err)
-				}
-				removedAny = true
+		storesDir := p.outputDir(repoDir, "_secret-stores", clusterName)
+		appFile := p.outputDir(repoDir, "_infra", "secrets-"+clusterName+"-app.yaml")
+		removed := false
+		if _, err := os.Stat(storesDir); err == nil {
+			if err := os.RemoveAll(storesDir); err != nil {
+				return fmt.Errorf("removing secret-store dir %s: %w", storesDir, err)
 			}
+			removed = true
 		}
-
-		for _, f := range []string{appFile, legacyAppFile} {
-			if _, err := os.Stat(f); err == nil {
-				if err := os.Remove(f); err != nil {
-					return fmt.Errorf("removing secrets app file %s: %w", f, err)
-				}
-				removedAny = true
+		if _, err := os.Stat(appFile); err == nil {
+			if err := os.Remove(appFile); err != nil {
+				return fmt.Errorf("removing secrets app file %s: %w", appFile, err)
 			}
+			removed = true
 		}
-
-		if !removedAny {
+		if !removed {
 			return nil
 		}
-		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): remove secret-store for env=%s cluster=%s", params.Env, params.ClusterName))
+		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): remove secret-stores for cluster=%s", clusterName))
 	})
 }
 
-// MissingSealedTokens reports which of the given envs do NOT have a
-// sealed-token.yaml in the gitops repo. Used by the startup self-heal
-// goroutine to decide which envs need a re-publish (so we don't churn
-// the repo with a fresh sealed-secret commit per env every restart —
-// SealedSecret encryption is non-deterministic, so re-sealing always
-// produces different bytes).
-//
-// One git clone covers all envs to avoid N round-trips when the
-// platform manages many bindings.
-func (p *Publisher) MissingSealedTokens(ctx context.Context, envs []string) ([]string, error) {
-	if len(envs) == 0 {
-		return nil, nil
-	}
-	var missing []string
-	err := p.withClonedRepo(ctx, func(repoDir string) error {
-		for _, env := range envs {
-			path := p.outputDir(repoDir, "_secret-stores", env, "sealed-token.yaml")
-			if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-				missing = append(missing, env)
-			} else if statErr != nil {
-				return fmt.Errorf("stat sealed-token for env %s: %w", env, statErr)
-			}
-		}
-		return nil
-	})
-	return missing, err
-}
-
-// RefreshSecretStore rewrites only store.yaml under gitops-output/_secret-stores/{env}/
-// without re-sealing the Connect token. Idempotent — when the rendered YAML
-// matches the file already in Git, no commit is created.
-//
-// Used after handleSetPlatformVault saves a new PlatformVaultID, so every
-// existing binding's deployed ClusterSecretStore picks up the platform vault
-// entry on its next ArgoCD sync without forcing the operator to re-paste any
-// Connect tokens.
-func (p *Publisher) RefreshSecretStore(ctx context.Context, params RefreshSecretStoreParams) error {
-	if params.Env == "" || params.VaultID == "" {
-		return fmt.Errorf("RefreshSecretStore: env and vaultID are required")
-	}
-
-	esoNS := params.ESONamespace
-	if esoNS == "" {
-		esoNS = "external-secrets"
-	}
-	storeYAML := BuildClusterSecretStoreYAML(ESOSecretStoreConfig{
-		Scope:           secrets.EnvScope(params.Env),
-		BackendType:     secrets.Backend1Password,
-		VaultID:         params.VaultID,
-		ESONamespace:    esoNS,
-		ConnectEndpoint: params.ConnectEndpoint,
-		Branding:        p.cfg.Branding,
-	})
-
-	return p.withClonedRepo(ctx, func(repoDir string) error {
-		path := p.outputDir(repoDir, "_secret-stores", params.Env, "store.yaml")
-		// Refuse to write if the per-env directory doesn't exist — that means
-		// no binding was ever published for this env, and creating an
-		// orphaned store.yaml without a sealed-token would yield a broken
-		// ClusterSecretStore once ArgoCD picks it up.
-		if _, err := os.Stat(filepath.Dir(path)); err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return fmt.Errorf("stat secret-store dir for env %s: %w", params.Env, err)
-		}
-		if err := p.writeFile(path, []byte(storeYAML)); err != nil {
-			return err
-		}
-		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): refresh store for env=%s", params.Env))
-	})
-}
-
-// buildSecretStoreArgoApp returns a minimal ArgoCD Application that syncs
-// the per-env secret-stores directory to the given target cluster.
-// The app is named secrets-{clusterName} so the name reflects the physical
-// target cluster rather than the logical environment.
-func buildSecretStoreArgoApp(env, clusterName, repoURL, branch, destServer, esoNamespace string, brand branding.Config, subPath string) string {
+// buildSecretStoreArgoApp returns an ArgoCD Application that syncs the
+// per-cluster secret-stores directory to the target cluster. Named
+// secrets-{clusterName} so it reflects the physical target.
+func buildSecretStoreArgoApp(clusterName, repoURL, branch, destServer, esoNamespace string, brand branding.Config, subPath string) string {
 	labels := branding.MergeLabels(
 		brand.ManagedByLabels(),
-		map[string]string{
-			brand.LabelKey("env"):     env,
-			brand.LabelKey("cluster"): clusterName,
-		},
+		map[string]string{brand.LabelKey("cluster"): clusterName},
 	)
-	storesPath := joinSubPath(subPath, "_secret-stores", env)
+	storesPath := joinSubPath(subPath, "_secret-stores", clusterName)
 	return fmt.Sprintf(`apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -310,7 +175,7 @@ spec:
     path: %s
     directory:
       recurse: false
-      include: '{sealed-token.yaml,store.yaml}'
+      include: '{sealed-token*.yaml,store*.yaml}'
   destination:
     server: %s
     namespace: %s

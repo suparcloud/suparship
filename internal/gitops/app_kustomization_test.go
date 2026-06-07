@@ -49,60 +49,73 @@ func TestPublishAppFiles_NoKustomizationEmitted(t *testing.T) {
 		t.Errorf("kustomization.yaml should NOT be written by the publisher (it breaks ArgoCD's directory mode), got err=%v", err)
 	}
 
-	// Sanity: the manifests the include filter applies still exist.
-	for _, name := range []string{"env-configmap.yaml", "external-secret-global.yaml"} {
-		if _, err := os.Stat(filepath.Join(appDir, name)); err != nil {
-			t.Errorf("expected %s in app dir, got: %v", name, err)
+	// Platform manifests no longer live in the app's chart dir — they moved to
+	// the platform-owned _app-resources/ tree.
+	for _, name := range []string{"env-configmap.yaml", "external-secret.yaml"} {
+		if _, err := os.Stat(filepath.Join(appDir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s should NOT be in the app chart dir (moved to _app-resources/)", name)
+		}
+	}
+	resDir := filepath.Join(dir, "_app-resources", "staging", "demo", "nginx")
+	for _, name := range []string{"meta.yaml", "env-configmap.yaml", "external-secret.yaml"} {
+		if _, err := os.Stat(filepath.Join(resDir, name)); err != nil {
+			t.Errorf("expected %s under _app-resources, got: %v", name, err)
 		}
 	}
 }
 
-// TestBuildArgoAppSet_HasPerAppDirectorySource locks the wiring that closes
-// the orphan-manifest gap: the rendered ApplicationSet must carry a third
-// source pointing at the per-app dir with an include filter. Without this,
-// env-configmap.yaml + external-secret.yaml are written to gitops but
-// never reach the cluster.
-//
-// The include filter must NOT reference kustomization.yaml — see
-// TestPublishAppFiles_NoKustomizationEmitted for the why.
-func TestBuildArgoAppSet_HasPerAppDirectorySource(t *testing.T) {
+// TestBuildArgoAppSet_NoPlatformSource locks that the app's chart ApplicationSet
+// carries only the values-ref + chart sources — platform manifests are shipped
+// by the separate platform ApplicationSet, not bundled onto the app.
+func TestBuildArgoAppSet_NoPlatformSource(t *testing.T) {
 	appset := gitops.BuildArgoAppSet(
-		gitops.AppSetEnv{
-			EnvName:       "staging",
-			ClusterServer: "https://kubernetes.default.svc",
-			BaseDomain:    "localhost",
-		},
+		gitops.AppSetEnv{EnvName: "staging", ClusterServer: "https://kubernetes.default.svc", BaseDomain: "localhost"},
 		"https://gitea.example.com/org/gitops.git",
-		gitops.AppSetOptions{
-			ArgoCDNamespace: "argocd",
-			TargetRevision:  "main",
-			SyncAutomated:   true,
-		},
+		gitops.AppSetOptions{ArgoCDNamespace: "argocd", TargetRevision: "main", SyncAutomated: true},
 	)
 	sources := appset.Spec.Template.Spec.Sources
-	if len(sources) != 3 {
-		t.Fatalf("expected 3 sources (ref + chart + per-app manifests), got %d", len(sources))
+	if len(sources) != 2 {
+		t.Fatalf("expected 2 sources (values ref + chart), got %d", len(sources))
 	}
-	manifestSrc := sources[2]
-	wantPath := "envs/staging/{{project}}/{{name}}"
-	if manifestSrc.Path != wantPath {
-		t.Errorf("per-app source path = %q, want %q", manifestSrc.Path, wantPath)
+	for _, s := range sources {
+		if s.Directory != nil {
+			t.Errorf("app AppSet must not carry a directory (platform-manifests) source, got %+v", s)
+		}
 	}
-	if manifestSrc.Directory == nil {
-		t.Fatal("per-app source missing Directory section")
+}
+
+// TestBuildPlatformAppSet_DirectorySource verifies the platform ApplicationSet
+// ships the per-app manifests from _app-resources via a directory source whose
+// include filter lists the two manifests (and never kustomization.yaml).
+func TestBuildPlatformAppSet_DirectorySource(t *testing.T) {
+	appset := gitops.BuildPlatformAppSet(
+		gitops.AppSetEnv{EnvName: "staging", ClusterServer: "https://k8s:6443"},
+		"https://gitea.example.com/org/gitops.git",
+		gitops.AppSetOptions{ArgoCDNamespace: "argocd", TargetRevision: "main", SyncAutomated: true},
+	)
+	if appset.Metadata.Name != "staging-platform" {
+		t.Errorf("appset name = %q, want staging-platform", appset.Metadata.Name)
 	}
-	if !strings.Contains(manifestSrc.Directory.Include, "env-configmap.yaml") {
-		t.Errorf("include filter missing env-configmap.yaml: %q", manifestSrc.Directory.Include)
+	gen := appset.Spec.Generators[0].Git
+	if gen == nil || len(gen.Files) != 1 || gen.Files[0].Path != "_app-resources/staging/*/*/meta.yaml" {
+		t.Errorf("generator path wrong: %+v", gen)
 	}
-	if !strings.Contains(manifestSrc.Directory.Include, "external-secret.yaml") {
-		t.Errorf("include filter missing external-secret.yaml: %q", manifestSrc.Directory.Include)
+	srcs := appset.Spec.Template.Spec.Sources
+	if len(srcs) != 1 || srcs[0].Directory == nil {
+		t.Fatalf("expected single directory source, got %+v", srcs)
 	}
-	if strings.Contains(manifestSrc.Directory.Include, "kustomization.yaml") {
-		t.Errorf("include filter must NOT reference kustomization.yaml — directory mode would apply it as a Kustomization CRD; got %q", manifestSrc.Directory.Include)
+	if srcs[0].Path != "_app-resources/staging/{{project}}/{{name}}" {
+		t.Errorf("directory path = %q", srcs[0].Path)
 	}
-	// Sanity: the chart source still points at .../charts/{{template}}.
-	if !strings.HasSuffix(sources[1].Path, "charts/{{template}}") {
-		t.Errorf("expected chart source still at charts/{{template}}, got %q", sources[1].Path)
+	inc := srcs[0].Directory.Include
+	if !strings.Contains(inc, "env-configmap.yaml") || !strings.Contains(inc, "external-secret.yaml") {
+		t.Errorf("include filter wrong: %q", inc)
+	}
+	if strings.Contains(inc, "kustomization.yaml") {
+		t.Errorf("include must not reference kustomization.yaml: %q", inc)
+	}
+	if got := appset.Spec.Template.Spec.Destination; got.Server != "https://k8s:6443" || got.Namespace != "{{namespace}}" {
+		t.Errorf("destination = %+v, want workload cluster + {{namespace}}", got)
 	}
 }
 

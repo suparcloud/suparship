@@ -50,13 +50,13 @@ var secretsStatusCmd = &cobra.Command{
 
 var secretsBindCmd = &cobra.Command{
 	Use:   "bind",
-	Short: "Bind an environment to a 1Password vault with a Connect token",
-	Long: `Add or rotate a binding for an environment. You provide the vault ID
-and the Connect token; suparship saves the binding in org config. When a
-GitOps repo and sealed-secrets cert are available, the token is sealed and
-published automatically.`,
-	Example: `  suparship secrets bind --env=staging --vault-id=abc-123 --connect-token-file=token.txt
-  suparship secrets bind --env=prod --vault-id=def-456 --connect-token-file=token.txt`,
+	Short: "Bind an environment to a 1Password vault",
+	Long: `Add or rotate a binding for an environment. You provide the vault ID;
+suparship saves the binding in org config. Connect tokens are pasted per
+cluster (one token per cluster, covering every vault it reads) via the UI or
+the cluster connect-token API — not per vault.`,
+	Example: `  suparship secrets bind --env=staging --vault-id=abc-123
+  suparship secrets bind --env=prod --vault-id=def-456`,
 	RunE: runSecretsBind,
 }
 
@@ -76,7 +76,6 @@ func init() {
 	secretsBindCmd.Flags().String("env", "", "environment to bind (required)")
 	secretsBindCmd.Flags().String("vault-id", "", "1Password vault UUID (required)")
 	secretsBindCmd.Flags().String("vault-name", "", "human-readable vault name (optional)")
-	secretsBindCmd.Flags().String("connect-token-file", "", "path to file containing the Connect token (required)")
 	secretsUnbindCmd.Flags().String("env", "", "environment to unbind (required)")
 
 	secretsBackendCmd.AddCommand(secretsBackendSetCmd)
@@ -217,8 +216,21 @@ func runSecretsStatus(cmd *cobra.Command, _ []string) error {
 	for _, ref := range op.EnvVaults {
 		printVault("env", ref.Key, ref)
 	}
-	for _, ref := range op.ClusterVaults {
-		printVault("cluster", ref.Key, ref)
+
+	// One Connect token per cluster, covering every vault the cluster reads.
+	if len(op.ClusterTokens) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "\n%-20s  %-7s  %s\n", "CLUSTER TOKEN", "SEALED", "LAST ERROR")
+		for _, t := range op.ClusterTokens {
+			sealed := "no"
+			if t.Sealed {
+				sealed = "yes"
+			}
+			lastErr := "-"
+			if t.LastError != "" {
+				lastErr = t.LastError
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%-20s  %-7s  %s\n", t.Cluster, sealed, lastErr)
+		}
 	}
 	return nil
 }
@@ -228,25 +240,12 @@ func runSecretsBind(cmd *cobra.Command, _ []string) error {
 	env, _ := cmd.Flags().GetString("env")
 	vaultID, _ := cmd.Flags().GetString("vault-id")
 	vaultName, _ := cmd.Flags().GetString("vault-name")
-	tokenFile, _ := cmd.Flags().GetString("connect-token-file")
 
 	if env == "" {
 		return fmt.Errorf("--env is required")
 	}
 	if vaultID == "" {
 		return fmt.Errorf("--vault-id is required")
-	}
-	if tokenFile == "" {
-		return fmt.Errorf("--connect-token-file is required")
-	}
-
-	tokenBytes, err := os.ReadFile(tokenFile)
-	if err != nil {
-		return fmt.Errorf("reading connect token file: %w", err)
-	}
-	connectToken := strings.TrimSpace(string(tokenBytes))
-	if connectToken == "" {
-		return fmt.Errorf("connect token file is empty")
 	}
 
 	store, err := loadOrgStore(cmd)
@@ -268,24 +267,22 @@ func runSecretsBind(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "Environment %q already bound — updating vault...\n", env)
 	}
 
-	storeName := secrets.EnvStoreName(env)
 	if vaultName == "" {
 		vaultName = vaultID
 	}
 
 	org.SecretBackend.UpsertVault(scope, secrets.VaultRef{
-		VaultID:                vaultID,
-		VaultName:              vaultName,
-		Provisioned:            true,
-		LastProvisioned:        time.Now(),
-		ClusterSecretStoreName: storeName,
+		VaultID:         vaultID,
+		VaultName:       vaultName,
+		Provisioned:     true,
+		LastProvisioned: time.Now(),
 	})
 	if err := store.SaveOrg(ctx, org); err != nil {
 		return fmt.Errorf("saving org config: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Bound env %s: vault=%s clusterSecretStore=%s\n", env, vaultName, storeName)
-	fmt.Fprintln(cmd.OutOrStdout(), "Note: Connect-token sealing/publishing is handled separately (see docs).")
+	fmt.Fprintf(cmd.OutOrStdout(), "Bound env %s: vault=%s\n", env, vaultName)
+	fmt.Fprintln(cmd.OutOrStdout(), "Note: paste each cluster's Connect token in the UI (or via the cluster connect-token API) to seal + publish its unified store.")
 	return nil
 }
 

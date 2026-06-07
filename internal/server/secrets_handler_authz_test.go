@@ -44,9 +44,9 @@ func TestSecretsAuthzMatrix(t *testing.T) {
 		{"shared env upsert by developer → 403", "POST", "/api/v1/org/secrets/env/staging", upsertBody, "bob", "developer", 403},
 		{"shared env list by viewer", "GET", "/api/v1/org/secrets/env/staging", nil, "carol", "viewer", 200},
 
-		// ── Shared cluster (org_admin writes) ───────────────────────
-		{"shared cluster upsert by org_admin", "POST", "/api/v1/org/secrets/cluster/prod-eu", upsertBody, "alice", "org_admin", 200},
-		{"shared cluster upsert by developer → 403", "POST", "/api/v1/org/secrets/cluster/prod-eu", upsertBody, "bob", "developer", 403},
+		// ── Shared cluster, nested under env (org_admin writes) ─────
+		{"shared cluster upsert by org_admin", "POST", "/api/v1/org/secrets/env/staging/cluster/prod-eu", upsertBody, "alice", "org_admin", 200},
+		{"shared cluster upsert by developer → 403", "POST", "/api/v1/org/secrets/env/staging/cluster/prod-eu", upsertBody, "bob", "developer", 403},
 
 		// ── App global (developer writes, viewer reads) ─────────────
 		{"app global upsert by developer", "POST", "/api/v1/projects/api/apps/backend/secrets/global", upsertBody, "bob", "developer", 200},

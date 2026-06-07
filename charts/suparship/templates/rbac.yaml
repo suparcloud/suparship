@@ -39,4 +39,46 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "suparship.serviceAccountName" . }}
     namespace: {{ include "suparship.namespace" . }}
+---
+# ── External Secrets Operator reader ──────────────────────────────────────
+# The k8s secret backend stores each scope's secrets in its own namespace
+# (suparship-secrets-global / -env-<env>; cluster-override items live inside
+# the env namespace), created on demand by the suparship server. The generated
+# ClusterSecretStores read those namespaces by impersonating this
+# ServiceAccount, so it needs cluster-wide read on Secrets (the vault
+# namespaces are dynamic and cannot be enumerated here). Scoped to read-only
+# on Secrets and used exclusively by ESO.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: suparship-eso-reader
+  namespace: {{ include "suparship.namespace" . }}
+  labels:
+    {{- include "suparship.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "suparship.fullname" . }}-eso-reader
+  labels:
+    {{- include "suparship.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "suparship.fullname" . }}-eso-reader
+  labels:
+    {{- include "suparship.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "suparship.fullname" . }}-eso-reader
+subjects:
+  - kind: ServiceAccount
+    name: suparship-eso-reader
+    namespace: {{ include "suparship.namespace" . }}
 {{- end }}

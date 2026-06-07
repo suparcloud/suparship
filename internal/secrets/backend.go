@@ -31,7 +31,8 @@ var ValidBackendTypes = map[BackendType]bool{
 // OnePasswordConfig holds 1Password-specific org-level configuration.
 // The only admin-facing input is the SA token (pasted once in the UI and
 // stored as a K8s Secret). Vault refs are populated as the global vault is
-// set and env/cluster vaults are provisioned on environment/cluster creation.
+// set and env vaults are registered. Cluster overrides are items inside the
+// env vault, so clusters need no vault of their own.
 type OnePasswordConfig struct {
 	// GroupName is the 1Password group that owns all suparship vaults.
 	// Fixed at install time via helm values; default "Suparship".
@@ -49,9 +50,28 @@ type OnePasswordConfig struct {
 	// environment name). Provisioned when an environment is created.
 	EnvVaults []VaultRef `json:"envVaults,omitempty" yaml:"envVaults,omitempty"`
 
-	// ClusterVaults holds one vault per cluster, keyed by VaultRef.Key (the
-	// cluster name). Provisioned when a cluster is created.
-	ClusterVaults []VaultRef `json:"clusterVaults,omitempty" yaml:"clusterVaults,omitempty"`
+	// ClusterTokens tracks, per workload cluster, the state of that cluster's
+	// single Connect token: stashed when the operator pastes it, sealed once
+	// the SealedSecret + unified ClusterSecretStore are published to gitops.
+	ClusterTokens []ClusterTokenRef `json:"clusterTokens,omitempty" yaml:"clusterTokens,omitempty"`
+}
+
+// ClusterTokenRef tracks the per-cluster Connect token + unified store state.
+// Each workload cluster carries ONE Connect token with access to every vault
+// it reads (the global vault + the env vaults bound to it) and ONE
+// ClusterSecretStore (UnifiedStoreName) listing those vaults.
+type ClusterTokenRef struct {
+	// Cluster is the registered cluster name.
+	Cluster string `json:"cluster" yaml:"cluster"`
+	// ConnectEndpoint overrides the org-level Connect URL for this cluster.
+	ConnectEndpoint string `json:"connectEndpoint,omitempty" yaml:"connectEndpoint,omitempty"`
+	// Sealed is true once the token was sealed and the unified store was
+	// published to gitops for this cluster.
+	Sealed bool `json:"sealed,omitempty" yaml:"sealed,omitempty"`
+	// LastSealed records when sealing last completed.
+	LastSealed time.Time `json:"lastSealed,omitempty" yaml:"lastSealed,omitempty"`
+	// LastError stores the most recent seal/publish error for UI display.
+	LastError string `json:"lastError,omitempty" yaml:"lastError,omitempty"`
 }
 
 // ConnectStatus tracks the state of the managed 1Password Connect server.
@@ -66,27 +86,22 @@ type ConnectStatus struct {
 	LastProbe time.Time `json:"lastProbe,omitempty" yaml:"lastProbe,omitempty"`
 }
 
-// VaultRef tracks the provisioned state of one vault (global, an environment,
-// or a cluster).
+// VaultRef tracks the registration of one vault (global or an environment).
+// Registration only records which 1Password vault backs the scope — Connect
+// tokens are per cluster (see ClusterTokenRef), not per vault.
 type VaultRef struct {
-	// Key is the environment name (for EnvVaults) or cluster name (for
-	// ClusterVaults). Empty for the global vault.
+	// Key is the environment name (for EnvVaults). Empty for the global vault.
 	Key string `json:"key,omitempty" yaml:"key,omitempty"`
 	// VaultID is the 1Password vault UUID.
 	VaultID string `json:"vaultId,omitempty" yaml:"vaultId,omitempty"`
 	// VaultName is the human-readable vault name.
 	VaultName string `json:"vaultName,omitempty" yaml:"vaultName,omitempty"`
-	// ClusterSecretStoreName is the ESO ClusterSecretStore resource created
-	// for this vault. Used when generating ExternalSecrets.
-	ClusterSecretStoreName string `json:"clusterSecretStoreName,omitempty" yaml:"clusterSecretStoreName,omitempty"`
-	// ConnectEndpoint overrides the org-level Connect URL for this vault.
-	ConnectEndpoint string `json:"connectEndpoint,omitempty" yaml:"connectEndpoint,omitempty"`
-	// Provisioned is true once the full provision chain has completed
-	// (Connect token sealed, ClusterSecretStore published to gitops).
+	// Provisioned is true once the vault is registered (its ID recorded and
+	// validated against the SA token).
 	Provisioned bool `json:"provisioned,omitempty" yaml:"provisioned,omitempty"`
-	// LastProvisioned records when provisioning last completed.
+	// LastProvisioned records when registration last completed.
 	LastProvisioned time.Time `json:"lastProvisioned,omitempty" yaml:"lastProvisioned,omitempty"`
-	// LastError stores the most recent provision error for UI display.
+	// LastError stores the most recent registration error for UI display.
 	LastError string `json:"lastError,omitempty" yaml:"lastError,omitempty"`
 }
 
@@ -119,22 +134,18 @@ func (c BackendConfig) Validate() error {
 }
 
 // FindVault returns the VaultRef for the given scope, or nil if not set.
+// Cluster scope resolves to its environment's vault — cluster overrides are
+// items inside the env vault.
 func (c BackendConfig) FindVault(scope Scope) *VaultRef {
 	if c.OnePassword == nil {
 		return nil
 	}
 	op := c.OnePassword
 	switch scope.Kind {
-	case ScopeEnv:
+	case ScopeEnv, ScopeCluster:
 		for i := range op.EnvVaults {
 			if op.EnvVaults[i].Key == scope.Env {
 				return &op.EnvVaults[i]
-			}
-		}
-	case ScopeCluster:
-		for i := range op.ClusterVaults {
-			if op.ClusterVaults[i].Key == scope.Cluster {
-				return &op.ClusterVaults[i]
 			}
 		}
 	default:
@@ -145,7 +156,8 @@ func (c BackendConfig) FindVault(scope Scope) *VaultRef {
 	return nil
 }
 
-// UpsertVault adds or replaces the vault ref for the given scope.
+// UpsertVault adds or replaces the vault ref for the given scope. Only global
+// and env scopes have vaults of their own; cluster scope is never persisted.
 func (c *BackendConfig) UpsertVault(scope Scope, ref VaultRef) {
 	if c.OnePassword == nil {
 		c.OnePassword = &OnePasswordConfig{}
@@ -155,9 +167,6 @@ func (c *BackendConfig) UpsertVault(scope Scope, ref VaultRef) {
 	case ScopeEnv:
 		ref.Key = scope.Env
 		op.EnvVaults = upsertVaultRef(op.EnvVaults, ref)
-	case ScopeCluster:
-		ref.Key = scope.Cluster
-		op.ClusterVaults = upsertVaultRef(op.ClusterVaults, ref)
 	default:
 		ref.Key = ""
 		op.GlobalVault = ref
@@ -173,8 +182,6 @@ func (c *BackendConfig) RemoveVault(scope Scope) {
 	switch scope.Kind {
 	case ScopeEnv:
 		op.EnvVaults = removeVaultRef(op.EnvVaults, scope.Env)
-	case ScopeCluster:
-		op.ClusterVaults = removeVaultRef(op.ClusterVaults, scope.Cluster)
 	default:
 		op.GlobalVault = VaultRef{}
 	}
@@ -202,6 +209,52 @@ func removeVaultRef(refs []VaultRef, key string) []VaultRef {
 	return filtered
 }
 
+// FindClusterToken returns the ClusterTokenRef for the cluster, or nil.
+func (c BackendConfig) FindClusterToken(cluster string) *ClusterTokenRef {
+	if c.OnePassword == nil {
+		return nil
+	}
+	for i := range c.OnePassword.ClusterTokens {
+		if c.OnePassword.ClusterTokens[i].Cluster == cluster {
+			return &c.OnePassword.ClusterTokens[i]
+		}
+	}
+	return nil
+}
+
+// UpsertClusterToken adds or replaces the per-cluster token ref.
+func (c *BackendConfig) UpsertClusterToken(ref ClusterTokenRef) {
+	if c.OnePassword == nil {
+		c.OnePassword = &OnePasswordConfig{}
+	}
+	op := c.OnePassword
+	for i := range op.ClusterTokens {
+		if op.ClusterTokens[i].Cluster == ref.Cluster {
+			op.ClusterTokens[i] = ref
+			return
+		}
+	}
+	op.ClusterTokens = append(op.ClusterTokens, ref)
+	sort.Slice(op.ClusterTokens, func(i, j int) bool {
+		return op.ClusterTokens[i].Cluster < op.ClusterTokens[j].Cluster
+	})
+}
+
+// RemoveClusterToken removes the per-cluster token ref. No-op if absent.
+func (c *BackendConfig) RemoveClusterToken(cluster string) {
+	if c.OnePassword == nil {
+		return
+	}
+	op := c.OnePassword
+	filtered := op.ClusterTokens[:0]
+	for _, t := range op.ClusterTokens {
+		if t.Cluster != cluster {
+			filtered = append(filtered, t)
+		}
+	}
+	op.ClusterTokens = filtered
+}
+
 // ── App-level read result ─────────────────────────────────────────────────
 
 // SecretEntry is a single key returned by ListKeys. Values are never returned
@@ -227,8 +280,7 @@ const (
 	RotateGraceSeconds = 60
 )
 
-// ConnectTokenSecretName returns the K8s Secret name that holds the per-scope
-// Connect token on target clusters (after being unsealed by sealed-secrets).
-func ConnectTokenSecretName(scope Scope) string {
-	return "op-connect-token-" + scopeSuffix(scope)
-}
+// ConnectTokenSecretName is the K8s Secret name that holds the cluster's
+// single Connect token on target clusters (after being unsealed by
+// sealed-secrets). One token per cluster, covering every vault it reads.
+const ConnectTokenSecretName = "op-connect-token"

@@ -16,6 +16,8 @@ import {
   listSharedClusterSecretKeys,
   upsertSharedClusterSecrets,
 } from "../lib/secrets";
+import { listOrgEnvironments } from "../lib/settings";
+import type { OrgEnvironment } from "../lib/settings";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
 
@@ -249,11 +251,38 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
 // ── Cluster overrides section (env vars + secrets) ────────────────────────────
 //
 // Cluster-scope is the platform-engineering escape hatch — values written here
-// override every other layer (org / env-type / project / app / app-env) for
+// override the global and env scopes (precedence: cluster > env > global) for
 // apps deployed onto this specific cluster. Use sparingly: incident break-glass,
 // regional tuning, per-cluster feature kill-switches.
+//
+// Cluster-override SECRETS are per-(env, cluster): the items live inside each
+// env vault (e.g. shared-cluster-eu-1 in suparship-secrets-env-staging), so one
+// editor is rendered per environment bound to this cluster. Env VARS remain a
+// separate cluster-global ConfigMap axis.
 
 function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
+  const [boundEnvs, setBoundEnvs] = useState<OrgEnvironment[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listOrgEnvironments()
+      .then((resp) => {
+        if (cancelled) return;
+        const envs = (resp.environments || []).filter(
+          (e) =>
+            e.activeClusterRef === cluster.name ||
+            (e.clusterRefs || []).includes(cluster.name),
+        );
+        setBoundEnvs(envs);
+      })
+      .catch(() => {
+        if (!cancelled) setBoundEnvs([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cluster.name]);
+
   const fetchEnv = useCallback(
     () => getClusterEnvConfig(cluster.name),
     [cluster.name],
@@ -271,10 +300,13 @@ function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
           Cluster overrides — escape hatch
         </h3>
         <p className="mt-0.5 text-xs text-gray-500">
-          Variables and secrets here override every other layer (org, env-type,
-          project, app, app-env) for apps deployed onto{" "}
+          Variables and secrets here override the global and env scopes
+          (precedence: cluster &gt; env &gt; global) for apps deployed onto{" "}
           <span className="font-mono">{cluster.name}</span>. Use for incident
-          response, regional tuning, or per-cluster kill-switches.
+          response, regional tuning, or per-cluster kill-switches. Override
+          secrets are stored per environment, as items inside that env&apos;s
+          vault — other clusters bound to the same environment can technically
+          read them (vault-scoped tokens).
         </p>
       </div>
       <EnvConfigEditor
@@ -284,14 +316,30 @@ function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
         fetchFn={fetchEnv}
         saveFn={saveEnv}
       />
-      <SecretEditor
-        key={`secrets-${cluster.name}`}
-        title={`Shared cluster secrets for "${cluster.name}"`}
-        description="Shared secrets applied to every app deployed onto this cluster (cluster scope). App-level cluster secrets override these."
-        fetchFn={() => listSharedClusterSecretKeys(cluster.name)}
-        upsertFn={(entries) => upsertSharedClusterSecrets(cluster.name, entries)}
-        deleteFn={(key) => deleteSharedClusterSecretKey(cluster.name, key)}
-      />
+      {boundEnvs === null ? (
+        <div className="h-10 animate-pulse rounded bg-gray-100" />
+      ) : boundEnvs.length === 0 ? (
+        <p className="text-xs text-gray-400">
+          No environment is bound to this cluster yet. Bind it to an
+          environment (Settings &gt; Environments) to set per-env cluster
+          override secrets.
+        </p>
+      ) : (
+        boundEnvs.map((env) => (
+          <SecretEditor
+            key={`secrets-${env.name}-${cluster.name}`}
+            title={`Shared cluster secrets for "${cluster.name}" in env "${env.name}"`}
+            description={`Shared secrets applied to every app of env "${env.name}" deployed onto this cluster (cluster scope, stored in the "${env.name}" env vault). App-level cluster secrets override these.`}
+            fetchFn={() => listSharedClusterSecretKeys(env.name, cluster.name)}
+            upsertFn={(entries) =>
+              upsertSharedClusterSecrets(env.name, cluster.name, entries)
+            }
+            deleteFn={(key) =>
+              deleteSharedClusterSecretKey(env.name, cluster.name, key)
+            }
+          />
+        ))
+      )}
     </div>
   );
 }
