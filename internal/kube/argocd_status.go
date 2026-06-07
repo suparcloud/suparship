@@ -77,6 +77,27 @@ func (r *ArgoCDStatusReader) ListProjectAppStatuses(ctx context.Context, project
 	return result, nil
 }
 
+// CountProjectApplications returns how many ArgoCD Application CRs in the
+// ArgoCD namespace reference projectName via spec.project. Used by the
+// two-phase project unpublish: the AppProject may only be removed once the
+// ApplicationSets have finished pruning the project's generated Applications,
+// because cascade deletion of an Application needs its AppProject to exist.
+// Matches on spec.project (not labels) so legacy/unlabeled Applications count.
+func (r *ArgoCDStatusReader) CountProjectApplications(ctx context.Context, projectName string) (int, error) {
+	list, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("listing argocd apps: %w", err)
+	}
+	count := 0
+	for _, item := range list.Items {
+		proj, _, _ := unstructuredString(item.Object, "spec", "project")
+		if proj == projectName {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 // parseArgoCDStatus maps ArgoCD sync/health status to domain.AppRuntimeStatus.

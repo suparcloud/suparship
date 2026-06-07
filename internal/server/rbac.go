@@ -36,6 +36,10 @@ type rbacHandler struct {
 	// storeReconciler republishes ESO ClusterSecretStores when an environment
 	// is created/changed. Optional; nil disables the hook.
 	storeReconciler SecretStoreReconciler
+	// projectAppCounter sequences the two phases of project deletion: the
+	// AppProject is removed only after the project's generated Applications
+	// are pruned. Optional; nil falls back to a fixed grace delay.
+	projectAppCounter ProjectAppCounter
 }
 
 // requireRole returns middleware that enforces authentication and checks that

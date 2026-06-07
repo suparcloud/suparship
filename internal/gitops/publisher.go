@@ -1207,18 +1207,21 @@ func isReservedTopLevelDir(name string) bool {
 	return false
 }
 
-// UnpublishProject removes all GitOps manifests for a project — its ArgoCD
-// AppProject, every app directory in every layout, its preview trees, and its
-// Kargo CRs — and commits + pushes the deletion. Per-env ApplicationSets are
-// shared across projects and stay. No-op if nothing found.
-func (p *Publisher) UnpublishProject(ctx context.Context, projectName string) error {
+// UnpublishProjectApps is PHASE 1 of project deletion: it removes every app
+// directory in every layout, the project's preview trees, and its Kargo CRs —
+// everything EXCEPT the ArgoCD AppProject — and commits + pushes the deletion.
+//
+// The AppProject must outlive the generated Applications: when an Application
+// is pruned, its cleanup finalizer resolves the AppProject to cascade-delete
+// the deployed resources. Removing both in one commit races ArgoCD and leaves
+// Applications stuck in Terminating ("appproject not found"). Call
+// UnpublishProjectInfra (phase 2) once the project's Applications are gone.
+//
+// Per-env ApplicationSets are shared across projects and stay. No-op if
+// nothing found.
+func (p *Publisher) UnpublishProjectApps(ctx context.Context, projectName string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		var u unpublishHelper
-
-		// ArgoCD AppProject.
-		if err := u.rm(p.outputDir(repoDir, "_infra", projectName+"-appproject.yaml")); err != nil {
-			return err
-		}
 
 		// envs/{env}/{project} and _app-resources/{env}/{project} — for
 		// _app-resources the "previews" entry also nests by project, so it is
@@ -1273,11 +1276,29 @@ func (p *Publisher) UnpublishProject(ctx context.Context, projectName string) er
 		}
 
 		if !u.removed {
-			slog.Debug("gitops: no project files found — nothing to delete", "project", projectName)
+			slog.Debug("gitops: no project app files found — nothing to delete", "project", projectName)
 			return nil
 		}
 
-		commitMsg := fmt.Sprintf("feat(projects): delete project %s\n\nDeleted by suparShip.", projectName)
+		commitMsg := fmt.Sprintf("feat(projects): delete project %s apps (phase 1/2)\n\nDeleted by suparShip.", projectName)
+		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
+// UnpublishProjectInfra is PHASE 2 of project deletion: it removes the
+// project's ArgoCD AppProject. Only call this after the project's generated
+// Applications have been pruned (see UnpublishProjectApps). No-op if absent.
+func (p *Publisher) UnpublishProjectInfra(ctx context.Context, projectName string) error {
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		var u unpublishHelper
+		if err := u.rm(p.outputDir(repoDir, "_infra", projectName+"-appproject.yaml")); err != nil {
+			return err
+		}
+		if !u.removed {
+			slog.Debug("gitops: no project infra files found — nothing to delete", "project", projectName)
+			return nil
+		}
+		commitMsg := fmt.Sprintf("feat(projects): delete project %s infra (phase 2/2)\n\nDeleted by suparShip.", projectName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }

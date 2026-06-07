@@ -62,10 +62,22 @@ type GitOpsPublisher interface {
 	// resource directories, Kargo CRs) and commits + pushes the deletion.
 	// It is a no-op if no files exist for the app.
 	UnpublishApp(ctx context.Context, projectName, appName string) error
-	// UnpublishProject removes all GitOps files for a project (its ArgoCD
-	// AppProject, every app directory, preview trees, Kargo CRs) and commits
-	// + pushes the deletion. It is a no-op if no files exist for the project.
-	UnpublishProject(ctx context.Context, projectName string) error
+	// UnpublishProjectApps removes the project's app directories, preview
+	// trees, and Kargo CRs (phase 1 of project deletion). The AppProject is
+	// intentionally kept — ArgoCD needs it to cascade-delete the generated
+	// Applications it prunes. No-op if no files exist.
+	UnpublishProjectApps(ctx context.Context, projectName string) error
+	// UnpublishProjectInfra removes the project's ArgoCD AppProject (phase 2
+	// of project deletion). Call only after the project's Applications have
+	// been pruned. No-op if absent.
+	UnpublishProjectInfra(ctx context.Context, projectName string) error
+}
+
+// ProjectAppCounter counts the live ArgoCD Applications that reference a
+// project via spec.project. Used to sequence the two phases of project
+// deletion: the AppProject is only removed once this reaches zero.
+type ProjectAppCounter interface {
+	CountProjectApplications(ctx context.Context, projectName string) (int, error)
 }
 
 // KargoPromoter creates Kargo Promotion CRs to advance freight through the
@@ -228,16 +240,28 @@ func (h *PublisherHolder) UnpublishApp(ctx context.Context, projectName, appName
 	return p.UnpublishApp(ctx, projectName, appName)
 }
 
-// UnpublishProject implements GitOpsPublisher. It delegates to the currently
-// held publisher; if none is set it returns nil (no-op).
-func (h *PublisherHolder) UnpublishProject(ctx context.Context, projectName string) error {
+// UnpublishProjectApps implements GitOpsPublisher. It delegates to the
+// currently held publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) UnpublishProjectApps(ctx context.Context, projectName string) error {
 	h.mu.RLock()
 	p := h.p
 	h.mu.RUnlock()
 	if p == nil {
 		return nil
 	}
-	return p.UnpublishProject(ctx, projectName)
+	return p.UnpublishProjectApps(ctx, projectName)
+}
+
+// UnpublishProjectInfra implements GitOpsPublisher. It delegates to the
+// currently held publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) UnpublishProjectInfra(ctx context.Context, projectName string) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.UnpublishProjectInfra(ctx, projectName)
 }
 
 // Swap replaces the inner publisher atomically. Subsequent PublishApp calls
@@ -334,6 +358,7 @@ type Config struct {
 	KargoStatusReader       KargoStatusReader       // optional: enables GET promotion-status endpoint
 	KargoPipelineReader     KargoPipelineReader     // optional: enables GET pipeline-stages endpoint
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
+	ProjectAppCounter       ProjectAppCounter       // optional: sequences two-phase project deletion against live ArgoCD apps
 	VaultStore              secrets.VaultStore      // optional: enables secret CRUD across global/env/cluster scopes
 	SecretsAuditor          *secrets.Auditor        // optional: enables audit logging for secret ops
 	ReadinessProbers        []ReadinessProber       // optional: checked by GET /readyz
@@ -427,6 +452,7 @@ func New(cfg Config) *Server {
 		if r, ok := cfg.GitOpsPublisher.(SecretStoreReconciler); ok {
 			rh.storeReconciler = r
 		}
+		rh.projectAppCounter = cfg.ProjectAppCounter
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
 			cfg.Logger.Info("service creation endpoint enabled")

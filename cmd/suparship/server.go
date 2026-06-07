@@ -136,6 +136,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kargoStatusReader       server.KargoStatusReader
 		kargoPipelineReader     server.KargoPipelineReader
 		deploymentHistoryReader server.DeploymentHistoryReader
+		projectAppCounter       server.ProjectAppCounter
 		kubeClient              kubernetes.Interface
 		dynClient               dynamic.Interface
 		gitopsConfigStore       *gitops.ConfigStore
@@ -218,9 +219,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			kargoPromoter = kargoAdapter
 			kargoStatusReader = kargoAdapter
 			kargoPipelineReader = kargoAdapter
-			// Wire ArgoCD deployment history reader.
+			// Wire ArgoCD deployment history reader. The same reader also
+			// counts a project's live Applications to sequence two-phase
+			// project deletion.
 			argoCDReader := kube.NewArgoCDStatusReaderFromDynamic(dynClient, "")
 			deploymentHistoryReader = &argoCDHistoryAdapter{reader: argoCDReader}
+			projectAppCounter = argoCDReader
 			logger.Info("kargo promoter enabled via dynamic client")
 			logger.Info("argocd deployment history reader enabled")
 		}
@@ -546,6 +550,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		KargoStatusReader:       kargoStatusReader,
 		KargoPipelineReader:     kargoPipelineReader,
 		DeploymentHistoryReader: deploymentHistoryReader,
+		ProjectAppCounter:       projectAppCounter,
 		ReadinessProbers:        readinessProbers,
 		CookieSecure:            cookieSecure,
 		Logger:                  logger,
@@ -1005,10 +1010,16 @@ func (a *gitOpsPublisherAdapter) UnpublishApp(ctx context.Context, projectName, 
 	return a.inner.UnpublishApp(ctx, projectName, appName)
 }
 
-// UnpublishProject implements server.GitOpsPublisher by removing all
-// gitops-output files for the given project and committing the deletion.
-func (a *gitOpsPublisherAdapter) UnpublishProject(ctx context.Context, projectName string) error {
-	return a.inner.UnpublishProject(ctx, projectName)
+// UnpublishProjectApps implements server.GitOpsPublisher (phase 1 of project
+// deletion: app dirs, previews, Kargo CRs — the AppProject stays).
+func (a *gitOpsPublisherAdapter) UnpublishProjectApps(ctx context.Context, projectName string) error {
+	return a.inner.UnpublishProjectApps(ctx, projectName)
+}
+
+// UnpublishProjectInfra implements server.GitOpsPublisher (phase 2 of project
+// deletion: the ArgoCD AppProject).
+func (a *gitOpsPublisherAdapter) UnpublishProjectInfra(ctx context.Context, projectName string) error {
+	return a.inner.UnpublishProjectInfra(ctx, projectName)
 }
 
 // argoCDHistoryAdapter bridges kube.ArgoCDStatusReader.GetAppDeploymentHistory
