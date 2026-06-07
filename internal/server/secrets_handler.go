@@ -582,9 +582,14 @@ func (h *secretsHandler) sealCluster(ctx context.Context, org *rbac.Org, cluster
 		return fmt.Errorf("fetch sealing cert for %q: %w", clusterName, err)
 	}
 
+	// Connect endpoint precedence: per-cluster override > org-level setting >
+	// built-in default (resolved by the YAML builder when empty).
 	var connectEndpoint string
 	if tokenRef != nil {
 		connectEndpoint = tokenRef.ConnectEndpoint
+	}
+	if connectEndpoint == "" && org.SecretBackend.OnePassword != nil {
+		connectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
 	}
 	return h.sealPublisher.PublishClusterSecretStore(ctx, gitops.ClusterSealParams{
 		ClusterName:       clusterName,
