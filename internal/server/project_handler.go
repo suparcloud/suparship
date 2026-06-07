@@ -10,7 +10,9 @@ package server
 // List and detail are served by org.go (handleGetProjects / handleGetProject).
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"regexp"
 
@@ -112,6 +114,18 @@ func (rh *rbacHandler) handleDeleteProject(w http.ResponseWriter, r *http.Reques
 		}
 		org.RoleBindings = bindings
 		_ = rh.orgStore.SaveOrg(r.Context(), org) // best-effort; project is already deleted
+	}
+
+	// Best-effort: remove the project's GitOps files (AppProject, every app
+	// directory, preview trees, Kargo CRs) so they don't dangle in the repo —
+	// ArgoCD then prunes the corresponding live resources.
+	if rh.appHandler != nil && rh.appHandler.gitOpsPublisher != nil {
+		pub := rh.appHandler.gitOpsPublisher
+		go func() {
+			if err := pub.UnpublishProject(context.Background(), projectName); err != nil {
+				slog.Warn("project delete: gitops cleanup failed", "project", projectName, "error", err)
+			}
+		}()
 	}
 
 	w.WriteHeader(http.StatusNoContent)

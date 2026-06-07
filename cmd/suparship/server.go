@@ -1005,6 +1005,12 @@ func (a *gitOpsPublisherAdapter) UnpublishApp(ctx context.Context, projectName, 
 	return a.inner.UnpublishApp(ctx, projectName, appName)
 }
 
+// UnpublishProject implements server.GitOpsPublisher by removing all
+// gitops-output files for the given project and committing the deletion.
+func (a *gitOpsPublisherAdapter) UnpublishProject(ctx context.Context, projectName string) error {
+	return a.inner.UnpublishProject(ctx, projectName)
+}
+
 // argoCDHistoryAdapter bridges kube.ArgoCDStatusReader.GetAppDeploymentHistory
 // to the server.DeploymentHistoryReader interface.
 type argoCDHistoryAdapter struct {

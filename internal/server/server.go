@@ -58,10 +58,14 @@ type GitOpsPublisher interface {
 	// the GitOps repo. Called on every explicit promotion so the target env's
 	// files are present before Kargo / ArgoCD act on the promotion.
 	PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error
-	// UnpublishApp removes all GitOps files for an app (all stable-env
-	// directories) and commits + pushes the deletion. It is a no-op if no
-	// files exist for the app.
+	// UnpublishApp removes all GitOps files for an app (app + platform
+	// resource directories, Kargo CRs) and commits + pushes the deletion.
+	// It is a no-op if no files exist for the app.
 	UnpublishApp(ctx context.Context, projectName, appName string) error
+	// UnpublishProject removes all GitOps files for a project (its ArgoCD
+	// AppProject, every app directory, preview trees, Kargo CRs) and commits
+	// + pushes the deletion. It is a no-op if no files exist for the project.
+	UnpublishProject(ctx context.Context, projectName string) error
 }
 
 // KargoPromoter creates Kargo Promotion CRs to advance freight through the
@@ -222,6 +226,18 @@ func (h *PublisherHolder) UnpublishApp(ctx context.Context, projectName, appName
 		return nil
 	}
 	return p.UnpublishApp(ctx, projectName, appName)
+}
+
+// UnpublishProject implements GitOpsPublisher. It delegates to the currently
+// held publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) UnpublishProject(ctx context.Context, projectName string) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.UnpublishProject(ctx, projectName)
 }
 
 // Swap replaces the inner publisher atomically. Subsequent PublishApp calls

@@ -581,7 +581,8 @@ func (r *recordingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, env
 	r.publishedEnvs = append(r.publishedEnvs, env.EnvName)
 	return nil
 }
-func (r *recordingPublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }
+func (r *recordingPublisher) UnpublishApp(_ context.Context, _, _ string) error  { return nil }
+func (r *recordingPublisher) UnpublishProject(_ context.Context, _ string) error { return nil }
 
 // newTestAppPromoteMuxWithPublisher wires an appHandler for promotion tests
 // with a GitOpsPublisher injected.
@@ -646,7 +647,8 @@ func (f *failingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*dom
 func (f *failingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, _ *domain.AppEnvironment) error {
 	return fmt.Errorf("simulated publish failure")
 }
-func (f *failingPublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }
+func (f *failingPublisher) UnpublishApp(_ context.Context, _, _ string) error  { return nil }
+func (f *failingPublisher) UnpublishProject(_ context.Context, _ string) error { return nil }
 
 func TestPromote_PublishAppEnvFailureContinues(t *testing.T) {
 	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, &failingPublisher{})
