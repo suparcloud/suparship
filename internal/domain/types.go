@@ -18,7 +18,10 @@
 // the relevant interface, then wire fake first and real after.
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Org represents the single organization in a suparShip installation.
 type Org struct {
@@ -126,6 +129,18 @@ func (c Cluster) EffectiveESONamespace() string {
 		return c.ESONamespace
 	}
 	return "external-secrets"
+}
+
+// Normalize trims stray whitespace from user-entered fields. APIServer is
+// written into ArgoCD destination.server (quoted YAML preserves spaces), where
+// a leading/trailing space makes ArgoCD's cluster lookup fail with
+// `cluster " https://..." not found`. Called on registration and when loading
+// stored records, so previously mis-entered values heal on read.
+func (c *Cluster) Normalize() {
+	c.Name = strings.TrimSpace(c.Name)
+	c.DisplayName = strings.TrimSpace(c.DisplayName)
+	c.APIServer = strings.TrimSpace(c.APIServer)
+	c.ESONamespace = strings.TrimSpace(c.ESONamespace)
 }
 
 // Service is a deployable workload belonging to a project.
