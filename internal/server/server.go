@@ -265,15 +265,15 @@ func NewSealPublisherHolder(initial SealedTokenPublisher) *SealPublisherHolder {
 	return &SealPublisherHolder{p: initial}
 }
 
-// PublishClusterSecretStores implements SealedTokenPublisher.
-func (h *SealPublisherHolder) PublishClusterSecretStores(ctx context.Context, params gitops.ClusterSealParams) error {
+// PublishClusterSecretStore implements SealedTokenPublisher.
+func (h *SealPublisherHolder) PublishClusterSecretStore(ctx context.Context, params gitops.ClusterSealParams) error {
 	h.mu.RLock()
 	p := h.p
 	h.mu.RUnlock()
 	if p == nil {
 		return nil
 	}
-	return p.PublishClusterSecretStores(ctx, params)
+	return p.PublishClusterSecretStore(ctx, params)
 }
 
 // DeleteClusterSecretStores implements SealedTokenPublisher.
@@ -540,6 +540,10 @@ func New(cfg Config) *Server {
 		if r, ok := cfg.GitOpsPublisher.(SecretStoreReconciler); ok {
 			ch.storeReconciler = r
 		}
+		// Secrets cleanup wiring for cluster deletion (all optional).
+		ch.sealPublisher = cfg.SealedTokenPublisher
+		ch.orgStore = cfg.OrgProvider
+		ch.kubeClient = cfg.KubeClient
 		ch.registerRoutes(mux)
 		cfg.Logger.Info("cluster endpoints enabled")
 	}

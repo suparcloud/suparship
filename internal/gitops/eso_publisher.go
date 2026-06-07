@@ -16,15 +16,26 @@ import (
 // Connect server ESO reads from.
 const DefaultConnectEndpoint = "http://onepassword-connect." + secrets.DefaultConnectNamespace + ".svc.cluster.local:8080"
 
-// ESOSecretStoreConfig captures the info needed to render one
-// ClusterSecretStore — one per scope/vault (global, an env, a cluster).
+// ESOSecretStoreConfig captures the info needed to render one per-vault
+// ClusterSecretStore (k8s backend: one store per vault/namespace).
 type ESOSecretStoreConfig struct {
 	// Scope identifies which vault this store reads from.
 	Scope secrets.Scope
-	// BackendType selects the provider stanza (k8s vs 1Password).
+	// BackendType selects the provider stanza. Only the k8s backend renders
+	// per-vault stores — the 1Password backend uses the unified per-cluster
+	// store (BuildUnifiedClusterSecretStoreYAML).
 	BackendType secrets.BackendType
-	// VaultID is the 1Password vault UUID for this scope. Ignored for k8s.
-	VaultID string
+	// Branding stamps platform identity into the generated labels.
+	Branding branding.Config
+}
+
+// UnifiedStoreConfig captures the single per-cluster ClusterSecretStore for
+// the 1Password backend: fixed name (secrets.UnifiedStoreName), one Connect
+// token, and the full list of vaults the cluster reads.
+type UnifiedStoreConfig struct {
+	// VaultIDs are the 1Password vault UUIDs (global first, then env vaults).
+	// Rendered into the provider's vaults map in order (1-based).
+	VaultIDs []string
 	// ESONamespace is the namespace on the target cluster where the sealed
 	// Connect-token Secret lives. Defaults to "external-secrets" when empty.
 	ESONamespace string
@@ -58,7 +69,8 @@ type ESOExternalSecretConfig struct {
 	Branding  branding.Config
 }
 
-// BuildClusterSecretStoreYAML renders a ClusterSecretStore from cfg.
+// BuildClusterSecretStoreYAML renders one per-vault ClusterSecretStore
+// (k8s backend).
 func BuildClusterSecretStoreYAML(cfg ESOSecretStoreConfig) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1
@@ -82,36 +94,52 @@ spec:
           name: suparship-eso-reader
           namespace: suparship-system
 `, secrets.VaultName(cfg.Scope)))
-	case secrets.Backend1Password:
-		esoNS := cfg.ESONamespace
-		if esoNS == "" {
-			esoNS = secrets.OnePasswordRemoteNamespace
-		}
-		connectEndpoint := cfg.ConnectEndpoint
-		if connectEndpoint == "" {
-			connectEndpoint = DefaultConnectEndpoint
-		}
-		sb.WriteString(fmt.Sprintf(`    onepassword:
+	default:
+		sb.WriteString(fmt.Sprintf("    # %s provider — configure manually\n", cfg.BackendType))
+	}
+
+	return sb.String()
+}
+
+// BuildUnifiedClusterSecretStoreYAML renders the single per-cluster
+// ClusterSecretStore for the 1Password backend. The fixed name
+// (secrets.UnifiedStoreName) is identical on every cluster, the vaults map
+// lists every vault the cluster reads (lookup order is cosmetic — item names
+// are scope-unique), and auth references the cluster's one sealed Connect
+// token (secrets.ConnectTokenSecretName).
+func BuildUnifiedClusterSecretStoreYAML(cfg UnifiedStoreConfig) string {
+	esoNS := cfg.ESONamespace
+	if esoNS == "" {
+		esoNS = secrets.OnePasswordRemoteNamespace
+	}
+	connectEndpoint := cfg.ConnectEndpoint
+	if connectEndpoint == "" {
+		connectEndpoint = DefaultConnectEndpoint
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: %s
+  labels:
+%s
+spec:
+  provider:
+    onepassword:
       connectHost: %s
       vaults:
-        %s: 1
-      auth:
+`, secrets.UnifiedStoreName(), branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), connectEndpoint))
+	for i, id := range cfg.VaultIDs {
+		sb.WriteString(fmt.Sprintf("        %s: %d\n", id, i+1))
+	}
+	sb.WriteString(fmt.Sprintf(`      auth:
         secretRef:
           connectTokenSecretRef:
             name: %s
             key: %s
             namespace: %s
-`,
-			connectEndpoint,
-			cfg.VaultID,
-			secrets.ConnectTokenSecretName(cfg.Scope),
-			secrets.SATokenSecretKey,
-			esoNS,
-		))
-	default:
-		sb.WriteString(fmt.Sprintf("    # %s provider — configure manually\n", cfg.BackendType))
-	}
-
+`, secrets.ConnectTokenSecretName, secrets.SATokenSecretKey, esoNS))
 	return sb.String()
 }
 
@@ -202,22 +230,35 @@ type WorkloadExternalSecretParams struct {
 	// scope regardless of presence.
 	Cluster  string
 	Presence ScopePresence
-	Branding branding.Config
+	// UnifiedStore selects the 1Password layout: every item extracts from the
+	// single per-cluster store (secrets.UnifiedStoreName), so no per-entry
+	// sourceRef is emitted. False = k8s layout with per-vault stores.
+	UnifiedStore bool
+	Branding     branding.Config
 }
 
 // BuildAppExternalSecret returns the single merged ExternalSecret config for an
 // app-env, or nil when no scope has keys. dataFrom items are ordered
-// global→env→cluster, shared-before-app within each scope, so cluster/app wins;
-// each item carries its scope's store (the global store is the default, so
-// global items omit sourceRef). Cluster-override items live in the env vault,
-// so they extract from the ENV store; they are included only when the env is
-// bound to a cluster.
+// global→env→cluster, shared-before-app within each scope, so cluster/app wins.
+// Cluster-override items live in the env vault and are included only when the
+// env is bound to a cluster.
+//
+// Store wiring depends on the backend: with UnifiedStore (1Password) every
+// item extracts from the single per-cluster store, so no sourceRef is emitted;
+// otherwise (k8s) each item carries its scope's per-vault store and non-global
+// items emit a per-entry sourceRef.
 func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretConfig {
-	globalStore := secrets.StoreName(secrets.GlobalScope())
+	storeFor := func(scope secrets.Scope) string {
+		if p.UnifiedStore {
+			return secrets.UnifiedStoreName()
+		}
+		return secrets.StoreName(scope)
+	}
+	defaultStore := storeFor(secrets.GlobalScope())
 	var items []ESOItemRef
 
 	add := func(scope secrets.Scope, shared, app bool) {
-		store := secrets.StoreName(scope)
+		store := storeFor(scope)
 		if shared {
 			items = append(items, ESOItemRef{Key: secrets.SharedItemName(scope), StoreName: store})
 		}
@@ -238,7 +279,7 @@ func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretCo
 	return &ESOExternalSecretConfig{
 		Name:      secrets.AppSecretName(p.App),
 		Namespace: p.Namespace,
-		StoreName: globalStore,
+		StoreName: defaultStore,
 		Items:     items,
 		Branding:  p.Branding,
 	}

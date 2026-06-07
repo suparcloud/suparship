@@ -21,23 +21,26 @@ func TestBuildClusterSecretStoreYAML_K8s(t *testing.T) {
 	}
 }
 
-func TestBuildClusterSecretStoreYAML_1Password(t *testing.T) {
-	yaml := BuildClusterSecretStoreYAML(ESOSecretStoreConfig{
-		Scope:       secrets.EnvScope("prod"),
-		BackendType: secrets.Backend1Password,
-		VaultID:     "v1",
+func TestBuildUnifiedClusterSecretStoreYAML(t *testing.T) {
+	yaml := BuildUnifiedClusterSecretStoreYAML(UnifiedStoreConfig{
+		VaultIDs: []string{"v-global", "v-env-staging"},
 	})
+	if !strings.Contains(yaml, "name: "+secrets.UnifiedStoreName()) {
+		t.Errorf("expected fixed unified store name, got:\n%s", yaml)
+	}
 	if !strings.Contains(yaml, "connectHost: "+DefaultConnectEndpoint) {
 		t.Errorf("expected in-cluster connectHost, got:\n%s", yaml)
 	}
-	if !strings.Contains(yaml, "name: op-connect-token-env-prod") {
-		t.Errorf("expected scope-derived auth secret, got:\n%s", yaml)
+	// One store lists every vault the cluster reads, in order.
+	if !strings.Contains(yaml, "v-global: 1") || !strings.Contains(yaml, "v-env-staging: 2") {
+		t.Errorf("expected ordered multi-vault mapping, got:\n%s", yaml)
+	}
+	// Auth references the cluster's single sealed Connect token.
+	if !strings.Contains(yaml, "name: "+secrets.ConnectTokenSecretName) {
+		t.Errorf("expected unified auth secret name, got:\n%s", yaml)
 	}
 	if !strings.Contains(yaml, "namespace: "+secrets.OnePasswordRemoteNamespace) {
 		t.Errorf("expected auth secret namespace, got:\n%s", yaml)
-	}
-	if !strings.Contains(yaml, "v1: 1") {
-		t.Errorf("expected single vault id mapping, got:\n%s", yaml)
 	}
 }
 
@@ -172,6 +175,41 @@ func TestBuildAppExternalSecret_ClusterItemsUseEnvStore(t *testing.T) {
 		if cfg.Items[i].StoreName != "suparship-store-env-prod" {
 			t.Errorf("item %q store = %q, want env store", k, cfg.Items[i].StoreName)
 		}
+	}
+}
+
+func TestBuildAppExternalSecret_UnifiedStore(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App:          "web",
+		Namespace:    "acme-web-prod",
+		Env:          "prod",
+		Cluster:      "c1",
+		UnifiedStore: true,
+		Presence: ScopePresence{
+			GlobalShared: true,
+			EnvApp:       true,
+			ClusterApp:   true,
+		},
+	})
+	if cfg == nil {
+		t.Fatal("expected a config")
+	}
+	// 1Password: every item extracts from the single per-cluster store.
+	if cfg.StoreName != secrets.UnifiedStoreName() {
+		t.Errorf("default store = %q, want %q", cfg.StoreName, secrets.UnifiedStoreName())
+	}
+	for _, it := range cfg.Items {
+		if it.StoreName != secrets.UnifiedStoreName() {
+			t.Errorf("item %q store = %q, want unified store", it.Key, it.StoreName)
+		}
+	}
+	// No per-entry sourceRef should be rendered (item store == default store).
+	yaml := BuildExternalSecretYAML(*cfg)
+	if strings.Contains(yaml, "sourceRef:") {
+		t.Errorf("expected no sourceRef in unified-store mode, got:\n%s", yaml)
+	}
+	if !strings.Contains(yaml, "name: "+secrets.UnifiedStoreName()) {
+		t.Errorf("expected unified store as secretStoreRef, got:\n%s", yaml)
 	}
 }
 

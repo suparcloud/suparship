@@ -195,9 +195,13 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/org/secret-backend/vaults", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListVaults)))
 		// Global vault: the 1Password vault holding global-scope items.
 		mux.HandleFunc("PUT /api/v1/org/secret-backend/global-vault", requireOrgAdmin(rh.requireOrgAdmin(sh.handleSetGlobalVault)))
-		// Env vault provisioning (1Password Connect-token sealing). Cluster
-		// overrides live inside env vaults, so there is no cluster registration.
+		// Env vault registration (vault ID only — cluster overrides live inside
+		// env vaults, so there is no cluster vault registration).
 		mux.HandleFunc("POST /api/v1/org/secret-backend/vaults/env/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRegisterEnvVault)))
+		// Per-cluster Connect token: one token per cluster, covering the global
+		// vault + the env vaults bound to that cluster; sealing publishes the
+		// cluster's single unified ClusterSecretStore.
+		mux.HandleFunc("POST /api/v1/org/secret-backend/clusters/{cluster}/connect-token", requireOrgAdmin(rh.requireOrgAdmin(sh.handleSetClusterConnectToken)))
 
 		// ── Shared-tier secrets (org-admin) across the 3 scopes ──
 		// Cluster scope is per-(env, cluster): routes nest cluster under env.

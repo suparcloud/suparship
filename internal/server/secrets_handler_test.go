@@ -177,7 +177,18 @@ func TestResolvedSecrets(t *testing.T) {
 func TestRegisterEnvVault_RequiresOnePassword(t *testing.T) {
 	mux, ah := newSecretsMux()
 	rec := do(t, mux, ah, "POST", "/api/v1/org/secret-backend/vaults/env/staging", "alice", "org_admin",
-		map[string]string{"vaultId": "v1", "connectToken": "tok"})
+		map[string]string{"vaultId": "v1"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 (1Password backend required), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSetClusterConnectToken_RequiresOnePassword verifies the per-cluster
+// Connect-token endpoint is rejected on the default k8s backend.
+func TestSetClusterConnectToken_RequiresOnePassword(t *testing.T) {
+	mux, ah := newSecretsMux()
+	rec := do(t, mux, ah, "POST", "/api/v1/org/secret-backend/clusters/prod-eu/connect-token", "alice", "org_admin",
+		map[string]string{"connectToken": "tok"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422 (1Password backend required), got %d: %s", rec.Code, rec.Body.String())
 	}

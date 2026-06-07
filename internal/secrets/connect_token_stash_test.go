@@ -55,11 +55,12 @@ func TestDeleteConnectToken_IdempotentOnMissing(t *testing.T) {
 
 func TestStash_LabelsForDiscovery(t *testing.T) {
 	client := fake.NewClientset()
-	if err := secrets.StashConnectToken(context.Background(), client, "prod", []byte("x")); err != nil {
+	key := secrets.ClusterStashKey("prod-eu")
+	if err := secrets.StashConnectToken(context.Background(), client, key, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	sec, err := client.CoreV1().Secrets("suparship-system").Get(context.Background(),
-		secrets.ConnectTokenStashName("prod"), metav1.GetOptions{})
+		secrets.ConnectTokenStashName(key), metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestStash_LabelsForDiscovery(t *testing.T) {
 	if sec.Labels["suparship.io/type"] != "onepassword-connect-token-stash" {
 		t.Errorf("missing type label: %v", sec.Labels)
 	}
-	if sec.Labels["suparship.io/env"] != "prod" {
-		t.Errorf("missing env label: %v", sec.Labels)
+	if sec.Labels["suparship.io/key"] != key {
+		t.Errorf("missing key label: %v", sec.Labels)
 	}
 }

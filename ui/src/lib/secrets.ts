@@ -11,9 +11,11 @@ export interface SecretKeysResponse {
   secretName: string;
 }
 
-// VaultRef describes one provisioned 1Password vault (global / an env).
+// VaultRef describes one registered 1Password vault (global / an env).
 // Key is the env name, empty for the global vault. Cluster overrides are
 // items inside the env vault — clusters have no vault of their own.
+// Registration records the vault ID only; Connect tokens are per cluster
+// (see ClusterTokenRef).
 export interface VaultRef {
   key?: string;
   vaultId: string;
@@ -21,8 +23,17 @@ export interface VaultRef {
   provisioned?: boolean;
   lastProvisioned?: string;
   lastError?: string;
-  clusterSecretStoreName?: string;
+}
+
+// ClusterTokenRef tracks one cluster's single Connect token + unified store
+// seal state. The token covers every vault the cluster reads (global + its
+// bound env vaults).
+export interface ClusterTokenRef {
+  cluster: string;
   connectEndpoint?: string;
+  sealed?: boolean;
+  lastSealed?: string;
+  lastError?: string;
 }
 
 export interface ConnectStatus {
@@ -37,6 +48,7 @@ export interface OnePasswordConfig {
   connect: ConnectStatus;
   globalVault?: VaultRef;
   envVaults?: VaultRef[];
+  clusterTokens?: ClusterTokenRef[];
 }
 
 export interface SecretBackendConfig {
@@ -95,27 +107,38 @@ export interface SetGlobalVaultResponse {
 export function setGlobalVault(
   vaultId: string,
   vaultName?: string,
-  connectToken?: string,
-  connectEndpoint?: string,
 ): Promise<SetGlobalVaultResponse> {
   return api.put<SetGlobalVaultResponse>("/org/secret-backend/global-vault", {
     vaultId,
     vaultName: vaultName || "",
-    connectToken: connectToken || "",
-    connectEndpoint: connectEndpoint || "",
   });
 }
 
-// ── Env vault provisioning (1Password) ──────────────────────────────────────
-// Registers an env vault and seals its Connect token onto the env's bound
-// cluster. Cluster overrides are items inside the env vault, so clusters need
-// no registration of their own.
+// ── Env vault registration (1Password) ──────────────────────────────────────
+// Records which vault backs the env (ID only). Connect tokens are per cluster
+// (setClusterConnectToken). Cluster overrides are items inside the env vault,
+// so clusters need no vault registration of their own.
 
 export function registerEnvVault(
   env: string,
-  body: { vaultId: string; vaultName?: string; connectToken?: string; connectEndpoint?: string },
+  body: { vaultId: string; vaultName?: string },
 ): Promise<void> {
   return api.post(`/org/secret-backend/vaults/env/${encodeURIComponent(env)}`, body);
+}
+
+// ── Per-cluster Connect token (1Password) ───────────────────────────────────
+// One token per cluster, with access to every vault the cluster reads (the
+// global vault + its bound env vaults). suparShip stashes it, seals it, and
+// publishes the cluster's single unified ClusterSecretStore.
+
+export function setClusterConnectToken(
+  cluster: string,
+  body: { connectToken: string; connectEndpoint?: string },
+): Promise<void> {
+  return api.post(
+    `/org/secret-backend/clusters/${encodeURIComponent(cluster)}/connect-token`,
+    body,
+  );
 }
 
 // ── Secret sync ────────────────────────────────────────────────────────────────

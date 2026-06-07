@@ -70,11 +70,27 @@ func ItemName(scope Scope, tier Tier, app string) string {
 	return SharedItemName(scope)
 }
 
-// ── ClusterSecretStore names (one ESO store per vault) ─────────────────────
+// ── ClusterSecretStore names ────────────────────────────────────────────────
+//
+// 1Password backend: every workload cluster runs ONE ClusterSecretStore with
+// the fixed name UnifiedStoreName, whose provider lists all the vaults that
+// cluster reads (global + its bound envs). k8s backend: one store per
+// vault/namespace (StoreName), since the kubernetes provider reads exactly
+// one remoteNamespace per store.
 
-// StoreName returns the ClusterSecretStore name for the given scope. Cluster
-// scope reads from its environment's store — cluster items live in the env
-// vault, so item and store suffixes intentionally diverge for cluster scope.
+// unifiedStoreName is the fixed per-cluster ClusterSecretStore name for the
+// 1Password backend. Identical on every cluster, so app ExternalSecrets are
+// cluster-agnostic and need no per-entry sourceRef.
+const unifiedStoreName = "suparship-store"
+
+// UnifiedStoreName returns the fixed ClusterSecretStore name used by the
+// 1Password backend on every workload cluster.
+func UnifiedStoreName() string { return unifiedStoreName }
+
+// StoreName returns the per-vault ClusterSecretStore name for the given scope
+// (k8s backend). Cluster scope reads from its environment's store — cluster
+// items live in the env vault, so item and store suffixes intentionally
+// diverge for cluster scope.
 func StoreName(scope Scope) string {
 	if scope.Kind == ScopeCluster {
 		return "suparship-store-" + scopeSuffix(EnvScope(scope.Env))

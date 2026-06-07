@@ -167,6 +167,13 @@ func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, 
 	p.cfg.AddonProfiles = addonProfiles
 }
 
+// usesUnifiedStore reports whether app ExternalSecrets should extract from the
+// single per-cluster ClusterSecretStore (1Password backend) instead of the
+// per-vault stores (k8s backend).
+func (p *Publisher) usesUnifiedStore() bool {
+	return p.cfg.BackendConfig != nil && p.cfg.BackendConfig.Effective() == secrets.Backend1Password
+}
+
 // NewPublisher creates a Publisher from cfg.
 // Returns an error when RepoURL is empty (required).
 func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
@@ -636,12 +643,13 @@ func (p *Publisher) writeAppPlatformResources(
 ) error {
 	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
 	esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
-		App:       app.Name,
-		Namespace: namespace,
-		Env:       env.EnvName,
-		Cluster:   env.ClusterRef,
-		Presence:  env.ScopeKeys,
-		Branding:  p.cfg.Branding,
+		App:          app.Name,
+		Namespace:    namespace,
+		Env:          env.EnvName,
+		Cluster:      env.ClusterRef,
+		Presence:     env.ScopeKeys,
+		UnifiedStore: p.usesUnifiedStore(),
+		Branding:     p.cfg.Branding,
 	})
 	meta := PlatformAppMeta{Name: app.Name, Project: app.ProjectName, Namespace: namespace}
 	if err := p.writePlatformDir(resDir, app.Name, namespace, env.EnvVars, esCfg, meta); err != nil {
@@ -1037,11 +1045,12 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		previewDir := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName)
 		resDir := p.outputDir(repoDir, "_app-resources", "previews", app.ProjectName, preview.PreviewName)
 		esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
-			App:       app.Name,
-			Namespace: preview.Namespace,
-			Env:       preview.PreviewName,
-			Presence:  preview.ScopeKeys,
-			Branding:  p.cfg.Branding,
+			App:          app.Name,
+			Namespace:    preview.Namespace,
+			Env:          preview.PreviewName,
+			Presence:     preview.ScopeKeys,
+			UnifiedStore: p.usesUnifiedStore(),
+			Branding:     p.cfg.Branding,
 		})
 		meta := PlatformAppMeta{
 			Name:          preview.PreviewName,

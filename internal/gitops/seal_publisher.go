@@ -11,122 +11,100 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
-// ScopeToken is one vault's 1Password Connect token to seal onto a workload
-// cluster, alongside the ClusterSecretStore that reads that vault.
-type ScopeToken struct {
-	// Scope identifies the vault (global or an env).
-	Scope secrets.Scope
-	// VaultID is the 1Password vault UUID for this scope.
-	VaultID string
-	// Token is the plaintext Connect token. It is sealed with the target
-	// cluster's cert and never written to Git in plaintext.
-	Token []byte
-	// ConnectEndpoint overrides the in-cluster 1Password Connect URL.
-	ConnectEndpoint string
-}
-
-// ClusterSealParams describes the full set of 1Password Connect tokens +
-// ClusterSecretStores to publish for ONE workload cluster. A cluster reads the
-// env vault(s) of the environments deployed to it (which also hold its
-// cluster-override items) and the org-wide global vault — so Scopes carries
-// all of those.
+// ClusterSealParams describes the single 1Password Connect token + unified
+// ClusterSecretStore to publish for ONE workload cluster. A cluster carries
+// ONE token with access to every vault it reads — the org-wide global vault
+// plus the env vault(s) of the environments deployed to it (which also hold
+// its cluster-override items) — and ONE store listing those vaults.
 type ClusterSealParams struct {
 	// ClusterName is the registered suparship cluster name (used for the
 	// per-cluster ArgoCD Application name and the _secret-stores/{cluster}/ dir).
 	ClusterName string
 	// ArgoCDDestination is the target cluster API server URL (https://...).
 	ArgoCDDestination string
-	// ESONamespace is where ESO + the sealed Connect-token Secrets live on the
+	// ESONamespace is where ESO + the sealed Connect-token Secret live on the
 	// target cluster. Defaults to "external-secrets".
 	ESONamespace string
 	// Cert is the target cluster's sealed-secrets controller public cert (PEM).
 	Cert []byte
-	// Scopes are the vault tokens to seal onto this cluster.
-	Scopes []ScopeToken
+	// Token is the cluster's single plaintext Connect token. It is sealed with
+	// the target cluster's cert and never written to Git in plaintext.
+	Token []byte
+	// VaultIDs are the 1Password vault UUIDs this cluster reads (global first,
+	// then env vaults). Rendered into the unified store's vaults map in order.
+	VaultIDs []string
+	// ConnectEndpoint overrides the in-cluster 1Password Connect URL.
+	ConnectEndpoint string
 }
 
-// PublishClusterSecretStores seals each scope's Connect token with the target
+// PublishClusterSecretStore seals the cluster's Connect token with the target
 // cluster's cert and commits, per cluster:
 //
-//	gitops-output/_secret-stores/{cluster}/sealed-token-{scopeKey}.yaml  -- SealedSecret
-//	gitops-output/_secret-stores/{cluster}/store-{scopeKey}.yaml         -- ClusterSecretStore
-//	gitops-output/_infra/secrets-{cluster}-app.yaml                      -- ArgoCD Application
+//	gitops-output/_secret-stores/{cluster}/sealed-token.yaml  -- SealedSecret (op-connect-token)
+//	gitops-output/_secret-stores/{cluster}/store.yaml         -- unified ClusterSecretStore (suparship-store)
+//	gitops-output/_infra/secrets-{cluster}-app.yaml           -- ArgoCD Application
 //
 // The ArgoCD Application syncs the whole _secret-stores/{cluster}/ directory to
-// the target cluster, so its ESO can read the global / env vaults. Scope files
-// no longer in params.Scopes are pruned (including stale per-cluster-vault
-// files from the previous model). Idempotent.
-func (p *Publisher) PublishClusterSecretStores(ctx context.Context, params ClusterSealParams) error {
+// the target cluster, so its ESO can read every vault the cluster needs through
+// one store. Any other files in the directory are pruned (including the legacy
+// per-scope sealed-token-{scope}.yaml / store-{scope}.yaml pairs). Idempotent.
+func (p *Publisher) PublishClusterSecretStore(ctx context.Context, params ClusterSealParams) error {
 	if params.ClusterName == "" {
-		return fmt.Errorf("PublishClusterSecretStores: clusterName is required")
+		return fmt.Errorf("PublishClusterSecretStore: clusterName is required")
 	}
 	if params.ArgoCDDestination == "" {
-		return fmt.Errorf("PublishClusterSecretStores: ArgoCDDestination is required for cluster %q", params.ClusterName)
+		return fmt.Errorf("PublishClusterSecretStore: ArgoCDDestination is required for cluster %q", params.ClusterName)
 	}
 	if len(params.Cert) == 0 {
-		return fmt.Errorf("PublishClusterSecretStores: cert is required for cluster %q", params.ClusterName)
+		return fmt.Errorf("PublishClusterSecretStore: cert is required for cluster %q", params.ClusterName)
+	}
+	if len(params.Token) == 0 {
+		return fmt.Errorf("PublishClusterSecretStore: token is required for cluster %q", params.ClusterName)
+	}
+	if len(params.VaultIDs) == 0 {
+		return fmt.Errorf("PublishClusterSecretStore: no vaults registered for cluster %q", params.ClusterName)
 	}
 	esoNS := params.ESONamespace
 	if esoNS == "" {
 		esoNS = secrets.OnePasswordRemoteNamespace
 	}
 
-	// Render all files first so a sealing error aborts before any write.
-	type scopeFile struct{ sealedName, storeName, sealedYAML, storeYAML string }
-	files := make([]scopeFile, 0, len(params.Scopes))
-	for _, st := range params.Scopes {
-		if len(st.Token) == 0 || st.VaultID == "" {
-			return fmt.Errorf("PublishClusterSecretStores: scope %q missing token or vaultID", secrets.ScopeKey(st.Scope))
-		}
-		key := secrets.ScopeKey(st.Scope)
-		sealedYAML, err := seal.BuildSealedSecret(params.Cert, seal.SealedSecretInput{
-			Name:      secrets.ConnectTokenSecretName(st.Scope),
-			Namespace: esoNS,
-			Scope:     seal.ScopeNamespaceWide,
-			Data:      map[string][]byte{secrets.SATokenSecretKey: st.Token},
-			Type:      "Opaque",
-			Labels: branding.MergeLabels(
-				p.cfg.Branding.ManagedByLabels(),
-				map[string]string{p.cfg.Branding.LabelKey("scope"): key},
-			),
-		})
-		if err != nil {
-			return fmt.Errorf("seal token for scope %q: %w", key, err)
-		}
-		storeYAML := BuildClusterSecretStoreYAML(ESOSecretStoreConfig{
-			Scope:           st.Scope,
-			BackendType:     secrets.Backend1Password,
-			VaultID:         st.VaultID,
-			ESONamespace:    esoNS,
-			ConnectEndpoint: st.ConnectEndpoint,
-			Branding:        p.cfg.Branding,
-		})
-		files = append(files, scopeFile{
-			sealedName: "sealed-token-" + key + ".yaml",
-			storeName:  "store-" + key + ".yaml",
-			sealedYAML: sealedYAML,
-			storeYAML:  storeYAML,
-		})
+	// Render both files first so a sealing error aborts before any write.
+	sealedYAML, err := seal.BuildSealedSecret(params.Cert, seal.SealedSecretInput{
+		Name:      secrets.ConnectTokenSecretName,
+		Namespace: esoNS,
+		Scope:     seal.ScopeNamespaceWide,
+		Data:      map[string][]byte{secrets.SATokenSecretKey: params.Token},
+		Type:      "Opaque",
+		Labels: branding.MergeLabels(
+			p.cfg.Branding.ManagedByLabels(),
+			map[string]string{p.cfg.Branding.LabelKey("cluster"): params.ClusterName},
+		),
+	})
+	if err != nil {
+		return fmt.Errorf("seal token for cluster %q: %w", params.ClusterName, err)
 	}
+	storeYAML := BuildUnifiedClusterSecretStoreYAML(UnifiedStoreConfig{
+		VaultIDs:        params.VaultIDs,
+		ESONamespace:    esoNS,
+		ConnectEndpoint: params.ConnectEndpoint,
+		Branding:        p.cfg.Branding,
+	})
 
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		storesDir := p.outputDir(repoDir, "_secret-stores", params.ClusterName)
 		infraDir := p.outputDir(repoDir, "_infra")
 
-		wanted := map[string]bool{}
-		for _, f := range files {
-			wanted[f.sealedName] = true
-			wanted[f.storeName] = true
-			if err := p.writeFile(filepath.Join(storesDir, f.sealedName), []byte(f.sealedYAML)); err != nil {
-				return err
-			}
-			if err := p.writeFile(filepath.Join(storesDir, f.storeName), []byte(f.storeYAML)); err != nil {
-				return err
-			}
+		wanted := map[string]bool{"sealed-token.yaml": true, "store.yaml": true}
+		if err := p.writeFile(filepath.Join(storesDir, "sealed-token.yaml"), []byte(sealedYAML)); err != nil {
+			return err
+		}
+		if err := p.writeFile(filepath.Join(storesDir, "store.yaml"), []byte(storeYAML)); err != nil {
+			return err
 		}
 
-		// Prune scope files no longer wanted (e.g. an env was unbound from this
-		// cluster, or a vault de-provisioned).
+		// Prune everything else — legacy per-scope sealed-token-{scope}.yaml /
+		// store-{scope}.yaml pairs from the per-vault-token model.
 		if entries, err := os.ReadDir(storesDir); err == nil {
 			for _, e := range entries {
 				if e.IsDir() || wanted[e.Name()] {
@@ -140,11 +118,11 @@ func (p *Publisher) PublishClusterSecretStores(ctx context.Context, params Clust
 		if err := p.writeFile(filepath.Join(infraDir, "secrets-"+params.ClusterName+"-app.yaml"), []byte(appYAML)); err != nil {
 			return err
 		}
-		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): seal vault tokens for cluster=%s", params.ClusterName))
+		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): seal connect token for cluster=%s", params.ClusterName))
 	})
 }
 
-// DeleteClusterSecretStores removes a cluster's sealed tokens + stores and its
+// DeleteClusterSecretStores removes a cluster's sealed token + store and its
 // ArgoCD Application. No-op if absent.
 func (p *Publisher) DeleteClusterSecretStores(ctx context.Context, clusterName string) error {
 	if clusterName == "" {
@@ -197,7 +175,7 @@ spec:
     path: %s
     directory:
       recurse: false
-      include: '{sealed-token-*.yaml,store-*.yaml}'
+      include: '{sealed-token*.yaml,store*.yaml}'
   destination:
     server: %s
     namespace: %s

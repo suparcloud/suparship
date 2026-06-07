@@ -7,8 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/seal"
+	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // clusterHandler serves /api/v1/clusters endpoints.
@@ -24,6 +28,15 @@ type clusterHandler struct {
 	// storeReconciler republishes ESO ClusterSecretStores when a cluster is
 	// created. Optional; nil disables the hook.
 	storeReconciler SecretStoreReconciler
+	// sealPublisher prunes the removed cluster's _secret-stores/{cluster}/ dir
+	// + ArgoCD app on delete. Optional; nil disables the cleanup.
+	sealPublisher SealedTokenPublisher
+	// orgStore drops the removed cluster's Connect-token state on delete.
+	// Optional; nil disables the cleanup.
+	orgStore rbac.OrgStore
+	// kubeClient removes the removed cluster's Connect-token stash on delete.
+	// Optional; nil disables the cleanup.
+	kubeClient kubernetes.Interface
 }
 
 // registerRoutes wires cluster endpoints into mux.
@@ -161,7 +174,36 @@ func (ch *clusterHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
+	// Best-effort: drop the removed cluster's sealed token + unified store from
+	// gitops, its Connect-token state from org config, and its token stash.
+	go ch.cleanupClusterSecrets(context.Background(), name)
+
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// cleanupClusterSecrets removes everything the secrets subsystem holds for a
+// deleted cluster: the _secret-stores/{cluster}/ gitops dir + ArgoCD app, the
+// ClusterTokenRef in org config, and the Connect-token stash Secret. All
+// best-effort — failures are logged only.
+func (ch *clusterHandler) cleanupClusterSecrets(ctx context.Context, name string) {
+	if ch.sealPublisher != nil {
+		if err := ch.sealPublisher.DeleteClusterSecretStores(ctx, name); err != nil {
+			ch.logger.Warn("cluster delete: gitops secret-store cleanup failed", "cluster", name, "error", err)
+		}
+	}
+	if ch.orgStore != nil {
+		if org, err := ch.orgStore.GetOrg(ctx); err == nil && org != nil && org.SecretBackend.FindClusterToken(name) != nil {
+			org.SecretBackend.RemoveClusterToken(name)
+			if err := ch.orgStore.SaveOrg(ctx, org); err != nil {
+				ch.logger.Warn("cluster delete: token state cleanup failed", "cluster", name, "error", err)
+			}
+		}
+	}
+	if ch.kubeClient != nil {
+		if err := secrets.DeleteConnectToken(ctx, ch.kubeClient, secrets.ClusterStashKey(name)); err != nil {
+			ch.logger.Warn("cluster delete: token stash cleanup failed", "cluster", name, "error", err)
+		}
+	}
 }
 
 // ── POST /api/v1/clusters/{name}/sealing-cert/refresh ────────────────────────

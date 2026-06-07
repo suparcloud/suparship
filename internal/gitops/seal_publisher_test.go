@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/branding"
-	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // freshTestCertPEM generates a self-signed cert and returns the PEM bytes.
@@ -58,27 +57,28 @@ func TestBuildSecretStoreArgoApp(t *testing.T) {
 	}
 }
 
-func TestPublishClusterSecretStores_ValidatesInputs(t *testing.T) {
+func TestPublishClusterSecretStore_ValidatesInputs(t *testing.T) {
 	p, err := NewPublisher(PublisherConfig{RepoURL: "https://example.com/r.git"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	certPEM := freshTestCertPEM(t)
-	scopes := []ScopeToken{{Scope: secrets.GlobalScope(), VaultID: "v1", Token: []byte("x")}}
+	token := []byte("x")
+	vaults := []string{"v-global", "v-env-staging"}
 
 	cases := []struct {
 		name   string
 		params ClusterSealParams
 	}{
-		{"missing cluster", ClusterSealParams{ArgoCDDestination: "https://k8s:6443", Cert: certPEM, Scopes: scopes}},
-		{"missing destination", ClusterSealParams{ClusterName: "c1", Cert: certPEM, Scopes: scopes}},
-		{"missing cert", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Scopes: scopes}},
-		{"scope missing token", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Cert: certPEM,
-			Scopes: []ScopeToken{{Scope: secrets.GlobalScope(), VaultID: "v1"}}}},
+		{"missing cluster", ClusterSealParams{ArgoCDDestination: "https://k8s:6443", Cert: certPEM, Token: token, VaultIDs: vaults}},
+		{"missing destination", ClusterSealParams{ClusterName: "c1", Cert: certPEM, Token: token, VaultIDs: vaults}},
+		{"missing cert", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Token: token, VaultIDs: vaults}},
+		{"missing token", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Cert: certPEM, VaultIDs: vaults}},
+		{"missing vaults", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Cert: certPEM, Token: token}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := p.PublishClusterSecretStores(t.Context(), tc.params); err == nil {
+			if err := p.PublishClusterSecretStore(t.Context(), tc.params); err == nil {
 				t.Error("expected validation error")
 			}
 		})

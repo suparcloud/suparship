@@ -10,44 +10,49 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// connectTokenStashKey is the data key inside the per-env stash Secret
+// connectTokenStashKey is the data key inside the per-cluster stash Secret
 // that holds the plaintext 1Password Connect token.
 const connectTokenStashKey = "token"
 
+// ClusterStashKey returns the stash key for one cluster's Connect token.
+// Each cluster has exactly one token, covering every vault it reads.
+func ClusterStashKey(cluster string) string { return "cluster-" + cluster }
+
 // ConnectTokenStashName returns the suparship-system Secret name that
-// holds the platform's local copy of the per-env 1Password Connect
-// token. The stash is what the startup self-heal goroutine reads to
-// re-seal + re-publish to the gitops repo when the gitops file has
-// gone missing (e.g. after a `git rm` of the gitops-output tree).
+// holds the platform's local copy of one cluster's 1Password Connect
+// token. The stash is what re-seal flows read to re-publish the sealed
+// token + unified store to the gitops repo — on vault-binding changes,
+// or when the gitops file has gone missing (e.g. after a `git rm` of
+// the gitops-output tree).
 //
 // This is the platform's PRIVATE persistence of the token. The same
-// token is also sealed into the gitops repo via PublishSealedReadToken,
-// but that gitops copy is opaque to the platform without per-cluster
-// kubeseal certs — and operators sometimes wipe it. The stash unblocks
-// recovery.
+// token is also sealed into the gitops repo, but that gitops copy is
+// opaque to the platform without per-cluster kubeseal certs — and
+// operators sometimes wipe it. The stash unblocks recovery.
 //
-// Naming intentionally distinct from ConnectTokenSecretName(env) — the
+// Naming intentionally distinct from ConnectTokenSecretName — the
 // latter is the WORKLOAD cluster's unsealed Secret that ESO reads.
-func ConnectTokenStashName(env string) string {
-	return "suparship-onepassword-connect-token-" + env
+func ConnectTokenStashName(key string) string {
+	return "suparship-onepassword-connect-token-" + key
 }
 
-// StashConnectToken upserts the plaintext per-env Connect token into
-// suparship-system. Idempotent; rotating tokens is a normal operation
-// (operator re-pastes via the binding flow) and the stash should
-// reflect the latest value.
+// StashConnectToken upserts the plaintext Connect token into
+// suparship-system under the given stash key (one per cluster).
+// Idempotent; rotating tokens is a normal operation (operator re-pastes
+// via the cluster token flow) and the stash should reflect the latest
+// value.
 //
-// Failure to stash is treated as non-fatal by callers — the binding
-// still works for the current process, only the startup self-heal is
-// degraded. The error is returned so callers can log it.
-func StashConnectToken(ctx context.Context, client kubernetes.Interface, env string, token []byte) error {
-	if env == "" {
-		return fmt.Errorf("env required")
+// Failure to stash is treated as non-fatal by callers — sealing still
+// works for the current request, only later re-seals are degraded. The
+// error is returned so callers can log it.
+func StashConnectToken(ctx context.Context, client kubernetes.Interface, key string, token []byte) error {
+	if key == "" {
+		return fmt.Errorf("stash key required")
 	}
 	if len(token) == 0 {
 		return fmt.Errorf("token required")
 	}
-	name := ConnectTokenStashName(env)
+	name := ConnectTokenStashName(key)
 	secrets := client.CoreV1().Secrets(SystemNamespace)
 
 	desired := &corev1.Secret{
@@ -57,7 +62,7 @@ func StashConnectToken(ctx context.Context, client kubernetes.Interface, env str
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "suparship",
 				"suparship.io/type":            "onepassword-connect-token-stash",
-				"suparship.io/env":             env,
+				"suparship.io/key":             key,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -81,30 +86,30 @@ func StashConnectToken(ctx context.Context, client kubernetes.Interface, env str
 	return nil
 }
 
-// LoadConnectToken returns the plaintext per-env Connect token from
-// the suparship-system stash, or (nil, nil) when no stash exists. The
-// not-found case is intentionally not an error — callers (the self-heal
-// goroutine) treat it as "operator never paste-stashed for this env"
+// LoadConnectToken returns the plaintext Connect token from the
+// suparship-system stash under the given key, or (nil, nil) when no
+// stash exists. The not-found case is intentionally not an error —
+// callers treat it as "operator never pasted a token for this cluster"
 // and skip it with a friendly log message.
-func LoadConnectToken(ctx context.Context, client kubernetes.Interface, env string) ([]byte, error) {
-	sec, err := client.CoreV1().Secrets(SystemNamespace).Get(ctx, ConnectTokenStashName(env), metav1.GetOptions{})
+func LoadConnectToken(ctx context.Context, client kubernetes.Interface, key string) ([]byte, error) {
+	sec, err := client.CoreV1().Secrets(SystemNamespace).Get(ctx, ConnectTokenStashName(key), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get connect-token stash %q: %w", env, err)
+		return nil, fmt.Errorf("get connect-token stash %q: %w", key, err)
 	}
 	return sec.Data[connectTokenStashKey], nil
 }
 
-// DeleteConnectToken removes the per-env stash. Called when an
-// operator removes a binding so we don't leak a token for an env the
-// platform no longer manages. Not-found is non-error (the stash may
-// already be gone, or the binding pre-dated the stash feature).
-func DeleteConnectToken(ctx context.Context, client kubernetes.Interface, env string) error {
-	err := client.CoreV1().Secrets(SystemNamespace).Delete(ctx, ConnectTokenStashName(env), metav1.DeleteOptions{})
+// DeleteConnectToken removes the stash under the given key. Called when
+// an operator removes a cluster so we don't leak a token the platform
+// no longer manages. Not-found is non-error (the stash may already be
+// gone).
+func DeleteConnectToken(ctx context.Context, client kubernetes.Interface, key string) error {
+	err := client.CoreV1().Secrets(SystemNamespace).Delete(ctx, ConnectTokenStashName(key), metav1.DeleteOptions{})
 	if err == nil || apierrors.IsNotFound(err) {
 		return nil
 	}
-	return fmt.Errorf("delete connect-token stash %q: %w", env, err)
+	return fmt.Errorf("delete connect-token stash %q: %w", key, err)
 }

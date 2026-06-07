@@ -1178,9 +1178,10 @@ func selfHealSealedTokens(
 	kubeClient kubernetes.Interface,
 	logger *slog.Logger,
 ) {
-	// TODO(5b): re-seal + republish per-scope Connect tokens (env/cluster
-	// vaults) that are missing from the gitops repo, once 1Password vault
-	// provisioning is reimplemented for the 3-scope model. No-op for now.
+	// TODO(5b): re-seal + republish the per-cluster Connect token + unified
+	// ClusterSecretStore (sealed-token.yaml / store.yaml) for clusters whose
+	// gitops files are missing, from the per-cluster stash
+	// (secrets.ClusterStashKey). No-op for now.
 	_ = ctx
 	_ = pub
 	_ = orgProvider
