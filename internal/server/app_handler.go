@@ -1229,6 +1229,16 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 	} {
 		diags, err := ah.diagnosticsReader.GetAppDiagnostics(ctx, t.app, t.source)
 		if err != nil {
+			// Don't silently drop a read failure (RBAC, throttling, API down) —
+			// that would falsely present a broken env as having no problems.
+			// Surface it as a warning so the operator knows status is unknown.
+			env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
+				Source: t.source,
+				Level:  domain.DiagnosticWarning,
+				Title:  "Delivery status unavailable",
+				Detail: err.Error(),
+				Hint:   "Could not read the ArgoCD Application status; the env's real health is unknown. Check suparShip's access to the ArgoCD namespace and that ArgoCD is reachable.",
+			})
 			continue
 		}
 		env.Status.Diagnostics = append(env.Status.Diagnostics, diags...)

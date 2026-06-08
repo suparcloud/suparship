@@ -5,10 +5,12 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
-	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
 )
@@ -46,6 +48,27 @@ func TestGetAppDiagnostics_AbsentAppIsEmpty(t *testing.T) {
 		t.Fatalf("expected no diagnostics for absent app, got %d", len(diags))
 	}
 }
+
+func TestGetAppDiagnostics_NonNotFoundErrorSurfaces(t *testing.T) {
+	// A real read error (RBAC denial, throttling, API down) must NOT be
+	// swallowed as "no diagnostics" — that would mask a broken env as healthy.
+	scheme := k8sruntime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		scheme, map[schema.GroupVersionResource]string{argoCDAppGVR: "ApplicationList"})
+	dyn.PrependReactor("get", "applications", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: "argoproj.io", Resource: "applications"}, "web-staging",
+			errForbidden{})
+	})
+	r := NewArgoCDStatusReaderFromDynamic(dyn, "argocd")
+	if _, err := r.GetAppDiagnostics(context.Background(), "web-staging", "argocd"); err == nil {
+		t.Fatal("expected a non-NotFound Get error to be returned, not swallowed")
+	}
+}
+
+type errForbidden struct{}
+
+func (errForbidden) Error() string { return "forbidden" }
 
 func TestGetAppDiagnostics_HealthyAppIsEmpty(t *testing.T) {
 	app := argoApp("web-staging", map[string]any{

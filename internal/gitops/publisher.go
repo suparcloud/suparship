@@ -1160,21 +1160,21 @@ func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName strin
 			}
 		}
 
-		// Kargo Warehouse + Stage CRs for this app. Filename-prefix matching:
-		// an app whose name is a hyphen-prefix of a sibling app's name could
-		// over-match stages, but app names within a project are validated DNS
-		// labels and this trade-off keeps deletion store-independent.
-		kargoPrefix := KargoNamespaceForProject(projectName) + "-" + appName + "-"
+		// Kargo Warehouse + Stage CRs for this app. Match on the stamped
+		// suparship.io/app label rather than the filename prefix: a sibling app
+		// whose name extends this one (e.g. "web-admin" vs "web") shares the
+		// filename prefix and would otherwise be wrongly pruned.
 		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
 		if entries, err := os.ReadDir(kargoDir); err == nil {
 			for _, e := range entries {
-				if e.IsDir() || !strings.HasPrefix(e.Name(), kargoPrefix) {
+				if e.IsDir() {
 					continue
 				}
-				if e.Name() != kargoPrefix+"warehouse.yaml" && !strings.HasSuffix(e.Name(), "-stage.yaml") {
+				path := filepath.Join(kargoDir, e.Name())
+				if kargoManifestLabel(path, labelApp) != appName {
 					continue
 				}
-				if err := u.rm(filepath.Join(kargoDir, e.Name())); err != nil {
+				if err := u.rm(path); err != nil {
 					return err
 				}
 			}
@@ -1202,6 +1202,27 @@ func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName strin
 		commitMsg := fmt.Sprintf("feat(apps): delete app %s/%s\n\nDeleted by suparShip.", projectName, appName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// kargoManifestLabel reads a Kargo manifest file and returns the value of the
+// given metadata label, or "" when the file is unreadable or lacks the label.
+// Used to prune an app/project's Kargo CRs by their stamped suparship.io/app
+// or suparship.io/project label rather than by a collision-prone filename
+// prefix.
+func kargoManifestLabel(path, key string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		Metadata struct {
+			Labels map[string]string `yaml:"labels"`
+		} `yaml:"metadata"`
+	}
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		return ""
+	}
+	return m.Metadata.Labels[key]
 }
 
 // isReservedTopLevelDir reports whether a top-level gitops-output entry is a
@@ -1254,16 +1275,21 @@ func (p *Publisher) UnpublishProjectApps(ctx context.Context, projectName string
 			return err
 		}
 
-		// Kargo Project CR + every app's Warehouse/Stage CRs. Same
-		// prefix-matching trade-off as UnpublishApp.
-		kargoPrefix := KargoNamespaceForProject(projectName) + "-"
+		// Kargo Project CR + every app's Warehouse/Stage CRs, matched on the
+		// stamped suparship.io/project label (the Project, Warehouse, and Stage
+		// CRs all carry it) — avoids the filename-prefix collision between a
+		// project and a hyphen-extended sibling (e.g. "web" vs "web-admin").
 		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
 		if entries, err := os.ReadDir(kargoDir); err == nil {
 			for _, e := range entries {
-				if e.IsDir() || !strings.HasPrefix(e.Name(), kargoPrefix) {
+				if e.IsDir() {
 					continue
 				}
-				if err := u.rm(filepath.Join(kargoDir, e.Name())); err != nil {
+				path := filepath.Join(kargoDir, e.Name())
+				if kargoManifestLabel(path, labelProject) != projectName {
+					continue
+				}
+				if err := u.rm(path); err != nil {
 					return err
 				}
 			}

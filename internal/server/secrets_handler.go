@@ -502,13 +502,23 @@ func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *
 		ConnectEndpoint: req.ConnectEndpoint,
 	})
 
-	if err := h.sealCluster(ctx, org, clusterName); err != nil {
-		_ = h.orgStore.SaveOrg(ctx, org) // persist LastError for the UI
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "token saved but sealing failed: " + err.Error()})
-		return
+	sealErr := h.sealCluster(ctx, org, clusterName)
+
+	// Persist just this cluster's token ref (status set by sealCluster) with a
+	// conflict-retried write so a concurrent reseal/edit isn't clobbered.
+	if ref := org.SecretBackend.FindClusterToken(clusterName); ref != nil {
+		refCopy := *ref
+		if perr := rbac.MutateOrg(ctx, h.orgStore, func(o *rbac.Org) error {
+			o.SecretBackend.UpsertClusterToken(refCopy)
+			return nil
+		}); perr != nil && sealErr == nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist org: " + perr.Error()})
+			return
+		}
 	}
-	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist org"})
+
+	if sealErr != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "token saved but sealing failed: " + sealErr.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"cluster": clusterName, "status": "sealed"})
@@ -648,7 +658,24 @@ func (h *secretsHandler) resealAllClusters(ctx context.Context, org *rbac.Org, r
 			h.logger.Warn("reseal cluster skipped/failed", "reason", reason, "cluster", c.Name, "error", err)
 		}
 	}
-	_ = h.orgStore.SaveOrg(ctx, org)
+	// Persist only the per-cluster seal statuses sealCluster updated, via a
+	// conflict-retried read-modify-write — so this background save doesn't
+	// clobber a concurrent config edit (env bindings, vault registration).
+	var refs []secrets.ClusterTokenRef
+	if org.SecretBackend.OnePassword != nil {
+		refs = append(refs, org.SecretBackend.OnePassword.ClusterTokens...)
+	}
+	if len(refs) == 0 {
+		return
+	}
+	if err := rbac.MutateOrg(ctx, h.orgStore, func(o *rbac.Org) error {
+		for _, r := range refs {
+			o.SecretBackend.UpsertClusterToken(r)
+		}
+		return nil
+	}); err != nil {
+		h.logger.Warn("reseal clusters: persisting seal status failed", "reason", reason, "error", err)
+	}
 }
 
 // resealAllClustersAsync reloads the org in the background (so it sees the

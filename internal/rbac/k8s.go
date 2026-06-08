@@ -74,7 +74,14 @@ func (p *K8sOrgProvider) GetOrg(ctx context.Context) (*Org, error) {
 		return nil, fmt.Errorf("configmap %s/%s missing key %q", ConfigMapNamespace, ConfigMapName, ConfigMapKey)
 	}
 
-	return ParseOrg([]byte(data))
+	org, err := ParseOrg([]byte(data))
+	if err != nil {
+		return nil, err
+	}
+	// Carry the ConfigMap's resourceVersion so SaveOrg can compare-and-swap
+	// and reject a write based on a stale read (lost-update prevention).
+	org.resourceVersion = cm.ResourceVersion
+	return org, nil
 }
 
 // SaveOrg persists the org configuration to the ConfigMap, creating it if it
@@ -117,9 +124,43 @@ func (p *K8sOrgProvider) SaveOrg(ctx context.Context, org *Org) error {
 		return fmt.Errorf("reading org configmap: %w", err)
 	}
 
+	// Write the caller's data, preserving any externally-set metadata on the
+	// live object. When the caller's org was loaded with a resourceVersion,
+	// pin the Update to it so a concurrent write since that read is rejected
+	// with a Conflict (lost-update prevention) rather than silently clobbered.
 	existing.Data = cm.Data
+	if org.resourceVersion != "" {
+		existing.ResourceVersion = org.resourceVersion
+	}
 	if _, err := p.client.CoreV1().ConfigMaps(ConfigMapNamespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("updating org configmap: %w", err)
 	}
 	return nil
+}
+
+// MutateOrg performs an optimistic read-modify-write: it loads the org, applies
+// fn, and saves, retrying from a fresh read when a concurrent writer caused a
+// conflict. Use it for background mutations (reseal status, cleanup) that would
+// otherwise clobber a concurrent change. fn must be idempotent across retries.
+func MutateOrg(ctx context.Context, store OrgStore, fn func(*Org) error) error {
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		org, err := store.GetOrg(ctx)
+		if err != nil {
+			return err
+		}
+		if err := fn(org); err != nil {
+			return err
+		}
+		err = store.SaveOrg(ctx, org)
+		if err == nil {
+			return nil
+		}
+		if !apierrors.IsConflict(err) {
+			return err
+		}
+		lastErr = err
+	}
+	return fmt.Errorf("org update failed after %d conflict retries: %w", maxAttempts, lastErr)
 }

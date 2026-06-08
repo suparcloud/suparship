@@ -2,8 +2,10 @@ package kube
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -24,8 +26,13 @@ import (
 // up into the platform app's health.
 func (r *ArgoCDStatusReader) GetAppDiagnostics(ctx context.Context, argoAppName, source string) ([]domain.Diagnostic, error) {
 	raw, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).Get(ctx, argoAppName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil // absent app (e.g. before first publish) == nothing to report
+	}
 	if err != nil {
-		return nil, nil //nolint:nilerr // absent app == nothing to report
+		// A real error (RBAC denial, API throttling, connectivity) must NOT be
+		// reported as "no diagnostics" — that would mask a broken env as healthy.
+		return nil, fmt.Errorf("reading argocd application %q: %w", argoAppName, err)
 	}
 	status, ok := raw.Object["status"].(map[string]any)
 	if !ok {

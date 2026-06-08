@@ -200,7 +200,20 @@ type Org struct {
 	// log in via the org IdP and their group claims drive RBAC (see
 	// RoleBinding.Group). The local admin credential remains as break-glass.
 	Auth AuthConfig `yaml:"auth,omitempty"`
+
+	// resourceVersion is the backing ConfigMap's resourceVersion at load time,
+	// used by SaveOrg for an optimistic compare-and-swap. Unexported so it is
+	// never serialized into the org YAML; set by the provider's GetOrg.
+	resourceVersion string
 }
+
+// ResourceVersion returns the backing ConfigMap resourceVersion this Org was
+// loaded with ("" for a fresh/never-persisted org). Used by the store for
+// optimistic concurrency.
+func (o *Org) ResourceVersion() string { return o.resourceVersion }
+
+// SetResourceVersion records the backing resourceVersion (provider use).
+func (o *Org) SetResourceVersion(rv string) { o.resourceVersion = rv }
 
 // AuthConfig holds org-level authentication configuration.
 type AuthConfig struct {
@@ -370,10 +383,14 @@ func (o *Org) Validate() error {
 		if rb.Project == "" {
 			return fmt.Errorf("roleBindings[%d]: project must not be empty", i)
 		}
-		if rb.Team == "" {
-			return fmt.Errorf("roleBindings[%d]: team must not be empty", i)
-		}
-		if !teamNames[rb.Team] {
+		// A binding grants to exactly one subject: a local Team (matched by
+		// username membership) or an IdP Group (matched by an SSO group claim).
+		switch {
+		case rb.Team == "" && rb.Group == "":
+			return fmt.Errorf("roleBindings[%d]: one of team or group must be set", i)
+		case rb.Team != "" && rb.Group != "":
+			return fmt.Errorf("roleBindings[%d]: set only one of team or group, not both", i)
+		case rb.Team != "" && !teamNames[rb.Team]:
 			return fmt.Errorf("roleBindings[%d]: references unknown team %q", i, rb.Team)
 		}
 		if !IsValidRole(rb.Role) {
