@@ -167,6 +167,17 @@ type DeploymentHistoryReader interface {
 	GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]DeploymentHistoryEntry, error)
 }
 
+// AppDiagnosticsReader reads failure signals from one ArgoCD Application CR
+// (conditions, non-healthy health message, failed sync) as domain.Diagnostics.
+// When nil, the app status simply carries no diagnostics. Implementations must
+// be safe for concurrent use.
+type AppDiagnosticsReader interface {
+	// GetAppDiagnostics returns diagnostics for the named ArgoCD Application.
+	// source labels the origin (e.g. "argocd", "argocd-platform"). Returns an
+	// empty slice (not an error) when the app is absent or healthy.
+	GetAppDiagnostics(ctx context.Context, argoAppName, source string) ([]domain.Diagnostic, error)
+}
+
 // ReadinessProber is a named readiness check injected into the server.
 // Each prober is called by GET /readyz; any non-nil error marks the
 // server as not ready.
@@ -359,6 +370,7 @@ type Config struct {
 	KargoPipelineReader     KargoPipelineReader     // optional: enables GET pipeline-stages endpoint
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
 	ProjectAppCounter       ProjectAppCounter       // optional: sequences two-phase project deletion against live ArgoCD apps
+	AppDiagnosticsReader    AppDiagnosticsReader    // optional: surfaces ArgoCD/ESO failure signals in app env status
 	VaultStore              secrets.VaultStore      // optional: enables secret CRUD across global/env/cluster scopes
 	SecretsAuditor          *secrets.Auditor        // optional: enables audit logging for secret ops
 	ReadinessProbers        []ReadinessProber       // optional: checked by GET /readyz
@@ -511,6 +523,10 @@ func New(cfg Config) *Server {
 			if cfg.DeploymentHistoryReader != nil {
 				rh.appHandler.deploymentHistoryReader = cfg.DeploymentHistoryReader
 				cfg.Logger.Info("deployment history reader enabled — history endpoint active")
+			}
+			if cfg.AppDiagnosticsReader != nil {
+				rh.appHandler.diagnosticsReader = cfg.AppDiagnosticsReader
+				cfg.Logger.Info("app diagnostics reader enabled — ArgoCD/ESO errors surfaced in app status")
 			}
 			cfg.Logger.Info("app endpoints enabled")
 		}

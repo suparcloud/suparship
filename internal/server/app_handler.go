@@ -40,6 +40,7 @@ type appHandler struct {
 	kargoStatusReader       KargoStatusReader       // optional: reads live Kargo Promotion status
 	kargoPipelineReader     KargoPipelineReader     // optional: reads live Kargo Stage pipeline status
 	deploymentHistoryReader DeploymentHistoryReader // optional: reads ArgoCD sync history
+	diagnosticsReader       AppDiagnosticsReader    // optional: reads ArgoCD/ESO failure signals for app env status
 	// kubeClient lets the upgrade-template handler validate that the
 	// requested version actually exists in the cluster as an archive
 	// ConfigMap before mutating + republishing. Optional — when nil
@@ -1178,6 +1179,11 @@ func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appN
 // callers always get a valid response. The method is a no-op when
 // runtimeProvider is nil (fake/local mode).
 func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName string, env *domain.AppEnvironment) {
+	// Diagnostics run regardless of the runtime lookup: a failed sync produces
+	// no workload, so GetServiceRuntime errors — but that "not deployed" case
+	// is exactly when the operator needs the ArgoCD/ESO failure reason.
+	defer ah.enrichEnvWithDiagnostics(ctx, appName, env)
+
 	if ah.runtimeProvider == nil {
 		return
 	}
@@ -1197,6 +1203,29 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	// Populate release image from the live Deployment when not already set.
 	if info.Image != "" && env.Release == nil {
 		env.Release = &domain.AppReleaseRef{Image: info.Image}
+	}
+}
+
+// enrichEnvWithDiagnostics appends ArgoCD/ESO failure signals to env.Status so
+// a stuck or "not deployed" env explains itself. It reads both the chart
+// Application ({project}-{app}-{env}) and its platform companion
+// ({project}-{app}-{env}-platform) — the latter owns the ConfigMap +
+// ExternalSecret, so ESO "not ready" errors surface through its health. No-op
+// when no diagnostics reader is wired (fake/local mode) or project is unknown.
+func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName string, env *domain.AppEnvironment) {
+	if ah.diagnosticsReader == nil || env.ProjectName == "" {
+		return
+	}
+	base := env.ProjectName + "-" + appName + "-" + env.EnvName
+	for _, t := range []struct{ app, source string }{
+		{base, "argocd"},
+		{base + "-platform", "external-secrets"},
+	} {
+		diags, err := ah.diagnosticsReader.GetAppDiagnostics(ctx, t.app, t.source)
+		if err != nil {
+			continue
+		}
+		env.Status.Diagnostics = append(env.Status.Diagnostics, diags...)
 	}
 }
 
@@ -1316,12 +1345,22 @@ func appEnvToDTO(env *domain.AppEnvironment) AppEnvironmentSummaryDTO {
 }
 
 func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
-	return AppStatusSummaryDTO{
+	dto := AppStatusSummaryDTO{
 		Phase:        s.Phase,
 		Replicas:     s.Replicas,
 		Available:    s.Available,
 		LastDeployed: s.LastDeployed,
 	}
+	for _, d := range s.Diagnostics {
+		dto.Diagnostics = append(dto.Diagnostics, DiagnosticDTO{
+			Source: d.Source,
+			Level:  string(d.Level),
+			Title:  d.Title,
+			Detail: d.Detail,
+			Hint:   d.Hint,
+		})
+	}
+	return dto
 }
 
 func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {

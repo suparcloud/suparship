@@ -310,6 +310,37 @@ type AppRuntimeStatus struct {
 	Available int32 `json:"available"`
 	// LastDeployed is the RFC 3339 timestamp of the most recent successful sync.
 	LastDeployed string `json:"lastDeployed,omitempty"`
+	// Diagnostics are human-readable problem reports gathered from the
+	// delivery pipeline (ArgoCD Application conditions/health, ExternalSecret
+	// status). Empty when everything is healthy. Surfaced so an operator can
+	// understand a stuck/"not deployed" env without leaving suparship.
+	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
+}
+
+// DiagnosticLevel classifies a Diagnostic by severity.
+type DiagnosticLevel string
+
+const (
+	DiagnosticError   DiagnosticLevel = "error"
+	DiagnosticWarning DiagnosticLevel = "warning"
+)
+
+// Diagnostic is one problem report about an app environment's delivery,
+// gathered from ArgoCD / External Secrets. Title is a short summary; Detail
+// is the raw upstream message; Hint is suparship's plain-language suggestion
+// for fixing it (may be empty when no pattern matched).
+type Diagnostic struct {
+	// Source identifies where the diagnostic came from, e.g. "argocd",
+	// "argocd-platform", "external-secrets".
+	Source string `json:"source"`
+	// Level is "error" or "warning".
+	Level DiagnosticLevel `json:"level"`
+	// Title is a short human-readable summary.
+	Title string `json:"title"`
+	// Detail is the raw upstream message.
+	Detail string `json:"detail,omitempty"`
+	// Hint is suparship's suggested fix, when a known pattern matched.
+	Hint string `json:"hint,omitempty"`
 }
 
 // AppEnvironment is a running instance of an App in a specific environment.

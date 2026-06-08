@@ -381,11 +381,20 @@ export interface AppReleaseRef {
   commit?: string;
 }
 
+export interface Diagnostic {
+  source: string;
+  level: "error" | "warning";
+  title: string;
+  detail?: string;
+  hint?: string;
+}
+
 export interface AppStatusSummary {
   phase: string;
   replicas: number;
   available: number;
   lastDeployed?: string;
+  diagnostics?: Diagnostic[];
 }
 
 export interface PreviewMeta {

@@ -137,6 +137,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kargoPipelineReader     server.KargoPipelineReader
 		deploymentHistoryReader server.DeploymentHistoryReader
 		projectAppCounter       server.ProjectAppCounter
+		appDiagnosticsReader    server.AppDiagnosticsReader
 		kubeClient              kubernetes.Interface
 		dynClient               dynamic.Interface
 		gitopsConfigStore       *gitops.ConfigStore
@@ -225,6 +226,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			argoCDReader := kube.NewArgoCDStatusReaderFromDynamic(dynClient, "")
 			deploymentHistoryReader = &argoCDHistoryAdapter{reader: argoCDReader}
 			projectAppCounter = argoCDReader
+			appDiagnosticsReader = argoCDReader
 			logger.Info("kargo promoter enabled via dynamic client")
 			logger.Info("argocd deployment history reader enabled")
 		}
@@ -551,6 +553,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		KargoPipelineReader:     kargoPipelineReader,
 		DeploymentHistoryReader: deploymentHistoryReader,
 		ProjectAppCounter:       projectAppCounter,
+		AppDiagnosticsReader:    appDiagnosticsReader,
 		ReadinessProbers:        readinessProbers,
 		CookieSecure:            cookieSecure,
 		Logger:                  logger,
