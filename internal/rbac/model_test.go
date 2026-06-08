@@ -100,6 +100,38 @@ func TestValidateBindingReferencesUnknownTeam(t *testing.T) {
 	}
 }
 
+func TestValidateGroupBinding(t *testing.T) {
+	// A Group-only binding (the SSO feature) must validate — no team required.
+	org := &Org{
+		Name:         "test",
+		RoleBindings: []RoleBinding{{Project: "*", Group: "platform-admins", Role: RoleOrgAdmin}},
+	}
+	if err := org.Validate(); err != nil {
+		t.Fatalf("group-only binding should validate, got: %v", err)
+	}
+}
+
+func TestValidateBindingRejectsBothTeamAndGroup(t *testing.T) {
+	org := &Org{
+		Name:         "test",
+		Teams:        []Team{{Name: "t"}},
+		RoleBindings: []RoleBinding{{Project: "*", Team: "t", Group: "g", Role: RoleViewer}},
+	}
+	if err := org.Validate(); err == nil || !strings.Contains(err.Error(), "only one of team or group") {
+		t.Fatalf("expected both-set error, got: %v", err)
+	}
+}
+
+func TestValidateBindingRejectsNeitherTeamNorGroup(t *testing.T) {
+	org := &Org{
+		Name:         "test",
+		RoleBindings: []RoleBinding{{Project: "*", Role: RoleViewer}},
+	}
+	if err := org.Validate(); err == nil || !strings.Contains(err.Error(), "one of team or group") {
+		t.Fatalf("expected neither-set error, got: %v", err)
+	}
+}
+
 func TestValidateBindingMissingProject(t *testing.T) {
 	org := &Org{
 		Name:         "test",

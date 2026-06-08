@@ -15,13 +15,15 @@ package branding
 import (
 	"sort"
 	"strings"
+
+	"github.com/suparcloud/suparship/internal/version"
 )
 
 // generatorVersion is stamped onto every platform-emitted manifest so a
 // future migration tool (or an SRE auditing the repo) can tell which
-// version of the generator produced a given file. Bumped intentionally
-// when the label/annotation contract changes.
-const generatorVersion = "v0.1.0"
+// version of the generator produced a given file. Sourced from the version
+// package so the manifest contract version has a single definition.
+const generatorVersion = version.Generator
 
 const (
 	// DefaultName is the platform identity used when Config.Name is

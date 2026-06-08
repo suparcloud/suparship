@@ -369,6 +369,34 @@ func ValidateAPIServerURL(raw string) error {
 	return nil
 }
 
+// ValidateImageRepository checks that an app's image_repository value is a
+// bare image reference (e.g. "ghcr.io/acme/web", "registry.example.com:5000/web"),
+// not a scheme'd URL and without a tag or whitespace. A malformed value yields
+// pods stuck in InvalidImageName/ErrImagePull that only surface at deploy time.
+// Empty is allowed — many templates ship their own image.
+func ValidateImageRepository(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if strings.TrimSpace(raw) != raw {
+		return fmt.Errorf("image_repository %q has leading or trailing whitespace", raw)
+	}
+	if strings.ContainsAny(raw, " \t") {
+		return fmt.Errorf("image_repository %q must not contain spaces", raw)
+	}
+	if strings.Contains(raw, "://") {
+		return fmt.Errorf("image_repository must be a bare image reference without a scheme (e.g. \"ghcr.io/acme/web\", not %q)", raw)
+	}
+	if strings.Contains(raw, "@") {
+		return fmt.Errorf("image_repository %q must not include a digest; set the tag/digest at deploy time", raw)
+	}
+	// A tag belongs in image_tag, not the repository.
+	if i := strings.LastIndex(raw, ":"); i > strings.LastIndex(raw, "/") && i != -1 {
+		return fmt.Errorf("image_repository %q must not include a tag — use the separate image tag field", raw)
+	}
+	return nil
+}
+
 // ValidateConnectEndpoint checks that a 1Password Connect server URL is
 // well-formed. The endpoint is an in-cluster address suparship cannot reach
 // from the control plane, so this is a shape check, not a reachability probe:

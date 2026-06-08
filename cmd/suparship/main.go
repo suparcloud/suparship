@@ -39,9 +39,23 @@ auditable Git output.`,
 
 func init() {
 	rootCmd.SetVersionTemplate(fmt.Sprintf(
-		"suparship %s (commit: %s, built: %s)\n",
-		version.Version, version.Commit, version.Date,
+		"suparship %s (commit: %s, built: %s, config-schema: v%s, generator: %s)\n",
+		version.Version, version.Commit, version.Date, version.Schema, version.Generator,
 	))
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print version and contract information",
+		Long: `Print the binary version plus the contract versions this build understands:
+  config-schema — the org-config format (compared on startup; see docs/upgrading.md)
+  generator     — the GitOps manifest/label contract stamped on emitted files`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"suparship %s\n  commit:        %s\n  built:         %s\n  config-schema: v%s\n  generator:     %s\n",
+				version.Version, version.Commit, version.Date, version.Schema, version.Generator)
+			return nil
+		},
+	})
 
 	rootCmd.PersistentFlags().String("kubeconfig", "", "path to kubeconfig (default: $KUBECONFIG or ~/.kube/config)")
 	rootCmd.PersistentFlags().String("context", "", "kubernetes context to use (default: current-context)")

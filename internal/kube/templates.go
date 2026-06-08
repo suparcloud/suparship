@@ -148,6 +148,10 @@ func TemplateConfigMapNameVersioned(templateName, version string) string {
 // sanitizeVersionForName produces a DNS-1123-safe suffix from a SemVer
 // string. Common cases: "1.2.0" → "1.2.0", "1.2.0-rc.1" → "1.2.0-rc.1",
 // "1.2.0+build.5" → "1.2.0-build.5".
+//
+// NOTE: gitops.chartVersionDir mirrors this for the version-scoped chart
+// directory name; keep the two in sync (they can't share a package — kube
+// imports gitops, so gitops can't import kube).
 func sanitizeVersionForName(version string) string {
 	var b strings.Builder
 	b.Grow(len(version))

@@ -171,6 +171,12 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	if values == nil {
 		values = map[string]any{}
 	}
+	if repo, ok := values["image_repository"].(string); ok {
+		if err := domain.ValidateImageRepository(repo); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+	}
 
 	result, err := domainapp.Create(domainapp.CreateRequest{
 		ProjectName:        projectName,
@@ -301,6 +307,117 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, createAppResponse{
 		App: appToDetailDTO(saved, savedEnvs),
 	})
+}
+
+// handleUpdateApp handles PATCH /api/v1/projects/{project}/apps/{app}.
+//
+// Edits an existing app's display name, description, and template input Values.
+// It is create's validate→persist→publish tail applied to an existing record:
+// Values are re-validated against the template's input schema (the same
+// project.ValidateAppInputs create uses) and the image repository checked, then
+// the spec is saved and re-published so values.yaml regenerates. The template
+// name is immutable; the version is changed via upgrade-template. On a publish
+// failure the spec change is rolled back so the store never drifts from gitops.
+func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+
+	var req updateAppRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+
+	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	if req.Template != "" && req.Template != app.Spec.Template.Name {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "cannot change an app's template; use the upgrade-template endpoint to change the version",
+		})
+		return
+	}
+
+	// Snapshot the editable fields so a failed publish rolls back cleanly.
+	prevValues, prevDisplay, prevDesc := app.Spec.Values, app.Spec.DisplayName, app.Spec.Description
+
+	if req.Values != nil {
+		newValues := *req.Values
+		if newValues == nil {
+			newValues = map[string]any{}
+		}
+		if repo, ok := newValues["image_repository"].(string); ok {
+			if err := domain.ValidateImageRepository(repo); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+				return
+			}
+		}
+		tmpl, ok := ah.templateIdx[app.Spec.Template.Name]
+		if !ok {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{
+				Error: "app's template \"" + app.Spec.Template.Name + "\" is no longer available; cannot re-validate values",
+			})
+			return
+		}
+		secretRefs := make([]project.SecretRef, len(app.Spec.SecretRefs))
+		for i, sr := range app.Spec.SecretRefs {
+			secretRefs[i] = project.SecretRef{Name: sr.Name, SecretRef: sr.SecretRef}
+		}
+		if err := project.ValidateAppInputs(newValues, secretRefs, tmpl); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		app.Spec.Values = newValues
+	}
+	if req.DisplayName != nil {
+		app.Spec.DisplayName = *req.DisplayName
+	}
+	if req.Description != nil {
+		app.Spec.Description = *req.Description
+	}
+
+	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
+		return
+	}
+
+	// Re-publish so values.yaml reflects the new inputs (best-effort with
+	// rollback, mirroring upgrade-template). Skip cleanly when no publisher.
+	if ah.gitOpsPublisher != nil {
+		allEnvs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list app environments"})
+			return
+		}
+		var stableEnvs []*domain.AppEnvironment
+		for _, env := range allEnvs {
+			if env.EnvType != domain.AppEnvPreview {
+				stableEnvs = append(stableEnvs, env)
+			}
+		}
+		if len(stableEnvs) == 0 {
+			stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
+		}
+		if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
+			app.Spec.Values, app.Spec.DisplayName, app.Spec.Description = prevValues, prevDisplay, prevDesc
+			_ = ah.appStore.SaveApp(r.Context(), projectName, app)
+			slog.Error("update-app: publish failed; rolled back config change",
+				"project", projectName, "app", appName, "err", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{
+				Error: "publish failed; config change rolled back: " + err.Error(),
+			})
+			return
+		}
+	}
+
+	saved, _ := ah.appStore.GetApp(r.Context(), projectName, appName)
+	savedEnvs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
+	writeJSON(w, http.StatusOK, updateAppResponse{App: appToDetailDTO(saved, savedEnvs)})
 }
 
 // handleDeleteApp handles DELETE /api/v1/projects/{project}/apps/{app}.
@@ -1223,6 +1340,16 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 	} {
 		diags, err := ah.diagnosticsReader.GetAppDiagnostics(ctx, t.app, t.source)
 		if err != nil {
+			// Don't silently drop a read failure (RBAC, throttling, API down) —
+			// that would falsely present a broken env as having no problems.
+			// Surface it as a warning so the operator knows status is unknown.
+			env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
+				Source: t.source,
+				Level:  domain.DiagnosticWarning,
+				Title:  "Delivery status unavailable",
+				Detail: err.Error(),
+				Hint:   "Could not read the ArgoCD Application status; the env's real health is unknown. Check suparShip's access to the ArgoCD namespace and that ArgoCD is reachable.",
+			})
 			continue
 		}
 		env.Status.Diagnostics = append(env.Status.Diagnostics, diags...)

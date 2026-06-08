@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp, deleteApp, upgradeAppTemplate } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp, deleteApp, updateApp, upgradeAppTemplate } from "../lib/apps";
 import { listTemplateVersions } from "../lib/templates";
 import type { TemplateVersionInfo } from "../types";
 import { createPreview, deletePreview } from "../lib/previews";
@@ -1483,7 +1483,15 @@ export function AppDetail() {
 
       {/* Tab panels */}
       {activeTab === "overview" && (
-        <OverviewTab data={data} currentEnv={currentEnv} />
+        <OverviewTab
+          data={data}
+          currentEnv={currentEnv}
+          project={data.project}
+          onSaved={async () => {
+            const refreshed = await getApp(data.project, data.name);
+            setData(refreshed.app);
+          }}
+        />
       )}
       {activeTab === "deployments" && (
         <DeploymentsTab
@@ -1594,12 +1602,165 @@ function DiagnosticsPanel({ diagnostics }: { diagnostics: Diagnostic[] }) {
   );
 }
 
+// AppConfigEditor shows the app's template input Values (and display
+// name/description) and lets a project_admin edit them inline. Saving PATCHes
+// the app — re-validated server-side against the template's input schema — and
+// re-publishes so values.yaml regenerates. Existing values are string-edited;
+// non-string values (numbers/bools/objects) are shown read-only with a hint to
+// keep the edit surface honest about what it round-trips.
+function AppConfigEditor({
+  data,
+  project,
+  onSaved,
+}: {
+  data: AppDetailType;
+  project: string;
+  onSaved: () => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [displayName, setDisplayName] = useState(data.displayName ?? "");
+  const [description, setDescription] = useState(data.description ?? "");
+  // Only string-valued entries are editable; others are passed through untouched.
+  const stringEntries = Object.entries(data.values).filter(
+    ([, v]) => typeof v === "string",
+  ) as [string, string][];
+  const [vals, setVals] = useState<Record<string, string>>(() =>
+    Object.fromEntries(stringEntries),
+  );
+
+  function reset() {
+    setDisplayName(data.displayName ?? "");
+    setDescription(data.description ?? "");
+    setVals(Object.fromEntries(stringEntries));
+    setEditing(false);
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      // Merge edited string values back over the original values map so
+      // non-string entries are preserved verbatim.
+      const merged: Record<string, unknown> = { ...data.values };
+      for (const [k, v] of Object.entries(vals)) merged[k] = v;
+      await updateApp(project, data.name, {
+        displayName,
+        description,
+        values: merged,
+      });
+      toast.success("App config updated — re-publishing to GitOps.");
+      await onSaved();
+      setEditing(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update app config");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const nonStringKeys = Object.keys(data.values).filter(
+    (k) => typeof data.values[k] !== "string",
+  );
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white">
+      <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
+        <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+          Configuration
+        </h2>
+        {editing ? (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={reset}
+              disabled={saving}
+              className="rounded-md px-3 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditing(true)}
+            className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+          >
+            Edit
+          </button>
+        )}
+      </div>
+
+      {editing ? (
+        <div className="space-y-3 px-5 py-4">
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600">Display name</span>
+            <input
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600">Description</span>
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+            />
+          </label>
+          {stringEntries.map(([key]) => (
+            <label key={key} className="block">
+              <span className="font-mono text-xs text-gray-600">{key}</span>
+              <input
+                type="text"
+                value={vals[key] ?? ""}
+                onChange={(e) => setVals((cur) => ({ ...cur, [key]: e.target.value }))}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm font-mono"
+              />
+            </label>
+          ))}
+          {nonStringKeys.length > 0 && (
+            <p className="text-xs text-gray-400">
+              {nonStringKeys.length} non-text value(s) ({nonStringKeys.join(", ")})
+              are preserved unchanged and editable via the template/values flow.
+            </p>
+          )}
+        </div>
+      ) : Object.keys(data.values).length > 0 || data.description ? (
+        <dl className="divide-y divide-gray-50">
+          {Object.entries(data.values).map(([key, val]) => (
+            <div key={key} className="flex items-center justify-between px-5 py-2.5">
+              <dt className="font-mono text-sm text-gray-500">{key}</dt>
+              <dd className="text-sm text-gray-900">{String(val)}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="px-5 py-4 text-sm text-gray-400">
+          No configuration values. Click Edit to add display name/description.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function OverviewTab({
   data,
   currentEnv,
+  project,
+  onSaved,
 }: {
   data: AppDetailType;
   currentEnv: AppEnvironmentSummary | null;
+  project: string;
+  onSaved: () => Promise<void>;
 }) {
   const replicas = currentEnv
     ? `${currentEnv.status.available}/${currentEnv.status.replicas}`
@@ -1702,27 +1863,12 @@ function OverviewTab({
       {/* Runtime component summaries for the selected environment */}
       <ComponentsTable components={data.components} currentEnv={currentEnv} />
 
-      {/* Configuration */}
-      {Object.keys(data.values).length > 0 && (
-        <div className="rounded-xl border border-gray-200 bg-white">
-          <div className="border-b border-gray-100 px-5 py-3">
-            <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
-              Configuration
-            </h2>
-          </div>
-          <dl className="divide-y divide-gray-50">
-            {Object.entries(data.values).map(([key, val]) => (
-              <div
-                key={key}
-                className="flex items-center justify-between px-5 py-2.5"
-              >
-                <dt className="font-mono text-sm text-gray-500">{key}</dt>
-                <dd className="text-sm text-gray-900">{String(val)}</dd>
-              </div>
-            ))}
-          </dl>
-        </div>
-      )}
+      {/* Configuration — editable */}
+      <AppConfigEditor
+        data={data}
+        project={project}
+        onSaved={onSaved}
+      />
 
       {/* Secrets */}
       {data.secretRefs.length > 0 && (

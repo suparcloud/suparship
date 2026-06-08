@@ -253,7 +253,7 @@ spec:
         ref: appvalues
       # Source 2: Helm chart, values loaded from source 1 via $appvalues ref
       - repoURL: "http://gitea.svc/gitops/gitops.git"
-        path: "charts/{{template}}"
+        path: "charts/{{chartPath}}"   # {{template}}/{{version}} — version-scoped
         targetRevision: HEAD
         helm:
           releaseName: "{{name}}"

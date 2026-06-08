@@ -139,6 +139,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		deploymentHistoryReader server.DeploymentHistoryReader
 		projectAppCounter       server.ProjectAppCounter
 		appDiagnosticsReader    server.AppDiagnosticsReader
+		stuckAppManager         server.StuckAppManager
 		kubeClient              kubernetes.Interface
 		dynClient               dynamic.Interface
 		gitopsConfigStore       *gitops.ConfigStore
@@ -228,6 +229,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			deploymentHistoryReader = &argoCDHistoryAdapter{reader: argoCDReader}
 			projectAppCounter = argoCDReader
 			appDiagnosticsReader = argoCDReader
+			stuckAppManager = &stuckAppAdapter{reader: argoCDReader}
 			logger.Info("kargo promoter enabled via dynamic client")
 			logger.Info("argocd deployment history reader enabled")
 		}
@@ -321,6 +323,19 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		bootstrapResult := bootstrap.Reconcile(cmd.Context(), client, logger)
 		logger.Info("bootstrap complete", "summary", bootstrap.FormatSummary(bootstrapResult))
 
+		// Upgrade check: compare the persisted org-config schema version with
+		// this binary's. Advisory only — surfaces migration guidance in logs.
+		if org, err := orgProvider.GetOrg(cmd.Context()); err == nil && org != nil {
+			switch check, msg := rbac.CheckSchema(org); check {
+			case rbac.SchemaCurrent:
+				// up to date — say nothing
+			case rbac.SchemaDowngrade:
+				logger.Error("org config schema check", "detail", msg)
+			default:
+				logger.Warn("org config schema check", "detail", msg)
+			}
+		}
+
 		// Ensure the suparship-system ArgoCD AppProject exists. This is a
 		// self-healing step: if the Helm chart was not yet upgraded (or ArgoCD
 		// was installed after suparship), this creates the project automatically
@@ -409,7 +424,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					"repo", repoCfg.RepoURL,
 					"argocd_repo", pubCfg.ArgoCDRepoURL,
 				)
-				go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+				go func() {
+					publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+					// Re-publish every app so manifest-contract changes (e.g. the
+					// version-scoped chart layout) land fleet-wide. Sequential
+					// after env infra to avoid concurrent git pushes.
+					republishAllApps(context.Background(), gitOpsPublisher, appStore, projectStore, logger)
+				}()
 				go selfHealSealedTokens(context.Background(), pub, orgProvider, clusterStore, clusterPool, kubeClient, logger)
 
 				// Ensure the suparship-apps root ArgoCD Application exists.
@@ -555,6 +576,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		DeploymentHistoryReader: deploymentHistoryReader,
 		ProjectAppCounter:       projectAppCounter,
 		AppDiagnosticsReader:    appDiagnosticsReader,
+		StuckAppManager:         stuckAppManager,
 		ReadinessProbers:        readinessProbers,
 		CookieSecure:            cookieSecure,
 		Logger:                  logger,
@@ -1053,6 +1075,34 @@ func (a *argoCDHistoryAdapter) GetAppDeploymentHistory(ctx context.Context, appN
 	return out, nil
 }
 
+// stuckAppAdapter bridges the ArgoCD reader's stuck-app detection/unstick to
+// the server.StuckAppManager interface, converting the kube DTO to the server one.
+type stuckAppAdapter struct {
+	reader *kube.ArgoCDStatusReader
+}
+
+func (a *stuckAppAdapter) ListStuckApplications(ctx context.Context) ([]server.StuckApp, error) {
+	raw, err := a.reader.ListStuckApplications(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.StuckApp, 0, len(raw))
+	for _, s := range raw {
+		out = append(out, server.StuckApp{
+			Name:              s.Name,
+			Project:           s.Project,
+			DeletionTimestamp: s.DeletionTimestamp,
+			Finalizers:        s.Finalizers,
+			Reason:            s.Reason,
+		})
+	}
+	return out, nil
+}
+
+func (a *stuckAppAdapter) UnstickApplication(ctx context.Context, name string) error {
+	return a.reader.UnstickApplication(ctx, name)
+}
+
 // fakeHistoryAdapter bridges fake.FakeDeploymentHistoryReader to the
 // server.DeploymentHistoryReader interface for use in fake/local dev mode.
 type fakeHistoryAdapter struct {
@@ -1172,6 +1222,53 @@ func publishInitialEnvInfra(
 			logger.Info("initial env infra: published", "project", name)
 		}
 	}
+}
+
+// republishAllApps re-publishes every app's gitops files at startup. It exists
+// so a manifest-contract change (e.g. the version-scoped chart layout, which
+// adds chartPath to app.yaml and moves charts to charts/{template}/{version})
+// lands across the whole fleet without per-app manual action — old app.yaml
+// files lack the new keys until rewritten. Idempotent: a no-op commit when
+// content is unchanged. Best-effort; per-app failures are logged.
+func republishAllApps(
+	ctx context.Context,
+	pub server.GitOpsPublisher,
+	appStore domain.AppStore,
+	projectStore project.Store,
+	logger *slog.Logger,
+) {
+	if pub == nil || appStore == nil || projectStore == nil {
+		return
+	}
+	projects, err := projectStore.List(ctx)
+	if err != nil {
+		logger.Warn("republish apps: list projects failed", "error", err)
+		return
+	}
+	for _, p := range projects {
+		apps, err := appStore.ListApps(ctx, p.Metadata.Name)
+		if err != nil {
+			logger.Warn("republish apps: list apps failed", "project", p.Metadata.Name, "error", err)
+			continue
+		}
+		for _, app := range apps {
+			envs, err := appStore.ListAppEnvironments(ctx, p.Metadata.Name, app.Name)
+			if err != nil {
+				logger.Warn("republish apps: list envs failed", "project", p.Metadata.Name, "app", app.Name, "error", err)
+				continue
+			}
+			var stable []*domain.AppEnvironment
+			for _, e := range envs {
+				if e.EnvType != domain.AppEnvPreview {
+					stable = append(stable, e)
+				}
+			}
+			if err := pub.PublishApp(ctx, app, stable); err != nil {
+				logger.Warn("republish apps: publish failed", "project", p.Metadata.Name, "app", app.Name, "error", err)
+			}
+		}
+	}
+	logger.Info("republish apps: complete")
 }
 
 // selfHealSealedTokens reconstructs missing per-env sealed Connect token

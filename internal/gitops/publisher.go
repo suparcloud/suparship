@@ -496,11 +496,12 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 		// nobody reads.
 		mode, _ := p.resolveTemplateChartMode(app.Spec.Template.Name)
 		if mode == AppMetadataChartTypeInline {
-			// Sync the Helm chart into charts/{template}/ so ArgoCD's
-			// ApplicationSet can resolve the chart path. The version
-			// the app was created against is honored — bumping the
-			// templates registry doesn't silently re-version every
-			// running app's chart bytes.
+			// Sync the Helm chart into charts/{template}/{version}/ so
+			// ArgoCD's ApplicationSet can resolve the chart path. The
+			// version the app was created against is honored — bumping the
+			// templates registry doesn't silently re-version every running
+			// app's chart bytes, and two apps pinning different versions of
+			// the same template get distinct, non-colliding chart dirs.
 			if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name, app.Spec.Template.Version); err != nil {
 				return fmt.Errorf("sync chart for template %s@%s: %w", app.Spec.Template.Name, app.Spec.Template.Version, err)
 			}
@@ -568,6 +569,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			Name:      app.Name,
 			Project:   app.ProjectName,
 			Template:  app.Spec.Template.Name,
+			ChartPath: chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
 			Namespace: ns,
 		}
 		// External-mode apps carry the chart locator in app.yaml so
@@ -694,8 +696,8 @@ func (p *Publisher) pruneLegacyPlatformFiles(appDir string) error {
 }
 
 // syncChart materialises the Helm chart for templateName at
-// charts/{templateName}/ inside the cloned gitops repo so ArgoCD's
-// ApplicationSet can resolve "charts/{{template}}".
+// charts/{templateName}/{version}/ inside the cloned gitops repo so ArgoCD's
+// ApplicationSet can resolve "charts/{{chartPath}}".
 //
 // Resolution order:
 //  1. Local disk: TemplatesDir/{templateName}/chart/ (built-ins & dev mode).
@@ -708,8 +710,41 @@ func (p *Publisher) pruneLegacyPlatformFiles(appDir string) error {
 // existing callers that don't configure ChartFetcher keep prior behaviour.
 // When the chart directory already exists with identical content the
 // subsequent git commit is a no-op via stagedIsEmpty.
+// chartVersionDir is the version-scoped subdirectory under charts/{template}/
+// that holds one chart version, so two apps pinning different versions of the
+// same template don't collide. A pinned version is sanitized DNS-1123-safe
+// (mirrors kube.sanitizeVersionForName — see the note there); an unpinned app
+// ("" version, tracks latest) uses "latest".
+func chartVersionDir(version string) string {
+	if version == "" {
+		return "latest"
+	}
+	var b strings.Builder
+	b.Grow(len(version))
+	for _, r := range strings.ToLower(version) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	s := strings.Trim(b.String(), "-")
+	if s == "" {
+		return "latest"
+	}
+	return s
+}
+
+// chartPathFor returns the gitops chart path for an app's template+version,
+// relative to charts/ — i.e. "{template}/{versionDir}". Written into app.yaml
+// as chartPath and substituted into the ApplicationSet chart source path.
+func chartPathFor(templateName, version string) string {
+	return templateName + "/" + chartVersionDir(version)
+}
+
 func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName, version string) error {
-	dstDir := p.outputDir(repoDir, "charts", templateName)
+	dstDir := p.outputDir(repoDir, "charts", templateName, chartVersionDir(version))
 
 	if p.cfg.TemplatesDir != "" {
 		srcDir := filepath.Join(p.cfg.TemplatesDir, templateName, "chart")
@@ -892,6 +927,13 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		// When the app specifies a concrete image, accept any tag (the tag
 		// pattern can always be tightened via the Warehouse directly).
 		whOpts.ImageTagPattern = ".*"
+	} else {
+		// No image set — applyKargoDefaults will use the ghcr.io/{project}/{app}
+		// placeholder, which won't resolve and leaves pods in InvalidImageName.
+		// Warn loudly rather than failing silently.
+		slog.Warn("gitops: app has no image_repository — Kargo Warehouse will use a placeholder that won't pull; set the app's image repository",
+			"project", app.ProjectName, "app", app.Name,
+			"placeholder", DefaultImageRepoURL(app.ProjectName, app.Name))
 	}
 	warehouse := BuildKargoWarehouse(app, whOpts)
 	whBytes, err := yaml.Marshal(warehouse)
@@ -1010,6 +1052,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 			PreviewName:   preview.PreviewName,
 			Project:       app.ProjectName,
 			Template:      app.Spec.Template.Name,
+			ChartPath:     chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
 			ClusterServer: preview.ClusterServer,
 			Namespace:     preview.Namespace,
 		}
@@ -1153,21 +1196,21 @@ func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName strin
 			}
 		}
 
-		// Kargo Warehouse + Stage CRs for this app. Filename-prefix matching:
-		// an app whose name is a hyphen-prefix of a sibling app's name could
-		// over-match stages, but app names within a project are validated DNS
-		// labels and this trade-off keeps deletion store-independent.
-		kargoPrefix := KargoNamespaceForProject(projectName) + "-" + appName + "-"
+		// Kargo Warehouse + Stage CRs for this app. Match on the stamped
+		// suparship.io/app label rather than the filename prefix: a sibling app
+		// whose name extends this one (e.g. "web-admin" vs "web") shares the
+		// filename prefix and would otherwise be wrongly pruned.
 		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
 		if entries, err := os.ReadDir(kargoDir); err == nil {
 			for _, e := range entries {
-				if e.IsDir() || !strings.HasPrefix(e.Name(), kargoPrefix) {
+				if e.IsDir() {
 					continue
 				}
-				if e.Name() != kargoPrefix+"warehouse.yaml" && !strings.HasSuffix(e.Name(), "-stage.yaml") {
+				path := filepath.Join(kargoDir, e.Name())
+				if kargoManifestLabel(path, labelApp) != appName {
 					continue
 				}
-				if err := u.rm(filepath.Join(kargoDir, e.Name())); err != nil {
+				if err := u.rm(path); err != nil {
 					return err
 				}
 			}
@@ -1195,6 +1238,27 @@ func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName strin
 		commitMsg := fmt.Sprintf("feat(apps): delete app %s/%s\n\nDeleted by suparShip.", projectName, appName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// kargoManifestLabel reads a Kargo manifest file and returns the value of the
+// given metadata label, or "" when the file is unreadable or lacks the label.
+// Used to prune an app/project's Kargo CRs by their stamped suparship.io/app
+// or suparship.io/project label rather than by a collision-prone filename
+// prefix.
+func kargoManifestLabel(path, key string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		Metadata struct {
+			Labels map[string]string `yaml:"labels"`
+		} `yaml:"metadata"`
+	}
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		return ""
+	}
+	return m.Metadata.Labels[key]
 }
 
 // isReservedTopLevelDir reports whether a top-level gitops-output entry is a
@@ -1247,16 +1311,21 @@ func (p *Publisher) UnpublishProjectApps(ctx context.Context, projectName string
 			return err
 		}
 
-		// Kargo Project CR + every app's Warehouse/Stage CRs. Same
-		// prefix-matching trade-off as UnpublishApp.
-		kargoPrefix := KargoNamespaceForProject(projectName) + "-"
+		// Kargo Project CR + every app's Warehouse/Stage CRs, matched on the
+		// stamped suparship.io/project label (the Project, Warehouse, and Stage
+		// CRs all carry it) — avoids the filename-prefix collision between a
+		// project and a hyphen-extended sibling (e.g. "web" vs "web-admin").
 		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
 		if entries, err := os.ReadDir(kargoDir); err == nil {
 			for _, e := range entries {
-				if e.IsDir() || !strings.HasPrefix(e.Name(), kargoPrefix) {
+				if e.IsDir() {
 					continue
 				}
-				if err := u.rm(filepath.Join(kargoDir, e.Name())); err != nil {
+				path := filepath.Join(kargoDir, e.Name())
+				if kargoManifestLabel(path, labelProject) != projectName {
+					continue
+				}
+				if err := u.rm(path); err != nil {
 					return err
 				}
 			}
@@ -1596,7 +1665,7 @@ walk away from the platform entirely. The repo keeps syncing.
 │               ├── env-configmap.yaml     # merged env vars (org→cluster)
 │               └── external-secret.yaml   # platform-managed ExternalSecret
 ├── previews/{project}/{previewName}/      # per-PR preview environments
-└── charts/{template}/                     # bundled Helm chart sources
+└── charts/{template}/{version}/           # bundled Helm chart sources (version-scoped)
 `+"```"+`
 
 The `+"`envs/`"+` wrapper makes the top-level self-documenting: stable envs

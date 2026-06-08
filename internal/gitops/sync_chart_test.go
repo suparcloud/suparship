@@ -94,7 +94,7 @@ func TestSyncChart_LocalDiskTakesPrecedence(t *testing.T) {
 		t.Fatalf("SyncChart: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(repoDir, "charts", "demo", "Chart.yaml"))
+	got, err := os.ReadFile(filepath.Join(repoDir, "charts", "demo", "latest", "Chart.yaml"))
 	if err != nil {
 		t.Fatalf("read result: %v", err)
 	}
@@ -126,9 +126,9 @@ func TestSyncChart_FallsBackToClusterBundle(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"charts/demo/Chart.yaml",
-		"charts/demo/values.yaml",
-		"charts/demo/templates/deploy.yaml",
+		"charts/demo/latest/Chart.yaml",
+		"charts/demo/latest/values.yaml",
+		"charts/demo/latest/templates/deploy.yaml",
 	} {
 		if _, err := os.Stat(filepath.Join(repoDir, want)); err != nil {
 			t.Errorf("expected %s in repo, got: %v", want, err)
@@ -219,7 +219,7 @@ func TestSyncChart_HonoursPinnedVersion(t *testing.T) {
 		t.Fatalf("SyncChart: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(repoDir, "charts", "demo", "Chart.yaml"))
+	got, err := os.ReadFile(filepath.Join(repoDir, "charts", "demo", "1.0.0", "Chart.yaml"))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

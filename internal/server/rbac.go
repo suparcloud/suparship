@@ -40,6 +40,9 @@ type rbacHandler struct {
 	// AppProject is removed only after the project's generated Applications
 	// are pruned. Optional; nil falls back to a fixed grace delay.
 	projectAppCounter ProjectAppCounter
+	// stuckApps detects + unsticks ArgoCD Applications wedged in Terminating.
+	// Optional; nil disables the platform stuck-apps endpoints.
+	stuckApps StuckAppManager
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -85,6 +88,13 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	// Project lifecycle — org_admin only.
 	mux.HandleFunc("POST /api/v1/projects", rh.auth.requireAuth(rh.orgAdminOnly(rh.handleCreateProject)))
 	mux.HandleFunc("DELETE /api/v1/projects/{project}", rh.auth.requireAuth(rh.orgAdminOnly(rh.handleDeleteProject)))
+
+	// Platform ops: detect + unstick ArgoCD Applications wedged in Terminating.
+	// org_admin only (unstick mutates cluster state). Enabled when wired.
+	if rh.stuckApps != nil {
+		mux.HandleFunc("GET /api/v1/platform/stuck-apps", rh.auth.requireAuth(rh.orgAdminOnly(rh.handleListStuckApps)))
+		mux.HandleFunc("POST /api/v1/platform/stuck-apps/{name}/unstick", rh.auth.requireAuth(rh.orgAdminOnly(rh.handleUnstickApp)))
+	}
 
 	// Org-level environment management (canonical pipeline definition).
 	// Reads are open to all authenticated users; writes require org_admin.
@@ -239,6 +249,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	if rh.appHandler != nil {
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps", viewProject(rh.appHandler.handleListApps))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}", viewProject(rh.appHandler.handleGetApp))
+		mux.HandleFunc("PATCH /api/v1/projects/{project}/apps/{app}", manageProject(rh.appHandler.handleUpdateApp))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}", manageProject(rh.appHandler.handleDeleteApp))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments", viewProject(rh.appHandler.handleListAppEnvironments))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}", viewProject(rh.appHandler.handleGetAppEnvironment))

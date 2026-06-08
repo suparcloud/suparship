@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { listApps } from "../lib/apps";
+import { StuckAppsBanner } from "../components/StuckAppsBanner";
 import { fetchPreviews } from "../lib/previews";
 import { createProject, fetchOrg, fetchProjects } from "../lib/settings";
 import { fetchEnvironments } from "../lib/services";
@@ -322,6 +323,9 @@ export function Dashboard() {
           New project
         </button>
       </div>
+
+      {/* Platform ops: stuck-deleting apps (org_admin only; self-hides otherwise) */}
+      <StuckAppsBanner />
 
       {/* Stats */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

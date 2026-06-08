@@ -84,7 +84,7 @@ func TestSyncChart_ChartSourcesAreNotHeadered(t *testing.T) {
 	}
 
 	for _, name := range []string{"Chart.yaml", "values.yaml", "templates/deploy.yaml"} {
-		raw, err := os.ReadFile(filepath.Join(repoDir, "charts", "demo", name))
+		raw, err := os.ReadFile(filepath.Join(repoDir, "charts", "demo", "latest", name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}

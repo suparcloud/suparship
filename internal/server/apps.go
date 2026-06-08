@@ -251,6 +251,25 @@ type createAppResponse struct {
 	App AppDetailDTO `json:"app"`
 }
 
+// updateAppRequest is the JSON body for PATCH /api/v1/projects/{p}/apps/{a}.
+// Every field is a pointer so absent = leave unchanged (vs. present-but-empty
+// = clear). Only metadata + template input Values are editable here; the
+// template name is immutable and the version is changed via the dedicated
+// upgrade-template endpoint. Components/addons/namespace are not yet editable.
+type updateAppRequest struct {
+	DisplayName *string         `json:"displayName,omitempty"`
+	Description *string         `json:"description,omitempty"`
+	Values      *map[string]any `json:"values,omitempty"`
+	// Template, when set, must equal the current template name — editing the
+	// template here is rejected (use upgrade-template for the version).
+	Template string `json:"template,omitempty"`
+}
+
+// updateAppResponse mirrors createAppResponse for the edit endpoint.
+type updateAppResponse struct {
+	App AppDetailDTO `json:"app"`
+}
+
 // --- App-scoped preview DTOs ---
 
 // AppPreviewSummaryDTO is the app-oriented view of a single preview environment.

@@ -371,6 +371,7 @@ type Config struct {
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
 	ProjectAppCounter       ProjectAppCounter       // optional: sequences two-phase project deletion against live ArgoCD apps
 	AppDiagnosticsReader    AppDiagnosticsReader    // optional: surfaces ArgoCD/ESO failure signals in app env status
+	StuckAppManager         StuckAppManager         // optional: enables platform stuck-app detection + unstick endpoints
 	VaultStore              secrets.VaultStore      // optional: enables secret CRUD across global/env/cluster scopes
 	SecretsAuditor          *secrets.Auditor        // optional: enables audit logging for secret ops
 	ReadinessProbers        []ReadinessProber       // optional: checked by GET /readyz
@@ -465,6 +466,7 @@ func New(cfg Config) *Server {
 			rh.storeReconciler = r
 		}
 		rh.projectAppCounter = cfg.ProjectAppCounter
+		rh.stuckApps = cfg.StuckAppManager
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
 			cfg.Logger.Info("service creation endpoint enabled")

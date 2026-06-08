@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 
@@ -146,7 +147,13 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// Best-effort: fetch and cache the sealed-secrets certificate from the
 	// newly registered cluster so that token sealing works immediately without
 	// a separate admin step. Failures are logged but do not fail the registration.
-	go ch.tryFetchSealingCert(r.Context(), req.Name)
+	// Use a detached context with a timeout — r.Context() is cancelled the
+	// moment this handler returns, which would abort the background fetch.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		ch.tryFetchSealingCert(ctx, req.Name)
+	}()
 
 	// Best-effort: (re)publish ESO ClusterSecretStores so the new cluster's
 	// store exists in gitops. Runs in the background to not delay the response.
@@ -197,11 +204,14 @@ func (ch *clusterHandler) cleanupClusterSecrets(ctx context.Context, name string
 		}
 	}
 	if ch.orgStore != nil {
-		if org, err := ch.orgStore.GetOrg(ctx); err == nil && org != nil && org.SecretBackend.FindClusterToken(name) != nil {
+		// Read-modify-write with conflict retry so a concurrent org write
+		// (e.g. a reseal) can't resurrect the deleted cluster's token ref.
+		err := rbac.MutateOrg(ctx, ch.orgStore, func(org *rbac.Org) error {
 			org.SecretBackend.RemoveClusterToken(name)
-			if err := ch.orgStore.SaveOrg(ctx, org); err != nil {
-				ch.logger.Warn("cluster delete: token state cleanup failed", "cluster", name, "error", err)
-			}
+			return nil
+		})
+		if err != nil {
+			ch.logger.Warn("cluster delete: token state cleanup failed", "cluster", name, "error", err)
 		}
 	}
 	if ch.kubeClient != nil {
