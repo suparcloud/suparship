@@ -611,6 +611,16 @@ func New(cfg Config) *Server {
 		projectStore: cfg.ProjectStore,
 		authEnabled:  cfg.Authenticator != nil,
 	}
+	if cfg.ClusterStore != nil {
+		oh.clusterStore = cfg.ClusterStore
+	}
+	if cfg.GitOpsConfigStore != nil {
+		store := cfg.GitOpsConfigStore
+		oh.gitopsCheck = func(ctx context.Context) bool {
+			c, err := store.Get(ctx)
+			return err == nil && c != nil && c.RepoURL != ""
+		}
+	}
 	mux.HandleFunc("GET /api/v1/onboarding/status", oh.handleStatus)
 
 	if cfg.KubeClient != nil {
