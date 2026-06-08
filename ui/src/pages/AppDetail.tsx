@@ -37,6 +37,7 @@ import type {
   AppLogsResponse,
   ComponentSummary,
   DeploymentHistoryEntry,
+  Diagnostic,
   KargoAppPipeline,
   KargoPromotion,
   KargoStageStatus,
@@ -1524,6 +1525,75 @@ export function AppDetail() {
 // Tab: Overview
 // ---------------------------------------------------------------------------
 
+// DiagnosticsPanel surfaces delivery problems (ArgoCD conditions/health,
+// ExternalSecret errors) so an operator can see why an env is stuck or
+// "not deployed" without leaving suparship. Renders nothing when healthy.
+function DiagnosticsPanel({ diagnostics }: { diagnostics: Diagnostic[] }) {
+  if (diagnostics.length === 0) return null;
+
+  const sourceLabel = (s: string) =>
+    s === "external-secrets"
+      ? "Secrets"
+      : s === "argocd" || s === "argocd-platform"
+        ? "Delivery"
+        : s;
+
+  return (
+    <div className="space-y-2">
+      <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+        Diagnostics
+      </h2>
+      {diagnostics.map((d, i) => {
+        const isError = d.level === "error";
+        return (
+          <div
+            key={`${d.source}-${i}`}
+            className={`rounded-lg border px-4 py-3 ${
+              isError
+                ? "border-red-200 bg-red-50"
+                : "border-amber-200 bg-amber-50"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                  isError
+                    ? "bg-red-100 text-red-700"
+                    : "bg-amber-100 text-amber-700"
+                }`}
+              >
+                {sourceLabel(d.source)}
+              </span>
+              <span
+                className={`text-sm font-medium ${
+                  isError ? "text-red-900" : "text-amber-900"
+                }`}
+              >
+                {d.title}
+              </span>
+            </div>
+            {d.detail && (
+              <p className="mt-1 whitespace-pre-wrap break-words font-mono text-xs text-gray-600">
+                {d.detail}
+              </p>
+            )}
+            {d.hint && (
+              <p
+                className={`mt-2 text-xs ${
+                  isError ? "text-red-800" : "text-amber-800"
+                }`}
+              >
+                <span className="font-medium">Suggested fix: </span>
+                {d.hint}
+              </p>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function OverviewTab({
   data,
   currentEnv,
@@ -1566,6 +1636,9 @@ function OverviewTab({
           </p>
         </div>
       )}
+
+      {/* Delivery diagnostics — why an env is stuck / "not deployed" */}
+      <DiagnosticsPanel diagnostics={currentEnv?.status.diagnostics ?? []} />
 
       {/* Quick stats */}
       <div className="grid gap-4 sm:grid-cols-3">

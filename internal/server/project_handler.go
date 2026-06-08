@@ -10,9 +10,12 @@ package server
 // List and detail are served by org.go (handleGetProjects / handleGetProject).
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -114,7 +117,75 @@ func (rh *rbacHandler) handleDeleteProject(w http.ResponseWriter, r *http.Reques
 		_ = rh.orgStore.SaveOrg(r.Context(), org) // best-effort; project is already deleted
 	}
 
+	// Best-effort: remove the project's GitOps files so they don't dangle in
+	// the repo — ArgoCD then prunes the corresponding live resources. Runs in
+	// two phases to avoid an ordering race: pruning a generated Application
+	// cascade-deletes its resources via a finalizer that must resolve the
+	// AppProject — removing both in one commit leaves Applications stuck in
+	// Terminating ("appproject not found"). So: (1) remove the app sources,
+	// (2) wait for the project's Applications to disappear, (3) remove the
+	// AppProject. On timeout the AppProject is kept — a dangling AppProject
+	// is benign, stuck Applications are not.
+	if rh.appHandler != nil && rh.appHandler.gitOpsPublisher != nil {
+		pub := rh.appHandler.gitOpsPublisher
+		counter := rh.projectAppCounter
+		go unpublishProjectTwoPhase(context.Background(), pub, counter, projectName)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Two-phase unpublish tuning. Vars (not consts) so tests can shorten them.
+var (
+	// unpublishPollInterval is how often phase 2 checks whether the project's
+	// generated Applications are gone.
+	unpublishPollInterval = 10 * time.Second
+	// unpublishPruneTimeout bounds the phase-2 wait. ApplicationSet prune +
+	// cascade delete is usually done within a couple of sync cycles.
+	unpublishPruneTimeout = 10 * time.Minute
+	// unpublishGraceDelay is the fallback wait when no ProjectAppCounter is
+	// wired (no ArgoCD reader) — long enough for a typical prune cycle.
+	unpublishGraceDelay = 90 * time.Second
+)
+
+// unpublishProjectTwoPhase removes a deleted project's gitops files in two
+// commits: app sources first, then — once ArgoCD has pruned the project's
+// generated Applications (or after a grace delay when no counter is wired) —
+// the AppProject. All best-effort; failures are logged, never retried here.
+func unpublishProjectTwoPhase(ctx context.Context, pub GitOpsPublisher, counter ProjectAppCounter, projectName string) {
+	if err := pub.UnpublishProjectApps(ctx, projectName); err != nil {
+		slog.Warn("project delete: gitops app cleanup failed; AppProject kept",
+			"project", projectName, "error", err)
+		return
+	}
+
+	if counter != nil {
+		deadline := time.Now().Add(unpublishPruneTimeout)
+		for {
+			n, err := counter.CountProjectApplications(ctx, projectName)
+			if err == nil && n == 0 {
+				break
+			}
+			if err != nil {
+				slog.Debug("project delete: app count failed; will retry", "project", projectName, "error", err)
+			}
+			if time.Now().After(deadline) {
+				slog.Warn("project delete: applications still present after wait — keeping AppProject so they can finish deleting; remove _infra/{project}-appproject.yaml manually once they are gone",
+					"project", projectName, "remaining", n)
+				return
+			}
+			time.Sleep(unpublishPollInterval)
+		}
+	} else {
+		// No ArgoCD reader available — give the ApplicationSets a prune cycle.
+		time.Sleep(unpublishGraceDelay)
+	}
+
+	if err := pub.UnpublishProjectInfra(ctx, projectName); err != nil {
+		slog.Warn("project delete: gitops appproject cleanup failed", "project", projectName, "error", err)
+		return
+	}
+	slog.Info("project delete: gitops cleanup complete", "project", projectName)
 }
 
 // ── requireOrgAdminForProject ─────────────────────────────────────────────────

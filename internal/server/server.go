@@ -58,10 +58,26 @@ type GitOpsPublisher interface {
 	// the GitOps repo. Called on every explicit promotion so the target env's
 	// files are present before Kargo / ArgoCD act on the promotion.
 	PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error
-	// UnpublishApp removes all GitOps files for an app (all stable-env
-	// directories) and commits + pushes the deletion. It is a no-op if no
-	// files exist for the app.
+	// UnpublishApp removes all GitOps files for an app (app + platform
+	// resource directories, Kargo CRs) and commits + pushes the deletion.
+	// It is a no-op if no files exist for the app.
 	UnpublishApp(ctx context.Context, projectName, appName string) error
+	// UnpublishProjectApps removes the project's app directories, preview
+	// trees, and Kargo CRs (phase 1 of project deletion). The AppProject is
+	// intentionally kept — ArgoCD needs it to cascade-delete the generated
+	// Applications it prunes. No-op if no files exist.
+	UnpublishProjectApps(ctx context.Context, projectName string) error
+	// UnpublishProjectInfra removes the project's ArgoCD AppProject (phase 2
+	// of project deletion). Call only after the project's Applications have
+	// been pruned. No-op if absent.
+	UnpublishProjectInfra(ctx context.Context, projectName string) error
+}
+
+// ProjectAppCounter counts the live ArgoCD Applications that reference a
+// project via spec.project. Used to sequence the two phases of project
+// deletion: the AppProject is only removed once this reaches zero.
+type ProjectAppCounter interface {
+	CountProjectApplications(ctx context.Context, projectName string) (int, error)
 }
 
 // KargoPromoter creates Kargo Promotion CRs to advance freight through the
@@ -151,6 +167,17 @@ type DeploymentHistoryReader interface {
 	GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]DeploymentHistoryEntry, error)
 }
 
+// AppDiagnosticsReader reads failure signals from one ArgoCD Application CR
+// (conditions, non-healthy health message, failed sync) as domain.Diagnostics.
+// When nil, the app status simply carries no diagnostics. Implementations must
+// be safe for concurrent use.
+type AppDiagnosticsReader interface {
+	// GetAppDiagnostics returns diagnostics for the named ArgoCD Application.
+	// source labels the origin (e.g. "argocd", "argocd-platform"). Returns an
+	// empty slice (not an error) when the app is absent or healthy.
+	GetAppDiagnostics(ctx context.Context, argoAppName, source string) ([]domain.Diagnostic, error)
+}
+
 // ReadinessProber is a named readiness check injected into the server.
 // Each prober is called by GET /readyz; any non-nil error marks the
 // server as not ready.
@@ -222,6 +249,30 @@ func (h *PublisherHolder) UnpublishApp(ctx context.Context, projectName, appName
 		return nil
 	}
 	return p.UnpublishApp(ctx, projectName, appName)
+}
+
+// UnpublishProjectApps implements GitOpsPublisher. It delegates to the
+// currently held publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) UnpublishProjectApps(ctx context.Context, projectName string) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.UnpublishProjectApps(ctx, projectName)
+}
+
+// UnpublishProjectInfra implements GitOpsPublisher. It delegates to the
+// currently held publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) UnpublishProjectInfra(ctx context.Context, projectName string) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.UnpublishProjectInfra(ctx, projectName)
 }
 
 // Swap replaces the inner publisher atomically. Subsequent PublishApp calls
@@ -318,6 +369,8 @@ type Config struct {
 	KargoStatusReader       KargoStatusReader       // optional: enables GET promotion-status endpoint
 	KargoPipelineReader     KargoPipelineReader     // optional: enables GET pipeline-stages endpoint
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
+	ProjectAppCounter       ProjectAppCounter       // optional: sequences two-phase project deletion against live ArgoCD apps
+	AppDiagnosticsReader    AppDiagnosticsReader    // optional: surfaces ArgoCD/ESO failure signals in app env status
 	VaultStore              secrets.VaultStore      // optional: enables secret CRUD across global/env/cluster scopes
 	SecretsAuditor          *secrets.Auditor        // optional: enables audit logging for secret ops
 	ReadinessProbers        []ReadinessProber       // optional: checked by GET /readyz
@@ -411,6 +464,7 @@ func New(cfg Config) *Server {
 		if r, ok := cfg.GitOpsPublisher.(SecretStoreReconciler); ok {
 			rh.storeReconciler = r
 		}
+		rh.projectAppCounter = cfg.ProjectAppCounter
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
 			cfg.Logger.Info("service creation endpoint enabled")
@@ -469,6 +523,10 @@ func New(cfg Config) *Server {
 			if cfg.DeploymentHistoryReader != nil {
 				rh.appHandler.deploymentHistoryReader = cfg.DeploymentHistoryReader
 				cfg.Logger.Info("deployment history reader enabled — history endpoint active")
+			}
+			if cfg.AppDiagnosticsReader != nil {
+				rh.appHandler.diagnosticsReader = cfg.AppDiagnosticsReader
+				cfg.Logger.Info("app diagnostics reader enabled — ArgoCD/ESO errors surfaced in app status")
 			}
 			cfg.Logger.Info("app endpoints enabled")
 		}
@@ -552,6 +610,16 @@ func New(cfg Config) *Server {
 		orgProvider:  cfg.OrgProvider, // OrgStore satisfies OrgProvider
 		projectStore: cfg.ProjectStore,
 		authEnabled:  cfg.Authenticator != nil,
+	}
+	if cfg.ClusterStore != nil {
+		oh.clusterStore = cfg.ClusterStore
+	}
+	if cfg.GitOpsConfigStore != nil {
+		store := cfg.GitOpsConfigStore
+		oh.gitopsCheck = func(ctx context.Context) bool {
+			c, err := store.Get(ctx)
+			return err == nil && c != nil && c.RepoURL != ""
+		}
 	}
 	mux.HandleFunc("GET /api/v1/onboarding/status", oh.handleStatus)
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"k8s.io/client-go/kubernetes"
 
@@ -105,8 +106,9 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
-	if req.APIServer == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "apiServer is required"})
+	req.APIServer = strings.TrimSpace(req.APIServer)
+	if err := domain.ValidateAPIServerURL(req.APIServer); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
 	if req.Kubeconfig == "" {
@@ -132,6 +134,9 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		ESONamespace: req.ESONamespace,
 		Status:       "ready",
 	}
+	// Trim stray whitespace — a leading space in APIServer ends up in ArgoCD
+	// destination.server and breaks cluster lookup.
+	cluster.Normalize()
 
 	if err := ch.store.CreateCluster(r.Context(), cluster, kubeconfigBytes); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to register cluster: " + err.Error()})

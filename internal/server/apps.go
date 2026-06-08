@@ -46,10 +46,21 @@ type AppReleaseRefDTO struct {
 // instance, derived from cluster observations. Phase matches the domain
 // Status* constants (e.g. "running", "degraded", "not-deployed").
 type AppStatusSummaryDTO struct {
-	Phase        string `json:"phase"`
-	Replicas     int32  `json:"replicas"`
-	Available    int32  `json:"available"`
-	LastDeployed string `json:"lastDeployed,omitempty"`
+	Phase        string          `json:"phase"`
+	Replicas     int32           `json:"replicas"`
+	Available    int32           `json:"available"`
+	LastDeployed string          `json:"lastDeployed,omitempty"`
+	Diagnostics  []DiagnosticDTO `json:"diagnostics,omitempty"`
+}
+
+// DiagnosticDTO is one human-readable problem report surfaced from the
+// delivery pipeline (ArgoCD / External Secrets).
+type DiagnosticDTO struct {
+	Source string `json:"source"`
+	Level  string `json:"level"`
+	Title  string `json:"title"`
+	Detail string `json:"detail,omitempty"`
+	Hint   string `json:"hint,omitempty"`
 }
 
 // PreviewMetaDTO carries preview-specific metadata embedded in an environment

@@ -9,6 +9,7 @@ package secrets
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -123,6 +124,44 @@ func (c BackendConfig) Effective() BackendType {
 		return BackendK8s
 	}
 	return c.Type
+}
+
+// SetupComplete reports whether the secret backend is fully configured for the
+// given org environments and the clusters they're bound to, returning a
+// human-readable reason when it is not. Pure (no network) — derived from
+// stored config — so it can drive a fast, polled setup checklist.
+//
+// k8s backend needs no operator setup. 1Password needs: a global vault, an env
+// vault per bound environment, and a sealed Connect token for each cluster that
+// runs at least one environment.
+func (c BackendConfig) SetupComplete(envNames, boundClusters []string) (bool, string) {
+	if c.Effective() != Backend1Password {
+		return true, ""
+	}
+	op := c.OnePassword
+	if op == nil || op.GlobalVault.VaultID == "" {
+		return false, "Pick the global vault under Settings → Secrets Backend."
+	}
+	var missingEnvVaults []string
+	for _, env := range envNames {
+		if c.FindVault(EnvScope(env)) == nil {
+			missingEnvVaults = append(missingEnvVaults, env)
+		}
+	}
+	if len(missingEnvVaults) > 0 {
+		return false, "Register an env vault for: " + strings.Join(missingEnvVaults, ", ") + "."
+	}
+	var unsealed []string
+	for _, cl := range boundClusters {
+		ref := c.FindClusterToken(cl)
+		if ref == nil || !ref.Sealed {
+			unsealed = append(unsealed, cl)
+		}
+	}
+	if len(unsealed) > 0 {
+		return false, "Paste a Connect token for cluster(s): " + strings.Join(unsealed, ", ") + "."
+	}
+	return true, ""
 }
 
 // Validate checks the backend config for save-time correctness.

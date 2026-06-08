@@ -1106,46 +1106,199 @@ func (p *Publisher) DeletePreview(ctx context.Context, projectName, previewName 
 	})
 }
 
-// UnpublishApp removes all GitOps manifests for an app — specifically the
-// app's subdirectory under every stable-env directory in gitops-output/ —
-// and commits + pushes the deletion. It is a no-op if no files are found.
+// unpublishHelper removes path if present, tracking whether anything was
+// actually deleted so callers can skip the commit when nothing changed.
+type unpublishHelper struct{ removed bool }
+
+func (u *unpublishHelper) rm(path string) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("removing %s: %w", path, err)
+	}
+	slog.Debug("gitops: removed", "path", path)
+	u.removed = true
+	return nil
+}
+
+// UnpublishApp removes all GitOps manifests for an app and commits + pushes
+// the deletion. Covered layouts:
+//
+//   - envs/{env}/{project}/{app}/            — app Application + values
+//   - _app-resources/{env}/{project}/{app}/  — platform ConfigMap/ExternalSecret
+//   - _infra/kargo/{ns}-{app}-*.yaml         — Kargo Warehouse + Stage CRs
+//   - {env}/{project}/{app}/                 — legacy pre-envs/ layout
+//
+// Preview trees (previews/{project}/{preview}) are keyed by preview name, not
+// app name, and are removed by the preview-delete flow. No-op if nothing found.
 func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
+		var u unpublishHelper
+
+		// envs/{env}/{project}/{app} and _app-resources/{env}/{project}/{app}.
+		for _, base := range []string{"envs", "_app-resources"} {
+			baseDir := p.outputDir(repoDir, base)
+			entries, err := os.ReadDir(baseDir)
+			if err != nil {
+				continue // tree absent — nothing to remove
+			}
+			for _, e := range entries {
+				if !e.IsDir() || e.Name() == "previews" {
+					continue
+				}
+				if err := u.rm(filepath.Join(baseDir, e.Name(), projectName, appName)); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Kargo Warehouse + Stage CRs for this app. Filename-prefix matching:
+		// an app whose name is a hyphen-prefix of a sibling app's name could
+		// over-match stages, but app names within a project are validated DNS
+		// labels and this trade-off keeps deletion store-independent.
+		kargoPrefix := KargoNamespaceForProject(projectName) + "-" + appName + "-"
+		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
+		if entries, err := os.ReadDir(kargoDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasPrefix(e.Name(), kargoPrefix) {
+					continue
+				}
+				if e.Name() != kargoPrefix+"warehouse.yaml" && !strings.HasSuffix(e.Name(), "-stage.yaml") {
+					continue
+				}
+				if err := u.rm(filepath.Join(kargoDir, e.Name())); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Legacy pre-envs/ layout: top-level {env}/{project}/{app}.
 		outputDir := p.outputDir(repoDir)
-
-		// Walk the top-level entries of gitops-output/ (each is an env dir or
-		// the special "previews" directory) and remove {envDir}/{project}/{app}/.
-		entries, err := os.ReadDir(outputDir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
+		if entries, err := os.ReadDir(outputDir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() || isReservedTopLevelDir(e.Name()) {
+					continue
+				}
+				if err := u.rm(filepath.Join(outputDir, e.Name(), projectName, appName)); err != nil {
+					return err
+				}
 			}
-			return fmt.Errorf("reading gitops-output: %w", err)
 		}
 
-		removed := false
-		for _, entry := range entries {
-			if !entry.IsDir() || entry.Name() == "previews" || entry.Name() == "_infra" {
-				continue
-			}
-			appDir := filepath.Join(outputDir, entry.Name(), projectName, appName)
-			if _, err := os.Stat(appDir); os.IsNotExist(err) {
-				continue
-			}
-			if err := os.RemoveAll(appDir); err != nil {
-				return fmt.Errorf("removing app dir %s: %w", appDir, err)
-			}
-			slog.Debug("gitops: removed app directory", "dir", appDir)
-			removed = true
-		}
-
-		if !removed {
-			slog.Debug("gitops: no app directories found — nothing to delete",
+		if !u.removed {
+			slog.Debug("gitops: no app files found — nothing to delete",
 				"project", projectName, "app", appName)
 			return nil
 		}
 
 		commitMsg := fmt.Sprintf("feat(apps): delete app %s/%s\n\nDeleted by suparShip.", projectName, appName)
+		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
+// isReservedTopLevelDir reports whether a top-level gitops-output entry is a
+// platform-owned tree rather than a legacy env directory.
+func isReservedTopLevelDir(name string) bool {
+	switch name {
+	case "previews", "envs", "charts", "_infra", "_app-resources", "_secret-stores":
+		return true
+	}
+	return false
+}
+
+// UnpublishProjectApps is PHASE 1 of project deletion: it removes every app
+// directory in every layout, the project's preview trees, and its Kargo CRs —
+// everything EXCEPT the ArgoCD AppProject — and commits + pushes the deletion.
+//
+// The AppProject must outlive the generated Applications: when an Application
+// is pruned, its cleanup finalizer resolves the AppProject to cascade-delete
+// the deployed resources. Removing both in one commit races ArgoCD and leaves
+// Applications stuck in Terminating ("appproject not found"). Call
+// UnpublishProjectInfra (phase 2) once the project's Applications are gone.
+//
+// Per-env ApplicationSets are shared across projects and stay. No-op if
+// nothing found.
+func (p *Publisher) UnpublishProjectApps(ctx context.Context, projectName string) error {
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		var u unpublishHelper
+
+		// envs/{env}/{project} and _app-resources/{env}/{project} — for
+		// _app-resources the "previews" entry also nests by project, so it is
+		// intentionally NOT skipped here.
+		for _, base := range []string{"envs", "_app-resources"} {
+			baseDir := p.outputDir(repoDir, base)
+			entries, err := os.ReadDir(baseDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				if err := u.rm(filepath.Join(baseDir, e.Name(), projectName)); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Preview chart trees.
+		if err := u.rm(p.outputDir(repoDir, "previews", projectName)); err != nil {
+			return err
+		}
+
+		// Kargo Project CR + every app's Warehouse/Stage CRs. Same
+		// prefix-matching trade-off as UnpublishApp.
+		kargoPrefix := KargoNamespaceForProject(projectName) + "-"
+		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
+		if entries, err := os.ReadDir(kargoDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasPrefix(e.Name(), kargoPrefix) {
+					continue
+				}
+				if err := u.rm(filepath.Join(kargoDir, e.Name())); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Legacy pre-envs/ layout: top-level {env}/{project}.
+		outputDir := p.outputDir(repoDir)
+		if entries, err := os.ReadDir(outputDir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() || isReservedTopLevelDir(e.Name()) {
+					continue
+				}
+				if err := u.rm(filepath.Join(outputDir, e.Name(), projectName)); err != nil {
+					return err
+				}
+			}
+		}
+
+		if !u.removed {
+			slog.Debug("gitops: no project app files found — nothing to delete", "project", projectName)
+			return nil
+		}
+
+		commitMsg := fmt.Sprintf("feat(projects): delete project %s apps (phase 1/2)\n\nDeleted by suparShip.", projectName)
+		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
+// UnpublishProjectInfra is PHASE 2 of project deletion: it removes the
+// project's ArgoCD AppProject. Only call this after the project's generated
+// Applications have been pruned (see UnpublishProjectApps). No-op if absent.
+func (p *Publisher) UnpublishProjectInfra(ctx context.Context, projectName string) error {
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		var u unpublishHelper
+		if err := u.rm(p.outputDir(repoDir, "_infra", projectName+"-appproject.yaml")); err != nil {
+			return err
+		}
+		if !u.removed {
+			slog.Debug("gitops: no project infra files found — nothing to delete", "project", projectName)
+			return nil
+		}
+		commitMsg := fmt.Sprintf("feat(projects): delete project %s infra (phase 2/2)\n\nDeleted by suparShip.", projectName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }

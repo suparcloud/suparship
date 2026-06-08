@@ -278,6 +278,14 @@ export interface TemplateDetail {
 
 // --- Onboarding types ---
 
+export interface SetupGate {
+  key: string;
+  title: string;
+  status: "ok" | "incomplete" | "error";
+  message?: string;
+  action?: string;
+}
+
 export interface OnboardingStatus {
   clusterConnected: boolean;
   authConfigured: boolean;
@@ -286,6 +294,8 @@ export interface OnboardingStatus {
   hasEnvironments: boolean;
   hasServices: boolean;
   complete: boolean;
+  gates?: SetupGate[];
+  platformReady?: boolean;
 }
 
 // --- Inventory / Runtime types ---
@@ -381,11 +391,20 @@ export interface AppReleaseRef {
   commit?: string;
 }
 
+export interface Diagnostic {
+  source: string;
+  level: "error" | "warning";
+  title: string;
+  detail?: string;
+  hint?: string;
+}
+
 export interface AppStatusSummary {
   phase: string;
   replicas: number;
   available: number;
   lastDeployed?: string;
+  diagnostics?: Diagnostic[];
 }
 
 export interface PreviewMeta {

@@ -187,7 +187,67 @@ export function Onboarding() {
             </div>
           )}
 
-          {/* Checklist */}
+          {/* Platform setup gates — the SRE-facing checklist with real
+              readiness and remediation per step. */}
+          {!loading && status?.gates && status.gates.length > 0 && (
+            <div>
+              <h2 className="mb-2 text-sm font-medium uppercase tracking-wider text-gray-400">
+                Platform setup
+              </h2>
+              <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+                {status.gates.map((g, i) => (
+                  <div
+                    key={g.key}
+                    className={`flex items-start gap-4 px-5 py-4 ${
+                      i > 0 ? "border-t border-gray-100" : ""
+                    }`}
+                  >
+                    <GateIcon status={g.status} />
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className={`text-sm font-medium ${
+                          g.status === "ok" ? "text-gray-900" : "text-gray-700"
+                        }`}
+                      >
+                        {g.title}
+                      </p>
+                      {g.message && (
+                        <p
+                          className={`mt-0.5 text-xs ${
+                            g.status === "error"
+                              ? "text-red-600"
+                              : g.status === "incomplete"
+                                ? "text-amber-600"
+                                : "text-gray-400"
+                          }`}
+                        >
+                          {g.message}
+                        </p>
+                      )}
+                    </div>
+                    {g.status === "ok" ? (
+                      <span className="flex-shrink-0 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700">
+                        Ready
+                      </span>
+                    ) : g.action ? (
+                      <Link
+                        to={g.action}
+                        className="flex-shrink-0 rounded-full border border-gray-900 bg-white px-3 py-1 text-xs font-medium text-gray-900 transition-colors hover:bg-gray-900 hover:text-white"
+                      >
+                        Fix
+                      </Link>
+                    ) : (
+                      <span className="flex-shrink-0 rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-500">
+                        Action needed
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Onboarding checklist (org/projects/apps) */}
           {loading ? (
             <ChecklistSkeleton />
           ) : status ? (
@@ -302,6 +362,29 @@ function StatusIcon({ done }: { done: boolean }) {
   return (
     <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border-2 border-dashed border-gray-300">
       <div className="h-2 w-2 rounded-full bg-gray-300" />
+    </div>
+  );
+}
+
+function GateIcon({ status }: { status: string }) {
+  if (status === "ok") {
+    return (
+      <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-emerald-100">
+        <svg className="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+        </svg>
+      </div>
+    );
+  }
+  const color =
+    status === "error"
+      ? "bg-red-100 text-red-600"
+      : "bg-amber-100 text-amber-600";
+  return (
+    <div className={`mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full ${color}`}>
+      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+      </svg>
     </div>
   );
 }

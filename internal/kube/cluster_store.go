@@ -326,6 +326,9 @@ func clusterFromConfigMap(cm *corev1.ConfigMap) (*domain.Cluster, error) {
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {
 		return nil, fmt.Errorf("unmarshaling cluster from configmap: %w", err)
 	}
+	// Heal records that were registered with stray whitespace (e.g. a leading
+	// space in APIServer breaks ArgoCD destination matching).
+	c.Normalize()
 	return &c, nil
 }
 

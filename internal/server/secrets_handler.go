@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -130,6 +131,13 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
 	}
+	if newCfg.OnePassword != nil {
+		newCfg.OnePassword.Connect.Endpoint = strings.TrimSpace(newCfg.OnePassword.Connect.Endpoint)
+		if err := domain.ValidateConnectEndpoint(newCfg.OnePassword.Connect.Endpoint); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+	}
 	org, err := h.orgStore.GetOrg(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
@@ -140,6 +148,9 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save org"})
 		return
 	}
+	// Config changes (e.g. the org-level Connect endpoint) are baked into each
+	// cluster's unified store — republish them best-effort in the background.
+	h.resealAllClustersAsync("backend-config-updated")
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -162,6 +173,13 @@ func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
 	}
+	if cfg.OnePassword != nil {
+		cfg.OnePassword.Connect.Endpoint = strings.TrimSpace(cfg.OnePassword.Connect.Endpoint)
+		if err := domain.ValidateConnectEndpoint(cfg.OnePassword.Connect.Endpoint); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+	}
 	org, err := h.orgStore.GetOrg(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
@@ -172,6 +190,9 @@ func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save org"})
 		return
 	}
+	// Config changes (e.g. the org-level Connect endpoint) are baked into each
+	// cluster's unified store — republish them best-effort in the background.
+	h.resealAllClustersAsync("backend-config-updated")
 	writeJSON(w, http.StatusOK, cfg)
 }
 
@@ -441,6 +462,11 @@ func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "connectToken is required"})
 		return
 	}
+	req.ConnectEndpoint = strings.TrimSpace(req.ConnectEndpoint)
+	if err := domain.ValidateConnectEndpoint(req.ConnectEndpoint); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
 	ctx := r.Context()
 	org, err := h.orgStore.GetOrg(ctx)
 	if err != nil {
@@ -582,9 +608,14 @@ func (h *secretsHandler) sealCluster(ctx context.Context, org *rbac.Org, cluster
 		return fmt.Errorf("fetch sealing cert for %q: %w", clusterName, err)
 	}
 
+	// Connect endpoint precedence: per-cluster override > org-level setting >
+	// built-in default (resolved by the YAML builder when empty).
 	var connectEndpoint string
 	if tokenRef != nil {
 		connectEndpoint = tokenRef.ConnectEndpoint
+	}
+	if connectEndpoint == "" && org.SecretBackend.OnePassword != nil {
+		connectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
 	}
 	return h.sealPublisher.PublishClusterSecretStore(ctx, gitops.ClusterSealParams{
 		ClusterName:       clusterName,
@@ -618,6 +649,26 @@ func (h *secretsHandler) resealAllClusters(ctx context.Context, org *rbac.Org, r
 		}
 	}
 	_ = h.orgStore.SaveOrg(ctx, org)
+}
+
+// resealAllClustersAsync reloads the org in the background (so it sees the
+// just-saved config, including 1Password-only fields) and republishes every
+// cluster's unified store. No-op for non-1Password backends.
+func (h *secretsHandler) resealAllClustersAsync(reason string) {
+	if h.sealPublisher == nil || h.clusterStore == nil {
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		org, err := h.orgStore.GetOrg(ctx)
+		if err != nil || org == nil {
+			return
+		}
+		if org.SecretBackend.Effective() != secrets.Backend1Password {
+			return
+		}
+		h.resealAllClusters(ctx, org, reason)
+	}()
 }
 
 // orgEnvCluster returns the cluster bound to envName, or "".

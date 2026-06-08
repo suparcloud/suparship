@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode"
@@ -338,6 +339,58 @@ func ValidateClusterName(name string) error {
 	}
 	if !dnsLabelRE.MatchString(name) {
 		return fmt.Errorf("cluster name %q must be a valid DNS label: lowercase letters, digits, and hyphens, 2–63 characters, starting with a letter", name)
+	}
+	return nil
+}
+
+// ValidateAPIServerURL checks that a cluster API server URL is well-formed
+// before it is stored. A malformed value (most often stray whitespace) is
+// copied verbatim into ArgoCD AppProject/ApplicationSet destinations, where it
+// silently breaks every app on that cluster with "cluster ... not found" — so
+// reject it at the door. The caller should Cluster.Normalize() (trim) first;
+// this catches the rest. Returns a message safe to show the user.
+func ValidateAPIServerURL(raw string) error {
+	if strings.TrimSpace(raw) != raw {
+		return fmt.Errorf("API server URL has leading or trailing whitespace")
+	}
+	if raw == "" {
+		return fmt.Errorf("API server URL must not be empty")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("API server URL is not a valid URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("API server URL must use https (got %q)", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("API server URL must include a host (e.g. https://10.0.0.1:6443)")
+	}
+	return nil
+}
+
+// ValidateConnectEndpoint checks that a 1Password Connect server URL is
+// well-formed. The endpoint is an in-cluster address suparship cannot reach
+// from the control plane, so this is a shape check, not a reachability probe:
+// it catches typos (bad scheme, missing host, stray whitespace) that would
+// otherwise only surface as an ESO "store not ready" much later. Empty is
+// allowed (callers fall back to the org/built-in default).
+func ValidateConnectEndpoint(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if strings.TrimSpace(raw) != raw {
+		return fmt.Errorf("Connect server URL has leading or trailing whitespace")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("Connect server URL is not a valid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("Connect server URL must use http or https (got %q)", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("Connect server URL must include a host (e.g. http://onepassword-connect.onepassword-connect.svc.cluster.local:8080)")
 	}
 	return nil
 }
