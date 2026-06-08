@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"k8s.io/client-go/kubernetes"
 
@@ -105,8 +106,9 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
-	if req.APIServer == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "apiServer is required"})
+	req.APIServer = strings.TrimSpace(req.APIServer)
+	if err := domain.ValidateAPIServerURL(req.APIServer); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
 	if req.Kubeconfig == "" {

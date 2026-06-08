@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -130,6 +131,13 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
 	}
+	if newCfg.OnePassword != nil {
+		newCfg.OnePassword.Connect.Endpoint = strings.TrimSpace(newCfg.OnePassword.Connect.Endpoint)
+		if err := domain.ValidateConnectEndpoint(newCfg.OnePassword.Connect.Endpoint); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+	}
 	org, err := h.orgStore.GetOrg(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
@@ -164,6 +172,13 @@ func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *h
 	if err := cfg.Validate(); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
+	}
+	if cfg.OnePassword != nil {
+		cfg.OnePassword.Connect.Endpoint = strings.TrimSpace(cfg.OnePassword.Connect.Endpoint)
+		if err := domain.ValidateConnectEndpoint(cfg.OnePassword.Connect.Endpoint); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
 	}
 	org, err := h.orgStore.GetOrg(r.Context())
 	if err != nil {
@@ -445,6 +460,11 @@ func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *
 	}
 	if req.ConnectToken == "" {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "connectToken is required"})
+		return
+	}
+	req.ConnectEndpoint = strings.TrimSpace(req.ConnectEndpoint)
+	if err := domain.ValidateConnectEndpoint(req.ConnectEndpoint); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
 	}
 	ctx := r.Context()

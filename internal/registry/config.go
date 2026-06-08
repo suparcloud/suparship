@@ -3,7 +3,11 @@
 // imagePullSecrets in app namespaces so pods can pull from private registries.
 package registry
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 var (
 	ErrConfigNotFound = errors.New("registry: configuration not found")
@@ -33,10 +37,26 @@ type Config struct {
 	Insecure bool `json:"insecure,omitempty" yaml:"insecure,omitempty"`
 }
 
-// Validate returns an error if the config is incomplete.
+// Validate returns an error if the config is incomplete or the registry URL
+// is malformed. The URL is a registry host (e.g. "ghcr.io",
+// "registry.example.com:5000"), NOT a scheme'd URL — a pasted "https://..."
+// or stray whitespace breaks Kargo Warehouse image subscriptions and
+// imagePullSecret generation, so reject it at the door.
 func (c *Config) Validate() error {
-	if c.Enabled && c.URL == "" {
+	if !c.Enabled {
+		return nil
+	}
+	if c.URL == "" {
 		return ErrMissingURL
+	}
+	if strings.TrimSpace(c.URL) != c.URL {
+		return fmt.Errorf("registry: url %q has leading or trailing whitespace", c.URL)
+	}
+	if strings.Contains(c.URL, "://") {
+		return fmt.Errorf("registry: url must be a host without a scheme (e.g. \"ghcr.io\", not %q)", c.URL)
+	}
+	if strings.ContainsAny(c.URL, " \t") {
+		return fmt.Errorf("registry: url %q must not contain spaces", c.URL)
 	}
 	return nil
 }
