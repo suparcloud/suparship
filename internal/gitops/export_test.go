@@ -36,3 +36,8 @@ func (p *Publisher) PublishAppEnvForTest(repoDir string, app *domain.App, env Ap
 func FirstDeployEnvsForTest(envs []AppPublishEnv) []AppPublishEnv {
 	return firstDeployEnvs(envs)
 }
+
+// ChartVersionDirForTest / ChartPathForTest expose the version-scoped chart
+// path helpers to white-box tests.
+func ChartVersionDirForTest(version string) string    { return chartVersionDir(version) }
+func ChartPathForTest(template, version string) string { return chartPathFor(template, version) }

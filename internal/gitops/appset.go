@@ -123,7 +123,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           joinSubPath(opts.SubPath, "charts", "{{template}}"),
+		Path:           joinSubPath(opts.SubPath, "charts", "{{chartPath}}"),
 		TargetRevision: opts.TargetRevision,
 		Helm: &HelmSource{
 			ReleaseName: "{{name}}",
@@ -350,7 +350,7 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           joinSubPath(opts.SubPath, "charts", "{{template}}"),
+		Path:           joinSubPath(opts.SubPath, "charts", "{{chartPath}}"),
 		TargetRevision: opts.TargetRevision,
 		Helm: &HelmSource{
 			ReleaseName: "{{appName}}",
@@ -440,6 +440,11 @@ type AppMetadata struct {
 	Name     string `yaml:"name"`
 	Project  string `yaml:"project"`
 	Template string `yaml:"template"`
+	// ChartPath is the gitops chart directory for this app relative to charts/,
+	// i.e. "{template}/{versionDir}". The inline ApplicationSet substitutes it
+	// into the chart source path ({{chartPath}}) so apps pinning different
+	// versions of the same template resolve to distinct, non-colliding dirs.
+	ChartPath string `yaml:"chartPath,omitempty"`
 	// Namespace is the resolved Kubernetes namespace for this app+env instance.
 	// Resolved at publish time by ResolveNamespace so each app can have a
 	// different namespace even within the same ApplicationSet.
@@ -468,10 +473,13 @@ const (
 // PreviewAppMetadata is written as app.yaml for each preview instance.
 // The previews ApplicationSet reads clusterServer and namespace from here.
 type PreviewAppMetadata struct {
-	AppName       string `yaml:"appName"`
-	PreviewName   string `yaml:"previewName"`
-	Project       string `yaml:"project"`
-	Template      string `yaml:"template"`
+	AppName     string `yaml:"appName"`
+	PreviewName string `yaml:"previewName"`
+	Project     string `yaml:"project"`
+	Template    string `yaml:"template"`
+	// ChartPath mirrors AppMetadata.ChartPath — the preview reuses the stable
+	// app's version-scoped chart directory (no separate chart copy).
+	ChartPath     string `yaml:"chartPath,omitempty"`
 	ClusterServer string `yaml:"clusterServer"`
 	Namespace     string `yaml:"namespace"`
 }

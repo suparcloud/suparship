@@ -103,6 +103,13 @@ export const api = {
     });
   },
 
+  patch<T>(path: string, body?: unknown): Promise<T> {
+    return request<T>(path, {
+      method: "PATCH",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  },
+
   del(path: string): Promise<void> {
     return request<void>(path, { method: "DELETE" });
   },

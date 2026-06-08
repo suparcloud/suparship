@@ -58,6 +58,26 @@ export function createApp(
   );
 }
 
+// UpdateAppRequest edits an app's metadata + template input values. Omitted
+// fields are left unchanged. Template name is immutable (use upgradeAppTemplate
+// for the version).
+export interface UpdateAppRequest {
+  displayName?: string;
+  description?: string;
+  values?: Record<string, unknown>;
+}
+
+export function updateApp(
+  project: string,
+  app: string,
+  req: UpdateAppRequest,
+): Promise<CreateAppResponse> {
+  return api.patch<CreateAppResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}`,
+    req,
+  );
+}
+
 export function promoteApp(
   project: string,
   app: string,

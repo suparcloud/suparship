@@ -50,6 +50,22 @@ one-time operator action** on the 1Password secret backend. The k8s secret
 backend is unaffected. (config-schema unchanged at `v1` — the changes are
 operational, and the config decoder tolerates the removed fields.)
 
+**0. Version-scoped chart layout (generator `v0.1.0` → `v0.2.0`).** Bundled
+charts moved from `charts/{template}/` to `charts/{template}/{version}/`, and
+each app's `app.yaml` gained a `chartPath` key the inline ApplicationSet now
+sources (`charts/{{chartPath}}`). This lets two apps pin different versions of
+the same template without colliding (and makes the existing template-upgrade
+flow safe).
+- *Action:* none — on startup the server **re-publishes every app**, writing
+  the new versioned chart dirs + `chartPath`. Until that runs, an app whose
+  `app.yaml` predates this change has an unresolved `{{chartPath}}`; the
+  auto-republish closes the window. The old version-less `charts/{template}/`
+  directories become **harmless orphans** — safe to delete from the gitops repo
+  once every app shows the new `charts/{template}/{version}/` layout.
+- Apps can now also have their template input **Values** + display
+  name/description edited in place (App → Config → Edit), re-published like
+  create. No migration needed.
+
 **1. Per-cluster vaults removed — cluster secrets now live in the env vault.**
 Cluster-scope overrides moved from a dedicated `suparship-secrets-cluster-<c>`
 vault into items inside the env vault (`<app>-cluster-<c>` in

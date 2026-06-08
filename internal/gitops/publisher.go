@@ -496,11 +496,12 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 		// nobody reads.
 		mode, _ := p.resolveTemplateChartMode(app.Spec.Template.Name)
 		if mode == AppMetadataChartTypeInline {
-			// Sync the Helm chart into charts/{template}/ so ArgoCD's
-			// ApplicationSet can resolve the chart path. The version
-			// the app was created against is honored — bumping the
-			// templates registry doesn't silently re-version every
-			// running app's chart bytes.
+			// Sync the Helm chart into charts/{template}/{version}/ so
+			// ArgoCD's ApplicationSet can resolve the chart path. The
+			// version the app was created against is honored — bumping the
+			// templates registry doesn't silently re-version every running
+			// app's chart bytes, and two apps pinning different versions of
+			// the same template get distinct, non-colliding chart dirs.
 			if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name, app.Spec.Template.Version); err != nil {
 				return fmt.Errorf("sync chart for template %s@%s: %w", app.Spec.Template.Name, app.Spec.Template.Version, err)
 			}
@@ -568,6 +569,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			Name:      app.Name,
 			Project:   app.ProjectName,
 			Template:  app.Spec.Template.Name,
+			ChartPath: chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
 			Namespace: ns,
 		}
 		// External-mode apps carry the chart locator in app.yaml so
@@ -694,8 +696,8 @@ func (p *Publisher) pruneLegacyPlatformFiles(appDir string) error {
 }
 
 // syncChart materialises the Helm chart for templateName at
-// charts/{templateName}/ inside the cloned gitops repo so ArgoCD's
-// ApplicationSet can resolve "charts/{{template}}".
+// charts/{templateName}/{version}/ inside the cloned gitops repo so ArgoCD's
+// ApplicationSet can resolve "charts/{{chartPath}}".
 //
 // Resolution order:
 //  1. Local disk: TemplatesDir/{templateName}/chart/ (built-ins & dev mode).
@@ -708,8 +710,41 @@ func (p *Publisher) pruneLegacyPlatformFiles(appDir string) error {
 // existing callers that don't configure ChartFetcher keep prior behaviour.
 // When the chart directory already exists with identical content the
 // subsequent git commit is a no-op via stagedIsEmpty.
+// chartVersionDir is the version-scoped subdirectory under charts/{template}/
+// that holds one chart version, so two apps pinning different versions of the
+// same template don't collide. A pinned version is sanitized DNS-1123-safe
+// (mirrors kube.sanitizeVersionForName — see the note there); an unpinned app
+// ("" version, tracks latest) uses "latest".
+func chartVersionDir(version string) string {
+	if version == "" {
+		return "latest"
+	}
+	var b strings.Builder
+	b.Grow(len(version))
+	for _, r := range strings.ToLower(version) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	s := strings.Trim(b.String(), "-")
+	if s == "" {
+		return "latest"
+	}
+	return s
+}
+
+// chartPathFor returns the gitops chart path for an app's template+version,
+// relative to charts/ — i.e. "{template}/{versionDir}". Written into app.yaml
+// as chartPath and substituted into the ApplicationSet chart source path.
+func chartPathFor(templateName, version string) string {
+	return templateName + "/" + chartVersionDir(version)
+}
+
 func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName, version string) error {
-	dstDir := p.outputDir(repoDir, "charts", templateName)
+	dstDir := p.outputDir(repoDir, "charts", templateName, chartVersionDir(version))
 
 	if p.cfg.TemplatesDir != "" {
 		srcDir := filepath.Join(p.cfg.TemplatesDir, templateName, "chart")
@@ -1017,6 +1052,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 			PreviewName:   preview.PreviewName,
 			Project:       app.ProjectName,
 			Template:      app.Spec.Template.Name,
+			ChartPath:     chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
 			ClusterServer: preview.ClusterServer,
 			Namespace:     preview.Namespace,
 		}
@@ -1629,7 +1665,7 @@ walk away from the platform entirely. The repo keeps syncing.
 │               ├── env-configmap.yaml     # merged env vars (org→cluster)
 │               └── external-secret.yaml   # platform-managed ExternalSecret
 ├── previews/{project}/{previewName}/      # per-PR preview environments
-└── charts/{template}/                     # bundled Helm chart sources
+└── charts/{template}/{version}/           # bundled Helm chart sources (version-scoped)
 `+"```"+`
 
 The `+"`envs/`"+` wrapper makes the top-level self-documenting: stable envs

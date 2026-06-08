@@ -25,5 +25,9 @@ const (
 	// platform-emitted GitOps manifest (the <domain>/generator-version label),
 	// so a migration tool or SRE can tell which generator produced a file.
 	// Bump when the generated manifest/label contract changes.
-	Generator = "v0.1.0"
+	//
+	// v0.2.0: version-scoped chart layout — charts moved to
+	// charts/{template}/{version}/ and app.yaml gained a chartPath key
+	// (ApplicationSet sources charts/{{chartPath}}). See docs/upgrading.md.
+	Generator = "v0.2.0"
 )

@@ -424,7 +424,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					"repo", repoCfg.RepoURL,
 					"argocd_repo", pubCfg.ArgoCDRepoURL,
 				)
-				go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+				go func() {
+					publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+					// Re-publish every app so manifest-contract changes (e.g. the
+					// version-scoped chart layout) land fleet-wide. Sequential
+					// after env infra to avoid concurrent git pushes.
+					republishAllApps(context.Background(), gitOpsPublisher, appStore, projectStore, logger)
+				}()
 				go selfHealSealedTokens(context.Background(), pub, orgProvider, clusterStore, clusterPool, kubeClient, logger)
 
 				// Ensure the suparship-apps root ArgoCD Application exists.
@@ -1216,6 +1222,53 @@ func publishInitialEnvInfra(
 			logger.Info("initial env infra: published", "project", name)
 		}
 	}
+}
+
+// republishAllApps re-publishes every app's gitops files at startup. It exists
+// so a manifest-contract change (e.g. the version-scoped chart layout, which
+// adds chartPath to app.yaml and moves charts to charts/{template}/{version})
+// lands across the whole fleet without per-app manual action — old app.yaml
+// files lack the new keys until rewritten. Idempotent: a no-op commit when
+// content is unchanged. Best-effort; per-app failures are logged.
+func republishAllApps(
+	ctx context.Context,
+	pub server.GitOpsPublisher,
+	appStore domain.AppStore,
+	projectStore project.Store,
+	logger *slog.Logger,
+) {
+	if pub == nil || appStore == nil || projectStore == nil {
+		return
+	}
+	projects, err := projectStore.List(ctx)
+	if err != nil {
+		logger.Warn("republish apps: list projects failed", "error", err)
+		return
+	}
+	for _, p := range projects {
+		apps, err := appStore.ListApps(ctx, p.Metadata.Name)
+		if err != nil {
+			logger.Warn("republish apps: list apps failed", "project", p.Metadata.Name, "error", err)
+			continue
+		}
+		for _, app := range apps {
+			envs, err := appStore.ListAppEnvironments(ctx, p.Metadata.Name, app.Name)
+			if err != nil {
+				logger.Warn("republish apps: list envs failed", "project", p.Metadata.Name, "app", app.Name, "error", err)
+				continue
+			}
+			var stable []*domain.AppEnvironment
+			for _, e := range envs {
+				if e.EnvType != domain.AppEnvPreview {
+					stable = append(stable, e)
+				}
+			}
+			if err := pub.PublishApp(ctx, app, stable); err != nil {
+				logger.Warn("republish apps: publish failed", "project", p.Metadata.Name, "app", app.Name, "error", err)
+			}
+		}
+	}
+	logger.Info("republish apps: complete")
 }
 
 // selfHealSealedTokens reconstructs missing per-env sealed Connect token
