@@ -156,9 +156,13 @@ func (e OrgEnvironment) EffectiveProjectNamespacePattern() string {
 
 // Org represents a single organization.
 type Org struct {
-	Name        string           `yaml:"name"`
-	DisplayName string           `yaml:"displayName"`
-	CreatedAt   string           `yaml:"createdAt,omitempty"`
+	Name        string `yaml:"name"`
+	DisplayName string `yaml:"displayName"`
+	CreatedAt   string `yaml:"createdAt,omitempty"`
+	// SchemaVersion is the org-config schema version this record was written
+	// with (version.Schema). Stamped on save; compared on startup to detect an
+	// upgrade across a breaking config change. Empty = pre-versioning.
+	SchemaVersion string `yaml:"schemaVersion,omitempty"`
 	// Environments is the canonical deployment pipeline shared by all projects.
 	// Projects may store per-environment overrides but inherit these defaults.
 	Environments []OrgEnvironment `yaml:"environments,omitempty"`

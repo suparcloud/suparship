@@ -8,6 +8,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/suparcloud/suparship/internal/version"
 )
 
 // Compile-time check that K8sOrgProvider satisfies OrgStore.
@@ -81,6 +83,10 @@ func (p *K8sOrgProvider) SaveOrg(ctx context.Context, org *Org) error {
 	if err := org.Validate(); err != nil {
 		return fmt.Errorf("invalid org: %w", err)
 	}
+
+	// Stamp the schema version this binary writes so future upgrades can
+	// detect the format (see CheckSchema / docs/upgrading.md).
+	org.SchemaVersion = version.Schema
 
 	data, err := org.Marshal()
 	if err != nil {

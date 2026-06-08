@@ -323,6 +323,19 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		bootstrapResult := bootstrap.Reconcile(cmd.Context(), client, logger)
 		logger.Info("bootstrap complete", "summary", bootstrap.FormatSummary(bootstrapResult))
 
+		// Upgrade check: compare the persisted org-config schema version with
+		// this binary's. Advisory only — surfaces migration guidance in logs.
+		if org, err := orgProvider.GetOrg(cmd.Context()); err == nil && org != nil {
+			switch check, msg := rbac.CheckSchema(org); check {
+			case rbac.SchemaCurrent:
+				// up to date — say nothing
+			case rbac.SchemaDowngrade:
+				logger.Error("org config schema check", "detail", msg)
+			default:
+				logger.Warn("org config schema check", "detail", msg)
+			}
+		}
+
 		// Ensure the suparship-system ArgoCD AppProject exists. This is a
 		// self-healing step: if the Helm chart was not yet upgraded (or ArgoCD
 		// was installed after suparship), this creates the project automatically
