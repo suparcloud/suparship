@@ -192,6 +192,67 @@ type Org struct {
 	// pin the implementation here. Per-env overrides on
 	// OrgEnvironment.AddonProfiles replace entries by type sparsely.
 	AddonProfiles domain.AddonProfiles `yaml:"addonProfiles,omitempty"`
+	// Auth holds optional SSO configuration. When OIDC is enabled, developers
+	// log in via the org IdP and their group claims drive RBAC (see
+	// RoleBinding.Group). The local admin credential remains as break-glass.
+	Auth AuthConfig `yaml:"auth,omitempty"`
+}
+
+// AuthConfig holds org-level authentication configuration.
+type AuthConfig struct {
+	// OIDC is the SSO config. Nil/disabled = local admin credential only.
+	OIDC *OIDCConfig `yaml:"oidc,omitempty"`
+}
+
+// OIDCConfig configures OpenID Connect SSO login. The client secret is NOT
+// stored here — it lives in a Kubernetes Secret (see SecretRef) so the org
+// ConfigMap stays free of credentials.
+type OIDCConfig struct {
+	// Enabled turns the SSO login flow on. When false the struct is ignored.
+	Enabled bool `yaml:"enabled"`
+	// IssuerURL is the OIDC issuer (discovery happens at issuer/.well-known).
+	IssuerURL string `yaml:"issuerURL"`
+	// ClientID is the OAuth2 client ID registered with the IdP.
+	ClientID string `yaml:"clientID"`
+	// ClientSecretRef names the Kubernetes Secret + key holding the client
+	// secret. Empty key defaults to "client-secret".
+	ClientSecretRef SecretKeyRef `yaml:"clientSecretRef,omitempty"`
+	// RedirectURL is suparShip's callback URL registered with the IdP, e.g.
+	// https://suparship.example.com/api/v1/auth/oidc/callback.
+	RedirectURL string `yaml:"redirectURL"`
+	// Scopes requested at login. Defaults to openid, profile, email, groups.
+	Scopes []string `yaml:"scopes,omitempty"`
+	// UsernameClaim is the ID-token claim used as the suparShip username.
+	// Defaults to "email".
+	UsernameClaim string `yaml:"usernameClaim,omitempty"`
+	// GroupsClaim is the ID-token claim carrying the user's IdP groups, matched
+	// against RoleBinding.Group. Defaults to "groups".
+	GroupsClaim string `yaml:"groupsClaim,omitempty"`
+}
+
+// SecretKeyRef references a key within a Kubernetes Secret in the suparship
+// system namespace.
+type SecretKeyRef struct {
+	Name string `yaml:"name"`
+	Key  string `yaml:"key,omitempty"`
+}
+
+// Defaulted returns a copy of the OIDC config with empty optional fields filled
+// with their conventional defaults.
+func (c OIDCConfig) Defaulted() OIDCConfig {
+	if len(c.Scopes) == 0 {
+		c.Scopes = []string{"openid", "profile", "email", "groups"}
+	}
+	if c.UsernameClaim == "" {
+		c.UsernameClaim = "email"
+	}
+	if c.GroupsClaim == "" {
+		c.GroupsClaim = "groups"
+	}
+	if c.ClientSecretRef.Key == "" {
+		c.ClientSecretRef.Key = "client-secret"
+	}
+	return c
 }
 
 // Team represents a named group of users.
@@ -201,12 +262,18 @@ type Team struct {
 	Members     []string `yaml:"members"`
 }
 
-// RoleBinding assigns a role to a team for a project.
-// Project "*" matches all projects.
+// RoleBinding assigns a role for a project to a subject — either a local Team
+// (matched by username membership) or an IdP Group (matched by a group claim
+// from an SSO login). Exactly one of Team/Group is set. Project "*" matches all
+// projects.
 type RoleBinding struct {
 	Project string `yaml:"project"`
-	Team    string `yaml:"team"`
-	Role    Role   `yaml:"role"`
+	// Team matches users by membership in a local Team (username-based).
+	Team string `yaml:"team,omitempty"`
+	// Group matches SSO users by an IdP group claim value. Lets the platform
+	// team grant access by IdP group without rostering individual users.
+	Group string `yaml:"group,omitempty"`
+	Role  Role   `yaml:"role"`
 }
 
 // NewDefaultOrg creates a minimal org with a single admins team containing

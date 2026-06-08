@@ -30,40 +30,60 @@ func (o *Org) UserTeams(username string) []string {
 }
 
 // EffectiveRole returns the highest-privilege role a user has for the given
-// project. It considers both project-specific bindings and wildcard ("*")
-// bindings. Returns ("", false) if the user has no role.
+// project, considering only local team membership (username-based). It is the
+// identity-without-SSO-groups case; SSO logins should use
+// EffectiveRoleForIdentity with their group claims. Returns ("", false) if the
+// user has no role.
 func (o *Org) EffectiveRole(username, project string) (Role, bool) {
+	return o.EffectiveRoleForIdentity(username, nil, project)
+}
+
+// EffectiveRoleForIdentity returns the highest-privilege role for an identity
+// described by its username (local team membership) AND its IdP group claims
+// (group bindings). A binding matches when its Team is one the user belongs to,
+// OR its Group is one of the supplied groups. Considers project-specific and
+// wildcard ("*") bindings. Returns ("", false) if nothing matches.
+func (o *Org) EffectiveRoleForIdentity(username string, groups []string, project string) (Role, bool) {
 	memberOf := make(map[string]bool)
 	for _, t := range o.UserTeams(username) {
 		memberOf[t] = true
 	}
-	if len(memberOf) == 0 {
-		return "", false
+	groupSet := make(map[string]bool, len(groups))
+	for _, g := range groups {
+		groupSet[g] = true
 	}
 
 	var highest Role
+	found := false
 	for _, rb := range o.RoleBindings {
 		if rb.Project != project && rb.Project != "*" {
 			continue
 		}
-		if !memberOf[rb.Team] {
+		matched := (rb.Team != "" && memberOf[rb.Team]) || (rb.Group != "" && groupSet[rb.Group])
+		if !matched {
 			continue
 		}
+		found = true
 		if RoleLevel(rb.Role) > RoleLevel(highest) {
 			highest = rb.Role
 		}
 	}
-
-	if highest == "" {
+	if !found {
 		return "", false
 	}
 	return highest, true
 }
 
 // HasPermission checks whether a user has at least the required role for the
-// given project.
+// given project, by local team membership only.
 func (o *Org) HasPermission(username, project string, required Role) bool {
-	effective, ok := o.EffectiveRole(username, project)
+	return o.HasPermissionForIdentity(username, nil, project, required)
+}
+
+// HasPermissionForIdentity checks whether an identity (username + IdP groups)
+// has at least the required role for the given project.
+func (o *Org) HasPermissionForIdentity(username string, groups []string, project string, required Role) bool {
+	effective, ok := o.EffectiveRoleForIdentity(username, groups, project)
 	if !ok {
 		return false
 	}
