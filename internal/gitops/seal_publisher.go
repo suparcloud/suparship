@@ -122,6 +122,25 @@ func (p *Publisher) PublishClusterSecretStore(ctx context.Context, params Cluste
 	})
 }
 
+// HasClusterSecretStore reports whether a cluster's unified store (store.yaml)
+// is present in the gitops repo. Used by startup self-heal to skip clusters
+// that are already published — re-sealing is non-deterministic and would
+// produce a noisy commit on every restart.
+func (p *Publisher) HasClusterSecretStore(ctx context.Context, clusterName string) (bool, error) {
+	if clusterName == "" {
+		return false, fmt.Errorf("HasClusterSecretStore: clusterName is required")
+	}
+	var present bool
+	err := p.withClonedRepo(ctx, func(repoDir string) error {
+		storePath := p.outputDir(repoDir, "_secret-stores", clusterName, "store.yaml")
+		if _, statErr := os.Stat(storePath); statErr == nil {
+			present = true
+		}
+		return nil
+	})
+	return present, err
+}
+
 // DeleteClusterSecretStores removes a cluster's sealed token + store and its
 // ArgoCD Application. No-op if absent.
 func (p *Publisher) DeleteClusterSecretStores(ctx context.Context, clusterName string) error {

@@ -29,6 +29,7 @@ import (
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/runtime"
+	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
@@ -1198,17 +1199,92 @@ func selfHealSealedTokens(
 	kubeClient kubernetes.Interface,
 	logger *slog.Logger,
 ) {
-	// TODO(5b): re-seal + republish the per-cluster Connect token + unified
-	// ClusterSecretStore (sealed-token.yaml / store.yaml) for clusters whose
-	// gitops files are missing, from the per-cluster stash
-	// (secrets.ClusterStashKey). No-op for now.
-	_ = ctx
-	_ = pub
-	_ = orgProvider
-	_ = clusterStore
-	_ = clusterPool
-	_ = kubeClient
-	_ = logger
+	if pub == nil || orgProvider == nil || clusterStore == nil || clusterPool == nil || kubeClient == nil {
+		return
+	}
+	org, err := orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		return
+	}
+	if org.SecretBackend.Effective() != secrets.Backend1Password {
+		return // only 1Password publishes sealed tokens + stores
+	}
+	clusters, err := clusterStore.ListClusters(ctx)
+	if err != nil {
+		logger.Warn("self-heal: listing clusters failed", "error", err)
+		return
+	}
+
+	certCache := seal.NewK8sCertCache(kubeClient)
+	for _, c := range clusters {
+		// Skip clusters whose store is already published — re-sealing is
+		// non-deterministic and would churn the repo on every restart.
+		if present, err := pub.HasClusterSecretStore(ctx, c.Name); err != nil {
+			logger.Warn("self-heal: store presence check failed", "cluster", c.Name, "error", err)
+			continue
+		} else if present {
+			continue
+		}
+
+		// Need the cluster's stashed token to reconstruct the sealed Secret.
+		token, err := secrets.LoadConnectToken(ctx, kubeClient, secrets.ClusterStashKey(c.Name))
+		if err != nil || len(token) == 0 {
+			logger.Info("self-heal: no stashed Connect token — operator must re-paste it",
+				"cluster", c.Name)
+			continue
+		}
+
+		// Vaults this cluster reads: the global vault + the env vault of each
+		// environment bound to it (mirrors server.clusterVaultIDs).
+		var vaultIDs []string
+		if ref := org.SecretBackend.FindVault(secrets.GlobalScope()); ref != nil && ref.VaultID != "" {
+			vaultIDs = append(vaultIDs, ref.VaultID)
+		}
+		for _, e := range org.Environments {
+			if e.EffectiveClusterRef() != c.Name {
+				continue
+			}
+			if ref := org.SecretBackend.FindVault(secrets.EnvScope(e.Name)); ref != nil && ref.VaultID != "" {
+				vaultIDs = append(vaultIDs, ref.VaultID)
+			}
+		}
+		if len(vaultIDs) == 0 || c.APIServer == "" {
+			continue
+		}
+
+		kubeForCluster, err := clusterPool.Get(ctx, c.Name)
+		if err != nil {
+			logger.Warn("self-heal: building cluster client failed", "cluster", c.Name, "error", err)
+			continue
+		}
+		cert, err := seal.FetchAndCache(ctx, certCache, kubeForCluster, c.Name, seal.FetchOptions{})
+		if err != nil {
+			logger.Warn("self-heal: fetching sealing cert failed", "cluster", c.Name, "error", err)
+			continue
+		}
+
+		var connectEndpoint string
+		if ref := org.SecretBackend.FindClusterToken(c.Name); ref != nil {
+			connectEndpoint = ref.ConnectEndpoint
+		}
+		if connectEndpoint == "" && org.SecretBackend.OnePassword != nil {
+			connectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
+		}
+
+		if err := pub.PublishClusterSecretStore(ctx, gitops.ClusterSealParams{
+			ClusterName:       c.Name,
+			ArgoCDDestination: c.APIServer,
+			ESONamespace:      c.EffectiveESONamespace(),
+			Cert:              cert,
+			Token:             token,
+			VaultIDs:          vaultIDs,
+			ConnectEndpoint:   connectEndpoint,
+		}); err != nil {
+			logger.Warn("self-heal: republish failed", "cluster", c.Name, "error", err)
+			continue
+		}
+		logger.Info("self-heal: republished sealed token + unified store from stash", "cluster", c.Name)
+	}
 }
 
 // brandingFromOrg fetches Org.Branding once at startup and returns its zero
