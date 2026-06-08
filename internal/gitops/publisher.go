@@ -892,6 +892,13 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		// When the app specifies a concrete image, accept any tag (the tag
 		// pattern can always be tightened via the Warehouse directly).
 		whOpts.ImageTagPattern = ".*"
+	} else {
+		// No image set — applyKargoDefaults will use the ghcr.io/{project}/{app}
+		// placeholder, which won't resolve and leaves pods in InvalidImageName.
+		// Warn loudly rather than failing silently.
+		slog.Warn("gitops: app has no image_repository — Kargo Warehouse will use a placeholder that won't pull; set the app's image repository",
+			"project", app.ProjectName, "app", app.Name,
+			"placeholder", DefaultImageRepoURL(app.ProjectName, app.Name))
 	}
 	warehouse := BuildKargoWarehouse(app, whOpts)
 	whBytes, err := yaml.Marshal(warehouse)

@@ -171,6 +171,12 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	if values == nil {
 		values = map[string]any{}
 	}
+	if repo, ok := values["image_repository"].(string); ok {
+		if err := domain.ValidateImageRepository(repo); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+	}
 
 	result, err := domainapp.Create(domainapp.CreateRequest{
 		ProjectName:        projectName,
