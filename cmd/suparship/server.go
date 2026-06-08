@@ -139,6 +139,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		deploymentHistoryReader server.DeploymentHistoryReader
 		projectAppCounter       server.ProjectAppCounter
 		appDiagnosticsReader    server.AppDiagnosticsReader
+		stuckAppManager         server.StuckAppManager
 		kubeClient              kubernetes.Interface
 		dynClient               dynamic.Interface
 		gitopsConfigStore       *gitops.ConfigStore
@@ -228,6 +229,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			deploymentHistoryReader = &argoCDHistoryAdapter{reader: argoCDReader}
 			projectAppCounter = argoCDReader
 			appDiagnosticsReader = argoCDReader
+			stuckAppManager = &stuckAppAdapter{reader: argoCDReader}
 			logger.Info("kargo promoter enabled via dynamic client")
 			logger.Info("argocd deployment history reader enabled")
 		}
@@ -555,6 +557,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		DeploymentHistoryReader: deploymentHistoryReader,
 		ProjectAppCounter:       projectAppCounter,
 		AppDiagnosticsReader:    appDiagnosticsReader,
+		StuckAppManager:         stuckAppManager,
 		ReadinessProbers:        readinessProbers,
 		CookieSecure:            cookieSecure,
 		Logger:                  logger,
@@ -1051,6 +1054,34 @@ func (a *argoCDHistoryAdapter) GetAppDeploymentHistory(ctx context.Context, appN
 		})
 	}
 	return out, nil
+}
+
+// stuckAppAdapter bridges the ArgoCD reader's stuck-app detection/unstick to
+// the server.StuckAppManager interface, converting the kube DTO to the server one.
+type stuckAppAdapter struct {
+	reader *kube.ArgoCDStatusReader
+}
+
+func (a *stuckAppAdapter) ListStuckApplications(ctx context.Context) ([]server.StuckApp, error) {
+	raw, err := a.reader.ListStuckApplications(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.StuckApp, 0, len(raw))
+	for _, s := range raw {
+		out = append(out, server.StuckApp{
+			Name:              s.Name,
+			Project:           s.Project,
+			DeletionTimestamp: s.DeletionTimestamp,
+			Finalizers:        s.Finalizers,
+			Reason:            s.Reason,
+		})
+	}
+	return out, nil
+}
+
+func (a *stuckAppAdapter) UnstickApplication(ctx context.Context, name string) error {
+	return a.reader.UnstickApplication(ctx, name)
 }
 
 // fakeHistoryAdapter bridges fake.FakeDeploymentHistoryReader to the
