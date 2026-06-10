@@ -1,0 +1,119 @@
+# Example suparShip Helm values — a realistic single-cluster install for "Acme".
+#
+# Copy and edit, then:
+#   helm install suparship ./charts/suparship \
+#     --namespace suparship-system --create-namespace -f values.yaml
+#
+# Everything here can also be configured in the UI after a minimal install; this
+# file is the IaC equivalent. `suparship` can export its live config back to this
+# shape:  GET /api/v1/org/export?format=yaml
+#
+# Secrets are NEVER inlined — reference pre-provisioned Kubernetes Secrets by
+# name (`existingSecret` / `clientSecretRef`). See docs/install.md and
+# docs/secrets.md.
+
+# -- Organization identity.
+org:
+  name: acme
+  displayName: "Acme"
+
+# -- Admin (break-glass) credential. Provision the Secret before install, or run
+# `kubectl exec deploy/suparship -- suparship admin bootstrap` after.
+admin:
+  secret:
+    name: suparship-admin-auth
+    usernameKey: username
+    passwordHashKey: password-hash
+
+# -- Serve cookies with the Secure flag when behind HTTPS (recommended).
+server:
+  cookieSecure: true
+
+# -- GitOps repository suparShip writes app/env manifests to (ArgoCD syncs it).
+gitops:
+  provider: github
+  repoURL: https://github.com/acme/gitops.git
+  branch: main
+  initializeRepo: true
+  # Secret with provider credentials (github: token, or appId/installationId/privateKey).
+  existingSecret: suparship-gitops-credentials
+  github:
+    appId: ""
+    installationId: ""
+
+# -- Workload clusters. Use inCluster for the hub itself; add entries (each
+# referencing a kubeconfig Secret) to deploy to remote clusters (hub-spoke).
+clusters:
+  - name: in-cluster
+    displayName: "Hub"
+    inCluster: true
+  # - name: prod-aks
+  #   displayName: "Prod (AKS)"
+  #   existingSecret: cluster-prod-aks-kubeconfig
+
+# -- Promotion pipeline. Each environment binds to a cluster by name.
+environments:
+  - name: staging
+    displayName: Staging
+    order: 1
+    clusterRefs: [in-cluster]
+    activeClusterRef: in-cluster
+    baseDomain: staging.acme.example.com
+  - name: prod
+    displayName: Production
+    order: 2
+    clusterRefs: [in-cluster]
+    activeClusterRef: in-cluster
+    baseDomain: acme.example.com
+
+# -- Secret backend for app/env/cluster secrets. "k8s" = native Secrets via ESO;
+# "onepassword" stores values in 1Password vaults. See docs/secrets.md.
+secrets:
+  backend: k8s
+
+# -- (Optional) private image registry for pulling app images.
+registry:
+  enabled: true
+  url: ghcr.io/acme
+  username: acme-bot
+  existingSecret: suparship-registry-credentials
+
+# -- Teams: named groups of local users (matched by username/email). Bind them
+# to roles below. See Settings → Teams in the UI.
+teams:
+  - name: platform
+    displayName: Platform
+    members: [alice@acme.example.com]
+  - name: api-devs
+    displayName: API Developers
+    members: [bob@acme.example.com]
+
+# -- Role bindings grant a role on a project to a team OR an IdP group (SSO).
+# project "*" = all projects. Roles: org_admin, project_admin, developer, viewer.
+roleBindings:
+  - project: "*"
+    team: platform
+    role: org_admin
+  - project: api
+    team: api-devs
+    role: developer
+  # Group-based (requires SSO + a groups claim — see docs/sso.md):
+  # - project: "*"
+  #   group: acme-sre
+  #   role: org_admin
+
+# -- (Optional) OIDC single sign-on. Disabled here; set enabled: true and fill
+# in your IdP details (or configure in Settings → Auth). The client secret lives
+# in a Kubernetes Secret referenced by clientSecretRef. See docs/sso.md.
+auth:
+  oidc:
+    enabled: false
+    issuerURL: ""              # e.g. https://accounts.google.com
+    clientID: ""
+    redirectURL: ""            # https://suparship.acme.example.com/api/v1/auth/oidc/callback
+    clientSecretRef:
+      name: suparship-oidc
+      key: client-secret
+    scopes: [openid, profile, email, groups]
+    usernameClaim: email
+    groupsClaim: groups

@@ -75,19 +75,48 @@ SREs define:
 
 ---
 
-## Quickstart (no cloud, no paid services)
+## Quickstart
 
-### Prerequisites
+Two ways to start, depending on whether you want to *try* suparShip or *run* it.
 
-- `kubectl`
-- `k3d`
-- (optional) `docker` – required only for local build mode
+### A. Try it locally — no cluster, no cloud (~1 min)
 
-### Install suparShip
+Runs the whole backend in-process with seeded demo data, so you can click through
+the UI immediately.
 
 ```bash
-curl -fsSL https://suparcloud.io/install/suparship.sh | sh
+git clone https://github.com/suparcloud/suparship && cd suparship
+cp .env.example .env          # SUPARSHIP_DEV_MODE=local; admin@local / admin123
+task dev                      # backend (fake) on :8080 + UI on :5173
 ```
+
+Open the UI and sign in with **`admin@local` / `admin123`**. Details in
+[Local Fake Mode](#local-fake-mode-contributor-default).
+
+### B. Install on a cluster (Helm)
+
+suparShip runs in a **hub** cluster and deploys your apps there — or to registered
+**remote** clusters — via ArgoCD. You need a cluster with ArgoCD (+ Kargo, ESO);
+see the prerequisites in [docs/install.md](docs/install.md).
+
+```bash
+# Start from the annotated example and edit it for your org:
+cp examples/values.yaml my-values.yaml
+
+helm install suparship ./charts/suparship \
+  --namespace suparship-system --create-namespace \
+  -f my-values.yaml
+```
+
+Then follow the day-1 runbook — [**docs/install.md**](docs/install.md) — to connect
+the GitOps repo, register clusters, bind environments, and turn the Platform-setup
+checklist green. Optionally wire [single sign-on](docs/sso.md), and verify the
+install against the [acceptance checklist](docs/acceptance.md).
+
+> You can declare the entire setup in values (org, environments, clusters, gitops,
+> registry, secrets backend, teams, role bindings, OIDC) or configure it in the UI
+> and export it back with `GET /api/v1/org/export?format=yaml`. See
+> [`examples/values.yaml`](examples/values.yaml).
 
 ---
 
@@ -554,6 +583,8 @@ Significant design decisions are recorded as Architecture Decision Records (ADRs
 |----------|---------|
 | [`docs/app-model.md`](docs/app-model.md) | App, Environment, and Component concepts and guardrails |
 | [`docs/secrets.md`](docs/secrets.md) | Secrets architecture: 1Password integration, provisioning, audit policy |
+| [`docs/sso.md`](docs/sso.md) | OIDC single sign-on setup (Google Workspace, Okta, …) and group/team RBAC |
+| [`docs/acceptance.md`](docs/acceptance.md) | Golden-path acceptance: automated smoke test + manual real-cluster checklist |
 | [`docs/templates-components.md`](docs/templates-components.md) | How templates define component topology |
 | [`docs/templates.md`](docs/templates.md) | Full template authoring reference |
 | [`docs/migration-app-model.md`](docs/migration-app-model.md) | Service → app migration guide |

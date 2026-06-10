@@ -65,6 +65,13 @@ func newExportMux(t *testing.T) (*http.ServeMux, *authHandler) {
 		},
 		Teams:        []rbac.Team{{Name: "admins", DisplayName: "Admins", Members: []string{"admin"}}},
 		RoleBindings: []rbac.RoleBinding{{Project: "*", Team: "admins", Role: "org_admin"}},
+		Auth: rbac.AuthConfig{OIDC: &rbac.OIDCConfig{
+			Enabled:         true,
+			IssuerURL:       "https://idp.example.com",
+			ClientID:        "suparship",
+			ClientSecretRef: rbac.SecretKeyRef{Name: "suparship-oidc", Key: "client-secret"},
+			RedirectURL:     "https://suparship.example.com/api/v1/auth/oidc/callback",
+		}},
 		SecretBackend: secrets.BackendConfig{
 			Type: secrets.Backend1Password,
 			OnePassword: &secrets.OnePasswordConfig{
@@ -173,6 +180,49 @@ func TestExportHandler_YAML(t *testing.T) {
 	disp := w.Header().Get("Content-Disposition")
 	if !strings.Contains(disp, "values.yaml") {
 		t.Errorf("Content-Disposition = %q, want attachment with values.yaml", disp)
+	}
+}
+
+func TestExportHandler_AuthTeamsRBAC(t *testing.T) {
+	mux, ah := newExportMux(t)
+	cookie := sessionCookieFor(ah, "admin", "org_admin")
+
+	// JSON: structured assertions, and no secret value present.
+	req := httptest.NewRequest("GET", "/api/v1/org/export", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	var vals helmValues
+	if err := json.Unmarshal(w.Body.Bytes(), &vals); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(vals.Teams) != 1 || vals.Teams[0].Name != "admins" {
+		t.Errorf("teams not exported: %+v", vals.Teams)
+	}
+	if len(vals.RoleBindings) != 1 || vals.RoleBindings[0].Role != "org_admin" {
+		t.Errorf("roleBindings not exported: %+v", vals.RoleBindings)
+	}
+	if vals.Auth == nil || vals.Auth.OIDC == nil || !vals.Auth.OIDC.Enabled {
+		t.Fatalf("auth.oidc not exported: %+v", vals.Auth)
+	}
+	if vals.Auth.OIDC.ClientSecretRef.Name != "suparship-oidc" {
+		t.Errorf("clientSecretRef not exported: %+v", vals.Auth.OIDC.ClientSecretRef)
+	}
+
+	// YAML: sections present, secret value never leaks.
+	yreq := httptest.NewRequest("GET", "/api/v1/org/export?format=yaml", nil)
+	yreq.AddCookie(cookie)
+	yw := httptest.NewRecorder()
+	mux.ServeHTTP(yw, yreq)
+	body := yw.Body.String()
+	for _, c := range []string{
+		"teams:", "name: admins",
+		"roleBindings:", "role: org_admin",
+		"auth:", "oidc:", "issuerURL:", "clientSecretRef:", "name: suparship-oidc",
+	} {
+		if !strings.Contains(body, c) {
+			t.Errorf("YAML missing %q", c)
+		}
 	}
 }
 

@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/session"
 )
 
@@ -26,6 +30,14 @@ type authHandler struct {
 	authenticator auth.Authenticator
 	sessions      *session.Store
 	cookieSecure  bool
+	// orgProvider supplies the OIDC config (org.Auth.OIDC). Optional; nil
+	// disables the SSO endpoints.
+	orgProvider rbac.OrgProvider
+	// kubeClient reads the OIDC client-secret Secret. Optional; nil disables SSO.
+	kubeClient kubernetes.Interface
+	// oidcProviders caches discovered *oidc.Provider by issuer URL so each
+	// login doesn't re-run discovery.
+	oidcProviders sync.Map
 }
 
 type loginRequest struct {
@@ -46,6 +58,12 @@ func (ah *authHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/login", ah.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", ah.handleLogout)
 	mux.HandleFunc("GET /api/v1/auth/me", ah.requireAuth(ah.handleMe))
+
+	// OIDC SSO. Public (no session): the login flow establishes the session.
+	// Enabled at runtime only when org.Auth.OIDC.Enabled (checked per request).
+	mux.HandleFunc("GET /api/v1/auth/providers", ah.handleAuthProviders)
+	mux.HandleFunc("GET /api/v1/auth/oidc/login", ah.handleOIDCLogin)
+	mux.HandleFunc("GET /api/v1/auth/oidc/callback", ah.handleOIDCCallback)
 }
 
 func (ah *authHandler) handleLogin(w http.ResponseWriter, r *http.Request) {

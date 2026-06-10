@@ -181,11 +181,13 @@ type DeploymentHistoryEntry struct {
 }
 
 // GetAppDeploymentHistory reads the sync history of the ArgoCD Application
-// for a given app/env combination. The Application CR name follows the
-// "{appName}-{envName}" convention (Model B). Returns an empty slice (not an
-// error) when the Application CR does not exist or has no history yet.
-func (r *ArgoCDStatusReader) GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]DeploymentHistoryEntry, error) {
-	appCRName := appName + "-" + envName
+// for a given project/app/env combination. The Application CR name follows the
+// "{project}-{app}-{env}" convention (matching gitops.ApplicationName) — the
+// project prefix is required, since two projects may each own an app of the
+// same name. Returns an empty slice (not an error) when the Application CR does
+// not exist or has no history yet.
+func (r *ArgoCDStatusReader) GetAppDeploymentHistory(ctx context.Context, projectName, appName, envName string) ([]DeploymentHistoryEntry, error) {
+	appCRName := projectName + "-" + appName + "-" + envName
 	raw, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).Get(ctx, appCRName, metav1.GetOptions{})
 	if err != nil {
 		// Not found is expected before the first deploy — return empty, not error.

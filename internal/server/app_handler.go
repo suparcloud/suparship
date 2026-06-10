@@ -14,6 +14,7 @@ import (
 
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -46,6 +47,13 @@ type appHandler struct {
 	// ConfigMap before mutating + republishing. Optional — when nil
 	// the upgrade endpoint trusts the request body and falls through.
 	kubeClient kubernetes.Interface
+	// clusterPool builds per-cluster Kubernetes clients from stored
+	// kubeconfigs. In hub-spoke installs workloads run on remote registered
+	// clusters, so live status + logs must be read from the env's workload
+	// cluster (resolved via the org Environment's EffectiveClusterRef), not
+	// suparship's own tooling cluster. Optional — nil falls back to the
+	// locally-injected runtime/logs providers (single-cluster installs).
+	clusterPool *k8s.ClusterClientPool
 }
 
 // newAppHandler creates an appHandler.
@@ -1021,11 +1029,21 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 // the resulting slice is in pipeline order. The Order field is propagated from
 // the org definition into each AppEnvironment.
 func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []*domain.AppEnvironment {
-	if ah.orgProvider == nil {
+	return StableEnvsFromOrg(ctx, ah.orgProvider, app)
+}
+
+// StableEnvsFromOrg derives an app's stable environments from the org's
+// canonical environment pipeline, resolving each env's namespace from the org's
+// topology + naming patterns. It is the publish-time fallback used when an app
+// has no persisted AppEnvironment records (the create path and the startup
+// republish both rely on it). Falls back to domainapp.DefaultEnvironments when
+// no org / no environments are configured.
+func StableEnvsFromOrg(ctx context.Context, orgProvider rbac.OrgProvider, app *domain.App) []*domain.AppEnvironment {
+	if orgProvider == nil {
 		return domainapp.DefaultEnvironments(app)
 	}
 
-	org, err := ah.orgProvider.GetOrg(ctx)
+	org, err := orgProvider.GetOrg(ctx)
 	if err != nil || org == nil || len(org.Environments) == 0 {
 		return domainapp.DefaultEnvironments(app)
 	}
@@ -1290,21 +1308,88 @@ func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appN
 	return nil, fmt.Errorf("no environment found to promote from; ensure an earlier environment has been deployed")
 }
 
+// workloadClusterClient resolves the cluster an environment's workloads run on
+// and returns a Kubernetes client for it. In a hub-spoke install the workload
+// lives on a remote registered cluster (the env's EffectiveClusterRef), so live
+// status and logs must be read from THAT cluster — suparship's own (tooling)
+// cluster has no such Deployment/pods, which is why an otherwise-Healthy app
+// reads back as "not deployed" with no logs.
+//
+// Return contract:
+//   - (nil, nil): no remote routing applies (no pool/org wired, or the env has
+//     no cluster binding) — the caller should use its locally-injected provider
+//     (single-cluster installs where workloads share suparship's cluster).
+//   - (client, nil): use this remote workload-cluster client.
+//   - (nil, err): the env IS bound to a remote cluster but it's unreachable
+//     (kubeconfig missing/bad) — the caller must NOT silently fall back to the
+//     local cluster, since that would falsely report "not deployed".
+func (ah *appHandler) workloadClusterClient(ctx context.Context, envName string) (kubernetes.Interface, error) {
+	return workloadClusterClientForEnv(ctx, ah.orgProvider, ah.clusterPool, envName)
+}
+
+// workloadClusterClientForEnv resolves the cluster an environment's workloads
+// run on and returns a Kubernetes client for it, shared by the app, inventory,
+// and (future) preview status paths. See workloadClusterClient for the return
+// contract; nil pool or orgProvider means "use the local provider".
+func workloadClusterClientForEnv(ctx context.Context, orgProvider rbac.OrgProvider, pool *k8s.ClusterClientPool, envName string) (kubernetes.Interface, error) {
+	if pool == nil || orgProvider == nil {
+		return nil, nil
+	}
+	org, err := orgProvider.GetOrg(ctx)
+	if err != nil {
+		return nil, nil // org unreadable — degrade to the local provider
+	}
+	var ref string
+	for _, e := range org.Environments {
+		if e.Name == envName {
+			ref = e.EffectiveClusterRef()
+			break
+		}
+	}
+	if ref == "" {
+		return nil, nil // env not bound to a cluster — single-cluster/local mode
+	}
+	client, err := pool.Get(ctx, ref)
+	if err != nil {
+		return nil, fmt.Errorf("workload cluster %q: %w", ref, err)
+	}
+	return client, nil
+}
+
 // enrichEnvWithLiveStatus overwrites the stored status fields in env with
 // freshly queried Kubernetes data. The Deployment is looked up by the app name
-// (workload) inside env.Namespace. On any error the stored values are kept so
-// callers always get a valid response. The method is a no-op when
-// runtimeProvider is nil (fake/local mode).
+// (workload) inside env.Namespace, on the env's workload cluster (remote in a
+// hub-spoke install — see workloadClusterClient). On any error the stored
+// values are kept so callers always get a valid response. The method is a no-op
+// when no runtime provider is available (fake/local mode).
 func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName string, env *domain.AppEnvironment) {
 	// Diagnostics run regardless of the runtime lookup: a failed sync produces
 	// no workload, so GetServiceRuntime errors — but that "not deployed" case
 	// is exactly when the operator needs the ArgoCD/ESO failure reason.
 	defer ah.enrichEnvWithDiagnostics(ctx, appName, env)
 
-	if ah.runtimeProvider == nil {
+	provider := ah.runtimeProvider
+	client, err := ah.workloadClusterClient(ctx, env.EnvName)
+	if err != nil {
+		// Bound to a remote cluster we can't reach. Don't query the local
+		// cluster — it would falsely report "not deployed". Surface the reason
+		// so the operator isn't misled by an otherwise-Healthy ArgoCD status.
+		env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
+			Source: "runtime",
+			Level:  domain.DiagnosticWarning,
+			Title:  "Workload cluster unreachable",
+			Detail: err.Error(),
+			Hint:   "suparShip couldn't connect to the cluster this environment deploys to, so live replica count and logs are unavailable (ArgoCD may still show it Healthy). Check the cluster's kubeconfig/credentials under Clusters and that its API server is reachable from suparShip.",
+		})
 		return
 	}
-	info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName)
+	if client != nil {
+		provider = runtime.NewK8sProvider(client)
+	}
+	if provider == nil {
+		return
+	}
+	info, err := provider.GetServiceRuntime(ctx, env.Namespace, appName)
 	if err != nil {
 		return
 	}
@@ -1673,7 +1758,7 @@ func (ah *appHandler) handleGetAppDeploymentHistory(w http.ResponseWriter, r *ht
 		return
 	}
 
-	history, err := ah.deploymentHistoryReader.GetAppDeploymentHistory(r.Context(), appName, envName)
+	history, err := ah.deploymentHistoryReader.GetAppDeploymentHistory(r.Context(), projectName, appName, envName)
 	if err != nil {
 		slog.Error("failed to get deployment history",
 			"project", projectName, "app", appName, "env", envName, "error", err,

@@ -61,6 +61,23 @@ func (ah *appHandler) handleGetAppLogs(w http.ResponseWriter, r *http.Request) {
 	namespace := appEnv.Namespace
 	component := r.URL.Query().Get("component")
 
+	// Logs must be streamed from the env's workload cluster (remote in a
+	// hub-spoke install), not suparship's own tooling cluster — the pods only
+	// exist where ArgoCD deployed them.
+	logsProvider := ah.logsProvider
+	if client, err := ah.workloadClusterClient(r.Context(), envName); err != nil {
+		writeJSON(w, http.StatusBadGateway, errorResponse{
+			Error: "workload cluster for environment \"" + envName + "\" is unreachable: " + err.Error(),
+		})
+		return
+	} else if client != nil {
+		logsProvider = runtime.NewK8sLogsProvider(client)
+	}
+	if logsProvider == nil {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "logs are not available in this mode"})
+		return
+	}
+
 	req := runtime.LogsRequest{
 		Namespace: namespace,
 		Pod:       r.URL.Query().Get("pod"),
@@ -85,7 +102,7 @@ func (ah *appHandler) handleGetAppLogs(w http.ResponseWriter, r *http.Request) {
 			workload = appName
 		}
 
-		pods, err := ah.logsProvider.ListPods(r.Context(), namespace, workload)
+		pods, err := logsProvider.ListPods(r.Context(), namespace, workload)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list pods"})
 			return
@@ -103,7 +120,7 @@ func (ah *appHandler) handleGetAppLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := ah.logsProvider.GetLogs(r.Context(), req)
+	result, err := logsProvider.GetLogs(r.Context(), req)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{
 			Error: "failed to read logs: " + err.Error(),

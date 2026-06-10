@@ -507,6 +507,13 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 			}
 		}
 
+		// Addon wrapper charts are inline templates too (e.g. "valkey"); sync
+		// each so the addon Applications publishAppAddons emits can resolve
+		// their charts/<chart>/latest/ path.
+		if err := p.syncAddonCharts(ctx, repoDir, app, envs); err != nil {
+			return err
+		}
+
 		// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
 		// full promotion pipeline is wired from day one.
 		if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
@@ -1848,6 +1855,36 @@ func marshalHelmValues(hv helmvalues.HelmValues) (string, error) {
 	return string(b), nil
 }
 
+// syncAddonCharts materialises each addon's wrapper chart (an inline template
+// such as "valkey") into charts/<chart>/latest/ so the addon Applications that
+// publishAppAddons emits resolve their chart path. Mirrors the app-template
+// sync in PublishApp. Addon profiles carry no version (AddonProfile has only
+// Chart + Provider), so addon charts are unpinned → the "latest" dir. Distinct
+// charts are synced once. External-mode addon charts are pulled by Argo from
+// the registry and need no local copy.
+func (p *Publisher) syncAddonCharts(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	if len(app.Spec.Addons) == 0 {
+		return nil
+	}
+	synced := map[string]bool{}
+	for _, env := range envs {
+		for _, claim := range app.Spec.Addons {
+			profile, err := domain.ResolveAddonProfile(p.cfg.AddonProfiles, env.AddonProfiles, claim.Type)
+			if err != nil || profile.Chart == "" || synced[profile.Chart] {
+				continue
+			}
+			if mode, _ := p.resolveTemplateChartMode(profile.Chart); mode != AppMetadataChartTypeInline {
+				continue // external addon chart — Argo pulls it, no local sync
+			}
+			if err := p.syncChart(ctx, repoDir, profile.Chart, ""); err != nil {
+				return fmt.Errorf("sync addon chart %q: %w", profile.Chart, err)
+			}
+			synced[profile.Chart] = true
+		}
+	}
+	return nil
+}
+
 // publishAppAddons writes one Application + values.yaml pair per
 // addon claim on app.Spec.Addons under
 // {appDir}/addons/<addon-name>/. Each pair is picked up by the same
@@ -1897,9 +1934,14 @@ func (p *Publisher) publishAppAddons(
 			ns = app.Name + "-" + env.EnvName
 		}
 		meta := AppMetadata{
-			Name:      fmt.Sprintf("%s-addon-%s", app.Name, claim.Name),
-			Project:   app.ProjectName,
-			Template:  profile.Chart,
+			Name:     fmt.Sprintf("%s-addon-%s", app.Name, claim.Name),
+			Project:  app.ProjectName,
+			Template: profile.Chart,
+			// The shared ApplicationSet sources charts/{{chartPath}}; addon
+			// wrapper charts are unpinned inline templates, synced to
+			// charts/<chart>/latest/ by syncAddonCharts. Without this the
+			// addon Application resolves an empty chart path and never syncs.
+			ChartPath: chartPathFor(profile.Chart, ""),
 			Namespace: ns,
 		}
 		metaBytes, err := yaml.Marshal(meta)

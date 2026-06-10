@@ -28,7 +28,18 @@ func newStuckReader(t *testing.T, objs ...*unstructured.Unstructured) *ArgoCDSta
 	return NewArgoCDStatusReaderFromDynamic(dyn, "argocd")
 }
 
+// appCR builds a suparShip-managed Application (it carries the suparship.io/project
+// ownership label, as every ApplicationSet-generated Application does).
 func appCR(name, project string, terminating bool, finalizers []string) *unstructured.Unstructured {
+	app := foreignAppCR(name, project, terminating, finalizers)
+	app.SetLabels(map[string]string{"suparship.io/project": project, "suparship.io/app": name})
+	return app
+}
+
+// foreignAppCR builds an Application with NO suparship.io/* ownership label —
+// the kind another tool (the platform team's own ArgoCD app-of-apps) puts in
+// the shared ArgoCD namespace.
+func foreignAppCR(name, project string, terminating bool, finalizers []string) *unstructured.Unstructured {
 	meta := map[string]any{"name": name, "namespace": "argocd"}
 	if terminating {
 		meta["deletionTimestamp"] = time.Now().UTC().Format(time.RFC3339)
@@ -66,6 +77,9 @@ func TestListStuckApplications(t *testing.T) {
 		appCR("stuck-missing-proj", "gone", true, []string{argoResourcesFinalizer}),
 		// terminating + finalizer, project exists → stuck, generic reason
 		appCR("stuck-proj-ok", "test", true, []string{argoResourcesFinalizer}),
+		// foreign app (no suparship.io/* label) stuck Terminating → ignored,
+		// it belongs to the platform team's own ArgoCD, not suparShip
+		foreignAppCR("cert-manager-staging", "infra", true, []string{argoResourcesFinalizer}),
 		appProjectCR("test"),
 	)
 
@@ -94,6 +108,9 @@ func TestListStuckApplications(t *testing.T) {
 	if _, ok := got["stuck-proj-ok"]; !ok {
 		t.Error("terminating app with finalizer + existing project should still be stuck")
 	}
+	if _, ok := got["cert-manager-staging"]; ok {
+		t.Error("foreign Application (no suparship.io/* label) must not be reported as stuck")
+	}
 }
 
 func TestUnstickApplication(t *testing.T) {
@@ -119,5 +136,16 @@ func TestUnstickApplication_RefusesLiveApp(t *testing.T) {
 	)
 	if err := r.UnstickApplication(context.Background(), "live"); err == nil {
 		t.Error("expected refusal to strip finalizers from a non-terminating app")
+	}
+}
+
+func TestUnstickApplication_RefusesForeignApp(t *testing.T) {
+	r := newStuckReader(t,
+		// foreign app, terminating + finalizer — would otherwise be unstuck,
+		// but it carries no suparship.io/* label so we refuse to touch it
+		foreignAppCR("cert-manager-staging", "infra", true, []string{argoResourcesFinalizer}),
+	)
+	if err := r.UnstickApplication(context.Background(), "cert-manager-staging"); err == nil {
+		t.Error("expected refusal to modify finalizers on a non-suparship Application")
 	}
 }

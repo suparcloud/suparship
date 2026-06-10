@@ -3,6 +3,8 @@ package server
 import (
 	"net/http"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
@@ -43,6 +45,10 @@ type rbacHandler struct {
 	// stuckApps detects + unsticks ArgoCD Applications wedged in Terminating.
 	// Optional; nil disables the platform stuck-apps endpoints.
 	stuckApps StuckAppManager
+	// kubeClient is used to upsert the OIDC client-secret Secret in the
+	// suparship-system namespace (the org ConfigMap stays credential-free).
+	// Optional; when nil the OIDC PUT rejects requests that carry a secret.
+	kubeClient kubernetes.Interface
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -61,7 +67,7 @@ func (rh *rbacHandler) requireRole(role rbac.Role, extractProject ProjectExtract
 			}
 
 			project := extractProject(r)
-			if !org.HasPermission(sess.Username, project, role) {
+			if !org.HasPermissionForIdentity(sess.Username, sess.Groups, project, role) {
 				writeJSON(w, http.StatusForbidden, errorResponse{Error: "insufficient permissions"})
 				return
 			}
@@ -84,6 +90,21 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/org", rh.auth.requireAuth(rh.handleGetOrg))
 	mux.HandleFunc("GET /api/v1/teams", rh.auth.requireAuth(rh.handleGetTeams))
 	mux.HandleFunc("GET /api/v1/projects", rh.auth.requireAuth(rh.handleGetProjects))
+
+	// Team management — reads open to all authenticated users; writes org_admin.
+	mux.HandleFunc("POST /api/v1/teams", requireOrgAdmin(rh.requireOrgAdmin(rh.handleCreateTeam)))
+	mux.HandleFunc("PUT /api/v1/teams/{team}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleUpdateTeam)))
+	mux.HandleFunc("DELETE /api/v1/teams/{team}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteTeam)))
+
+	// Role bindings (team/group → role on a project, "*" = all). org_admin only.
+	mux.HandleFunc("GET /api/v1/role-bindings", rh.auth.requireAuth(rh.handleListRoleBindings))
+	mux.HandleFunc("POST /api/v1/role-bindings", requireOrgAdmin(rh.requireOrgAdmin(rh.handleCreateRoleBinding)))
+	mux.HandleFunc("DELETE /api/v1/role-bindings", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteRoleBinding)))
+
+	// OIDC SSO config — read open to all authenticated users (secret never
+	// exposed); write org_admin. The client secret lives in a k8s Secret.
+	mux.HandleFunc("GET /api/v1/org/auth", rh.auth.requireAuth(rh.handleGetAuthConfig))
+	mux.HandleFunc("PUT /api/v1/org/auth", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutAuthConfig)))
 
 	// Project lifecycle — org_admin only.
 	mux.HandleFunc("POST /api/v1/projects", rh.auth.requireAuth(rh.orgAdminOnly(rh.handleCreateProject)))
@@ -287,7 +308,7 @@ func (rh *rbacHandler) requireOrgAdmin(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
 			return
 		}
-		if !org.HasPermission(sess.Username, "*", rbac.RoleOrgAdmin) {
+		if !org.HasPermissionForIdentity(sess.Username, sess.Groups, "*", rbac.RoleOrgAdmin) {
 			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
 			return
 		}

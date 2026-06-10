@@ -75,13 +75,49 @@ export interface ProjectsResponse {
 
 export interface RoleBinding {
   project: string;
-  team: string;
+  // Exactly one of team or group is set.
+  team?: string;
+  group?: string;
   role: string;
 }
 
 export interface ProjectRBACResponse {
   project: string;
   roleBindings: RoleBinding[];
+}
+
+export interface RoleBindingsResponse {
+  roleBindings: RoleBinding[];
+}
+
+// OIDCConfig mirrors the server's OIDC config DTO. The client secret value is
+// never returned — clientSecretSet reports whether one is stored.
+export interface OIDCConfig {
+  enabled: boolean;
+  issuerURL: string;
+  clientID: string;
+  redirectURL: string;
+  scopes: string[];
+  usernameClaim: string;
+  groupsClaim: string;
+  clientSecretSet: boolean;
+}
+
+export interface AuthConfigResponse {
+  oidc: OIDCConfig;
+}
+
+// UpdateOIDCRequest is the PUT body for /org/auth. clientSecret is write-only;
+// omit it to keep the stored value.
+export interface UpdateOIDCRequest {
+  enabled: boolean;
+  issuerURL: string;
+  clientID: string;
+  clientSecret?: string;
+  redirectURL: string;
+  scopes?: string[];
+  usernameClaim?: string;
+  groupsClaim?: string;
 }
 
 export interface TemplateSummary {

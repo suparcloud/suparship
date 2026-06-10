@@ -12,6 +12,12 @@ func (p *Publisher) SyncChartForTest(ctx context.Context, repoDir, templateName,
 	return p.syncChart(ctx, repoDir, templateName, version)
 }
 
+// SyncAddonChartsForTest exposes syncAddonCharts so tests can assert that an
+// app's addon wrapper charts are materialised under charts/<chart>/latest/.
+func (p *Publisher) SyncAddonChartsForTest(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	return p.syncAddonCharts(ctx, repoDir, app, envs)
+}
+
 // PublishKargoCRsForTest exposes publishKargoCRs for white-box unit testing.
 // It writes Kargo Namespace, Warehouse, and Stage files into repoDir/gitops-output/_infra/kargo/
 // without any git operations so tests can assert on the generated YAML without

@@ -54,10 +54,13 @@ type ProjectDetailResponse struct {
 	Services     []string         `json:"services"`
 }
 
-// RoleBindingDTO represents a role binding in API responses.
+// RoleBindingDTO represents a role binding in API responses. Exactly one of
+// Team or Group is set — Team matches local users by membership, Group matches
+// SSO users by an IdP group claim.
 type RoleBindingDTO struct {
 	Project string `json:"project"`
-	Team    string `json:"team"`
+	Team    string `json:"team,omitempty"`
+	Group   string `json:"group,omitempty"`
 	Role    string `json:"role"`
 }
 

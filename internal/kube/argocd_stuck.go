@@ -33,6 +33,26 @@ type StuckApplication struct {
 // wedged — the alternative is an Application stuck forever).
 const argoResourcesFinalizer = "resources-finalizer.argocd.argoproj.io"
 
+// isSuparshipManagedApp reports whether an ArgoCD Application was emitted by
+// suparShip. The ArgoCD namespace is frequently shared with the platform
+// team's own Applications (cert-manager, ingress controllers, node-feature-
+// discovery, …); those are none of suparShip's business — surfacing them as
+// "stuck" is noise, and unsticking them would strip finalizers off objects we
+// don't own.
+//
+// Every Application suparShip writes carries a suparship.io/* ownership label:
+// ApplicationSet-generated app/addon/preview Applications get suparship.io/project
+// (and usually suparship.io/app); directly-created infra Applications hardcode
+// suparship.io/managed-by=suparship. A foreign Application has none of these.
+func isSuparshipManagedApp(labels map[string]string) bool {
+	if labels == nil {
+		return false
+	}
+	return labels[labelManagedBy] == "suparship" ||
+		labels["suparship.io/project"] != "" ||
+		labels["suparship.io/app"] != ""
+}
+
 // ListStuckApplications returns Applications in the ArgoCD namespace that are
 // stuck Terminating — a non-empty deletionTimestamp plus remaining finalizers.
 // It enriches each with a reason, flagging the common case where the referenced
@@ -53,6 +73,9 @@ func (r *ArgoCDStatusReader) ListStuckApplications(ctx context.Context) ([]Stuck
 
 	var stuck []StuckApplication
 	for _, item := range list.Items {
+		if !isSuparshipManagedApp(item.GetLabels()) {
+			continue // foreign Application sharing the ArgoCD namespace — not ours to track
+		}
 		delTS := item.GetDeletionTimestamp()
 		finalizers := item.GetFinalizers()
 		if delTS == nil || len(finalizers) == 0 {
@@ -82,6 +105,9 @@ func (r *ArgoCDStatusReader) UnstickApplication(ctx context.Context, name string
 	app, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("getting application %q: %w", name, err)
+	}
+	if !isSuparshipManagedApp(app.GetLabels()) {
+		return fmt.Errorf("application %q is not managed by suparShip; refusing to modify finalizers on a foreign object", name)
 	}
 	if app.GetDeletionTimestamp() == nil {
 		return fmt.Errorf("application %q is not being deleted; refusing to remove finalizers from a live app", name)
