@@ -1055,8 +1055,8 @@ type argoCDHistoryAdapter struct {
 }
 
 // GetAppDeploymentHistory implements server.DeploymentHistoryReader.
-func (a *argoCDHistoryAdapter) GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]server.DeploymentHistoryEntry, error) {
-	raw, err := a.reader.GetAppDeploymentHistory(ctx, appName, envName)
+func (a *argoCDHistoryAdapter) GetAppDeploymentHistory(ctx context.Context, projectName, appName, envName string) ([]server.DeploymentHistoryEntry, error) {
+	raw, err := a.reader.GetAppDeploymentHistory(ctx, projectName, appName, envName)
 	if err != nil {
 		return nil, err
 	}
@@ -1110,7 +1110,7 @@ type fakeHistoryAdapter struct {
 }
 
 // GetAppDeploymentHistory implements server.DeploymentHistoryReader.
-func (a *fakeHistoryAdapter) GetAppDeploymentHistory(_ context.Context, appName, envName string) ([]server.DeploymentHistoryEntry, error) {
+func (a *fakeHistoryAdapter) GetAppDeploymentHistory(_ context.Context, _ /*projectName*/, appName, envName string) ([]server.DeploymentHistoryEntry, error) {
 	raw := a.inner.GetFakeHistory(appName, envName)
 	out := make([]server.DeploymentHistoryEntry, 0, len(raw))
 	for _, h := range raw {

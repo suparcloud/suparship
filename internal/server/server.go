@@ -162,9 +162,11 @@ type DeploymentHistoryEntry struct {
 // be safe for concurrent use.
 type DeploymentHistoryReader interface {
 	// GetAppDeploymentHistory returns the sync history for the ArgoCD Application
-	// "{appName}-{envName}" in reverse-chronological order (most recent first).
-	// Returns an empty slice (not an error) when no history is available.
-	GetAppDeploymentHistory(ctx context.Context, appName, envName string) ([]DeploymentHistoryEntry, error)
+	// "{projectName}-{appName}-{envName}" in reverse-chronological order (most
+	// recent first). The project prefix is required to disambiguate apps of the
+	// same name across projects. Returns an empty slice (not an error) when no
+	// history is available.
+	GetAppDeploymentHistory(ctx context.Context, projectName, appName, envName string) ([]DeploymentHistoryEntry, error)
 }
 
 // AppDiagnosticsReader reads failure signals from one ArgoCD Application CR
@@ -501,6 +503,10 @@ func New(cfg Config) *Server {
 			if cfg.LogsProvider != nil {
 				rh.appHandler.logsProvider = cfg.LogsProvider
 				cfg.Logger.Info("app logs endpoint enabled")
+			}
+			if cfg.ClusterPool != nil {
+				rh.appHandler.clusterPool = cfg.ClusterPool
+				cfg.Logger.Info("workload-cluster routing enabled — live status + logs read from each env's workload cluster")
 			}
 			if cfg.GitOpsPublisher != nil {
 				rh.appHandler.gitOpsPublisher = cfg.GitOpsPublisher
