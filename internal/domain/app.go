@@ -323,6 +323,9 @@ type DiagnosticLevel string
 const (
 	DiagnosticError   DiagnosticLevel = "error"
 	DiagnosticWarning DiagnosticLevel = "warning"
+	// DiagnosticInfo is non-failure context (e.g. a per-cluster status
+	// breakdown for a fan-out environment).
+	DiagnosticInfo DiagnosticLevel = "info"
 )
 
 // Diagnostic is one problem report about an app environment's delivery,

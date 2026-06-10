@@ -197,7 +197,11 @@ environments: []
 # - name: prod
 #   displayName: Production
 #   order: 2
-#   clusterRef: prod-cluster
+#   clusterRefs: [prod-aks, prod-eks]
+#   activeClusterRef: prod-aks
+#   # deployMode: "active" (default — deploy to activeClusterRef only) or
+#   # "all" (fan out to every clusterRef — one Application per cluster).
+#   deployMode: all
 #   baseDomain: prod.example.com
 #   namespacePattern: "{app}-{env}"
 

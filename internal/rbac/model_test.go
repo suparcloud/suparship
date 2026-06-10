@@ -381,3 +381,63 @@ func TestValidateRoutingProfiles_Rejects(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveDeployTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		env  OrgEnvironment
+		want []string
+	}{
+		{
+			name: "active mode uses the active cluster only",
+			env:  OrgEnvironment{ClusterRefs: []string{"c1", "c2"}, ActiveClusterRef: "c2", DeployMode: DeployModeActive},
+			want: []string{"c2"},
+		},
+		{
+			name: "default (empty) mode behaves as active",
+			env:  OrgEnvironment{ClusterRefs: []string{"c1", "c2"}},
+			want: []string{"c1"}, // EffectiveClusterRef falls back to ClusterRefs[0]
+		},
+		{
+			name: "all mode fans out to every cluster",
+			env:  OrgEnvironment{ClusterRefs: []string{"c1", "c2", "c3"}, DeployMode: DeployModeAll},
+			want: []string{"c1", "c2", "c3"},
+		},
+		{
+			name: "unbound env yields no targets",
+			env:  OrgEnvironment{DeployMode: DeployModeActive},
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.env.ResolveDeployTargets()
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestValidate_DeployModeAllRequiresCluster(t *testing.T) {
+	o := &Org{
+		Name:         "acme",
+		Environments: []OrgEnvironment{{Name: "staging", DeployMode: DeployModeAll}}, // no clusterRefs
+	}
+	if err := o.Validate(); err == nil {
+		t.Fatal("expected validation error: deployMode=all with no clusterRefs")
+	}
+	o.Environments[0].ClusterRefs = []string{"c1"}
+	if err := o.Validate(); err != nil {
+		t.Fatalf("expected valid once a clusterRef is set, got %v", err)
+	}
+	o.Environments[0].DeployMode = "bogus"
+	if err := o.Validate(); err == nil {
+		t.Fatal("expected validation error for invalid deployMode")
+	}
+}

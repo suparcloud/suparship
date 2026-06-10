@@ -65,6 +65,10 @@ environments:
     clusterRefs: [in-cluster]
     activeClusterRef: in-cluster
     baseDomain: acme.example.com
+    # deployMode: how many of clusterRefs receive deploys.
+    #   active (default) → only activeClusterRef.
+    #   all              → fan out to every clusterRef (one Application per cluster).
+    deployMode: active
 
 # -- Secret backend for app/env/cluster secrets. "k8s" = native Secrets via ESO;
 # "onepassword" stores values in 1Password vaults. See docs/secrets.md.

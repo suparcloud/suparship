@@ -119,6 +119,31 @@ type OrgEnvironment struct {
 	// this for per-env provider swaps like "staging uses
 	// valkey-operator, prod uses Crossplane ElastiCache".
 	AddonProfiles domain.AddonProfiles `yaml:"addonProfiles,omitempty"`
+	// DeployMode controls how many of this env's clusters receive deploys:
+	//   "" / "active" → only the active cluster (EffectiveClusterRef).
+	//   "all"          → every cluster in ClusterRefs (fan-out).
+	// "select" is just a curated ClusterRefs + "all".
+	DeployMode string `yaml:"deployMode,omitempty"`
+}
+
+// Deploy modes for OrgEnvironment.DeployMode.
+const (
+	DeployModeActive = "active"
+	DeployModeAll    = "all"
+)
+
+// ResolveDeployTargets returns the cluster refs this environment deploys to,
+// honouring DeployMode. "active" (the default) yields the single effective
+// cluster; "all" yields every bound cluster. Returns nil when the env is
+// unbound (no clusters).
+func (e OrgEnvironment) ResolveDeployTargets() []string {
+	if e.DeployMode == DeployModeAll {
+		return append([]string(nil), e.ClusterRefs...)
+	}
+	if ref := e.EffectiveClusterRef(); ref != "" {
+		return []string{ref}
+	}
+	return nil
 }
 
 // EffectiveAppNamespacePattern returns the per-env override that applies to
@@ -365,6 +390,15 @@ func (o *Org) Validate() error {
 					e.Name, e.ActiveClusterRef, e.ClusterRefs,
 				)
 			}
+		}
+		switch e.DeployMode {
+		case "", DeployModeActive, DeployModeAll:
+		default:
+			return fmt.Errorf("environments[%s]: invalid deployMode %q (want %q or %q)",
+				e.Name, e.DeployMode, DeployModeActive, DeployModeAll)
+		}
+		if e.DeployMode == DeployModeAll && len(e.ClusterRefs) == 0 {
+			return fmt.Errorf("environments[%s]: deployMode %q requires at least one clusterRef", e.Name, DeployModeAll)
 		}
 	}
 

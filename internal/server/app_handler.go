@@ -1356,53 +1356,139 @@ func workloadClusterClientForEnv(ctx context.Context, orgProvider rbac.OrgProvid
 	return client, nil
 }
 
-// enrichEnvWithLiveStatus overwrites the stored status fields in env with
-// freshly queried Kubernetes data. The Deployment is looked up by the app name
-// (workload) inside env.Namespace, on the env's workload cluster (remote in a
-// hub-spoke install — see workloadClusterClient). On any error the stored
-// values are kept so callers always get a valid response. The method is a no-op
-// when no runtime provider is available (fake/local mode).
+// namedClient pairs a resolved workload-cluster client with its cluster name.
+type namedClient struct {
+	name   string
+	client kubernetes.Interface
+}
+
+// workloadClustersForEnv resolves the env's deploy-target clusters (one in
+// "active" mode, all bound clusters in "all" mode) to Kubernetes clients.
+// routed=false means no remote routing applies (no pool/org wired, or the env
+// is unbound) — the caller uses its locally-injected provider. When routed, it
+// returns a client per reachable target plus the names of targets it couldn't
+// reach (surfaced as diagnostics, never silently dropped).
+func (ah *appHandler) workloadClustersForEnv(ctx context.Context, envName string) (clients []namedClient, unreachable []string, routed bool) {
+	if ah.clusterPool == nil || ah.orgProvider == nil {
+		return nil, nil, false
+	}
+	org, err := ah.orgProvider.GetOrg(ctx)
+	if err != nil {
+		return nil, nil, false
+	}
+	var targets []string
+	for _, e := range org.Environments {
+		if e.Name == envName {
+			targets = e.ResolveDeployTargets()
+			break
+		}
+	}
+	if len(targets) == 0 {
+		return nil, nil, false // unbound — single-cluster/local mode
+	}
+	for _, ref := range targets {
+		c, err := ah.clusterPool.Get(ctx, ref)
+		if err != nil {
+			unreachable = append(unreachable, ref)
+			continue
+		}
+		clients = append(clients, namedClient{name: ref, client: c})
+	}
+	return clients, unreachable, true
+}
+
+// runtimeStatusRank ranks phases by severity so a fan-out env surfaces its
+// worst cluster: an env is only "healthy" when every cluster is healthy.
+var runtimeStatusRank = map[string]int{
+	runtime.StatusHealthy:     0,
+	runtime.StatusProgressing: 1,
+	runtime.StatusUnknown:     2,
+	runtime.StatusNotDeployed: 3,
+	runtime.StatusDegraded:    4,
+}
+
+// enrichEnvWithLiveStatus overwrites the stored status fields in env with freshly
+// queried Kubernetes data, read from the env's workload cluster(s). In "all"
+// deploy mode it aggregates across every target cluster (worst-of phase, summed
+// replicas, per-cluster breakdown in diagnostics). On any error the stored values
+// are kept so callers always get a valid response. No-op in fake/local mode.
 func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName string, env *domain.AppEnvironment) {
 	// Diagnostics run regardless of the runtime lookup: a failed sync produces
 	// no workload, so GetServiceRuntime errors — but that "not deployed" case
 	// is exactly when the operator needs the ArgoCD/ESO failure reason.
 	defer ah.enrichEnvWithDiagnostics(ctx, appName, env)
 
-	provider := ah.runtimeProvider
-	client, err := ah.workloadClusterClient(ctx, env.EnvName)
-	if err != nil {
-		// Bound to a remote cluster we can't reach. Don't query the local
-		// cluster — it would falsely report "not deployed". Surface the reason
-		// so the operator isn't misled by an otherwise-Healthy ArgoCD status.
+	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, env.EnvName)
+
+	// No remote routing (single-cluster / fake mode): query the local provider.
+	if !routed {
+		if ah.runtimeProvider == nil {
+			return
+		}
+		if info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName); err == nil {
+			ah.applyRuntimeInfo(env, info)
+		}
+		return
+	}
+
+	for _, name := range unreachable {
 		env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
 			Source: "runtime",
 			Level:  domain.DiagnosticWarning,
 			Title:  "Workload cluster unreachable",
-			Detail: err.Error(),
-			Hint:   "suparShip couldn't connect to the cluster this environment deploys to, so live replica count and logs are unavailable (ArgoCD may still show it Healthy). Check the cluster's kubeconfig/credentials under Clusters and that its API server is reachable from suparShip.",
+			Detail: fmt.Sprintf("cluster %q could not be reached", name),
+			Hint:   "Live replica count for this cluster is unavailable (ArgoCD may still show it Healthy). Check the cluster's kubeconfig/credentials under Clusters and that its API server is reachable from suparShip.",
 		})
+	}
+	if len(clients) == 0 {
+		return // all targets unreachable; diagnostics above explain
+	}
+
+	// Aggregate across reachable clusters: worst-of phase, summed replicas.
+	agg := &runtime.RuntimeInfo{Status: runtime.StatusHealthy}
+	got := false
+	for _, nc := range clients {
+		info, err := runtime.NewK8sProvider(nc.client).GetServiceRuntime(ctx, env.Namespace, appName)
+		if err != nil {
+			continue
+		}
+		got = true
+		if runtimeStatusRank[info.Status] >= runtimeStatusRank[agg.Status] {
+			agg.Status = info.Status
+		}
+		agg.Replicas += info.Replicas
+		agg.Available += info.Available
+		if info.LastDeployed > agg.LastDeployed {
+			agg.LastDeployed = info.LastDeployed
+		}
+		if agg.Image == "" {
+			agg.Image = info.Image
+		}
+		agg.IngressURLs = append(agg.IngressURLs, info.IngressURLs...)
+		if len(clients) > 1 {
+			env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
+				Source: "runtime",
+				Level:  domain.DiagnosticInfo,
+				Title:  fmt.Sprintf("Cluster %s: %s", nc.name, info.Status),
+				Detail: fmt.Sprintf("%d/%d replicas available", info.Available, info.Replicas),
+			})
+		}
+	}
+	if !got {
 		return
 	}
-	if client != nil {
-		provider = runtime.NewK8sProvider(client)
-	}
-	if provider == nil {
-		return
-	}
-	info, err := provider.GetServiceRuntime(ctx, env.Namespace, appName)
-	if err != nil {
-		return
-	}
-	env.Status = domain.AppRuntimeStatus{
-		Phase:        info.Status,
-		Replicas:     info.Replicas,
-		Available:    info.Available,
-		LastDeployed: info.LastDeployed,
-	}
+	ah.applyRuntimeInfo(env, agg)
+}
+
+// applyRuntimeInfo folds a RuntimeInfo into the env's stored status/urls/release.
+func (ah *appHandler) applyRuntimeInfo(env *domain.AppEnvironment, info *runtime.RuntimeInfo) {
+	env.Status.Phase = info.Status
+	env.Status.Replicas = info.Replicas
+	env.Status.Available = info.Available
+	env.Status.LastDeployed = info.LastDeployed
 	if len(info.IngressURLs) > 0 {
 		env.URLs = info.IngressURLs
 	}
-	// Populate release image from the live Deployment when not already set.
 	if info.Image != "" && env.Release == nil {
 		env.Release = &domain.AppReleaseRef{Image: info.Image}
 	}

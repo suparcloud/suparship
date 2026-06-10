@@ -258,7 +258,15 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 				return err
 			}
 
-			destinations = append(destinations, AppProjectDestination{Server: env.ClusterServer, Namespace: "*"})
+			// Authorize every destination cluster the env fans out to (one in
+			// active mode, all bound clusters in "all" mode).
+			if len(env.Clusters) > 0 {
+				for _, c := range env.Clusters {
+					destinations = append(destinations, AppProjectDestination{Server: c.Server, Namespace: "*"})
+				}
+			} else {
+				destinations = append(destinations, AppProjectDestination{Server: env.ClusterServer, Namespace: "*"})
+			}
 		}
 
 		// Write a SINGLE {project}-appproject.yaml per project (not one per env)
