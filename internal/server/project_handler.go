@@ -199,7 +199,7 @@ func (rh *rbacHandler) orgAdminOnly(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
 			return
 		}
-		if !org.HasPermission(sess.Username, "*", rbac.RoleOrgAdmin) {
+		if !org.HasPermissionForIdentity(sess.Username, sess.Groups, "*", rbac.RoleOrgAdmin) {
 			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
 			return
 		}

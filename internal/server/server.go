@@ -437,9 +437,14 @@ func New(cfg Config) *Server {
 			authenticator: cfg.Authenticator,
 			sessions:      session.NewStore(sessionTTL),
 			cookieSecure:  cfg.CookieSecure,
+			orgProvider:   cfg.OrgProvider,
+			kubeClient:    cfg.KubeClient,
 		}
 		ah.registerRoutes(mux)
 		cfg.Logger.Info("auth endpoints enabled")
+		if cfg.OrgProvider != nil {
+			cfg.Logger.Info("OIDC SSO login enabled when configured (Settings → Auth)")
+		}
 	}
 
 	if ah != nil {

@@ -1,19 +1,57 @@
-import { type FormEvent, useState } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { type FormEvent, useEffect, useState } from "react";
+import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 
 import { useAuth } from "../lib/AuthContext";
-import { ApiError } from "../lib/api";
+import { api, ApiError } from "../lib/api";
+
+interface AuthProviders {
+  oidc: { enabled: boolean; loginURL?: string };
+}
+
+// Friendly messages for the ?error= codes the OIDC callback redirects with.
+const ssoErrors: Record<string, string> = {
+  sso_unavailable: "Single sign-on is not configured.",
+  sso_init: "Could not start single sign-on. Check the OIDC configuration.",
+  sso_state: "Single sign-on session expired or was tampered with. Try again.",
+  sso_denied: "Single sign-on was denied by the identity provider.",
+  sso_exchange: "Single sign-on failed during token exchange.",
+  sso_no_id_token: "The identity provider returned no ID token.",
+  sso_verify: "Could not verify the single sign-on identity.",
+  sso_nonce: "Single sign-on verification failed (nonce mismatch). Try again.",
+  sso_claims: "Could not read identity claims from the provider.",
+  sso_session: "Could not create a session after single sign-on.",
+};
 
 export function Login() {
   const { user, login } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const [username, setUsername] = useState(
     import.meta.env.DEV ? "admin@local" : "",
   );
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(() => {
+    const code = searchParams.get("error");
+    return code ? (ssoErrors[code] ?? "Single sign-on failed.") : "";
+  });
   const [submitting, setSubmitting] = useState(false);
+  const [oidc, setOidc] = useState<AuthProviders["oidc"] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<AuthProviders>("/auth/providers")
+      .then((res) => {
+        if (!cancelled) setOidc(res.oidc);
+      })
+      .catch(() => {
+        /* providers endpoint optional; ignore */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (user) {
     return <Navigate to="/" replace />;
@@ -125,6 +163,24 @@ export function Login() {
             {submitting ? "Signing in..." : "Sign in"}
           </button>
         </form>
+
+        {oidc?.enabled && oidc.loginURL && (
+          <>
+            <div className="my-6 flex items-center gap-3">
+              <span className="h-px flex-1 bg-gray-200" />
+              <span className="text-xs uppercase tracking-wide text-gray-400">
+                or
+              </span>
+              <span className="h-px flex-1 bg-gray-200" />
+            </div>
+            <a
+              href={oidc.loginURL}
+              className="block w-full rounded-md border border-gray-300 px-4 py-2 text-center text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+            >
+              Sign in with SSO
+            </a>
+          </>
+        )}
       </div>
     </div>
   );

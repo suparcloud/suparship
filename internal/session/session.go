@@ -13,9 +13,13 @@ const idBytes = 32
 
 // Session represents an authenticated user session.
 type Session struct {
-	ID        string
-	Username  string
-	Role      string
+	ID       string
+	Username string
+	Role     string
+	// Groups holds the IdP group claims from an SSO login, matched against
+	// RoleBinding.Group for group-aware authorization. Nil for local
+	// (password) logins, which authorize by team membership.
+	Groups    []string
 	ExpiresAt time.Time
 }
 
@@ -34,8 +38,15 @@ func NewStore(ttl time.Duration) *Store {
 	}
 }
 
-// Create generates a new session for the given user and role.
+// Create generates a new session for the given user and role (no IdP groups —
+// used by local password login).
 func (s *Store) Create(username, role string) (*Session, error) {
+	return s.CreateWithGroups(username, role, nil)
+}
+
+// CreateWithGroups generates a new session carrying the user's IdP group claims
+// (from an SSO login), used for group-aware authorization.
+func (s *Store) CreateWithGroups(username, role string, groups []string) (*Session, error) {
 	id, err := generateID()
 	if err != nil {
 		return nil, fmt.Errorf("generating session ID: %w", err)
@@ -45,6 +56,7 @@ func (s *Store) Create(username, role string) (*Session, error) {
 		ID:        id,
 		Username:  username,
 		Role:      role,
+		Groups:    groups,
 		ExpiresAt: time.Now().Add(s.ttl),
 	}
 

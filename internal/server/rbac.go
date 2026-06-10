@@ -67,7 +67,7 @@ func (rh *rbacHandler) requireRole(role rbac.Role, extractProject ProjectExtract
 			}
 
 			project := extractProject(r)
-			if !org.HasPermission(sess.Username, project, role) {
+			if !org.HasPermissionForIdentity(sess.Username, sess.Groups, project, role) {
 				writeJSON(w, http.StatusForbidden, errorResponse{Error: "insufficient permissions"})
 				return
 			}
@@ -308,7 +308,7 @@ func (rh *rbacHandler) requireOrgAdmin(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
 			return
 		}
-		if !org.HasPermission(sess.Username, "*", rbac.RoleOrgAdmin) {
+		if !org.HasPermissionForIdentity(sess.Username, sess.Groups, "*", rbac.RoleOrgAdmin) {
 			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
 			return
 		}
