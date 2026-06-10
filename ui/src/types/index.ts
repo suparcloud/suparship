@@ -479,6 +479,16 @@ export interface AppDetail {
   secretRefs: AppSecretRef[];
   components: ComponentSummary[];
   environments: AppEnvironmentSummary[];
+  // Per-(env, cluster) value overrides keyed env → cluster (fan-out envs only).
+  clusterOverrides?: Record<string, Record<string, ClusterValueOverrideDTO>>;
+}
+
+// ClusterValueOverrideDTO mirrors the backend per-(env, cluster) override.
+export interface ClusterValueOverrideDTO {
+  replicas?: number;
+  sizePreset?: string;
+  values?: Record<string, unknown>;
+  config?: Record<string, string>;
 }
 
 export interface AppListResponse {

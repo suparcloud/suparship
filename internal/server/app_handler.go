@@ -1609,12 +1609,30 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 			Name:    app.Spec.Template.Name,
 			Version: app.Spec.Template.Version,
 		},
-		Values:       values,
-		SecretRefs:   secretRefs,
-		Components:   componentDTOs(app.Spec.Components),
-		Addons:       addonDTOs(app.Spec.Addons),
-		Environments: envDTOs,
+		Values:           values,
+		SecretRefs:       secretRefs,
+		Components:       componentDTOs(app.Spec.Components),
+		Addons:           addonDTOs(app.Spec.Addons),
+		Environments:     envDTOs,
+		ClusterOverrides: clusterOverridesDTO(app.Spec.EnvironmentDefaults),
 	}
+}
+
+// clusterOverridesDTO extracts the per-(env, cluster) value overrides from the
+// app's EnvironmentDefaults into the env → cluster map the API exposes. Returns
+// nil when no env has any override.
+func clusterOverridesDTO(defaults map[string]domain.EnvironmentOverride) map[string]map[string]domain.ClusterValueOverride {
+	var out map[string]map[string]domain.ClusterValueOverride
+	for envName, ov := range defaults {
+		if len(ov.ClusterOverrides) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string]map[string]domain.ClusterValueOverride{}
+		}
+		out[envName] = ov.ClusterOverrides
+	}
+	return out
 }
 
 func addonDTOs(addons []domain.AddonSpec) []AddonClaimDTO {

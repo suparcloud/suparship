@@ -139,6 +139,10 @@ type AppDetailDTO struct {
 	Addons      []AddonClaimDTO            `json:"addons"`
 	// Environments includes stable (staging, prod) and preview instances.
 	Environments []AppEnvironmentSummaryDTO `json:"environments"`
+	// ClusterOverrides surfaces stored per-(env, cluster) value overrides keyed
+	// env → cluster, so the UI can edit them. Only populated for envs that have
+	// any. Mirrors what the edit PATCH accepts.
+	ClusterOverrides map[string]map[string]domain.ClusterValueOverride `json:"clusterOverrides,omitempty"`
 }
 
 // AddonClaimDTO mirrors domain.AddonSpec for the wire. Per-app values
