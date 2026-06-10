@@ -1,11 +1,15 @@
 import { api } from "./api";
 import type {
   OrgInfo,
+  TeamInfo,
   TeamsResponse,
   ProjectsResponse,
   ProjectDetail,
   ProjectRBACResponse,
   RoleBinding,
+  RoleBindingsResponse,
+  AuthConfigResponse,
+  UpdateOIDCRequest,
 } from "../types";
 
 // ── OrgEnvironment ────────────────────────────────────────────────────────────
@@ -57,6 +61,58 @@ export function fetchOrg(): Promise<OrgInfo> {
 
 export function fetchTeams(): Promise<TeamsResponse> {
   return api.get<TeamsResponse>("/teams");
+}
+
+// ── Team management (org_admin) ───────────────────────────────────────────────
+
+export interface UpsertTeamRequest {
+  name?: string;
+  displayName?: string;
+  members?: string[];
+}
+
+export function createTeam(req: UpsertTeamRequest): Promise<TeamInfo> {
+  return api.post<TeamInfo>("/teams", req);
+}
+
+export function updateTeam(
+  name: string,
+  req: Omit<UpsertTeamRequest, "name">,
+): Promise<TeamInfo> {
+  return api.put<TeamInfo>(`/teams/${encodeURIComponent(name)}`, req);
+}
+
+export function deleteTeam(name: string): Promise<void> {
+  return api.del(`/teams/${encodeURIComponent(name)}`);
+}
+
+// ── Role bindings (org_admin) ─────────────────────────────────────────────────
+
+export function listRoleBindings(): Promise<RoleBindingsResponse> {
+  return api.get<RoleBindingsResponse>("/role-bindings");
+}
+
+export function createRoleBinding(rb: RoleBinding): Promise<RoleBinding> {
+  return api.post<RoleBinding>("/role-bindings", rb);
+}
+
+export function deleteRoleBinding(rb: RoleBinding): Promise<void> {
+  const params = new URLSearchParams({ project: rb.project, role: rb.role });
+  if (rb.team) params.set("team", rb.team);
+  if (rb.group) params.set("group", rb.group);
+  return api.del(`/role-bindings?${params.toString()}`);
+}
+
+// ── OIDC SSO config (read open; write org_admin) ──────────────────────────────
+
+export function getAuthConfig(): Promise<AuthConfigResponse> {
+  return api.get<AuthConfigResponse>("/org/auth");
+}
+
+export function updateAuthConfig(
+  req: UpdateOIDCRequest,
+): Promise<AuthConfigResponse> {
+  return api.put<AuthConfigResponse>("/org/auth", req);
 }
 
 export function fetchProjects(): Promise<ProjectsResponse> {
@@ -142,36 +198,17 @@ export function fetchProjectRBAC(
   );
 }
 
+// fetchAllRoleBindings returns every role binding org-wide, sorted with the
+// wildcard project first. Backed by the org-level /role-bindings endpoint.
 export async function fetchAllRoleBindings(): Promise<RoleBinding[]> {
-  const { projects } = await fetchProjects();
-  if (projects.length === 0) return [];
-
-  const results = await Promise.allSettled(
-    projects.map((p) => fetchProjectRBAC(p.name)),
-  );
-
-  const seen = new Set<string>();
-  const bindings: RoleBinding[] = [];
-
-  for (const result of results) {
-    if (result.status !== "fulfilled") continue;
-    for (const rb of result.value.roleBindings) {
-      const key = `${rb.project}|${rb.team}|${rb.role}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        bindings.push(rb);
-      }
-    }
-  }
-
-  bindings.sort((a, b) => {
+  const { roleBindings } = await listRoleBindings();
+  const subject = (rb: RoleBinding) => rb.team ?? rb.group ?? "";
+  return [...roleBindings].sort((a, b) => {
     if (a.project !== b.project) {
       if (a.project === "*") return -1;
       if (b.project === "*") return 1;
       return a.project.localeCompare(b.project);
     }
-    return a.team.localeCompare(b.team);
+    return subject(a).localeCompare(subject(b));
   });
-
-  return bindings;
 }

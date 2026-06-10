@@ -106,6 +106,50 @@ admin:
     # -- Secret key holding the bcrypt-hashed password.
     passwordHashKey: password-hash
 
+# -- OIDC single sign-on (SSO). Configured in the UI under Settings → Auth, or
+# declaratively here. The client secret is NEVER stored in config — it lives in
+# a Kubernetes Secret referenced by clientSecretRef (provision it separately).
+auth:
+  oidc:
+    # -- Turn the SSO login flow on.
+    enabled: false
+    # -- OIDC issuer URL (discovery at issuerURL/.well-known/openid-configuration).
+    issuerURL: ""
+    # -- OAuth2 client ID registered with the IdP.
+    clientID: ""
+    # -- suparShip's callback URL registered with the IdP.
+    redirectURL: ""
+    # -- Secret + key holding the OAuth2 client secret.
+    clientSecretRef:
+      name: suparship-oidc
+      key: client-secret
+    # -- ID-token scopes requested at login.
+    scopes: [openid, profile, email, groups]
+    # -- ID-token claim used as the suparShip username.
+    usernameClaim: email
+    # -- ID-token claim carrying IdP groups, matched against roleBindings[].group.
+    groupsClaim: groups
+
+# -- Teams: named groups of local users (matched by username). Used by
+# roleBindings below. Configured in the UI under Settings → Teams.
+teams: []
+# Example:
+# - name: platform
+#   displayName: Platform
+#   members: [alice, bob]
+
+# -- Role bindings grant a role on a project to a team (local users) OR an IdP
+# group (SSO). project "*" matches all projects. Roles: org_admin,
+# project_admin, developer, viewer. Set exactly one of team/group.
+roleBindings: []
+# Example:
+# - project: "*"
+#   team: platform
+#   role: org_admin
+# - project: api
+#   group: api-developers
+#   role: developer
+
 # -- GitOps repository connection
 gitops:
   # -- Git provider: github, gitlab, bitbucket, gitea, generic

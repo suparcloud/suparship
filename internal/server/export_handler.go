@@ -35,13 +35,16 @@ func (h *exportHandler) registerRoutes(mux *http.ServeMux) {
 // helmValues mirrors the onboarding-relevant sections of charts/suparship/values.yaml.
 // Only safe-to-export fields are included — never secret values.
 type helmValues struct {
-	Org          helmOrg               `json:"org"`
-	Environments []helmEnvironment     `json:"environments,omitempty"`
-	Clusters     []helmCluster         `json:"clusters,omitempty"`
-	GitOps       *helmGitOps           `json:"gitops,omitempty"`
-	Secrets      helmSecrets           `json:"secrets"`
-	Registry     *helmRegistry         `json:"registry,omitempty"`
-	Templates    *helmTemplates        `json:"templates,omitempty"`
+	Org          helmOrg           `json:"org"`
+	Environments []helmEnvironment `json:"environments,omitempty"`
+	Clusters     []helmCluster     `json:"clusters,omitempty"`
+	GitOps       *helmGitOps       `json:"gitops,omitempty"`
+	Secrets      helmSecrets       `json:"secrets"`
+	Registry     *helmRegistry     `json:"registry,omitempty"`
+	Templates    *helmTemplates    `json:"templates,omitempty"`
+	Auth         *helmAuth         `json:"auth,omitempty"`
+	Teams        []helmTeam        `json:"teams,omitempty"`
+	RoleBindings []helmRoleBinding `json:"roleBindings,omitempty"`
 }
 
 type helmOrg struct {
@@ -120,6 +123,41 @@ type helmExternalTemplateRepo struct {
 	ExistingSecret string `json:"existingSecret,omitempty"`
 }
 
+// helmAuth / helmOIDC mirror the OIDC SSO config. The client secret value is
+// never exported — only the name/key of the Secret that holds it.
+type helmAuth struct {
+	OIDC *helmOIDC `json:"oidc,omitempty"`
+}
+
+type helmOIDC struct {
+	Enabled         bool             `json:"enabled"`
+	IssuerURL       string           `json:"issuerURL,omitempty"`
+	ClientID        string           `json:"clientID,omitempty"`
+	ClientSecretRef helmSecretKeyRef `json:"clientSecretRef,omitempty"`
+	RedirectURL     string           `json:"redirectURL,omitempty"`
+	Scopes          []string         `json:"scopes,omitempty"`
+	UsernameClaim   string           `json:"usernameClaim,omitempty"`
+	GroupsClaim     string           `json:"groupsClaim,omitempty"`
+}
+
+type helmSecretKeyRef struct {
+	Name string `json:"name,omitempty"`
+	Key  string `json:"key,omitempty"`
+}
+
+type helmTeam struct {
+	Name        string   `json:"name"`
+	DisplayName string   `json:"displayName,omitempty"`
+	Members     []string `json:"members,omitempty"`
+}
+
+type helmRoleBinding struct {
+	Project string `json:"project"`
+	Team    string `json:"team,omitempty"`
+	Group   string `json:"group,omitempty"`
+	Role    string `json:"role"`
+}
+
 func (h *exportHandler) handleExport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -181,6 +219,33 @@ func (h *exportHandler) collectOrg(ctx context.Context, vals *helmValues) {
 				GroupName: org.SecretBackend.OnePassword.GroupName,
 			}
 		}
+	}
+
+	// Teams + role bindings (the RBAC config configured in the UI).
+	for _, t := range org.Teams {
+		vals.Teams = append(vals.Teams, helmTeam{
+			Name: t.Name, DisplayName: t.DisplayName, Members: t.Members,
+		})
+	}
+	for _, rb := range org.RoleBindings {
+		vals.RoleBindings = append(vals.RoleBindings, helmRoleBinding{
+			Project: rb.Project, Team: rb.Team, Group: rb.Group, Role: string(rb.Role),
+		})
+	}
+
+	// OIDC SSO config — secret ref only, never the secret value.
+	if org.Auth.OIDC != nil {
+		c := org.Auth.OIDC.Defaulted()
+		vals.Auth = &helmAuth{OIDC: &helmOIDC{
+			Enabled:         c.Enabled,
+			IssuerURL:       c.IssuerURL,
+			ClientID:        c.ClientID,
+			ClientSecretRef: helmSecretKeyRef{Name: c.ClientSecretRef.Name, Key: c.ClientSecretRef.Key},
+			RedirectURL:     c.RedirectURL,
+			Scopes:          c.Scopes,
+			UsernameClaim:   c.UsernameClaim,
+			GroupsClaim:     c.GroupsClaim,
+		}}
 	}
 }
 
@@ -438,6 +503,70 @@ func toYAML(v helmValues) string {
 					b.WriteString(fmt.Sprintf("      existingSecret: %s\n", yamlQ(ext.ExistingSecret)))
 				}
 			}
+		}
+	}
+
+	if len(v.Teams) > 0 {
+		b.WriteString("\nteams:\n")
+		for _, t := range v.Teams {
+			b.WriteString(fmt.Sprintf("  - name: %s\n", yamlQ(t.Name)))
+			if t.DisplayName != "" {
+				b.WriteString(fmt.Sprintf("    displayName: %s\n", yamlQ(t.DisplayName)))
+			}
+			if len(t.Members) > 0 {
+				b.WriteString("    members:\n")
+				for _, m := range t.Members {
+					b.WriteString(fmt.Sprintf("      - %s\n", yamlQ(m)))
+				}
+			}
+		}
+	}
+
+	if len(v.RoleBindings) > 0 {
+		b.WriteString("\nroleBindings:\n")
+		for _, rb := range v.RoleBindings {
+			b.WriteString(fmt.Sprintf("  - project: %s\n", yamlQ(rb.Project)))
+			if rb.Team != "" {
+				b.WriteString(fmt.Sprintf("    team: %s\n", yamlQ(rb.Team)))
+			}
+			if rb.Group != "" {
+				b.WriteString(fmt.Sprintf("    group: %s\n", yamlQ(rb.Group)))
+			}
+			b.WriteString(fmt.Sprintf("    role: %s\n", yamlQ(rb.Role)))
+		}
+	}
+
+	if v.Auth != nil && v.Auth.OIDC != nil {
+		o := v.Auth.OIDC
+		b.WriteString("\nauth:\n  oidc:\n")
+		b.WriteString(fmt.Sprintf("    enabled: %t\n", o.Enabled))
+		if o.IssuerURL != "" {
+			b.WriteString(fmt.Sprintf("    issuerURL: %s\n", yamlQ(o.IssuerURL)))
+		}
+		if o.ClientID != "" {
+			b.WriteString(fmt.Sprintf("    clientID: %s\n", yamlQ(o.ClientID)))
+		}
+		if o.RedirectURL != "" {
+			b.WriteString(fmt.Sprintf("    redirectURL: %s\n", yamlQ(o.RedirectURL)))
+		}
+		if o.ClientSecretRef.Name != "" {
+			b.WriteString("    clientSecretRef:\n")
+			b.WriteString(fmt.Sprintf("      name: %s\n", yamlQ(o.ClientSecretRef.Name)))
+			if o.ClientSecretRef.Key != "" {
+				b.WriteString(fmt.Sprintf("      key: %s\n", yamlQ(o.ClientSecretRef.Key)))
+			}
+		}
+		if len(o.Scopes) > 0 {
+			b.WriteString("    scopes:\n")
+			for _, s := range o.Scopes {
+				b.WriteString(fmt.Sprintf("      - %s\n", yamlQ(s)))
+			}
+		}
+		if o.UsernameClaim != "" {
+			b.WriteString(fmt.Sprintf("    usernameClaim: %s\n", yamlQ(o.UsernameClaim)))
+		}
+		if o.GroupsClaim != "" {
+			b.WriteString(fmt.Sprintf("    groupsClaim: %s\n", yamlQ(o.GroupsClaim)))
 		}
 	}
 

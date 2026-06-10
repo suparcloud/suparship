@@ -469,6 +469,7 @@ func New(cfg Config) *Server {
 		}
 		rh.projectAppCounter = cfg.ProjectAppCounter
 		rh.stuckApps = cfg.StuckAppManager
+		rh.kubeClient = cfg.KubeClient
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
 			cfg.Logger.Info("service creation endpoint enabled")
