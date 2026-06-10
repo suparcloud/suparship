@@ -852,6 +852,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 			BaseDomain:      res.baseDomain,
 			Namespace:       env.Namespace,
 			RoutingProfiles: lookupOrgEnvRoutingProfiles(org, env.EnvName),
+			Clusters:        res.clusters,
 		}
 
 		// Populate secret-store info from org backend config.

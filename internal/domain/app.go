@@ -217,6 +217,21 @@ type EnvironmentOverride struct {
 	// EnvConfig holds env vars and secret refs specific to this app+environment
 	// combination (App Environment level of the hierarchy — wins all other levels).
 	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
+	// ClusterOverrides holds per-cluster value overrides keyed by cluster name,
+	// applied on top of this env override for apps in a fan-out environment
+	// (deployMode "all"). Each cluster's published values.yaml is the env values
+	// deep-merged with its ClusterOverrides entry. Only meaningful in "all" mode.
+	ClusterOverrides map[string]ClusterValueOverride `json:"clusterOverrides,omitempty" yaml:"clusterOverrides,omitempty"`
+}
+
+// ClusterValueOverride holds per-(env, cluster) value overrides, applied on top
+// of the environment override. Same shape as the value-bearing subset of
+// EnvironmentOverride; wins over env-level values for that cluster only.
+type ClusterValueOverride struct {
+	Replicas   int32             `json:"replicas,omitempty" yaml:"replicas,omitempty"`
+	SizePreset SizePreset        `json:"sizePreset,omitempty" yaml:"sizePreset,omitempty"`
+	Values     map[string]any    `json:"values,omitempty" yaml:"values,omitempty"`
+	Config     map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
 }
 
 // AppSpec is the desired configuration for an app. It is deterministic and

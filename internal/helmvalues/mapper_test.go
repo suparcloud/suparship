@@ -578,3 +578,40 @@ func TestStripScheme(t *testing.T) {
 		}
 	}
 }
+
+// TestMapToHelmValuesForEnv_ClusterOverride proves per-cluster value overrides:
+// the cluster with an override gets the overridden replica count, while a
+// cluster without one (and the active/no-cluster case) keep the env value.
+func TestMapToHelmValuesForEnv_ClusterOverride(t *testing.T) {
+	app := &domain.App{
+		Name:        "web",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template:   domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{{Name: "web", Type: domain.ComponentWeb}},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"prod": {
+					Replicas: 2,
+					ClusterOverrides: map[string]domain.ClusterValueOverride{
+						"aks": {Replicas: 5},
+					},
+				},
+			},
+		},
+	}
+
+	replicasFor := func(cluster string) int32 {
+		hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", cluster, "", nil, nil, nil, nil)
+		return hv.Components["web"].Replicas
+	}
+
+	if got := replicasFor("aks"); got != 5 {
+		t.Errorf("aks (overridden) replicas = %d, want 5", got)
+	}
+	if got := replicasFor("eks"); got != 2 {
+		t.Errorf("eks (no override) replicas = %d, want the env value 2", got)
+	}
+	if got := replicasFor(""); got != 2 {
+		t.Errorf("no-cluster replicas = %d, want the env value 2", got)
+	}
+}

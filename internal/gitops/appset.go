@@ -154,7 +154,14 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 
 	// Source 2: Helm chart; reads per-app values from the repo via $appvalues.
 	// The full path is used because $appvalues resolves to the repo root (see above).
+	// Fan-out (deployMode "all") reads a per-cluster values file under
+	// _clusters/{{clusterName}}/ so per-cluster overrides apply; single-cluster
+	// reads the shared env values file.
+	fanOut := len(env.Clusters) > 1
 	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
+	if fanOut {
+		valuesFilePath = "$appvalues/" + joinSubPath(opts.SubPath, "envs", env.EnvName, "_clusters", "{{clusterName}}", "{{project}}", "{{name}}", "values.yaml")
+	}
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
 		Path:           joinSubPath(opts.SubPath, "charts", "{{chartPath}}"),
@@ -205,7 +212,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	appName := "{{project}}-{{name}}-" + env.EnvName
 	destServer := env.ClusterServer
 
-	if len(env.Clusters) > 1 {
+	if fanOut {
 		elements := make([]map[string]string, 0, len(env.Clusters))
 		for _, c := range env.Clusters {
 			elements = append(elements, map[string]string{"clusterName": c.Name, "clusterServer": c.Server})
@@ -309,7 +316,11 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 	// chartRepoURL/chartName/chartVersion come from the per-app app.yaml
 	// (AppMetadata.ChartRepoURL etc.) which the Git File generator
 	// flattens into template parameters.
+	fanOut := len(env.Clusters) > 1
 	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs-external", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
+	if fanOut {
+		valuesFilePath = "$appvalues/" + joinSubPath(opts.SubPath, "envs-external", env.EnvName, "_clusters", "{{clusterName}}", "{{project}}", "{{name}}", "values.yaml")
+	}
 	chartSource := ApplicationSource{
 		RepoURL:        "{{chartRepoURL}}",
 		Chart:          "{{chartName}}",
@@ -349,7 +360,7 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 	generators := []ApplicationSetGenerator{gitGen}
 	appName := "{{project}}-{{name}}-" + env.EnvName
 	destServer := env.ClusterServer
-	if len(env.Clusters) > 1 {
+	if fanOut {
 		elements := make([]map[string]string, 0, len(env.Clusters))
 		for _, c := range env.Clusters {
 			elements = append(elements, map[string]string{"clusterName": c.Name, "clusterServer": c.Server})

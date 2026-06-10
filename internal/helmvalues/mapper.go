@@ -121,6 +121,14 @@ func MapToHelmValuesForEnv(
 	}
 
 	envOverride := app.Spec.EnvironmentDefaults[envName] // zero value if absent
+	// Per-cluster overrides (deployMode "all"): fold the cluster's override on
+	// top of the env override so its replicas/size/config/values win for this
+	// cluster only. cluster=="" (single-cluster / active mode) is a no-op.
+	if cluster != "" {
+		if co, ok := envOverride.ClusterOverrides[cluster]; ok {
+			envOverride = applyClusterOverride(envOverride, co)
+		}
+	}
 
 	imageRepo, imageTag := extractImage(app.Spec.Values)
 	port := extractPort(app.Spec.Values)
@@ -420,6 +428,37 @@ func resolveReplicas(componentReplicas, envReplicas int32, envType domain.AppEnv
 // mergeConfig produces a new map that contains all keys from base, with keys
 // from override added or overwriting where they conflict. Returns nil when
 // both inputs are empty to avoid emitting an empty map in YAML output.
+// applyClusterOverride returns a copy of the env override with the per-cluster
+// override folded on top: non-zero scalar fields win, maps are shallow-merged
+// (cluster keys overwrite env keys). EnvConfig is left to the env layer (per-
+// cluster env vars/secrets flow through the separate cluster-scope mechanism).
+func applyClusterOverride(env domain.EnvironmentOverride, co domain.ClusterValueOverride) domain.EnvironmentOverride {
+	if co.Replicas != 0 {
+		env.Replicas = co.Replicas
+	}
+	if co.SizePreset != "" {
+		env.SizePreset = co.SizePreset
+	}
+	env.Config = mergeConfig(env.Config, co.Config)
+	env.Values = mergeValues(env.Values, co.Values)
+	return env
+}
+
+// mergeValues shallow-merges two template-input maps; override keys win.
+func mergeValues(base, override map[string]any) map[string]any {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	merged := make(map[string]any, len(base)+len(override))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range override {
+		merged[k] = v
+	}
+	return merged
+}
+
 func mergeConfig(base, override map[string]string) map[string]string {
 	if len(base) == 0 && len(override) == 0 {
 		return nil

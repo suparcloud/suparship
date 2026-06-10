@@ -353,6 +353,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 
 	// Snapshot the editable fields so a failed publish rolls back cleanly.
 	prevValues, prevDisplay, prevDesc := app.Spec.Values, app.Spec.DisplayName, app.Spec.Description
+	prevEnvDefaults := app.Spec.EnvironmentDefaults
 
 	if req.Values != nil {
 		newValues := *req.Values
@@ -388,6 +389,24 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if req.Description != nil {
 		app.Spec.Description = *req.Description
 	}
+	if req.ClusterOverrides != nil {
+		// Replace per-(env, cluster) value overrides. Fold each into the app's
+		// EnvironmentDefaults so they ride the existing per-env override record.
+		ed := app.Spec.EnvironmentDefaults
+		if ed == nil {
+			ed = map[string]domain.EnvironmentOverride{}
+		}
+		for envName, byCluster := range req.ClusterOverrides {
+			ov := ed[envName]
+			if len(byCluster) == 0 {
+				ov.ClusterOverrides = nil
+			} else {
+				ov.ClusterOverrides = byCluster
+			}
+			ed[envName] = ov
+		}
+		app.Spec.EnvironmentDefaults = ed
+	}
 
 	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
@@ -413,6 +432,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
 			app.Spec.Values, app.Spec.DisplayName, app.Spec.Description = prevValues, prevDisplay, prevDesc
+			app.Spec.EnvironmentDefaults = prevEnvDefaults
 			_ = ah.appStore.SaveApp(r.Context(), projectName, app)
 			slog.Error("update-app: publish failed; rolled back config change",
 				"project", projectName, "app", appName, "err", err)
