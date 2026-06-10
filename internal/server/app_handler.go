@@ -1324,10 +1324,18 @@ func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appN
 //     (kubeconfig missing/bad) — the caller must NOT silently fall back to the
 //     local cluster, since that would falsely report "not deployed".
 func (ah *appHandler) workloadClusterClient(ctx context.Context, envName string) (kubernetes.Interface, error) {
-	if ah.clusterPool == nil || ah.orgProvider == nil {
+	return workloadClusterClientForEnv(ctx, ah.orgProvider, ah.clusterPool, envName)
+}
+
+// workloadClusterClientForEnv resolves the cluster an environment's workloads
+// run on and returns a Kubernetes client for it, shared by the app, inventory,
+// and (future) preview status paths. See workloadClusterClient for the return
+// contract; nil pool or orgProvider means "use the local provider".
+func workloadClusterClientForEnv(ctx context.Context, orgProvider rbac.OrgProvider, pool *k8s.ClusterClientPool, envName string) (kubernetes.Interface, error) {
+	if pool == nil || orgProvider == nil {
 		return nil, nil
 	}
-	org, err := ah.orgProvider.GetOrg(ctx)
+	org, err := orgProvider.GetOrg(ctx)
 	if err != nil {
 		return nil, nil // org unreadable — degrade to the local provider
 	}
@@ -1341,7 +1349,7 @@ func (ah *appHandler) workloadClusterClient(ctx context.Context, envName string)
 	if ref == "" {
 		return nil, nil // env not bound to a cluster — single-cluster/local mode
 	}
-	client, err := ah.clusterPool.Get(ctx, ref)
+	client, err := pool.Get(ctx, ref)
 	if err != nil {
 		return nil, fmt.Errorf("workload cluster %q: %w", ref, err)
 	}
