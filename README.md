@@ -554,6 +554,7 @@ Significant design decisions are recorded as Architecture Decision Records (ADRs
 |----------|---------|
 | [`docs/app-model.md`](docs/app-model.md) | App, Environment, and Component concepts and guardrails |
 | [`docs/secrets.md`](docs/secrets.md) | Secrets architecture: 1Password integration, provisioning, audit policy |
+| [`docs/sso.md`](docs/sso.md) | OIDC single sign-on setup (Google Workspace, Okta, …) and group/team RBAC |
 | [`docs/templates-components.md`](docs/templates-components.md) | How templates define component topology |
 | [`docs/templates.md`](docs/templates.md) | Full template authoring reference |
 | [`docs/migration-app-model.md`](docs/migration-app-model.md) | Service → app migration guide |
