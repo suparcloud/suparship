@@ -1,6 +1,7 @@
 package gitops_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,47 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
 )
+
+// TestSyncAddonCharts_MaterialisesWrapperChart is the regression test for the
+// addon chart not being synced: the addon's wrapper chart ("valkey") must be
+// materialised under charts/<chart>/latest/ so the addon Application (which
+// sources charts/{{chartPath}}) resolves.
+func TestSyncAddonCharts_MaterialisesWrapperChart(t *testing.T) {
+	repoDir := t.TempDir()
+	tgz := buildPackagedChart(t, "valkey", map[string]string{
+		"Chart.yaml": "apiVersion: v2\nname: valkey\nversion: 0.1.0\n",
+	})
+	fetcher := &fakeChartFetcher{templateName: "valkey", data: tgz}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:      "http://localhost/fake.git",
+		ChartFetcher: fetcher,
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+
+	app := &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Addons:   []domain.AddonSpec{{Name: "cache", Type: "redis"}},
+		},
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Bound: true,
+		AddonProfiles: domain.AddonProfiles{
+			"redis": {Type: "redis", Provider: "valkey-operator", Chart: "valkey"},
+		},
+	}}
+
+	if err := p.SyncAddonChartsForTest(context.Background(), repoDir, app, envs); err != nil {
+		t.Fatalf("SyncAddonChartsForTest: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "charts", "valkey", "latest", "Chart.yaml")); err != nil {
+		t.Errorf("addon wrapper chart should be synced to charts/valkey/latest/: %v", err)
+	}
+}
 
 // TestPublishAppFiles_WithAddon_WritesPerAddonValues asserts the
 // publisher renders a parallel app.yaml + values.yaml per addon claim
@@ -61,6 +103,12 @@ func TestPublishAppFiles_WithAddon_WritesPerAddonValues(t *testing.T) {
 	}
 	if !strings.Contains(string(appYAML), "name: hello-addon-cache") {
 		t.Errorf("addon app.yaml should name the release hello-addon-cache, got:\n%s", appYAML)
+	}
+	// Regression: the addon app.yaml must carry chartPath so the shared
+	// ApplicationSet (sourcing charts/{{chartPath}}) resolves the addon's
+	// wrapper chart. Addons are unpinned → the "latest" dir.
+	if !strings.Contains(string(appYAML), "chartPath: valkey/latest") {
+		t.Errorf("addon app.yaml should set chartPath=valkey/latest, got:\n%s", appYAML)
 	}
 
 	// values.yaml must carry the AddonInstanceValues shape with the

@@ -1029,11 +1029,21 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 // the resulting slice is in pipeline order. The Order field is propagated from
 // the org definition into each AppEnvironment.
 func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []*domain.AppEnvironment {
-	if ah.orgProvider == nil {
+	return StableEnvsFromOrg(ctx, ah.orgProvider, app)
+}
+
+// StableEnvsFromOrg derives an app's stable environments from the org's
+// canonical environment pipeline, resolving each env's namespace from the org's
+// topology + naming patterns. It is the publish-time fallback used when an app
+// has no persisted AppEnvironment records (the create path and the startup
+// republish both rely on it). Falls back to domainapp.DefaultEnvironments when
+// no org / no environments are configured.
+func StableEnvsFromOrg(ctx context.Context, orgProvider rbac.OrgProvider, app *domain.App) []*domain.AppEnvironment {
+	if orgProvider == nil {
 		return domainapp.DefaultEnvironments(app)
 	}
 
-	org, err := ah.orgProvider.GetOrg(ctx)
+	org, err := orgProvider.GetOrg(ctx)
 	if err != nil || org == nil || len(org.Environments) == 0 {
 		return domainapp.DefaultEnvironments(app)
 	}

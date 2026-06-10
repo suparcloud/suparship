@@ -36,7 +36,9 @@ import (
 	"github.com/suparcloud/suparship/internal/tpl"
 	"github.com/suparcloud/suparship/internal/tpl/credstore"
 	"github.com/suparcloud/suparship/internal/tpl/registrysync"
+	"github.com/suparcloud/suparship/internal/version"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -425,11 +427,24 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					"argocd_repo", pubCfg.ArgoCDRepoURL,
 				)
 				go func() {
-					publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
+					bg := context.Background()
+					publishInitialEnvInfra(bg, pub, orgProvider, clusterStore, projectStore, logger)
 					// Re-publish every app so manifest-contract changes (e.g. the
-					// version-scoped chart layout) land fleet-wide. Sequential
-					// after env infra to avoid concurrent git pushes.
-					republishAllApps(context.Background(), gitOpsPublisher, appStore, projectStore, logger)
+					// version-scoped chart layout) land fleet-wide — but only once
+					// per generator bump, not on every boot. The republish is a
+					// full clone+commit+push per app; gating on a persisted marker
+					// keeps restarts (and crash loops) from re-running the whole
+					// fleet. Sequential after env infra to avoid concurrent pushes.
+					if applied := appliedGeneratorVersion(bg, kubeClient); applied == version.Generator {
+						logger.Info("republish apps: skipped — fleet already on current generator", "generator", version.Generator)
+					} else if failures := republishAllApps(bg, gitOpsPublisher, appStore, projectStore, orgProvider, logger); failures == 0 {
+						// Mark the boundary crossed only on a clean run, so a
+						// partial failure re-runs (self-heals) on the next boot.
+						setAppliedGeneratorVersion(bg, kubeClient, version.Generator, logger)
+					} else {
+						logger.Warn("republish apps: not marking generator applied — some apps failed; will retry next boot",
+							"failures", failures, "generator", version.Generator)
+					}
 				}()
 				go selfHealSealedTokens(context.Background(), pub, orgProvider, clusterStore, clusterPool, kubeClient, logger)
 
@@ -1230,31 +1245,38 @@ func publishInitialEnvInfra(
 // lands across the whole fleet without per-app manual action — old app.yaml
 // files lack the new keys until rewritten. Idempotent: a no-op commit when
 // content is unchanged. Best-effort; per-app failures are logged.
+// republishAllApps re-publishes every app's stable-env gitops files and returns
+// the number of apps that failed. A zero return means the whole fleet is on the
+// current layout (callers use it to gate the generator marker).
 func republishAllApps(
 	ctx context.Context,
 	pub server.GitOpsPublisher,
 	appStore domain.AppStore,
 	projectStore project.Store,
+	orgProvider rbac.OrgProvider,
 	logger *slog.Logger,
-) {
+) int {
 	if pub == nil || appStore == nil || projectStore == nil {
-		return
+		return 0
 	}
 	projects, err := projectStore.List(ctx)
 	if err != nil {
 		logger.Warn("republish apps: list projects failed", "error", err)
-		return
+		return 1
 	}
+	failures := 0
 	for _, p := range projects {
 		apps, err := appStore.ListApps(ctx, p.Metadata.Name)
 		if err != nil {
 			logger.Warn("republish apps: list apps failed", "project", p.Metadata.Name, "error", err)
+			failures++
 			continue
 		}
 		for _, app := range apps {
 			envs, err := appStore.ListAppEnvironments(ctx, p.Metadata.Name, app.Name)
 			if err != nil {
 				logger.Warn("republish apps: list envs failed", "project", p.Metadata.Name, "app", app.Name, "error", err)
+				failures++
 				continue
 			}
 			var stable []*domain.AppEnvironment
@@ -1263,12 +1285,82 @@ func republishAllApps(
 					stable = append(stable, e)
 				}
 			}
+			// Apps created against the org's default pipeline have no persisted
+			// AppEnvironment records — they're resolved at publish time. Without
+			// this fallback those apps would be silently skipped, leaving their
+			// app.yaml on the old (chartPath-less) layout. Mirrors the create
+			// path (appHandler.stableEnvsFromOrg).
+			if len(stable) == 0 {
+				stable = server.StableEnvsFromOrg(ctx, orgProvider, app)
+			}
 			if err := pub.PublishApp(ctx, app, stable); err != nil {
 				logger.Warn("republish apps: publish failed", "project", p.Metadata.Name, "app", app.Name, "error", err)
+				failures++
 			}
 		}
 	}
-	logger.Info("republish apps: complete")
+	// Preview environments are intentionally not republished here: they are
+	// ephemeral (per-PR) and regenerate with the current layout on the next
+	// preview create/sync, and the preview publish path is not wired into
+	// startup. This is a documented limitation, not a silent skip.
+	logger.Info("republish apps: complete (stable envs only; previews regenerate on next sync)", "failures", failures)
+	return failures
+}
+
+// generatorStateConfigMap records the generator contract version last applied
+// across the fleet, so the startup republish runs once per bump (not per boot).
+const (
+	generatorStateConfigMap = "suparship-generator-state"
+	generatorStateKey       = "appliedGeneratorVersion"
+)
+
+// appliedGeneratorVersion returns the generator version the fleet was last
+// republished for, or "" when unknown (no client, missing ConfigMap, read
+// error) — which conservatively triggers a republish.
+func appliedGeneratorVersion(ctx context.Context, client kubernetes.Interface) string {
+	if client == nil {
+		return ""
+	}
+	cm, err := client.CoreV1().ConfigMaps(secrets.SystemNamespace).Get(ctx, generatorStateConfigMap, metav1.GetOptions{})
+	if err != nil {
+		return ""
+	}
+	return cm.Data[generatorStateKey]
+}
+
+// setAppliedGeneratorVersion upserts the generator-state marker. Best-effort:
+// a failure just means the next boot re-runs the (idempotent) republish.
+func setAppliedGeneratorVersion(ctx context.Context, client kubernetes.Interface, v string, logger *slog.Logger) {
+	if client == nil {
+		return
+	}
+	api := client.CoreV1().ConfigMaps(secrets.SystemNamespace)
+	cm, err := api.Get(ctx, generatorStateConfigMap, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = api.Create(ctx, &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      generatorStateConfigMap,
+				Namespace: secrets.SystemNamespace,
+				Labels:    map[string]string{"app.kubernetes.io/managed-by": "suparship"},
+			},
+			Data: map[string]string{generatorStateKey: v},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			logger.Warn("republish apps: could not record generator marker", "error", err)
+		}
+		return
+	}
+	if err != nil {
+		logger.Warn("republish apps: could not read generator marker for update", "error", err)
+		return
+	}
+	if cm.Data == nil {
+		cm.Data = map[string]string{}
+	}
+	cm.Data[generatorStateKey] = v
+	if _, err := api.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		logger.Warn("republish apps: could not update generator marker", "error", err)
+	}
 }
 
 // selfHealSealedTokens reconstructs missing per-env sealed Connect token
