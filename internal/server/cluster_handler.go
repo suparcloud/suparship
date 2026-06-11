@@ -41,18 +41,38 @@ type clusterHandler struct {
 	kubeClient kubernetes.Interface
 }
 
-// registerRoutes wires cluster endpoints into mux.
+// registerRoutes wires cluster endpoints into mux. Clusters are infra/admin
+// topology (API server URLs, kubeconfig-backed registration), so both reads and
+// writes require org_admin — a developer/viewer has no business listing or
+// mutating the workload-cluster registry.
 func (ch *clusterHandler) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/clusters", ch.requireAuth(ch.handleList))
-	mux.HandleFunc("GET /api/v1/clusters/{name}", ch.requireAuth(ch.handleGet))
-	mux.HandleFunc("POST /api/v1/clusters", ch.requireAuth(ch.handleCreate))
-	mux.HandleFunc("DELETE /api/v1/clusters/{name}", ch.requireAuth(ch.handleDelete))
-	mux.HandleFunc("POST /api/v1/clusters/{name}/sealing-cert/refresh", ch.requireAuth(ch.handleRefreshSealingCert))
+	mux.HandleFunc("GET /api/v1/clusters", ch.requireOrgAdmin(ch.handleList))
+	mux.HandleFunc("GET /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleGet))
+	mux.HandleFunc("POST /api/v1/clusters", ch.requireOrgAdmin(ch.handleCreate))
+	mux.HandleFunc("DELETE /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleDelete))
+	mux.HandleFunc("POST /api/v1/clusters/{name}/sealing-cert/refresh", ch.requireOrgAdmin(ch.handleRefreshSealingCert))
 }
 
-// requireAuth wraps a handler with session authentication.
-func (ch *clusterHandler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
-	return ch.auth.requireAuth(next)
+// requireOrgAdmin enforces session auth + the org_admin role. When no org store
+// is wired (e.g. minimal test setups) it degrades to auth-only.
+func (ch *clusterHandler) requireOrgAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return ch.auth.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		if ch.orgStore == nil {
+			next(w, r)
+			return
+		}
+		sess := sessionFromContext(r.Context())
+		org, err := ch.orgStore.GetOrg(r.Context())
+		if err != nil || org == nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
+			return
+		}
+		if !org.HasPermissionForIdentity(sess.Username, sess.Groups, "*", rbac.RoleOrgAdmin) {
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
+			return
+		}
+		next(w, r)
+	})
 }
 
 // ── GET /api/v1/clusters ──────────────────────────────────────────────────────

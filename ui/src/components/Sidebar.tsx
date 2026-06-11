@@ -1,5 +1,7 @@
 import { NavLink } from "react-router-dom";
 
+import { useAuth } from "../lib/AuthContext";
+
 const mainNav = [
   { to: "/", label: "Dashboard" },
   { to: "/templates", label: "Templates" },
@@ -25,6 +27,12 @@ function navLinkClass({ isActive }: { isActive: boolean }) {
 }
 
 export function Sidebar() {
+  const { user } = useAuth();
+  // Org-level Settings are an org_admin/platform area; the read APIs behind
+  // them are org_admin-gated, so hide the section for non-admins (they'd only
+  // hit 403s). Developers use environments/profiles via the app flows.
+  const isOrgAdmin = user?.role === "org_admin";
+
   return (
     <aside className="flex w-56 flex-col border-r border-gray-200 bg-white py-4">
       <nav className="flex flex-1 flex-col gap-1 px-3">
@@ -39,14 +47,18 @@ export function Sidebar() {
           </NavLink>
         ))}
 
-        <div className="mb-1 mt-5 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
-          Settings
-        </div>
-        {settingsNav.map((item) => (
-          <NavLink key={item.to} to={item.to} className={navLinkClass}>
-            {item.label}
-          </NavLink>
-        ))}
+        {isOrgAdmin && (
+          <>
+            <div className="mb-1 mt-5 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
+              Settings
+            </div>
+            {settingsNav.map((item) => (
+              <NavLink key={item.to} to={item.to} className={navLinkClass}>
+                {item.label}
+              </NavLink>
+            ))}
+          </>
+        )}
       </nav>
     </aside>
   );

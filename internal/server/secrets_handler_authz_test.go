@@ -9,12 +9,12 @@ import (
 )
 
 // TestSecretsAuthzMatrix verifies the RBAC enforcement for every
-// (scope, verb, role) combination per the plan's authorization matrix:
+// (scope, verb, role) combination:
 //
-//	org/env-type → org_admin only for writes
-//	project      → project_admin+ for writes
-//	app/app-env  → developer+ for writes
-//	all scopes   → viewer+ for reads
+//	org/env-type/cluster (shared) → org_admin for writes AND key-listing reads
+//	   (key names at the org scope are platform-admin info)
+//	project                       → project_admin+ for writes
+//	app/app-env                   → developer+ for writes, viewer+ for reads
 func TestSecretsAuthzMatrix(t *testing.T) {
 	mux, ah := newSecretsMux()
 
@@ -37,12 +37,14 @@ func TestSecretsAuthzMatrix(t *testing.T) {
 		{"shared global upsert by developer → 403", "POST", "/api/v1/org/secrets/global", upsertBody, "bob", "developer", 403},
 		{"shared global upsert by viewer → 403", "POST", "/api/v1/org/secrets/global", upsertBody, "carol", "viewer", 403},
 		{"shared global delete by org_admin", "DELETE", "/api/v1/org/secrets/global/K", nil, "alice", "org_admin", 200},
-		{"shared global list by viewer", "GET", "/api/v1/org/secrets/global", nil, "carol", "viewer", 200},
+		{"shared global list by org_admin", "GET", "/api/v1/org/secrets/global", nil, "alice", "org_admin", 200},
+		{"shared global list by viewer → 403", "GET", "/api/v1/org/secrets/global", nil, "carol", "viewer", 403},
 
-		// ── Shared env (org_admin writes) ───────────────────────────
+		// ── Shared env (org_admin writes + key-listing reads) ───────
 		{"shared env upsert by org_admin", "POST", "/api/v1/org/secrets/env/staging", upsertBody, "alice", "org_admin", 200},
 		{"shared env upsert by developer → 403", "POST", "/api/v1/org/secrets/env/staging", upsertBody, "bob", "developer", 403},
-		{"shared env list by viewer", "GET", "/api/v1/org/secrets/env/staging", nil, "carol", "viewer", 200},
+		{"shared env list by org_admin", "GET", "/api/v1/org/secrets/env/staging", nil, "alice", "org_admin", 200},
+		{"shared env list by viewer → 403", "GET", "/api/v1/org/secrets/env/staging", nil, "carol", "viewer", 403},
 
 		// ── Shared cluster, nested under env (org_admin writes) ─────
 		{"shared cluster upsert by org_admin", "POST", "/api/v1/org/secrets/env/staging/cluster/prod-eu", upsertBody, "alice", "org_admin", 200},

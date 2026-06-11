@@ -88,7 +88,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 
 	// Org-level read endpoints — authenticated users only.
 	mux.HandleFunc("GET /api/v1/org", rh.auth.requireAuth(rh.handleGetOrg))
-	mux.HandleFunc("GET /api/v1/teams", rh.auth.requireAuth(rh.handleGetTeams))
+	mux.HandleFunc("GET /api/v1/teams", requireOrgAdmin(rh.requireOrgAdmin(rh.handleGetTeams)))
 	mux.HandleFunc("GET /api/v1/projects", rh.auth.requireAuth(rh.handleGetProjects))
 
 	// Team management — reads open to all authenticated users; writes org_admin.
@@ -97,13 +97,13 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/teams/{team}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteTeam)))
 
 	// Role bindings (team/group → role on a project, "*" = all). org_admin only.
-	mux.HandleFunc("GET /api/v1/role-bindings", rh.auth.requireAuth(rh.handleListRoleBindings))
+	mux.HandleFunc("GET /api/v1/role-bindings", requireOrgAdmin(rh.requireOrgAdmin(rh.handleListRoleBindings)))
 	mux.HandleFunc("POST /api/v1/role-bindings", requireOrgAdmin(rh.requireOrgAdmin(rh.handleCreateRoleBinding)))
 	mux.HandleFunc("DELETE /api/v1/role-bindings", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteRoleBinding)))
 
 	// OIDC SSO config — read open to all authenticated users (secret never
 	// exposed); write org_admin. The client secret lives in a k8s Secret.
-	mux.HandleFunc("GET /api/v1/org/auth", rh.auth.requireAuth(rh.handleGetAuthConfig))
+	mux.HandleFunc("GET /api/v1/org/auth", requireOrgAdmin(rh.requireOrgAdmin(rh.handleGetAuthConfig)))
 	mux.HandleFunc("PUT /api/v1/org/auth", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutAuthConfig)))
 
 	// Project lifecycle — org_admin only.
@@ -197,15 +197,15 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	if rh.envConfigHandler != nil {
 		ec := rh.envConfigHandler
 		// Org and Environment levels — org_admin writes, any-auth reads.
-		mux.HandleFunc("GET /api/v1/org/envconfig", rh.auth.requireAuth(ec.handleGetOrgEnvConfig))
+		mux.HandleFunc("GET /api/v1/org/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handleGetOrgEnvConfig)))
 		mux.HandleFunc("PUT /api/v1/org/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutOrgEnvConfig)))
-		mux.HandleFunc("GET /api/v1/org/envconfig/{envtype}", rh.auth.requireAuth(ec.handleGetEnvTypeEnvConfig))
+		mux.HandleFunc("GET /api/v1/org/envconfig/{envtype}", requireOrgAdmin(rh.requireOrgAdmin(ec.handleGetEnvTypeEnvConfig)))
 		mux.HandleFunc("PUT /api/v1/org/envconfig/{envtype}", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutEnvTypeEnvConfig)))
 		// Project level — project_admin writes, viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig", viewProject(ec.handleGetProjectEnvConfig))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/envconfig", manageProject(ec.handlePutProjectEnvConfig))
 		// Cluster level — org_admin writes, any-auth reads. Platform escape hatch.
-		mux.HandleFunc("GET /api/v1/clusters/{cluster}/envconfig", rh.auth.requireAuth(ec.handleGetClusterEnvConfig))
+		mux.HandleFunc("GET /api/v1/clusters/{cluster}/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handleGetClusterEnvConfig)))
 		mux.HandleFunc("PUT /api/v1/clusters/{cluster}/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutClusterEnvConfig)))
 		// App level — developer writes (202 async), viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envconfig", viewProject(ec.handleGetAppEnvConfig))
@@ -223,7 +223,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/org/secrets-backend", rh.auth.requireAuth(sh.handleGetSecretsBackend))
 		mux.HandleFunc("PUT /api/v1/org/secrets-backend", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePutSecretsBackend)))
 		// Full backend config (new schema).
-		mux.HandleFunc("GET /api/v1/org/secret-backend", rh.auth.requireAuth(sh.handleGetSecretsBackendFull))
+		mux.HandleFunc("GET /api/v1/org/secret-backend", requireOrgAdmin(rh.requireOrgAdmin(sh.handleGetSecretsBackendFull)))
 		mux.HandleFunc("PUT /api/v1/org/secret-backend", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePutSecretsBackendFull)))
 		// SA token + vault listing.
 		mux.HandleFunc("POST /api/v1/org/secret-backend/sa-token", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePostSAToken)))
@@ -240,13 +240,13 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 
 		// ── Shared-tier secrets (org-admin) across the 3 scopes ──
 		// Cluster scope is per-(env, cluster): routes nest cluster under env.
-		mux.HandleFunc("GET /api/v1/org/secrets/global", rh.auth.requireAuth(sh.handleListSecrets))
+		mux.HandleFunc("GET /api/v1/org/secrets/global", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListSecrets)))
 		mux.HandleFunc("POST /api/v1/org/secrets/global", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
 		mux.HandleFunc("DELETE /api/v1/org/secrets/global/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
-		mux.HandleFunc("GET /api/v1/org/secrets/env/{env}", rh.auth.requireAuth(sh.handleListSecrets))
+		mux.HandleFunc("GET /api/v1/org/secrets/env/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListSecrets)))
 		mux.HandleFunc("POST /api/v1/org/secrets/env/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
 		mux.HandleFunc("DELETE /api/v1/org/secrets/env/{env}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
-		mux.HandleFunc("GET /api/v1/org/secrets/env/{env}/cluster/{cluster}", rh.auth.requireAuth(sh.handleListSecrets))
+		mux.HandleFunc("GET /api/v1/org/secrets/env/{env}/cluster/{cluster}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListSecrets)))
 		mux.HandleFunc("POST /api/v1/org/secrets/env/{env}/cluster/{cluster}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
 		mux.HandleFunc("DELETE /api/v1/org/secrets/env/{env}/cluster/{cluster}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
 
