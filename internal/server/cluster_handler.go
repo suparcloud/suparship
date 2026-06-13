@@ -49,6 +49,7 @@ func (ch *clusterHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/clusters", ch.requireOrgAdmin(ch.handleList))
 	mux.HandleFunc("GET /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleGet))
 	mux.HandleFunc("POST /api/v1/clusters", ch.requireOrgAdmin(ch.handleCreate))
+	mux.HandleFunc("PUT /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleUpdateMetadata))
 	mux.HandleFunc("DELETE /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleDelete))
 	mux.HandleFunc("POST /api/v1/clusters/{name}/sealing-cert/refresh", ch.requireOrgAdmin(ch.handleRefreshSealingCert))
 }
@@ -111,9 +112,25 @@ type createClusterRequest struct {
 	// ESONamespace is the namespace where External Secrets Operator is installed
 	// on this cluster. Defaults to "external-secrets" when empty.
 	ESONamespace string `json:"esoNamespace,omitempty"`
+	// BaseDomain is the cluster's default ingress DNS zone (multi-cloud).
+	BaseDomain string `json:"baseDomain,omitempty"`
+	// RoutingProfiles overrides env/org routing for apps on this cluster, keyed
+	// by ExposeMode (internal/external).
+	RoutingProfiles domain.RoutingProfiles `json:"routingProfiles,omitempty"`
 	// Kubeconfig is the base64-encoded raw kubeconfig for this cluster.
 	// It is stored encrypted in Kubernetes Secrets and never written to Git.
 	Kubeconfig string `json:"kubeconfig"`
+}
+
+// validateClusterRoutingProfiles checks each present profile resolves (valid
+// mode name + non-empty ingressClassName), reusing domain.ResolveRoutingProfile.
+func validateClusterRoutingProfiles(profiles domain.RoutingProfiles) error {
+	for mode := range profiles {
+		if _, err := domain.ResolveRoutingProfile(nil, nil, profiles, domain.ExposeMode(mode)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -148,12 +165,19 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		displayName = req.Name
 	}
 
+	if err := validateClusterRoutingProfiles(req.RoutingProfiles); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
 	cluster := domain.Cluster{
-		Name:         req.Name,
-		DisplayName:  displayName,
-		APIServer:    req.APIServer,
-		ESONamespace: req.ESONamespace,
-		Status:       "ready",
+		Name:            req.Name,
+		DisplayName:     displayName,
+		APIServer:       req.APIServer,
+		ESONamespace:    req.ESONamespace,
+		BaseDomain:      strings.TrimSpace(req.BaseDomain),
+		RoutingProfiles: req.RoutingProfiles,
+		Status:          "ready",
 	}
 	// Trim stray whitespace — a leading space in APIServer ends up in ArgoCD
 	// destination.server and breaks cluster lookup.
@@ -186,6 +210,54 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, cluster)
+}
+
+// ── PUT /api/v1/clusters/{name} — edit metadata (routing) ─────────────────────
+
+type updateClusterRequest struct {
+	DisplayName     string                 `json:"displayName,omitempty"`
+	BaseDomain      string                 `json:"baseDomain,omitempty"`
+	ESONamespace    string                 `json:"esoNamespace,omitempty"`
+	RoutingProfiles domain.RoutingProfiles `json:"routingProfiles,omitempty"`
+}
+
+// clusterMetadataUpdater is implemented by the real store; the dev/fake store
+// doesn't support metadata edits (cluster routing isn't exercised in fake mode).
+type clusterMetadataUpdater interface {
+	UpdateClusterMetadata(ctx context.Context, name, displayName, baseDomain, esoNamespace string, routing domain.RoutingProfiles) (*domain.Cluster, error)
+}
+
+func (ch *clusterHandler) handleUpdateMetadata(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	var req updateClusterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if err := validateClusterRoutingProfiles(req.RoutingProfiles); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+	updater, ok := ch.store.(clusterMetadataUpdater)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "cluster metadata updates are not supported in this mode"})
+		return
+	}
+	cluster, err := updater.UpdateClusterMetadata(r.Context(), name, req.DisplayName, strings.TrimSpace(req.BaseDomain), req.ESONamespace, req.RoutingProfiles)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to update cluster: " + err.Error()})
+		return
+	}
+	// Routing changes affect published values for apps on this cluster; nudge a
+	// secret-store reconcile (best-effort) so any dependent infra refreshes.
+	if ch.storeReconciler != nil {
+		go func() {
+			if err := ch.storeReconciler.ReconcileSecretStores(context.Background()); err != nil {
+				ch.logger.Warn("cluster update: reconcile secret stores failed", "cluster", name, "error", err)
+			}
+		}()
+	}
+	writeJSON(w, http.StatusOK, cluster)
 }
 
 // ── DELETE /api/v1/clusters/{name} ───────────────────────────────────────────

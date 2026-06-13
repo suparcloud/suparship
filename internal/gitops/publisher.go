@@ -612,18 +612,23 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// AppPublishEnv.RoutingProfiles. When both are empty, helmvalues
 		// falls back to the legacy Expose=true → nginx shim.
 		//
-		// marshalValues computes the values for a given cluster (so per-cluster
-		// overrides merge via the mapper) and marshals them.
-		marshalValues := func(clusterName string) ([]byte, error) {
-			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, env.BaseDomain, env.Namespace, clusterName, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+		// marshalValues computes the values for one cluster: the cluster's own
+		// baseDomain + routing profiles override the env's (per-cluster /
+		// multi-cloud), and its name drives per-cluster value overrides.
+		marshalValues := func(c ClusterTarget) ([]byte, error) {
+			baseDomain := env.BaseDomain
+			if c.BaseDomain != "" {
+				baseDomain = c.BaseDomain
+			}
+			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
 			return yaml.Marshal(hv)
 		}
 		if len(env.Clusters) > 1 {
 			// Fan-out: one values.yaml per cluster under _clusters/<cluster>/,
-			// each merged with that cluster's overrides. The matrix ApplicationSet
-			// points its valueFile at this per-cluster path via {{clusterName}}.
+			// each merged with that cluster's overrides + routing. The matrix
+			// ApplicationSet points its valueFile at this path via {{clusterName}}.
 			for _, c := range env.Clusters {
-				hvBytes, err := marshalValues(c.Name)
+				hvBytes, err := marshalValues(c)
 				if err != nil {
 					return fmt.Errorf("marshal values.yaml for env %s cluster %s: %w", env.EnvName, c.Name, err)
 				}
@@ -633,7 +638,14 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 				}
 			}
 		} else {
-			hvBytes, err := marshalValues(env.ClusterRef)
+			// Single cluster: use the resolved active cluster's routing when
+			// present (so a lone remote cluster on another cloud still gets its
+			// own domain/ingress), else fall back to the env's ClusterRef.
+			target := ClusterTarget{Name: env.ClusterRef}
+			if len(env.Clusters) == 1 {
+				target = env.Clusters[0]
+			}
+			hvBytes, err := marshalValues(target)
 			if err != nil {
 				return fmt.Errorf("marshal values.yaml for env %s: %w", env.EnvName, err)
 			}
@@ -1115,7 +1127,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		// Org-level routing profiles apply uniformly to previews; per-env
 		// overrides don't make sense for ephemeral preview envs (their
 		// names are PR-specific and have no static config).
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, p.cfg.AddonProfiles, nil)
+		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
 		hvBytes, err := yaml.Marshal(hv)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)

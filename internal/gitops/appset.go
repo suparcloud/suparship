@@ -1,5 +1,7 @@
 package gitops
 
+import "github.com/suparcloud/suparship/internal/domain"
+
 // AppSetEnv parameterises one environment in an ApplicationSet.
 // Each instance maps to one cluster in the env/cluster-centric Model B layout.
 type AppSetEnv struct {
@@ -20,13 +22,20 @@ type AppSetEnv struct {
 	BaseDomain string
 }
 
-// ClusterTarget identifies one destination cluster for an environment's fan-out.
+// ClusterTarget identifies one destination cluster for an environment's fan-out,
+// plus its routing overrides (multi-cloud: each cluster may use its own base
+// domain, ingress class, and cert issuer).
 type ClusterTarget struct {
 	// Name is the registered cluster name (suparship.io/cluster), used in the
 	// fan-out Application name suffix and the per-cluster values path.
 	Name string
 	// Server is the Kubernetes API server URL → spec.destination.server.
 	Server string
+	// BaseDomain is the cluster's default ingress DNS zone (empty = inherit env).
+	BaseDomain string
+	// RoutingProfiles overrides env/org routing for apps on this cluster, by
+	// ExposeMode. Empty/sparse = inherit env → org.
+	RoutingProfiles domain.RoutingProfiles
 }
 
 // AppSetOptions carries shared configuration for all ApplicationSet builders.

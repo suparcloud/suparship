@@ -47,9 +47,20 @@ clusters:
   - name: in-cluster
     displayName: "Hub"
     inCluster: true
+  # Multi-cloud example: each cluster brings its own ingress base domain +
+  # class + cert issuer (overrides env → org routing for apps deployed there).
   # - name: prod-aks
   #   displayName: "Prod (AKS)"
   #   existingSecret: cluster-prod-aks-kubeconfig
+  #   baseDomain: azure.example.com
+  #   routingProfiles:
+  #     external: { ingressClassName: webapprouting.kubernetes.azure.com, clusterIssuer: letsencrypt-azure }
+  # - name: prod-eks
+  #   displayName: "Prod (AWS)"
+  #   existingSecret: cluster-prod-eks-kubeconfig
+  #   baseDomain: aws.example.com
+  #   routingProfiles:
+  #     external: { ingressClassName: alb, clusterIssuer: letsencrypt-aws }
 
 # -- Promotion pipeline. Each environment binds to a cluster by name.
 environments:

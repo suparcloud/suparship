@@ -81,6 +81,46 @@ func (s *K8sClusterStore) GetCluster(ctx context.Context, name string) (*domain.
 	return clusterFromConfigMap(cm)
 }
 
+// UpdateClusterMetadata rewrites only the metadata fields an operator can edit
+// after registration — DisplayName, BaseDomain, RoutingProfiles, ESONamespace —
+// in the cluster's ConfigMap. APIServer, kubeconfig Secret, and the ArgoCD
+// cluster Secret are NOT touched (changing the API server means re-registering).
+func (s *K8sClusterStore) UpdateClusterMetadata(ctx context.Context, name string, displayName, baseDomain, esoNamespace string, routing domain.RoutingProfiles) (*domain.Cluster, error) {
+	cm, err := s.client.CoreV1().ConfigMaps(suparshipSystemNS).Get(ctx, clusterConfigMapPrefix+name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("cluster %q not found", name)
+		}
+		return nil, fmt.Errorf("getting cluster %q: %w", name, err)
+	}
+	cluster, err := clusterFromConfigMap(cm)
+	if err != nil {
+		return nil, err
+	}
+	if displayName != "" {
+		cluster.DisplayName = displayName
+	}
+	cluster.BaseDomain = baseDomain
+	cluster.RoutingProfiles = routing
+	if esoNamespace != "" {
+		cluster.ESONamespace = esoNamespace
+	}
+	cluster.Normalize()
+
+	data, err := json.Marshal(cluster)
+	if err != nil {
+		return nil, fmt.Errorf("marshal cluster %q: %w", name, err)
+	}
+	if cm.Data == nil {
+		cm.Data = map[string]string{}
+	}
+	cm.Data[clusterConfigMapKey] = string(data)
+	if _, err := s.client.CoreV1().ConfigMaps(suparshipSystemNS).Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		return nil, fmt.Errorf("update cluster %q metadata: %w", name, err)
+	}
+	return cluster, nil
+}
+
 // CreateCluster registers a new cluster. It:
 //  1. Stores the raw kubeconfig as a Secret in suparship-system.
 //  2. Registers (or links) the cluster with ArgoCD by looking for a

@@ -137,7 +137,9 @@ func ValidateExposeModes(components []ComponentSpec, orgProfiles, envProfiles Ro
 		}
 		exposed++
 		if hasProfiles {
-			if _, err := ResolveRoutingProfile(orgProfiles, envProfiles, c.ExposeMode); err != nil {
+			// App-save validation has no cluster context (cluster routing is
+			// resolved at publish time) — pass nil for the cluster layer.
+			if _, err := ResolveRoutingProfile(orgProfiles, envProfiles, nil, c.ExposeMode); err != nil {
 				return fmt.Errorf("component %q: %w", c.Name, err)
 			}
 		}

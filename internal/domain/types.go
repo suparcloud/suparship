@@ -120,6 +120,17 @@ type Cluster struct {
 	// SealedSecrets and ClusterSecretStore resources for this cluster are
 	// created in this namespace.
 	ESONamespace string `json:"esoNamespace,omitempty"`
+	// BaseDomain is this cluster's default ingress DNS zone (e.g.
+	// "aws.example.com"). In a multi-cloud fan-out it makes each cluster's app
+	// hosts distinct. Empty inherits the environment's base domain. A per-mode
+	// RoutingProfiles entry's baseDomain overrides this.
+	BaseDomain string `json:"baseDomain,omitempty"`
+	// RoutingProfiles overrides the env/org routing profiles for apps deployed
+	// to this cluster, keyed by ExposeMode ("internal"/"external"), each with
+	// its own ingressClassName, clusterIssuer, and optional baseDomain. Lets a
+	// cluster on a different cloud use its own ingress controller + cert issuer.
+	// Sparse: modes not present here inherit env → org.
+	RoutingProfiles RoutingProfiles `json:"routingProfiles,omitempty"`
 }
 
 // EffectiveESONamespace returns ESONamespace, falling back to "external-secrets"

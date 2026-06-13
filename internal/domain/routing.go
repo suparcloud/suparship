@@ -35,10 +35,11 @@ func DefaultRoutingProfiles() RoutingProfiles {
 //  4. The resolved profile must have a non-empty IngressClassName; an empty
 //     class is a configuration error.
 //
-// Callers should pass the org's full RoutingProfiles map and the (optionally
-// nil) environment's override map. mode is the component's
+// Callers pass the org's full RoutingProfiles map, the (optionally nil)
+// environment override map, and the (optionally nil) per-cluster override map.
+// Precedence is cluster → env → org (cluster wins). mode is the component's
 // EffectiveExposeMode().
-func ResolveRoutingProfile(orgProfiles, envProfiles RoutingProfiles, mode ExposeMode) (RoutingProfile, error) {
+func ResolveRoutingProfile(orgProfiles, envProfiles, clusterProfiles RoutingProfiles, mode ExposeMode) (RoutingProfile, error) {
 	if mode == ExposeDisabled || mode == "" {
 		return RoutingProfile{}, nil
 	}
@@ -48,6 +49,9 @@ func ResolveRoutingProfile(orgProfiles, envProfiles RoutingProfiles, mode Expose
 	}
 
 	key := string(mode)
+	if profile, ok := clusterProfiles[key]; ok {
+		return validateProfile(profile, mode)
+	}
 	if profile, ok := envProfiles[key]; ok {
 		return validateProfile(profile, mode)
 	}

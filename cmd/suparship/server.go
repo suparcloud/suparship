@@ -726,7 +726,12 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 						"env", orgEnv.Name, "clusterRef", ref)
 					continue
 				}
-				res.clusters = append(res.clusters, gitops.ClusterTarget{Name: ref, Server: cluster.APIServer})
+				res.clusters = append(res.clusters, gitops.ClusterTarget{
+					Name:            ref,
+					Server:          cluster.APIServer,
+					BaseDomain:      cluster.BaseDomain,
+					RoutingProfiles: cluster.RoutingProfiles,
+				})
 			}
 		}
 
@@ -1236,7 +1241,12 @@ func publishInitialEnvInfra(
 			if cerr != nil || c == nil || c.APIServer == "" {
 				continue
 			}
-			clusters = append(clusters, gitops.ClusterTarget{Name: ref, Server: c.APIServer})
+			clusters = append(clusters, gitops.ClusterTarget{
+				Name:            ref,
+				Server:          c.APIServer,
+				BaseDomain:      c.BaseDomain,
+				RoutingProfiles: c.RoutingProfiles,
+			})
 		}
 		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
 			EnvName:       orgEnv.Name,

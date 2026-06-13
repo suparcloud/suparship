@@ -6,7 +6,7 @@ import (
 )
 
 func TestResolveRoutingProfile_Disabled(t *testing.T) {
-	got, err := ResolveRoutingProfile(nil, nil, ExposeDisabled)
+	got, err := ResolveRoutingProfile(nil, nil, nil, ExposeDisabled)
 	if err != nil {
 		t.Fatalf("disabled mode should not error: %v", err)
 	}
@@ -18,6 +18,7 @@ func TestResolveRoutingProfile_Disabled(t *testing.T) {
 func TestResolveRoutingProfile_EmptyModeTreatedAsDisabled(t *testing.T) {
 	got, err := ResolveRoutingProfile(
 		RoutingProfiles{string(ExposeInternal): {IngressClassName: "nginx"}},
+		nil,
 		nil,
 		ExposeMode(""),
 	)
@@ -34,7 +35,7 @@ func TestResolveRoutingProfile_OrgLookup(t *testing.T) {
 		string(ExposeInternal): {IngressClassName: "nginx-internal"},
 		string(ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
 	}
-	got, err := ResolveRoutingProfile(org, nil, ExposeExternal)
+	got, err := ResolveRoutingProfile(org, nil, nil, ExposeExternal)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -53,7 +54,7 @@ func TestResolveRoutingProfile_EnvOverridesOrg(t *testing.T) {
 	env := RoutingProfiles{
 		string(ExposeExternal): {IngressClassName: "nginx-staging", ClusterIssuer: "letsencrypt-staging"},
 	}
-	got, err := ResolveRoutingProfile(org, env, ExposeExternal)
+	got, err := ResolveRoutingProfile(org, env, nil, ExposeExternal)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -62,6 +63,33 @@ func TestResolveRoutingProfile_EnvOverridesOrg(t *testing.T) {
 	}
 	if got.IngressClassName != "nginx-staging" {
 		t.Errorf("env should win: class = %q, want nginx-staging", got.IngressClassName)
+	}
+}
+
+func TestResolveRoutingProfile_ClusterOverridesEnv(t *testing.T) {
+	// Cluster wins over env (and org) — the multi-cloud case: each cluster
+	// brings its own ingress class + issuer + base domain.
+	org := RoutingProfiles{
+		string(ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod", BaseDomain: "example.com"},
+	}
+	env := RoutingProfiles{
+		string(ExposeExternal): {IngressClassName: "nginx-staging", ClusterIssuer: "letsencrypt-staging"},
+	}
+	cluster := RoutingProfiles{
+		string(ExposeExternal): {IngressClassName: "alb", ClusterIssuer: "letsencrypt-aws", BaseDomain: "aws.example.com"},
+	}
+	got, err := ResolveRoutingProfile(org, env, cluster, ExposeExternal)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.IngressClassName != "alb" || got.ClusterIssuer != "letsencrypt-aws" || got.BaseDomain != "aws.example.com" {
+		t.Errorf("cluster should win, got %+v", got)
+	}
+	// A mode absent from the cluster layer falls back to env/org.
+	gotInternal, _ := ResolveRoutingProfile(
+		RoutingProfiles{string(ExposeInternal): {IngressClassName: "nginx-internal"}}, nil, cluster, ExposeInternal)
+	if gotInternal.IngressClassName != "nginx-internal" {
+		t.Errorf("absent cluster mode should fall back to org, got %+v", gotInternal)
 	}
 }
 
@@ -74,7 +102,7 @@ func TestResolveRoutingProfile_EnvOverrideIsReplacementNotMerge(t *testing.T) {
 	env := RoutingProfiles{
 		string(ExposeExternal): {IngressClassName: "nginx"},
 	}
-	got, err := ResolveRoutingProfile(org, env, ExposeExternal)
+	got, err := ResolveRoutingProfile(org, env, nil, ExposeExternal)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -87,7 +115,7 @@ func TestResolveRoutingProfile_UnknownMode(t *testing.T) {
 	org := RoutingProfiles{
 		string(ExposeInternal): {IngressClassName: "nginx"},
 	}
-	_, err := ResolveRoutingProfile(org, nil, ExposeExternal)
+	_, err := ResolveRoutingProfile(org, nil, nil, ExposeExternal)
 	if err == nil {
 		t.Fatal("expected error for missing profile, got nil")
 	}
@@ -100,7 +128,7 @@ func TestResolveRoutingProfile_InvalidMode(t *testing.T) {
 	org := RoutingProfiles{
 		"weird": {IngressClassName: "nginx"},
 	}
-	_, err := ResolveRoutingProfile(org, nil, ExposeMode("weird"))
+	_, err := ResolveRoutingProfile(org, nil, nil, ExposeMode("weird"))
 	if err == nil {
 		t.Fatal("expected error for invalid mode, got nil")
 	}
@@ -113,7 +141,7 @@ func TestResolveRoutingProfile_EmptyClassName(t *testing.T) {
 	org := RoutingProfiles{
 		string(ExposeInternal): {ClusterIssuer: "internal-ca"},
 	}
-	_, err := ResolveRoutingProfile(org, nil, ExposeInternal)
+	_, err := ResolveRoutingProfile(org, nil, nil, ExposeInternal)
 	if err == nil {
 		t.Fatal("expected error for empty ingressClassName, got nil")
 	}

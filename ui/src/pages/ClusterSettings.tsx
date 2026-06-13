@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { toast } from "sonner";
+
 import {
   listClusters,
   registerCluster,
   refreshSealingCert,
   removeCluster,
+  updateCluster,
 } from "../lib/clusters";
-import type { Cluster } from "../lib/clusters";
+import type { Cluster, RoutingProfiles } from "../lib/clusters";
 import {
   getClusterEnvConfig,
   updateClusterEnvConfig,
@@ -259,6 +262,132 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
 // env vault (e.g. shared-cluster-eu-1 in suparship-secrets-env-staging), so one
 // editor is rendered per environment bound to this cluster. Env VARS remain a
 // separate cluster-global ConfigMap axis.
+
+// ── Cluster routing section (base domain + per-mode ingress/issuer) ───────────
+//
+// Multi-cloud: a cluster on AWS vs Azure has its own DNS zone, ingress class,
+// and cert issuer. These override the env → org routing for apps deployed here.
+
+const routingModes = ["internal", "external"] as const;
+type RoutingDraft = Record<string, { ingressClassName: string; clusterIssuer: string; baseDomain: string }>;
+
+function ClusterRoutingSection({
+  cluster,
+  onSaved,
+}: {
+  cluster: Cluster;
+  onSaved: () => Promise<void>;
+}) {
+  const seed = useCallback((): RoutingDraft => {
+    const d: RoutingDraft = {};
+    for (const m of routingModes) {
+      const p = cluster.routingProfiles?.[m];
+      d[m] = {
+        ingressClassName: p?.ingressClassName ?? "",
+        clusterIssuer: p?.clusterIssuer ?? "",
+        baseDomain: p?.baseDomain ?? "",
+      };
+    }
+    return d;
+  }, [cluster]);
+
+  const [baseDomain, setBaseDomain] = useState(cluster.baseDomain ?? "");
+  const [draft, setDraft] = useState<RoutingDraft>(seed);
+  const [saving, setSaving] = useState(false);
+
+  const inputCls =
+    "mt-1 block w-full rounded-md border border-gray-300 bg-white px-2 py-1 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500";
+
+  async function save() {
+    setSaving(true);
+    try {
+      const profiles: RoutingProfiles = {};
+      for (const m of routingModes) {
+        const p = draft[m];
+        if (!p) continue;
+        if (p.ingressClassName.trim()) {
+          profiles[m] = {
+            ingressClassName: p.ingressClassName.trim(),
+            clusterIssuer: p.clusterIssuer.trim() || undefined,
+            baseDomain: p.baseDomain.trim() || undefined,
+          };
+        }
+      }
+      await updateCluster(cluster.name, {
+        baseDomain: baseDomain.trim() || undefined,
+        routingProfiles: Object.keys(profiles).length ? profiles : undefined,
+      });
+      toast.success(`Routing for "${cluster.name}" saved`);
+      await onSaved();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save routing");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 border-t border-gray-100 bg-gray-50 px-6 py-5">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900">Routing (per cluster)</h3>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Override the environment's ingress for apps on{" "}
+          <span className="font-mono">{cluster.name}</span> — its own base domain,
+          ingress class, and cert issuer (multi-cloud). Empty fields inherit env → org.
+        </p>
+      </div>
+
+      <label className="block max-w-md">
+        <span className="text-xs font-medium text-gray-700">Base domain</span>
+        <input
+          className={inputCls}
+          value={baseDomain}
+          placeholder="aws.example.com"
+          onChange={(e) => setBaseDomain(e.target.value)}
+        />
+      </label>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        {routingModes.map((m) => {
+          const p = draft[m] ?? { ingressClassName: "", clusterIssuer: "", baseDomain: "" };
+          const set = (patch: Partial<RoutingDraft[string]>) =>
+            setDraft((d) => ({ ...d, [m]: { ...(d[m] ?? p), ...patch } }));
+          return (
+            <div key={m} className="rounded-md border border-gray-200 bg-white p-3">
+              <p className="mb-1 text-xs font-medium uppercase tracking-wider text-gray-500">{m}</p>
+              <label className="block">
+                <span className="text-xs text-gray-500">Ingress class</span>
+                <input className={inputCls} value={p.ingressClassName}
+                  placeholder={m === "external" ? "alb / nginx" : "nginx-internal"}
+                  onChange={(e) => set({ ingressClassName: e.target.value })} />
+              </label>
+              <label className="mt-2 block">
+                <span className="text-xs text-gray-500">Cluster issuer</span>
+                <input className={inputCls} value={p.clusterIssuer}
+                  placeholder="letsencrypt-aws" onChange={(e) => set({ clusterIssuer: e.target.value })} />
+              </label>
+              <label className="mt-2 block">
+                <span className="text-xs text-gray-500">Base domain (override)</span>
+                <input className={inputCls} value={p.baseDomain}
+                  placeholder="inherit cluster/env" onChange={(e) => set({ baseDomain: e.target.value })} />
+              </label>
+            </div>
+          );
+        })}
+      </div>
+
+      <div>
+        <button
+          onClick={save}
+          disabled={saving}
+          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save routing"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
   const [boundEnvs, setBoundEnvs] = useState<OrgEnvironment[] | null>(null);
@@ -555,6 +684,7 @@ export function ClusterSettings() {
                   {expandedName === c.name && (
                     <tr key={`${c.name}-overrides`}>
                       <td colSpan={4} className="p-0">
+                        <ClusterRoutingSection cluster={c} onSaved={load} />
                         <ClusterOverridesSection cluster={c} />
                       </td>
                     </tr>

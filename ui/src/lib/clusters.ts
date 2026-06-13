@@ -1,5 +1,15 @@
 import { api } from "./api";
 
+// RoutingProfile mirrors the backend per-ExposeMode routing config.
+export interface RoutingProfile {
+  ingressClassName: string;
+  clusterIssuer?: string;
+  baseDomain?: string;
+}
+
+// RoutingProfiles is keyed by ExposeMode ("internal" | "external").
+export type RoutingProfiles = Record<string, RoutingProfile>;
+
 export interface Cluster {
   name: string;
   displayName?: string;
@@ -8,6 +18,10 @@ export interface Cluster {
    *  Defaults to "external-secrets" when omitted. */
   esoNamespace?: string;
   status?: string;
+  /** Default ingress DNS zone for this cluster (multi-cloud). */
+  baseDomain?: string;
+  /** Per-ExposeMode routing overrides for apps on this cluster. */
+  routingProfiles?: RoutingProfiles;
 }
 
 interface ClustersResponse {
@@ -32,12 +46,29 @@ export interface RegisterClusterRequest {
   /** Namespace where External Secrets Operator is installed on this cluster.
    *  Leave blank to use the default ("external-secrets"). */
   esoNamespace?: string;
+  baseDomain?: string;
+  routingProfiles?: RoutingProfiles;
 }
 
 export async function registerCluster(
   req: RegisterClusterRequest,
 ): Promise<Cluster> {
   return api.post<Cluster>("/clusters", req);
+}
+
+// UpdateClusterRequest edits cluster metadata (routing) without re-registering.
+export interface UpdateClusterRequest {
+  displayName?: string;
+  baseDomain?: string;
+  esoNamespace?: string;
+  routingProfiles?: RoutingProfiles;
+}
+
+export async function updateCluster(
+  name: string,
+  req: UpdateClusterRequest,
+): Promise<Cluster> {
+  return api.put<Cluster>(`/clusters/${encodeURIComponent(name)}`, req);
 }
 
 export async function removeCluster(name: string): Promise<void> {

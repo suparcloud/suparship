@@ -29,7 +29,7 @@ func TestMapper_AddonClaim_AppendsConnectionSecret(t *testing.T) {
 	}
 
 	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
-		"localhost", "", "", "", nil, nil, orgAddons, nil)
+		"localhost", "", "", "", nil, nil, nil, orgAddons, nil)
 
 	wantSecret := "hello-addon-cache-conn"
 	if !slices.Contains(hv.Suparship.EnvFromSecrets, wantSecret) {
@@ -47,7 +47,7 @@ func TestMapper_AddonClaim_AppendsConnectionSecret(t *testing.T) {
 func TestMapper_NoAddons_EmptyClaims(t *testing.T) {
 	app := appWithAddons("hello") // no claims
 	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
-		"localhost", "", "", "", nil, nil, nil, nil)
+		"localhost", "", "", "", nil, nil, nil, nil, nil)
 
 	if len(hv.ServiceClaims) != 0 {
 		t.Errorf("ServiceClaims should be empty, got %v", hv.ServiceClaims)
@@ -67,7 +67,7 @@ func TestMapper_UnresolvedAddon_Skipped(t *testing.T) {
 		domain.AddonSpec{Name: "cache", Type: "redis"},
 	)
 	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
-		"localhost", "", "", "", nil, nil, nil, nil)
+		"localhost", "", "", "", nil, nil, nil, nil, nil)
 
 	if len(hv.ServiceClaims) != 0 {
 		t.Errorf("unresolved addon should produce no ServiceClaims, got %v", hv.ServiceClaims)
@@ -90,7 +90,7 @@ func TestMapper_EnvAddonProfileWins(t *testing.T) {
 		"redis": {Type: "redis", Provider: "crossplane-elasticache", Chart: "crossplane-redis"},
 	}
 	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd,
-		"localhost", "", "", "", nil, nil, org, env)
+		"localhost", "", "", "", nil, nil, nil, org, env)
 
 	if len(hv.ServiceClaims) != 1 {
 		t.Fatalf("expected 1 claim, got %d", len(hv.ServiceClaims))
@@ -111,7 +111,7 @@ func TestMapper_MultipleAddons_SortedByName(t *testing.T) {
 		"postgres": {Type: "postgres", Provider: "cnpg", Chart: "cloudnative-pg"},
 	}
 	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
-		"localhost", "", "", "", nil, nil, org, nil)
+		"localhost", "", "", "", nil, nil, nil, org, nil)
 
 	if len(hv.ServiceClaims) != 3 {
 		t.Fatalf("got %d claims, want 3", len(hv.ServiceClaims))

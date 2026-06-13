@@ -88,7 +88,7 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 // that want strict validation should use MapToHelmValuesForEnv with real
 // profiles after running domain.ValidateExposeModes.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
-	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", "", nil, nil, nil, nil)
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", "", nil, nil, nil, nil, nil)
 }
 
 // MapToHelmValuesForEnv is the canonical mapper. The envFrom lists reference
@@ -110,7 +110,7 @@ func MapToHelmValuesForEnv(
 	envType domain.AppEnvironmentType,
 	baseDomain, namespace, cluster string,
 	orgName string,
-	orgProfiles, envProfiles domain.RoutingProfiles,
+	orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles,
 	orgAddonProfiles, envAddonProfiles domain.AddonProfiles,
 ) HelmValues {
 	if baseDomain == "" {
@@ -135,8 +135,23 @@ func MapToHelmValuesForEnv(
 	healthPath := extractHealthPath(app.Spec.Values)
 
 	routingComponent := resolveRoutingComponent(app.Spec.Components)
-	components := buildComponents(app.Spec.Components, envType, envOverride, imageRepo, imageTag, port, healthPath, routingComponent, orgProfiles, envProfiles)
-	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, baseDomain))
+	components := buildComponents(app.Spec.Components, envType, envOverride, imageRepo, imageTag, port, healthPath, routingComponent, orgProfiles, envProfiles, clusterProfiles)
+
+	// The app's URL uses the routing component's resolved profile base domain
+	// when set (cluster → env → org), so a per-cluster baseDomain yields a
+	// cluster-specific host; otherwise the caller-supplied baseDomain (the
+	// cluster default or env default) is used.
+	effectiveBase := baseDomain
+	for _, c := range app.Spec.Components {
+		if c.Name != routingComponent {
+			continue
+		}
+		if prof, err := domain.ResolveRoutingProfile(orgProfiles, envProfiles, clusterProfiles, c.ExposeMode); err == nil && prof.BaseDomain != "" {
+			effectiveBase = prof.BaseDomain
+		}
+		break
+	}
+	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, effectiveBase))
 
 	// Resource names are deterministic so values.yaml lines up with the K8s
 	// resources the publisher creates: the per-app ConfigMap and the three
@@ -297,7 +312,7 @@ func buildComponents(
 	port int32,
 	healthPath string,
 	routingComponent string,
-	orgProfiles, envProfiles domain.RoutingProfiles,
+	orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles,
 ) map[string]*ComponentValues {
 	if len(specs) == 0 {
 		return map[string]*ComponentValues{}
@@ -318,7 +333,7 @@ func buildComponents(
 		if isRouting {
 			p, hp = port, healthPath
 		}
-		components[c.Name] = buildComponentValues(c, envType, envOverride, imageRepo, imageTag, p, hp, isRouting, orgProfiles, envProfiles)
+		components[c.Name] = buildComponentValues(c, envType, envOverride, imageRepo, imageTag, p, hp, isRouting, orgProfiles, envProfiles, clusterProfiles)
 	}
 	return components
 }
@@ -340,7 +355,7 @@ func buildComponentValues(
 	port int32,
 	healthPath string,
 	isRouting bool,
-	orgProfiles, envProfiles domain.RoutingProfiles,
+	orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles,
 ) *ComponentValues {
 	enabled := c.Enabled
 	if envType == domain.AppEnvPreview && !c.PreviewEnabled {
@@ -377,7 +392,7 @@ func buildComponentValues(
 		cv.HealthCheck = &HealthCheckValues{Path: healthPath}
 	}
 	if isRouting {
-		cv.Ingress = resolveIngress(c, orgProfiles, envProfiles)
+		cv.Ingress = resolveIngress(c, orgProfiles, envProfiles, clusterProfiles)
 	}
 	return cv
 }
@@ -391,12 +406,12 @@ func buildComponentValues(
 // the mapper stays a pure derivation, so a misconfigured profile drops the
 // ingress silently rather than blocking chart render. Validation is the
 // caller's job (domain.ValidateExposeModes runs in the app-save handler).
-func resolveIngress(c domain.ComponentSpec, orgProfiles, envProfiles domain.RoutingProfiles) *IngressValues {
+func resolveIngress(c domain.ComponentSpec, orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles) *IngressValues {
 	mode := c.ExposeMode
 	if mode == domain.ExposeDisabled || mode == "" {
 		return nil
 	}
-	profile, err := domain.ResolveRoutingProfile(orgProfiles, envProfiles, mode)
+	profile, err := domain.ResolveRoutingProfile(orgProfiles, envProfiles, clusterProfiles, mode)
 	if err != nil {
 		return nil
 	}

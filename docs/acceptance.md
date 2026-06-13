@@ -87,6 +87,18 @@ Fan-out:
 - [ ] App detail shows **aggregated** status (worst-of phase, summed replicas)
       with a per-cluster breakdown in the status diagnostics.
 
+Per-cluster routing (multi-cloud):
+
+- [ ] Give cluster A and B **different base domains** (Settings → Clusters →
+      expand → Routing: e.g. A `aws.example.com`, B `azure.example.com`) and, if
+      the clouds differ, different ingress class + ClusterIssuer per cluster.
+- [ ] After publish, each app's per-cluster
+      `_clusters/<cluster>/…/values.yaml` shows a host under that cluster's
+      domain (`app.<env>.aws.example.com` vs `…azure.example.com`) and the
+      cluster's ingress class/issuer.
+- [ ] DNS for each domain points at that cluster's ingress; the app is reachable
+      on both clouds at its respective host with a valid cert.
+
 Per-cluster override:
 
 - [ ] In App → Config → **Per-cluster overrides**, set a different **replica
