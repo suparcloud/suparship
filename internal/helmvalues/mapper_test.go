@@ -81,6 +81,52 @@ func TestMapToHelmValues_AppContext_Preview(t *testing.T) {
 	}
 }
 
+// ── platform metadata block ─────────────────────────────────────────────────
+
+func TestMapToHelmValuesForEnv_PlatformBlock(t *testing.T) {
+	app := webApp("hello", webComponent("web"))
+	orgProfiles := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt"},
+	}
+	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd,
+		"acme.com", "hello-prod", "prod-eks", "acme",
+		orgProfiles, nil, nil, nil, nil)
+
+	p := hv.Platform
+	if p.Org != "acme" || p.Project != "demo" || p.App != "hello" {
+		t.Errorf("identity = %+v, want org=acme project=demo app=hello", p)
+	}
+	if p.Env != "prod" || p.EnvType != "prod" || p.Cluster != "prod-eks" || p.Namespace != "hello-prod" {
+		t.Errorf("env/cluster/ns = %+v", p)
+	}
+	if p.BaseDomain != "acme.com" {
+		t.Errorf("BaseDomain = %q, want acme.com", p.BaseDomain)
+	}
+	if p.RoutingHost != hv.Routing.Host {
+		t.Errorf("RoutingHost %q != Routing.Host %q", p.RoutingHost, hv.Routing.Host)
+	}
+	if p.IngressClassName != "nginx" || p.ClusterIssuer != "letsencrypt" {
+		t.Errorf("ingress = %q/%q, want nginx/letsencrypt", p.IngressClassName, p.ClusterIssuer)
+	}
+}
+
+func TestMapToHelmValuesForEnv_PlatformBlock_Preview(t *testing.T) {
+	app := webApp("hello", webComponent("web"))
+	hv := MapToHelmValuesForEnv(app, "pr-42", domain.AppEnvPreview,
+		"acme.com", "hello-pr-42", "", "acme", nil, nil, nil, nil, nil)
+
+	if hv.Platform.EnvType != "preview" {
+		t.Errorf("EnvType = %q, want preview", hv.Platform.EnvType)
+	}
+	// Preview host has the {env}.{app}.preview.{domain} shape.
+	if !strings.Contains(hv.Platform.RoutingHost, "preview.acme.com") {
+		t.Errorf("preview RoutingHost = %q, want *.preview.acme.com", hv.Platform.RoutingHost)
+	}
+	if hv.Platform.Cluster != "" {
+		t.Errorf("Cluster = %q, want empty (active mode)", hv.Platform.Cluster)
+	}
+}
+
 // ── image extraction ──────────────────────────────────────────────────────────
 
 func TestMapToHelmValues_ImageFromValues(t *testing.T) {

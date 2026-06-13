@@ -216,6 +216,55 @@
       },
       "type": "object"
     },
+    "platform": {
+      "additionalProperties": true,
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "baseDomain": {
+          "type": "string"
+        },
+        "cluster": {
+          "type": "string"
+        },
+        "clusterIssuer": {
+          "type": "string"
+        },
+        "env": {
+          "type": "string"
+        },
+        "envType": {
+          "type": "string"
+        },
+        "ingressClassName": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "org": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "routingHost": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "app",
+        "baseDomain",
+        "env",
+        "envType",
+        "namespace",
+        "org",
+        "project",
+        "routingHost"
+      ],
+      "type": "object"
+    },
     "routing": {
       "additionalProperties": true,
       "properties": {
@@ -280,6 +329,7 @@
   "required": [
     "app",
     "components",
+    "platform",
     "routing",
     "suparship"
   ],

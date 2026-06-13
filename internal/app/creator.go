@@ -149,6 +149,10 @@ type CreateRequest struct {
 	// NamespacePattern overrides org/project defaults for app namespace naming.
 	// Only applies when NamespaceScope is "app".
 	NamespacePattern string
+	// RawValues is an optional freeform Helm values overlay (escape hatch),
+	// deep-merged onto the generated chart values at publish. May reference
+	// {platform.*}/{vars.*} tokens. No secrets.
+	RawValues map[string]any
 }
 
 // CreateResult holds the pure-function outputs of Create.
@@ -216,6 +220,7 @@ func Create(req CreateRequest) (*CreateResult, error) {
 		app.Spec.NamespacePattern = req.NamespacePattern
 	}
 	app.Spec.Addons = req.Addons
+	app.Spec.RawValues = req.RawValues
 
 	// Generate Helm values for each default environment.
 	hvMap := make(map[string]helmvalues.HelmValues, len(envs))

@@ -41,6 +41,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
+	"github.com/suparcloud/suparship/internal/platform"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
@@ -786,6 +787,95 @@ func (h *envConfigHandler) republishProjectApps(ctx context.Context, projectName
 			h.logger.Error("republish: publisher failed", "project", projectName, "app", app.Name, "reason", reason, "err", err)
 		}
 	}
+}
+
+// ── Config-variable catalog (for the UI variable picker) ─────────────────────
+
+// VarTokenDTO is one referenceable {vars.NAME} token, scope-labelled.
+type VarTokenDTO struct {
+	Token string `json:"token"`
+	Name  string `json:"name"`
+	Scope string `json:"scope"`
+}
+
+// ConfigVariablesResponse is the JSON body for
+// GET /api/v1/projects/{project}/config-variables. It powers the UI's "Insert
+// variable" picker: platform identity/routing tokens (static) plus the
+// non-secret env-var tokens drawn from the org/env/project/cluster scopes.
+// Secrets are NEVER included.
+type ConfigVariablesResponse struct {
+	Platform []platform.TokenInfo `json:"platform"`
+	Vars     []VarTokenDTO        `json:"vars"`
+}
+
+// handleGetConfigVariables returns the variable catalog for the given project:
+// the static {platform.*} tokens and the union of non-secret {vars.*} keys from
+// org, each environment, the project, and each bound cluster. Resolution of the
+// actual values happens per (env, cluster) at publish time; this only advertises
+// the names. Project-read authorized (registered with viewProject).
+func (h *envConfigHandler) handleGetConfigVariables(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	ctx := r.Context()
+
+	resp := ConfigVariablesResponse{Platform: platform.PlatformTokens(), Vars: []VarTokenDTO{}}
+
+	// Track first-seen scope per var name so the picker shows where it comes from
+	// without listing the same name once per scope.
+	seen := map[string]bool{}
+	add := func(scope string, vars map[string]string) {
+		names := make([]string, 0, len(vars))
+		for k := range vars {
+			names = append(names, k)
+		}
+		sortStrings(names)
+		for _, name := range names {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			resp.Vars = append(resp.Vars, VarTokenDTO{Token: "{vars." + name + "}", Name: name, Scope: scope})
+		}
+	}
+
+	org, err := h.orgStore.GetOrg(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	add("org", org.EnvConfig.Vars)
+	for _, e := range org.Environments {
+		add("env:"+e.Name, e.EnvConfig.Vars)
+	}
+	if proj, err := h.projectStore.Get(ctx, projectName); err == nil && proj != nil {
+		add("project", proj.Spec.EnvConfig.Vars)
+	}
+	// Cluster scope: read each distinct bound cluster's runtime env ConfigMap.
+	if h.upperLevelWriter != nil {
+		clusterSeen := map[string]bool{}
+		for _, e := range org.Environments {
+			for _, c := range clusterRefsOf(e) {
+				if c == "" || clusterSeen[c] {
+					continue
+				}
+				clusterSeen[c] = true
+				if cfg, err := h.upperLevelWriter.ReadClusterEnvConfig(ctx, c); err == nil {
+					add("cluster:"+c, cfg.Vars)
+				}
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// clusterRefsOf returns the cluster refs an environment is bound to, covering
+// both the fan-out list and the active ref.
+func clusterRefsOf(e rbac.OrgEnvironment) []string {
+	refs := append([]string{}, e.ClusterRefs...)
+	if e.ActiveClusterRef != "" {
+		refs = append(refs, e.ActiveClusterRef)
+	}
+	return refs
 }
 
 // sortStrings sorts a string slice in-place (imported from sort package via

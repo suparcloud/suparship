@@ -143,6 +143,12 @@ type AppDetailDTO struct {
 	// env → cluster, so the UI can edit them. Only populated for envs that have
 	// any. Mirrors what the edit PATCH accepts.
 	ClusterOverrides map[string]map[string]domain.ClusterValueOverride `json:"clusterOverrides,omitempty"`
+	// RawValues surfaces the app-level freeform Helm values overlay so the UI can
+	// edit it. Omitted when unset.
+	RawValues map[string]any `json:"rawValues,omitempty"`
+	// EnvRawValues surfaces per-environment overlays keyed by env name, for envs
+	// that have one. Mirrors what the edit PATCH accepts.
+	EnvRawValues map[string]map[string]any `json:"envRawValues,omitempty"`
 }
 
 // AddonClaimDTO mirrors domain.AddonSpec for the wire. Per-app values
@@ -248,6 +254,10 @@ type createAppRequest struct {
 	// NamespacePattern overrides org/project defaults. Only applies when
 	// NamespaceScope is "app". Tokens: {org}, {project}, {app}, {env}.
 	NamespacePattern string `json:"namespacePattern,omitempty"`
+	// RawValues is an optional freeform Helm values overlay deep-merged onto the
+	// generated chart values at publish. String leaves may reference
+	// {platform.*}/{vars.*} tokens. No secrets.
+	RawValues map[string]any `json:"rawValues,omitempty"`
 }
 
 // createAppResponse is the JSON body returned on a successful app creation.
@@ -274,6 +284,13 @@ type updateAppRequest struct {
 	// environments; each entry is deep-merged over the env values for that
 	// cluster at publish. Omit to leave existing overrides untouched.
 	ClusterOverrides map[string]map[string]domain.ClusterValueOverride `json:"clusterOverrides,omitempty"`
+	// RawValues, when non-nil, replaces the app-level freeform Helm values
+	// overlay. Send an empty object to clear it.
+	RawValues *map[string]any `json:"rawValues,omitempty"`
+	// EnvRawValues, when non-nil, replaces per-environment freeform Helm values
+	// overlays keyed by environment name. Each entry overrides (deep-merges over)
+	// the app-level RawValues at publish. Omit to leave existing overlays intact.
+	EnvRawValues map[string]map[string]any `json:"envRawValues,omitempty"`
 }
 
 // updateAppResponse mirrors createAppResponse for the edit endpoint.

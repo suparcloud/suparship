@@ -22,9 +22,28 @@ func TestSchema_TopLevelStructure(t *testing.T) {
 	if !ok {
 		t.Fatalf("properties missing or wrong type: %T", s["properties"])
 	}
-	for _, key := range []string{"app", "components", "routing", "suparship"} {
+	for _, key := range []string{"app", "platform", "components", "routing", "suparship"} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing top-level property %q", key)
+		}
+	}
+}
+
+func TestSchema_Platform_HasIdentityAndRoutingFields(t *testing.T) {
+	s := Schema()
+	platform, ok := s["properties"].(map[string]any)["platform"].(map[string]any)
+	if !ok {
+		t.Fatalf("platform property missing or wrong type")
+	}
+	props := platform["properties"].(map[string]any)
+	for _, k := range []string{"org", "project", "app", "env", "envType", "namespace", "baseDomain", "routingHost"} {
+		f, ok := props[k].(map[string]any)
+		if !ok {
+			t.Errorf("platform.%s missing", k)
+			continue
+		}
+		if f["type"] != "string" {
+			t.Errorf("platform.%s type = %v, want string", k, f["type"])
 		}
 	}
 }

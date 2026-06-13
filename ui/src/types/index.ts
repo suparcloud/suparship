@@ -481,6 +481,10 @@ export interface AppDetail {
   environments: AppEnvironmentSummary[];
   // Per-(env, cluster) value overrides keyed env → cluster (fan-out envs only).
   clusterOverrides?: Record<string, Record<string, ClusterValueOverrideDTO>>;
+  // App-level freeform Helm values overlay.
+  rawValues?: Record<string, unknown>;
+  // Per-environment freeform overlays keyed by env name.
+  envRawValues?: Record<string, Record<string, unknown>>;
 }
 
 // ClusterValueOverrideDTO mirrors the backend per-(env, cluster) override.
@@ -618,6 +622,9 @@ export interface CreateAppRequest {
   namespaceScope?: "app" | "project";
   /** Optional namespace pattern override. Only applies when namespaceScope is "app". */
   namespacePattern?: string;
+  /** Optional freeform Helm values overlay, deep-merged onto generated values at
+   *  publish. String leaves may reference {platform.*}/{vars.*} tokens. No secrets. */
+  rawValues?: Record<string, unknown>;
 }
 
 export interface CreateAppResponse {

@@ -1,9 +1,13 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { parse as parseYaml } from "yaml";
 
 import { ApiError } from "../lib/api";
 import { createApp } from "../lib/apps";
+import { listConfigVariables } from "../lib/configVars";
+import type { ConfigVariables } from "../lib/configVars";
 import { fetchTemplate, fetchTemplates } from "../lib/templates";
+import { VariablePicker, insertAtCursor } from "../components/VariablePicker";
 import type {
   TemplateSummary,
   TemplateDetail,
@@ -283,6 +287,15 @@ function ConfigureStep({
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
+  const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
+  const [rawValuesText, setRawValuesText] = useState("");
+  const rawValuesRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    listConfigVariables(project)
+      .then(setConfigVars)
+      .catch(() => setConfigVars({ platform: [], vars: [] }));
+  }, [project]);
 
   function applyPreset(presetName: string) {
     const preset = template.presets.find((p) => p.name === presetName);
@@ -343,6 +356,27 @@ function ConfigureStep({
       if (ref) secretRefList.push({ name: si.name, secretRef: ref });
     }
 
+    let rawValues: Record<string, unknown> | undefined;
+    if (rawValuesText.trim()) {
+      try {
+        const parsed = parseYaml(rawValuesText);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          rawValues = parsed as Record<string, unknown>;
+        } else {
+          setError("Raw values must be a YAML object (key: value pairs).");
+          setSubmitting(false);
+          return;
+        }
+      } catch (err) {
+        setError(
+          "Raw values is not valid YAML: " +
+            (err instanceof Error ? err.message : String(err)),
+        );
+        setSubmitting(false);
+        return;
+      }
+    }
+
     try {
       await createApp(project, {
         name: appName,
@@ -351,6 +385,7 @@ function ConfigureStep({
         secretRefs: secretRefList,
         namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
         namespacePattern: namespacePattern.trim() || undefined,
+        rawValues,
       });
       navigate(`/projects/${project}/apps/${appName}`);
     } catch (err) {
@@ -478,6 +513,7 @@ function ConfigureStep({
                 value={values[inp.name]}
                 error={fieldErrors[inp.name]}
                 onChange={(val) => updateValue(inp.name, val)}
+                configVars={configVars}
               />
             ))}
           </div>
@@ -512,6 +548,7 @@ function ConfigureStep({
                   value={values[inp.name]}
                   error={fieldErrors[inp.name]}
                   onChange={(val) => updateValue(inp.name, val)}
+                  configVars={configVars}
                 />
               ))}
             </div>
@@ -621,6 +658,39 @@ function ConfigureStep({
         </FormSection>
       )}
 
+      {/* Raw values overlay (advanced escape hatch) */}
+      <FormSection title="Raw values (advanced)">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <p className="text-xs text-gray-400">
+            Freeform Helm values (YAML) deep-merged on top of the generated
+            <code className="mx-1 font-mono">values.yaml</code>. Reference platform
+            metadata and env vars with{" "}
+            <code className="font-mono">{"{platform.*}"}</code> /{" "}
+            <code className="font-mono">{"{vars.*}"}</code> tokens — resolved per
+            environment at deploy. No secrets.
+          </p>
+          <VariablePicker
+            variables={configVars}
+            onInsert={(token) =>
+              setRawValuesText((cur) =>
+                insertAtCursor(rawValuesRef.current, cur, token),
+              )
+            }
+          />
+        </div>
+        <textarea
+          ref={rawValuesRef}
+          value={rawValuesText}
+          onChange={(e) => setRawValuesText(e.target.value)}
+          rows={6}
+          spellCheck={false}
+          placeholder={
+            "podAnnotations:\n  region: {vars.REGION}\ningress:\n  host: {platform.routingHost}"
+          }
+          className="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-xs focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+        />
+      </FormSection>
+
       {/* Error */}
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3">
@@ -658,13 +728,16 @@ function DynamicField({
   value,
   error,
   onChange,
+  configVars,
 }: {
   input: TemplateInput;
   value: unknown;
   error?: string;
   onChange: (val: unknown) => void;
+  configVars?: ConfigVariables | null;
 }) {
   const id = `input-${input.name}`;
+  const textRef = useRef<HTMLInputElement>(null);
   const borderCls = error
     ? "border-red-300 focus:border-red-500 focus:ring-red-500"
     : "border-gray-300 focus:border-gray-900 focus:ring-gray-900";
@@ -740,16 +813,30 @@ function DynamicField({
           className={baseCls}
         />
       ) : (
-        <input
-          id={id}
-          type="text"
-          value={String(value ?? "")}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={
-            input.default !== undefined ? String(input.default) : undefined
-          }
-          className={baseCls}
-        />
+        <div className="mt-1.5 flex items-start gap-2">
+          <input
+            id={id}
+            ref={textRef}
+            type="text"
+            value={String(value ?? "")}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={
+              input.default !== undefined ? String(input.default) : undefined
+            }
+            className={`${baseCls} mt-0`}
+          />
+          {configVars !== undefined && (
+            <VariablePicker
+              variables={configVars ?? null}
+              label="Var"
+              onInsert={(token) =>
+                onChange(
+                  insertAtCursor(textRef.current, String(value ?? ""), token),
+                )
+              }
+            />
+          )}
+        </div>
       )}
 
       {error && <p className="mt-1 text-xs text-red-600">{error}</p>}

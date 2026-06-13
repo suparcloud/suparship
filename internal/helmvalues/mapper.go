@@ -166,11 +166,31 @@ func MapToHelmValuesForEnv(
 	addonSecs, claims := buildAddonBindings(app, envAddonProfiles, orgAddonProfiles)
 	secs = append(secs, addonSecs...)
 
+	// Platform metadata block: identity + resolved routing context. Ingress
+	// class/issuer come from the routing component's resolved profile (already
+	// computed into its ComponentValues.Ingress above).
+	platform := PlatformValues{
+		Org:         orgName,
+		Project:     app.ProjectName,
+		App:         app.Name,
+		Env:         envName,
+		EnvType:     string(envType),
+		Cluster:     cluster,
+		Namespace:   namespace,
+		BaseDomain:  effectiveBase,
+		RoutingHost: routingHost,
+	}
+	if rc := components[routingComponent]; rc != nil && rc.Ingress != nil {
+		platform.IngressClassName = rc.Ingress.ClassName
+		platform.ClusterIssuer = rc.Ingress.ClusterIssuer
+	}
+
 	return HelmValues{
 		App: AppContext{
 			Name: app.Name,
 			Env:  envName,
 		},
+		Platform:   platform,
 		Components: components,
 		Routing: RoutingValues{
 			Host:      routingHost,

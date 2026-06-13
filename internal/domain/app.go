@@ -217,6 +217,11 @@ type EnvironmentOverride struct {
 	// EnvConfig holds env vars and secret refs specific to this app+environment
 	// combination (App Environment level of the hierarchy — wins all other levels).
 	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
+	// RawValues is a freeform Helm values overlay for this environment, deep-merged
+	// on top of the app-level RawValues and the generated chart values at publish
+	// time (env wins). String leaves may reference {platform.*}/{vars.*} tokens,
+	// resolved per (env, cluster). No secrets.
+	RawValues map[string]any `json:"rawValues,omitempty" yaml:"rawValues,omitempty"`
 	// ClusterOverrides holds per-cluster value overrides keyed by cluster name,
 	// applied on top of this env override for apps in a fan-out environment
 	// (deployMode "all"). Each cluster's published values.yaml is the env values
@@ -277,6 +282,11 @@ type AppSpec struct {
 	// Component-specific vars should use ComponentSpec.Config instead, which
 	// renders as direct env: entries and wins over all envFrom layers.
 	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
+	// RawValues is a freeform Helm values overlay (escape hatch) deep-merged on
+	// top of the generated chart values at publish time, below any per-env
+	// RawValues. String leaves may reference {platform.*}/{vars.*} tokens, resolved
+	// per (env, cluster). No secrets — use SecretRefs/EnvConfig.SecretRefs.
+	RawValues map[string]any `json:"rawValues,omitempty" yaml:"rawValues,omitempty"`
 	// NamespaceScope controls whether this app deploys into a dedicated app
 	// namespace ("app", default) or the shared project namespace ("project").
 	// Empty is treated as "app".
