@@ -49,6 +49,96 @@ function StatusBadge({ status }: { status?: string }) {
   );
 }
 
+// ── Kubeconfig helper ──────────────────────────────────────────────────────────
+
+// KUBECONFIG_SCRIPT is a single copy-paste bash script that creates a
+// ServiceAccount + long-lived token on the target cluster and writes a
+// token-based kubeconfig (the portable credential, and the way to register
+// EKS/GKE clusters that use exec / cloud-IAM auth). Built as an array of literal
+// lines to avoid JS template interpolation of the shell's ${...} variables.
+const KUBECONFIG_SCRIPT = [
+  "#!/usr/bin/env bash",
+  "set -euo pipefail",
+  "",
+  "# Run with kubectl pointed at the cluster you want to register.",
+  "SA=suparship; NS=kube-system",
+  "",
+  'kubectl create serviceaccount "$SA" -n "$NS" \\',
+  "  --dry-run=client -o yaml | kubectl apply -f -",
+  'kubectl create clusterrolebinding "$SA" --clusterrole=cluster-admin \\',
+  '  --serviceaccount="$NS:$SA" --dry-run=client -o yaml | kubectl apply -f -',
+  "",
+  "# Long-lived token Secret (K8s 1.24+ no longer auto-creates one).",
+  'kubectl apply -f - <<EOF',
+  "apiVersion: v1",
+  "kind: Secret",
+  "metadata:",
+  '  name: ${SA}-token',
+  "  namespace: ${NS}",
+  "  annotations:",
+  "    kubernetes.io/service-account.name: ${SA}",
+  "type: kubernetes.io/service-account-token",
+  "EOF",
+  "",
+  "# Wait for the controller to populate the token.",
+  'for i in $(seq 1 10); do',
+  '  TOKEN=$(kubectl get secret "${SA}-token" -n "$NS" \\',
+  "    -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)",
+  '  [ -n "$TOKEN" ] && break',
+  "  sleep 1",
+  "done",
+  "",
+  "SERVER=$(kubectl config view --minify \\",
+  "  -o jsonpath='{.clusters[0].cluster.server}')",
+  'CA=$(kubectl get secret "${SA}-token" -n "$NS" \\',
+  "  -o jsonpath='{.data.ca\\.crt}')",
+  "",
+  "cat > suparship-kubeconfig.yaml <<EOF",
+  "apiVersion: v1",
+  "kind: Config",
+  "clusters:",
+  "- name: target",
+  "  cluster:",
+  "    server: ${SERVER}",
+  "    certificate-authority-data: ${CA}",
+  "contexts:",
+  "- name: target",
+  "  context:",
+  "    cluster: target",
+  "    user: suparship",
+  "current-context: target",
+  "users:",
+  "- name: suparship",
+  "  user:",
+  "    token: ${TOKEN}",
+  "EOF",
+  "",
+  'echo "✓ Wrote suparship-kubeconfig.yaml"',
+  'echo "  API server URL: ${SERVER}"',
+].join("\n");
+
+function CopyButton({ text, label }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("Copy failed — select and copy manually");
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      className="rounded border border-gray-600 bg-gray-800 px-2 py-1 text-[11px] font-medium text-gray-100 hover:bg-gray-700"
+    >
+      {copied ? "Copied!" : (label ?? "Copy")}
+    </button>
+  );
+}
+
 // ── Register modal ────────────────────────────────────────────────────────────
 
 interface RegisterModalProps {
@@ -191,56 +281,33 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
               {showHelp ? "Hide" : "Need a kubeconfig? Create one from a ServiceAccount"}
             </button>
             {showHelp && (
-              <div className="mt-2 space-y-2 rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+              <div className="mt-2 space-y-3 rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
                 <p>
-                  A ServiceAccount token is the most portable credential (and the
-                  way to register EKS/GKE clusters that use exec / cloud-IAM auth).
-                  Run against the <strong>target cluster</strong>:
+                  A ServiceAccount token is the most portable credential — and the
+                  way to register EKS/GKE clusters that use exec / cloud-IAM auth.
+                  Point <code className="font-mono">kubectl</code> at the{" "}
+                  <strong>cluster you want to register</strong>, run this script,
+                  then upload the <code className="font-mono">suparship-kubeconfig.yaml</code>{" "}
+                  it writes (it also prints the API server URL to paste above).
                 </p>
-                <pre className="overflow-x-auto rounded bg-gray-900 p-3 font-mono text-[11px] leading-relaxed text-gray-100">
-                  {`kubectl create serviceaccount suparship -n kube-system
-kubectl create clusterrolebinding suparship \\
-  --clusterrole=cluster-admin \\
-  --serviceaccount=kube-system:suparship
-
-kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: Secret
-metadata:
-  name: suparship-token
-  namespace: kube-system
-  annotations:
-    kubernetes.io/service-account.name: suparship
-type: kubernetes.io/service-account-token
-EOF
-
-SERVER=$(kubectl config view --minify \\
-  -o jsonpath='{.clusters[0].cluster.server}')
-CA=$(kubectl get secret suparship-token -n kube-system \\
-  -o jsonpath='{.data.ca\\.crt}')
-TOKEN=$(kubectl get secret suparship-token -n kube-system \\
-  -o jsonpath='{.data.token}' | base64 -d)
-
-cat > suparship-kubeconfig.yaml <<EOF
-apiVersion: v1
-kind: Config
-clusters:
-- name: target
-  cluster: { server: \${SERVER}, certificate-authority-data: \${CA} }
-contexts:
-- name: target
-  context: { cluster: target, user: suparship }
-current-context: target
-users:
-- name: suparship
-  user: { token: \${TOKEN} }
-EOF`}
-                </pre>
+                <div className="overflow-hidden rounded-md border border-gray-700 bg-gray-900">
+                  <div className="flex items-center justify-between border-b border-gray-700 px-3 py-1.5">
+                    <span className="font-mono text-[11px] text-gray-400">
+                      create-kubeconfig.sh
+                    </span>
+                    <CopyButton text={KUBECONFIG_SCRIPT} label="Copy script" />
+                  </div>
+                  <pre className="max-h-72 overflow-auto p-3 font-mono text-[11px] leading-relaxed text-gray-100">
+                    {KUBECONFIG_SCRIPT}
+                  </pre>
+                </div>
                 <p>
-                  Upload <code className="font-mono">suparship-kubeconfig.yaml</code>{" "}
-                  above and paste <code className="font-mono">$SERVER</code> as the
-                  API server URL. Full guide:{" "}
-                  <code className="font-mono">docs/cluster-kubeconfig.md</code>.
+                  Verify with{" "}
+                  <code className="font-mono">
+                    kubectl --kubeconfig suparship-kubeconfig.yaml get nodes
+                  </code>
+                  . Full guide, including how to scope down the role and rotate the
+                  token: <code className="font-mono">docs/cluster-kubeconfig.md</code>.
                 </p>
               </div>
             )}
