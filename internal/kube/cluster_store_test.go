@@ -447,3 +447,44 @@ func TestDeleteCluster_DeletesOwnedArgoCDSecret_ViaFlag(t *testing.T) {
 		t.Error("owned ArgoCD secret should have been deleted")
 	}
 }
+
+func TestUpdateClusterMetadata_RoutingRoundTrip(t *testing.T) {
+	// Seed an existing cluster ConfigMap (skip CreateCluster's kubeconfig/argocd
+	// machinery — we only exercise the metadata rewrite path).
+	seed, _ := json.Marshal(domain.Cluster{
+		Name: "prod", DisplayName: "Prod", APIServer: "https://prod:6443", Status: "ready",
+	})
+	client := newTestClient(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: clusterConfigMapPrefix + "prod", Namespace: suparshipSystemNS},
+		Data:       map[string]string{clusterConfigMapKey: string(seed)},
+	})
+	store := NewK8sClusterStore(client)
+	ctx := context.Background()
+
+	updated, err := store.UpdateClusterMetadata(ctx, "prod", "Production", "aws.example.com", "",
+		domain.RoutingProfiles{"external": {IngressClassName: "alb", ClusterIssuer: "le-aws"}})
+	if err != nil {
+		t.Fatalf("UpdateClusterMetadata: %v", err)
+	}
+	if updated.BaseDomain != "aws.example.com" || updated.RoutingProfiles["external"].IngressClassName != "alb" {
+		t.Errorf("returned cluster missing routing: %+v", updated)
+	}
+
+	// Re-read: routing persisted, APIServer untouched.
+	got, err := store.GetCluster(ctx, "prod")
+	if err != nil {
+		t.Fatalf("GetCluster: %v", err)
+	}
+	if got.BaseDomain != "aws.example.com" {
+		t.Errorf("baseDomain = %q, want aws.example.com", got.BaseDomain)
+	}
+	if got.RoutingProfiles["external"].ClusterIssuer != "le-aws" {
+		t.Errorf("issuer not persisted: %+v", got.RoutingProfiles)
+	}
+	if got.APIServer != "https://prod:6443" {
+		t.Errorf("APIServer must be untouched, got %q", got.APIServer)
+	}
+	if got.DisplayName != "Production" {
+		t.Errorf("displayName = %q, want Production", got.DisplayName)
+	}
+}

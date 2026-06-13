@@ -47,9 +47,20 @@ clusters:
   - name: in-cluster
     displayName: "Hub"
     inCluster: true
+  # Multi-cloud example: each cluster brings its own ingress base domain +
+  # class + cert issuer (overrides env → org routing for apps deployed there).
   # - name: prod-aks
   #   displayName: "Prod (AKS)"
   #   existingSecret: cluster-prod-aks-kubeconfig
+  #   baseDomain: azure.example.com
+  #   routingProfiles:
+  #     external: { ingressClassName: webapprouting.kubernetes.azure.com, clusterIssuer: letsencrypt-azure }
+  # - name: prod-eks
+  #   displayName: "Prod (AWS)"
+  #   existingSecret: cluster-prod-eks-kubeconfig
+  #   baseDomain: aws.example.com
+  #   routingProfiles:
+  #     external: { ingressClassName: alb, clusterIssuer: letsencrypt-aws }
 
 # -- Promotion pipeline. Each environment binds to a cluster by name.
 environments:
@@ -65,6 +76,10 @@ environments:
     clusterRefs: [in-cluster]
     activeClusterRef: in-cluster
     baseDomain: acme.example.com
+    # deployMode: how many of clusterRefs receive deploys.
+    #   active (default) → only activeClusterRef.
+    #   all              → fan out to every clusterRef (one Application per cluster).
+    deployMode: active
 
 # -- Secret backend for app/env/cluster secrets. "k8s" = native Secrets via ESO;
 # "onepassword" stores values in 1Password vaults. See docs/secrets.md.

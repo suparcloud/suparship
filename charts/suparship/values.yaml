@@ -197,7 +197,11 @@ environments: []
 # - name: prod
 #   displayName: Production
 #   order: 2
-#   clusterRef: prod-cluster
+#   clusterRefs: [prod-aks, prod-eks]
+#   activeClusterRef: prod-aks
+#   # deployMode: "active" (default — deploy to activeClusterRef only) or
+#   # "all" (fan out to every clusterRef — one Application per cluster).
+#   deployMode: all
 #   baseDomain: prod.example.com
 #   namespacePattern: "{app}-{env}"
 
@@ -210,10 +214,20 @@ clusters: []
 #   displayName: "Local Cluster"
 #   apiServer: https://kubernetes.default.svc
 #   inCluster: true
-# - name: prod-cluster
-#   displayName: Production
-#   apiServer: https://prod-k8s.example.com
-#   existingSecret: suparship-cluster-prod   # Secret with key: kubeconfig
+# - name: prod-aks
+#   displayName: Production (Azure)
+#   apiServer: https://prod-aks.example.com
+#   existingSecret: suparship-cluster-prod-aks   # Secret with key: kubeconfig
+#   # Per-cluster routing (multi-cloud): this cluster's own DNS zone + ingress.
+#   # Overrides env → org routing for apps deployed here. baseDomain is the
+#   # default zone; per-mode profiles refine ingress class / issuer / domain.
+#   baseDomain: azure.example.com
+#   routingProfiles:
+#     external:
+#       ingressClassName: webapprouting.kubernetes.azure.com
+#       clusterIssuer: letsencrypt-azure
+#     internal:
+#       ingressClassName: nginx-internal
 
 # -- Secret backend configuration
 secrets:

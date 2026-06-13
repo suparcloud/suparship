@@ -117,3 +117,49 @@ func TestWorkloadClusterClient(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkloadClustersForEnv(t *testing.T) {
+	pool := k8s.NewClusterClientPool(fakeKubeconfigGetter{have: map[string]bool{"c1": true, "c2": true}})
+	ctx := context.Background()
+
+	// active mode → only the active cluster.
+	ah := &appHandler{clusterPool: pool, orgProvider: &staticOrgProvider{org: orgWithEnvs(
+		rbac.OrgEnvironment{Name: "staging", ClusterRefs: []string{"c1", "c2"}, ActiveClusterRef: "c1", DeployMode: rbac.DeployModeActive},
+	)}}
+	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, "staging")
+	if !routed || len(clients) != 1 || clients[0].name != "c1" || len(unreachable) != 0 {
+		t.Fatalf("active: got clients=%v unreachable=%v routed=%v", names(clients), unreachable, routed)
+	}
+
+	// all mode → every cluster.
+	ah.orgProvider = &staticOrgProvider{org: orgWithEnvs(
+		rbac.OrgEnvironment{Name: "staging", ClusterRefs: []string{"c1", "c2"}, DeployMode: rbac.DeployModeAll},
+	)}
+	clients, _, routed = ah.workloadClustersForEnv(ctx, "staging")
+	if !routed || len(clients) != 2 {
+		t.Fatalf("all: expected 2 clients, got %v (routed=%v)", names(clients), routed)
+	}
+
+	// all mode with an unregistered cluster → it lands in unreachable.
+	ah.orgProvider = &staticOrgProvider{org: orgWithEnvs(
+		rbac.OrgEnvironment{Name: "staging", ClusterRefs: []string{"c1", "missing"}, DeployMode: rbac.DeployModeAll},
+	)}
+	clients, unreachable, routed = ah.workloadClustersForEnv(ctx, "staging")
+	if !routed || len(clients) != 1 || len(unreachable) != 1 || unreachable[0] != "missing" {
+		t.Fatalf("unreachable: got clients=%v unreachable=%v", names(clients), unreachable)
+	}
+
+	// no pool → not routed (local fallback).
+	ah.clusterPool = nil
+	if _, _, r := ah.workloadClustersForEnv(ctx, "staging"); r {
+		t.Error("no pool should not route")
+	}
+}
+
+func names(cs []namedClient) []string {
+	out := make([]string, len(cs))
+	for i, c := range cs {
+		out[i] = c.name
+	}
+	return out
+}

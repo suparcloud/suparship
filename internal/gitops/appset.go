@@ -1,16 +1,41 @@
 package gitops
 
+import "github.com/suparcloud/suparship/internal/domain"
+
 // AppSetEnv parameterises one environment in an ApplicationSet.
 // Each instance maps to one cluster in the env/cluster-centric Model B layout.
 type AppSetEnv struct {
 	// EnvName is the logical environment name, e.g. "staging".
 	EnvName string
 	// ClusterServer is the Kubernetes API server URL for this environment's cluster.
-	// Written as spec.destination.server in generated Applications.
+	// Written as spec.destination.server in generated Applications (single-cluster
+	// / active mode).
 	ClusterServer string
+	// Clusters lists every cluster this environment fans out to (deployMode
+	// "all"). When it has more than one entry, BuildArgoAppSet emits a matrix
+	// generator (git-files × cluster list) producing one Application per
+	// (app, cluster); otherwise it emits the single-cluster template using
+	// ClusterServer. Empty/one entry preserves the legacy behaviour.
+	Clusters []ClusterTarget
 	// BaseDomain is the ingress base domain for apps in this environment,
 	// e.g. "staging.acme.com". Used in values.yaml generation, not in the AppSet itself.
 	BaseDomain string
+}
+
+// ClusterTarget identifies one destination cluster for an environment's fan-out,
+// plus its routing overrides (multi-cloud: each cluster may use its own base
+// domain, ingress class, and cert issuer).
+type ClusterTarget struct {
+	// Name is the registered cluster name (suparship.io/cluster), used in the
+	// fan-out Application name suffix and the per-cluster values path.
+	Name string
+	// Server is the Kubernetes API server URL → spec.destination.server.
+	Server string
+	// BaseDomain is the cluster's default ingress DNS zone (empty = inherit env).
+	BaseDomain string
+	// RoutingProfiles overrides env/org routing for apps on this cluster, by
+	// ExposeMode. Empty/sparse = inherit env → org.
+	RoutingProfiles domain.RoutingProfiles
 }
 
 // AppSetOptions carries shared configuration for all ApplicationSet builders.
@@ -45,11 +70,29 @@ type ApplicationSetSpec struct {
 	Template   ApplicationSetTemplate    `yaml:"template"`
 }
 
-// ApplicationSetGenerator holds one generator configuration.
-// Only the Git File generator is used in suparShip's model.
+// ApplicationSetGenerator holds one generator configuration. Single-cluster
+// envs use a bare Git File generator; multi-cluster envs use a Matrix of the
+// Git File generator × a List of clusters.
 type ApplicationSetGenerator struct {
 	// Git is the Git File generator configuration.
 	Git *GitFileGenerator `yaml:"git,omitempty"`
+	// Matrix combines child generators (git-files × clusters) — one Application
+	// per cross-product element.
+	Matrix *MatrixGenerator `yaml:"matrix,omitempty"`
+	// List enumerates literal parameter sets (one per destination cluster).
+	List *ListGenerator `yaml:"list,omitempty"`
+}
+
+// MatrixGenerator is an ArgoCD matrix generator: the cross-product of its
+// child generators' parameters.
+type MatrixGenerator struct {
+	Generators []ApplicationSetGenerator `yaml:"generators"`
+}
+
+// ListGenerator is an ArgoCD list generator: each element is a flat map of
+// string params injected into the template (e.g. clusterName, clusterServer).
+type ListGenerator struct {
+	Elements []map[string]string `yaml:"elements"`
 }
 
 // GitFileGenerator discovers parameterisation files in a Git repository.
@@ -120,7 +163,14 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 
 	// Source 2: Helm chart; reads per-app values from the repo via $appvalues.
 	// The full path is used because $appvalues resolves to the repo root (see above).
+	// Fan-out (deployMode "all") reads a per-cluster values file under
+	// _clusters/{{clusterName}}/ so per-cluster overrides apply; single-cluster
+	// reads the shared env values file.
+	fanOut := len(env.Clusters) > 1
 	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
+	if fanOut {
+		valuesFilePath = "$appvalues/" + joinSubPath(opts.SubPath, "envs", env.EnvName, "_clusters", "{{clusterName}}", "{{project}}", "{{name}}", "values.yaml")
+	}
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
 		Path:           joinSubPath(opts.SubPath, "charts", "{{chartPath}}"),
@@ -151,6 +201,41 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 		}
 	}
 
+	// Generators + destination depend on deploy mode. Single-cluster (active)
+	// keeps the legacy git-files generator with a hardcoded destination and the
+	// {project}-{app}-{env} Application name (preserving the Kargo/history/status
+	// contract). Multi-cluster (all) wraps the git generator in a matrix × the
+	// env's cluster list, so one Application is produced per (app, cluster), with
+	// the destination + name suffix coming from the list element.
+	gitGen := ApplicationSetGenerator{
+		Git: &GitFileGenerator{
+			RepoURL:  repoURL,
+			Revision: opts.TargetRevision,
+			Files: []GitFilePathSpec{
+				{Path: joinSubPath(opts.SubPath, "envs", env.EnvName, "*", "*", "app.yaml")},
+			},
+		},
+	}
+
+	generators := []ApplicationSetGenerator{gitGen}
+	appName := "{{project}}-{{name}}-" + env.EnvName
+	destServer := env.ClusterServer
+
+	if fanOut {
+		elements := make([]map[string]string, 0, len(env.Clusters))
+		for _, c := range env.Clusters {
+			elements = append(elements, map[string]string{"clusterName": c.Name, "clusterServer": c.Server})
+		}
+		generators = []ApplicationSetGenerator{{
+			Matrix: &MatrixGenerator{Generators: []ApplicationSetGenerator{
+				gitGen,
+				{List: &ListGenerator{Elements: elements}},
+			}},
+		}}
+		appName += "-{{clusterName}}"
+		destServer = "{{clusterServer}}"
+	}
+
 	return &ApplicationSet{
 		APIVersion: argoAppSetAPIVersion,
 		Kind:       "ApplicationSet",
@@ -162,25 +247,15 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 			},
 		},
 		Spec: ApplicationSetSpec{
-			Generators: []ApplicationSetGenerator{
-				{
-					Git: &GitFileGenerator{
-						RepoURL:  repoURL,
-						Revision: opts.TargetRevision,
-						Files: []GitFilePathSpec{
-							{Path: joinSubPath(opts.SubPath, "envs", env.EnvName, "*", "*", "app.yaml")},
-						},
-					},
-				},
-			},
+			Generators: generators,
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
-					// Application name MUST mirror gitops.ApplicationName —
-					// {project}-{app}-{env} — so two suparship projects can
-					// each have an app called e.g. "color-app" without
-					// producing duplicate Application names that break the
-					// ApplicationSet reconciler.
-					Name:      "{{project}}-{{name}}-" + env.EnvName,
+					// Single-cluster name MUST mirror gitops.ApplicationName —
+					// {project}-{app}-{env} — so two suparship projects can each
+					// have an app called e.g. "color-app" without duplicate
+					// Application names. Fan-out appends -{{clusterName}} to keep
+					// each (app, cluster) Application unique.
+					Name:      appName,
 					Namespace: opts.ArgoCDNamespace,
 					Labels: map[string]string{
 						labelApp:     "{{name}}",
@@ -188,9 +263,8 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 						labelEnv:     env.EnvName,
 					},
 					// Authorize the corresponding Kargo Stage to trigger ArgoCD syncs
-					// for this Application. The annotation value is "<namespace>:<stage>"
-					// where namespace = Kargo project namespace = suparship project name,
-					// and stage = "{app}-{env}" per KargoStageName convention.
+					// for this Application. Promotion stays env-level (one stage per
+					// env), so the value is the same across a fan-out env's clusters.
 					Annotations: map[string]string{
 						"kargo.akuity.io/authorized-stage": "{{project}}:{{name}}-" + env.EnvName,
 					},
@@ -198,7 +272,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 				Spec: ApplicationSetAppSpec{
 					Project:     "{{project}}",
 					Sources:     []ApplicationSource{valuesRefSource, chartSource},
-					Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: "{{namespace}}"},
+					Destination: ApplicationDestination{Server: destServer, Namespace: "{{namespace}}"},
 					SyncPolicy:  syncPolicy,
 				},
 			},
@@ -251,7 +325,11 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 	// chartRepoURL/chartName/chartVersion come from the per-app app.yaml
 	// (AppMetadata.ChartRepoURL etc.) which the Git File generator
 	// flattens into template parameters.
+	fanOut := len(env.Clusters) > 1
 	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs-external", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
+	if fanOut {
+		valuesFilePath = "$appvalues/" + joinSubPath(opts.SubPath, "envs-external", env.EnvName, "_clusters", "{{clusterName}}", "{{project}}", "{{name}}", "values.yaml")
+	}
 	chartSource := ApplicationSource{
 		RepoURL:        "{{chartRepoURL}}",
 		Chart:          "{{chartName}}",
@@ -277,6 +355,35 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 		}
 	}
 
+	// Fan-out matches inline-mode: single cluster keeps the legacy name +
+	// hardcoded destination; multi-cluster uses a matrix × cluster list.
+	gitGen := ApplicationSetGenerator{
+		Git: &GitFileGenerator{
+			RepoURL:  repoURL,
+			Revision: opts.TargetRevision,
+			Files: []GitFilePathSpec{
+				{Path: joinSubPath(opts.SubPath, "envs-external", env.EnvName, "*", "*", "app.yaml")},
+			},
+		},
+	}
+	generators := []ApplicationSetGenerator{gitGen}
+	appName := "{{project}}-{{name}}-" + env.EnvName
+	destServer := env.ClusterServer
+	if fanOut {
+		elements := make([]map[string]string, 0, len(env.Clusters))
+		for _, c := range env.Clusters {
+			elements = append(elements, map[string]string{"clusterName": c.Name, "clusterServer": c.Server})
+		}
+		generators = []ApplicationSetGenerator{{
+			Matrix: &MatrixGenerator{Generators: []ApplicationSetGenerator{
+				gitGen,
+				{List: &ListGenerator{Elements: elements}},
+			}},
+		}}
+		appName += "-{{clusterName}}"
+		destServer = "{{clusterServer}}"
+	}
+
 	return &ApplicationSet{
 		APIVersion: argoAppSetAPIVersion,
 		Kind:       "ApplicationSet",
@@ -290,20 +397,10 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 			},
 		},
 		Spec: ApplicationSetSpec{
-			Generators: []ApplicationSetGenerator{
-				{
-					Git: &GitFileGenerator{
-						RepoURL:  repoURL,
-						Revision: opts.TargetRevision,
-						Files: []GitFilePathSpec{
-							{Path: joinSubPath(opts.SubPath, "envs-external", env.EnvName, "*", "*", "app.yaml")},
-						},
-					},
-				},
-			},
+			Generators: generators,
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
-					Name:      "{{project}}-{{name}}-" + env.EnvName,
+					Name:      appName,
 					Namespace: opts.ArgoCDNamespace,
 					Labels: map[string]string{
 						labelApp:     "{{name}}",
@@ -317,7 +414,7 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 				Spec: ApplicationSetAppSpec{
 					Project:     "{{project}}",
 					Sources:     []ApplicationSource{valuesRefSource, chartSource},
-					Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: "{{namespace}}"},
+					Destination: ApplicationDestination{Server: destServer, Namespace: "{{namespace}}"},
 					SyncPolicy:  syncPolicy,
 				},
 			},
@@ -540,6 +637,34 @@ func BuildPlatformAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *App
 		Directory:      &DirectorySource{Recurse: false, Include: platformResourcesInclude},
 	}
 
+	// Fan the per-app ConfigMap + ExternalSecret out to every cluster the env
+	// targets, so pods on each cluster get their config/secrets (mirrors the
+	// app chart AppSet's fan-out).
+	gitGen := ApplicationSetGenerator{Git: &GitFileGenerator{
+		RepoURL:  repoURL,
+		Revision: opts.TargetRevision,
+		Files: []GitFilePathSpec{
+			{Path: joinSubPath(opts.SubPath, "_app-resources", env.EnvName, "*", "*", "meta.yaml")},
+		},
+	}}
+	generators := []ApplicationSetGenerator{gitGen}
+	appName := "{{project}}-{{name}}-" + env.EnvName + "-platform"
+	destServer := env.ClusterServer
+	if len(env.Clusters) > 1 {
+		elements := make([]map[string]string, 0, len(env.Clusters))
+		for _, c := range env.Clusters {
+			elements = append(elements, map[string]string{"clusterName": c.Name, "clusterServer": c.Server})
+		}
+		generators = []ApplicationSetGenerator{{
+			Matrix: &MatrixGenerator{Generators: []ApplicationSetGenerator{
+				gitGen,
+				{List: &ListGenerator{Elements: elements}},
+			}},
+		}}
+		appName = "{{project}}-{{name}}-" + env.EnvName + "-{{clusterName}}-platform"
+		destServer = "{{clusterServer}}"
+	}
+
 	return &ApplicationSet{
 		APIVersion: argoAppSetAPIVersion,
 		Kind:       "ApplicationSet",
@@ -549,18 +674,10 @@ func BuildPlatformAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *App
 			Annotations: map[string]string{syncWaveAnnotation: "0"},
 		},
 		Spec: ApplicationSetSpec{
-			Generators: []ApplicationSetGenerator{
-				{Git: &GitFileGenerator{
-					RepoURL:  repoURL,
-					Revision: opts.TargetRevision,
-					Files: []GitFilePathSpec{
-						{Path: joinSubPath(opts.SubPath, "_app-resources", env.EnvName, "*", "*", "meta.yaml")},
-					},
-				}},
-			},
+			Generators: generators,
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
-					Name:      "{{project}}-{{name}}-" + env.EnvName + "-platform",
+					Name:      appName,
 					Namespace: opts.ArgoCDNamespace,
 					Labels: map[string]string{
 						labelApp:     "{{name}}",
@@ -571,7 +688,7 @@ func BuildPlatformAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *App
 				Spec: ApplicationSetAppSpec{
 					Project:     "{{project}}",
 					Sources:     []ApplicationSource{manifestsSource},
-					Destination: ApplicationDestination{Server: env.ClusterServer, Namespace: "{{namespace}}"},
+					Destination: ApplicationDestination{Server: destServer, Namespace: "{{namespace}}"},
 					SyncPolicy:  platformSyncPolicy(opts),
 				},
 			},

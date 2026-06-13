@@ -61,10 +61,20 @@ export function createApp(
 // UpdateAppRequest edits an app's metadata + template input values. Omitted
 // fields are left unchanged. Template name is immutable (use upgradeAppTemplate
 // for the version).
+// ClusterValueOverride mirrors the backend per-(env, cluster) override.
+export interface ClusterValueOverride {
+  replicas?: number;
+  sizePreset?: string;
+  values?: Record<string, unknown>;
+  config?: Record<string, string>;
+}
+
 export interface UpdateAppRequest {
   displayName?: string;
   description?: string;
   values?: Record<string, unknown>;
+  // clusterOverrides replaces per-(env, cluster) overrides, keyed env → cluster.
+  clusterOverrides?: Record<string, Record<string, ClusterValueOverride>>;
 }
 
 export function updateApp(

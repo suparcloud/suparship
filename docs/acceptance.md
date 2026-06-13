@@ -57,6 +57,84 @@ Tick each; note the build/image tag under test.
       configured org/envs/clusters/gitops/registry/auth/teams/roleBindings with
       no secret values (refs only).
 
+## Multi-cluster fan-out + per-cluster overrides
+
+Only verifiable on a real multi-cluster ArgoCD (unit + smoke tests cover the
+manifest shape, not live sync). Requires **two** registered workload clusters.
+
+Setup:
+
+- [ ] Register a **second** workload cluster (Settings → Clusters); both show
+      Ready.
+- [ ] Bind an environment to **both** clusters (`clusterRefs: [A, B]`) and set
+      its **Deploy mode** to **All clusters** (Settings → Organization → the env,
+      or `deployMode: all` in values).
+- [ ] Deploy an app to that environment.
+
+Fan-out:
+
+- [ ] ArgoCD shows **two** Applications for the app —
+      `<project>-<app>-<env>-<clusterA>` and `…-<clusterB>` — each with its
+      `spec.destination.server` pointing at the respective cluster, both
+      Synced + Healthy on their own cluster.
+- [ ] The gitops repo has one `app.yaml` per app under
+      `envs/<env>/<project>/<app>/` and a per-cluster
+      `envs/<env>/_clusters/<cluster>/<project>/<app>/values.yaml` for each
+      cluster.
+- [ ] The AppProject authorizes **both** cluster destinations; the per-app
+      ConfigMap + ExternalSecret land on **both** clusters (platform AppSet
+      fanned out too).
+- [ ] App detail shows **aggregated** status (worst-of phase, summed replicas)
+      with a per-cluster breakdown in the status diagnostics.
+
+Per-cluster routing (multi-cloud):
+
+- [ ] Give cluster A and B **different base domains** (Settings → Clusters →
+      expand → Routing: e.g. A `aws.example.com`, B `azure.example.com`) and, if
+      the clouds differ, different ingress class + ClusterIssuer per cluster.
+- [ ] After publish, each app's per-cluster
+      `_clusters/<cluster>/…/values.yaml` shows a host under that cluster's
+      domain (`app.<env>.aws.example.com` vs `…azure.example.com`) and the
+      cluster's ingress class/issuer.
+- [ ] DNS for each domain points at that cluster's ingress; the app is reachable
+      on both clouds at its respective host with a valid cert.
+
+Per-cluster override:
+
+- [ ] In App → Config → **Per-cluster overrides**, set a different **replica
+      count** for cluster A than B (e.g. A=3, B=1); Save.
+- [ ] Only cluster A's `_clusters/<A>/…/values.yaml` reflects the override; the
+      env value still applies to B.
+- [ ] After ArgoCD syncs, cluster A runs the overridden replica count and
+      cluster B runs the env default — confirm on each cluster.
+- [ ] Switching the env's Deploy mode back to **Active cluster only**
+      collapses to a single `<project>-<app>-<env>` Application on the active
+      cluster (no orphaned per-cluster Applications after the next publish).
+
+## Import from ArgoCD (brownfield)
+
+Only verifiable against a real ArgoCD that already has a cluster registered with
+a **token-based** kubeconfig (not exec/cloud-IAM).
+
+- [ ] In an ArgoCD that pre-dates suparShip, register a workload cluster with a
+      token kubeconfig (`argocd cluster add` against a context that uses a bearer
+      token / service-account token).
+- [ ] Settings → Clusters → **Import from ArgoCD** lists that cluster as
+      importable; a cluster ArgoCD added with exec/cloud-IAM auth (EKS/GKE)
+      appears greyed with the "exec / cloud-IAM auth not supported" reason; a
+      cluster suparShip already manages appears greyed as "already registered".
+- [ ] Select the token cluster → Import → it appears in the Clusters list as
+      **ready**; live status/logs work (proves the reconstructed kubeconfig
+      builds a working client); the Routing editor is available.
+- [ ] No **new** ArgoCD cluster Secret was created for that server (import linked
+      the existing one); deleting the imported cluster from suparShip leaves the
+      original ArgoCD cluster Secret intact.
+- [ ] On the **k8s** secret backend, deploy an app to an env on the imported
+      cluster and confirm its secrets materialize (the ESO ClusterSecretStore was
+      published by import). On the **1Password** backend, the cluster shows
+      pending-token until you paste its Connect token (Settings → Secrets
+      Backend), then secrets materialize.
+
 ## On failure
 
 Capture the failing step, the server logs around it (`oidc:` / `gitops:` /

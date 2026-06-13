@@ -1,5 +1,7 @@
 package server
 
+import "github.com/suparcloud/suparship/internal/domain"
+
 // This file defines app-oriented API DTOs. Routes and handlers that serve
 // these types are registered in rbac.go via appHandler. Legacy service-oriented
 // DTOs in inventory.go, services.go, previews.go, and promote.go are retained
@@ -137,6 +139,10 @@ type AppDetailDTO struct {
 	Addons      []AddonClaimDTO            `json:"addons"`
 	// Environments includes stable (staging, prod) and preview instances.
 	Environments []AppEnvironmentSummaryDTO `json:"environments"`
+	// ClusterOverrides surfaces stored per-(env, cluster) value overrides keyed
+	// env → cluster, so the UI can edit them. Only populated for envs that have
+	// any. Mirrors what the edit PATCH accepts.
+	ClusterOverrides map[string]map[string]domain.ClusterValueOverride `json:"clusterOverrides,omitempty"`
 }
 
 // AddonClaimDTO mirrors domain.AddonSpec for the wire. Per-app values
@@ -263,6 +269,11 @@ type updateAppRequest struct {
 	// Template, when set, must equal the current template name — editing the
 	// template here is rejected (use upgrade-template for the version).
 	Template string `json:"template,omitempty"`
+	// ClusterOverrides, when non-nil, replaces the per-(env, cluster) value
+	// overrides keyed env → cluster. Only meaningful for fan-out ("all" mode)
+	// environments; each entry is deep-merged over the env values for that
+	// cluster at publish. Omit to leave existing overrides untouched.
+	ClusterOverrides map[string]map[string]domain.ClusterValueOverride `json:"clusterOverrides,omitempty"`
 }
 
 // updateAppResponse mirrors createAppResponse for the edit endpoint.

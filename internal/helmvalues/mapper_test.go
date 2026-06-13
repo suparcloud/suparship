@@ -2,6 +2,7 @@ package helmvalues
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -455,7 +456,7 @@ func TestResolveIngress_NeverAppliedToWorker(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil, nil, nil)
 
 	if hv.Components["worker"].Ingress != nil {
 		t.Errorf("worker should not have Ingress, got %+v", hv.Components["worker"].Ingress)
@@ -480,7 +481,7 @@ func TestResolveIngress_FromOrgProfile_NoTLS(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil, nil, nil)
 
 	got := hv.Components["web"].Ingress
 	if got == nil {
@@ -501,7 +502,7 @@ func TestResolveIngress_FromOrgProfile_WithTLS(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
 	}
-	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", "", "", org, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", "", "", org, nil, nil, nil, nil)
 
 	got := hv.Components["web"].Ingress
 	if got == nil {
@@ -522,7 +523,7 @@ func TestResolveIngress_EnvProfileOverridesOrg(t *testing.T) {
 	env := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx-staging", ClusterIssuer: "letsencrypt-staging"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "staging.acme.com", "", "", "", org, env, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "staging.acme.com", "", "", "", org, env, nil, nil, nil)
 
 	got := hv.Components["web"].Ingress
 	if got == nil {
@@ -543,7 +544,7 @@ func TestResolveIngress_UnknownModeYieldsNoIngress(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil, nil, nil)
 
 	if hv.Components["web"].Ingress != nil {
 		t.Errorf("unknown mode should yield nil Ingress, got %+v", hv.Components["web"].Ingress)
@@ -578,3 +579,84 @@ func TestStripScheme(t *testing.T) {
 		}
 	}
 }
+
+// TestMapToHelmValuesForEnv_ClusterOverride proves per-cluster value overrides:
+// the cluster with an override gets the overridden replica count, while a
+// cluster without one (and the active/no-cluster case) keep the env value.
+func TestMapToHelmValuesForEnv_ClusterOverride(t *testing.T) {
+	app := &domain.App{
+		Name:        "web",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template:   domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{{Name: "web", Type: domain.ComponentWeb}},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"prod": {
+					Replicas: 2,
+					ClusterOverrides: map[string]domain.ClusterValueOverride{
+						"aks": {Replicas: 5},
+					},
+				},
+			},
+		},
+	}
+
+	replicasFor := func(cluster string) int32 {
+		hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", cluster, "", nil, nil, nil, nil, nil)
+		return hv.Components["web"].Replicas
+	}
+
+	if got := replicasFor("aks"); got != 5 {
+		t.Errorf("aks (overridden) replicas = %d, want 5", got)
+	}
+	if got := replicasFor("eks"); got != 2 {
+		t.Errorf("eks (no override) replicas = %d, want the env value 2", got)
+	}
+	if got := replicasFor(""); got != 2 {
+		t.Errorf("no-cluster replicas = %d, want the env value 2", got)
+	}
+}
+
+// TestMapToHelmValuesForEnv_ClusterRoutingOverride proves per-cluster routing:
+// two clusters with different routing profiles yield different ingress hosts +
+// classes for the same app/env.
+func TestMapToHelmValuesForEnv_ClusterRoutingOverride(t *testing.T) {
+	app := &domain.App{
+		Name:        "web",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template:   domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal}},
+		},
+	}
+	org := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "le-prod", BaseDomain: "example.com"},
+	}
+	aks := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "webapprouting.kubernetes.azure.com", ClusterIssuer: "le-azure", BaseDomain: "azure.example.com"},
+	}
+	eks := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "alb", ClusterIssuer: "le-aws", BaseDomain: "aws.example.com"},
+	}
+
+	hvAKS := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "aks", "", org, nil, aks, nil, nil)
+	hvEKS := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "eks", "", org, nil, eks, nil, nil)
+
+	if hvAKS.Routing.Host == hvEKS.Routing.Host {
+		t.Fatalf("hosts should differ per cluster, both = %q", hvAKS.Routing.Host)
+	}
+	if !contains(hvAKS.Routing.Host, "azure.example.com") {
+		t.Errorf("AKS host = %q, want azure.example.com", hvAKS.Routing.Host)
+	}
+	if !contains(hvEKS.Routing.Host, "aws.example.com") {
+		t.Errorf("EKS host = %q, want aws.example.com", hvEKS.Routing.Host)
+	}
+	if hvAKS.Components["web"].Ingress == nil || hvAKS.Components["web"].Ingress.ClassName != "webapprouting.kubernetes.azure.com" {
+		t.Errorf("AKS ingress class wrong: %+v", hvAKS.Components["web"].Ingress)
+	}
+	if hvEKS.Components["web"].Ingress == nil || hvEKS.Components["web"].Ingress.ClassName != "alb" {
+		t.Errorf("EKS ingress class wrong: %+v", hvEKS.Components["web"].Ingress)
+	}
+}
+
+func contains(s, sub string) bool { return strings.Contains(s, sub) }

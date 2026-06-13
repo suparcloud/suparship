@@ -24,6 +24,9 @@ export interface OrgEnvironment {
   // The single member of clusterRefs currently receiving deploys. Empty
   // falls back to clusterRefs[0] at the server.
   activeClusterRef?: string;
+  // "active" (deploy to activeClusterRef only) or "all" (fan out to every
+  // clusterRef). Empty = active.
+  deployMode?: string;
   baseDomain?: string;
   namespacePattern?: string;
 }

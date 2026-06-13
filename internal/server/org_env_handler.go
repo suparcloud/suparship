@@ -35,8 +35,11 @@ type OrgEnvironmentDTO struct {
 	Order            int      `json:"order"`
 	ClusterRefs      []string `json:"clusterRefs,omitempty"`
 	ActiveClusterRef string   `json:"activeClusterRef,omitempty"`
-	BaseDomain       string   `json:"baseDomain,omitempty"`
-	NamespacePattern string   `json:"namespacePattern,omitempty"`
+	// DeployMode: "active" (default — deploy to the active cluster only) or
+	// "all" (fan out to every clusterRef).
+	DeployMode       string `json:"deployMode,omitempty"`
+	BaseDomain       string `json:"baseDomain,omitempty"`
+	NamespacePattern string `json:"namespacePattern,omitempty"`
 	// RoutingProfiles is a sparse override map keyed by ExposeMode name.
 	// Entries here replace the org-level profile of the same name; absent
 	// names inherit the org-level profile.
@@ -55,6 +58,7 @@ func orgEnvToDTO(e rbac.OrgEnvironment) OrgEnvironmentDTO {
 		Order:            e.Order,
 		ClusterRefs:      e.ClusterRefs,
 		ActiveClusterRef: e.ActiveClusterRef,
+		DeployMode:       e.DeployMode,
 		BaseDomain:       e.BaseDomain,
 		NamespacePattern: e.NamespacePattern,
 		RoutingProfiles:  e.RoutingProfiles,
@@ -89,7 +93,9 @@ type upsertOrgEnvRequest struct {
 	// ClusterRefs (or empty to unset, which falls back to ClusterRefs[0]
 	// at read time).
 	ActiveClusterRef *string `json:"activeClusterRef,omitempty"`
-	BaseDomain       string  `json:"baseDomain,omitempty"`
+	// DeployMode when non-nil sets "active" or "all". Omit to leave unchanged.
+	DeployMode *string `json:"deployMode,omitempty"`
+	BaseDomain string  `json:"baseDomain,omitempty"`
 	// NamespacePattern when present (including empty string) replaces the stored
 	// per-environment namespace pattern. Use "" to clear an existing override
 	// and fall back to the org-wide ResourceNaming.AppNamespace default.
@@ -148,6 +154,9 @@ func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http
 	}
 	if req.ActiveClusterRef != nil {
 		newEnv.ActiveClusterRef = *req.ActiveClusterRef
+	}
+	if req.DeployMode != nil {
+		newEnv.DeployMode = *req.DeployMode
 	}
 	if req.NamespacePattern != nil {
 		newEnv.NamespacePattern = *req.NamespacePattern
@@ -234,6 +243,9 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 			// (EffectiveClusterRef will fall back to ClusterRefs[0]).
 			if req.ActiveClusterRef != nil {
 				org.Environments[i].ActiveClusterRef = *req.ActiveClusterRef
+			}
+			if req.DeployMode != nil {
+				org.Environments[i].DeployMode = *req.DeployMode
 			}
 			if req.BaseDomain != "" {
 				org.Environments[i].BaseDomain = req.BaseDomain

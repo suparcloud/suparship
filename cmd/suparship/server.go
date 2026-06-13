@@ -661,6 +661,10 @@ type envResolved struct {
 	clusterServer    string
 	baseDomain       string
 	namespacePattern string
+	// clusters is the resolved deploy-target set (one entry in "active" mode,
+	// every bound cluster in "all" mode), each with its API server URL. The
+	// ApplicationSet fans out across these when there is more than one.
+	clusters []gitops.ClusterTarget
 	// bound is true when the org environment has a non-empty ClusterRef that
 	// maps to a known cluster. GitOps artifacts are only published for bound
 	// environments; unbound envs are tracked in the store so the UI can prompt
@@ -692,9 +696,10 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 			res.baseDomain = "localhost"
 		}
 
-		// Resolve the cluster API server from the cluster store. Single-cluster
-		// deploy: the env's effective (active) cluster is the one we target.
-		// Future multi-cluster fan-out will iterate over all of orgEnv.ClusterRefs.
+		// Resolve the cluster API server from the cluster store. The active
+		// cluster drives the single-cluster destination + the per-cluster status
+		// lookup; ResolveDeployTargets() yields the full fan-out set ("active" →
+		// just the active cluster, "all" → every bound clusterRef).
 		activeRef := orgEnv.EffectiveClusterRef()
 		if activeRef != "" && a.clusterStore != nil {
 			cluster, err := a.clusterStore.GetCluster(ctx, activeRef)
@@ -708,6 +713,25 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 			} else {
 				res.clusterServer = cluster.APIServer
 				res.bound = true
+			}
+		}
+
+		// Resolve every deploy target to {name, APIServer} for fan-out. Skip
+		// clusters that aren't registered or lack an API server.
+		if a.clusterStore != nil {
+			for _, ref := range orgEnv.ResolveDeployTargets() {
+				cluster, err := a.clusterStore.GetCluster(ctx, ref)
+				if err != nil || cluster == nil || cluster.APIServer == "" {
+					slog.Warn("resolveEnvs: skipping unresolved deploy target",
+						"env", orgEnv.Name, "clusterRef", ref)
+					continue
+				}
+				res.clusters = append(res.clusters, gitops.ClusterTarget{
+					Name:            ref,
+					Server:          cluster.APIServer,
+					BaseDomain:      cluster.BaseDomain,
+					RoutingProfiles: cluster.RoutingProfiles,
+				})
 			}
 		}
 
@@ -820,6 +844,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 			appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
 				EnvName:       env.EnvName,
 				ClusterServer: res.clusterServer,
+				Clusters:      res.clusters,
 				BaseDomain:    res.baseDomain,
 			})
 		}
@@ -832,6 +857,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 			BaseDomain:      res.baseDomain,
 			Namespace:       env.Namespace,
 			RoutingProfiles: lookupOrgEnvRoutingProfiles(org, env.EnvName),
+			Clusters:        res.clusters,
 		}
 
 		// Populate secret-store info from org backend config.
@@ -1207,9 +1233,25 @@ func publishInitialEnvInfra(
 		if baseDomain == "" {
 			baseDomain = "localhost"
 		}
+		// Resolve the full fan-out target set so the ApplicationSet covers every
+		// cluster in "all" mode (active mode resolves to just the active cluster).
+		var clusters []gitops.ClusterTarget
+		for _, ref := range orgEnv.ResolveDeployTargets() {
+			c, cerr := clusterStore.GetCluster(ctx, ref)
+			if cerr != nil || c == nil || c.APIServer == "" {
+				continue
+			}
+			clusters = append(clusters, gitops.ClusterTarget{
+				Name:            ref,
+				Server:          c.APIServer,
+				BaseDomain:      c.BaseDomain,
+				RoutingProfiles: c.RoutingProfiles,
+			})
+		}
 		appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
 			EnvName:       orgEnv.Name,
 			ClusterServer: cluster.APIServer,
+			Clusters:      clusters,
 			BaseDomain:    baseDomain,
 		})
 	}

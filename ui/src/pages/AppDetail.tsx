@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp, deleteApp, updateApp, upgradeAppTemplate } from "../lib/apps";
+import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
 import { listTemplateVersions } from "../lib/templates";
 import type { TemplateVersionInfo } from "../types";
 import { createPreview, deletePreview } from "../lib/previews";
@@ -1751,6 +1752,277 @@ function AppConfigEditor({
   );
 }
 
+// ClusterOverridesEditor lets an operator override template values per cluster
+// for fan-out ("all" deploy-mode) environments. It reads the env→cluster set
+// from the org environments and the current overrides from the app detail, and
+// saves via the app-edit PATCH (clusterOverrides), which re-publishes per
+// cluster.
+type ClusterDraft = { replicas: string; rows: { key: string; value: string }[] };
+
+function ClusterOverridesEditor({
+  data,
+  project,
+  onSaved,
+}: {
+  data: AppDetailType;
+  project: string;
+  onSaved: () => Promise<void>;
+}) {
+  const [fanoutEnvs, setFanoutEnvs] = useState<
+    { name: string; clusters: string[] }[]
+  >([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // draft[env][cluster] = { replicas, rows }
+  const [draft, setDraft] = useState<Record<string, Record<string, ClusterDraft>>>({});
+
+  const seed = useCallback(
+    (envs: { name: string; clusters: string[] }[]) => {
+      const d: Record<string, Record<string, ClusterDraft>> = {};
+      for (const env of envs) {
+        const envMap: Record<string, ClusterDraft> = {};
+        for (const cluster of env.clusters) {
+          const existing = data.clusterOverrides?.[env.name]?.[cluster];
+          const rows = Object.entries(existing?.values ?? {}).map(([k, v]) => ({
+            key: k,
+            value: String(v),
+          }));
+          envMap[cluster] = {
+            replicas: existing?.replicas ? String(existing.replicas) : "",
+            rows,
+          };
+        }
+        d[env.name] = envMap;
+      }
+      return d;
+    },
+    [data],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    listOrgEnvironments()
+      .then((res) => {
+        if (cancelled) return;
+        const envs = res.environments
+          .filter((e) => e.deployMode === "all" && (e.clusterRefs?.length ?? 0) > 0)
+          .map((e) => ({ name: e.name, clusters: e.clusterRefs ?? [] }));
+        setFanoutEnvs(envs);
+        setDraft(seed(envs));
+      })
+      .catch(() => {
+        /* org envs optional; panel just won't show */
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [seed]);
+
+  function setCluster(env: string, cluster: string, patch: Partial<ClusterDraft>) {
+    setDraft((d) => {
+      const envMap = d[env] ?? {};
+      const cur = envMap[cluster] ?? { replicas: "", rows: [] };
+      return { ...d, [env]: { ...envMap, [cluster]: { ...cur, ...patch } } };
+    });
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const payload: NonNullable<UpdateAppRequest["clusterOverrides"]> = {};
+      for (const env of fanoutEnvs) {
+        const envPayload: Record<string, ClusterValueOverride> = {};
+        for (const cluster of env.clusters) {
+          const cd = draft[env.name]?.[cluster];
+          if (!cd) continue;
+          const values: Record<string, unknown> = {};
+          for (const r of cd.rows) {
+            if (r.key.trim()) values[r.key.trim()] = r.value;
+          }
+          const ov: ClusterValueOverride = {};
+          const n = parseInt(cd.replicas, 10);
+          if (cd.replicas.trim() && !Number.isNaN(n)) ov.replicas = n;
+          if (Object.keys(values).length > 0) ov.values = values;
+          if (ov.replicas !== undefined || ov.values) {
+            envPayload[cluster] = ov;
+          }
+        }
+        payload[env.name] = envPayload;
+      }
+      await updateApp(project, data.name, { clusterOverrides: payload });
+      toast.success("Per-cluster overrides saved — re-publishing to GitOps.");
+      await onSaved();
+      setEditing(false);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to save per-cluster overrides",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading || fanoutEnvs.length === 0) {
+    // Nothing to show until at least one environment is in "all" deploy mode.
+    return null;
+  }
+
+  const inputCls =
+    "w-full rounded-md border border-gray-300 px-2 py-1 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500";
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white">
+      <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
+        <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+          Per-cluster overrides
+        </h2>
+        {editing ? (
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                setDraft(seed(fanoutEnvs));
+                setEditing(false);
+              }}
+              className="text-xs text-gray-500 hover:text-gray-700"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="text-xs font-medium text-blue-600 hover:text-blue-800 disabled:opacity-50"
+            >
+              {saving ? "Saving..." : "Save"}
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditing(true)}
+            className="text-xs font-medium text-blue-600 hover:text-blue-800"
+          >
+            Edit
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-5 px-5 py-4">
+        <p className="text-xs text-gray-400">
+          Override replicas and template values for individual clusters in
+          fan-out (“All clusters”) environments. Empty fields inherit the
+          environment value.
+        </p>
+        {fanoutEnvs.map((env) => (
+          <div key={env.name}>
+            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-gray-500">
+              {env.name}
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {env.clusters.map((cluster) => {
+                const cd = draft[env.name]?.[cluster] ?? { replicas: "", rows: [] };
+                return (
+                  <div
+                    key={cluster}
+                    className="rounded-lg border border-gray-200 p-3"
+                  >
+                    <p className="mb-2 font-mono text-xs text-gray-700">{cluster}</p>
+                    {editing ? (
+                      <div className="space-y-2">
+                        <label className="block">
+                          <span className="text-xs text-gray-500">Replicas</span>
+                          <input
+                            type="number"
+                            min={0}
+                            className={inputCls}
+                            value={cd.replicas}
+                            placeholder="inherit"
+                            onChange={(e) =>
+                              setCluster(env.name, cluster, { replicas: e.target.value })
+                            }
+                          />
+                        </label>
+                        <div>
+                          <span className="text-xs text-gray-500">Values</span>
+                          {cd.rows.map((row, i) => (
+                            <div key={i} className="mt-1 flex gap-1">
+                              <input
+                                className={inputCls}
+                                placeholder="key"
+                                value={row.key}
+                                onChange={(e) => {
+                                  const rows = cd.rows.map((r, j) =>
+                                    j === i ? { ...r, key: e.target.value } : r,
+                                  );
+                                  setCluster(env.name, cluster, { rows });
+                                }}
+                              />
+                              <input
+                                className={inputCls}
+                                placeholder="value"
+                                value={row.value}
+                                onChange={(e) => {
+                                  const rows = cd.rows.map((r, j) =>
+                                    j === i ? { ...r, value: e.target.value } : r,
+                                  );
+                                  setCluster(env.name, cluster, { rows });
+                                }}
+                              />
+                              <button
+                                onClick={() => {
+                                  const rows = cd.rows.filter((_, j) => j !== i);
+                                  setCluster(env.name, cluster, { rows });
+                                }}
+                                className="px-1 text-xs text-red-500 hover:text-red-700"
+                                aria-label="Remove"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() =>
+                              setCluster(env.name, cluster, {
+                                rows: [...cd.rows, { key: "", value: "" }],
+                              })
+                            }
+                            className="mt-1 text-xs text-blue-600 hover:text-blue-800"
+                          >
+                            + Add value
+                          </button>
+                        </div>
+                      </div>
+                    ) : cd.replicas || cd.rows.length > 0 ? (
+                      <dl className="space-y-1 text-xs">
+                        {cd.replicas && (
+                          <div className="flex justify-between">
+                            <dt className="text-gray-500">replicas</dt>
+                            <dd className="font-mono text-gray-800">{cd.replicas}</dd>
+                          </div>
+                        )}
+                        {cd.rows.map((r, i) => (
+                          <div key={i} className="flex justify-between">
+                            <dt className="text-gray-500">{r.key}</dt>
+                            <dd className="font-mono text-gray-800">{r.value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : (
+                      <p className="text-xs italic text-gray-400">No overrides</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function OverviewTab({
   data,
   currentEnv,
@@ -1869,6 +2141,9 @@ function OverviewTab({
         project={project}
         onSaved={onSaved}
       />
+
+      {/* Per-cluster overrides — only for fan-out environments */}
+      <ClusterOverridesEditor data={data} project={project} onSaved={onSaved} />
 
       {/* Secrets */}
       {data.secretRefs.length > 0 && (

@@ -80,6 +80,9 @@ interface EnvFormState {
   // The active deploy target. Must be a member of clusterRefs (or empty,
   // which falls back to clusterRefs[0] at the server).
   activeClusterRef: string;
+  // "active" (deploy to activeClusterRef only) or "all" (fan out to every
+  // clusterRef — one Application per cluster).
+  deployMode: string;
   baseDomain: string;
   namespacePattern: string;
 }
@@ -90,6 +93,7 @@ const emptyEnvForm = (): EnvFormState => ({
   order: "",
   clusterRefs: [],
   activeClusterRef: "",
+  deployMode: "active",
   baseDomain: "",
   namespacePattern: "",
 });
@@ -139,6 +143,7 @@ function OrgEnvironmentsSection() {
       order: String(env.order),
       clusterRefs: env.clusterRefs ?? [],
       activeClusterRef: env.activeClusterRef ?? "",
+      deployMode: env.deployMode ?? "active",
       baseDomain: env.baseDomain ?? "",
       namespacePattern: env.namespacePattern ?? "",
     });
@@ -170,6 +175,7 @@ function OrgEnvironmentsSection() {
         order: form.order ? parseInt(form.order, 10) : undefined,
         clusterRefs: form.clusterRefs,
         activeClusterRef: activeRef || undefined,
+        deployMode: form.deployMode || undefined,
         baseDomain: form.baseDomain || undefined,
         namespacePattern: form.namespacePattern || undefined,
       };
@@ -452,6 +458,27 @@ function OrgEnvironmentsSection() {
                     })}
                   </div>
                 )}
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-700">
+                  Deploy mode
+                </label>
+                <select
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  value={form.deployMode}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, deployMode: e.target.value }))
+                  }
+                >
+                  <option value="active">Active cluster only</option>
+                  <option value="all">All clusters (fan out)</option>
+                </select>
+                <p className="mt-1 text-xs text-gray-400">
+                  {form.deployMode === "all"
+                    ? "Apps deploy to every registered cluster — one Application per cluster."
+                    : "Apps deploy only to the cluster marked Active."}
+                </p>
               </div>
 
               <div>

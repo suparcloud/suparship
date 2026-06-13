@@ -120,6 +120,36 @@ type Cluster struct {
 	// SealedSecrets and ClusterSecretStore resources for this cluster are
 	// created in this namespace.
 	ESONamespace string `json:"esoNamespace,omitempty"`
+	// BaseDomain is this cluster's default ingress DNS zone (e.g.
+	// "aws.example.com"). In a multi-cloud fan-out it makes each cluster's app
+	// hosts distinct. Empty inherits the environment's base domain. A per-mode
+	// RoutingProfiles entry's baseDomain overrides this.
+	BaseDomain string `json:"baseDomain,omitempty"`
+	// RoutingProfiles overrides the env/org routing profiles for apps deployed
+	// to this cluster, keyed by ExposeMode ("internal"/"external"), each with
+	// its own ingressClassName, clusterIssuer, and optional baseDomain. Lets a
+	// cluster on a different cloud use its own ingress controller + cert issuer.
+	// Sparse: modes not present here inherit env → org.
+	RoutingProfiles RoutingProfiles `json:"routingProfiles,omitempty"`
+}
+
+// ArgoCDClusterCandidate describes a cluster that ArgoCD already has registered
+// (one ArgoCD cluster Secret), surfaced as a candidate for import into suparship.
+type ArgoCDClusterCandidate struct {
+	// Name is the ArgoCD cluster name (the Secret's data.name).
+	Name string `json:"name"`
+	// Server is the Kubernetes API server URL (the Secret's data.server).
+	Server string `json:"server"`
+	// AuthType is how ArgoCD authenticates to the cluster: "token", "clientCert",
+	// "basic", "exec" (cloud-IAM), or "unknown".
+	AuthType string `json:"authType"`
+	// Importable is true when suparship can reconstruct a usable kubeconfig from
+	// the ArgoCD credentials (bearer token, client cert, or basic auth).
+	Importable bool `json:"importable"`
+	// Reason explains why an entry is not importable (exec/cloud-IAM auth, etc.).
+	Reason string `json:"reason,omitempty"`
+	// AlreadyRegistered is true when a suparship cluster already targets this server.
+	AlreadyRegistered bool `json:"alreadyRegistered"`
 }
 
 // EffectiveESONamespace returns ESONamespace, falling back to "external-secrets"
@@ -203,8 +233,8 @@ type Template struct {
 // should model previews as AppEnvironment values with EnvType=AppEnvPreview.
 // See docs/migration-app-model.md for the transition guide.
 type Preview struct {
-	Name        string    `json:"name"`
-	ProjectName string    `json:"projectName"`
+	Name        string `json:"name"`
+	ProjectName string `json:"projectName"`
 	// ServiceName identifies the service (i.e. app) that owns this preview.
 	// Deprecated: ServiceName will be renamed AppName once the service→app
 	// migration is complete. For now, treat ServiceName == AppName.
