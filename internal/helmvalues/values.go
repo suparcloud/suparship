@@ -48,7 +48,10 @@
 // serialized via encoding/json or gopkg.in/yaml.v3).
 package helmvalues
 
-import "github.com/suparcloud/suparship/internal/envconfig"
+import (
+	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/envconfig"
+)
 
 // HelmValues is the root of the canonical Helm values document for a
 // suparShip app chart. All fields are exported with both JSON and YAML tags
@@ -172,9 +175,15 @@ type ComponentValues struct {
 	// into the container at runtime. Secret values MUST NOT appear here;
 	// inject them via Kubernetes SecretKeyRef at the chart level.
 	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	// Resources is optional. When non-nil the chart uses the named size
-	// preset to select CPU/memory requests and limits.
+	// EnvFrom lists extra Secret/ConfigMap sources the component envFroms,
+	// beyond the platform hierarchy. Charts append these to their envFrom block.
+	EnvFrom []EnvFromSource `json:"envFrom,omitempty" yaml:"envFrom,omitempty"`
+	// Resources is optional. The chart uses Size (preset) or the raw
+	// Requests/Limits when present.
 	Resources *ResourceValues `json:"resources,omitempty" yaml:"resources,omitempty"`
+	// Autoscaling carries per-component KEDA triggers + min/max. Charts that
+	// support KEDA read this; others ignore it.
+	Autoscaling *ComponentAutoscaling `json:"autoscaling,omitempty" yaml:"autoscaling,omitempty"`
 }
 
 // HealthCheckValues lets an operator override the chart's liveness/
@@ -219,6 +228,34 @@ type ImageValues struct {
 type ResourceValues struct {
 	// Size is one of "small", "medium", or "large".
 	Size string `json:"size,omitempty" yaml:"size,omitempty"`
+	// Requests / Limits are raw Kubernetes resource quantities (cpu, memory,
+	// ephemeral-storage → quantity string), set instead of Size when a chart
+	// consumes raw resources. When present, charts should prefer these over Size.
+	Requests map[string]string `json:"requests,omitempty" yaml:"requests,omitempty"`
+	Limits   map[string]string `json:"limits,omitempty" yaml:"limits,omitempty"`
+}
+
+// EnvFromRef names a Secret or ConfigMap to envFrom, with the optional flag so
+// pods start before the source is populated.
+type EnvFromRef struct {
+	Name     string `json:"name" yaml:"name"`
+	Optional bool   `json:"optional,omitempty" yaml:"optional,omitempty"`
+}
+
+// EnvFromSource is one entry in a component's envFrom list (exactly one of the
+// two refs set). Mirrors the k8s EnvFromSource shape charts render directly.
+type EnvFromSource struct {
+	SecretRef    *EnvFromRef `json:"secretRef,omitempty" yaml:"secretRef,omitempty"`
+	ConfigMapRef *EnvFromRef `json:"configMapRef,omitempty" yaml:"configMapRef,omitempty"`
+}
+
+// ComponentAutoscaling carries per-component KEDA autoscaling values. A non-empty
+// Triggers list replaces the chart's default triggers for the component; the
+// chart reads minReplicaCount/maxReplicaCount when set.
+type ComponentAutoscaling struct {
+	Triggers        []domain.KEDATrigger `json:"triggers,omitempty" yaml:"triggers,omitempty"`
+	MinReplicaCount *int32               `json:"minReplicaCount,omitempty" yaml:"minReplicaCount,omitempty"`
+	MaxReplicaCount *int32               `json:"maxReplicaCount,omitempty" yaml:"maxReplicaCount,omitempty"`
 }
 
 // RoutingValues declares the primary public entry point for the deployment.

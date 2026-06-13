@@ -127,6 +127,92 @@ func TestMapToHelmValuesForEnv_PlatformBlock_Preview(t *testing.T) {
 	}
 }
 
+// ── per-component resources / envFrom / autoscaling ──────────────────────────
+
+func i32p(n int32) *int32 { return &n }
+
+func TestBuildComponent_RawResources_OmitSize(t *testing.T) {
+	c := webComponent("web")
+	c.SizePreset = "large" // should be ignored when raw resources present
+	c.Resources = &domain.ComponentResources{
+		Requests: map[string]string{"cpu": "1700m", "memory": "5260Mi"},
+		Limits:   map[string]string{"memory": "5260Mi"},
+	}
+	app := webApp("hello", c)
+	hv := MapToHelmValues(app, "prod", domain.AppEnvProd)
+	r := hv.Components["web"].Resources
+	if r == nil || r.Size != "" {
+		t.Fatalf("expected raw resources with no size, got %+v", r)
+	}
+	if r.Requests["cpu"] != "1700m" || r.Limits["memory"] != "5260Mi" {
+		t.Errorf("raw resources wrong: %+v", r)
+	}
+}
+
+func TestBuildComponent_SizeWhenNoRaw(t *testing.T) {
+	c := webComponent("web")
+	c.SizePreset = "medium"
+	hv := MapToHelmValues(webApp("hello", c), "prod", domain.AppEnvProd)
+	if r := hv.Components["web"].Resources; r == nil || r.Size != "medium" || len(r.Requests) != 0 {
+		t.Errorf("expected size preset, got %+v", r)
+	}
+}
+
+func TestBuildComponent_EnvFrom(t *testing.T) {
+	c := webComponent("web")
+	c.EnvFromConfigMaps = []string{"cm1"}
+	c.EnvFromSecrets = []string{"sec1"}
+	hv := MapToHelmValues(webApp("hello", c), "prod", domain.AppEnvProd)
+	ef := hv.Components["web"].EnvFrom
+	if len(ef) != 2 || ef[0].ConfigMapRef == nil || ef[0].ConfigMapRef.Name != "cm1" || !ef[0].ConfigMapRef.Optional {
+		t.Fatalf("configMapRef wrong: %+v", ef)
+	}
+	if ef[1].SecretRef == nil || ef[1].SecretRef.Name != "sec1" {
+		t.Errorf("secretRef wrong: %+v", ef)
+	}
+}
+
+func TestBuildComponent_Autoscaling(t *testing.T) {
+	c := webComponent("web")
+	c.Scaling = &domain.ComponentScaling{
+		MinReplicas: i32p(0), MaxReplicas: i32p(60),
+		Triggers: []domain.KEDATrigger{{Type: "cpu", MetricType: "Utilization", Metadata: map[string]string{"value": "80"}}},
+	}
+	hv := MapToHelmValues(webApp("hello", c), "prod", domain.AppEnvProd)
+	a := hv.Components["web"].Autoscaling
+	if a == nil || a.MaxReplicaCount == nil || *a.MaxReplicaCount != 60 || len(a.Triggers) != 1 || a.Triggers[0].Type != "cpu" {
+		t.Fatalf("autoscaling wrong: %+v", a)
+	}
+}
+
+func TestBuildComponent_PerEnvOverrideWins(t *testing.T) {
+	c := webComponent("web")
+	c.Resources = &domain.ComponentResources{Requests: map[string]string{"cpu": "1"}}
+	c.EnvFromSecrets = []string{"base-secret"}
+	c.Config = map[string]string{"LOG": "info"}
+	app := webApp("hello", c)
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"prod": {Components: map[string]domain.ComponentConfig{
+			"web": {
+				Resources:      &domain.ComponentResources{Requests: map[string]string{"cpu": "4"}},
+				EnvFromSecrets: []string{"prod-secret"},
+				Env:            map[string]string{"LOG": "warn", "EXTRA": "1"},
+			},
+		}},
+	}
+	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "localhost", "", "", "", nil, nil, nil, nil, nil)
+	w := hv.Components["web"]
+	if w.Resources.Requests["cpu"] != "4" {
+		t.Errorf("per-env resources should win: %+v", w.Resources)
+	}
+	if len(w.EnvFrom) != 1 || w.EnvFrom[0].SecretRef.Name != "prod-secret" {
+		t.Errorf("per-env envFrom should replace: %+v", w.EnvFrom)
+	}
+	if w.Env["LOG"] != "warn" || w.Env["EXTRA"] != "1" {
+		t.Errorf("per-env env merge wrong: %+v", w.Env)
+	}
+}
+
 // ── image extraction ──────────────────────────────────────────────────────────
 
 func TestMapToHelmValues_ImageFromValues(t *testing.T) {

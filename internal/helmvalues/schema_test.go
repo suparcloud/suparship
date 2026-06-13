@@ -81,12 +81,21 @@ func TestSchema_Components_AllowsAnyKey_TypedValue(t *testing.T) {
 	}
 	// Spot-check that ComponentValues fields appear with expected types.
 	for field, want := range map[string]string{
-		"enabled":  "boolean",
-		"replicas": "integer",
+		"enabled":     "boolean",
+		"replicas":    "integer",
+		"envFrom":     "array",
+		"autoscaling": "object",
 	} {
 		got := cprops[field].(map[string]any)["type"]
 		if got != want {
 			t.Errorf("components.<>.%s type = %v, want %v", field, got, want)
+		}
+	}
+	// resources gains raw requests/limits alongside size.
+	rprops := cprops["resources"].(map[string]any)["properties"].(map[string]any)
+	for _, k := range []string{"size", "requests", "limits"} {
+		if _, ok := rprops[k]; !ok {
+			t.Errorf("resources schema missing %q", k)
 		}
 	}
 }

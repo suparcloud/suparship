@@ -200,6 +200,41 @@ type TemplateComponent struct {
 	// *override* from the type-based defaults; ResolvedCapabilities()
 	// fills in the rest. See ComponentCapabilities for the vocabulary.
 	Capabilities ComponentCapabilities `yaml:"capabilities,omitempty"`
+	// Defaults seeds the per-component config (raw resources, envFrom, KEDA
+	// scaling, env overrides) into the app's ComponentSpec at creation.
+	// Operators override per app / per environment afterward in the UI.
+	Defaults *ComponentDefaults `yaml:"defaults,omitempty"`
+}
+
+// ComponentDefaults are the per-component config defaults a template declares.
+// Copied into domain.ComponentSpec at app creation. Mirrors the per-component
+// knobs (resources / envFrom / scaling / env).
+type ComponentDefaults struct {
+	Resources         *ComponentResources `yaml:"resources,omitempty"`
+	EnvFromSecrets    []string            `yaml:"envFromSecrets,omitempty"`
+	EnvFromConfigMaps []string            `yaml:"envFromConfigMaps,omitempty"`
+	Scaling           *ComponentScaling   `yaml:"scaling,omitempty"`
+	Env               map[string]string   `yaml:"env,omitempty"`
+}
+
+// ComponentResources mirrors domain.ComponentResources for template YAML.
+type ComponentResources struct {
+	Requests map[string]string `yaml:"requests,omitempty"`
+	Limits   map[string]string `yaml:"limits,omitempty"`
+}
+
+// KEDATrigger mirrors domain.KEDATrigger for template YAML.
+type KEDATrigger struct {
+	Type       string            `yaml:"type"`
+	MetricType string            `yaml:"metricType,omitempty"`
+	Metadata   map[string]string `yaml:"metadata,omitempty"`
+}
+
+// ComponentScaling mirrors domain.ComponentScaling for template YAML.
+type ComponentScaling struct {
+	Triggers    []KEDATrigger `yaml:"triggers,omitempty"`
+	MinReplicas *int32        `yaml:"minReplicas,omitempty"`
+	MaxReplicas *int32        `yaml:"maxReplicas,omitempty"`
 }
 
 // ComponentCapabilities declares which input groups the UI should

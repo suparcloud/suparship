@@ -149,6 +149,11 @@ type AppDetailDTO struct {
 	// EnvRawValues surfaces per-environment overlays keyed by env name, for envs
 	// that have one. Mirrors what the edit PATCH accepts.
 	EnvRawValues map[string]map[string]any `json:"envRawValues,omitempty"`
+	// ComponentConfigs surfaces app-level per-component config (resources,
+	// envFrom, scaling, env) keyed by component name, so the UI can edit it.
+	ComponentConfigs map[string]domain.ComponentConfig `json:"componentConfigs,omitempty"`
+	// EnvComponents surfaces per-(env, component) overrides keyed env → component.
+	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
 }
 
 // AddonClaimDTO mirrors domain.AddonSpec for the wire. Per-app values
@@ -291,6 +296,13 @@ type updateAppRequest struct {
 	// overlays keyed by environment name. Each entry overrides (deep-merges over)
 	// the app-level RawValues at publish. Omit to leave existing overlays intact.
 	EnvRawValues map[string]map[string]any `json:"envRawValues,omitempty"`
+	// ComponentConfigs, when non-nil, replaces app-level per-component config
+	// (resources, envFrom, scaling, env) keyed by component name.
+	ComponentConfigs map[string]domain.ComponentConfig `json:"componentConfigs,omitempty"`
+	// EnvComponents, when non-nil, replaces per-(env, component) overrides keyed
+	// env → component. Each entry overrides the app-level component config for
+	// that environment only.
+	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
 }
 
 // updateAppResponse mirrors createAppResponse for the edit endpoint.

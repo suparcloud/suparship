@@ -356,6 +356,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	prevValues, prevDisplay, prevDesc := app.Spec.Values, app.Spec.DisplayName, app.Spec.Description
 	prevEnvDefaults := app.Spec.EnvironmentDefaults
 	prevRawValues := app.Spec.RawValues
+	prevComponents := append([]domain.ComponentSpec(nil), app.Spec.Components...)
 
 	if req.Values != nil {
 		newValues := *req.Values
@@ -412,6 +413,32 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if req.RawValues != nil {
 		app.Spec.RawValues = *req.RawValues
 	}
+	if req.ComponentConfigs != nil {
+		// Apply app-level per-component config onto the matching ComponentSpec.
+		for i := range app.Spec.Components {
+			cfg, ok := req.ComponentConfigs[app.Spec.Components[i].Name]
+			if !ok {
+				continue
+			}
+			applyComponentConfig(&app.Spec.Components[i], cfg)
+		}
+	}
+	if req.EnvComponents != nil {
+		ed := app.Spec.EnvironmentDefaults
+		if ed == nil {
+			ed = map[string]domain.EnvironmentOverride{}
+		}
+		for envName, byComp := range req.EnvComponents {
+			ov := ed[envName]
+			if len(byComp) == 0 {
+				ov.Components = nil
+			} else {
+				ov.Components = byComp
+			}
+			ed[envName] = ov
+		}
+		app.Spec.EnvironmentDefaults = ed
+	}
 	if req.EnvRawValues != nil {
 		// Replace per-env raw-values overlays, folding into EnvironmentDefaults.
 		ed := app.Spec.EnvironmentDefaults
@@ -456,6 +483,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			app.Spec.Values, app.Spec.DisplayName, app.Spec.Description = prevValues, prevDisplay, prevDesc
 			app.Spec.EnvironmentDefaults = prevEnvDefaults
 			app.Spec.RawValues = prevRawValues
+			app.Spec.Components = prevComponents
 			_ = ah.appStore.SaveApp(r.Context(), projectName, app)
 			slog.Error("update-app: publish failed; rolled back config change",
 				"project", projectName, "app", appName, "err", err)
@@ -1640,7 +1668,57 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		ClusterOverrides: clusterOverridesDTO(app.Spec.EnvironmentDefaults),
 		RawValues:        app.Spec.RawValues,
 		EnvRawValues:     envRawValuesDTO(app.Spec.EnvironmentDefaults),
+		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
+		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
 	}
+}
+
+// applyComponentConfig writes per-component config (resources, envFrom, scaling,
+// env) onto an app-level ComponentSpec. Env replaces the component's Config.
+func applyComponentConfig(spec *domain.ComponentSpec, cfg domain.ComponentConfig) {
+	spec.Resources = cfg.Resources
+	spec.EnvFromSecrets = cfg.EnvFromSecrets
+	spec.EnvFromConfigMaps = cfg.EnvFromConfigMaps
+	spec.Scaling = cfg.Scaling
+	if cfg.Env != nil {
+		spec.Config = cfg.Env
+	}
+}
+
+// componentConfigsDTO projects each ComponentSpec into the editable
+// ComponentConfig shape (env mirrors the spec's Config). Returns nil when there
+// are no components.
+func componentConfigsDTO(specs []domain.ComponentSpec) map[string]domain.ComponentConfig {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make(map[string]domain.ComponentConfig, len(specs))
+	for _, c := range specs {
+		out[c.Name] = domain.ComponentConfig{
+			Resources:         c.Resources,
+			EnvFromSecrets:    c.EnvFromSecrets,
+			EnvFromConfigMaps: c.EnvFromConfigMaps,
+			Scaling:           c.Scaling,
+			Env:               c.Config,
+		}
+	}
+	return out
+}
+
+// envComponentsDTO extracts per-(env, component) overrides from
+// EnvironmentDefaults. Returns nil when no env has any.
+func envComponentsDTO(defaults map[string]domain.EnvironmentOverride) map[string]map[string]domain.ComponentConfig {
+	var out map[string]map[string]domain.ComponentConfig
+	for envName, ov := range defaults {
+		if len(ov.Components) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string]map[string]domain.ComponentConfig{}
+		}
+		out[envName] = ov.Components
+	}
+	return out
 }
 
 // envRawValuesDTO extracts per-env raw-values overlays from EnvironmentDefaults,

@@ -65,15 +65,52 @@ func ComponentsFromTemplate(tmpl *tpl.Template, toggles map[string]bool) []domai
 
 	specs := make([]domain.ComponentSpec, 0, len(sorted))
 	for _, tc := range sorted {
-		specs = append(specs, domain.ComponentSpec{
+		spec := domain.ComponentSpec{
 			Name:           tc.Name,
 			Type:           templateComponentTypeToDomain(tc.Type),
 			Enabled:        resolveEnabled(tc, toggles),
 			ExposeMode:     templateExposedToMode(tc.Exposed),
 			PreviewEnabled: tc.PreviewEnabled,
-		})
+		}
+		applyComponentDefaults(&spec, tc.Defaults)
+		specs = append(specs, spec)
 	}
 	return specs
+}
+
+// applyComponentDefaults seeds a template's per-component Defaults block into
+// the ComponentSpec (raw resources, envFrom, KEDA scaling, env). No-op when nil.
+func applyComponentDefaults(spec *domain.ComponentSpec, d *tpl.ComponentDefaults) {
+	if d == nil {
+		return
+	}
+	if d.Resources != nil {
+		spec.Resources = &domain.ComponentResources{
+			Requests: d.Resources.Requests,
+			Limits:   d.Resources.Limits,
+		}
+	}
+	spec.EnvFromSecrets = d.EnvFromSecrets
+	spec.EnvFromConfigMaps = d.EnvFromConfigMaps
+	if d.Scaling != nil {
+		triggers := make([]domain.KEDATrigger, len(d.Scaling.Triggers))
+		for i, t := range d.Scaling.Triggers {
+			triggers[i] = domain.KEDATrigger{Type: t.Type, MetricType: t.MetricType, Metadata: t.Metadata}
+		}
+		spec.Scaling = &domain.ComponentScaling{
+			Triggers:    triggers,
+			MinReplicas: d.Scaling.MinReplicas,
+			MaxReplicas: d.Scaling.MaxReplicas,
+		}
+	}
+	if len(d.Env) > 0 {
+		if spec.Config == nil {
+			spec.Config = map[string]string{}
+		}
+		for k, v := range d.Env {
+			spec.Config[k] = v
+		}
+	}
 }
 
 // resolveEnabled returns the enabled state for a single TemplateComponent.

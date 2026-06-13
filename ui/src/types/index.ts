@@ -485,6 +485,39 @@ export interface AppDetail {
   rawValues?: Record<string, unknown>;
   // Per-environment freeform overlays keyed by env name.
   envRawValues?: Record<string, Record<string, unknown>>;
+  // App-level per-component config keyed by component name.
+  componentConfigs?: Record<string, ComponentConfig>;
+  // Per-(env, component) overrides keyed env → component.
+  envComponents?: Record<string, Record<string, ComponentConfig>>;
+}
+
+// ComponentResources holds raw k8s resource quantities (cpu/memory/…).
+export interface ComponentResources {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
+}
+
+// KEDATrigger mirrors a KEDA ScaledObject trigger.
+export interface KEDATrigger {
+  type: string;
+  metricType?: string;
+  metadata?: Record<string, string>;
+}
+
+export interface ComponentScaling {
+  triggers?: KEDATrigger[];
+  minReplicas?: number;
+  maxReplicas?: number;
+}
+
+// ComponentConfig is the per-component knob set (resources / envFrom / scaling /
+// env) editable at app level and per environment.
+export interface ComponentConfig {
+  resources?: ComponentResources;
+  envFromSecrets?: string[];
+  envFromConfigMaps?: string[];
+  scaling?: ComponentScaling;
+  env?: Record<string, string>;
 }
 
 // ClusterValueOverrideDTO mirrors the backend per-(env, cluster) override.

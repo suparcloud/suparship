@@ -384,11 +384,31 @@ func buildComponentValues(
 
 	replicas := resolveReplicas(c.Replicas, envOverride.Replicas, envType)
 
-	env := mergeConfig(c.Config, envOverride.Config)
+	// Per-component, per-env override layered on top of the app-level spec.
+	co := envOverride.Components[c.Name]
+
+	// env: component Config + env-wide Config + per-(env,component) override.
+	env := mergeConfig(mergeConfig(c.Config, envOverride.Config), co.Env)
 
 	sizePreset := string(c.SizePreset)
 	if envOverride.SizePreset != "" {
 		sizePreset = string(envOverride.SizePreset)
+	}
+
+	// Raw resources: per-env override wins over app-level; both win over size.
+	rawRes := c.Resources
+	if co.Resources != nil {
+		rawRes = co.Resources
+	}
+
+	// envFrom name lists: per-env override replaces app-level when set.
+	secrets := pickStrings(co.EnvFromSecrets, c.EnvFromSecrets)
+	configMaps := pickStrings(co.EnvFromConfigMaps, c.EnvFromConfigMaps)
+
+	// Scaling: per-env override wins over app-level.
+	scaling := c.Scaling
+	if co.Scaling != nil {
+		scaling = co.Scaling
 	}
 
 	cv := &ComponentValues{
@@ -402,8 +422,21 @@ func buildComponentValues(
 	if len(env) > 0 {
 		cv.Env = env
 	}
-	if sizePreset != "" {
+	switch {
+	case rawRes != nil && (len(rawRes.Requests) > 0 || len(rawRes.Limits) > 0):
+		cv.Resources = &ResourceValues{Requests: rawRes.Requests, Limits: rawRes.Limits}
+	case sizePreset != "":
 		cv.Resources = &ResourceValues{Size: sizePreset}
+	}
+	if ef := buildEnvFrom(configMaps, secrets); len(ef) > 0 {
+		cv.EnvFrom = ef
+	}
+	if scaling != nil && (len(scaling.Triggers) > 0 || scaling.MinReplicas != nil || scaling.MaxReplicas != nil) {
+		cv.Autoscaling = &ComponentAutoscaling{
+			Triggers:        scaling.Triggers,
+			MinReplicaCount: scaling.MinReplicas,
+			MaxReplicaCount: scaling.MaxReplicas,
+		}
 	}
 	if port > 0 {
 		cv.Port = port
@@ -415,6 +448,28 @@ func buildComponentValues(
 		cv.Ingress = resolveIngress(c, orgProfiles, envProfiles, clusterProfiles)
 	}
 	return cv
+}
+
+// pickStrings returns override when non-empty, else base (per-env replaces
+// app-level for list-valued fields).
+func pickStrings(override, base []string) []string {
+	if len(override) > 0 {
+		return override
+	}
+	return base
+}
+
+// buildEnvFrom converts configmap-name then secret-name lists into the chart's
+// envFrom entries (all optional so pods start before sources exist).
+func buildEnvFrom(configMaps, secrets []string) []EnvFromSource {
+	out := make([]EnvFromSource, 0, len(configMaps)+len(secrets))
+	for _, n := range configMaps {
+		out = append(out, EnvFromSource{ConfigMapRef: &EnvFromRef{Name: n, Optional: true}})
+	}
+	for _, n := range secrets {
+		out = append(out, EnvFromSource{SecretRef: &EnvFromRef{Name: n, Optional: true}})
+	}
+	return out
 }
 
 // resolveIngress turns a component's exposure intent into the IngressValues
