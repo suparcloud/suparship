@@ -133,6 +133,25 @@ type Cluster struct {
 	RoutingProfiles RoutingProfiles `json:"routingProfiles,omitempty"`
 }
 
+// ArgoCDClusterCandidate describes a cluster that ArgoCD already has registered
+// (one ArgoCD cluster Secret), surfaced as a candidate for import into suparship.
+type ArgoCDClusterCandidate struct {
+	// Name is the ArgoCD cluster name (the Secret's data.name).
+	Name string `json:"name"`
+	// Server is the Kubernetes API server URL (the Secret's data.server).
+	Server string `json:"server"`
+	// AuthType is how ArgoCD authenticates to the cluster: "token", "clientCert",
+	// "basic", "exec" (cloud-IAM), or "unknown".
+	AuthType string `json:"authType"`
+	// Importable is true when suparship can reconstruct a usable kubeconfig from
+	// the ArgoCD credentials (bearer token, client cert, or basic auth).
+	Importable bool `json:"importable"`
+	// Reason explains why an entry is not importable (exec/cloud-IAM auth, etc.).
+	Reason string `json:"reason,omitempty"`
+	// AlreadyRegistered is true when a suparship cluster already targets this server.
+	AlreadyRegistered bool `json:"alreadyRegistered"`
+}
+
 // EffectiveESONamespace returns ESONamespace, falling back to "external-secrets"
 // when the field is empty (the upstream default installation namespace for ESO).
 func (c Cluster) EffectiveESONamespace() string {
@@ -214,8 +233,8 @@ type Template struct {
 // should model previews as AppEnvironment values with EnvType=AppEnvPreview.
 // See docs/migration-app-model.md for the transition guide.
 type Preview struct {
-	Name        string    `json:"name"`
-	ProjectName string    `json:"projectName"`
+	Name        string `json:"name"`
+	ProjectName string `json:"projectName"`
 	// ServiceName identifies the service (i.e. app) that owns this preview.
 	// Deprecated: ServiceName will be renamed AppName once the service→app
 	// migration is complete. For now, treat ServiceName == AppName.

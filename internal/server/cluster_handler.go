@@ -47,6 +47,8 @@ type clusterHandler struct {
 // mutating the workload-cluster registry.
 func (ch *clusterHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/clusters", ch.requireOrgAdmin(ch.handleList))
+	mux.HandleFunc("GET /api/v1/clusters/argocd", ch.requireOrgAdmin(ch.handleListArgoCD))
+	mux.HandleFunc("POST /api/v1/clusters/import", ch.requireOrgAdmin(ch.handleImport))
 	mux.HandleFunc("GET /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleGet))
 	mux.HandleFunc("POST /api/v1/clusters", ch.requireOrgAdmin(ch.handleCreate))
 	mux.HandleFunc("PUT /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleUpdateMetadata))
@@ -188,28 +190,116 @@ func (ch *clusterHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Best-effort: fetch and cache the sealed-secrets certificate from the
-	// newly registered cluster so that token sealing works immediately without
-	// a separate admin step. Failures are logged but do not fail the registration.
-	// Use a detached context with a timeout — r.Context() is cancelled the
-	// moment this handler returns, which would abort the background fetch.
+	ch.provisionClusterConnection(req.Name)
+
+	writeJSON(w, http.StatusCreated, cluster)
+}
+
+// provisionClusterConnection runs the post-registration hooks that turn a stored
+// cluster into a working secret-delivery target: fetch + cache the sealed-secrets
+// cert from the cluster, and (re)publish the ESO ClusterSecretStores to gitops.
+// Both run in the background (detached context) and are best-effort — failures
+// are logged, not surfaced. Shared by register (handleCreate) and import
+// (handleImport) so an imported cluster is wired identically to a registered one.
+func (ch *clusterHandler) provisionClusterConnection(name string) {
+	// r.Context() is cancelled when the handler returns, so use a detached
+	// context with a timeout for the cert fetch.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		ch.tryFetchSealingCert(ctx, req.Name)
+		ch.tryFetchSealingCert(ctx, name)
 	}()
 
-	// Best-effort: (re)publish ESO ClusterSecretStores so the new cluster's
-	// store exists in gitops. Runs in the background to not delay the response.
 	if ch.storeReconciler != nil {
 		go func() {
-			if err := ch.storeReconciler.ReconcileSecretStores(context.Background()); err != nil {
-				ch.logger.Warn("cluster create: reconcile secret stores failed", "cluster", req.Name, "error", err)
+			if err := ch.storeReconciler.ReconcileSecretStores(context.Background()); err != nil && ch.logger != nil {
+				ch.logger.Warn("provision cluster connection: reconcile secret stores failed", "cluster", name, "error", err)
 			}
 		}()
 	}
+}
 
-	writeJSON(w, http.StatusCreated, cluster)
+// ── GET /api/v1/clusters/argocd — list importable ArgoCD clusters ─────────────
+
+// argoCDClusterLister is implemented by the real store; fake/dev stores that
+// don't talk to ArgoCD won't satisfy it (import is a no-op in those modes).
+type argoCDClusterLister interface {
+	ListArgoCDClusters(ctx context.Context) ([]domain.ArgoCDClusterCandidate, error)
+}
+
+// argoCDClusterImporter reconstructs a kubeconfig from an ArgoCD cluster
+// registration and stores it as a suparship cluster.
+type argoCDClusterImporter interface {
+	ImportArgoCDCluster(ctx context.Context, name string) (*domain.Cluster, error)
+}
+
+func (ch *clusterHandler) handleListArgoCD(w http.ResponseWriter, r *http.Request) {
+	lister, ok := ch.store.(argoCDClusterLister)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "importing clusters from ArgoCD is not supported in this mode"})
+		return
+	}
+	candidates, err := lister.ListArgoCDClusters(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list ArgoCD clusters: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"clusters": candidates})
+}
+
+// ── POST /api/v1/clusters/import — import clusters from ArgoCD ─────────────────
+
+type importClustersRequest struct {
+	// Names are the ArgoCD cluster names (data.name) to import.
+	Names []string `json:"names"`
+}
+
+type importSkip struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+type importClustersResponse struct {
+	Imported []domain.Cluster `json:"imported"`
+	Skipped  []importSkip     `json:"skipped"`
+}
+
+// handleImport imports one or more clusters from ArgoCD. For each name it
+// reconstructs a kubeconfig from the ArgoCD cluster registration, stores the
+// cluster (linking — not re-creating — the ArgoCD Secret), and runs the same
+// provisioning hooks as a fresh registration so the cluster can actually deliver
+// secrets (sealing cert + ESO ClusterSecretStore). Clusters using exec/cloud-IAM
+// auth, already registered, or otherwise un-reconstructable are skipped with a
+// reason rather than failing the whole request.
+func (ch *clusterHandler) handleImport(w http.ResponseWriter, r *http.Request) {
+	importer, ok := ch.store.(argoCDClusterImporter)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "importing clusters from ArgoCD is not supported in this mode"})
+		return
+	}
+
+	var req importClustersRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if len(req.Names) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "names is required"})
+		return
+	}
+
+	resp := importClustersResponse{Imported: []domain.Cluster{}, Skipped: []importSkip{}}
+	for _, name := range req.Names {
+		cluster, err := importer.ImportArgoCDCluster(r.Context(), name)
+		if err != nil {
+			resp.Skipped = append(resp.Skipped, importSkip{Name: name, Reason: err.Error()})
+			continue
+		}
+		ch.provisionClusterConnection(cluster.Name)
+		resp.Imported = append(resp.Imported, *cluster)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ── PUT /api/v1/clusters/{name} — edit metadata (routing) ─────────────────────

@@ -75,6 +75,43 @@ export async function removeCluster(name: string): Promise<void> {
   return api.del(`/clusters/${name}`);
 }
 
+// ── Import from ArgoCD ────────────────────────────────────────────────────────
+
+// ArgoCDClusterCandidate is a cluster ArgoCD already has registered, surfaced as
+// an import candidate.
+export interface ArgoCDClusterCandidate {
+  name: string;
+  server: string;
+  /** "token" | "clientCert" | "basic" | "exec" | "unknown" */
+  authType: string;
+  importable: boolean;
+  reason?: string;
+  alreadyRegistered: boolean;
+}
+
+export async function listArgoCDClusters(): Promise<ArgoCDClusterCandidate[]> {
+  const res = await api.get<{ clusters: ArgoCDClusterCandidate[] }>(
+    "/clusters/argocd",
+  );
+  return res.clusters ?? [];
+}
+
+export interface ImportSkip {
+  name: string;
+  reason: string;
+}
+
+export interface ImportClustersResult {
+  imported: Cluster[];
+  skipped: ImportSkip[];
+}
+
+export async function importClusters(
+  names: string[],
+): Promise<ImportClustersResult> {
+  return api.post<ImportClustersResult>("/clusters/import", { names });
+}
+
 export interface SealingCertRefreshResponse {
   cluster: string;
   cached: boolean;

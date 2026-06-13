@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/suparcloud/suparship/internal/domain"
 )
@@ -24,11 +26,11 @@ const (
 	clusterKubeconfigKey      = "kubeconfig"
 	argoCDClusterSecretPrefix = "cluster-"
 
-	labelManagedBy  = "suparship.io/managed-by"
-	labelType       = "suparship.io/type"
-	labelCluster    = "suparship.io/cluster"
+	labelManagedBy   = "suparship.io/managed-by"
+	labelType        = "suparship.io/type"
+	labelCluster     = "suparship.io/cluster"
 	argoCDSecretType = "argocd.argoproj.io/secret-type"
-	argoCDCluster   = "cluster"
+	argoCDCluster    = "cluster"
 )
 
 // K8sClusterStore implements domain.ClusterStore backed by Kubernetes
@@ -136,27 +138,8 @@ func (s *K8sClusterStore) CreateCluster(ctx context.Context, cluster domain.Clus
 	}
 
 	// 1. Store raw kubeconfig Secret first (needed for ArgoCD credential extraction).
-	kubeconfigSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      clusterKubeconfigPrefix + cluster.Name,
-			Namespace: suparshipSystemNS,
-			Labels: map[string]string{
-				labelManagedBy: "suparship",
-				labelType:      "cluster-kubeconfig",
-				labelCluster:   cluster.Name,
-			},
-		},
-		Data: map[string][]byte{
-			clusterKubeconfigKey: kubeconfig,
-		},
-	}
-	if _, err := s.client.CoreV1().Secrets(suparshipSystemNS).Create(ctx, kubeconfigSecret, metav1.CreateOptions{}); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("creating cluster kubeconfig secret: %w", err)
-		}
-		if _, err := s.client.CoreV1().Secrets(suparshipSystemNS).Update(ctx, kubeconfigSecret, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("updating cluster kubeconfig secret: %w", err)
-		}
+	if err := s.writeKubeconfigSecret(ctx, cluster.Name, kubeconfig); err != nil {
+		return err
 	}
 
 	// 2. Register or link with ArgoCD. Determine whether suparship owns the Secret.
@@ -169,6 +152,59 @@ func (s *K8sClusterStore) CreateCluster(ctx context.Context, cluster domain.Clus
 	cluster.ArgoCDOwned = argoCDOwned
 
 	// 3. Store cluster metadata ConfigMap with final ArgoCDOwned state.
+	return s.writeMetadataConfigMap(ctx, cluster)
+}
+
+// ImportCluster registers a cluster discovered in ArgoCD. Unlike CreateCluster
+// it does NOT create or link an ArgoCD cluster Secret: the source ArgoCD Secret
+// already registers this server (and is named by ArgoCD's own scheme, not
+// suparship's), so creating ours would double-register the same server. The
+// cluster is recorded with ArgoCDOwned=false, which makes DeleteCluster leave
+// the source ArgoCD Secret intact. It still stores the (reconstructed) kubeconfig
+// so the hub can build a client for status/logs and sealing-cert fetch.
+func (s *K8sClusterStore) ImportCluster(ctx context.Context, cluster domain.Cluster, kubeconfig []byte) error {
+	if err := domain.ValidateClusterName(cluster.Name); err != nil {
+		return err
+	}
+	cluster.ArgoCDOwned = false
+	cluster.Normalize()
+	if err := s.writeKubeconfigSecret(ctx, cluster.Name, kubeconfig); err != nil {
+		return err
+	}
+	return s.writeMetadataConfigMap(ctx, cluster)
+}
+
+// writeKubeconfigSecret creates (or updates) the kubeconfig Secret for a cluster
+// in suparship-system. Shared by CreateCluster and ImportCluster.
+func (s *K8sClusterStore) writeKubeconfigSecret(ctx context.Context, clusterName string, kubeconfig []byte) error {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterKubeconfigPrefix + clusterName,
+			Namespace: suparshipSystemNS,
+			Labels: map[string]string{
+				labelManagedBy: "suparship",
+				labelType:      "cluster-kubeconfig",
+				labelCluster:   clusterName,
+			},
+		},
+		Data: map[string][]byte{
+			clusterKubeconfigKey: kubeconfig,
+		},
+	}
+	if _, err := s.client.CoreV1().Secrets(suparshipSystemNS).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating cluster kubeconfig secret: %w", err)
+		}
+		if _, err := s.client.CoreV1().Secrets(suparshipSystemNS).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("updating cluster kubeconfig secret: %w", err)
+		}
+	}
+	return nil
+}
+
+// writeMetadataConfigMap creates (or updates) the cluster metadata ConfigMap in
+// suparship-system. Shared by CreateCluster and ImportCluster.
+func (s *K8sClusterStore) writeMetadataConfigMap(ctx context.Context, cluster domain.Cluster) error {
 	data, err := json.Marshal(cluster)
 	if err != nil {
 		return fmt.Errorf("marshaling cluster: %w", err)
@@ -195,7 +231,6 @@ func (s *K8sClusterStore) CreateCluster(ctx context.Context, cluster domain.Clus
 			return fmt.Errorf("updating cluster configmap: %w", err)
 		}
 	}
-
 	return nil
 }
 
@@ -261,10 +296,17 @@ func (s *K8sClusterStore) GetKubeconfig(ctx context.Context, clusterName string)
 // ── ArgoCD registration ───────────────────────────────────────────────────────
 
 // argoCDClusterConfig is the JSON structure ArgoCD expects in the "config"
-// field of its cluster Secret.
+// field of its cluster Secret. suparship writes only bearerToken + TLS; the
+// extra fields exist so import can detect (and reject) exec/cloud-IAM and
+// basic-auth registrations it cannot reconstruct a kubeconfig from. They are
+// omitempty, so registration round-trips unchanged.
 type argoCDClusterConfig struct {
-	BearerToken     string              `json:"bearerToken,omitempty"`
-	TLSClientConfig argoCDTLSConfig     `json:"tlsClientConfig,omitempty"`
+	BearerToken        string           `json:"bearerToken,omitempty"`
+	Username           string           `json:"username,omitempty"`
+	Password           string           `json:"password,omitempty"`
+	TLSClientConfig    argoCDTLSConfig  `json:"tlsClientConfig,omitempty"`
+	AWSAuthConfig      *json.RawMessage `json:"awsAuthConfig,omitempty"`
+	ExecProviderConfig *json.RawMessage `json:"execProviderConfig,omitempty"`
 }
 
 type argoCDTLSConfig struct {
@@ -353,6 +395,184 @@ func (s *K8sClusterStore) registerWithArgoCD(ctx context.Context, cluster domain
 	}
 
 	return true, nil
+}
+
+// ── ArgoCD import ──────────────────────────────────────────────────────────────
+
+// ListArgoCDClusters returns every cluster ArgoCD has registered (one ArgoCD
+// cluster Secret each), classified for import. Clusters that already exist in
+// suparship are flagged AlreadyRegistered (matched by API server); clusters
+// ArgoCD authenticates to with exec/cloud-IAM auth are flagged not Importable
+// with a reason — suparship's hub client + ArgoCD-secret format only handle
+// bearer-token, client-cert, and basic auth.
+func (s *K8sClusterStore) ListArgoCDClusters(ctx context.Context) ([]domain.ArgoCDClusterCandidate, error) {
+	secrets, err := s.client.CoreV1().Secrets(argoCDNS).List(ctx, metav1.ListOptions{
+		LabelSelector: argoCDSecretType + "=" + argoCDCluster,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing argocd cluster secrets: %w", err)
+	}
+
+	registeredServers := map[string]bool{}
+	if clusters, err := s.ListClusters(ctx); err == nil {
+		for _, c := range clusters {
+			registeredServers[strings.TrimSpace(c.APIServer)] = true
+		}
+	}
+
+	out := make([]domain.ArgoCDClusterCandidate, 0, len(secrets.Items))
+	for i := range secrets.Items {
+		sec := &secrets.Items[i]
+		name := secretField(sec, "name")
+		server := secretField(sec, "server")
+		cand := classifyArgoCDCluster(name, server, secretField(sec, "config"))
+		cand.AlreadyRegistered = registeredServers[strings.TrimSpace(server)]
+		out = append(out, cand)
+	}
+	return out, nil
+}
+
+// ImportArgoCDCluster looks up the ArgoCD cluster registration named `name`,
+// reconstructs a kubeconfig from its stored credentials, and registers it with
+// suparship via ImportCluster (ArgoCDOwned=false — the source ArgoCD Secret is
+// left as the canonical registration). Returns an error (suitable as a skip
+// reason) when the cluster is not found, already registered, or uses auth
+// suparship cannot reconstruct.
+func (s *K8sClusterStore) ImportArgoCDCluster(ctx context.Context, name string) (*domain.Cluster, error) {
+	server, configRaw, found, err := s.findArgoCDClusterSecret(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("argocd cluster %q not found", name)
+	}
+
+	cand := classifyArgoCDCluster(name, server, configRaw)
+	if !cand.Importable {
+		return nil, fmt.Errorf("%s", cand.Reason)
+	}
+
+	if existing, _ := s.GetCluster(ctx, name); existing != nil {
+		return nil, fmt.Errorf("cluster %q is already registered", name)
+	}
+
+	var cfg argoCDClusterConfig
+	if configRaw != "" {
+		if err := json.Unmarshal([]byte(configRaw), &cfg); err != nil {
+			return nil, fmt.Errorf("parsing argocd cluster config: %w", err)
+		}
+	}
+	kubeconfig, err := buildKubeconfigFromArgoCD(server, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster := domain.Cluster{
+		Name:        name,
+		DisplayName: name,
+		APIServer:   server,
+		Status:      "ready",
+		ArgoCDOwned: false,
+	}
+	cluster.Normalize()
+	if err := s.ImportCluster(ctx, cluster, kubeconfig); err != nil {
+		return nil, err
+	}
+	return &cluster, nil
+}
+
+// findArgoCDClusterSecret returns the (server, config) of the ArgoCD cluster
+// Secret whose data.name equals name. ArgoCD names its cluster Secrets by its
+// own scheme, so we match on the stored name field rather than the object name.
+func (s *K8sClusterStore) findArgoCDClusterSecret(ctx context.Context, name string) (server, config string, found bool, err error) {
+	secrets, err := s.client.CoreV1().Secrets(argoCDNS).List(ctx, metav1.ListOptions{
+		LabelSelector: argoCDSecretType + "=" + argoCDCluster,
+	})
+	if err != nil {
+		return "", "", false, fmt.Errorf("listing argocd cluster secrets: %w", err)
+	}
+	for i := range secrets.Items {
+		sec := &secrets.Items[i]
+		if secretField(sec, "name") == name {
+			return secretField(sec, "server"), secretField(sec, "config"), true, nil
+		}
+	}
+	return "", "", false, nil
+}
+
+// classifyArgoCDCluster determines whether an ArgoCD cluster registration can be
+// imported and how it authenticates.
+func classifyArgoCDCluster(name, server, configRaw string) domain.ArgoCDClusterCandidate {
+	cand := domain.ArgoCDClusterCandidate{Name: name, Server: server}
+	var cfg argoCDClusterConfig
+	if configRaw != "" {
+		if err := json.Unmarshal([]byte(configRaw), &cfg); err != nil {
+			cand.AuthType = "unknown"
+			cand.Reason = "could not parse the ArgoCD cluster config"
+			return cand
+		}
+	}
+	switch {
+	case cfg.ExecProviderConfig != nil || cfg.AWSAuthConfig != nil:
+		cand.AuthType = "exec"
+		cand.Reason = "exec / cloud-IAM auth not supported — register with a token-based kubeconfig instead"
+	case cfg.BearerToken != "":
+		cand.AuthType = "token"
+		cand.Importable = true
+	case len(cfg.TLSClientConfig.CertData) > 0:
+		cand.AuthType = "clientCert"
+		cand.Importable = true
+	case cfg.Username != "":
+		cand.AuthType = "basic"
+		cand.Importable = true
+	default:
+		cand.AuthType = "unknown"
+		cand.Reason = "no supported credentials found in the ArgoCD cluster config"
+	}
+	return cand
+}
+
+// buildKubeconfigFromArgoCD reconstructs a kubeconfig from an ArgoCD cluster
+// {server, config}. It is the reverse of registerWithArgoCD and supports the
+// auth modes classifyArgoCDCluster marks importable (bearer token, client cert,
+// basic auth).
+func buildKubeconfigFromArgoCD(server string, cfg argoCDClusterConfig) ([]byte, error) {
+	if cfg.BearerToken == "" && len(cfg.TLSClientConfig.CertData) == 0 && cfg.Username == "" {
+		return nil, fmt.Errorf("argocd cluster config has no supported credentials (bearer token / client cert / basic auth)")
+	}
+
+	const key = "default"
+	apiCfg := clientcmdapi.NewConfig()
+
+	cluster := &clientcmdapi.Cluster{Server: server}
+	if cfg.TLSClientConfig.Insecure {
+		cluster.InsecureSkipTLSVerify = true
+	} else {
+		cluster.CertificateAuthorityData = cfg.TLSClientConfig.CAData
+	}
+	apiCfg.Clusters[key] = cluster
+
+	apiCfg.AuthInfos[key] = &clientcmdapi.AuthInfo{
+		Token:                 cfg.BearerToken,
+		ClientCertificateData: cfg.TLSClientConfig.CertData,
+		ClientKeyData:         cfg.TLSClientConfig.KeyData,
+		Username:              cfg.Username,
+		Password:              cfg.Password,
+	}
+	apiCfg.Contexts[key] = &clientcmdapi.Context{Cluster: key, AuthInfo: key}
+	apiCfg.CurrentContext = key
+
+	return clientcmd.Write(*apiCfg)
+}
+
+// secretField reads a Secret value from Data (real clusters store the decoded
+// value there) falling back to StringData (used by tests that build Secrets
+// without the fake clientset's StringData→Data merge).
+func secretField(sec *corev1.Secret, key string) string {
+	if v, ok := sec.Data[key]; ok {
+		return string(v)
+	}
+	return sec.StringData[key]
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

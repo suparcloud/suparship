@@ -4,12 +4,18 @@ import { toast } from "sonner";
 
 import {
   listClusters,
+  listArgoCDClusters,
+  importClusters,
   registerCluster,
   refreshSealingCert,
   removeCluster,
   updateCluster,
 } from "../lib/clusters";
-import type { Cluster, RoutingProfiles } from "../lib/clusters";
+import type {
+  Cluster,
+  RoutingProfiles,
+  ArgoCDClusterCandidate,
+} from "../lib/clusters";
 import {
   getClusterEnvConfig,
   updateClusterEnvConfig,
@@ -473,6 +479,176 @@ function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
   );
 }
 
+// ── Import-from-ArgoCD modal ───────────────────────────────────────────────────
+
+interface ImportModalProps {
+  onClose: () => void;
+  onImported: () => void;
+}
+
+function ImportModal({ onClose, onImported }: ImportModalProps) {
+  const [candidates, setCandidates] = useState<ArgoCDClusterCandidate[] | null>(
+    null,
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [importing, setImporting] = useState(false);
+
+  useEffect(() => {
+    listArgoCDClusters()
+      .then((c) => setCandidates(c))
+      .catch((err) =>
+        setError(
+          err instanceof Error ? err.message : "Failed to list ArgoCD clusters",
+        ),
+      );
+  }, []);
+
+  function toggle(name: string) {
+    setSelected((prev) => ({ ...prev, [name]: !prev[name] }));
+  }
+
+  async function handleImport() {
+    const names = Object.keys(selected).filter((n) => selected[n]);
+    if (names.length === 0) return;
+    setImporting(true);
+    try {
+      const res = await importClusters(names);
+      if (res.imported.length > 0) {
+        toast.success(
+          `Imported ${res.imported.length} cluster${res.imported.length > 1 ? "s" : ""}`,
+        );
+      }
+      for (const s of res.skipped) {
+        toast.error(`Skipped ${s.name}: ${s.reason}`);
+      }
+      onImported();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  const selectableCount =
+    candidates?.filter((c) => c.importable && !c.alreadyRegistered).length ?? 0;
+  const selectedCount = Object.values(selected).filter(Boolean).length;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+      <div className="w-full max-w-2xl rounded-xl bg-white p-8 shadow-xl">
+        <h2 className="text-lg font-semibold text-gray-900">
+          Import clusters from ArgoCD
+        </h2>
+        <p className="mt-1 text-sm text-gray-500">
+          suparShip reconstructs a kubeconfig from each ArgoCD registration and
+          wires it for secret delivery (sealing cert + secret store). Clusters
+          using exec / cloud-IAM auth (EKS/GKE) can't be imported — register
+          those with a token-based kubeconfig instead.
+        </p>
+
+        {error && (
+          <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {error}
+          </div>
+        )}
+
+        {!candidates && !error && (
+          <div className="mt-6 space-y-3">
+            {[1, 2, 3].map((i) => (
+              <div
+                key={i}
+                className="h-12 animate-pulse rounded-md bg-gray-100"
+              />
+            ))}
+          </div>
+        )}
+
+        {candidates && candidates.length === 0 && (
+          <p className="mt-6 text-sm text-gray-500">
+            No ArgoCD clusters found.
+          </p>
+        )}
+
+        {candidates && candidates.length > 0 && (
+          <div className="mt-6 max-h-80 overflow-y-auto rounded-md border border-gray-200">
+            <table className="w-full text-sm">
+              <tbody className="divide-y divide-gray-50">
+                {candidates.map((c) => {
+                  const disabled = !c.importable || c.alreadyRegistered;
+                  const note = c.alreadyRegistered
+                    ? "already registered"
+                    : !c.importable
+                      ? (c.reason ?? "not importable")
+                      : c.authType;
+                  return (
+                    <tr
+                      key={c.name}
+                      className={disabled ? "bg-gray-50" : "hover:bg-gray-50"}
+                    >
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          disabled={disabled}
+                          checked={!!selected[c.name]}
+                          onChange={() => toggle(c.name)}
+                          className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 disabled:opacity-40"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <div
+                          className={`font-medium ${disabled ? "text-gray-400" : "text-gray-900"}`}
+                        >
+                          {c.name}
+                        </div>
+                        <div className="text-xs text-gray-400">{c.server}</div>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <span
+                          className={`text-xs ${disabled ? "text-gray-400" : "text-gray-500"}`}
+                        >
+                          {note}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {selectableCount > 0 && (
+          <p className="mt-3 text-xs text-gray-400">
+            After import, set base domain / ingress in each cluster's Routing
+            editor. On the 1Password backend, paste the cluster's Connect token
+            under Settings → Secrets Backend.
+          </p>
+        )}
+
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleImport}
+            disabled={importing || selectedCount === 0}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {importing
+              ? "Importing…"
+              : `Import${selectedCount > 0 ? ` (${selectedCount})` : ""}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export function ClusterSettings() {
@@ -480,6 +656,7 @@ export function ClusterSettings() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showRegister, setShowRegister] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [removingName, setRemovingName] = useState<string | null>(null);
   const [refreshingCert, setRefreshingCert] = useState<string | null>(null);
   const [certMessage, setCertMessage] = useState<Record<string, string>>({});
@@ -542,6 +719,10 @@ export function ClusterSettings() {
         />
       )}
 
+      {showImport && (
+        <ImportModal onClose={() => setShowImport(false)} onImported={load} />
+      )}
+
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Clusters</h1>
@@ -549,12 +730,20 @@ export function ClusterSettings() {
             Workload clusters that suparShip deploys apps to via ArgoCD.
           </p>
         </div>
-        <button
-          onClick={() => setShowRegister(true)}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-        >
-          Register cluster
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={() => setShowImport(true)}
+            className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            Import from ArgoCD
+          </button>
+          <button
+            onClick={() => setShowRegister(true)}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+          >
+            Register cluster
+          </button>
+        </div>
       </div>
 
       {loading && (
