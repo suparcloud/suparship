@@ -132,6 +132,11 @@ fetches the sealed-secrets cert in the background.
 > The first cluster can be the tooling cluster itself (`inCluster: true` /
 > `https://kubernetes.default.svc`).
 
+> **Need a kubeconfig?** The most portable credential is a ServiceAccount token.
+> See [Create a token-based kubeconfig](cluster-kubeconfig.md) for a copy-paste
+> recipe (also the recommended path for EKS/GKE clusters that can't be imported
+> because they use exec / cloud-IAM auth).
+
 **Brownfield — already running ArgoCD?** Settings → Clusters → **Import from
 ArgoCD** lists the clusters ArgoCD already has registered. Importing reconstructs
 a kubeconfig from each ArgoCD registration and wires it exactly like a fresh

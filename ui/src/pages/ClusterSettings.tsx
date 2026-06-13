@@ -64,6 +64,7 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
   const [kubeconfigB64, setKubeconfigB64] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
   const [esoNamespace, setEsoNamespace] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -182,6 +183,67 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
                 </p>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => setShowHelp((v) => !v)}
+              className="mt-2 text-xs font-medium text-indigo-600 hover:text-indigo-700"
+            >
+              {showHelp ? "Hide" : "Need a kubeconfig? Create one from a ServiceAccount"}
+            </button>
+            {showHelp && (
+              <div className="mt-2 space-y-2 rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+                <p>
+                  A ServiceAccount token is the most portable credential (and the
+                  way to register EKS/GKE clusters that use exec / cloud-IAM auth).
+                  Run against the <strong>target cluster</strong>:
+                </p>
+                <pre className="overflow-x-auto rounded bg-gray-900 p-3 font-mono text-[11px] leading-relaxed text-gray-100">
+                  {`kubectl create serviceaccount suparship -n kube-system
+kubectl create clusterrolebinding suparship \\
+  --clusterrole=cluster-admin \\
+  --serviceaccount=kube-system:suparship
+
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: suparship-token
+  namespace: kube-system
+  annotations:
+    kubernetes.io/service-account.name: suparship
+type: kubernetes.io/service-account-token
+EOF
+
+SERVER=$(kubectl config view --minify \\
+  -o jsonpath='{.clusters[0].cluster.server}')
+CA=$(kubectl get secret suparship-token -n kube-system \\
+  -o jsonpath='{.data.ca\\.crt}')
+TOKEN=$(kubectl get secret suparship-token -n kube-system \\
+  -o jsonpath='{.data.token}' | base64 -d)
+
+cat > suparship-kubeconfig.yaml <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- name: target
+  cluster: { server: \${SERVER}, certificate-authority-data: \${CA} }
+contexts:
+- name: target
+  context: { cluster: target, user: suparship }
+current-context: target
+users:
+- name: suparship
+  user: { token: \${TOKEN} }
+EOF`}
+                </pre>
+                <p>
+                  Upload <code className="font-mono">suparship-kubeconfig.yaml</code>{" "}
+                  above and paste <code className="font-mono">$SERVER</code> as the
+                  API server URL. Full guide:{" "}
+                  <code className="font-mono">docs/cluster-kubeconfig.md</code>.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Advanced options */}
