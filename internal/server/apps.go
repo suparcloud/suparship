@@ -263,6 +263,12 @@ type createAppRequest struct {
 	// generated chart values at publish. String leaves may reference
 	// {platform.*}/{vars.*} tokens. No secrets.
 	RawValues map[string]any `json:"rawValues,omitempty"`
+	// ComponentConfigs holds app-level per-component config (resources, envFrom,
+	// scaling, env) keyed by component name, applied over the template defaults.
+	ComponentConfigs map[string]domain.ComponentConfig `json:"componentConfigs,omitempty"`
+	// EnvComponents holds per-(env, component) overrides keyed env → component,
+	// for setting staging≠prod tuning at creation.
+	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
 }
 
 // createAppResponse is the JSON body returned on a successful app creation.

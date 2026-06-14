@@ -6,14 +6,17 @@ import { ApiError } from "../lib/api";
 import { createApp } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
+import { listOrgEnvironments } from "../lib/settings";
 import { fetchTemplate, fetchTemplates } from "../lib/templates";
 import { VariablePicker, insertAtCursor } from "../components/VariablePicker";
+import { ComponentConfigEditor } from "../components/ComponentConfigEditor";
 import type {
   TemplateSummary,
   TemplateDetail,
   TemplateInput,
   TemplateSecretInput,
   SecretRefInput,
+  ComponentConfig,
 } from "../types";
 
 type Step = "template" | "configure";
@@ -290,11 +293,29 @@ function ConfigureStep({
   const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
   const [rawValuesText, setRawValuesText] = useState("");
   const rawValuesRef = useRef<HTMLTextAreaElement>(null);
+  const [environments, setEnvironments] = useState<string[]>([]);
+  const [componentConfigs, setComponentConfigs] = useState<
+    Record<string, ComponentConfig>
+  >({});
+  const [envComponents, setEnvComponents] = useState<
+    Record<string, Record<string, ComponentConfig>>
+  >({});
 
   useEffect(() => {
     listConfigVariables(project)
       .then(setConfigVars)
       .catch(() => setConfigVars({ platform: [], vars: [] }));
+    // Stable (non-preview) environments the new app will get — used for the
+    // per-environment component config tabs.
+    listOrgEnvironments()
+      .then((res) =>
+        setEnvironments(
+          (res.environments ?? [])
+            .map((e) => e.name)
+            .filter((n) => n !== "preview"),
+        ),
+      )
+      .catch(() => setEnvironments([]));
   }, [project]);
 
   function applyPreset(presetName: string) {
@@ -386,6 +407,10 @@ function ConfigureStep({
         namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
         namespacePattern: namespacePattern.trim() || undefined,
         rawValues,
+        componentConfigs:
+          Object.keys(componentConfigs).length > 0 ? componentConfigs : undefined,
+        envComponents:
+          Object.keys(envComponents).length > 0 ? envComponents : undefined,
       });
       navigate(`/projects/${project}/apps/${appName}`);
     } catch (err) {
@@ -655,6 +680,28 @@ function ConfigureStep({
               />
             ))}
           </div>
+        </FormSection>
+      )}
+
+      {/* Per-component configuration — resources / scaling / envFrom / env,
+          app-default + per-environment (staging/prod) overrides. */}
+      {(template.components?.length ?? 0) > 0 && (
+        <FormSection title="Component configuration">
+          <p className="mb-4 text-xs text-gray-400">
+            Per-component resources, KEDA autoscaling (min/max + triggers),
+            envFrom, and env overrides. Set an app default and override per
+            environment (e.g. larger resources / higher max replicas in prod).
+          </p>
+          <ComponentConfigEditor
+            components={(template.components ?? []).map((c) => c.name)}
+            environments={environments}
+            componentConfigs={componentConfigs}
+            envComponents={envComponents}
+            onChange={(cc, ec) => {
+              setComponentConfigs(cc);
+              setEnvComponents(ec);
+            }}
+          />
         </FormSection>
       )}
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type {
   ComponentConfig,
@@ -7,9 +7,12 @@ import type {
 } from "../types";
 
 // ComponentConfigEditor edits per-component resources / envFrom / KEDA scaling /
-// env overrides, at the app level and per environment. It is fully controlled:
-// it holds a working copy and calls onSave with the app-level map +
-// per-(env,component) map.
+// env overrides, at the app level and per environment.
+//
+// Two modes:
+//   - onSave (app-detail): shows a "Save component config" button.
+//   - onChange (create form): controlled — emits the pruned maps on every edit
+//     and hides the Save button so the parent submits with the rest of the form.
 
 interface Props {
   components: string[];
@@ -17,7 +20,11 @@ interface Props {
   componentConfigs: Record<string, ComponentConfig>;
   envComponents: Record<string, Record<string, ComponentConfig>>;
   saving?: boolean;
-  onSave: (
+  onSave?: (
+    componentConfigs: Record<string, ComponentConfig>,
+    envComponents: Record<string, Record<string, ComponentConfig>>,
+  ) => void;
+  onChange?: (
     componentConfigs: Record<string, ComponentConfig>,
     envComponents: Record<string, Record<string, ComponentConfig>>,
   ) => void;
@@ -32,6 +39,7 @@ export function ComponentConfigEditor({
   envComponents,
   saving,
   onSave,
+  onChange,
 }: Props) {
   const [appCfg, setAppCfg] = useState<Record<string, ComponentConfig>>(
     () => structuredClone(componentConfigs ?? {}),
@@ -41,6 +49,12 @@ export function ComponentConfigEditor({
   >(() => structuredClone(envComponents ?? {}));
   const [scope, setScope] = useState<string>(APP_SCOPE);
   const [component, setComponent] = useState<string>(components[0] ?? "");
+
+  // Controlled mode: emit pruned maps to the parent on every edit.
+  useEffect(() => {
+    if (onChange) onChange(prune(appCfg), pruneEnv(envCfg));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appCfg, envCfg]);
 
   // The config object for the current (scope, component); undefined when unset.
   const current: ComponentConfig = useMemo(() => {
@@ -103,16 +117,18 @@ export function ComponentConfigEditor({
         <EnvEditor cfg={current} onChange={update} />
       </div>
 
-      <div className="flex justify-end">
-        <button
-          type="button"
-          disabled={saving}
-          onClick={() => onSave(prune(appCfg), pruneEnv(envCfg))}
-          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {saving ? "Saving…" : "Save component config"}
-        </button>
-      </div>
+      {onSave && !onChange && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => onSave(prune(appCfg), pruneEnv(envCfg))}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save component config"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

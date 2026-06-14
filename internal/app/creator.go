@@ -78,6 +78,27 @@ func ComponentsFromTemplate(tmpl *tpl.Template, toggles map[string]bool) []domai
 	return specs
 }
 
+// applyComponentConfig writes per-component config (resources, envFrom, scaling,
+// env) onto a ComponentSpec, overriding template defaults. Only set fields apply;
+// Env replaces the component's Config.
+func applyComponentConfig(spec *domain.ComponentSpec, cfg domain.ComponentConfig) {
+	if cfg.Resources != nil {
+		spec.Resources = cfg.Resources
+	}
+	if cfg.EnvFromSecrets != nil {
+		spec.EnvFromSecrets = cfg.EnvFromSecrets
+	}
+	if cfg.EnvFromConfigMaps != nil {
+		spec.EnvFromConfigMaps = cfg.EnvFromConfigMaps
+	}
+	if cfg.Scaling != nil {
+		spec.Scaling = cfg.Scaling
+	}
+	if cfg.Env != nil {
+		spec.Config = cfg.Env
+	}
+}
+
 // applyComponentDefaults seeds a template's per-component Defaults block into
 // the ComponentSpec (raw resources, envFrom, KEDA scaling, env). No-op when nil.
 func applyComponentDefaults(spec *domain.ComponentSpec, d *tpl.ComponentDefaults) {
@@ -190,6 +211,12 @@ type CreateRequest struct {
 	// deep-merged onto the generated chart values at publish. May reference
 	// {platform.*}/{vars.*} tokens. No secrets.
 	RawValues map[string]any
+	// ComponentConfigs holds per-component config (resources, envFrom, scaling,
+	// env) keyed by component name, applied over the template defaults. Optional.
+	ComponentConfigs map[string]domain.ComponentConfig
+	// EnvComponents holds per-(env, component) overrides keyed env → component,
+	// folded into the app's EnvironmentDefaults at creation. Optional.
+	EnvComponents map[string]map[string]domain.ComponentConfig
 }
 
 // CreateResult holds the pure-function outputs of Create.
@@ -258,6 +285,25 @@ func Create(req CreateRequest) (*CreateResult, error) {
 	}
 	app.Spec.Addons = req.Addons
 	app.Spec.RawValues = req.RawValues
+
+	// Apply per-component config (app level) over the template defaults.
+	for i := range app.Spec.Components {
+		if cc, ok := req.ComponentConfigs[app.Spec.Components[i].Name]; ok {
+			applyComponentConfig(&app.Spec.Components[i], cc)
+		}
+	}
+	// Fold per-(env, component) overrides into EnvironmentDefaults.
+	for envName, byComp := range req.EnvComponents {
+		if len(byComp) == 0 {
+			continue
+		}
+		ov := app.Spec.EnvironmentDefaults[envName]
+		ov.Components = byComp
+		if app.Spec.EnvironmentDefaults == nil {
+			app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+		}
+		app.Spec.EnvironmentDefaults[envName] = ov
+	}
 
 	// Generate Helm values for each default environment.
 	hvMap := make(map[string]helmvalues.HelmValues, len(envs))

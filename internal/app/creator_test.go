@@ -651,6 +651,46 @@ func TestCreate_ReturnsAppAndEnvironments(t *testing.T) {
 	}
 }
 
+func TestCreate_ComponentConfigsAndEnvComponents(t *testing.T) {
+	min0, max2, max9 := int32(0), int32(2), int32(9)
+	result, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{"image": "ghcr.io/org/app:v1"},
+		ComponentConfigs: map[string]domain.ComponentConfig{
+			"web": {
+				Resources: &domain.ComponentResources{Requests: map[string]string{"cpu": "1"}},
+				Scaling:   &domain.ComponentScaling{MinReplicas: &min0, MaxReplicas: &max2},
+			},
+		},
+		EnvComponents: map[string]map[string]domain.ComponentConfig{
+			"prod": {"web": {Scaling: &domain.ComponentScaling{MaxReplicas: &max9}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// App-level component config applied to the ComponentSpec.
+	var web *domain.ComponentSpec
+	for i := range result.App.Spec.Components {
+		if result.App.Spec.Components[i].Name == "web" {
+			web = &result.App.Spec.Components[i]
+		}
+	}
+	if web == nil || web.Resources == nil || web.Resources.Requests["cpu"] != "1" {
+		t.Fatalf("app-level resources not applied: %+v", web)
+	}
+	if web.Scaling == nil || web.Scaling.MaxReplicas == nil || *web.Scaling.MaxReplicas != 2 {
+		t.Fatalf("app-level scaling not applied: %+v", web.Scaling)
+	}
+	// Per-env override folded into EnvironmentDefaults.
+	prod := result.App.Spec.EnvironmentDefaults["prod"].Components["web"]
+	if prod.Scaling == nil || prod.Scaling.MaxReplicas == nil || *prod.Scaling.MaxReplicas != 9 {
+		t.Fatalf("per-env override not folded: %+v", result.App.Spec.EnvironmentDefaults["prod"])
+	}
+}
+
 func TestCreate_ComponentsInitialisedFromTemplate(t *testing.T) {
 	result, err := Create(CreateRequest{
 		ProjectName: "demo",

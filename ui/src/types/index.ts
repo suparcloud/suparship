@@ -299,6 +299,11 @@ export interface TemplatePreset {
   values: Record<string, unknown>;
 }
 
+export interface TemplateComponentInfo {
+  name: string;
+  type: string;
+}
+
 export interface TemplateDetail {
   name: string;
   version: string;
@@ -310,6 +315,7 @@ export interface TemplateDetail {
   advancedInputs: TemplateInput[];
   secretInputs: TemplateSecretInput[];
   presets: TemplatePreset[];
+  components?: TemplateComponentInfo[];
 }
 
 // --- Onboarding types ---
@@ -658,6 +664,10 @@ export interface CreateAppRequest {
   /** Optional freeform Helm values overlay, deep-merged onto generated values at
    *  publish. String leaves may reference {platform.*}/{vars.*} tokens. No secrets. */
   rawValues?: Record<string, unknown>;
+  /** App-level per-component config keyed by component name. */
+  componentConfigs?: Record<string, ComponentConfig>;
+  /** Per-(env, component) overrides keyed env → component. */
+  envComponents?: Record<string, Record<string, ComponentConfig>>;
 }
 
 export interface CreateAppResponse {
