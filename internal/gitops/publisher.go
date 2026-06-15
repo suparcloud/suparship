@@ -779,51 +779,15 @@ func marshalValuesWithOverlay(hv helmvalues.HelmValues, overlay map[string]any, 
 	return yaml.Marshal(base)
 }
 
-// deepMerge recursively merges overlay onto base and returns base. Nested maps
-// are merged key-by-key; any non-map value (scalar, slice) in overlay replaces
-// the base value. A nil base is initialized.
+// deepMerge / deepCopyMap delegate to helmvalues so publish-time layering and the
+// API's effective-values preview share one implementation. Kept as local wrappers
+// to leave the existing call sites unchanged.
 func deepMerge(base, overlay map[string]any) map[string]any {
-	if base == nil {
-		base = map[string]any{}
-	}
-	for k, ov := range overlay {
-		if ovMap, ok := ov.(map[string]any); ok {
-			if baseMap, ok := base[k].(map[string]any); ok {
-				base[k] = deepMerge(baseMap, ovMap)
-				continue
-			}
-		}
-		base[k] = ov
-	}
-	return base
+	return helmvalues.DeepMerge(base, overlay)
 }
 
-// deepCopyMap returns a deep copy of a YAML/JSON-decoded map so callers can
-// mutate (merge/interpolate) without touching the stored app spec.
 func deepCopyMap(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		out[k] = deepCopyValue(v)
-	}
-	return out
-}
-
-func deepCopyValue(v any) any {
-	switch t := v.(type) {
-	case map[string]any:
-		return deepCopyMap(t)
-	case []any:
-		out := make([]any, len(t))
-		for i, e := range t {
-			out[i] = deepCopyValue(e)
-		}
-		return out
-	default:
-		return v
-	}
+	return helmvalues.DeepCopyMap(m)
 }
 
 // writeAppPlatformResources writes the platform-managed ConfigMap + ExternalSecret
