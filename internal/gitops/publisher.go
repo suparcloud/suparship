@@ -622,7 +622,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 				baseDomain = c.BaseDomain
 			}
 			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
-			return marshalValuesWithOverlay(hv, rawValuesOverlay(app, env.EnvName), env.EnvVars)
+			return marshalValuesWithOverlay(hv, envOverlay(app, env), env.EnvVars)
 		}
 		if len(env.Clusters) > 1 {
 			// Fan-out: one values.yaml per cluster under _clusters/<cluster>/,
@@ -682,6 +682,18 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		slog.Debug("gitops: wrote app files", "env", env.EnvName, "app", app.Name)
 	}
 	return nil
+}
+
+// envOverlay builds the full values overlay applied on top of the chart/base
+// values for an environment, layered low→high (later wins):
+//  1. template PlatformDefaultValues (PE, all envs)
+//  2. template PlatformEnvValues     (PE, this env)
+//  3. app + env developer RawValues  (rawValuesOverlay)
+//
+// Everything is deep-copied so neither the template nor the app spec is mutated.
+func envOverlay(app *domain.App, env AppPublishEnv) map[string]any {
+	overlay := deepMerge(deepCopyMap(env.PlatformDefaultValues), deepCopyMap(env.PlatformEnvValues))
+	return deepMerge(overlay, rawValuesOverlay(app, env.EnvName))
 }
 
 // rawValuesOverlay returns the freeform Helm values overlay for an env: the
@@ -1227,6 +1239,13 @@ type AppPublishEnv struct {
 	// overrides) instead of a single shared env values.yaml. Empty / single =
 	// the legacy single values.yaml.
 	Clusters []ClusterTarget
+	// PlatformDefaultValues / PlatformEnvValues are the Platform-Engineer-authored
+	// Helm values overlays from the app's template: DefaultValues (all envs) and
+	// EnvValues[thisEnv]. Layered on top of the chart/base values and below the
+	// developer RawValues, then {platform.*}/{vars.*} interpolated. Populated by
+	// the publish adapter from the resolved template.
+	PlatformDefaultValues map[string]any
+	PlatformEnvValues     map[string]any
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD

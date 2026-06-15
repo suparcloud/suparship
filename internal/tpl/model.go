@@ -104,27 +104,37 @@ type Metadata struct {
 
 // TemplateSpec defines the template's behavior and user-facing configuration.
 type TemplateSpec struct {
-	Title          string              `yaml:"title"`
-	Description    string              `yaml:"description,omitempty"`
-	Category       string              `yaml:"category"`
-	Engine         Engine              `yaml:"engine"`
+	Title       string `yaml:"title"`
+	Description string `yaml:"description,omitempty"`
+	Category    string `yaml:"category"`
+	Engine      Engine `yaml:"engine"`
 	// Components declares the named runtime units this template produces.
 	// When absent, the platform derives a single default component from
 	// Category (backwards-compatible behaviour). When present, each entry
 	// defines defaults that the user can override at app-creation time.
-	Components     []TemplateComponent `yaml:"components,omitempty"`
+	Components []TemplateComponent `yaml:"components,omitempty"`
 	// Addons declares the addon shapes this template materialises when
 	// installed. Wrapper templates (category=addon) declare exactly one
 	// addon entry — the connection contract their chart produces.
 	// Application templates leave this empty; addons are claimed
 	// through AppSpec.Addons and resolved per env via the org's
 	// AddonProfile catalog.
-	Addons         []TemplateAddon     `yaml:"addons,omitempty"`
-	Inputs         []Input             `yaml:"inputs,omitempty"`
-	AdvancedInputs []Input             `yaml:"advancedInputs,omitempty"`
-	SecretInputs   []SecretInput       `yaml:"secretInputs,omitempty"`
-	Mappings       map[string]string   `yaml:"mappings,omitempty"`
-	Presets        []Preset            `yaml:"presets,omitempty"`
+	Addons         []TemplateAddon   `yaml:"addons,omitempty"`
+	Inputs         []Input           `yaml:"inputs,omitempty"`
+	AdvancedInputs []Input           `yaml:"advancedInputs,omitempty"`
+	SecretInputs   []SecretInput     `yaml:"secretInputs,omitempty"`
+	Mappings       map[string]string `yaml:"mappings,omitempty"`
+	Presets        []Preset          `yaml:"presets,omitempty"`
+	// DefaultValues is a Platform-Engineer-authored Helm values overlay applied
+	// to EVERY environment, layered on top of the chart's own default values
+	// (and below per-env EnvValues and developer overrides). Arbitrary Helm
+	// values (BYO-chart friendly); string leaves may use {platform.*}/{vars.*}
+	// tokens resolved at publish.
+	DefaultValues map[string]any `yaml:"defaultValues,omitempty"`
+	// EnvValues holds per-environment Helm values overlays keyed by environment
+	// name (e.g. "staging", "prod"), layered after DefaultValues — so an org can
+	// set a smaller staging baseline and a larger prod one.
+	EnvValues map[string]map[string]any `yaml:"envValues,omitempty"`
 }
 
 // TemplateAddon declares one addon shape this template's chart

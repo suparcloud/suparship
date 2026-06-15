@@ -32,6 +32,49 @@ func TestDeepMerge_NestedMergeAndReplace(t *testing.T) {
 	}
 }
 
+func TestEnvOverlay_LayersPlatformThenEnvThenRaw(t *testing.T) {
+	app := &domain.App{
+		Name: "hello", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			RawValues: map[string]any{"replicas": 5, "image": map[string]any{"tag": "dev"}},
+		},
+	}
+	env := AppPublishEnv{
+		EnvName: "prod",
+		// PE platform defaults (all envs).
+		PlatformDefaultValues: map[string]any{
+			"replicas":  1,
+			"image":     map[string]any{"repository": "ghcr.io/org/app", "tag": "base"},
+			"resources": map[string]any{"requests": map[string]any{"cpu": "100m"}},
+		},
+		// PE per-env (prod) baseline.
+		PlatformEnvValues: map[string]any{
+			"replicas":  3,
+			"resources": map[string]any{"requests": map[string]any{"cpu": "500m"}},
+		},
+	}
+	got := envOverlay(app, env)
+
+	// rawValues (dev) wins over env over default.
+	if got["replicas"] != 5 {
+		t.Errorf("replicas = %v, want 5 (dev rawValues wins)", got["replicas"])
+	}
+	// env baseline (cpu 500m) wins over platform default (100m); no rawValues for it.
+	cpu := got["resources"].(map[string]any)["requests"].(map[string]any)["cpu"]
+	if cpu != "500m" {
+		t.Errorf("cpu = %v, want 500m (env over default)", cpu)
+	}
+	// nested merge: repository from default survives, tag overridden by rawValues.
+	img := got["image"].(map[string]any)
+	if img["repository"] != "ghcr.io/org/app" || img["tag"] != "dev" {
+		t.Errorf("image merge wrong: %v", img)
+	}
+	// app spec not mutated.
+	if app.Spec.RawValues["replicas"] != 5 {
+		t.Error("envOverlay mutated the app spec")
+	}
+}
+
 func TestRawValuesOverlay_EnvWinsOverApp(t *testing.T) {
 	app := &domain.App{
 		Name: "hello", ProjectName: "demo",
