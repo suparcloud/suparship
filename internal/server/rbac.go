@@ -283,6 +283,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/promotions/{name}", viewProject(rh.appHandler.handleGetKargoPromotion))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/kargo/stages", viewProject(rh.appHandler.handleGetKargoStages))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}/history", viewProject(rh.appHandler.handleGetAppDeploymentHistory))
+		// Read-only effective-values preview for the values editor (computes the
+		// merged chart⊕platform⊕overrides document for an env; never mutates).
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/envs/{env}/values/preview", viewProject(rh.appHandler.handleAppValuesPreview))
 		// Sync re-triggers the gitops publish for an existing app. Registered
 		// unconditionally — returns 503 when publisher is not configured so the
 		// UI can show a clear error rather than a 404.

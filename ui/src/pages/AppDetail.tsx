@@ -1,9 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, promoteApp, syncApp, deleteApp, updateApp, upgradeAppTemplate } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, promoteApp, syncApp, deleteApp, updateApp, upgradeAppTemplate } from "../lib/apps";
 import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
+import { listConfigVariables } from "../lib/configVars";
+import type { ConfigVariables } from "../lib/configVars";
+import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
+
+// CodeMirror is heavy; only the values editor needs it.
+const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 import { listTemplateVersions } from "../lib/templates";
 import type { TemplateVersionInfo } from "../types";
 import { createPreview, deletePreview } from "../lib/previews";
@@ -31,13 +37,11 @@ import {
 } from "../lib/secrets";
 import { listOrgEnvironments } from "../lib/settings";
 import type { ResolvedSecretEntry } from "../lib/secrets";
-import { ComponentConfigEditor } from "../components/ComponentConfigEditor";
 import type {
   AppDeploymentHistoryResponse,
   AppDetail as AppDetailType,
   AppEnvironmentSummary,
   AppLogsResponse,
-  ComponentConfig,
   ComponentSummary,
   DeploymentHistoryEntry,
   Diagnostic,
@@ -1611,145 +1615,260 @@ function DiagnosticsPanel({ diagnostics }: { diagnostics: Diagnostic[] }) {
 // re-publishes so values.yaml regenerates. Existing values are string-edited;
 // non-string values (numbers/bools/objects) are shown read-only with a hint to
 // keep the edit surface honest about what it round-trips.
-function AppConfigEditor({
+// Disclosure is a small collapsible wrapper for advanced/secondary sections.
+function Disclosure({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-5 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-400 hover:text-gray-600"
+      >
+        <svg
+          className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-90" : ""}`}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2.5}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+        </svg>
+        {title}
+      </button>
+      {open && <div className="border-t border-gray-100 px-5 py-4">{children}</div>}
+    </div>
+  );
+}
+
+// LegacyConfigNotice surfaces structured config persisted by the old form
+// (template input values / per-component config). It's frozen — still published
+// by the backend but no longer editable here — shown read-only for discovery.
+function LegacyConfigNotice({ data }: { data: AppDetailType }) {
+  const hasValues = Object.keys(data.values ?? {}).length > 0;
+  const hasComponents =
+    Object.keys(data.componentConfigs ?? {}).length > 0 ||
+    Object.keys(data.envComponents ?? {}).length > 0;
+  if (!hasValues && !hasComponents) return null;
+
+  const legacy = {
+    ...(hasValues ? { values: data.values } : {}),
+    ...(data.componentConfigs && Object.keys(data.componentConfigs).length > 0
+      ? { componentConfigs: data.componentConfigs }
+      : {}),
+    ...(data.envComponents && Object.keys(data.envComponents).length > 0
+      ? { envComponents: data.envComponents }
+      : {}),
+  };
+
+  return (
+    <Disclosure title="Legacy structured config (read-only)">
+      <p className="mb-2 text-xs text-gray-500">
+        This app carries structured config from the older form. It's still applied
+        at deploy but is no longer editable here — express changes as values
+        overrides above. It will be migrated/cleared in a future step.
+      </p>
+      <pre className="max-h-72 overflow-auto rounded-lg bg-gray-50 p-3 font-mono text-xs text-gray-700">
+        {JSON.stringify(legacy, null, 2)}
+      </pre>
+    </Disclosure>
+  );
+}
+
+// AppValuesEditor edits the developer's override layers — the app-level base
+// (rawValues, all envs) and per-environment overrides (envRawValues[env]) — and
+// shows a read-only effective preview (chart ⊕ platform/env ⊕ overrides) computed
+// by the backend, reflecting unsaved edits.
+const BASE_SCOPE = "__base__";
+
+function AppValuesEditor({
   data,
   project,
+  currentEnvName,
   onSaved,
 }: {
   data: AppDetailType;
   project: string;
+  currentEnvName: string | null;
   onSaved: () => Promise<void>;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [displayName, setDisplayName] = useState(data.displayName ?? "");
-  const [description, setDescription] = useState(data.description ?? "");
-  // Only string-valued entries are editable; others are passed through untouched.
-  const stringEntries = Object.entries(data.values).filter(
-    ([, v]) => typeof v === "string",
-  ) as [string, string][];
-  const [vals, setVals] = useState<Record<string, string>>(() =>
-    Object.fromEntries(stringEntries),
-  );
+  const envs = (data.environments ?? [])
+    .filter((e) => e.envType !== "preview")
+    .map((e) => e.envName);
 
-  function reset() {
-    setDisplayName(data.displayName ?? "");
-    setDescription(data.description ?? "");
-    setVals(Object.fromEntries(stringEntries));
-    setEditing(false);
+  const [scope, setScope] = useState<string>(BASE_SCOPE);
+  const [baseText, setBaseText] = useState("");
+  const [envTexts, setEnvTexts] = useState<Record<string, string>>({});
+  const [yamlError, setYamlError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
+  const [preview, setPreview] = useState<string>("");
+  const [chartAvailable, setChartAvailable] = useState(true);
+
+  // Seed editors from the persisted overlays whenever the app data changes.
+  useEffect(() => {
+    setBaseText(stringifyOverlay(data.rawValues));
+    const next: Record<string, string> = {};
+    for (const env of envs) {
+      next[env] = stringifyOverlay(data.envRawValues?.[env]);
+    }
+    setEnvTexts(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  useEffect(() => {
+    listConfigVariables(project)
+      .then(setConfigVars)
+      .catch(() => setConfigVars({ platform: [], vars: [] }));
+  }, [project]);
+
+  const activeText = scope === BASE_SCOPE ? baseText : (envTexts[scope] ?? "");
+  function setActiveText(text: string) {
+    if (scope === BASE_SCOPE) setBaseText(text);
+    else setEnvTexts((cur) => ({ ...cur, [scope]: text }));
   }
 
+  // The env whose effective values we preview: the selected scope env, else the
+  // currently-viewed env, else the first env.
+  const previewEnv =
+    scope !== BASE_SCOPE ? scope : (currentEnvName ?? envs[0] ?? "");
+
+  // Debounced effective-values preview, reflecting unsaved edits to both layers.
+  useEffect(() => {
+    if (!previewEnv) return;
+    const baseParsed = parseYamlOverlay(baseText);
+    const envParsed = parseYamlOverlay(envTexts[previewEnv] ?? "");
+    if (baseParsed.error || envParsed.error) return; // keep last good preview
+    const handle = setTimeout(() => {
+      previewAppValues(project, data.name, previewEnv, {
+        rawValues: baseParsed.value ?? {},
+        envRawValues: { [previewEnv]: envParsed.value ?? {} },
+      })
+        .then((res) => {
+          setPreview(stringifyOverlay(res.values));
+          setChartAvailable(res.chartDefaultsAvailable);
+        })
+        .catch(() => {
+          /* leave last good preview */
+        });
+    }, 400);
+    return () => clearTimeout(handle);
+  }, [project, data.name, previewEnv, baseText, envTexts]);
+
   async function save() {
+    const parsed = parseYamlOverlay(activeText);
+    if (parsed.error) {
+      setYamlError(parsed.error);
+      return;
+    }
     setSaving(true);
     try {
-      // Merge edited string values back over the original values map so
-      // non-string entries are preserved verbatim.
-      const merged: Record<string, unknown> = { ...data.values };
-      for (const [k, v] of Object.entries(vals)) merged[k] = v;
-      await updateApp(project, data.name, {
-        displayName,
-        description,
-        values: merged,
-      });
-      toast.success("App config updated — re-publishing to GitOps.");
+      const req: UpdateAppRequest =
+        scope === BASE_SCOPE
+          ? { rawValues: parsed.value ?? {} }
+          : { envRawValues: { [scope]: parsed.value ?? {} } };
+      await updateApp(project, data.name, req);
+      toast.success("Values saved — re-publishing to GitOps.");
       await onSaved();
-      setEditing(false);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to update app config");
+      toast.error(err instanceof Error ? err.message : "Failed to save values");
     } finally {
       setSaving(false);
     }
   }
 
-  const nonStringKeys = Object.keys(data.values).filter(
-    (k) => typeof data.values[k] !== "string",
-  );
-
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
       <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
         <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
-          Configuration
+          Values
         </h2>
-        {editing ? (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={reset}
-              disabled={saving}
-              className="rounded-md px-3 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={save}
-              disabled={saving}
-              className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={() => setEditing(true)}
-            className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+        <div className="flex items-center gap-2">
+          <select
+            value={scope}
+            onChange={(e) => {
+              setScope(e.target.value);
+              setYamlError(null);
+            }}
+            className="rounded-md border border-gray-300 px-2 py-1 text-xs"
           >
-            Edit
+            <option value={BASE_SCOPE}>Base (all environments)</option>
+            {envs.map((env) => (
+              <option key={env} value={env}>
+                {env} overrides
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={save}
+            disabled={saving || yamlError !== null}
+            className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save"}
           </button>
+        </div>
+      </div>
+      <div className="px-5 py-4">
+        <p className="mb-3 text-xs text-gray-400">
+          {scope === BASE_SCOPE
+            ? "App-level overrides applied to every environment."
+            : `Overrides for ${scope}, layered on top of the base.`}{" "}
+          Edit only what you override — empty inherits the chart and platform
+          defaults. Reference{" "}
+          <code className="font-mono">{"{platform.*}"}</code> /{" "}
+          <code className="font-mono">{"{vars.*}"}</code> tokens.
+        </p>
+        <Suspense
+          fallback={
+            <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
+              Loading editor…
+            </div>
+          }
+        >
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <ValuesEditor
+              label={scope === BASE_SCOPE ? "Base overrides" : `${scope} overrides`}
+              value={activeText}
+              configVars={configVars}
+              placeholder={
+                "# e.g.\nresources:\n  requests:\n    cpu: 200m"
+              }
+              onChange={setActiveText}
+              onValidChange={(_, err) => setYamlError(err)}
+            />
+            <div>
+              <ValuesEditor
+                label={
+                  previewEnv
+                    ? `Effective — ${previewEnv}`
+                    : "Effective"
+                }
+                value={preview}
+                readOnly
+              />
+              {!chartAvailable && (
+                <p className="mt-1 text-xs text-gray-400">
+                  Chart defaults aren't readable for this template; preview shows
+                  platform defaults + overrides only.
+                </p>
+              )}
+              <p className="mt-1 text-xs text-gray-400">
+                Preview omits <code className="font-mono">{"{…}"}</code> token
+                resolution — applied at deploy.
+              </p>
+            </div>
+          </div>
+        </Suspense>
+        {yamlError && (
+          <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
         )}
       </div>
-
-      {editing ? (
-        <div className="space-y-3 px-5 py-4">
-          <label className="block">
-            <span className="text-xs font-medium text-gray-600">Display name</span>
-            <input
-              type="text"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm"
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs font-medium text-gray-600">Description</span>
-            <input
-              type="text"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm"
-            />
-          </label>
-          {stringEntries.map(([key]) => (
-            <label key={key} className="block">
-              <span className="font-mono text-xs text-gray-600">{key}</span>
-              <input
-                type="text"
-                value={vals[key] ?? ""}
-                onChange={(e) => setVals((cur) => ({ ...cur, [key]: e.target.value }))}
-                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm font-mono"
-              />
-            </label>
-          ))}
-          {nonStringKeys.length > 0 && (
-            <p className="text-xs text-gray-400">
-              {nonStringKeys.length} non-text value(s) ({nonStringKeys.join(", ")})
-              are preserved unchanged and editable via the template/values flow.
-            </p>
-          )}
-        </div>
-      ) : Object.keys(data.values).length > 0 || data.description ? (
-        <dl className="divide-y divide-gray-50">
-          {Object.entries(data.values).map(([key, val]) => (
-            <div key={key} className="flex items-center justify-between px-5 py-2.5">
-              <dt className="font-mono text-sm text-gray-500">{key}</dt>
-              <dd className="text-sm text-gray-900">{String(val)}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : (
-        <p className="px-5 py-4 text-sm text-gray-400">
-          No configuration values. Click Edit to add display name/description.
-        </p>
-      )}
     </div>
   );
 }
@@ -1760,61 +1879,6 @@ function AppConfigEditor({
 // saves via the app-edit PATCH (clusterOverrides), which re-publishes per
 // cluster.
 type ClusterDraft = { replicas: string; rows: { key: string; value: string }[] };
-
-// ComponentConfigSection wraps the per-component editor: resources / KEDA
-// triggers / envFrom / env, at app level and per (stable) environment.
-function ComponentConfigSection({
-  data,
-  project,
-  onSaved,
-}: {
-  data: AppDetailType;
-  project: string;
-  onSaved: () => Promise<void>;
-}) {
-  const [saving, setSaving] = useState(false);
-  const components = (data.components ?? []).map((c) => c.name);
-  const environments = (data.environments ?? [])
-    .filter((e) => e.envType !== "preview")
-    .map((e) => e.envName);
-  if (components.length === 0) return null;
-
-  async function save(
-    componentConfigs: Record<string, ComponentConfig>,
-    envComponents: Record<string, Record<string, ComponentConfig>>,
-  ) {
-    setSaving(true);
-    try {
-      await updateApp(project, data.name, { componentConfigs, envComponents });
-      await onSaved();
-      toast.success("Component config saved");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <section className="rounded-lg border border-gray-200 bg-white p-6">
-      <h3 className="text-sm font-semibold text-gray-900">
-        Component configuration
-      </h3>
-      <p className="mb-4 mt-1 text-xs text-gray-500">
-        Per-component resources, KEDA autoscaling, envFrom, and env overrides —
-        at the app level or overridden per environment.
-      </p>
-      <ComponentConfigEditor
-        components={components}
-        environments={environments}
-        componentConfigs={data.componentConfigs ?? {}}
-        envComponents={data.envComponents ?? {}}
-        saving={saving}
-        onSave={save}
-      />
-    </section>
-  );
-}
 
 function ClusterOverridesEditor({
   data,
@@ -2192,18 +2256,21 @@ function OverviewTab({
       {/* Runtime component summaries for the selected environment */}
       <ComponentsTable components={data.components} currentEnv={currentEnv} />
 
-      {/* Configuration — editable */}
-      <AppConfigEditor
+      {/* Values — edit the base + per-env override layers; preview effective. */}
+      <AppValuesEditor
         data={data}
         project={project}
+        currentEnvName={currentEnv?.envName ?? null}
         onSaved={onSaved}
       />
 
-      {/* Per-cluster overrides — only for fan-out environments */}
-      <ClusterOverridesEditor data={data} project={project} onSaved={onSaved} />
+      {/* Legacy structured config (from the old form) — frozen, read-only. */}
+      <LegacyConfigNotice data={data} />
 
-      {/* Per-component config — resources / KEDA triggers / envFrom / env */}
-      <ComponentConfigSection data={data} project={project} onSaved={onSaved} />
+      {/* Per-cluster overrides — only for fan-out environments. Advanced. */}
+      <Disclosure title="Per-cluster overrides (advanced)">
+        <ClusterOverridesEditor data={data} project={project} onSaved={onSaved} />
+      </Disclosure>
 
       {/* Secrets */}
       {data.secretRefs.length > 0 && (

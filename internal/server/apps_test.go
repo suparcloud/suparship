@@ -927,16 +927,34 @@ func TestCreateAppUnknownTemplate(t *testing.T) {
 	}
 }
 
-func TestCreateAppValidationFailureMissingRequiredInput(t *testing.T) {
+func TestCreateApp_NoValuesSkipsInputValidation(t *testing.T) {
+	// Values-editor-first: the create form sends no `values`. Template inputs are
+	// no longer enforced, so omitting a required input ("image" in
+	// appCreateTestTemplate) must SUCCEED — developers configure via the values
+	// editor (rawValues), not template inputs.
 	mux, ah, _, _ := newTestAppCreateMux()
 
-	// "image" is a required input in appCreateTestTemplate; omit it.
 	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
 		Name:     "my-app",
 		Template: "web-service",
 	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (inputs not enforced when values omitted), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateApp_StillValidatesProvidedValues(t *testing.T) {
+	// When a legacy client DOES send values, validation still runs (e.g. unknown
+	// input is rejected) — the guard only skips enforcement for empty values.
+	mux, ah, _, _ := newTestAppCreateMux()
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "my-app",
+		Template: "web-service",
+		Values:   map[string]any{"not_a_real_input": "x"},
+	})
 	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 422 for unknown provided input, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

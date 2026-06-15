@@ -253,8 +253,14 @@ func Create(req CreateRequest) (*CreateResult, error) {
 	for i, sr := range req.SecretRefs {
 		secretRefsForValidation[i] = project.SecretRef{Name: sr.Name, SecretRef: sr.SecretRef}
 	}
-	if err := project.ValidateAppInputs(req.Values, secretRefsForValidation, req.Template); err != nil {
-		return nil, fmt.Errorf("invalid template inputs: %w", err)
+	// Template inputs are retired in the values-editor-first flow: the form sends
+	// no `values` (developers configure via the values editor). Only validate when
+	// values are actually provided (legacy API clients), so a template declaring a
+	// required, default-less input no longer blocks creation.
+	if len(req.Values) > 0 {
+		if err := project.ValidateAppInputs(req.Values, secretRefsForValidation, req.Template); err != nil {
+			return nil, fmt.Errorf("invalid template inputs: %w", err)
+		}
 	}
 	if err := domain.ValidateAddons(req.Addons); err != nil {
 		return nil, fmt.Errorf("invalid addon claims: %w", err)

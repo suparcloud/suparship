@@ -1,5 +1,7 @@
 import { api } from "./api";
 import type {
+  EffectiveValuesResponse,
+  TemplateOverride,
   TemplateCredentialsRequest,
   TemplateCredentialsResponse,
   TemplateDetail,
@@ -19,6 +21,59 @@ export function fetchTemplates(): Promise<TemplatesResponse> {
 
 export function fetchTemplate(name: string): Promise<TemplateDetail> {
   return api.get<TemplateDetail>(`/templates/${encodeURIComponent(name)}`);
+}
+
+// fetchTemplateEffectiveValues returns the starting values document for a
+// not-yet-created app from this template: chart defaults ⊕ the template's
+// platform/env defaults ⊕ the saved org override (for the given env). Backs the
+// create form's read-only effective-values preview.
+export function fetchTemplateEffectiveValues(
+  name: string,
+  env?: string,
+): Promise<EffectiveValuesResponse> {
+  const q = env ? `?env=${encodeURIComponent(env)}` : "";
+  return api.get<EffectiveValuesResponse>(
+    `/templates/${encodeURIComponent(name)}/effective-values${q}`,
+  );
+}
+
+// fetchTemplateOverride returns the saved org-level platform override for a
+// template (PE/SRE-authored). Empty object when none is set.
+export function fetchTemplateOverride(name: string): Promise<TemplateOverride> {
+  return api.get<TemplateOverride>(
+    `/templates/${encodeURIComponent(name)}/overrides`,
+  );
+}
+
+// updateTemplateOverride replaces the org-level platform override (org_admin).
+// Send an empty override to clear it.
+export function updateTemplateOverride(
+  name: string,
+  override: TemplateOverride,
+): Promise<TemplateOverride> {
+  return api.put<TemplateOverride>(
+    `/templates/${encodeURIComponent(name)}/overrides`,
+    override,
+  );
+}
+
+// previewTemplateEffectiveValues previews chart ⊕ template ⊕ the supplied
+// (unsaved) org override for an env (and optional target cluster) — backs the PE
+// editor's live preview.
+export function previewTemplateEffectiveValues(
+  name: string,
+  env: string,
+  cluster: string,
+  override: TemplateOverride,
+): Promise<EffectiveValuesResponse> {
+  const params = new URLSearchParams();
+  if (env) params.set("env", env);
+  if (cluster) params.set("cluster", cluster);
+  const q = params.toString();
+  return api.post<EffectiveValuesResponse>(
+    `/templates/${encodeURIComponent(name)}/effective-values${q ? `?${q}` : ""}`,
+    override,
+  );
 }
 
 // deleteTemplate removes a cluster-stored template. Built-in templates

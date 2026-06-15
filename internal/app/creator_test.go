@@ -764,18 +764,31 @@ func TestCreate_ValidationRejectsInvalidAppName(t *testing.T) {
 	}
 }
 
-func TestCreate_ValidationRejectsMissingRequiredInput(t *testing.T) {
+func TestCreate_EmptyValuesSkipsInputValidation(t *testing.T) {
+	// Values-editor-first: with no `values`, template inputs are not enforced —
+	// a required input ("image") absent must NOT fail creation. Developers
+	// configure via the values editor (rawValues) instead.
 	_, err := Create(CreateRequest{
 		ProjectName: "demo",
 		AppName:     "my-app",
 		Template:    minimalTemplateWithComponents(),
-		Values:      map[string]any{}, // "image" is required but absent
+		Values:      map[string]any{}, // "image" is required but absent — allowed now
+	})
+	if err != nil {
+		t.Fatalf("expected no error when values are omitted, got: %v", err)
+	}
+}
+
+func TestCreate_StillValidatesProvidedValues(t *testing.T) {
+	// When values ARE provided, validation still runs.
+	_, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{"unknown_input": "x"},
 	})
 	if err == nil {
-		t.Fatal("expected error for missing required input")
-	}
-	if !strings.Contains(err.Error(), "image") {
-		t.Errorf("error should mention missing input 'image', got: %v", err)
+		t.Fatal("expected error for unknown provided input")
 	}
 }
 

@@ -316,6 +316,36 @@ export interface TemplateDetail {
   secretInputs: TemplateSecretInput[];
   presets: TemplatePreset[];
   components?: TemplateComponentInfo[];
+  // Platform-Engineer-authored Helm values overlays (all-envs + per-env),
+  // layered above chart defaults and below developer overrides.
+  defaultValues?: Record<string, unknown>;
+  envValues?: Record<string, Record<string, unknown>>;
+}
+
+// TemplateOverride is the org-level platform values overlay a PE/SRE authors for
+// a template (all-envs default + per-env), layered above the template's own
+// values and below developer overrides at publish. Stored separately from the
+// template so external sync can't clobber it.
+export interface TemplateOverride {
+  defaultValues?: Record<string, unknown>;
+  envValues?: Record<string, Record<string, unknown>>;
+  // Per-cluster overlays keyed by cluster ref (env-agnostic), for cloud-intrinsic
+  // structured annotations. Applied to every env that deploys to the cluster.
+  clusterValues?: Record<string, Record<string, unknown>>;
+}
+
+// EffectiveValuesResponse is the read-only "what will deploy" preview backing
+// the values editor: the merged values document (chart ⊕ platform/env ⊕
+// overrides), NOT the fully rendered chart.
+export interface EffectiveValuesResponse {
+  values: Record<string, unknown>;
+  // false when the chart bundle couldn't be read (built-in/disk/external-mode);
+  // the preview then reflects only platform/env defaults + overrides.
+  chartDefaultsAvailable: boolean;
+  // whether {platform.*}/{vars.*} tokens were resolved (always false in v1).
+  interpolated: boolean;
+  // overlays that contributed, low→high.
+  layers: string[];
 }
 
 // --- Onboarding types ---

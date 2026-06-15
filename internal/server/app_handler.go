@@ -399,9 +399,14 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		for i, sr := range app.Spec.SecretRefs {
 			secretRefs[i] = project.SecretRef{Name: sr.Name, SecretRef: sr.SecretRef}
 		}
-		if err := project.ValidateAppInputs(newValues, secretRefs, tmpl); err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
-			return
+		// Only enforce template inputs when values are actually provided — the
+		// values-editor-first flow sends none (see creator.go). An empty values
+		// map (explicit clear) is allowed without re-validating required inputs.
+		if len(newValues) > 0 {
+			if err := project.ValidateAppInputs(newValues, secretRefs, tmpl); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+				return
+			}
 		}
 		app.Spec.Values = newValues
 	}
