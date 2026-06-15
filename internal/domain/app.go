@@ -188,6 +188,55 @@ type ComponentSpec struct {
 	// (e.g. environment variable defaults, feature flags). Secret values
 	// MUST NOT appear here; use AppSpec.SecretRefs instead.
 	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
+	// Resources sets raw CPU/memory requests+limits for the component
+	// container. Set instead of (or alongside, taking precedence over)
+	// SizePreset when a chart consumes raw resources.
+	Resources *ComponentResources `json:"resources,omitempty" yaml:"resources,omitempty"`
+	// EnvFromSecrets / EnvFromConfigMaps are extra Secret / ConfigMap names the
+	// component should envFrom, appended after the platform envFrom hierarchy.
+	EnvFromSecrets    []string `json:"envFromSecrets,omitempty" yaml:"envFromSecrets,omitempty"`
+	EnvFromConfigMaps []string `json:"envFromConfigMaps,omitempty" yaml:"envFromConfigMaps,omitempty"`
+	// Scaling holds per-component KEDA autoscaling (triggers + min/max).
+	Scaling *ComponentScaling `json:"scaling,omitempty" yaml:"scaling,omitempty"`
+}
+
+// ComponentResources holds raw Kubernetes resource quantities for a component
+// container — set directly rather than via a size preset. Keys are resource
+// names (cpu, memory, ephemeral-storage) mapped to quantity strings.
+type ComponentResources struct {
+	Requests map[string]string `json:"requests,omitempty" yaml:"requests,omitempty"`
+	Limits   map[string]string `json:"limits,omitempty" yaml:"limits,omitempty"`
+}
+
+// KEDATrigger is one KEDA ScaledObject trigger. Metadata values are all strings
+// (KEDA's contract). Advanced fields (authenticationRef, fallback, …) are out of
+// scope here — use the raw-values overlay for those.
+type KEDATrigger struct {
+	Type       string            `json:"type" yaml:"type"`
+	MetricType string            `json:"metricType,omitempty" yaml:"metricType,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+// ComponentScaling holds per-component KEDA autoscaling config. A non-empty
+// Triggers list replaces the chart's defaults for that component.
+type ComponentScaling struct {
+	Triggers    []KEDATrigger `json:"triggers,omitempty" yaml:"triggers,omitempty"`
+	MinReplicas *int32        `json:"minReplicas,omitempty" yaml:"minReplicas,omitempty"`
+	MaxReplicas *int32        `json:"maxReplicas,omitempty" yaml:"maxReplicas,omitempty"`
+}
+
+// ComponentConfig carries the per-component knobs that can be overridden per
+// environment (EnvironmentOverride.Components) and declared as template defaults
+// (ComponentDefaults). All fields optional; only set ones apply over the
+// app-level ComponentSpec values.
+type ComponentConfig struct {
+	Resources         *ComponentResources `json:"resources,omitempty" yaml:"resources,omitempty"`
+	EnvFromSecrets    []string            `json:"envFromSecrets,omitempty" yaml:"envFromSecrets,omitempty"`
+	EnvFromConfigMaps []string            `json:"envFromConfigMaps,omitempty" yaml:"envFromConfigMaps,omitempty"`
+	Scaling           *ComponentScaling   `json:"scaling,omitempty" yaml:"scaling,omitempty"`
+	// Env is a key/value env-override map for this component, merged over the
+	// component's app-level Config (env override wins per key).
+	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 }
 
 
@@ -217,6 +266,15 @@ type EnvironmentOverride struct {
 	// EnvConfig holds env vars and secret refs specific to this app+environment
 	// combination (App Environment level of the hierarchy — wins all other levels).
 	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
+	// RawValues is a freeform Helm values overlay for this environment, deep-merged
+	// on top of the app-level RawValues and the generated chart values at publish
+	// time (env wins). String leaves may reference {platform.*}/{vars.*} tokens,
+	// resolved per (env, cluster). No secrets.
+	RawValues map[string]any `json:"rawValues,omitempty" yaml:"rawValues,omitempty"`
+	// Components holds per-component overrides for this environment, keyed by
+	// component name — resources, envFrom, scaling, and env — overriding the
+	// app-level ComponentSpec values for this env only.
+	Components map[string]ComponentConfig `json:"components,omitempty" yaml:"components,omitempty"`
 	// ClusterOverrides holds per-cluster value overrides keyed by cluster name,
 	// applied on top of this env override for apps in a fan-out environment
 	// (deployMode "all"). Each cluster's published values.yaml is the env values
@@ -277,6 +335,11 @@ type AppSpec struct {
 	// Component-specific vars should use ComponentSpec.Config instead, which
 	// renders as direct env: entries and wins over all envFrom layers.
 	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
+	// RawValues is a freeform Helm values overlay (escape hatch) deep-merged on
+	// top of the generated chart values at publish time, below any per-env
+	// RawValues. String leaves may reference {platform.*}/{vars.*} tokens, resolved
+	// per (env, cluster). No secrets — use SecretRefs/EnvConfig.SecretRefs.
+	RawValues map[string]any `json:"rawValues,omitempty" yaml:"rawValues,omitempty"`
 	// NamespaceScope controls whether this app deploys into a dedicated app
 	// namespace ("app", default) or the shared project namespace ("project").
 	// Empty is treated as "app".

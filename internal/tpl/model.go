@@ -104,27 +104,37 @@ type Metadata struct {
 
 // TemplateSpec defines the template's behavior and user-facing configuration.
 type TemplateSpec struct {
-	Title          string              `yaml:"title"`
-	Description    string              `yaml:"description,omitempty"`
-	Category       string              `yaml:"category"`
-	Engine         Engine              `yaml:"engine"`
+	Title       string `yaml:"title"`
+	Description string `yaml:"description,omitempty"`
+	Category    string `yaml:"category"`
+	Engine      Engine `yaml:"engine"`
 	// Components declares the named runtime units this template produces.
 	// When absent, the platform derives a single default component from
 	// Category (backwards-compatible behaviour). When present, each entry
 	// defines defaults that the user can override at app-creation time.
-	Components     []TemplateComponent `yaml:"components,omitempty"`
+	Components []TemplateComponent `yaml:"components,omitempty"`
 	// Addons declares the addon shapes this template materialises when
 	// installed. Wrapper templates (category=addon) declare exactly one
 	// addon entry — the connection contract their chart produces.
 	// Application templates leave this empty; addons are claimed
 	// through AppSpec.Addons and resolved per env via the org's
 	// AddonProfile catalog.
-	Addons         []TemplateAddon     `yaml:"addons,omitempty"`
-	Inputs         []Input             `yaml:"inputs,omitempty"`
-	AdvancedInputs []Input             `yaml:"advancedInputs,omitempty"`
-	SecretInputs   []SecretInput       `yaml:"secretInputs,omitempty"`
-	Mappings       map[string]string   `yaml:"mappings,omitempty"`
-	Presets        []Preset            `yaml:"presets,omitempty"`
+	Addons         []TemplateAddon   `yaml:"addons,omitempty"`
+	Inputs         []Input           `yaml:"inputs,omitempty"`
+	AdvancedInputs []Input           `yaml:"advancedInputs,omitempty"`
+	SecretInputs   []SecretInput     `yaml:"secretInputs,omitempty"`
+	Mappings       map[string]string `yaml:"mappings,omitempty"`
+	Presets        []Preset          `yaml:"presets,omitempty"`
+	// DefaultValues is a Platform-Engineer-authored Helm values overlay applied
+	// to EVERY environment, layered on top of the chart's own default values
+	// (and below per-env EnvValues and developer overrides). Arbitrary Helm
+	// values (BYO-chart friendly); string leaves may use {platform.*}/{vars.*}
+	// tokens resolved at publish.
+	DefaultValues map[string]any `yaml:"defaultValues,omitempty"`
+	// EnvValues holds per-environment Helm values overlays keyed by environment
+	// name (e.g. "staging", "prod"), layered after DefaultValues — so an org can
+	// set a smaller staging baseline and a larger prod one.
+	EnvValues map[string]map[string]any `yaml:"envValues,omitempty"`
 }
 
 // TemplateAddon declares one addon shape this template's chart
@@ -200,6 +210,41 @@ type TemplateComponent struct {
 	// *override* from the type-based defaults; ResolvedCapabilities()
 	// fills in the rest. See ComponentCapabilities for the vocabulary.
 	Capabilities ComponentCapabilities `yaml:"capabilities,omitempty"`
+	// Defaults seeds the per-component config (raw resources, envFrom, KEDA
+	// scaling, env overrides) into the app's ComponentSpec at creation.
+	// Operators override per app / per environment afterward in the UI.
+	Defaults *ComponentDefaults `yaml:"defaults,omitempty"`
+}
+
+// ComponentDefaults are the per-component config defaults a template declares.
+// Copied into domain.ComponentSpec at app creation. Mirrors the per-component
+// knobs (resources / envFrom / scaling / env).
+type ComponentDefaults struct {
+	Resources         *ComponentResources `yaml:"resources,omitempty"`
+	EnvFromSecrets    []string            `yaml:"envFromSecrets,omitempty"`
+	EnvFromConfigMaps []string            `yaml:"envFromConfigMaps,omitempty"`
+	Scaling           *ComponentScaling   `yaml:"scaling,omitempty"`
+	Env               map[string]string   `yaml:"env,omitempty"`
+}
+
+// ComponentResources mirrors domain.ComponentResources for template YAML.
+type ComponentResources struct {
+	Requests map[string]string `yaml:"requests,omitempty"`
+	Limits   map[string]string `yaml:"limits,omitempty"`
+}
+
+// KEDATrigger mirrors domain.KEDATrigger for template YAML.
+type KEDATrigger struct {
+	Type       string            `yaml:"type"`
+	MetricType string            `yaml:"metricType,omitempty"`
+	Metadata   map[string]string `yaml:"metadata,omitempty"`
+}
+
+// ComponentScaling mirrors domain.ComponentScaling for template YAML.
+type ComponentScaling struct {
+	Triggers    []KEDATrigger `yaml:"triggers,omitempty"`
+	MinReplicas *int32        `yaml:"minReplicas,omitempty"`
+	MaxReplicas *int32        `yaml:"maxReplicas,omitempty"`
 }
 
 // ComponentCapabilities declares which input groups the UI should

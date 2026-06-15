@@ -232,7 +232,7 @@ func newCompatTestMux(t *testing.T) (*http.ServeMux, *http.Cookie) {
 		auth:             ah,
 		orgStore:      org,
 		projectStore:     store,
-		serviceHandler:   newServiceHandler(store, []*tpl.Template{tmpl}),
+		serviceHandler:   newServiceHandler(store, []*tpl.Template{tmpl}, nil),
 		inventoryHandler: newInventoryHandler(store, nil),
 		previewHandler:   newPreviewHandler(ps, store, nil, org),
 		promoteHandler:   newPromoteHandler(store),

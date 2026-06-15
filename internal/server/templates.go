@@ -37,31 +37,31 @@ type TemplatesResponse struct {
 // TemplateDetailDTO is the full form returned by GET /api/v1/templates/{name},
 // including all inputs and presets needed for UI form generation.
 type TemplateDetailDTO struct {
-	Name           string                       `json:"name"`
-	Version        string                       `json:"version"`
-	Title          string                       `json:"title"`
-	Description    string                       `json:"description,omitempty"`
-	Category       string                       `json:"category"`
-	Engine         string                       `json:"engine"`
-	Components     []TemplateComponentDTO       `json:"components"`
-	Inputs         []InputDTO                   `json:"inputs"`
-	AdvancedInputs []InputDTO                   `json:"advancedInputs"`
-	SecretInputs   []SecretInputDTO             `json:"secretInputs"`
-	Presets        []PresetDTO                  `json:"presets"`
+	Name           string                 `json:"name"`
+	Version        string                 `json:"version"`
+	Title          string                 `json:"title"`
+	Description    string                 `json:"description,omitempty"`
+	Category       string                 `json:"category"`
+	Engine         string                 `json:"engine"`
+	Components     []TemplateComponentDTO `json:"components"`
+	Inputs         []InputDTO             `json:"inputs"`
+	AdvancedInputs []InputDTO             `json:"advancedInputs"`
+	SecretInputs   []SecretInputDTO       `json:"secretInputs"`
+	Presets        []PresetDTO            `json:"presets"`
 }
 
 // TemplateComponentDTO mirrors tpl.TemplateComponent for the wire,
 // with capabilities resolved (no pointers, type-based defaults
 // already filled in) so the UI can drive form rendering directly.
 type TemplateComponentDTO struct {
-	Name               string                  `json:"name"`
-	Type               string                  `json:"type"`
-	Required           bool                    `json:"required"`
-	DefaultEnabled     bool                    `json:"defaultEnabled"`
-	PreviewEnabled     bool                    `json:"previewEnabled"`
-	Exposed            bool                    `json:"exposed"`
-	Produces           []string                `json:"produces,omitempty"`
-	OptionallyProduces []string                `json:"optionallyProduces,omitempty"`
+	Name               string                   `json:"name"`
+	Type               string                   `json:"type"`
+	Required           bool                     `json:"required"`
+	DefaultEnabled     bool                     `json:"defaultEnabled"`
+	PreviewEnabled     bool                     `json:"previewEnabled"`
+	Exposed            bool                     `json:"exposed"`
+	Produces           []string                 `json:"produces,omitempty"`
+	OptionallyProduces []string                 `json:"optionallyProduces,omitempty"`
 	Capabilities       tpl.ResolvedCapabilities `json:"capabilities"`
 }
 
@@ -102,9 +102,10 @@ type PresetDTO struct {
 // for cluster-stored templates so the BYO-chart import flow surfaces in the
 // gallery without a server restart.
 //
-// Resolution policy: built-ins take precedence on name collisions — that
-// way an operator who accidentally imports a chart named "web-service"
-// can't shadow the platform's golden path.
+// Resolution policy: cluster/externally-synced templates OVERRIDE built-ins on
+// name collisions — an operator can update or replace a shipped golden path
+// (e.g. voiceai-agent) from their templates repo. The built-in is the fallback
+// used only when no cluster copy exists.
 type templateHandler struct {
 	auth          *authHandler
 	builtin       []*tpl.Template
@@ -250,31 +251,32 @@ func parseSemVer(s string) ([3]int, bool) {
 	return parts, true
 }
 
-// handleDelete removes a template's cluster ConfigMap. Returns 204 on
-// success, 404 when the template isn't cluster-stored (built-ins shipped
-// via --templates-dir live on disk and can't be deleted from the API),
-// and 409 when the name shadows a built-in (deletion would re-expose the
-// built-in, which is confusing — operator should rename the built-in
-// instead).
+// handleDelete removes a template's cluster ConfigMap (the synced/imported copy).
+// When the name also has a built-in, that built-in reappears as the fallback
+// after deletion — so deleting an override is allowed and returns 204. Returns
+// 409 when the name is a built-in default with no cluster copy to delete, and
+// 404 when the name is unknown entirely.
 //
-// Note: for templates synced from an external repo, deletion succeeds
-// but the next sync tick re-creates the ConfigMap. The UI surfaces a
-// warning before calling this; callers running scripts should be aware.
+// Note: for templates synced from an external repo, deletion succeeds but the
+// next sync tick re-creates the ConfigMap. The UI warns before calling this.
 func (th *templateHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if name == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name required"})
 		return
 	}
-	for _, t := range th.builtin {
-		if t.Metadata.Name == name {
-			writeJSON(w, http.StatusConflict, errorResponse{
-				Error: "template " + name + " is built-in and shipped with the binary; cluster ConfigMaps with the same name are shadowed and can't be deleted via this endpoint",
-			})
-			return
-		}
+	// 409 message reused for both the no-client and not-deleted built-in cases.
+	builtinConflict := errorResponse{
+		Error: "template " + name + " is a built-in default; there is no synced/cluster copy to delete",
 	}
 	if th.kubeClient == nil {
+		// No cluster to delete from. A built-in name is still a built-in
+		// default (nothing removable) — answer 409 rather than a generic 503,
+		// so disk-only/local-dev installs get the same informative response.
+		if th.isBuiltin(name) {
+			writeJSON(w, http.StatusConflict, builtinConflict)
+			return
+		}
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "cluster client not configured"})
 		return
 	}
@@ -287,42 +289,70 @@ func (th *templateHandler) handleDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !deleted {
+		// Nothing in the cluster to delete: distinguish a built-in default
+		// (ships with the platform; nothing to remove) from an unknown name.
+		if th.isBuiltin(name) {
+			writeJSON(w, http.StatusConflict, builtinConflict)
+			return
+		}
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "template " + name + " not found in cluster"})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// resolve merges built-ins with the current cluster list. Cluster fetch
-// errors are logged but not surfaced — the gallery should still render the
-// built-ins when the API server is misbehaving rather than 500ing entirely.
-func (th *templateHandler) resolve(ctx context.Context) ([]*tpl.Template, map[string]*tpl.Template) {
-	seen := make(map[string]bool, len(th.builtin))
-	merged := make([]*tpl.Template, 0, len(th.builtin))
+// isBuiltin reports whether name matches a built-in (disk/binary) template.
+func (th *templateHandler) isBuiltin(name string) bool {
 	for _, t := range th.builtin {
-		merged = append(merged, t)
-		seen[t.Metadata.Name] = true
+		if t.Metadata.Name == name {
+			return true
+		}
 	}
-	if th.clusterLoader != nil {
-		cluster, err := th.clusterLoader(ctx)
-		if err != nil && th.logger != nil {
-			th.logger.Warn("template list: cluster fetch failed; serving built-ins only", "err", err)
-		}
-		for _, t := range cluster {
-			if seen[t.Metadata.Name] {
-				continue
-			}
-			merged = append(merged, t)
-			seen[t.Metadata.Name] = true
-		}
+	return false
+}
+
+// ResolveTemplates merges built-ins with the live cluster set, with cluster /
+// externally-synced templates OVERRIDING built-ins of the same name (the
+// built-in is the fallback).
+//
+// On a cluster-fetch error it returns the built-ins merged so far TOGETHER with
+// the error, so callers choose their own policy: read endpoints (gallery,
+// app/service-creation lookups) degrade to the built-ins and log; the publish
+// path fails loud rather than committing values.yaml without the PE overlays.
+// This is the single resolver shared by the gallery, creation lookups, and the
+// publish adapter so all resolve identically.
+func ResolveTemplates(ctx context.Context, builtin []*tpl.Template, clusterLoader ClusterTemplateLoader) (map[string]*tpl.Template, error) {
+	byName := make(map[string]*tpl.Template, len(builtin))
+	for _, t := range builtin {
+		byName[t.Metadata.Name] = t
+	}
+	if clusterLoader == nil {
+		return byName, nil
+	}
+	cluster, err := clusterLoader(ctx)
+	if err != nil {
+		return byName, err
+	}
+	for _, t := range cluster {
+		byName[t.Metadata.Name] = t // cluster overrides built-in
+	}
+	return byName, nil
+}
+
+// resolve returns the gallery's merged template list (sorted) + name index.
+// A cluster-fetch error degrades to the built-ins (logged) rather than 500ing.
+func (th *templateHandler) resolve(ctx context.Context) ([]*tpl.Template, map[string]*tpl.Template) {
+	byName, err := ResolveTemplates(ctx, th.builtin, th.clusterLoader)
+	if err != nil && th.logger != nil {
+		th.logger.Warn("templates: cluster fetch failed; serving built-ins only", "err", err)
+	}
+	merged := make([]*tpl.Template, 0, len(byName))
+	for _, t := range byName {
+		merged = append(merged, t)
 	}
 	sort.Slice(merged, func(i, j int) bool {
 		return merged[i].Metadata.Name < merged[j].Metadata.Name
 	})
-	byName := make(map[string]*tpl.Template, len(merged))
-	for _, t := range merged {
-		byName[t.Metadata.Name] = t
-	}
 	return merged, byName
 }
 

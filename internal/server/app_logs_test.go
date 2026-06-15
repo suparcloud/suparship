@@ -26,7 +26,7 @@ func newTestAppLogsMux() (*http.ServeMux, *authHandler, *memAppStore, *fakeLogsP
 	store := newMemAppStore()
 	lp := newFakeLogsProvider()
 
-	appH := newAppHandler(store, nil, nil)
+	appH := newAppHandler(store, nil, nil, nil)
 	appH.logsProvider = lp
 
 	rh := &rbacHandler{
@@ -469,7 +469,7 @@ func TestAppLogsRouteNotRegisteredWithoutProvider(t *testing.T) {
 	store.addApp(app)
 	store.addEnv(env)
 
-	appH := newAppHandler(store, nil, nil)
+	appH := newAppHandler(store, nil, nil, nil)
 	// intentionally leave appH.logsProvider = nil
 
 	rh := &rbacHandler{

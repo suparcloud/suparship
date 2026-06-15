@@ -34,7 +34,7 @@ func newTestAppPromoteMux(projectName string) (*http.ServeMux, *authHandler, *me
 	rh := &rbacHandler{
 		auth:        ah,
 		orgStore: &staticOrgProvider{org: testRBACOrg()},
-		appHandler:  newAppHandler(store, nil, nil),
+		appHandler:  newAppHandler(store, nil, nil, nil),
 	}
 	rh.registerRoutes(mux)
 
@@ -600,7 +600,7 @@ func newTestAppPromoteMuxWithPublisher(projectName string, pub GitOpsPublisher) 
 	store.apps[projectName] = make(map[string]*domain.App)
 	store.mu.Unlock()
 
-	appH := newAppHandler(store, nil, nil)
+	appH := newAppHandler(store, nil, nil, nil)
 	appH.gitOpsPublisher = pub
 
 	rh := &rbacHandler{

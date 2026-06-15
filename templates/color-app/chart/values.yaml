@@ -7,6 +7,21 @@ app:
   name: ""
   env: ""
 
+# -- Platform metadata — injected by suparShip at publish time. Reference any
+# field via .Values.platform.* in this chart. Never contains secrets.
+platform:
+  org: ""
+  project: ""
+  app: ""
+  env: ""
+  envType: ""
+  cluster: ""
+  namespace: ""
+  baseDomain: ""
+  routingHost: ""
+  ingressClassName: ""
+  clusterIssuer: ""
+
 components:
   web:
     enabled: true

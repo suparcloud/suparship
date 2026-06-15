@@ -48,7 +48,10 @@
 // serialized via encoding/json or gopkg.in/yaml.v3).
 package helmvalues
 
-import "github.com/suparcloud/suparship/internal/envconfig"
+import (
+	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/envconfig"
+)
 
 // HelmValues is the root of the canonical Helm values document for a
 // suparShip app chart. All fields are exported with both JSON and YAML tags
@@ -56,6 +59,11 @@ import "github.com/suparcloud/suparship/internal/envconfig"
 type HelmValues struct {
 	// App identifies which app and environment these values belong to.
 	App AppContext `json:"app" yaml:"app"`
+	// Platform carries suparShip-injected platform metadata (identity + routing
+	// context) for this app/env/cluster. Chart authors can reference it via
+	// .Values.platform.*, and it is the source of truth for {platform.*} tokens
+	// the publisher interpolates in user-supplied values. Never contains secrets.
+	Platform PlatformValues `json:"platform" yaml:"platform"`
 	// Components is a map from component name to its resolved configuration.
 	// Keys are always sorted alphabetically by the mapper to ensure
 	// deterministic output across Go runtime versions.
@@ -94,6 +102,38 @@ type HelmValues struct {
 type SuparshipValues struct {
 	EnvFromConfigMaps []string `json:"envFromConfigMaps,omitempty" yaml:"envFromConfigMaps,omitempty"`
 	EnvFromSecrets    []string `json:"envFromSecrets,omitempty" yaml:"envFromSecrets,omitempty"`
+}
+
+// PlatformValues carries suparShip platform metadata injected into every app
+// chart's values: app/env identity and the resolved routing context for this
+// (env, cluster). It is emitted as `.Values.platform` and is the source of truth
+// for {platform.*} interpolation tokens. Secrets are never included.
+type PlatformValues struct {
+	// Org is the organization name.
+	Org string `json:"org" yaml:"org"`
+	// Project is the project the app belongs to.
+	Project string `json:"project" yaml:"project"`
+	// App is the app name.
+	App string `json:"app" yaml:"app"`
+	// Env is the environment name (e.g. "staging", "prod", "pr-42").
+	Env string `json:"env" yaml:"env"`
+	// EnvType is the environment classification ("staging", "prod", "preview").
+	EnvType string `json:"envType" yaml:"envType"`
+	// Cluster is the target cluster name. Empty in single-cluster active mode.
+	Cluster string `json:"cluster,omitempty" yaml:"cluster,omitempty"`
+	// Namespace is the Kubernetes namespace the app deploys into.
+	Namespace string `json:"namespace" yaml:"namespace"`
+	// BaseDomain is the resolved ingress DNS zone for this (env, cluster).
+	BaseDomain string `json:"baseDomain" yaml:"baseDomain"`
+	// RoutingHost is the resolved external host (no scheme), e.g.
+	// "hello.staging.acme.com".
+	RoutingHost string `json:"routingHost" yaml:"routingHost"`
+	// IngressClassName is the resolved IngressClass for the routing component.
+	// Empty when routing is disabled / no profile resolved.
+	IngressClassName string `json:"ingressClassName,omitempty" yaml:"ingressClassName,omitempty"`
+	// ClusterIssuer is the resolved cert-manager ClusterIssuer. Empty for plain
+	// HTTP or no profile.
+	ClusterIssuer string `json:"clusterIssuer,omitempty" yaml:"clusterIssuer,omitempty"`
 }
 
 // AppContext carries top-level app identity injected into every chart.
@@ -135,9 +175,15 @@ type ComponentValues struct {
 	// into the container at runtime. Secret values MUST NOT appear here;
 	// inject them via Kubernetes SecretKeyRef at the chart level.
 	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	// Resources is optional. When non-nil the chart uses the named size
-	// preset to select CPU/memory requests and limits.
+	// EnvFrom lists extra Secret/ConfigMap sources the component envFroms,
+	// beyond the platform hierarchy. Charts append these to their envFrom block.
+	EnvFrom []EnvFromSource `json:"envFrom,omitempty" yaml:"envFrom,omitempty"`
+	// Resources is optional. The chart uses Size (preset) or the raw
+	// Requests/Limits when present.
 	Resources *ResourceValues `json:"resources,omitempty" yaml:"resources,omitempty"`
+	// Autoscaling carries per-component KEDA triggers + min/max. Charts that
+	// support KEDA read this; others ignore it.
+	Autoscaling *ComponentAutoscaling `json:"autoscaling,omitempty" yaml:"autoscaling,omitempty"`
 }
 
 // HealthCheckValues lets an operator override the chart's liveness/
@@ -182,6 +228,34 @@ type ImageValues struct {
 type ResourceValues struct {
 	// Size is one of "small", "medium", or "large".
 	Size string `json:"size,omitempty" yaml:"size,omitempty"`
+	// Requests / Limits are raw Kubernetes resource quantities (cpu, memory,
+	// ephemeral-storage → quantity string), set instead of Size when a chart
+	// consumes raw resources. When present, charts should prefer these over Size.
+	Requests map[string]string `json:"requests,omitempty" yaml:"requests,omitempty"`
+	Limits   map[string]string `json:"limits,omitempty" yaml:"limits,omitempty"`
+}
+
+// EnvFromRef names a Secret or ConfigMap to envFrom, with the optional flag so
+// pods start before the source is populated.
+type EnvFromRef struct {
+	Name     string `json:"name" yaml:"name"`
+	Optional bool   `json:"optional,omitempty" yaml:"optional,omitempty"`
+}
+
+// EnvFromSource is one entry in a component's envFrom list (exactly one of the
+// two refs set). Mirrors the k8s EnvFromSource shape charts render directly.
+type EnvFromSource struct {
+	SecretRef    *EnvFromRef `json:"secretRef,omitempty" yaml:"secretRef,omitempty"`
+	ConfigMapRef *EnvFromRef `json:"configMapRef,omitempty" yaml:"configMapRef,omitempty"`
+}
+
+// ComponentAutoscaling carries per-component KEDA autoscaling values. A non-empty
+// Triggers list replaces the chart's default triggers for the component; the
+// chart reads minReplicaCount/maxReplicaCount when set.
+type ComponentAutoscaling struct {
+	Triggers        []domain.KEDATrigger `json:"triggers,omitempty" yaml:"triggers,omitempty"`
+	MinReplicaCount *int32               `json:"minReplicaCount,omitempty" yaml:"minReplicaCount,omitempty"`
+	MaxReplicaCount *int32               `json:"maxReplicaCount,omitempty" yaml:"maxReplicaCount,omitempty"`
 }
 
 // RoutingValues declares the primary public entry point for the deployment.

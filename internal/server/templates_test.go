@@ -1,11 +1,18 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
@@ -335,6 +342,213 @@ func TestGetTemplateDetail_EmptyComponentsArrayNotNull(t *testing.T) {
 	}
 }
 
+// --- Template resolution: cluster overrides built-in ---
+
+// namedTemplate is a tiny builder for resolution/delete tests.
+func namedTemplate(name, version string) *tpl.Template {
+	return &tpl.Template{
+		APIVersion: tpl.CurrentAPIVersion,
+		Kind:       tpl.TemplateKind,
+		Metadata:   tpl.Metadata{Name: name, Version: version},
+		Spec: tpl.TemplateSpec{
+			Title:  name,
+			Engine: tpl.Engine{Type: tpl.EngineHelm},
+		},
+	}
+}
+
+// clusterTemplates returns a ClusterTemplateLoader that always yields ts.
+func clusterTemplates(ts ...*tpl.Template) ClusterTemplateLoader {
+	return func(context.Context) ([]*tpl.Template, error) {
+		return ts, nil
+	}
+}
+
+func TestResolveTemplates_ClusterOverridesBuiltin(t *testing.T) {
+	builtin := []*tpl.Template{namedTemplate("voiceai-agent", "1.0.0")}
+	loader := clusterTemplates(namedTemplate("voiceai-agent", "2.0.0"))
+
+	byName, err := ResolveTemplates(context.Background(), builtin, loader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, ok := byName["voiceai-agent"]
+	if !ok {
+		t.Fatal("voiceai-agent missing from resolved set")
+	}
+	if got.Metadata.Version != "2.0.0" {
+		t.Fatalf("cluster copy should override built-in: version = %q, want 2.0.0", got.Metadata.Version)
+	}
+}
+
+func TestResolveTemplates_BuiltinFallbackWhenNoClusterCopy(t *testing.T) {
+	builtin := []*tpl.Template{namedTemplate("api-service", "1.0.0")}
+	// Cluster has a different template; api-service must fall back to built-in.
+	loader := clusterTemplates(namedTemplate("voiceai-agent", "2.0.0"))
+
+	byName, err := ResolveTemplates(context.Background(), builtin, loader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, ok := byName["api-service"]
+	if !ok {
+		t.Fatal("api-service should fall back to the built-in copy")
+	}
+	if got.Metadata.Version != "1.0.0" {
+		t.Fatalf("api-service version = %q, want 1.0.0 (built-in)", got.Metadata.Version)
+	}
+	if _, ok := byName["voiceai-agent"]; !ok {
+		t.Fatal("cluster-only template should also be present")
+	}
+}
+
+// TestResolveTemplates_FetchErrorReturnsBuiltinsAndError locks in the F3
+// contract: a cluster-fetch error is surfaced to the caller, but the built-ins
+// are still returned so read endpoints can degrade gracefully.
+func TestResolveTemplates_FetchErrorReturnsBuiltinsAndError(t *testing.T) {
+	builtin := []*tpl.Template{namedTemplate("api-service", "1.0.0")}
+	loader := func(context.Context) ([]*tpl.Template, error) {
+		return nil, errors.New("apiserver unavailable")
+	}
+
+	byName, err := ResolveTemplates(context.Background(), builtin, loader)
+	if err == nil {
+		t.Fatal("expected the cluster-fetch error to be surfaced")
+	}
+	if _, ok := byName["api-service"]; !ok {
+		t.Fatal("built-ins should still be returned on fetch error (degrade path)")
+	}
+}
+
+// --- DELETE /api/v1/templates/{name} ---
+
+// templateDeleteMuxNoClient wires the DELETE route with NO kube client, to
+// exercise the disk-only / local-dev path (th.kubeClient left nil).
+func templateDeleteMuxNoClient(builtin []*tpl.Template) (*http.ServeMux, *authHandler) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+	th := newTemplateHandler(ah, builtin, nil, nil) // kubeClient deliberately nil
+	th.registerRoutes(mux)
+	return mux, ah
+}
+
+func TestHandleDelete_BuiltinNoClientReturns409(t *testing.T) {
+	// Disk-only mode (nil kube client): a built-in name gets the informative
+	// 409, not a generic 503. (F4)
+	mux, ah := templateDeleteMuxNoClient([]*tpl.Template{namedTemplate("api-service", "1.0.0")})
+	rec := deleteTemplateReq(mux, ah, "api-service")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for built-in with no kube client, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp errorResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if !strings.Contains(resp.Error, "built-in default") {
+		t.Fatalf("error should mention built-in default, got %q", resp.Error)
+	}
+}
+
+func TestHandleDelete_UnknownNoClientReturns503(t *testing.T) {
+	// Non-built-in name with no kube client: can't resolve without a cluster,
+	// so 503 is the honest answer.
+	mux, ah := templateDeleteMuxNoClient(nil)
+	rec := deleteTemplateReq(mux, ah, "whatever")
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for unknown name with no kube client, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// clusterTemplateCM builds a ConfigMap carrying the template-name label so
+// kube.DeleteTemplate's selector finds (and deletes) it.
+func clusterTemplateCM(name string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "suparship-template-" + name,
+			Namespace: "suparship-system",
+			Labels: map[string]string{
+				"suparship.io/type":          "template",
+				"suparship.io/template-name": name,
+			},
+		},
+	}
+}
+
+// templateDeleteMux wires a templateHandler with a kube client so the DELETE
+// route is active. authMiddleware is left nil → plain auth.
+func templateDeleteMux(builtin []*tpl.Template, client *fake.Clientset) (*http.ServeMux, *authHandler) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	th := newTemplateHandler(ah, builtin, nil, nil)
+	th.kubeClient = client
+	th.registerRoutes(mux)
+	return mux, ah
+}
+
+func deleteTemplateReq(mux *http.ServeMux, ah *authHandler, name string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("DELETE", "/api/v1/templates/"+name, nil)
+	req.AddCookie(sessionCookieFor(ah, "admin", "org_admin"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHandleDelete_ClusterCopyDeletableEvenWhenBuiltin(t *testing.T) {
+	// voiceai-agent is BOTH a built-in default AND synced into the cluster.
+	// Deleting the cluster copy must succeed (204): the built-in stays as the
+	// fallback. This is the core of the override fix — a built-in name no
+	// longer blocks deleting its synced override.
+	builtin := []*tpl.Template{namedTemplate("voiceai-agent", "1.0.0")}
+	client := fake.NewSimpleClientset(clusterTemplateCM("voiceai-agent"))
+
+	mux, ah := templateDeleteMux(builtin, client)
+	rec := deleteTemplateReq(mux, ah, "voiceai-agent")
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 deleting synced override, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleDelete_PureBuiltinReturns409(t *testing.T) {
+	// api-service is a built-in with NO cluster copy: nothing to delete, and
+	// the platform can't remove a shipped default → 409 with a clear message.
+	builtin := []*tpl.Template{namedTemplate("api-service", "1.0.0")}
+	client := fake.NewSimpleClientset() // empty cluster
+
+	mux, ah := templateDeleteMux(builtin, client)
+	rec := deleteTemplateReq(mux, ah, "api-service")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for pure built-in, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp errorResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if !strings.Contains(resp.Error, "built-in default") {
+		t.Fatalf("error should mention built-in default, got %q", resp.Error)
+	}
+}
+
+func TestHandleDelete_UnknownReturns404(t *testing.T) {
+	client := fake.NewSimpleClientset() // empty cluster, no built-ins
+	mux, ah := templateDeleteMux(nil, client)
+	rec := deleteTemplateReq(mux, ah, "nope")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown template, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // --- semverGreater (PR5.2 helper) ---
 
 func TestSemverGreater(t *testing.T) {
@@ -347,8 +561,8 @@ func TestSemverGreater(t *testing.T) {
 		{"1.9.0", "1.10.0", false},
 		{"1.0.0", "1.0.0", false},
 		{"1.0.0-rc.1", "1.0.0-rc.0", false}, // pre-release stripped → equal → false
-		{"v1.0.0", "1.0.0", true},          // non-numeric "v" prefix falls back to lex
-		{"a.b.c", "1.0.0", true},           // unparseable falls back to lex
+		{"v1.0.0", "1.0.0", true},           // non-numeric "v" prefix falls back to lex
+		{"a.b.c", "1.0.0", true},            // unparseable falls back to lex
 	}
 	for _, tc := range cases {
 		t.Run(tc.a+">"+tc.b, func(t *testing.T) {

@@ -22,9 +22,28 @@ func TestSchema_TopLevelStructure(t *testing.T) {
 	if !ok {
 		t.Fatalf("properties missing or wrong type: %T", s["properties"])
 	}
-	for _, key := range []string{"app", "components", "routing", "suparship"} {
+	for _, key := range []string{"app", "platform", "components", "routing", "suparship"} {
 		if _, ok := props[key]; !ok {
 			t.Errorf("missing top-level property %q", key)
+		}
+	}
+}
+
+func TestSchema_Platform_HasIdentityAndRoutingFields(t *testing.T) {
+	s := Schema()
+	platform, ok := s["properties"].(map[string]any)["platform"].(map[string]any)
+	if !ok {
+		t.Fatalf("platform property missing or wrong type")
+	}
+	props := platform["properties"].(map[string]any)
+	for _, k := range []string{"org", "project", "app", "env", "envType", "namespace", "baseDomain", "routingHost"} {
+		f, ok := props[k].(map[string]any)
+		if !ok {
+			t.Errorf("platform.%s missing", k)
+			continue
+		}
+		if f["type"] != "string" {
+			t.Errorf("platform.%s type = %v, want string", k, f["type"])
 		}
 	}
 }
@@ -62,12 +81,21 @@ func TestSchema_Components_AllowsAnyKey_TypedValue(t *testing.T) {
 	}
 	// Spot-check that ComponentValues fields appear with expected types.
 	for field, want := range map[string]string{
-		"enabled":  "boolean",
-		"replicas": "integer",
+		"enabled":     "boolean",
+		"replicas":    "integer",
+		"envFrom":     "array",
+		"autoscaling": "object",
 	} {
 		got := cprops[field].(map[string]any)["type"]
 		if got != want {
 			t.Errorf("components.<>.%s type = %v, want %v", field, got, want)
+		}
+	}
+	// resources gains raw requests/limits alongside size.
+	rprops := cprops["resources"].(map[string]any)["properties"].(map[string]any)
+	for _, k := range []string{"size", "requests", "limits"} {
+		if _, ok := rprops[k]; !ok {
+			t.Errorf("resources schema missing %q", k)
 		}
 	}
 }

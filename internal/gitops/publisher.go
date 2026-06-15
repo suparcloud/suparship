@@ -18,6 +18,7 @@ import (
 	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/helmvalues"
+	"github.com/suparcloud/suparship/internal/platform"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/tpl"
 	"gopkg.in/yaml.v3"
@@ -621,7 +622,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 				baseDomain = c.BaseDomain
 			}
 			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
-			return yaml.Marshal(hv)
+			return marshalValuesWithOverlay(hv, envOverlay(app, env), env.EnvVars)
 		}
 		if len(env.Clusters) > 1 {
 			// Fan-out: one values.yaml per cluster under _clusters/<cluster>/,
@@ -658,8 +659,15 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// Platform-managed per-app resources (ConfigMap + ExternalSecret) are
 		// written to the platform-owned _app-resources/ tree and shipped by the
 		// platform ApplicationSet — NOT into the app's chart Application.
+		// Env-var values may reference {platform.*}/{vars.*}; resolve them against
+		// the env's ACTIVE cluster (MVP — the ConfigMap is a single per-env write).
+		envVars := env.EnvVars
+		if hasInterpToken(envVars) {
+			ctx := p.platformVarsContext(app, env, orgName)
+			envVars = ctx.InterpolateMap(envVars)
+		}
 		appDir := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name)
-		if err := p.writeAppPlatformResources(repoDir, appDir, app, ns, env); err != nil {
+		if err := p.writeAppPlatformResources(repoDir, appDir, app, ns, env, envVars); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
 		}
 
@@ -676,21 +684,128 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 	return nil
 }
 
+// envOverlay builds the full values overlay applied on top of the chart/base
+// values for an environment, layered low→high (later wins):
+//  1. template PlatformDefaultValues (PE, all envs)
+//  2. template PlatformEnvValues     (PE, this env)
+//  3. app + env developer RawValues  (rawValuesOverlay)
+//
+// Everything is deep-copied so neither the template nor the app spec is mutated.
+func envOverlay(app *domain.App, env AppPublishEnv) map[string]any {
+	overlay := deepMerge(deepCopyMap(env.PlatformDefaultValues), deepCopyMap(env.PlatformEnvValues))
+	return deepMerge(overlay, rawValuesOverlay(app, env.EnvName))
+}
+
+// rawValuesOverlay returns the freeform Helm values overlay for an env: the
+// app-level RawValues deep-merged with the env-level RawValues (env wins). Both
+// are deep-copied so the stored app spec is never mutated. Returns nil when
+// neither is set.
+func rawValuesOverlay(app *domain.App, envName string) map[string]any {
+	base := deepCopyMap(app.Spec.RawValues)
+	if ov, ok := app.Spec.EnvironmentDefaults[envName]; ok && len(ov.RawValues) > 0 {
+		base = deepMerge(base, deepCopyMap(ov.RawValues))
+	}
+	return base
+}
+
+// activeTarget returns the ClusterTarget matching the env's active ClusterRef,
+// falling back to the sole cluster or a bare-name target.
+func activeTarget(env AppPublishEnv) ClusterTarget {
+	for _, c := range env.Clusters {
+		if c.Name == env.ClusterRef {
+			return c
+		}
+	}
+	if len(env.Clusters) == 1 {
+		return env.Clusters[0]
+	}
+	return ClusterTarget{Name: env.ClusterRef}
+}
+
+// platformVarsContext builds the interpolation context for env-var values using
+// the env's ACTIVE cluster (MVP: env-var token resolution is not fanned out
+// per-cluster — the <app>-config ConfigMap is a single per-env write). Vars is
+// the merged non-secret env-var map.
+func (p *Publisher) platformVarsContext(app *domain.App, env AppPublishEnv, orgName string) platform.Context {
+	target := activeTarget(env)
+	baseDomain := env.BaseDomain
+	if target.BaseDomain != "" {
+		baseDomain = target.BaseDomain
+	}
+	hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, target.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+	return platform.Context{Platform: hv.Platform, Vars: env.EnvVars}
+}
+
+// hasInterpToken reports whether any value in m contains an interpolation token,
+// so the publisher can skip the work (and avoid churn) when none do.
+func hasInterpToken(m map[string]string) bool {
+	for _, v := range m {
+		if strings.Contains(v, "{platform.") || strings.Contains(v, "{vars.") {
+			return true
+		}
+	}
+	return false
+}
+
+// marshalValuesWithOverlay serializes hv to YAML, applying platform/{vars.*}
+// interpolation and the raw-values overlay only when needed. When there is no
+// overlay and no interpolation token anywhere in the values, it returns the
+// struct-marshalled bytes unchanged (stable, declaration-order keys) so existing
+// apps see no churn. Otherwise it round-trips hv to a map, interpolates every
+// string leaf against the platform context, deep-merges the (interpolated)
+// overlay on top, and marshals the result.
+func marshalValuesWithOverlay(hv helmvalues.HelmValues, overlay map[string]any, vars map[string]string) ([]byte, error) {
+	raw, err := yaml.Marshal(hv)
+	if err != nil {
+		return nil, err
+	}
+	needsInterp := len(overlay) > 0 ||
+		bytes.Contains(raw, []byte("{platform.")) ||
+		bytes.Contains(raw, []byte("{vars."))
+	if !needsInterp {
+		return raw, nil
+	}
+
+	ctx := platform.Context{Platform: hv.Platform, Vars: vars}
+	var base map[string]any
+	if err := yaml.Unmarshal(raw, &base); err != nil {
+		return nil, err
+	}
+	base, _ = ctx.InterpolateTree(base).(map[string]any)
+	if len(overlay) > 0 {
+		ov, _ := ctx.InterpolateTree(overlay).(map[string]any)
+		base = deepMerge(base, ov)
+	}
+	return yaml.Marshal(base)
+}
+
+// deepMerge / deepCopyMap delegate to helmvalues so publish-time layering and the
+// API's effective-values preview share one implementation. Kept as local wrappers
+// to leave the existing call sites unchanged.
+func deepMerge(base, overlay map[string]any) map[string]any {
+	return helmvalues.DeepMerge(base, overlay)
+}
+
+func deepCopyMap(m map[string]any) map[string]any {
+	return helmvalues.DeepCopyMap(m)
+}
+
 // writeAppPlatformResources writes the platform-managed ConfigMap + ExternalSecret
 // (and a meta.yaml for the platform ApplicationSet generator) into the
 // platform-owned tree at _app-resources/{env}/{project}/{app}/, then prunes any
 // stale copies left in the app's own directory by older versions (which used to
 // ship these alongside the chart). oldAppDir is the per-app chart directory.
 //
-// The ConfigMap data is env.EnvVars verbatim — the caller merges global → env →
-// cluster scopes before publishing, so the committed YAML is the audit-trail for
-// what the pod sees. The ExternalSecret merges all present scopes into one
-// <app>-secrets Secret; nil (skipped) when no scope has keys.
+// envVars is the merged global → env → cluster scope map (already platform-token
+// interpolated by the caller), written verbatim as the audit-trail for what the
+// pod sees. The ExternalSecret merges all present scopes into one <app>-secrets
+// Secret; nil (skipped) when no scope has keys.
 func (p *Publisher) writeAppPlatformResources(
 	repoDir, oldAppDir string,
 	app *domain.App,
 	namespace string,
 	env AppPublishEnv,
+	envVars map[string]string,
 ) error {
 	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
 	esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
@@ -703,7 +818,7 @@ func (p *Publisher) writeAppPlatformResources(
 		Branding:     p.cfg.Branding,
 	})
 	meta := PlatformAppMeta{Name: app.Name, Project: app.ProjectName, Namespace: namespace}
-	if err := p.writePlatformDir(resDir, app.Name, namespace, env.EnvVars, esCfg, meta); err != nil {
+	if err := p.writePlatformDir(resDir, app.Name, namespace, envVars, esCfg, meta); err != nil {
 		return err
 	}
 	// Migration: remove platform manifests that older publishers wrote into the
@@ -1088,6 +1203,13 @@ type AppPublishEnv struct {
 	// overrides) instead of a single shared env values.yaml. Empty / single =
 	// the legacy single values.yaml.
 	Clusters []ClusterTarget
+	// PlatformDefaultValues / PlatformEnvValues are the Platform-Engineer-authored
+	// Helm values overlays from the app's template: DefaultValues (all envs) and
+	// EnvValues[thisEnv]. Layered on top of the chart/base values and below the
+	// developer RawValues, then {platform.*}/{vars.*} interpolated. Populated by
+	// the publish adapter from the resolved template.
+	PlatformDefaultValues map[string]any
+	PlatformEnvValues     map[string]any
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD
@@ -1128,13 +1250,18 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		// overrides don't make sense for ephemeral preview envs (their
 		// names are PR-specific and have no static config).
 		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
-		hvBytes, err := yaml.Marshal(hv)
+		hvBytes, err := marshalValuesWithOverlay(hv, rawValuesOverlay(app, preview.PreviewName), preview.EnvVars)
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
 		}
 		valuesPath := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName, "values.yaml")
 		if err := p.writeFile(valuesPath, hvBytes); err != nil {
 			return err
+		}
+		// Interpolate preview env-var values against the preview's platform context.
+		previewEnvVars := preview.EnvVars
+		if hasInterpToken(previewEnvVars) {
+			previewEnvVars = platform.Context{Platform: hv.Platform, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
 		}
 
 		// Platform-managed ConfigMap + ExternalSecret go to the platform-owned
@@ -1156,7 +1283,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 			Namespace:     preview.Namespace,
 			ClusterServer: preview.ClusterServer,
 		}
-		if err := p.writePlatformDir(resDir, app.Name, preview.Namespace, preview.EnvVars, esCfg, meta); err != nil {
+		if err := p.writePlatformDir(resDir, app.Name, preview.Namespace, previewEnvVars, esCfg, meta); err != nil {
 			return fmt.Errorf("writing preview platform resources: %w", err)
 		}
 		if err := p.pruneLegacyPlatformFiles(previewDir); err != nil {

@@ -16,6 +16,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/suparcloud/suparship/internal/project"
@@ -82,18 +83,19 @@ type templateRefDTO struct {
 // See docs/migration-app-model.md.
 type serviceHandler struct {
 	projectStore project.Store
-	templateIdx  map[string]*tpl.Template
+	// builtin + clusterLoader resolve templates live (cluster overrides
+	// built-in), matching appHandler — so a synced/overridden template is
+	// usable here too, and cluster-only installs (no disk built-ins) aren't
+	// left with an empty index now that the startup snapshot is no longer frozen.
+	builtin       []*tpl.Template
+	clusterLoader ClusterTemplateLoader
 }
 
 // newServiceHandler constructs the legacy service creation handler.
 //
 // Deprecated: See newServiceHandler's type comment.
-func newServiceHandler(store project.Store, templates []*tpl.Template) *serviceHandler {
-	idx := make(map[string]*tpl.Template, len(templates))
-	for _, t := range templates {
-		idx[t.Metadata.Name] = t
-	}
-	return &serviceHandler{projectStore: store, templateIdx: idx}
+func newServiceHandler(store project.Store, templates []*tpl.Template, clusterLoader ClusterTemplateLoader) *serviceHandler {
+	return &serviceHandler{projectStore: store, builtin: templates, clusterLoader: clusterLoader}
 }
 
 // handleCreateService handles POST /api/v1/projects/{project}/services.
@@ -121,7 +123,11 @@ func (sh *serviceHandler) handleCreateService(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	tmpl, ok := sh.templateIdx[req.Template]
+	byName, err := ResolveTemplates(r.Context(), sh.builtin, sh.clusterLoader)
+	if err != nil {
+		slog.Warn("service: cluster template fetch failed; using built-ins only", "err", err)
+	}
+	tmpl, ok := byName[req.Template]
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, errorResponse{
 			Error: "template \"" + req.Template + "\" not found",

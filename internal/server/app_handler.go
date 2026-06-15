@@ -30,8 +30,12 @@ import (
 // projectStore is non-nil. The logs route is registered when logsProvider
 // is non-nil.
 type appHandler struct {
-	appStore                domain.AppStore
-	templateIdx             map[string]*tpl.Template
+	appStore domain.AppStore
+	// builtin + clusterLoader resolve templates live (cluster overrides built-in)
+	// so externally-synced templates are usable for app creation/upgrade without
+	// a restart. Use lookupTemplate; do not read a cached index.
+	builtin                 []*tpl.Template
+	clusterLoader           ClusterTemplateLoader
 	projectStore            project.Store
 	orgProvider             rbac.OrgProvider        // optional: provides org env fallback for sync
 	runtimeProvider         runtime.Provider        // optional: enriches env responses with live K8s status
@@ -62,16 +66,29 @@ type appHandler struct {
 // POST /api/v1/projects/{project}/apps creation endpoint; the caller is
 // responsible for registering the route only when both are present (see
 // rbacHandler.registerRoutes).
-func newAppHandler(store domain.AppStore, templates []*tpl.Template, projectStore project.Store) *appHandler {
-	idx := make(map[string]*tpl.Template, len(templates))
-	for _, t := range templates {
-		idx[t.Metadata.Name] = t
-	}
+func newAppHandler(store domain.AppStore, templates []*tpl.Template, clusterLoader ClusterTemplateLoader, projectStore project.Store) *appHandler {
 	return &appHandler{
-		appStore:     store,
-		templateIdx:  idx,
-		projectStore: projectStore,
+		appStore:      store,
+		builtin:       templates,
+		clusterLoader: clusterLoader,
+		projectStore:  projectStore,
 	}
+}
+
+// lookupTemplate resolves a template by name live (cluster overrides built-in),
+// so externally-synced templates are usable for app creation/upgrade without a
+// server restart. Returns (nil, false) when the name is unknown.
+//
+// A cluster-fetch failure degrades to the built-ins (matching the gallery) but
+// is logged via the default logger — otherwise a transient blip surfaces to the
+// user as a misleading "template not found" with no server-side trace.
+func (ah *appHandler) lookupTemplate(ctx context.Context, name string) (*tpl.Template, bool) {
+	byName, err := ResolveTemplates(ctx, ah.builtin, ah.clusterLoader)
+	if err != nil {
+		slog.Warn("app: cluster template fetch failed; using built-ins only", "err", err)
+	}
+	t, ok := byName[name]
+	return t, ok
 }
 
 // handleCreateApp handles POST /api/v1/projects/{project}/apps.
@@ -99,7 +116,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tmpl, ok := ah.templateIdx[req.Template]
+	tmpl, ok := ah.lookupTemplate(r.Context(), req.Template)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, errorResponse{
 			Error: "template \"" + req.Template + "\" not found",
@@ -199,6 +216,9 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Addons:             addons,
 		NamespaceScope:     domain.NamespaceScope(req.NamespaceScope),
 		NamespacePattern:   req.NamespacePattern,
+		RawValues:          req.RawValues,
+		ComponentConfigs:   req.ComponentConfigs,
+		EnvComponents:      req.EnvComponents,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -354,6 +374,8 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	// Snapshot the editable fields so a failed publish rolls back cleanly.
 	prevValues, prevDisplay, prevDesc := app.Spec.Values, app.Spec.DisplayName, app.Spec.Description
 	prevEnvDefaults := app.Spec.EnvironmentDefaults
+	prevRawValues := app.Spec.RawValues
+	prevComponents := append([]domain.ComponentSpec(nil), app.Spec.Components...)
 
 	if req.Values != nil {
 		newValues := *req.Values
@@ -366,7 +388,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		tmpl, ok := ah.templateIdx[app.Spec.Template.Name]
+		tmpl, ok := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
 		if !ok {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{
 				Error: "app's template \"" + app.Spec.Template.Name + "\" is no longer available; cannot re-validate values",
@@ -407,6 +429,52 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		}
 		app.Spec.EnvironmentDefaults = ed
 	}
+	if req.RawValues != nil {
+		app.Spec.RawValues = *req.RawValues
+	}
+	if req.ComponentConfigs != nil {
+		// Apply app-level per-component config onto the matching ComponentSpec.
+		for i := range app.Spec.Components {
+			cfg, ok := req.ComponentConfigs[app.Spec.Components[i].Name]
+			if !ok {
+				continue
+			}
+			applyComponentConfig(&app.Spec.Components[i], cfg)
+		}
+	}
+	if req.EnvComponents != nil {
+		ed := app.Spec.EnvironmentDefaults
+		if ed == nil {
+			ed = map[string]domain.EnvironmentOverride{}
+		}
+		for envName, byComp := range req.EnvComponents {
+			ov := ed[envName]
+			if len(byComp) == 0 {
+				ov.Components = nil
+			} else {
+				ov.Components = byComp
+			}
+			ed[envName] = ov
+		}
+		app.Spec.EnvironmentDefaults = ed
+	}
+	if req.EnvRawValues != nil {
+		// Replace per-env raw-values overlays, folding into EnvironmentDefaults.
+		ed := app.Spec.EnvironmentDefaults
+		if ed == nil {
+			ed = map[string]domain.EnvironmentOverride{}
+		}
+		for envName, rv := range req.EnvRawValues {
+			ov := ed[envName]
+			if len(rv) == 0 {
+				ov.RawValues = nil
+			} else {
+				ov.RawValues = rv
+			}
+			ed[envName] = ov
+		}
+		app.Spec.EnvironmentDefaults = ed
+	}
 
 	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
@@ -433,6 +501,8 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
 			app.Spec.Values, app.Spec.DisplayName, app.Spec.Description = prevValues, prevDisplay, prevDesc
 			app.Spec.EnvironmentDefaults = prevEnvDefaults
+			app.Spec.RawValues = prevRawValues
+			app.Spec.Components = prevComponents
 			_ = ah.appStore.SaveApp(r.Context(), projectName, app)
 			slog.Error("update-app: publish failed; rolled back config change",
 				"project", projectName, "app", appName, "err", err)
@@ -1615,7 +1685,75 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		Addons:           addonDTOs(app.Spec.Addons),
 		Environments:     envDTOs,
 		ClusterOverrides: clusterOverridesDTO(app.Spec.EnvironmentDefaults),
+		RawValues:        app.Spec.RawValues,
+		EnvRawValues:     envRawValuesDTO(app.Spec.EnvironmentDefaults),
+		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
+		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
 	}
+}
+
+// applyComponentConfig writes per-component config (resources, envFrom, scaling,
+// env) onto an app-level ComponentSpec. Env replaces the component's Config.
+func applyComponentConfig(spec *domain.ComponentSpec, cfg domain.ComponentConfig) {
+	spec.Resources = cfg.Resources
+	spec.EnvFromSecrets = cfg.EnvFromSecrets
+	spec.EnvFromConfigMaps = cfg.EnvFromConfigMaps
+	spec.Scaling = cfg.Scaling
+	if cfg.Env != nil {
+		spec.Config = cfg.Env
+	}
+}
+
+// componentConfigsDTO projects each ComponentSpec into the editable
+// ComponentConfig shape (env mirrors the spec's Config). Returns nil when there
+// are no components.
+func componentConfigsDTO(specs []domain.ComponentSpec) map[string]domain.ComponentConfig {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make(map[string]domain.ComponentConfig, len(specs))
+	for _, c := range specs {
+		out[c.Name] = domain.ComponentConfig{
+			Resources:         c.Resources,
+			EnvFromSecrets:    c.EnvFromSecrets,
+			EnvFromConfigMaps: c.EnvFromConfigMaps,
+			Scaling:           c.Scaling,
+			Env:               c.Config,
+		}
+	}
+	return out
+}
+
+// envComponentsDTO extracts per-(env, component) overrides from
+// EnvironmentDefaults. Returns nil when no env has any.
+func envComponentsDTO(defaults map[string]domain.EnvironmentOverride) map[string]map[string]domain.ComponentConfig {
+	var out map[string]map[string]domain.ComponentConfig
+	for envName, ov := range defaults {
+		if len(ov.Components) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string]map[string]domain.ComponentConfig{}
+		}
+		out[envName] = ov.Components
+	}
+	return out
+}
+
+// envRawValuesDTO extracts per-env raw-values overlays from EnvironmentDefaults,
+// keyed by env name. Returns nil when no env has one.
+func envRawValuesDTO(defaults map[string]domain.EnvironmentOverride) map[string]map[string]any {
+	var out map[string]map[string]any
+	for envName, ov := range defaults {
+		if len(ov.RawValues) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string]map[string]any{}
+		}
+		out[envName] = ov.RawValues
+	}
+	return out
 }
 
 // clusterOverridesDTO extracts the per-(env, cluster) value overrides from the

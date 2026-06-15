@@ -114,9 +114,9 @@ func newTestServiceMux() (*http.ServeMux, *authHandler, *memProjectStore) {
 	store := newMemProjectStore()
 
 	rh := &rbacHandler{
-		auth:        ah,
-		orgStore: &staticOrgProvider{org: testRBACOrg()},
-		serviceHandler: newServiceHandler(store, []*tpl.Template{svcTestTemplate()}),
+		auth:           ah,
+		orgStore:       &staticOrgProvider{org: testRBACOrg()},
+		serviceHandler: newServiceHandler(store, []*tpl.Template{svcTestTemplate()}, nil),
 	}
 	rh.registerRoutes(mux)
 
@@ -136,6 +136,42 @@ func postServiceJSON(mux *http.ServeMux, cookie *http.Cookie, projectName string
 }
 
 // --- Tests ---
+
+// TestCreateService_LiveClusterTemplate proves the legacy service endpoint also
+// resolves templates live (F5): a template present ONLY in the cluster (no
+// built-in) is usable, so cluster-only installs aren't left with an empty index
+// now that the startup snapshot is no longer frozen.
+func TestCreateService_LiveClusterTemplate(t *testing.T) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	store := newMemProjectStore()
+	_ = store.Save(context.Background(), svcTestProject())
+
+	loader := func(context.Context) ([]*tpl.Template, error) {
+		return []*tpl.Template{svcTestTemplate()}, nil
+	}
+	rh := &rbacHandler{
+		auth:           ah,
+		orgStore:       &staticOrgProvider{org: testRBACOrg()},
+		serviceHandler: newServiceHandler(store, nil /* no built-ins */, loader),
+	}
+	rh.registerRoutes(mux)
+
+	rec := postServiceJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "myapi", createServiceRequest{
+		Name:       "api",
+		Template:   "web-service",
+		Values:     map[string]any{"service_name": "my-api", "size": "large"},
+		SecretRefs: []secretRefRequest{{Name: "database_url", SecretRef: "api-db.url"}},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 creating from a cluster-only template, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
 
 func TestCreateServiceValid(t *testing.T) {
 	mux, ah, store := newTestServiceMux()

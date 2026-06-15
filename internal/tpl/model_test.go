@@ -128,6 +128,43 @@ spec:
 	}
 }
 
+func TestParseDefaultAndEnvValues(t *testing.T) {
+	yaml := `
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata:
+  name: layered
+  version: "0.1.0"
+spec:
+  title: Layered
+  category: misc
+  engine:
+    type: helm
+  defaultValues:
+    replicas: 1
+    image:
+      repository: ghcr.io/org/app
+  envValues:
+    staging:
+      replicas: 1
+    prod:
+      replicas: 4
+      resources:
+        requests:
+          cpu: "500m"
+`
+	tmpl, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("template with defaultValues/envValues should parse: %v", err)
+	}
+	if tmpl.Spec.DefaultValues["replicas"] != 1 {
+		t.Errorf("defaultValues.replicas = %v, want 1", tmpl.Spec.DefaultValues["replicas"])
+	}
+	if tmpl.Spec.EnvValues["prod"]["replicas"] != 4 {
+		t.Errorf("envValues.prod.replicas = %v, want 4", tmpl.Spec.EnvValues["prod"]["replicas"])
+	}
+}
+
 func mustContain(t *testing.T, err error, substr string) {
 	t.Helper()
 	if err == nil {
@@ -617,10 +654,10 @@ func TestResolvedCapabilities_ExplicitOverridesWin(t *testing.T) {
 		Name: "stateful-worker",
 		Type: TemplateComponentWorker,
 		Capabilities: ComponentCapabilities{
-			PDB:         &off,        // override worker default
-			Resources:   &off,        // chart bakes its own resources
-			Autoscaling: "none",      // no scaling for this stateful workload
-			Expose:      &on,         // expose a metrics port
+			PDB:         &off,   // override worker default
+			Resources:   &off,   // chart bakes its own resources
+			Autoscaling: "none", // no scaling for this stateful workload
+			Expose:      &on,    // expose a metrics port
 			Routing:     "ingress",
 		},
 	}

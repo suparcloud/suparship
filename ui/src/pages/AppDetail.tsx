@@ -31,11 +31,13 @@ import {
 } from "../lib/secrets";
 import { listOrgEnvironments } from "../lib/settings";
 import type { ResolvedSecretEntry } from "../lib/secrets";
+import { ComponentConfigEditor } from "../components/ComponentConfigEditor";
 import type {
   AppDeploymentHistoryResponse,
   AppDetail as AppDetailType,
   AppEnvironmentSummary,
   AppLogsResponse,
+  ComponentConfig,
   ComponentSummary,
   DeploymentHistoryEntry,
   Diagnostic,
@@ -1759,6 +1761,61 @@ function AppConfigEditor({
 // cluster.
 type ClusterDraft = { replicas: string; rows: { key: string; value: string }[] };
 
+// ComponentConfigSection wraps the per-component editor: resources / KEDA
+// triggers / envFrom / env, at app level and per (stable) environment.
+function ComponentConfigSection({
+  data,
+  project,
+  onSaved,
+}: {
+  data: AppDetailType;
+  project: string;
+  onSaved: () => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const components = (data.components ?? []).map((c) => c.name);
+  const environments = (data.environments ?? [])
+    .filter((e) => e.envType !== "preview")
+    .map((e) => e.envName);
+  if (components.length === 0) return null;
+
+  async function save(
+    componentConfigs: Record<string, ComponentConfig>,
+    envComponents: Record<string, Record<string, ComponentConfig>>,
+  ) {
+    setSaving(true);
+    try {
+      await updateApp(project, data.name, { componentConfigs, envComponents });
+      await onSaved();
+      toast.success("Component config saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-gray-200 bg-white p-6">
+      <h3 className="text-sm font-semibold text-gray-900">
+        Component configuration
+      </h3>
+      <p className="mb-4 mt-1 text-xs text-gray-500">
+        Per-component resources, KEDA autoscaling, envFrom, and env overrides —
+        at the app level or overridden per environment.
+      </p>
+      <ComponentConfigEditor
+        components={components}
+        environments={environments}
+        componentConfigs={data.componentConfigs ?? {}}
+        envComponents={data.envComponents ?? {}}
+        saving={saving}
+        onSave={save}
+      />
+    </section>
+  );
+}
+
 function ClusterOverridesEditor({
   data,
   project,
@@ -2144,6 +2201,9 @@ function OverviewTab({
 
       {/* Per-cluster overrides — only for fan-out environments */}
       <ClusterOverridesEditor data={data} project={project} onSaved={onSaved} />
+
+      {/* Per-component config — resources / KEDA triggers / envFrom / env */}
+      <ComponentConfigSection data={data} project={project} onSaved={onSaved} />
 
       {/* Secrets */}
       {data.secretRefs.length > 0 && (

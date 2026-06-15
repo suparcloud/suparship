@@ -20,6 +20,22 @@ app:
   name: ""
   env: ""
 
+# -- Platform metadata — injected by suparShip at publish time (identity +
+# resolved routing context for this env/cluster). Reference any field via
+# .Values.platform.* in your chart. Never contains secrets.
+platform:
+  org: ""
+  project: ""
+  app: ""
+  env: ""
+  envType: ""
+  cluster: ""
+  namespace: ""
+  baseDomain: ""
+  routingHost: ""
+  ingressClassName: ""
+  clusterIssuer: ""
+
 # -- Per-component configuration managed by suparShip.
 components:
   web:

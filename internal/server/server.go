@@ -476,7 +476,7 @@ func New(cfg Config) *Server {
 		rh.stuckApps = cfg.StuckAppManager
 		rh.kubeClient = cfg.KubeClient
 		if cfg.ProjectStore != nil {
-			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates)
+			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates, cfg.ClusterTemplateLoader)
 			cfg.Logger.Info("service creation endpoint enabled")
 
 			rh.inventoryHandler = newInventoryHandler(cfg.ProjectStore, cfg.RuntimeProvider)
@@ -497,7 +497,7 @@ func New(cfg Config) *Server {
 			}
 		}
 		if cfg.AppStore != nil {
-			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ProjectStore)
+			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ClusterTemplateLoader, cfg.ProjectStore)
 			rh.appHandler.kubeClient = cfg.KubeClient
 			if cfg.OrgProvider != nil {
 				rh.appHandler.orgProvider = cfg.OrgProvider

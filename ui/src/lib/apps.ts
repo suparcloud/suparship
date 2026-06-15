@@ -1,5 +1,6 @@
 import { api } from "./api";
 import type {
+  ComponentConfig,
   AppDeploymentHistoryResponse,
   AppDetailResponse,
   AppEnvironmentResponse,
@@ -75,6 +76,14 @@ export interface UpdateAppRequest {
   values?: Record<string, unknown>;
   // clusterOverrides replaces per-(env, cluster) overrides, keyed env → cluster.
   clusterOverrides?: Record<string, Record<string, ClusterValueOverride>>;
+  // rawValues replaces the app-level freeform Helm values overlay.
+  rawValues?: Record<string, unknown>;
+  // envRawValues replaces per-environment overlays keyed by env name.
+  envRawValues?: Record<string, Record<string, unknown>>;
+  // componentConfigs replaces app-level per-component config keyed by name.
+  componentConfigs?: Record<string, ComponentConfig>;
+  // envComponents replaces per-(env, component) overrides keyed env → component.
+  envComponents?: Record<string, Record<string, ComponentConfig>>;
 }
 
 export function updateApp(

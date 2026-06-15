@@ -55,6 +55,42 @@
       "additionalProperties": {
         "additionalProperties": true,
         "properties": {
+          "autoscaling": {
+            "additionalProperties": true,
+            "properties": {
+              "maxReplicaCount": {
+                "type": "integer"
+              },
+              "minReplicaCount": {
+                "type": "integer"
+              },
+              "triggers": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "metadata": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "type": "object"
+                    },
+                    "metricType": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -63,6 +99,45 @@
               "type": "string"
             },
             "type": "object"
+          },
+          "envFrom": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "configMapRef": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "optional": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "secretRef": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "optional": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
           },
           "healthCheck": {
             "additionalProperties": true,
@@ -116,6 +191,18 @@
           "resources": {
             "additionalProperties": true,
             "properties": {
+              "limits": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "requests": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
               "size": {
                 "type": "string"
               }
@@ -216,6 +303,55 @@
       },
       "type": "object"
     },
+    "platform": {
+      "additionalProperties": true,
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "baseDomain": {
+          "type": "string"
+        },
+        "cluster": {
+          "type": "string"
+        },
+        "clusterIssuer": {
+          "type": "string"
+        },
+        "env": {
+          "type": "string"
+        },
+        "envType": {
+          "type": "string"
+        },
+        "ingressClassName": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "org": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "routingHost": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "app",
+        "baseDomain",
+        "env",
+        "envType",
+        "namespace",
+        "org",
+        "project",
+        "routingHost"
+      ],
+      "type": "object"
+    },
     "routing": {
       "additionalProperties": true,
       "properties": {
@@ -280,6 +416,7 @@
   "required": [
     "app",
     "components",
+    "platform",
     "routing",
     "suparship"
   ],

@@ -299,6 +299,11 @@ export interface TemplatePreset {
   values: Record<string, unknown>;
 }
 
+export interface TemplateComponentInfo {
+  name: string;
+  type: string;
+}
+
 export interface TemplateDetail {
   name: string;
   version: string;
@@ -310,6 +315,7 @@ export interface TemplateDetail {
   advancedInputs: TemplateInput[];
   secretInputs: TemplateSecretInput[];
   presets: TemplatePreset[];
+  components?: TemplateComponentInfo[];
 }
 
 // --- Onboarding types ---
@@ -481,6 +487,43 @@ export interface AppDetail {
   environments: AppEnvironmentSummary[];
   // Per-(env, cluster) value overrides keyed env → cluster (fan-out envs only).
   clusterOverrides?: Record<string, Record<string, ClusterValueOverrideDTO>>;
+  // App-level freeform Helm values overlay.
+  rawValues?: Record<string, unknown>;
+  // Per-environment freeform overlays keyed by env name.
+  envRawValues?: Record<string, Record<string, unknown>>;
+  // App-level per-component config keyed by component name.
+  componentConfigs?: Record<string, ComponentConfig>;
+  // Per-(env, component) overrides keyed env → component.
+  envComponents?: Record<string, Record<string, ComponentConfig>>;
+}
+
+// ComponentResources holds raw k8s resource quantities (cpu/memory/…).
+export interface ComponentResources {
+  requests?: Record<string, string>;
+  limits?: Record<string, string>;
+}
+
+// KEDATrigger mirrors a KEDA ScaledObject trigger.
+export interface KEDATrigger {
+  type: string;
+  metricType?: string;
+  metadata?: Record<string, string>;
+}
+
+export interface ComponentScaling {
+  triggers?: KEDATrigger[];
+  minReplicas?: number;
+  maxReplicas?: number;
+}
+
+// ComponentConfig is the per-component knob set (resources / envFrom / scaling /
+// env) editable at app level and per environment.
+export interface ComponentConfig {
+  resources?: ComponentResources;
+  envFromSecrets?: string[];
+  envFromConfigMaps?: string[];
+  scaling?: ComponentScaling;
+  env?: Record<string, string>;
 }
 
 // ClusterValueOverrideDTO mirrors the backend per-(env, cluster) override.
@@ -618,6 +661,13 @@ export interface CreateAppRequest {
   namespaceScope?: "app" | "project";
   /** Optional namespace pattern override. Only applies when namespaceScope is "app". */
   namespacePattern?: string;
+  /** Optional freeform Helm values overlay, deep-merged onto generated values at
+   *  publish. String leaves may reference {platform.*}/{vars.*} tokens. No secrets. */
+  rawValues?: Record<string, unknown>;
+  /** App-level per-component config keyed by component name. */
+  componentConfigs?: Record<string, ComponentConfig>;
+  /** Per-(env, component) overrides keyed env → component. */
+  envComponents?: Record<string, Record<string, ComponentConfig>>;
 }
 
 export interface CreateAppResponse {
