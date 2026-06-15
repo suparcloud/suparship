@@ -48,6 +48,11 @@ type TemplateDetailDTO struct {
 	AdvancedInputs []InputDTO             `json:"advancedInputs"`
 	SecretInputs   []SecretInputDTO       `json:"secretInputs"`
 	Presets        []PresetDTO            `json:"presets"`
+	// DefaultValues / EnvValues are the Platform-Engineer-authored Helm values
+	// overlays (all-envs + per-env), exposed so the values-editor UI can show /
+	// seed the effective-values preview without a second round-trip.
+	DefaultValues map[string]any            `json:"defaultValues,omitempty"`
+	EnvValues     map[string]map[string]any `json:"envValues,omitempty"`
 }
 
 // TemplateComponentDTO mirrors tpl.TemplateComponent for the wire,
@@ -143,6 +148,7 @@ func (th *templateHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/templates", th.auth.requireAuth(th.handleList))
 	mux.HandleFunc("GET /api/v1/templates/{name}", th.auth.requireAuth(th.handleDetail))
 	mux.HandleFunc("GET /api/v1/templates/{name}/versions", th.auth.requireAuth(th.handleListVersions))
+	mux.HandleFunc("GET /api/v1/templates/{name}/effective-values", th.auth.requireAuth(th.handleEffectiveValues))
 	mux.HandleFunc("DELETE /api/v1/templates/{name}", th.adminOrAuth()(th.handleDelete))
 }
 
@@ -398,6 +404,8 @@ func templateToDetail(t *tpl.Template) TemplateDetailDTO {
 		AdvancedInputs: inputsToDTO(t.Spec.AdvancedInputs),
 		SecretInputs:   secretInputsToDTO(t.Spec.SecretInputs),
 		Presets:        presetsToDTO(t.Spec.Presets),
+		DefaultValues:  t.Spec.DefaultValues,
+		EnvValues:      t.Spec.EnvValues,
 	}
 }
 
