@@ -1,5 +1,6 @@
 import { api } from "./api";
 import type {
+  EffectiveValuesResponse,
   TemplateCredentialsRequest,
   TemplateCredentialsResponse,
   TemplateDetail,
@@ -19,6 +20,20 @@ export function fetchTemplates(): Promise<TemplatesResponse> {
 
 export function fetchTemplate(name: string): Promise<TemplateDetail> {
   return api.get<TemplateDetail>(`/templates/${encodeURIComponent(name)}`);
+}
+
+// fetchTemplateEffectiveValues returns the starting values document for a
+// not-yet-created app from this template: chart defaults ⊕ the template's
+// platform/env defaults (for the given env). Backs the create form's read-only
+// effective-values preview.
+export function fetchTemplateEffectiveValues(
+  name: string,
+  env?: string,
+): Promise<EffectiveValuesResponse> {
+  const q = env ? `?env=${encodeURIComponent(env)}` : "";
+  return api.get<EffectiveValuesResponse>(
+    `/templates/${encodeURIComponent(name)}/effective-values${q}`,
+  );
 }
 
 // deleteTemplate removes a cluster-stored template. Built-in templates

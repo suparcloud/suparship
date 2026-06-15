@@ -9,6 +9,7 @@ import type {
   AppLogsResponse,
   CreateAppRequest,
   CreateAppResponse,
+  EffectiveValuesResponse,
   KargoAppPipeline,
   KargoPromotionStatus,
   PromoteRequest,
@@ -94,6 +95,24 @@ export function updateApp(
   return api.patch<CreateAppResponse>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}`,
     req,
+  );
+}
+
+// previewAppValues computes the read-only effective values for an existing
+// app + env, layering the supplied (possibly unsaved) overlays so the editor can
+// preview live as the user types. Computes only — never mutates.
+export function previewAppValues(
+  project: string,
+  app: string,
+  env: string,
+  body: {
+    rawValues?: Record<string, unknown>;
+    envRawValues?: Record<string, Record<string, unknown>>;
+  },
+): Promise<EffectiveValuesResponse> {
+  return api.post<EffectiveValuesResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/values/preview`,
+    body,
   );
 }
 

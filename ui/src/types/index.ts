@@ -316,6 +316,24 @@ export interface TemplateDetail {
   secretInputs: TemplateSecretInput[];
   presets: TemplatePreset[];
   components?: TemplateComponentInfo[];
+  // Platform-Engineer-authored Helm values overlays (all-envs + per-env),
+  // layered above chart defaults and below developer overrides.
+  defaultValues?: Record<string, unknown>;
+  envValues?: Record<string, Record<string, unknown>>;
+}
+
+// EffectiveValuesResponse is the read-only "what will deploy" preview backing
+// the values editor: the merged values document (chart ⊕ platform/env ⊕
+// overrides), NOT the fully rendered chart.
+export interface EffectiveValuesResponse {
+  values: Record<string, unknown>;
+  // false when the chart bundle couldn't be read (built-in/disk/external-mode);
+  // the preview then reflects only platform/env defaults + overrides.
+  chartDefaultsAvailable: boolean;
+  // whether {platform.*}/{vars.*} tokens were resolved (always false in v1).
+  interpolated: boolean;
+  // overlays that contributed, low→high.
+  layers: string[];
 }
 
 // --- Onboarding types ---
