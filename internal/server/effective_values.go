@@ -7,6 +7,7 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/helmvalues"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/tpl"
@@ -55,11 +56,14 @@ func chartDefaults(ctx context.Context, kc kubernetes.Interface, t *tpl.Template
 // computeEffectiveValues layers the values document low→high, exactly mirroring
 // the publisher's envOverlay/rawValuesOverlay order:
 //
-//	chart defaults ⊕ template DefaultValues ⊕ template EnvValues[env] ⊕ appRaw ⊕ envRaw
+//	chart defaults
+//	  ⊕ template DefaultValues ⊕ template EnvValues[env]   (chart author / repo)
+//	  ⊕ org override DefaultValues ⊕ org EnvValues[env]    (PE/SRE, org-level)
+//	  ⊕ appRaw ⊕ envRaw                                    (developer)
 //
-// Inputs are deep-copied so callers' maps (the stored app spec, the template) are
-// never mutated.
-func computeEffectiveValues(chartVals map[string]any, t *tpl.Template, envName string, appRaw, envRaw map[string]any) map[string]any {
+// Inputs are deep-copied so callers' maps (the stored app spec, the template,
+// the org override) are never mutated.
+func computeEffectiveValues(chartVals map[string]any, t *tpl.Template, ov *domain.TemplateOverride, envName string, appRaw, envRaw map[string]any) map[string]any {
 	out := helmvalues.DeepCopyMap(chartVals)
 	if out == nil {
 		out = map[string]any{}
@@ -70,21 +74,33 @@ func computeEffectiveValues(chartVals map[string]any, t *tpl.Template, envName s
 			out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(t.Spec.EnvValues[envName]))
 		}
 	}
+	if ov != nil {
+		out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(ov.DefaultValues))
+		if envName != "" && ov.EnvValues != nil {
+			out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(ov.EnvValues[envName]))
+		}
+	}
 	out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(appRaw))
 	out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(envRaw))
 	return out
 }
 
-func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Template, envName string, appRaw, envRaw map[string]any) EffectiveValuesDTO {
+func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Template, ov *domain.TemplateOverride, envName string, appRaw, envRaw map[string]any) EffectiveValuesDTO {
 	layers := []string{}
 	if available {
 		layers = append(layers, "chart defaults")
 	}
 	if t != nil && len(t.Spec.DefaultValues) > 0 {
-		layers = append(layers, "platform defaults")
+		layers = append(layers, "template defaults")
 	}
 	if t != nil && envName != "" && len(t.Spec.EnvValues[envName]) > 0 {
-		layers = append(layers, "platform "+envName)
+		layers = append(layers, "template "+envName)
+	}
+	if ov != nil && len(ov.DefaultValues) > 0 {
+		layers = append(layers, "org overrides")
+	}
+	if ov != nil && envName != "" && len(ov.EnvValues[envName]) > 0 {
+		layers = append(layers, "org "+envName)
 	}
 	if len(appRaw) > 0 {
 		layers = append(layers, "app overrides")
@@ -93,7 +109,7 @@ func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Templat
 		layers = append(layers, envName+" overrides")
 	}
 	return EffectiveValuesDTO{
-		Values:                 computeEffectiveValues(chartVals, t, envName, appRaw, envRaw),
+		Values:                 computeEffectiveValues(chartVals, t, ov, envName, appRaw, envRaw),
 		ChartDefaultsAvailable: available,
 		Interpolated:           false,
 		Layers:                 layers,
@@ -118,7 +134,22 @@ func (th *templateHandler) handleEffectiveValues(w http.ResponseWriter, r *http.
 	}
 	env := r.URL.Query().Get("env")
 	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, env, nil, nil))
+	ov := loadOverride(r.Context(), th.kubeClient, name)
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, env, nil, nil))
+}
+
+// loadOverride best-effort reads a template's org-level platform override.
+// Returns nil (no override) on nil client or any error — the override is
+// additive/optional and must never fail an effective-values computation.
+func loadOverride(ctx context.Context, kc kubernetes.Interface, name string) *domain.TemplateOverride {
+	if kc == nil {
+		return nil
+	}
+	ov, err := kube.LoadTemplateOverride(ctx, kc, name)
+	if err != nil {
+		return nil
+	}
+	return ov
 }
 
 // valuesPreviewRequest is the body of the app values-preview endpoint: the live,
@@ -166,5 +197,6 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 
 	t, _ := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
 	chartVals, available := chartDefaults(r.Context(), ah.kubeClient, t)
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, envName, appRaw, envRaw))
+	ov := loadOverride(r.Context(), ah.kubeClient, app.Spec.Template.Name)
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, envName, appRaw, envRaw))
 }

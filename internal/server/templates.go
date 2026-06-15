@@ -149,6 +149,9 @@ func (th *templateHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/templates/{name}", th.auth.requireAuth(th.handleDetail))
 	mux.HandleFunc("GET /api/v1/templates/{name}/versions", th.auth.requireAuth(th.handleListVersions))
 	mux.HandleFunc("GET /api/v1/templates/{name}/effective-values", th.auth.requireAuth(th.handleEffectiveValues))
+	mux.HandleFunc("POST /api/v1/templates/{name}/effective-values", th.auth.requireAuth(th.handlePostEffectiveValues))
+	mux.HandleFunc("GET /api/v1/templates/{name}/overrides", th.auth.requireAuth(th.handleGetTemplateOverride))
+	mux.HandleFunc("PUT /api/v1/templates/{name}/overrides", th.adminOrAuth()(th.handlePutTemplateOverride))
 	mux.HandleFunc("DELETE /api/v1/templates/{name}", th.adminOrAuth()(th.handleDelete))
 }
 

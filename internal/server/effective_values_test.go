@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"k8s.io/client-go/kubernetes/fake"
+
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -39,7 +41,7 @@ func TestComputeEffectiveValues_LayerPrecedence(t *testing.T) {
 	appRaw := map[string]any{"image": map[string]any{"tag": "dev"}}
 	envRaw := map[string]any{"replicaCount": 9}
 
-	got := computeEffectiveValues(chart, tmpl, "prod", appRaw, envRaw)
+	got := computeEffectiveValues(chart, tmpl, nil, "prod", appRaw, envRaw)
 
 	// envRaw (9) > template EnvValues.prod (4) > DefaultValues/chart (1).
 	if got["replicaCount"] != 9 {
@@ -64,7 +66,7 @@ func TestComputeEffectiveValues_LayerPrecedence(t *testing.T) {
 func TestComputeEffectiveValues_EnvValuesOnlyForThatEnv(t *testing.T) {
 	tmpl := valuesTemplate()
 	// staging has no EnvValues entry → falls back to DefaultValues replicaCount 1.
-	got := computeEffectiveValues(nil, tmpl, "staging", nil, nil)
+	got := computeEffectiveValues(nil, tmpl, nil, "staging", nil, nil)
 	if got["replicaCount"] != 1 {
 		t.Errorf("staging replicaCount = %v, want 1 (default, no env override)", got["replicaCount"])
 	}
@@ -72,9 +74,76 @@ func TestComputeEffectiveValues_EnvValuesOnlyForThatEnv(t *testing.T) {
 
 func TestComputeEffectiveValues_NilChartDegrades(t *testing.T) {
 	tmpl := valuesTemplate()
-	got := computeEffectiveValues(nil, tmpl, "prod", nil, nil)
+	got := computeEffectiveValues(nil, tmpl, nil, "prod", nil, nil)
 	if got["replicaCount"] != 4 {
 		t.Errorf("replicaCount = %v, want 4 (env default, no chart)", got["replicaCount"])
+	}
+}
+
+func TestComputeEffectiveValues_OrgLayerBetweenTemplateAndApp(t *testing.T) {
+	tmpl := valuesTemplate() // DefaultValues replicaCount 1, EnvValues.prod replicaCount 4
+	ov := &domain.TemplateOverride{
+		DefaultValues: map[string]any{"replicaCount": 2}, // org > template default
+		EnvValues:     map[string]map[string]any{"prod": {"replicaCount": 6}},
+	}
+
+	// No app override → org prod (6) wins over template prod (4).
+	if got := computeEffectiveValues(nil, tmpl, ov, "prod", nil, nil); got["replicaCount"] != 6 {
+		t.Errorf("replicaCount = %v, want 6 (org prod over template prod)", got["replicaCount"])
+	}
+	// App override still wins over the org layer.
+	if got := computeEffectiveValues(nil, tmpl, ov, "prod", map[string]any{"replicaCount": 11}, nil); got["replicaCount"] != 11 {
+		t.Errorf("replicaCount = %v, want 11 (app over org)", got["replicaCount"])
+	}
+	// Org default applies to an env with no org EnvValues entry.
+	if got := computeEffectiveValues(nil, tmpl, ov, "staging", nil, nil); got["replicaCount"] != 2 {
+		t.Errorf("staging replicaCount = %v, want 2 (org default)", got["replicaCount"])
+	}
+}
+
+func TestHandleTemplateOverride_PutGetRoundTrip(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	th := &templateHandler{builtin: []*tpl.Template{valuesTemplate()}, kubeClient: client}
+
+	body, _ := json.Marshal(TemplateOverrideDTO{
+		DefaultValues: map[string]any{"replicaCount": 3},
+	})
+	put := httptest.NewRequest("PUT", "/api/v1/templates/voiceai-agent/overrides", bytes.NewReader(body))
+	put.SetPathValue("name", "voiceai-agent")
+	pr := httptest.NewRecorder()
+	th.handlePutTemplateOverride(pr, put)
+	if pr.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", pr.Code, pr.Body.String())
+	}
+
+	get := httptest.NewRequest("GET", "/api/v1/templates/voiceai-agent/overrides", nil)
+	get.SetPathValue("name", "voiceai-agent")
+	gr := httptest.NewRecorder()
+	th.handleGetTemplateOverride(gr, get)
+	var dto TemplateOverrideDTO
+	_ = json.NewDecoder(gr.Body).Decode(&dto)
+	if dto.DefaultValues["replicaCount"] != float64(3) {
+		t.Fatalf("round-trip replicaCount = %v, want 3", dto.DefaultValues["replicaCount"])
+	}
+}
+
+func TestHandlePostEffectiveValues_ReflectsUnsavedOverride(t *testing.T) {
+	th := &templateHandler{builtin: []*tpl.Template{valuesTemplate()}}
+
+	body, _ := json.Marshal(TemplateOverrideDTO{
+		EnvValues: map[string]map[string]any{"prod": {"replicaCount": 8}},
+	})
+	req := httptest.NewRequest("POST", "/api/v1/templates/voiceai-agent/effective-values?env=prod", bytes.NewReader(body))
+	req.SetPathValue("name", "voiceai-agent")
+	rec := httptest.NewRecorder()
+	th.handlePostEffectiveValues(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp EffectiveValuesDTO
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Values["replicaCount"] != float64(8) {
+		t.Errorf("replicaCount = %v, want 8 (unsaved org override)", resp.Values["replicaCount"])
 	}
 }
 
