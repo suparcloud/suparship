@@ -28,6 +28,28 @@ export function parseYamlOverlay(text: string): {
   }
 }
 
+// mergeOverlay deep-merges overlay onto base (returning a new object), mirroring
+// the server's helmvalues.DeepMerge: nested maps merge key-by-key; any non-map
+// value (scalar, array) replaces wholesale. Used to render a live effective
+// preview client-side while the user edits, without a round-trip per keystroke.
+export function mergeOverlay(
+  base: Record<string, unknown> | null | undefined,
+  overlay: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = base ? structuredClone(base) : {};
+  if (!overlay) return out;
+  for (const [k, ov] of Object.entries(overlay)) {
+    const isMap = (v: unknown): v is Record<string, unknown> =>
+      typeof v === "object" && v !== null && !Array.isArray(v);
+    if (isMap(ov) && isMap(out[k])) {
+      out[k] = mergeOverlay(out[k] as Record<string, unknown>, ov);
+    } else {
+      out[k] = ov;
+    }
+  }
+  return out;
+}
+
 // stringifyOverlay renders an overlay object back to YAML for seeding the editor.
 // An empty or absent object becomes "" so the editor starts blank ("inherit all").
 export function stringifyOverlay(
