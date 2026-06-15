@@ -30,8 +30,12 @@ import (
 // projectStore is non-nil. The logs route is registered when logsProvider
 // is non-nil.
 type appHandler struct {
-	appStore                domain.AppStore
-	templateIdx             map[string]*tpl.Template
+	appStore domain.AppStore
+	// builtin + clusterLoader resolve templates live (cluster overrides built-in)
+	// so externally-synced templates are usable for app creation/upgrade without
+	// a restart. Use lookupTemplate; do not read a cached index.
+	builtin                 []*tpl.Template
+	clusterLoader           ClusterTemplateLoader
 	projectStore            project.Store
 	orgProvider             rbac.OrgProvider        // optional: provides org env fallback for sync
 	runtimeProvider         runtime.Provider        // optional: enriches env responses with live K8s status
@@ -62,16 +66,21 @@ type appHandler struct {
 // POST /api/v1/projects/{project}/apps creation endpoint; the caller is
 // responsible for registering the route only when both are present (see
 // rbacHandler.registerRoutes).
-func newAppHandler(store domain.AppStore, templates []*tpl.Template, projectStore project.Store) *appHandler {
-	idx := make(map[string]*tpl.Template, len(templates))
-	for _, t := range templates {
-		idx[t.Metadata.Name] = t
-	}
+func newAppHandler(store domain.AppStore, templates []*tpl.Template, clusterLoader ClusterTemplateLoader, projectStore project.Store) *appHandler {
 	return &appHandler{
-		appStore:     store,
-		templateIdx:  idx,
-		projectStore: projectStore,
+		appStore:      store,
+		builtin:       templates,
+		clusterLoader: clusterLoader,
+		projectStore:  projectStore,
 	}
+}
+
+// lookupTemplate resolves a template by name live (cluster overrides built-in),
+// so externally-synced templates are usable for app creation/upgrade without a
+// server restart. Returns (nil, false) when the name is unknown.
+func (ah *appHandler) lookupTemplate(ctx context.Context, name string) (*tpl.Template, bool) {
+	t, ok := resolveTemplates(ctx, ah.builtin, ah.clusterLoader, nil)[name]
+	return t, ok
 }
 
 // handleCreateApp handles POST /api/v1/projects/{project}/apps.
@@ -99,7 +108,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tmpl, ok := ah.templateIdx[req.Template]
+	tmpl, ok := ah.lookupTemplate(r.Context(), req.Template)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, errorResponse{
 			Error: "template \"" + req.Template + "\" not found",
@@ -371,7 +380,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		tmpl, ok := ah.templateIdx[app.Spec.Template.Name]
+		tmpl, ok := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
 		if !ok {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{
 				Error: "app's template \"" + app.Spec.Template.Name + "\" is no longer available; cannot re-validate values",

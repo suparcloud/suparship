@@ -346,21 +346,21 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// a warning is logged and the server continues.
 		bootstrap.ReconcileArgoCD(cmd.Context(), dynClient, logger)
 
-		// When no local templates directory is provided, attempt to load
-		// templates stored as ConfigMaps in the cluster (label
-		// suparship.io/type=template, namespace suparship-system).
-		// Failure is non-fatal: the server starts without templates so
-		// existing services remain accessible and operators can diagnose
-		// the issue without a hard stop.
+		// Templates stored as ConfigMaps in the cluster (label
+		// suparship.io/type=template, namespace suparship-system) are served
+		// LIVE via cfg.ClusterTemplateLoader / the publisher's clusterLoader —
+		// NOT frozen into the built-in set at startup. Freezing them made
+		// externally-synced templates impossible to update or delete (the stale
+		// startup copy shadowed the live one). With no --templates-dir there are
+		// no disk built-ins; every template resolves live from the cluster.
+		// A best-effort count is logged for operator visibility only.
 		if templatesDir == "" {
-			clusterTemplates, err := kube.LoadTemplates(cmd.Context(), client)
-			if err != nil {
-				logger.Warn("could not load templates from cluster, starting without",
+			if clusterTemplates, err := kube.LoadTemplates(cmd.Context(), client); err != nil {
+				logger.Warn("could not list cluster templates at startup (served live regardless)",
 					"error", err,
 				)
 			} else {
-				templates = clusterTemplates
-				logger.Info("templates loaded from cluster", "count", len(templates))
+				logger.Info("cluster templates available (served live)", "count", len(clusterTemplates))
 			}
 		}
 	}
@@ -420,7 +420,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					vault:           vaultStore,
 					projectStore:    projectStore,
 					envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(cmd.Context(), orgProvider)),
-					templateIdx:     templateIndex(templates),
+					builtin:         templates,
+					clusterLoader:   clusterTemplateLoaderFromClient(kubeClient),
 				}
 				sealPublisherHolder.Swap(pub)
 				logger.Info("gitops publisher enabled",
@@ -555,7 +556,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				vault:           vaultStore,
 				projectStore:    projectStore,
 				envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(ctx, orgProvider)),
-				templateIdx:     templateIndex(templates),
+				builtin:         templates,
+				clusterLoader:   clusterTemplateLoaderFromClient(kubeClient),
 			})
 			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
@@ -656,26 +658,36 @@ type gitOpsPublisherAdapter struct {
 	// suparship-system. Optional: when nil, the cluster layer contributes no
 	// vars.
 	envConfigReader *envconfig.UpperLevelEnvWriter
-	// templateIdx resolves an app's template by name so the adapter can layer
-	// the template's PE-authored DefaultValues/EnvValues overlays into the
-	// published per-env values. Optional: when nil/absent no overlay is applied.
-	templateIdx map[string]*tpl.Template
+	// builtin + clusterLoader resolve an app's template by name (cluster
+	// overrides built-in) so the adapter can layer the template's PE-authored
+	// DefaultValues/EnvValues overlays into the published per-env values.
+	// Resolved live so externally-synced templates apply without a restart.
+	// Optional: when both are nil/empty no overlay is applied.
+	builtin       []*tpl.Template
+	clusterLoader server.ClusterTemplateLoader
 }
 
-// templateIndex builds a name→template lookup for the publish adapter.
-func templateIndex(ts []*tpl.Template) map[string]*tpl.Template {
-	idx := make(map[string]*tpl.Template, len(ts))
-	for _, t := range ts {
-		idx[t.Metadata.Name] = t
+// resolveTemplate resolves a template by name live (cluster overrides built-in).
+func (a *gitOpsPublisherAdapter) resolveTemplate(ctx context.Context, name string) *tpl.Template {
+	byName := make(map[string]*tpl.Template, len(a.builtin))
+	for _, t := range a.builtin {
+		byName[t.Metadata.Name] = t
 	}
-	return idx
+	if a.clusterLoader != nil {
+		if cluster, err := a.clusterLoader(ctx); err == nil {
+			for _, t := range cluster {
+				byName[t.Metadata.Name] = t // cluster overrides built-in
+			}
+		}
+	}
+	return byName[name]
 }
 
 // setPlatformOverlays populates the PE-authored values overlays on an
 // AppPublishEnv from the app's resolved template (DefaultValues for all envs +
 // EnvValues for this env). No-op when the template isn't found.
-func (a *gitOpsPublisherAdapter) setPlatformOverlays(pub *gitops.AppPublishEnv, app *domain.App, envName string) {
-	tmpl := a.templateIdx[app.Spec.Template.Name]
+func (a *gitOpsPublisherAdapter) setPlatformOverlays(ctx context.Context, pub *gitops.AppPublishEnv, app *domain.App, envName string) {
+	tmpl := a.resolveTemplate(ctx, app.Spec.Template.Name)
 	if tmpl == nil {
 		return
 	}
@@ -899,7 +911,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 		// committed YAML in the GitOps repo is the audit-trail for what the
 		// pod will see — no chart-side multi-source merging.
 		pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
-		a.setPlatformOverlays(&pub, app, env.EnvName)
+		a.setPlatformOverlays(ctx, &pub, app, env.EnvName)
 
 		pubEnvs = append(pubEnvs, pub)
 	}
@@ -1097,7 +1109,7 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 		a.enrichPubEnvWithSecrets(ctx, org, app, env.EnvName, &pub)
 	}
 	pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
-	a.setPlatformOverlays(&pub, app, env.EnvName)
+	a.setPlatformOverlays(ctx, &pub, app, env.EnvName)
 
 	return a.inner.PublishAppEnv(ctx, app, pub)
 }

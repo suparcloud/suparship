@@ -216,9 +216,9 @@ func newTestAppMux() (*http.ServeMux, *authHandler, *memAppStore) {
 
 	store := newMemAppStore()
 	rh := &rbacHandler{
-		auth:        ah,
-		orgStore: &staticOrgProvider{org: testRBACOrg()},
-		appHandler:  newAppHandler(store, nil, nil),
+		auth:       ah,
+		orgStore:   &staticOrgProvider{org: testRBACOrg()},
+		appHandler: newAppHandler(store, nil, nil, nil),
 	}
 	rh.registerRoutes(mux)
 
@@ -247,7 +247,7 @@ func newTestAppCreateMux() (*http.ServeMux, *authHandler, *memAppStore, *memProj
 	_ = projStore.Save(context.Background(), appCreateTestProject())
 
 	orgProv := &staticOrgProvider{org: testRBACOrg()}
-	appH := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, projStore)
+	appH := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, nil, projStore)
 	appH.orgProvider = orgProv
 
 	rh := &rbacHandler{
@@ -258,6 +258,71 @@ func newTestAppCreateMux() (*http.ServeMux, *authHandler, *memAppStore, *memProj
 	rh.registerRoutes(mux)
 
 	return mux, ah, appStore, projStore
+}
+
+// newAppCreateMuxWith wires an app-create mux with explicit built-in templates
+// and a cluster loader, so tests can exercise live (cluster-overrides-built-in)
+// template resolution at app-creation time.
+func newAppCreateMuxWith(builtin []*tpl.Template, clusterLoader ClusterTemplateLoader) (*http.ServeMux, *authHandler, *memAppStore) {
+	mux := http.NewServeMux()
+
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	appStore := newMemAppStore()
+	appStore.mu.Lock()
+	appStore.apps["demo"] = make(map[string]*domain.App)
+	appStore.mu.Unlock()
+
+	projStore := newMemProjectStore()
+	_ = projStore.Save(context.Background(), appCreateTestProject())
+
+	orgProv := &staticOrgProvider{org: testRBACOrg()}
+	appH := newAppHandler(appStore, builtin, clusterLoader, projStore)
+	appH.orgProvider = orgProv
+
+	rh := &rbacHandler{auth: ah, orgStore: orgProv, appHandler: appH}
+	rh.registerRoutes(mux)
+
+	return mux, ah, appStore
+}
+
+// TestCreateApp_LiveClusterTemplate proves app creation reads templates live:
+// a template that exists ONLY in the cluster (no built-in) is usable for
+// creation without a server restart — the core of un-freezing the snapshot.
+func TestCreateApp_LiveClusterTemplate(t *testing.T) {
+	clusterOnly := &tpl.Template{
+		APIVersion: tpl.CurrentAPIVersion,
+		Kind:       tpl.TemplateKind,
+		Metadata:   tpl.Metadata{Name: "synced-chart", Version: "1.0.0"},
+		Spec: tpl.TemplateSpec{
+			Title:  "Synced Chart",
+			Engine: tpl.Engine{Type: tpl.EngineHelm},
+			Inputs: []tpl.Input{
+				{Name: "image", Title: "Image", Type: tpl.InputTypeString, Required: true},
+			},
+		},
+	}
+	loader := func(context.Context) ([]*tpl.Template, error) {
+		return []*tpl.Template{clusterOnly}, nil
+	}
+
+	mux, ah, appStore := newAppCreateMuxWith(nil /* no built-ins */, loader)
+
+	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "synced-app",
+		Template: "synced-chart",
+		Values:   map[string]any{"image": "ghcr.io/org/app:v1"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 creating from a cluster-only template, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := appStore.GetApp(context.Background(), "demo", "synced-app"); err != nil {
+		t.Fatalf("expected persisted app from cluster template: %v", err)
+	}
 }
 
 // --- Fixtures for app creation tests ---
@@ -1006,8 +1071,8 @@ func TestCreateAppNoOrgEnvironmentsRejects(t *testing.T) {
 
 	// Org with NO environments registered.
 	emptyEnvOrg := &rbac.Org{
-		Name:        "test",
-		DisplayName: "Test Org",
+		Name:         "test",
+		DisplayName:  "Test Org",
 		Environments: []rbac.OrgEnvironment{}, // explicitly empty
 		Teams: []rbac.Team{
 			{Name: "admins", DisplayName: "Admins", Members: []string{"alice"}},
@@ -1017,7 +1082,7 @@ func TestCreateAppNoOrgEnvironmentsRejects(t *testing.T) {
 		},
 	}
 	orgProv := &staticOrgProvider{org: emptyEnvOrg}
-	appH := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, projStore)
+	appH := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, nil, projStore)
 	appH.orgProvider = orgProv
 
 	rh := &rbacHandler{
@@ -1075,7 +1140,7 @@ func TestCreateAppSingleEnvOnlyCreatesOneEnv(t *testing.T) {
 		},
 	}
 	orgProv2 := &staticOrgProvider{org: singleEnvOrg}
-	appH2 := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, projStore)
+	appH2 := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, nil, projStore)
 	appH2.orgProvider = orgProv2
 
 	rh := &rbacHandler{
