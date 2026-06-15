@@ -14,6 +14,8 @@ import {
 import { listOrgEnvironments } from "../lib/settings";
 import { listClusters } from "../lib/clusters";
 import type { Cluster } from "../lib/clusters";
+import { listPlatformConfigVariables } from "../lib/configVars";
+import type { ConfigVariables } from "../lib/configVars";
 import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   TemplateDetail as TemplateDetailType,
@@ -309,6 +311,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
   const [saving, setSaving] = useState(false);
   const [preview, setPreview] = useState("");
   const [chartAvailable, setChartAvailable] = useState(true);
+  const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
 
   // Seed from the saved override + load env/cluster lists (admins only).
   useEffect(() => {
@@ -340,6 +343,9 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
     listClusters()
       .then(setClusters)
       .catch(() => setClusters([]));
+    listPlatformConfigVariables()
+      .then(setConfigVars)
+      .catch(() => setConfigVars({ platform: [], vars: [] }));
     return () => {
       cancelled = true;
     };
@@ -507,6 +513,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
           <ValuesEditor
             label={activeLabel}
             value={activeText}
+            configVars={configVars}
             height="26rem"
             placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 500m"}
             onChange={setActiveText}
