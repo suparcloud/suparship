@@ -1,15 +1,28 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { ApiError } from "../lib/api";
-import { deleteTemplate, fetchTemplate } from "../lib/templates";
+import { useAuth } from "../lib/AuthContext";
+import {
+  deleteTemplate,
+  fetchTemplate,
+  fetchTemplateOverride,
+  previewTemplateEffectiveValues,
+  updateTemplateOverride,
+} from "../lib/templates";
+import { listOrgEnvironments } from "../lib/settings";
+import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   TemplateDetail as TemplateDetailType,
   TemplateInput,
+  TemplateOverride,
   TemplateSecretInput,
   TemplatePreset,
 } from "../types";
+
+// CodeMirror is heavy; only the override editor needs it.
+const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 
 const inputTypeBadge: Record<string, string> = {
   string: "bg-blue-50 text-blue-700",
@@ -307,6 +320,208 @@ export function TemplateDetail() {
             ))}
           </div>
         </Section>
+      )}
+
+      {/* Platform overrides — org_admin only */}
+      <PlatformOverridesEditor templateName={template.name} />
+    </div>
+  );
+}
+
+const ALL_ENVS = "__all__";
+
+// PlatformOverridesEditor lets a platform engineer (org_admin) layer org-specific
+// Helm values on top of a template's own defaults, per env, WITHOUT forking the
+// upstream template. Stored separately from the template so an external sync
+// can't clobber it. The editor holds the override layer; a read-only pane shows
+// the effective values (chart ⊕ template ⊕ override). Hidden for non-admins.
+function PlatformOverridesEditor({ templateName }: { templateName: string }) {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "org_admin";
+
+  const [envs, setEnvs] = useState<string[]>([]);
+  const [scope, setScope] = useState<string>(ALL_ENVS);
+  const [allText, setAllText] = useState("");
+  const [envTexts, setEnvTexts] = useState<Record<string, string>>({});
+  const [yamlError, setYamlError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState("");
+  const [chartAvailable, setChartAvailable] = useState(true);
+
+  // Seed from the saved override + load env list (admins only).
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    fetchTemplateOverride(templateName)
+      .then((ov) => {
+        if (cancelled) return;
+        setAllText(stringifyOverlay(ov.defaultValues));
+        const next: Record<string, string> = {};
+        for (const [env, vals] of Object.entries(ov.envValues ?? {})) {
+          next[env] = stringifyOverlay(vals as Record<string, unknown>);
+        }
+        setEnvTexts(next);
+      })
+      .catch(() => {
+        /* no override yet */
+      });
+    listOrgEnvironments()
+      .then((res) =>
+        setEnvs((res.environments ?? []).map((e) => e.name).filter((n) => n !== "preview")),
+      )
+      .catch(() => setEnvs([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin, templateName]);
+
+  // Build the full override from the live editor text across all scopes.
+  function buildOverride(): { override: TemplateOverride; error: string | null } {
+    const all = parseYamlOverlay(allText);
+    if (all.error) return { override: {}, error: `All-envs: ${all.error}` };
+    const envValues: Record<string, Record<string, unknown>> = {};
+    for (const [env, text] of Object.entries(envTexts)) {
+      const p = parseYamlOverlay(text);
+      if (p.error) return { override: {}, error: `${env}: ${p.error}` };
+      if (p.value && Object.keys(p.value).length > 0) envValues[env] = p.value;
+    }
+    return {
+      override: {
+        defaultValues: all.value ?? {},
+        envValues: Object.keys(envValues).length > 0 ? envValues : undefined,
+      },
+      error: null,
+    };
+  }
+
+  const previewEnv = scope !== ALL_ENVS ? scope : (envs[0] ?? "");
+
+  // Debounced effective preview (chart ⊕ template ⊕ live override).
+  useEffect(() => {
+    if (!isAdmin || !previewEnv) return;
+    const { override, error } = buildOverride();
+    if (error) return; // keep last good preview
+    const handle = setTimeout(() => {
+      previewTemplateEffectiveValues(templateName, previewEnv, override)
+        .then((res) => {
+          setPreview(stringifyOverlay(res.values));
+          setChartAvailable(res.chartDefaultsAvailable);
+        })
+        .catch(() => {
+          /* keep last good preview */
+        });
+    }, 400);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, templateName, previewEnv, allText, envTexts]);
+
+  if (!isAdmin) return null;
+
+  const activeText = scope === ALL_ENVS ? allText : (envTexts[scope] ?? "");
+  function setActiveText(text: string) {
+    if (scope === ALL_ENVS) setAllText(text);
+    else setEnvTexts((cur) => ({ ...cur, [scope]: text }));
+  }
+
+  async function save() {
+    const { override, error } = buildOverride();
+    if (error) {
+      setYamlError(error);
+      toast.error(`Invalid YAML — ${error}`);
+      return;
+    }
+    setSaving(true);
+    try {
+      await updateTemplateOverride(templateName, override);
+      toast.success("Platform overrides saved — applies on next publish.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save overrides");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">Platform overrides</h2>
+          <p className="mt-0.5 mb-4 max-w-2xl text-sm text-gray-500">
+            Org-specific Helm values layered on top of this template's defaults,
+            per environment — applied to every app using it. Sits below per-app
+            overrides (developers can still override). Stored separately from the
+            template, so an external sync won't clobber it.
+          </p>
+        </div>
+        <button
+          onClick={save}
+          disabled={saving || yamlError !== null}
+          className="shrink-0 rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save overrides"}
+        </button>
+      </div>
+
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+          Scope
+        </span>
+        <select
+          value={scope}
+          onChange={(e) => {
+            setScope(e.target.value);
+            setYamlError(null);
+          }}
+          className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+        >
+          <option value={ALL_ENVS}>All environments</option>
+          {envs.map((env) => (
+            <option key={env} value={env}>
+              {env}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <Suspense
+        fallback={
+          <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
+            Loading editor…
+          </div>
+        }
+      >
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <ValuesEditor
+            label={scope === ALL_ENVS ? "All-envs overrides" : `${scope} overrides`}
+            value={activeText}
+            height="22rem"
+            placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 500m"}
+            onChange={setActiveText}
+            onValidChange={(_, err) => setYamlError(err)}
+          />
+          <div>
+            <ValuesEditor
+              label={previewEnv ? `Effective — ${previewEnv}` : "Effective"}
+              value={preview}
+              height="22rem"
+              readOnly
+            />
+            {!chartAvailable && (
+              <p className="mt-1 text-xs text-gray-400">
+                Chart defaults aren't readable for this template; preview shows
+                template + overrides only.
+              </p>
+            )}
+            <p className="mt-1 text-xs text-gray-400">
+              Preview omits per-app overrides and{" "}
+              <code className="font-mono">{"{…}"}</code> token resolution — applied
+              at deploy.
+            </p>
+          </div>
+        </div>
+      </Suspense>
+      {yamlError && (
+        <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
       )}
     </div>
   );

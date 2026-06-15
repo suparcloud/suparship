@@ -322,6 +322,15 @@ export interface TemplateDetail {
   envValues?: Record<string, Record<string, unknown>>;
 }
 
+// TemplateOverride is the org-level platform values overlay a PE/SRE authors for
+// a template (all-envs default + per-env), layered above the template's own
+// values and below developer overrides at publish. Stored separately from the
+// template so external sync can't clobber it.
+export interface TemplateOverride {
+  defaultValues?: Record<string, unknown>;
+  envValues?: Record<string, Record<string, unknown>>;
+}
+
 // EffectiveValuesResponse is the read-only "what will deploy" preview backing
 // the values editor: the merged values document (chart ⊕ platform/env ⊕
 // overrides), NOT the fully rendered chart.

@@ -1,6 +1,7 @@
 import { api } from "./api";
 import type {
   EffectiveValuesResponse,
+  TemplateOverride,
   TemplateCredentialsRequest,
   TemplateCredentialsResponse,
   TemplateDetail,
@@ -24,8 +25,8 @@ export function fetchTemplate(name: string): Promise<TemplateDetail> {
 
 // fetchTemplateEffectiveValues returns the starting values document for a
 // not-yet-created app from this template: chart defaults ⊕ the template's
-// platform/env defaults (for the given env). Backs the create form's read-only
-// effective-values preview.
+// platform/env defaults ⊕ the saved org override (for the given env). Backs the
+// create form's read-only effective-values preview.
 export function fetchTemplateEffectiveValues(
   name: string,
   env?: string,
@@ -33,6 +34,40 @@ export function fetchTemplateEffectiveValues(
   const q = env ? `?env=${encodeURIComponent(env)}` : "";
   return api.get<EffectiveValuesResponse>(
     `/templates/${encodeURIComponent(name)}/effective-values${q}`,
+  );
+}
+
+// fetchTemplateOverride returns the saved org-level platform override for a
+// template (PE/SRE-authored). Empty object when none is set.
+export function fetchTemplateOverride(name: string): Promise<TemplateOverride> {
+  return api.get<TemplateOverride>(
+    `/templates/${encodeURIComponent(name)}/overrides`,
+  );
+}
+
+// updateTemplateOverride replaces the org-level platform override (org_admin).
+// Send an empty override to clear it.
+export function updateTemplateOverride(
+  name: string,
+  override: TemplateOverride,
+): Promise<TemplateOverride> {
+  return api.put<TemplateOverride>(
+    `/templates/${encodeURIComponent(name)}/overrides`,
+    override,
+  );
+}
+
+// previewTemplateEffectiveValues previews chart ⊕ template ⊕ the supplied
+// (unsaved) org override for an env — backs the PE editor's live preview.
+export function previewTemplateEffectiveValues(
+  name: string,
+  env: string,
+  override: TemplateOverride,
+): Promise<EffectiveValuesResponse> {
+  const q = env ? `?env=${encodeURIComponent(env)}` : "";
+  return api.post<EffectiveValuesResponse>(
+    `/templates/${encodeURIComponent(name)}/effective-values${q}`,
+    override,
   );
 }
 
