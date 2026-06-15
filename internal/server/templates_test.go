@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -367,7 +368,10 @@ func TestResolveTemplates_ClusterOverridesBuiltin(t *testing.T) {
 	builtin := []*tpl.Template{namedTemplate("voiceai-agent", "1.0.0")}
 	loader := clusterTemplates(namedTemplate("voiceai-agent", "2.0.0"))
 
-	byName := resolveTemplates(context.Background(), builtin, loader, nil)
+	byName, err := ResolveTemplates(context.Background(), builtin, loader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	got, ok := byName["voiceai-agent"]
 	if !ok {
@@ -383,7 +387,10 @@ func TestResolveTemplates_BuiltinFallbackWhenNoClusterCopy(t *testing.T) {
 	// Cluster has a different template; api-service must fall back to built-in.
 	loader := clusterTemplates(namedTemplate("voiceai-agent", "2.0.0"))
 
-	byName := resolveTemplates(context.Background(), builtin, loader, nil)
+	byName, err := ResolveTemplates(context.Background(), builtin, loader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	got, ok := byName["api-service"]
 	if !ok {
@@ -397,7 +404,66 @@ func TestResolveTemplates_BuiltinFallbackWhenNoClusterCopy(t *testing.T) {
 	}
 }
 
+// TestResolveTemplates_FetchErrorReturnsBuiltinsAndError locks in the F3
+// contract: a cluster-fetch error is surfaced to the caller, but the built-ins
+// are still returned so read endpoints can degrade gracefully.
+func TestResolveTemplates_FetchErrorReturnsBuiltinsAndError(t *testing.T) {
+	builtin := []*tpl.Template{namedTemplate("api-service", "1.0.0")}
+	loader := func(context.Context) ([]*tpl.Template, error) {
+		return nil, errors.New("apiserver unavailable")
+	}
+
+	byName, err := ResolveTemplates(context.Background(), builtin, loader)
+	if err == nil {
+		t.Fatal("expected the cluster-fetch error to be surfaced")
+	}
+	if _, ok := byName["api-service"]; !ok {
+		t.Fatal("built-ins should still be returned on fetch error (degrade path)")
+	}
+}
+
 // --- DELETE /api/v1/templates/{name} ---
+
+// templateDeleteMuxNoClient wires the DELETE route with NO kube client, to
+// exercise the disk-only / local-dev path (th.kubeClient left nil).
+func templateDeleteMuxNoClient(builtin []*tpl.Template) (*http.ServeMux, *authHandler) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+	th := newTemplateHandler(ah, builtin, nil, nil) // kubeClient deliberately nil
+	th.registerRoutes(mux)
+	return mux, ah
+}
+
+func TestHandleDelete_BuiltinNoClientReturns409(t *testing.T) {
+	// Disk-only mode (nil kube client): a built-in name gets the informative
+	// 409, not a generic 503. (F4)
+	mux, ah := templateDeleteMuxNoClient([]*tpl.Template{namedTemplate("api-service", "1.0.0")})
+	rec := deleteTemplateReq(mux, ah, "api-service")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for built-in with no kube client, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp errorResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if !strings.Contains(resp.Error, "built-in default") {
+		t.Fatalf("error should mention built-in default, got %q", resp.Error)
+	}
+}
+
+func TestHandleDelete_UnknownNoClientReturns503(t *testing.T) {
+	// Non-built-in name with no kube client: can't resolve without a cluster,
+	// so 503 is the honest answer.
+	mux, ah := templateDeleteMuxNoClient(nil)
+	rec := deleteTemplateReq(mux, ah, "whatever")
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for unknown name with no kube client, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
 
 // clusterTemplateCM builds a ConfigMap carrying the template-name label so
 // kube.DeleteTemplate's selector finds (and deletes) it.

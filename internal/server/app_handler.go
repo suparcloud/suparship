@@ -83,7 +83,11 @@ func newAppHandler(store domain.AppStore, templates []*tpl.Template, clusterLoad
 // is logged via the default logger — otherwise a transient blip surfaces to the
 // user as a misleading "template not found" with no server-side trace.
 func (ah *appHandler) lookupTemplate(ctx context.Context, name string) (*tpl.Template, bool) {
-	t, ok := resolveTemplates(ctx, ah.builtin, ah.clusterLoader, slog.Default())[name]
+	byName, err := ResolveTemplates(ctx, ah.builtin, ah.clusterLoader)
+	if err != nil {
+		slog.Warn("app: cluster template fetch failed; using built-ins only", "err", err)
+	}
+	t, ok := byName[name]
 	return t, ok
 }
 

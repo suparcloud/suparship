@@ -265,7 +265,18 @@ func (th *templateHandler) handleDelete(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name required"})
 		return
 	}
+	// 409 message reused for both the no-client and not-deleted built-in cases.
+	builtinConflict := errorResponse{
+		Error: "template " + name + " is a built-in default; there is no synced/cluster copy to delete",
+	}
 	if th.kubeClient == nil {
+		// No cluster to delete from. A built-in name is still a built-in
+		// default (nothing removable) — answer 409 rather than a generic 503,
+		// so disk-only/local-dev installs get the same informative response.
+		if th.isBuiltin(name) {
+			writeJSON(w, http.StatusConflict, builtinConflict)
+			return
+		}
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "cluster client not configured"})
 		return
 	}
@@ -280,13 +291,9 @@ func (th *templateHandler) handleDelete(w http.ResponseWriter, r *http.Request) 
 	if !deleted {
 		// Nothing in the cluster to delete: distinguish a built-in default
 		// (ships with the platform; nothing to remove) from an unknown name.
-		for _, t := range th.builtin {
-			if t.Metadata.Name == name {
-				writeJSON(w, http.StatusConflict, errorResponse{
-					Error: "template " + name + " is a built-in default; there is no synced/cluster copy to delete",
-				})
-				return
-			}
+		if th.isBuiltin(name) {
+			writeJSON(w, http.StatusConflict, builtinConflict)
+			return
 		}
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "template " + name + " not found in cluster"})
 		return
@@ -294,31 +301,51 @@ func (th *templateHandler) handleDelete(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// resolveTemplates merges built-ins with the live cluster set, with cluster /
+// isBuiltin reports whether name matches a built-in (disk/binary) template.
+func (th *templateHandler) isBuiltin(name string) bool {
+	for _, t := range th.builtin {
+		if t.Metadata.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveTemplates merges built-ins with the live cluster set, with cluster /
 // externally-synced templates OVERRIDING built-ins of the same name (the
-// built-in is the fallback). Cluster fetch errors are logged, not surfaced —
-// callers still get the built-ins. Shared by the gallery, app-creation lookups,
-// and the publish adapter so all resolve identically.
-func resolveTemplates(ctx context.Context, builtin []*tpl.Template, clusterLoader ClusterTemplateLoader, logger *slog.Logger) map[string]*tpl.Template {
+// built-in is the fallback).
+//
+// On a cluster-fetch error it returns the built-ins merged so far TOGETHER with
+// the error, so callers choose their own policy: read endpoints (gallery,
+// app/service-creation lookups) degrade to the built-ins and log; the publish
+// path fails loud rather than committing values.yaml without the PE overlays.
+// This is the single resolver shared by the gallery, creation lookups, and the
+// publish adapter so all resolve identically.
+func ResolveTemplates(ctx context.Context, builtin []*tpl.Template, clusterLoader ClusterTemplateLoader) (map[string]*tpl.Template, error) {
 	byName := make(map[string]*tpl.Template, len(builtin))
 	for _, t := range builtin {
 		byName[t.Metadata.Name] = t
 	}
-	if clusterLoader != nil {
-		cluster, err := clusterLoader(ctx)
-		if err != nil && logger != nil {
-			logger.Warn("templates: cluster fetch failed; serving built-ins only", "err", err)
-		}
-		for _, t := range cluster {
-			byName[t.Metadata.Name] = t // cluster overrides built-in
-		}
+	if clusterLoader == nil {
+		return byName, nil
 	}
-	return byName
+	cluster, err := clusterLoader(ctx)
+	if err != nil {
+		return byName, err
+	}
+	for _, t := range cluster {
+		byName[t.Metadata.Name] = t // cluster overrides built-in
+	}
+	return byName, nil
 }
 
 // resolve returns the gallery's merged template list (sorted) + name index.
+// A cluster-fetch error degrades to the built-ins (logged) rather than 500ing.
 func (th *templateHandler) resolve(ctx context.Context) ([]*tpl.Template, map[string]*tpl.Template) {
-	byName := resolveTemplates(ctx, th.builtin, th.clusterLoader, th.logger)
+	byName, err := ResolveTemplates(ctx, th.builtin, th.clusterLoader)
+	if err != nil && th.logger != nil {
+		th.logger.Warn("templates: cluster fetch failed; serving built-ins only", "err", err)
+	}
 	merged := make([]*tpl.Template, 0, len(byName))
 	for _, t := range byName {
 		merged = append(merged, t)

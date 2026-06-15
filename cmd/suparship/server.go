@@ -667,25 +667,18 @@ type gitOpsPublisherAdapter struct {
 	clusterLoader server.ClusterTemplateLoader
 }
 
-// resolveTemplate resolves a template by name live (cluster overrides built-in).
+// resolveTemplate resolves a template by name live (cluster overrides built-in)
+// via the shared server.ResolveTemplates so the publish path agrees with the
+// gallery / app-creation lookups.
 //
-// A cluster-fetch failure is returned as an error rather than swallowed: callers
-// in the publish path must fail loud instead of silently shipping a values.yaml
-// without the PE-authored platform/env overlays. Returns (nil, nil) when the
-// fetch succeeds but the name simply isn't found.
+// A cluster-fetch failure is returned as an error rather than swallowed: the
+// publish path must fail loud instead of silently shipping a values.yaml without
+// the PE-authored platform/env overlays. Returns (nil, nil) when the fetch
+// succeeds but the name simply isn't found.
 func (a *gitOpsPublisherAdapter) resolveTemplate(ctx context.Context, name string) (*tpl.Template, error) {
-	byName := make(map[string]*tpl.Template, len(a.builtin))
-	for _, t := range a.builtin {
-		byName[t.Metadata.Name] = t
-	}
-	if a.clusterLoader != nil {
-		cluster, err := a.clusterLoader(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("load cluster templates: %w", err)
-		}
-		for _, t := range cluster {
-			byName[t.Metadata.Name] = t // cluster overrides built-in
-		}
+	byName, err := server.ResolveTemplates(ctx, a.builtin, a.clusterLoader)
+	if err != nil {
+		return nil, fmt.Errorf("load cluster templates: %w", err)
 	}
 	return byName[name], nil
 }
