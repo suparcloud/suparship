@@ -19,70 +19,12 @@ import type { ConfigVariables } from "../lib/configVars";
 import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   TemplateDetail as TemplateDetailType,
-  TemplateInput,
   TemplateOverride,
   TemplateSecretInput,
 } from "../types";
 
 // CodeMirror is heavy; only the override editor needs it.
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
-
-const inputTypeBadge: Record<string, string> = {
-  string: "bg-blue-50 text-blue-700",
-  number: "bg-emerald-50 text-emerald-700",
-  boolean: "bg-violet-50 text-violet-700",
-  enum: "bg-amber-50 text-amber-700",
-};
-
-function TypeBadge({ type }: { type: string }) {
-  const cls = inputTypeBadge[type] ?? "bg-gray-100 text-gray-600";
-  return (
-    <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
-      {type}
-    </span>
-  );
-}
-
-function InputCard({ input }: { input: TemplateInput }) {
-  return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <h4 className="text-sm font-semibold text-gray-900">{input.title}</h4>
-          {input.required && (
-            <span className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600">
-              Required
-            </span>
-          )}
-        </div>
-        <TypeBadge type={input.type} />
-      </div>
-
-      {input.description && (
-        <p className="mt-1.5 text-sm text-gray-500">{input.description}</p>
-      )}
-
-      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
-        <span className="font-mono">{input.name}</span>
-        {input.default !== undefined && input.default !== null && (
-          <span>
-            Default: <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-gray-600">{String(input.default)}</code>
-          </span>
-        )}
-        {input.type === "enum" && input.options.length > 0 && (
-          <span>
-            Options: {input.options.map((o) => (
-              <code key={o} className="mr-1 rounded bg-gray-100 px-1 py-0.5 font-mono text-gray-600">{o}</code>
-            ))}
-          </span>
-        )}
-        {input.min !== undefined && <span>Min: {input.min}</span>}
-        {input.max !== undefined && <span>Max: {input.max}</span>}
-        {input.pattern && <span>Pattern: <code className="font-mono">{input.pattern}</code></span>}
-      </div>
-    </div>
-  );
-}
 
 function SecretInputCard({ input }: { input: TemplateSecretInput }) {
   return (
@@ -250,24 +192,9 @@ export function TemplateDetail() {
         <StatCard label="Engine" value={template.engine} />
       </div>
 
-      {/* Chart parameters (reference) — inputs are no longer the configuration
-          surface (apps are configured via the values editor). Kept collapsed
-          for reference / documentation of the chart's declared parameters. */}
-      {(template.inputs.length > 0 || template.advancedInputs.length > 0) && (
-        <ParametersDisclosure
-          count={template.inputs.length + template.advancedInputs.length}
-        >
-          <p className="mb-3 text-xs text-gray-400">
-            Informational only — apps are configured via the values editor, not
-            these inputs.
-          </p>
-          <div className="space-y-3">
-            {[...template.inputs, ...template.advancedInputs].map((inp) => (
-              <InputCard key={inp.name} input={inp} />
-            ))}
-          </div>
-        </ParametersDisclosure>
-      )}
+      {/* Template inputs are deprecated and not shown — apps are configured via
+          the values editor, and the effective-values preview is the real "what
+          deploys" reference. */}
 
       {/* Secret inputs */}
       {template.secretInputs.length > 0 && (
@@ -562,39 +489,6 @@ function StatCard({ label, value }: { label: string; value: string }) {
       <p className="mt-0.5 text-lg font-semibold capitalize text-gray-900">
         {value}
       </p>
-    </div>
-  );
-}
-
-// ParametersDisclosure is a collapsed section for the chart's declared inputs —
-// reference documentation, not a configuration surface (the values editor is).
-function ParametersDisclosure({
-  count,
-  children,
-}: {
-  count: number;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 text-sm font-medium text-gray-500 transition-colors hover:text-gray-700"
-      >
-        <svg
-          className={`h-4 w-4 transition-transform ${open ? "rotate-90" : ""}`}
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2}
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-        </svg>
-        Chart parameters (reference) ({count})
-      </button>
-      {open && <div className="mt-4">{children}</div>}
     </div>
   );
 }
