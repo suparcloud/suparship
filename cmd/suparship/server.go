@@ -711,6 +711,16 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 		if ov.EnvValues != nil {
 			env = helmvalues.DeepMerge(env, helmvalues.DeepCopyMap(ov.EnvValues[envName]))
 		}
+		// Per-cluster org overlay (env-agnostic). Templates have no per-cluster
+		// layer, so this comes solely from the org override; the publisher applies
+		// only the block matching each written values.yaml's target cluster.
+		if len(ov.ClusterValues) > 0 {
+			cv := make(map[string]map[string]any, len(ov.ClusterValues))
+			for k, v := range ov.ClusterValues {
+				cv[k] = helmvalues.DeepCopyMap(v)
+			}
+			pub.PlatformClusterValues = cv
+		}
 	}
 	pub.PlatformDefaultValues = def
 	pub.PlatformEnvValues = env

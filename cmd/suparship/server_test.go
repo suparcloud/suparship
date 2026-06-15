@@ -118,6 +118,25 @@ func TestSetPlatformOverlays_OrgOverrideMergedOnTop(t *testing.T) {
 	}
 }
 
+// TestSetPlatformOverlays_ClusterValuesPassedThrough: the org per-cluster overlay
+// is threaded onto AppPublishEnv (env-agnostic; publisher selects the target
+// cluster's block per values.yaml).
+func TestSetPlatformOverlays_ClusterValuesPassedThrough(t *testing.T) {
+	tmpl := overlayTemplate("voiceai-agent", "1.0.0")
+	ov := &domain.TemplateOverride{
+		ClusterValues: map[string]map[string]any{
+			"eks-uswest": {"ingress": map[string]any{"annotations": map[string]any{"aws": "nlb"}}},
+		},
+	}
+	pub := gitops.AppPublishEnv{EnvName: "prod"}
+	setPlatformOverlays(&pub, tmpl, ov, "prod")
+
+	got := pub.PlatformClusterValues["eks-uswest"]["ingress"].(map[string]any)["annotations"].(map[string]any)
+	if got["aws"] != "nlb" {
+		t.Errorf("cluster block not passed through: %v", pub.PlatformClusterValues)
+	}
+}
+
 // TestSetPlatformOverlays_NilTemplateNoOp: a nil template (app has no matching
 // template) leaves the publish env untouched.
 func TestSetPlatformOverlays_NilTemplateNoOp(t *testing.T) {
