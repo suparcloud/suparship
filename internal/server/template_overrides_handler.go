@@ -14,6 +14,7 @@ import (
 type TemplateOverrideDTO struct {
 	DefaultValues map[string]any            `json:"defaultValues,omitempty"`
 	EnvValues     map[string]map[string]any `json:"envValues,omitempty"`
+	ClusterValues map[string]map[string]any `json:"clusterValues,omitempty"`
 }
 
 // handleGetTemplateOverride serves GET /api/v1/templates/{name}/overrides.
@@ -40,7 +41,7 @@ func (th *templateHandler) handleGetTemplateOverride(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusOK, TemplateOverrideDTO{})
 		return
 	}
-	writeJSON(w, http.StatusOK, TemplateOverrideDTO{DefaultValues: ov.DefaultValues, EnvValues: ov.EnvValues})
+	writeJSON(w, http.StatusOK, TemplateOverrideDTO{DefaultValues: ov.DefaultValues, EnvValues: ov.EnvValues, ClusterValues: ov.ClusterValues})
 }
 
 // handlePutTemplateOverride serves PUT /api/v1/templates/{name}/overrides.
@@ -60,7 +61,7 @@ func (th *templateHandler) handlePutTemplateOverride(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
 		return
 	}
-	ov := &domain.TemplateOverride{DefaultValues: dto.DefaultValues, EnvValues: dto.EnvValues}
+	ov := &domain.TemplateOverride{DefaultValues: dto.DefaultValues, EnvValues: dto.EnvValues, ClusterValues: dto.ClusterValues}
 	if err := kube.SaveTemplateOverride(r.Context(), th.kubeClient, name, ov); err != nil {
 		if th.logger != nil {
 			th.logger.Error("save template override", "name", name, "err", err)
@@ -68,7 +69,7 @@ func (th *templateHandler) handlePutTemplateOverride(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save template override"})
 		return
 	}
-	writeJSON(w, http.StatusOK, TemplateOverrideDTO{DefaultValues: ov.DefaultValues, EnvValues: ov.EnvValues})
+	writeJSON(w, http.StatusOK, TemplateOverrideDTO{DefaultValues: ov.DefaultValues, EnvValues: ov.EnvValues, ClusterValues: ov.ClusterValues})
 }
 
 // handlePostEffectiveValues serves POST /api/v1/templates/{name}/effective-values?env={env}.
@@ -91,8 +92,9 @@ func (th *templateHandler) handlePostEffectiveValues(w http.ResponseWriter, r *h
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&dto)
 	}
-	ov := &domain.TemplateOverride{DefaultValues: dto.DefaultValues, EnvValues: dto.EnvValues}
+	ov := &domain.TemplateOverride{DefaultValues: dto.DefaultValues, EnvValues: dto.EnvValues, ClusterValues: dto.ClusterValues}
 	env := r.URL.Query().Get("env")
+	cluster := r.URL.Query().Get("cluster")
 	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, env, nil, nil))
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, env, cluster, nil, nil))
 }

@@ -57,13 +57,13 @@ func chartDefaults(ctx context.Context, kc kubernetes.Interface, t *tpl.Template
 // the publisher's envOverlay/rawValuesOverlay order:
 //
 //	chart defaults
-//	  ⊕ template DefaultValues ⊕ template EnvValues[env]   (chart author / repo)
-//	  ⊕ org override DefaultValues ⊕ org EnvValues[env]    (PE/SRE, org-level)
-//	  ⊕ appRaw ⊕ envRaw                                    (developer)
+//	  ⊕ template DefaultValues ⊕ template EnvValues[env]       (chart author / repo)
+//	  ⊕ org DefaultValues ⊕ org EnvValues[env] ⊕ org ClusterValues[cluster]  (PE/SRE)
+//	  ⊕ appRaw ⊕ envRaw                                        (developer)
 //
 // Inputs are deep-copied so callers' maps (the stored app spec, the template,
 // the org override) are never mutated.
-func computeEffectiveValues(chartVals map[string]any, t *tpl.Template, ov *domain.TemplateOverride, envName string, appRaw, envRaw map[string]any) map[string]any {
+func computeEffectiveValues(chartVals map[string]any, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any) map[string]any {
 	out := helmvalues.DeepCopyMap(chartVals)
 	if out == nil {
 		out = map[string]any{}
@@ -79,13 +79,16 @@ func computeEffectiveValues(chartVals map[string]any, t *tpl.Template, ov *domai
 		if envName != "" && ov.EnvValues != nil {
 			out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(ov.EnvValues[envName]))
 		}
+		if cluster != "" && ov.ClusterValues != nil {
+			out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(ov.ClusterValues[cluster]))
+		}
 	}
 	out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(appRaw))
 	out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(envRaw))
 	return out
 }
 
-func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Template, ov *domain.TemplateOverride, envName string, appRaw, envRaw map[string]any) EffectiveValuesDTO {
+func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any) EffectiveValuesDTO {
 	layers := []string{}
 	if available {
 		layers = append(layers, "chart defaults")
@@ -102,6 +105,9 @@ func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Templat
 	if ov != nil && envName != "" && len(ov.EnvValues[envName]) > 0 {
 		layers = append(layers, "org "+envName)
 	}
+	if ov != nil && cluster != "" && len(ov.ClusterValues[cluster]) > 0 {
+		layers = append(layers, "org cluster "+cluster)
+	}
 	if len(appRaw) > 0 {
 		layers = append(layers, "app overrides")
 	}
@@ -109,7 +115,7 @@ func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Templat
 		layers = append(layers, envName+" overrides")
 	}
 	return EffectiveValuesDTO{
-		Values:                 computeEffectiveValues(chartVals, t, ov, envName, appRaw, envRaw),
+		Values:                 computeEffectiveValues(chartVals, t, ov, envName, cluster, appRaw, envRaw),
 		ChartDefaultsAvailable: available,
 		Interpolated:           false,
 		Layers:                 layers,
@@ -133,9 +139,10 @@ func (th *templateHandler) handleEffectiveValues(w http.ResponseWriter, r *http.
 		return
 	}
 	env := r.URL.Query().Get("env")
+	cluster := r.URL.Query().Get("cluster")
 	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
 	ov := loadOverride(r.Context(), th.kubeClient, name)
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, env, nil, nil))
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, env, cluster, nil, nil))
 }
 
 // loadOverride best-effort reads a template's org-level platform override.
@@ -198,5 +205,7 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 	t, _ := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
 	chartVals, available := chartDefaults(r.Context(), ah.kubeClient, t)
 	ov := loadOverride(r.Context(), ah.kubeClient, app.Spec.Template.Name)
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, envName, appRaw, envRaw))
+	// App preview stays env-level; per-cluster org overlay is shown in the
+	// template editor, not here (the app values-doc preview omits per-cluster).
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, envName, "", appRaw, envRaw))
 }

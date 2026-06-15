@@ -16,6 +16,13 @@ type TemplateOverride struct {
 	// EnvValues holds per-environment overlays keyed by environment name,
 	// layered after DefaultValues.
 	EnvValues map[string]map[string]any `json:"envValues,omitempty" yaml:"envValues,omitempty"`
+	// ClusterValues holds per-cluster overlays keyed by cluster ref, layered
+	// after EnvValues. Env-agnostic: a cluster's block applies in every env that
+	// deploys to it — for cloud-intrinsic structured annotations (e.g. an
+	// Azure-internal-LB or AWS-NLB annotation) that token substitution can't
+	// express. Simple per-cluster values can instead use {platform.cluster} or
+	// cluster-scoped {vars.*}.
+	ClusterValues map[string]map[string]any `json:"clusterValues,omitempty" yaml:"clusterValues,omitempty"`
 }
 
 // IsEmpty reports whether the override carries nothing — used to decide whether
@@ -29,6 +36,11 @@ func (o *TemplateOverride) IsEmpty() bool {
 	}
 	for _, ev := range o.EnvValues {
 		if len(ev) > 0 {
+			return false
+		}
+	}
+	for _, cv := range o.ClusterValues {
+		if len(cv) > 0 {
 			return false
 		}
 	}

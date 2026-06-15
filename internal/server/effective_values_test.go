@@ -41,7 +41,7 @@ func TestComputeEffectiveValues_LayerPrecedence(t *testing.T) {
 	appRaw := map[string]any{"image": map[string]any{"tag": "dev"}}
 	envRaw := map[string]any{"replicaCount": 9}
 
-	got := computeEffectiveValues(chart, tmpl, nil, "prod", appRaw, envRaw)
+	got := computeEffectiveValues(chart, tmpl, nil, "prod", "", appRaw, envRaw)
 
 	// envRaw (9) > template EnvValues.prod (4) > DefaultValues/chart (1).
 	if got["replicaCount"] != 9 {
@@ -66,7 +66,7 @@ func TestComputeEffectiveValues_LayerPrecedence(t *testing.T) {
 func TestComputeEffectiveValues_EnvValuesOnlyForThatEnv(t *testing.T) {
 	tmpl := valuesTemplate()
 	// staging has no EnvValues entry → falls back to DefaultValues replicaCount 1.
-	got := computeEffectiveValues(nil, tmpl, nil, "staging", nil, nil)
+	got := computeEffectiveValues(nil, tmpl, nil, "staging", "", nil, nil)
 	if got["replicaCount"] != 1 {
 		t.Errorf("staging replicaCount = %v, want 1 (default, no env override)", got["replicaCount"])
 	}
@@ -74,7 +74,7 @@ func TestComputeEffectiveValues_EnvValuesOnlyForThatEnv(t *testing.T) {
 
 func TestComputeEffectiveValues_NilChartDegrades(t *testing.T) {
 	tmpl := valuesTemplate()
-	got := computeEffectiveValues(nil, tmpl, nil, "prod", nil, nil)
+	got := computeEffectiveValues(nil, tmpl, nil, "prod", "", nil, nil)
 	if got["replicaCount"] != 4 {
 		t.Errorf("replicaCount = %v, want 4 (env default, no chart)", got["replicaCount"])
 	}
@@ -88,16 +88,65 @@ func TestComputeEffectiveValues_OrgLayerBetweenTemplateAndApp(t *testing.T) {
 	}
 
 	// No app override → org prod (6) wins over template prod (4).
-	if got := computeEffectiveValues(nil, tmpl, ov, "prod", nil, nil); got["replicaCount"] != 6 {
+	if got := computeEffectiveValues(nil, tmpl, ov, "prod", "", nil, nil); got["replicaCount"] != 6 {
 		t.Errorf("replicaCount = %v, want 6 (org prod over template prod)", got["replicaCount"])
 	}
 	// App override still wins over the org layer.
-	if got := computeEffectiveValues(nil, tmpl, ov, "prod", map[string]any{"replicaCount": 11}, nil); got["replicaCount"] != 11 {
+	if got := computeEffectiveValues(nil, tmpl, ov, "prod", "", map[string]any{"replicaCount": 11}, nil); got["replicaCount"] != 11 {
 		t.Errorf("replicaCount = %v, want 11 (app over org)", got["replicaCount"])
 	}
 	// Org default applies to an env with no org EnvValues entry.
-	if got := computeEffectiveValues(nil, tmpl, ov, "staging", nil, nil); got["replicaCount"] != 2 {
+	if got := computeEffectiveValues(nil, tmpl, ov, "staging", "", nil, nil); got["replicaCount"] != 2 {
 		t.Errorf("staging replicaCount = %v, want 2 (org default)", got["replicaCount"])
+	}
+}
+
+func TestComputeEffectiveValues_ClusterLayer(t *testing.T) {
+	tmpl := valuesTemplate()
+	ov := &domain.TemplateOverride{
+		EnvValues: map[string]map[string]any{"prod": {"replicaCount": 4}},
+		ClusterValues: map[string]map[string]any{
+			"eks-uswest": {"ingress": map[string]any{"annotations": map[string]any{"aws": "nlb"}}},
+			"aks-eastus": {"ingress": map[string]any{"annotations": map[string]any{"azure": "internal"}}},
+		},
+	}
+
+	// Cluster block applies for that cluster; env layer also present.
+	got := computeEffectiveValues(nil, tmpl, ov, "prod", "eks-uswest", nil, nil)
+	ann := got["ingress"].(map[string]any)["annotations"].(map[string]any)
+	if ann["aws"] != "nlb" {
+		t.Errorf("aws cluster annotation missing: %v", ann)
+	}
+	if _, leaked := ann["azure"]; leaked {
+		t.Errorf("other cluster's block leaked: %v", ann)
+	}
+	if got["replicaCount"] != 4 {
+		t.Errorf("env layer lost: replicaCount = %v, want 4", got["replicaCount"])
+	}
+
+	// No cluster → no cluster block.
+	none := computeEffectiveValues(nil, tmpl, ov, "prod", "", nil, nil)
+	if _, ok := none["ingress"]; ok {
+		t.Errorf("cluster block applied without a cluster: %v", none["ingress"])
+	}
+}
+
+func TestHandlePostEffectiveValues_ReflectsUnsavedClusterBlock(t *testing.T) {
+	th := &templateHandler{builtin: []*tpl.Template{valuesTemplate()}}
+	body, _ := json.Marshal(TemplateOverrideDTO{
+		ClusterValues: map[string]map[string]any{"eks-uswest": {"foo": "bar"}},
+	})
+	req := httptest.NewRequest("POST", "/api/v1/templates/voiceai-agent/effective-values?env=prod&cluster=eks-uswest", bytes.NewReader(body))
+	req.SetPathValue("name", "voiceai-agent")
+	rec := httptest.NewRecorder()
+	th.handlePostEffectiveValues(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp EffectiveValuesDTO
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Values["foo"] != "bar" {
+		t.Errorf("foo = %v, want bar (unsaved cluster block)", resp.Values["foo"])
 	}
 }
 
