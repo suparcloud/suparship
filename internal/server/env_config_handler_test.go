@@ -157,6 +157,67 @@ func TestGetConfigVariables_ListsPlatformAndVars_NoSecrets(t *testing.T) {
 	}
 }
 
+func TestGetPlatformConfigVariables_OmitsProjectScope(t *testing.T) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	org := envConfigOrg()
+	org.EnvConfig = envconfig.EnvConfig{Vars: map[string]string{"ORG_VAR": "x"}}
+	org.Environments[0].EnvConfig = envconfig.EnvConfig{Vars: map[string]string{"ENV_VAR": "y"}}
+
+	projStore := newMemProjectStore()
+	_ = projStore.Save(context.Background(), &project.Project{
+		Metadata: project.ProjectMeta{Name: "api"},
+		Spec:     project.ProjectSpec{EnvConfig: envconfig.EnvConfig{Vars: map[string]string{"PROJ_VAR": "z"}}},
+	})
+	orgStore := &staticOrgProvider{org: org}
+	ech := &envConfigHandler{orgStore: orgStore, projectStore: projStore, appStore: newMemAppStore(), logger: slog.Default()}
+	rh := &rbacHandler{auth: ah, orgStore: orgStore, projectStore: projStore, envConfigHandler: ech}
+	rh.registerRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/api/v1/platform/config-variables", nil)
+	req.AddCookie(sessionCookieFor(ah, "alice", "org_admin"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp ConfigVariablesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Platform) == 0 {
+		t.Error("platform tokens missing")
+	}
+	names := map[string]bool{}
+	for _, v := range resp.Vars {
+		names[v.Name] = true
+	}
+	for _, want := range []string{"ORG_VAR", "ENV_VAR"} {
+		if !names[want] {
+			t.Errorf("missing org/env var %q in platform catalog", want)
+		}
+	}
+	if names["PROJ_VAR"] {
+		t.Error("project-scoped var PROJ_VAR must not appear in the project-agnostic catalog")
+	}
+}
+
+func TestGetPlatformConfigVariables_Unauthenticated(t *testing.T) {
+	mux, _ := newEnvConfigMux()
+	req := httptest.NewRequest("GET", "/api/v1/platform/config-variables", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated = %d, want 401", rec.Code)
+	}
+}
+
 func TestGetConfigVariables_RequiresProjectView(t *testing.T) {
 	mux, _ := newEnvConfigMux()
 	req := httptest.NewRequest("GET", "/api/v1/projects/api/config-variables", nil)
