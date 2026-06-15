@@ -58,15 +58,20 @@ export function updateTemplateOverride(
 }
 
 // previewTemplateEffectiveValues previews chart ⊕ template ⊕ the supplied
-// (unsaved) org override for an env — backs the PE editor's live preview.
+// (unsaved) org override for an env (and optional target cluster) — backs the PE
+// editor's live preview.
 export function previewTemplateEffectiveValues(
   name: string,
   env: string,
+  cluster: string,
   override: TemplateOverride,
 ): Promise<EffectiveValuesResponse> {
-  const q = env ? `?env=${encodeURIComponent(env)}` : "";
+  const params = new URLSearchParams();
+  if (env) params.set("env", env);
+  if (cluster) params.set("cluster", cluster);
+  const q = params.toString();
   return api.post<EffectiveValuesResponse>(
-    `/templates/${encodeURIComponent(name)}/effective-values${q}`,
+    `/templates/${encodeURIComponent(name)}/effective-values${q ? `?${q}` : ""}`,
     override,
   );
 }

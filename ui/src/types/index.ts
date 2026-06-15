@@ -329,6 +329,9 @@ export interface TemplateDetail {
 export interface TemplateOverride {
   defaultValues?: Record<string, unknown>;
   envValues?: Record<string, Record<string, unknown>>;
+  // Per-cluster overlays keyed by cluster ref (env-agnostic), for cloud-intrinsic
+  // structured annotations. Applied to every env that deploys to the cluster.
+  clusterValues?: Record<string, Record<string, unknown>>;
 }
 
 // EffectiveValuesResponse is the read-only "what will deploy" preview backing
