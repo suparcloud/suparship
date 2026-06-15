@@ -22,6 +22,7 @@ import (
 	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/fake"
 	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/helmvalues"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/preview"
@@ -422,6 +423,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(cmd.Context(), orgProvider)),
 					builtin:         templates,
 					clusterLoader:   clusterTemplateLoaderFromClient(kubeClient),
+					overrideLoader:  templateOverrideLoaderFromClient(kubeClient),
 				}
 				sealPublisherHolder.Swap(pub)
 				logger.Info("gitops publisher enabled",
@@ -558,6 +560,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(ctx, orgProvider)),
 				builtin:         templates,
 				clusterLoader:   clusterTemplateLoaderFromClient(kubeClient),
+				overrideLoader:  templateOverrideLoaderFromClient(kubeClient),
 			})
 			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
@@ -665,6 +668,11 @@ type gitOpsPublisherAdapter struct {
 	// Optional: when both are nil/empty no overlay is applied.
 	builtin       []*tpl.Template
 	clusterLoader server.ClusterTemplateLoader
+	// overrideLoader reads the org-level platform override for a template
+	// (PE/SRE-authored, stored separately from the template so sync can't clobber
+	// it). Merged on top of the template's own Default/Env values. Optional: nil
+	// → no org layer. Best-effort — a load error degrades to "no override".
+	overrideLoader func(ctx context.Context, name string) (*domain.TemplateOverride, error)
 }
 
 // resolveTemplate resolves a template by name live (cluster overrides built-in)
@@ -684,18 +692,43 @@ func (a *gitOpsPublisherAdapter) resolveTemplate(ctx context.Context, name strin
 }
 
 // setPlatformOverlays populates the PE-authored values overlays on an
-// AppPublishEnv from the app's already-resolved template (DefaultValues for all
-// envs + EnvValues for this env). The template is resolved once per publish and
-// threaded in, so a multi-env publish does not re-list cluster templates per
-// env. No-op when tmpl is nil (app has no matching template).
-func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, envName string) {
+// AppPublishEnv: the template's own Default/Env values, with the org-level
+// override (ov) merged ON TOP (org refines the chart/template). Both are resolved
+// once per publish and threaded in, so a multi-env publish does not re-fetch per
+// env. The developer's rawValues still win over this platform layer downstream
+// (publisher.envOverlay). No-op when tmpl is nil (app has no matching template).
+func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *domain.TemplateOverride, envName string) {
 	if tmpl == nil {
 		return
 	}
-	pub.PlatformDefaultValues = tmpl.Spec.DefaultValues
+	def := helmvalues.DeepCopyMap(tmpl.Spec.DefaultValues)
+	var env map[string]any
 	if tmpl.Spec.EnvValues != nil {
-		pub.PlatformEnvValues = tmpl.Spec.EnvValues[envName]
+		env = helmvalues.DeepCopyMap(tmpl.Spec.EnvValues[envName])
 	}
+	if ov != nil {
+		def = helmvalues.DeepMerge(def, helmvalues.DeepCopyMap(ov.DefaultValues))
+		if ov.EnvValues != nil {
+			env = helmvalues.DeepMerge(env, helmvalues.DeepCopyMap(ov.EnvValues[envName]))
+		}
+	}
+	pub.PlatformDefaultValues = def
+	pub.PlatformEnvValues = env
+}
+
+// loadOverride best-effort reads a template's org-level platform override.
+// Returns nil on no loader or any error — the override is additive/optional and
+// must never fail a publish (unlike template resolution, which fails loud).
+func (a *gitOpsPublisherAdapter) loadOverride(ctx context.Context, name string) *domain.TemplateOverride {
+	if a.overrideLoader == nil {
+		return nil
+	}
+	ov, err := a.overrideLoader(ctx, name)
+	if err != nil {
+		slog.Warn("publish: load template override failed; proceeding without org layer", "template", name, "err", err)
+		return nil
+	}
+	return ov
 }
 
 // envResolved holds the resolved cluster and domain info for one environment.
@@ -866,6 +899,8 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 	if err != nil {
 		return fmt.Errorf("publish app %s/%s: %w", app.ProjectName, app.Name, err)
 	}
+	// Org-level platform override (best-effort; additive). Loaded once.
+	ov := a.loadOverride(ctx, app.Spec.Template.Name)
 
 	// Load org config once for naming and backend info.
 	var org *rbac.Org
@@ -920,7 +955,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 		// committed YAML in the GitOps repo is the audit-trail for what the
 		// pod will see — no chart-side multi-source merging.
 		pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
-		setPlatformOverlays(&pub, tmpl, env.EnvName)
+		setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
 
 		pubEnvs = append(pubEnvs, pub)
 	}
@@ -1097,6 +1132,7 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 	if err != nil {
 		return fmt.Errorf("publish app env %s/%s/%s: %w", app.ProjectName, app.Name, env.EnvName, err)
 	}
+	ov := a.loadOverride(ctx, app.Spec.Template.Name)
 
 	resolved := a.resolveEnvs(ctx)
 	res, ok := resolved[env.EnvName]
@@ -1125,7 +1161,7 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 		a.enrichPubEnvWithSecrets(ctx, org, app, env.EnvName, &pub)
 	}
 	pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
-	setPlatformOverlays(&pub, tmpl, env.EnvName)
+	setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
 
 	return a.inner.PublishAppEnv(ctx, app, pub)
 }
@@ -1743,6 +1779,18 @@ func clusterTemplateLoaderFromClient(client kubernetes.Interface) server.Cluster
 	}
 	return func(ctx context.Context) ([]*tpl.Template, error) {
 		return kube.LoadTemplates(ctx, client)
+	}
+}
+
+// templateOverrideLoaderFromClient returns a loader for a template's org-level
+// platform override (separate ConfigMap, sync-safe). Returns nil in
+// fake/local-dev mode (no client) — the publisher then applies no org layer.
+func templateOverrideLoaderFromClient(client kubernetes.Interface) func(context.Context, string) (*domain.TemplateOverride, error) {
+	if client == nil {
+		return nil
+	}
+	return func(ctx context.Context, name string) (*domain.TemplateOverride, error) {
+		return kube.LoadTemplateOverride(ctx, client, name)
 	}
 }
 

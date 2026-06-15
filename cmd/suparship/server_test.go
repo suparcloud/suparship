@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -81,7 +82,7 @@ func TestSetPlatformOverlays_AppliesDefaultAndEnv(t *testing.T) {
 	}
 
 	pub := gitops.AppPublishEnv{EnvName: "prod"}
-	setPlatformOverlays(&pub, tmpl, "prod")
+	setPlatformOverlays(&pub, tmpl, nil, "prod")
 
 	if v := pub.PlatformDefaultValues["replicas"]; v != 1 {
 		t.Fatalf("default overlay not applied: %v", pub.PlatformDefaultValues)
@@ -91,11 +92,37 @@ func TestSetPlatformOverlays_AppliesDefaultAndEnv(t *testing.T) {
 	}
 }
 
+// TestSetPlatformOverlays_OrgOverrideMergedOnTop: the org override layers on top
+// of the template's own values (org wins) for both the default and env slices.
+func TestSetPlatformOverlays_OrgOverrideMergedOnTop(t *testing.T) {
+	tmpl := overlayTemplate("voiceai-agent", "1.0.0")
+	tmpl.Spec.DefaultValues = map[string]any{"replicas": 1, "image": map[string]any{"tag": "base"}}
+	tmpl.Spec.EnvValues = map[string]map[string]any{"prod": {"replicas": 3}}
+	ov := &domain.TemplateOverride{
+		DefaultValues: map[string]any{"replicas": 2}, // org > template default
+		EnvValues:     map[string]map[string]any{"prod": {"replicas": 7}},
+	}
+
+	pub := gitops.AppPublishEnv{EnvName: "prod"}
+	setPlatformOverlays(&pub, tmpl, ov, "prod")
+
+	if pub.PlatformDefaultValues["replicas"] != 2 {
+		t.Errorf("default replicas = %v, want 2 (org over template)", pub.PlatformDefaultValues["replicas"])
+	}
+	// template's non-overridden default key survives the merge.
+	if img := pub.PlatformDefaultValues["image"].(map[string]any); img["tag"] != "base" {
+		t.Errorf("template default key lost: %v", img)
+	}
+	if pub.PlatformEnvValues["replicas"] != 7 {
+		t.Errorf("prod replicas = %v, want 7 (org env over template env)", pub.PlatformEnvValues["replicas"])
+	}
+}
+
 // TestSetPlatformOverlays_NilTemplateNoOp: a nil template (app has no matching
 // template) leaves the publish env untouched.
 func TestSetPlatformOverlays_NilTemplateNoOp(t *testing.T) {
 	pub := gitops.AppPublishEnv{EnvName: "prod"}
-	setPlatformOverlays(&pub, nil, "prod")
+	setPlatformOverlays(&pub, nil, nil, "prod")
 	if pub.PlatformDefaultValues != nil || pub.PlatformEnvValues != nil {
 		t.Fatalf("nil template should be a no-op, got %+v / %+v", pub.PlatformDefaultValues, pub.PlatformEnvValues)
 	}
