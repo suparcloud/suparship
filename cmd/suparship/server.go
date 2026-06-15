@@ -668,26 +668,34 @@ type gitOpsPublisherAdapter struct {
 }
 
 // resolveTemplate resolves a template by name live (cluster overrides built-in).
-func (a *gitOpsPublisherAdapter) resolveTemplate(ctx context.Context, name string) *tpl.Template {
+//
+// A cluster-fetch failure is returned as an error rather than swallowed: callers
+// in the publish path must fail loud instead of silently shipping a values.yaml
+// without the PE-authored platform/env overlays. Returns (nil, nil) when the
+// fetch succeeds but the name simply isn't found.
+func (a *gitOpsPublisherAdapter) resolveTemplate(ctx context.Context, name string) (*tpl.Template, error) {
 	byName := make(map[string]*tpl.Template, len(a.builtin))
 	for _, t := range a.builtin {
 		byName[t.Metadata.Name] = t
 	}
 	if a.clusterLoader != nil {
-		if cluster, err := a.clusterLoader(ctx); err == nil {
-			for _, t := range cluster {
-				byName[t.Metadata.Name] = t // cluster overrides built-in
-			}
+		cluster, err := a.clusterLoader(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load cluster templates: %w", err)
+		}
+		for _, t := range cluster {
+			byName[t.Metadata.Name] = t // cluster overrides built-in
 		}
 	}
-	return byName[name]
+	return byName[name], nil
 }
 
 // setPlatformOverlays populates the PE-authored values overlays on an
-// AppPublishEnv from the app's resolved template (DefaultValues for all envs +
-// EnvValues for this env). No-op when the template isn't found.
-func (a *gitOpsPublisherAdapter) setPlatformOverlays(ctx context.Context, pub *gitops.AppPublishEnv, app *domain.App, envName string) {
-	tmpl := a.resolveTemplate(ctx, app.Spec.Template.Name)
+// AppPublishEnv from the app's already-resolved template (DefaultValues for all
+// envs + EnvValues for this env). The template is resolved once per publish and
+// threaded in, so a multi-env publish does not re-list cluster templates per
+// env. No-op when tmpl is nil (app has no matching template).
+func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, envName string) {
 	if tmpl == nil {
 		return
 	}
@@ -858,6 +866,14 @@ func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, project
 func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
 	resolved := a.resolveEnvs(ctx)
 
+	// Resolve the app's template ONCE (the name is fixed across envs; only the
+	// per-env overlay slice differs). Fail loud on a cluster-fetch error rather
+	// than publishing values.yaml without the PE platform/env overlays.
+	tmpl, err := a.resolveTemplate(ctx, app.Spec.Template.Name)
+	if err != nil {
+		return fmt.Errorf("publish app %s/%s: %w", app.ProjectName, app.Name, err)
+	}
+
 	// Load org config once for naming and backend info.
 	var org *rbac.Org
 	if a.orgProvider != nil {
@@ -911,7 +927,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 		// committed YAML in the GitOps repo is the audit-trail for what the
 		// pod will see — no chart-side multi-source merging.
 		pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
-		a.setPlatformOverlays(ctx, &pub, app, env.EnvName)
+		setPlatformOverlays(&pub, tmpl, env.EnvName)
 
 		pubEnvs = append(pubEnvs, pub)
 	}
@@ -1082,6 +1098,13 @@ func (a *gitOpsPublisherAdapter) mergeAllEnvVars(ctx context.Context, app *domai
 // repo. Called on every explicit promotion so the target env's files exist
 // before Kargo / ArgoCD act.
 func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error {
+	// Resolve the template up front; fail loud on a cluster-fetch error so a
+	// promote never writes values.yaml missing the platform/env overlays.
+	tmpl, err := a.resolveTemplate(ctx, app.Spec.Template.Name)
+	if err != nil {
+		return fmt.Errorf("publish app env %s/%s/%s: %w", app.ProjectName, app.Name, env.EnvName, err)
+	}
+
 	resolved := a.resolveEnvs(ctx)
 	res, ok := resolved[env.EnvName]
 	if !ok {
@@ -1109,7 +1132,7 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 		a.enrichPubEnvWithSecrets(ctx, org, app, env.EnvName, &pub)
 	}
 	pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
-	a.setPlatformOverlays(ctx, &pub, app, env.EnvName)
+	setPlatformOverlays(&pub, tmpl, env.EnvName)
 
 	return a.inner.PublishAppEnv(ctx, app, pub)
 }

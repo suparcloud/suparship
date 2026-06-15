@@ -78,8 +78,12 @@ func newAppHandler(store domain.AppStore, templates []*tpl.Template, clusterLoad
 // lookupTemplate resolves a template by name live (cluster overrides built-in),
 // so externally-synced templates are usable for app creation/upgrade without a
 // server restart. Returns (nil, false) when the name is unknown.
+//
+// A cluster-fetch failure degrades to the built-ins (matching the gallery) but
+// is logged via the default logger — otherwise a transient blip surfaces to the
+// user as a misleading "template not found" with no server-side trace.
 func (ah *appHandler) lookupTemplate(ctx context.Context, name string) (*tpl.Template, bool) {
-	t, ok := resolveTemplates(ctx, ah.builtin, ah.clusterLoader, nil)[name]
+	t, ok := resolveTemplates(ctx, ah.builtin, ah.clusterLoader, slog.Default())[name]
 	return t, ok
 }
 
