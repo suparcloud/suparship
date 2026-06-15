@@ -5,6 +5,8 @@ import { ApiError } from "../lib/api";
 import { createApp } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
+import { listOrgEnvironments } from "../lib/settings";
+import type { OrgEnvironment } from "../lib/settings";
 import {
   fetchTemplate,
   fetchTemplateEffectiveValues,
@@ -297,11 +299,20 @@ function ConfigureStep({
   const [overlayError, setOverlayError] = useState<string | null>(null);
   // Read-only effective base (chart ⊕ platform defaults) for the preview pane.
   const [base, setBase] = useState<EffectiveValuesResponse | null>(null);
+  // Org environments — drives the read-only "Deployment targets" panel.
+  const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
 
   useEffect(() => {
     listConfigVariables(project)
       .then(setConfigVars)
       .catch(() => setConfigVars({ platform: [], vars: [] }));
+    listOrgEnvironments()
+      .then((res) =>
+        setOrgEnvs(
+          (res.environments ?? []).filter((e) => e.name !== "preview"),
+        ),
+      )
+      .catch(() => setOrgEnvs([]));
   }, [project]);
 
   useEffect(() => {
@@ -399,6 +410,9 @@ function ConfigureStep({
           Change
         </button>
       </div>
+
+      {/* Deployment targets (read-only) */}
+      <DeploymentTargets envs={orgEnvs} />
 
       {/* App name */}
       <div>
@@ -612,6 +626,83 @@ function ConfigureStep({
         </button>
       </div>
     </form>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Deployment targets (read-only)
+// ---------------------------------------------------------------------------
+
+// effectiveClusters resolves which cluster(s) an environment deploys to: every
+// clusterRef in "all" (fan-out) mode, else the active one (falling back to the
+// first). Mirrors the server's EffectiveClusterRef resolution.
+function effectiveClusters(env: OrgEnvironment): string[] {
+  if ((env.deployMode ?? "active") === "all") {
+    return env.clusterRefs ?? [];
+  }
+  const active = env.activeClusterRef || env.clusterRefs?.[0] || "";
+  return active ? [active] : [];
+}
+
+// DeploymentTargets shows, read-only, where the app will land: every org
+// environment (the app is created across all of them), which env gets the first
+// deploy (lowest order), and the cluster(s) each env maps to. The env→cluster
+// binding is owned by platform engineers in org settings, not chosen per app.
+function DeploymentTargets({ envs }: { envs: OrgEnvironment[] }) {
+  if (envs.length === 0) return null;
+  const sorted = [...envs].sort((a, b) => a.order - b.order);
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-4 py-2.5">
+        <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+          Deployment targets
+        </h2>
+      </div>
+      <ul className="divide-y divide-gray-50">
+        {sorted.map((env, i) => {
+          const clusters = effectiveClusters(env);
+          return (
+            <li
+              key={env.name}
+              className="flex items-center justify-between gap-3 px-4 py-2.5"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-gray-800">
+                  {env.displayName || env.name}
+                </span>
+                <span
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                    i === 0
+                      ? "bg-indigo-50 text-indigo-600"
+                      : "bg-gray-100 text-gray-500"
+                  }`}
+                >
+                  {i === 0 ? "first deploy" : "via promotion"}
+                </span>
+                {(env.deployMode ?? "active") === "all" && (
+                  <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                    fan-out
+                  </span>
+                )}
+              </div>
+              <span className="font-mono text-xs text-gray-500">
+                {clusters.length > 0 ? (
+                  clusters.join(", ")
+                ) : (
+                  <span className="text-amber-600">no cluster bound</span>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="border-t border-gray-100 px-4 py-2 text-xs text-gray-400">
+        The app is created in every environment; the lowest one deploys first and
+        you promote to advance it. Clusters are bound per environment in org
+        settings — not chosen per app.
+      </p>
+    </div>
   );
 }
 
