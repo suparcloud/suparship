@@ -494,7 +494,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
           <ValuesEditor
             label={scope === ALL_ENVS ? "All-envs overrides" : `${scope} overrides`}
             value={activeText}
-            height="22rem"
+            height="26rem"
             placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 500m"}
             onChange={setActiveText}
             onValidChange={(_, err) => setYamlError(err)}
@@ -503,7 +503,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
             <ValuesEditor
               label={previewEnv ? `Effective — ${previewEnv}` : "Effective"}
               value={preview}
-              height="22rem"
+              height="26rem"
               readOnly
             />
             {!chartAvailable && (
