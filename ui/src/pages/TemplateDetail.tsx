@@ -20,7 +20,6 @@ import type {
   TemplateInput,
   TemplateOverride,
   TemplateSecretInput,
-  TemplatePreset,
 } from "../types";
 
 // CodeMirror is heavy; only the override editor needs it.
@@ -106,30 +105,6 @@ function SecretInputCard({ input }: { input: TemplateSecretInput }) {
   );
 }
 
-function PresetCard({ preset }: { preset: TemplatePreset }) {
-  const entries = Object.entries(preset.values);
-  return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <h4 className="text-sm font-semibold text-gray-900">{preset.title}</h4>
-      {preset.description && (
-        <p className="mt-1 text-sm text-gray-500">{preset.description}</p>
-      )}
-      {entries.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {entries.map(([key, val]) => (
-            <span
-              key={key}
-              className="inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-0.5 text-xs font-mono text-gray-600"
-            >
-              <span className="text-gray-400">{key}:</span> {String(val)}
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function TemplateDetail() {
   const { name } = useParams<{ name: string }>();
   const navigate = useNavigate();
@@ -195,11 +170,6 @@ export function TemplateDetail() {
       </div>
     );
   }
-
-  const totalInputs =
-    template.inputs.length +
-    template.advancedInputs.length +
-    template.secretInputs.length;
 
   // handleDelete drops the template's cluster ConfigMap. We confirm
   // explicitly because the action is destructive and not reversible
@@ -273,33 +243,28 @@ export function TemplateDetail() {
       </div>
 
       {/* Quick stats */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4">
         <StatCard label="Category" value={template.category} />
         <StatCard label="Engine" value={template.engine} />
-        <StatCard label="Inputs" value={String(totalInputs)} />
-        <StatCard label="Presets" value={String(template.presets.length)} />
       </div>
 
-      {/* Inputs */}
-      {template.inputs.length > 0 && (
-        <Section title="Inputs" subtitle="Configuration parameters for this template.">
+      {/* Chart parameters (reference) — inputs are no longer the configuration
+          surface (apps are configured via the values editor). Kept collapsed
+          for reference / documentation of the chart's declared parameters. */}
+      {(template.inputs.length > 0 || template.advancedInputs.length > 0) && (
+        <ParametersDisclosure
+          count={template.inputs.length + template.advancedInputs.length}
+        >
+          <p className="mb-3 text-xs text-gray-400">
+            Informational only — apps are configured via the values editor, not
+            these inputs.
+          </p>
           <div className="space-y-3">
-            {template.inputs.map((inp) => (
+            {[...template.inputs, ...template.advancedInputs].map((inp) => (
               <InputCard key={inp.name} input={inp} />
             ))}
           </div>
-        </Section>
-      )}
-
-      {/* Advanced inputs */}
-      {template.advancedInputs.length > 0 && (
-        <Section title="Advanced inputs" subtitle="Additional tuning parameters.">
-          <div className="space-y-3">
-            {template.advancedInputs.map((inp) => (
-              <InputCard key={inp.name} input={inp} />
-            ))}
-          </div>
-        </Section>
+        </ParametersDisclosure>
       )}
 
       {/* Secret inputs */}
@@ -308,17 +273,6 @@ export function TemplateDetail() {
           <div className="space-y-3">
             {template.secretInputs.map((si) => (
               <SecretInputCard key={si.name} input={si} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {/* Presets */}
-      {template.presets.length > 0 && (
-        <Section title="Presets" subtitle="Pre-configured sets of defaults to get started quickly.">
-          <div className="grid gap-4 sm:grid-cols-2">
-            {template.presets.map((p) => (
-              <PresetCard key={p.name} preset={p} />
             ))}
           </div>
         </Section>
@@ -601,6 +555,39 @@ function StatCard({ label, value }: { label: string; value: string }) {
       <p className="mt-0.5 text-lg font-semibold capitalize text-gray-900">
         {value}
       </p>
+    </div>
+  );
+}
+
+// ParametersDisclosure is a collapsed section for the chart's declared inputs —
+// reference documentation, not a configuration surface (the values editor is).
+function ParametersDisclosure({
+  count,
+  children,
+}: {
+  count: number;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 text-sm font-medium text-gray-500 transition-colors hover:text-gray-700"
+      >
+        <svg
+          className={`h-4 w-4 transition-transform ${open ? "rotate-90" : ""}`}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+        </svg>
+        Chart parameters (reference) ({count})
+      </button>
+      {open && <div className="mt-4">{children}</div>}
     </div>
   );
 }
