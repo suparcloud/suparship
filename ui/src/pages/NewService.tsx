@@ -81,7 +81,7 @@ export function NewService() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="mx-auto max-w-5xl space-y-6">
       {/* Breadcrumb */}
       <Link
         to={`/projects/${project}`}
@@ -434,7 +434,7 @@ function ConfigureStep({
             setAppName(e.target.value);
             setNameError(null);
           }}
-          className={`mt-2 block w-full rounded-md border px-3 py-2 text-sm shadow-sm transition-colors focus:outline-none focus:ring-1 ${
+          className={`mt-2 block w-full max-w-2xl rounded-md border px-3 py-2 text-sm shadow-sm transition-colors focus:outline-none focus:ring-1 ${
             nameError
               ? "border-red-300 focus:border-red-500 focus:ring-red-500"
               : "border-gray-300 focus:border-gray-900 focus:ring-gray-900"
@@ -497,7 +497,7 @@ function ConfigureStep({
               </label>
               <input
                 type="text"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                className="w-full max-w-2xl rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 placeholder="e.g. {project}-{app}-{env}  or  {project}-{app}"
                 value={namespacePattern}
                 onChange={(e) => setNamespacePattern(e.target.value)}
@@ -566,6 +566,7 @@ function ConfigureStep({
               label="Your overrides"
               value={overlayText}
               configVars={configVars}
+              height="26rem"
               placeholder={
                 "# e.g.\nresources:\n  requests:\n    cpu: 200m\nenv:\n  LOG_LEVEL: debug"
               }
@@ -583,6 +584,7 @@ function ConfigureStep({
                     : "Effective (platform ⊕ overrides)"
                 }
                 value={effectivePreview}
+                height="26rem"
                 readOnly
               />
               {base && !base.chartDefaultsAvailable && (
@@ -745,7 +747,7 @@ function SecretField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={input.secretRef || "secret-name.key"}
-        className={`mt-1.5 block w-full rounded-md border px-3 py-2 font-mono text-sm shadow-sm transition-colors focus:outline-none focus:ring-1 ${borderCls}`}
+        className={`mt-1.5 block w-full max-w-2xl rounded-md border px-3 py-2 font-mono text-sm shadow-sm transition-colors focus:outline-none focus:ring-1 ${borderCls}`}
       />
       <p className="mt-1 text-xs text-gray-400">
         Format: <code className="rounded bg-gray-100 px-1 py-0.5">secret-name.key</code>
