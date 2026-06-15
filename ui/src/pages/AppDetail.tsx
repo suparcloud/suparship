@@ -1846,8 +1846,8 @@ function AppValuesEditor({
               <ValuesEditor
                 label={
                   previewEnv
-                    ? `Effective — ${previewEnv}`
-                    : "Effective"
+                    ? `Effective — ${previewEnv} (as deployed)`
+                    : "Effective (as deployed)"
                 }
                 value={preview}
                 readOnly
@@ -1855,12 +1855,13 @@ function AppValuesEditor({
               {!chartAvailable && (
                 <p className="mt-1 text-xs text-gray-400">
                   Chart defaults aren't readable for this template; preview shows
-                  platform defaults + overrides only.
+                  the platform base + overrides only.
                 </p>
               )}
               <p className="mt-1 text-xs text-gray-400">
-                Preview omits <code className="font-mono">{"{…}"}</code> token
-                resolution — applied at deploy.
+                Chart defaults ⊕ platform base ⊕ overrides. Routing/cluster
+                resolution and <code className="font-mono">{"{…}"}</code> tokens
+                are resolved at deploy.
               </p>
             </div>
           </div>

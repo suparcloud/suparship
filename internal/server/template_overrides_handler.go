@@ -96,5 +96,6 @@ func (th *templateHandler) handlePostEffectiveValues(w http.ResponseWriter, r *h
 	env := r.URL.Query().Get("env")
 	cluster := r.URL.Query().Get("cluster")
 	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, env, cluster, nil, nil))
+	// Template-level preview: no concrete app, so no canonical base.
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, nil, nil))
 }

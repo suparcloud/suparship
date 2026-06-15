@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"gopkg.in/yaml.v3"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -63,10 +64,17 @@ func chartDefaults(ctx context.Context, kc kubernetes.Interface, t *tpl.Template
 //
 // Inputs are deep-copied so callers' maps (the stored app spec, the template,
 // the org override) are never mutated.
-func computeEffectiveValues(chartVals map[string]any, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any) map[string]any {
+func computeEffectiveValues(chartVals, canonicalBase map[string]any, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any) map[string]any {
 	out := helmvalues.DeepCopyMap(chartVals)
 	if out == nil {
 		out = map[string]any{}
+	}
+	// canonicalBase is the platform↔chart contract (app/components/suparship/
+	// routing) suparShip publishes; Helm applies it on top of the chart's own
+	// values.yaml defaults at render. Layer it here so the app preview matches
+	// what deploys. nil for template-level previews (no concrete app).
+	if canonicalBase != nil {
+		out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(canonicalBase))
 	}
 	if t != nil {
 		out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(t.Spec.DefaultValues))
@@ -88,10 +96,13 @@ func computeEffectiveValues(chartVals map[string]any, t *tpl.Template, ov *domai
 	return out
 }
 
-func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any) EffectiveValuesDTO {
+func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any) EffectiveValuesDTO {
 	layers := []string{}
 	if available {
 		layers = append(layers, "chart defaults")
+	}
+	if len(canonicalBase) > 0 {
+		layers = append(layers, "platform base")
 	}
 	if t != nil && len(t.Spec.DefaultValues) > 0 {
 		layers = append(layers, "template defaults")
@@ -115,7 +126,7 @@ func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Templat
 		layers = append(layers, envName+" overrides")
 	}
 	return EffectiveValuesDTO{
-		Values:                 computeEffectiveValues(chartVals, t, ov, envName, cluster, appRaw, envRaw),
+		Values:                 computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, cluster, appRaw, envRaw),
 		ChartDefaultsAvailable: available,
 		Interpolated:           false,
 		Layers:                 layers,
@@ -142,7 +153,8 @@ func (th *templateHandler) handleEffectiveValues(w http.ResponseWriter, r *http.
 	cluster := r.URL.Query().Get("cluster")
 	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
 	ov := loadOverride(r.Context(), th.kubeClient, name)
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, env, cluster, nil, nil))
+	// Template-level preview: no concrete app, so no canonical base.
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, nil, nil))
 }
 
 // loadOverride best-effort reads a template's org-level platform override.
@@ -205,7 +217,39 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 	t, _ := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
 	chartVals, available := chartDefaults(r.Context(), ah.kubeClient, t)
 	ov := loadOverride(r.Context(), ah.kubeClient, app.Spec.Template.Name)
-	// App preview stays env-level; per-cluster org overlay is shown in the
-	// template editor, not here (the app values-doc preview omits per-cluster).
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, envName, "", appRaw, envRaw))
+	// Include the canonical platform↔chart base (app/components/suparship/routing)
+	// so the preview matches what Helm renders. App preview stays env-level; the
+	// per-cluster org overlay is previewed in the template editor.
+	canonicalBase := ah.canonicalBaseMap(r.Context(), app, envName)
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, canonicalBase, available, t, ov, envName, "", appRaw, envRaw))
+}
+
+// canonicalBaseMap renders the canonical HelmValues base suparShip publishes for
+// an app+env (app/components/suparship/routing) into a map, so the effective
+// preview reflects the platform↔chart contract Helm applies — not just chart
+// defaults + overlays. Routing host / cluster resolution is approximate here
+// (nil profiles, empty baseDomain); the structural keys are what matter.
+func (ah *appHandler) canonicalBaseMap(ctx context.Context, app *domain.App, envName string) map[string]any {
+	envType := domain.AppEnvStaging
+	namespace := ""
+	if env, err := ah.appStore.GetAppEnvironment(ctx, app.ProjectName, app.Name, envName); err == nil && env != nil {
+		envType = env.EnvType
+		namespace = env.Namespace
+	}
+	orgName := ""
+	if ah.orgProvider != nil {
+		if org, err := ah.orgProvider.GetOrg(ctx); err == nil && org != nil {
+			orgName = org.Name
+		}
+	}
+	hv := helmvalues.MapToHelmValuesForEnv(app, envName, envType, "", namespace, "", orgName, nil, nil, nil, nil, nil)
+	raw, err := yaml.Marshal(hv)
+	if err != nil {
+		return nil
+	}
+	var out map[string]any
+	if err := yaml.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return out
 }
