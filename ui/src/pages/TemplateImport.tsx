@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
+import { parse, stringify } from "yaml";
 
 import { ApiError } from "../lib/api";
 import {
@@ -16,6 +17,34 @@ function kibibyteFmt(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KiB`;
 }
 
+// parseSpec pulls the spec fields we surface as structured form inputs out of
+// the generated template.yaml. Best-effort: a parse failure just yields empty
+// seeds (the operator fills them in).
+function parseSpec(yaml: string): {
+  title?: string;
+  category?: string;
+  description?: string;
+  injectCanonicalValues?: boolean;
+} {
+  try {
+    const doc = parse(yaml);
+    const spec = doc?.spec;
+    if (!spec || typeof spec !== "object") return {};
+    return {
+      title: typeof spec.title === "string" ? spec.title : undefined,
+      category: typeof spec.category === "string" ? spec.category : undefined,
+      description:
+        typeof spec.description === "string" ? spec.description : undefined,
+      injectCanonicalValues:
+        typeof spec.injectCanonicalValues === "boolean"
+          ? spec.injectCanonicalValues
+          : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 export function TemplateImport() {
   const navigate = useNavigate();
 
@@ -26,18 +55,35 @@ export function TemplateImport() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Structured metadata fields, seeded from the generated template.yaml.
+  // These are what the operator normally edits; the raw-YAML textarea is an
+  // advanced escape hatch behind `rawMode`.
+  const [title, setTitle] = useState("");
+  const [category, setCategory] = useState("");
+  const [description, setDescription] = useState("");
+  // passthrough = injectCanonicalValues:false — the chart brings its own
+  // values and the platform only exposes metadata tokens (no canonical schema).
+  const [passthrough, setPassthrough] = useState(false);
+  const [rawMode, setRawMode] = useState(false);
+
   // handlePreview ships the chart to the backend for introspection. The
-  // returned template.yaml seeds the editor; the operator can refine it
-  // before saving.
+  // returned template.yaml seeds the structured fields (and the raw editor);
+  // the operator can refine before saving.
   async function handlePreview(f: File) {
     setError(null);
     setPreview(null);
     setEditedYAML("");
+    setRawMode(false);
     setPreviewing(true);
     try {
       const p = await importTemplatePreview(f);
       setPreview(p);
       setEditedYAML(p.templateYAML);
+      const spec = parseSpec(p.templateYAML);
+      setTitle(spec.title ?? p.summary.chartName ?? "");
+      setCategory(spec.category ?? "");
+      setDescription(spec.description ?? p.summary.description ?? "");
+      setPassthrough(spec.injectCanonicalValues === false);
     } catch (err) {
       const msg =
         err instanceof ApiError
@@ -52,15 +98,56 @@ export function TemplateImport() {
     }
   }
 
-  // handleSave persists the (possibly edited) template + chart bundle to
-  // the cluster. We re-upload the original .tgz because the backend is
-  // stateless — the preview request didn't store anything.
+  // buildYAML folds the structured fields back into the generated
+  // template.yaml, preserving everything we don't surface (engine, chart,
+  // version). Passthrough drops the inferred inputs/mappings — a BYO chart
+  // consumes its own values, not the canonical schema.
+  function buildYAML(): string {
+    let doc: Record<string, unknown> = {};
+    try {
+      const parsed = parse(editedYAML || preview?.templateYAML || "");
+      if (parsed && typeof parsed === "object") {
+        doc = parsed as Record<string, unknown>;
+      }
+    } catch {
+      doc = {};
+    }
+    const spec = (doc.spec && typeof doc.spec === "object"
+      ? (doc.spec as Record<string, unknown>)
+      : {}) as Record<string, unknown>;
+    spec.title = title.trim();
+    spec.category = category.trim();
+    if (description.trim()) spec.description = description.trim();
+    else delete spec.description;
+    if (passthrough) {
+      spec.injectCanonicalValues = false;
+      delete spec.inputs;
+      delete spec.advancedInputs;
+      delete spec.mappings;
+    } else {
+      delete spec.injectCanonicalValues; // canonical is the default
+    }
+    doc.spec = spec;
+    return stringify(doc);
+  }
+
+  // Toggle the advanced raw editor, seeding it from the structured fields so
+  // edits start from what the form would produce.
+  function toggleRaw() {
+    if (!rawMode) setEditedYAML(buildYAML());
+    setRawMode((v) => !v);
+  }
+
+  // handleSave persists the template + chart bundle to the cluster. We
+  // re-upload the original .tgz because the backend is stateless — the
+  // preview request didn't store anything.
   async function handleSave() {
     if (!file || !preview) return;
     setSaving(true);
     setError(null);
     try {
-      const result = await importTemplate(file, editedYAML);
+      const templateYAML = rawMode ? editedYAML : buildYAML();
+      const result = await importTemplate(file, templateYAML);
       toast.success(`Imported ${result.name} v${result.version}`);
       navigate(`/templates/${encodeURIComponent(result.name)}`);
     } catch (err) {
@@ -138,21 +225,107 @@ export function TemplateImport() {
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-gray-900">
-                Generated template.yaml
+                Template metadata
               </h2>
               <p className="mt-1 text-xs text-gray-500">
-                Review and edit before saving. Categories, titles, and input
-                descriptions are best-effort guesses.
+                Seeded from the chart — review before saving. Category and title
+                are best-effort guesses. You can also edit these later on the
+                template's detail page.
               </p>
             </div>
+            <button
+              type="button"
+              onClick={toggleRaw}
+              className="shrink-0 text-xs font-medium text-gray-500 hover:text-gray-700"
+            >
+              {rawMode ? "Use the form" : "Edit raw YAML"}
+            </button>
           </div>
-          <textarea
-            value={editedYAML}
-            onChange={(e) => setEditedYAML(e.target.value)}
-            spellCheck={false}
-            rows={20}
-            className="mt-4 block w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-xs text-gray-800 focus:border-gray-400 focus:outline-none"
-          />
+
+          {rawMode ? (
+            <textarea
+              value={editedYAML}
+              onChange={(e) => setEditedYAML(e.target.value)}
+              spellCheck={false}
+              rows={20}
+              className="mt-4 block w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-xs text-gray-800 focus:border-gray-400 focus:outline-none"
+            />
+          ) : (
+            <div className="mt-4 space-y-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <label className="block">
+                  <span className="text-sm font-medium text-gray-900">Title</span>
+                  <input
+                    type="text"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-sm font-medium text-gray-900">Category</span>
+                  <input
+                    type="text"
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value)}
+                    placeholder="web, voiceai, worker, …"
+                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none"
+                  />
+                </label>
+              </div>
+              <label className="block">
+                <span className="text-sm font-medium text-gray-900">Description</span>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={3}
+                  className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-400 focus:outline-none"
+                />
+              </label>
+
+              <fieldset className="rounded-lg border border-gray-200 p-4">
+                <legend className="px-1 text-sm font-medium text-gray-900">
+                  Values mode
+                </legend>
+                <label className="flex items-start gap-3">
+                  <input
+                    type="radio"
+                    name="valuesMode"
+                    checked={!passthrough}
+                    onChange={() => setPassthrough(false)}
+                    className="mt-1"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium text-gray-900">Canonical</span>
+                    <span className="block text-xs text-gray-500">
+                      suparship-common contract — the platform injects the
+                      app/platform/components schema and the inferred inputs apply.
+                    </span>
+                  </span>
+                </label>
+                <label className="mt-3 flex items-start gap-3">
+                  <input
+                    type="radio"
+                    name="valuesMode"
+                    checked={passthrough}
+                    onChange={() => setPassthrough(true)}
+                    className="mt-1"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium text-gray-900">
+                      Passthrough (BYO chart)
+                    </span>
+                    <span className="block text-xs text-gray-500">
+                      The chart brings its own values; the platform only exposes
+                      metadata tokens (<code className="font-mono">{`{platform.*}`}</code>,{" "}
+                      <code className="font-mono">{`{vars.*}`}</code>). Drops the
+                      inferred inputs/mappings.
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+            </div>
+          )}
         </div>
       )}
 
@@ -175,7 +348,10 @@ export function TemplateImport() {
           <button
             type="button"
             onClick={handleSave}
-            disabled={saving || !editedYAML.trim()}
+            disabled={
+              saving ||
+              (rawMode ? !editedYAML.trim() : !title.trim() || !category.trim())
+            }
             className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
           >
             {saving ? "Saving…" : "Save template"}
