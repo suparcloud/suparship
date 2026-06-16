@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -127,6 +128,48 @@ func TestRawValuesOverlay_EnvWinsOverApp(t *testing.T) {
 	// The stored app spec must be untouched (deep copy).
 	if app.Spec.RawValues["podAnnotations"].(map[string]any)["shared"] != "app" {
 		t.Error("rawValuesOverlay mutated the stored app spec")
+	}
+}
+
+func TestMarshalPassthroughValues_OverlayOnlyWithTokens(t *testing.T) {
+	pv := helmvalues.PlatformValues{Cluster: "aks-eastus", Env: "prod"}
+	overlay := map[string]any{
+		"replicaCount": 4,
+		"ingress": map[string]any{
+			"annotations": map[string]any{"region": "{platform.cluster}"},
+		},
+	}
+	got, err := marshalPassthroughValues(pv, overlay, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := yaml.Unmarshal(got, &out); err != nil {
+		t.Fatal(err)
+	}
+	// No canonical schema keys injected.
+	for _, k := range []string{"app", "platform", "components", "suparship", "routing"} {
+		if _, present := out[k]; present {
+			t.Errorf("passthrough must not inject canonical key %q: %v", k, out)
+		}
+	}
+	// Overlay present; {platform.cluster} token resolved.
+	if out["replicaCount"] != 4 {
+		t.Errorf("overlay lost: %v", out)
+	}
+	ann := out["ingress"].(map[string]any)["annotations"].(map[string]any)
+	if ann["region"] != "aks-eastus" {
+		t.Errorf("token not resolved: region = %v, want aks-eastus", ann["region"])
+	}
+}
+
+func TestMarshalPassthroughValues_EmptyOverlay(t *testing.T) {
+	got, err := marshalPassthroughValues(helmvalues.PlatformValues{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(got)) != "{}" {
+		t.Errorf("empty overlay should marshal to {}, got %q", string(got))
 	}
 }
 

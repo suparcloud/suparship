@@ -622,6 +622,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 				baseDomain = c.BaseDomain
 			}
 			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+			if env.SkipCanonicalBase {
+				// BYO/passthrough: emit only the overlay; hv.Platform still drives
+				// token resolution. The chart's own values.yaml is the base (Helm).
+				return marshalPassthroughValues(hv.Platform, envOverlay(app, env, c.Name), env.EnvVars)
+			}
 			return marshalValuesWithOverlay(hv, envOverlay(app, env, c.Name), env.EnvVars)
 		}
 		if len(env.Clusters) > 1 {
@@ -783,6 +788,20 @@ func marshalValuesWithOverlay(hv helmvalues.HelmValues, overlay map[string]any, 
 		base = deepMerge(base, ov)
 	}
 	return yaml.Marshal(base)
+}
+
+// marshalPassthroughValues is the BYO/passthrough counterpart: it emits ONLY the
+// (interpolated) overlay — no canonical suparship-common base — so the chart's own
+// values.yaml (applied by Helm underneath) is the foundation. The platform values
+// are used solely for {platform.*}/{vars.*} token resolution, not injected as a
+// values block. Returns "{}" when the overlay is empty.
+func marshalPassthroughValues(pv helmvalues.PlatformValues, overlay map[string]any, vars map[string]string) ([]byte, error) {
+	if len(overlay) == 0 {
+		return []byte("{}\n"), nil
+	}
+	ctx := platform.Context{Platform: pv, Vars: vars}
+	out, _ := ctx.InterpolateTree(deepCopyMap(overlay)).(map[string]any)
+	return yaml.Marshal(out)
 }
 
 // deepMerge / deepCopyMap delegate to helmvalues so publish-time layering and the
@@ -1222,6 +1241,12 @@ type AppPublishEnv struct {
 	// values.yaml is applied (see envOverlay). Populated by the publish adapter
 	// from the org template override.
 	PlatformClusterValues map[string]map[string]any
+	// SkipCanonicalBase, when true, omits the canonical suparship-common values
+	// base (app/platform/components/suparship/routing) from the published
+	// values.yaml — for BYO/passthrough templates (Spec.CanonicalValues()==false).
+	// The platform context is still built so {platform.*}/{vars.*} tokens in the
+	// overlay resolve; only the injected schema is dropped.
+	SkipCanonicalBase bool
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD
@@ -1262,7 +1287,12 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		// overrides don't make sense for ephemeral preview envs (their
 		// names are PR-specific and have no static config).
 		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
-		hvBytes, err := marshalValuesWithOverlay(hv, rawValuesOverlay(app, preview.PreviewName), preview.EnvVars)
+		var hvBytes []byte
+		if preview.SkipCanonicalBase {
+			hvBytes, err = marshalPassthroughValues(hv.Platform, rawValuesOverlay(app, preview.PreviewName), preview.EnvVars)
+		} else {
+			hvBytes, err = marshalValuesWithOverlay(hv, rawValuesOverlay(app, preview.PreviewName), preview.EnvVars)
+		}
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
 		}
@@ -1324,6 +1354,9 @@ type PreviewPublishSpec struct {
 	// ScopeKeys reports which (scope, tier) items have keys, so PublishPreview
 	// emits only the ExternalSecrets that resolve.
 	ScopeKeys ScopePresence
+	// SkipCanonicalBase mirrors AppPublishEnv.SkipCanonicalBase for previews of
+	// BYO/passthrough templates.
+	SkipCanonicalBase bool
 }
 
 // DeletePreview removes the preview directory from the GitOps repo and commits.

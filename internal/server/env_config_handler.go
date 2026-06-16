@@ -817,10 +817,46 @@ func (h *envConfigHandler) handleGetConfigVariables(w http.ResponseWriter, r *ht
 	projectName := r.PathValue("project")
 	ctx := r.Context()
 
-	resp := ConfigVariablesResponse{Platform: platform.PlatformTokens(), Vars: []VarTokenDTO{}}
+	org, err := h.orgStore.GetOrg(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	includeProject := ""
+	if proj, err := h.projectStore.Get(ctx, projectName); err == nil && proj != nil {
+		includeProject = projectName
+	}
+	resp := ConfigVariablesResponse{
+		Platform: platform.PlatformTokens(),
+		Vars:     h.collectConfigVars(ctx, org, includeProject),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
-	// Track first-seen scope per var name so the picker shows where it comes from
-	// without listing the same name once per scope.
+// handleGetPlatformConfigVariables returns the project-agnostic variable catalog:
+// the static {platform.*} tokens plus org/env/cluster-scoped {vars.*} (no
+// project/app scope). Powers the "Insert variable" picker in the template-level
+// platform-overrides editor, which has no project context. Authenticated.
+func (h *envConfigHandler) handleGetPlatformConfigVariables(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	org, err := h.orgStore.GetOrg(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	resp := ConfigVariablesResponse{
+		Platform: platform.PlatformTokens(),
+		Vars:     h.collectConfigVars(ctx, org, ""),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// collectConfigVars unions the non-secret {vars.*} names across scopes (org, each
+// env, optionally the project, each bound cluster), deduped by first-seen so the
+// picker shows where each name comes from. A non-empty projectName adds the
+// project scope; "" omits it (project-agnostic / template-level catalog).
+func (h *envConfigHandler) collectConfigVars(ctx context.Context, org *rbac.Org, projectName string) []VarTokenDTO {
+	out := []VarTokenDTO{}
 	seen := map[string]bool{}
 	add := func(scope string, vars map[string]string) {
 		names := make([]string, 0, len(vars))
@@ -833,21 +869,18 @@ func (h *envConfigHandler) handleGetConfigVariables(w http.ResponseWriter, r *ht
 				continue
 			}
 			seen[name] = true
-			resp.Vars = append(resp.Vars, VarTokenDTO{Token: "{vars." + name + "}", Name: name, Scope: scope})
+			out = append(out, VarTokenDTO{Token: "{vars." + name + "}", Name: name, Scope: scope})
 		}
 	}
 
-	org, err := h.orgStore.GetOrg(ctx)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
-		return
-	}
 	add("org", org.EnvConfig.Vars)
 	for _, e := range org.Environments {
 		add("env:"+e.Name, e.EnvConfig.Vars)
 	}
-	if proj, err := h.projectStore.Get(ctx, projectName); err == nil && proj != nil {
-		add("project", proj.Spec.EnvConfig.Vars)
+	if projectName != "" {
+		if proj, err := h.projectStore.Get(ctx, projectName); err == nil && proj != nil {
+			add("project", proj.Spec.EnvConfig.Vars)
+		}
 	}
 	// Cluster scope: read each distinct bound cluster's runtime env ConfigMap.
 	if h.upperLevelWriter != nil {
@@ -864,8 +897,7 @@ func (h *envConfigHandler) handleGetConfigVariables(w http.ResponseWriter, r *ht
 			}
 		}
 	}
-
-	writeJSON(w, http.StatusOK, resp)
+	return out
 }
 
 // clusterRefsOf returns the cluster refs an environment is bound to, covering

@@ -9,79 +9,23 @@ import {
   fetchTemplate,
   fetchTemplateOverride,
   previewTemplateEffectiveValues,
+  updateTemplateMetadata,
   updateTemplateOverride,
 } from "../lib/templates";
 import { listOrgEnvironments } from "../lib/settings";
 import { listClusters } from "../lib/clusters";
 import type { Cluster } from "../lib/clusters";
+import { listPlatformConfigVariables } from "../lib/configVars";
+import type { ConfigVariables } from "../lib/configVars";
 import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   TemplateDetail as TemplateDetailType,
-  TemplateInput,
   TemplateOverride,
   TemplateSecretInput,
-  TemplatePreset,
 } from "../types";
 
 // CodeMirror is heavy; only the override editor needs it.
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
-
-const inputTypeBadge: Record<string, string> = {
-  string: "bg-blue-50 text-blue-700",
-  number: "bg-emerald-50 text-emerald-700",
-  boolean: "bg-violet-50 text-violet-700",
-  enum: "bg-amber-50 text-amber-700",
-};
-
-function TypeBadge({ type }: { type: string }) {
-  const cls = inputTypeBadge[type] ?? "bg-gray-100 text-gray-600";
-  return (
-    <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
-      {type}
-    </span>
-  );
-}
-
-function InputCard({ input }: { input: TemplateInput }) {
-  return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <h4 className="text-sm font-semibold text-gray-900">{input.title}</h4>
-          {input.required && (
-            <span className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600">
-              Required
-            </span>
-          )}
-        </div>
-        <TypeBadge type={input.type} />
-      </div>
-
-      {input.description && (
-        <p className="mt-1.5 text-sm text-gray-500">{input.description}</p>
-      )}
-
-      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
-        <span className="font-mono">{input.name}</span>
-        {input.default !== undefined && input.default !== null && (
-          <span>
-            Default: <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-gray-600">{String(input.default)}</code>
-          </span>
-        )}
-        {input.type === "enum" && input.options.length > 0 && (
-          <span>
-            Options: {input.options.map((o) => (
-              <code key={o} className="mr-1 rounded bg-gray-100 px-1 py-0.5 font-mono text-gray-600">{o}</code>
-            ))}
-          </span>
-        )}
-        {input.min !== undefined && <span>Min: {input.min}</span>}
-        {input.max !== undefined && <span>Max: {input.max}</span>}
-        {input.pattern && <span>Pattern: <code className="font-mono">{input.pattern}</code></span>}
-      </div>
-    </div>
-  );
-}
 
 function SecretInputCard({ input }: { input: TemplateSecretInput }) {
   return (
@@ -102,30 +46,6 @@ function SecretInputCard({ input }: { input: TemplateSecretInput }) {
           Ref: <code className="rounded bg-white px-1 py-0.5 font-mono text-gray-600">{input.secretRef}</code>
         </span>
       </div>
-    </div>
-  );
-}
-
-function PresetCard({ preset }: { preset: TemplatePreset }) {
-  const entries = Object.entries(preset.values);
-  return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <h4 className="text-sm font-semibold text-gray-900">{preset.title}</h4>
-      {preset.description && (
-        <p className="mt-1 text-sm text-gray-500">{preset.description}</p>
-      )}
-      {entries.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {entries.map(([key, val]) => (
-            <span
-              key={key}
-              className="inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-0.5 text-xs font-mono text-gray-600"
-            >
-              <span className="text-gray-400">{key}:</span> {String(val)}
-            </span>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -195,11 +115,6 @@ export function TemplateDetail() {
       </div>
     );
   }
-
-  const totalInputs =
-    template.inputs.length +
-    template.advancedInputs.length +
-    template.secretInputs.length;
 
   // handleDelete drops the template's cluster ConfigMap. We confirm
   // explicitly because the action is destructive and not reversible
@@ -272,35 +187,12 @@ export function TemplateDetail() {
         </button>
       </div>
 
-      {/* Quick stats */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <StatCard label="Category" value={template.category} />
-        <StatCard label="Engine" value={template.engine} />
-        <StatCard label="Inputs" value={String(totalInputs)} />
-        <StatCard label="Presets" value={String(template.presets.length)} />
-      </div>
+      {/* Metadata — editable for org_admins on imported templates */}
+      <MetadataSection template={template} onUpdated={setTemplate} />
 
-      {/* Inputs */}
-      {template.inputs.length > 0 && (
-        <Section title="Inputs" subtitle="Configuration parameters for this template.">
-          <div className="space-y-3">
-            {template.inputs.map((inp) => (
-              <InputCard key={inp.name} input={inp} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {/* Advanced inputs */}
-      {template.advancedInputs.length > 0 && (
-        <Section title="Advanced inputs" subtitle="Additional tuning parameters.">
-          <div className="space-y-3">
-            {template.advancedInputs.map((inp) => (
-              <InputCard key={inp.name} input={inp} />
-            ))}
-          </div>
-        </Section>
-      )}
+      {/* Template inputs are deprecated and not shown — apps are configured via
+          the values editor, and the effective-values preview is the real "what
+          deploys" reference. */}
 
       {/* Secret inputs */}
       {template.secretInputs.length > 0 && (
@@ -308,17 +200,6 @@ export function TemplateDetail() {
           <div className="space-y-3">
             {template.secretInputs.map((si) => (
               <SecretInputCard key={si.name} input={si} />
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {/* Presets */}
-      {template.presets.length > 0 && (
-        <Section title="Presets" subtitle="Pre-configured sets of defaults to get started quickly.">
-          <div className="grid gap-4 sm:grid-cols-2">
-            {template.presets.map((p) => (
-              <PresetCard key={p.name} preset={p} />
             ))}
           </div>
         </Section>
@@ -355,6 +236,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
   const [saving, setSaving] = useState(false);
   const [preview, setPreview] = useState("");
   const [chartAvailable, setChartAvailable] = useState(true);
+  const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
 
   // Seed from the saved override + load env/cluster lists (admins only).
   useEffect(() => {
@@ -386,6 +268,9 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
     listClusters()
       .then(setClusters)
       .catch(() => setClusters([]));
+    listPlatformConfigVariables()
+      .then(setConfigVars)
+      .catch(() => setConfigVars({ platform: [], vars: [] }));
     return () => {
       cancelled = true;
     };
@@ -553,6 +438,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
           <ValuesEditor
             label={activeLabel}
             value={activeText}
+            configVars={configVars}
             height="26rem"
             placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 500m"}
             onChange={setActiveText}
@@ -588,6 +474,162 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
       {yamlError && (
         <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
       )}
+    </div>
+  );
+}
+
+function valuesModeLabel(t: TemplateDetailType): string {
+  return t.injectCanonicalValues === false
+    ? "Passthrough (BYO chart)"
+    : "Canonical values";
+}
+
+// MetadataSection shows category/engine + values-mode and lets an org_admin edit
+// the metadata of an imported/BYO template in place (title, category, description,
+// passthrough). Synced/built-in templates are read-only with a provenance notice.
+function MetadataSection({
+  template,
+  onUpdated,
+}: {
+  template: TemplateDetailType;
+  onUpdated: (t: TemplateDetailType) => void;
+}) {
+  const { user } = useAuth();
+  const canEdit = user?.role === "org_admin" && template.editable === true;
+
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [title, setTitle] = useState(template.title);
+  const [category, setCategory] = useState(template.category);
+  const [description, setDescription] = useState(template.description ?? "");
+  const [passthrough, setPassthrough] = useState(
+    template.injectCanonicalValues === false,
+  );
+
+  function reset() {
+    setTitle(template.title);
+    setCategory(template.category);
+    setDescription(template.description ?? "");
+    setPassthrough(template.injectCanonicalValues === false);
+    setEditing(false);
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const updated = await updateTemplateMetadata(template.name, {
+        title,
+        category,
+        description,
+        injectCanonicalValues: !passthrough,
+      });
+      onUpdated(updated);
+      toast.success("Template metadata updated");
+      setEditing(false);
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to update metadata",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-white p-5">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-900">Edit metadata</h2>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={reset}
+              disabled={saving}
+              className="rounded-md px-3 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600">Title</span>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="mt-1 w-full max-w-xl rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600">Category</span>
+            <input
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              placeholder="e.g. web, worker, voiceai"
+              className="mt-1 w-full max-w-xs rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600">Description</span>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              className="mt-1 w-full max-w-2xl rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+            />
+          </label>
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              checked={passthrough}
+              onChange={(e) => setPassthrough(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span className="text-sm text-gray-700">
+              Passthrough — this chart brings its own values (no canonical schema
+              injected).{" "}
+              <span className="text-xs text-gray-400">
+                Turning this on clears the auto-generated chart parameters.
+              </span>
+            </span>
+          </label>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="grid grid-cols-2 gap-4">
+        <StatCard label="Category" value={template.category} />
+        <StatCard label="Engine" value={template.engine} />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-3">
+        <span className="text-xs text-gray-400">
+          {valuesModeLabel(template)}
+          {template.source?.origin === "synced" && template.source.externalRepo
+            ? ` · managed by ${template.source.externalRepo}`
+            : template.source?.origin === "builtin"
+              ? " · built-in"
+              : ""}
+        </span>
+        {canEdit ? (
+          <button
+            onClick={() => setEditing(true)}
+            className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+          >
+            Edit metadata
+          </button>
+        ) : template.source?.origin === "synced" ? (
+          <span className="text-xs text-gray-400">Edit at the source repo</span>
+        ) : null}
+      </div>
     </div>
   );
 }

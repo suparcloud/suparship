@@ -217,6 +217,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig/resolved", viewProject(ec.handleGetResolvedEnvConfig))
 		// Variable catalog for the UI picker — any viewer.
 		mux.HandleFunc("GET /api/v1/projects/{project}/config-variables", viewProject(ec.handleGetConfigVariables))
+		// Project-agnostic catalog (platform tokens + org/env/cluster vars) for the
+		// template-level platform-overrides editor, which has no project context.
+		mux.HandleFunc("GET /api/v1/platform/config-variables", rh.auth.requireAuth(ec.handleGetPlatformConfigVariables))
 	}
 
 	if rh.secretsHandler != nil {

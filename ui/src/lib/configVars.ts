@@ -31,3 +31,12 @@ export async function listConfigVariables(
   );
   return { platform: res.platform ?? [], vars: res.vars ?? [] };
 }
+
+// listPlatformConfigVariables fetches the project-agnostic catalog: the static
+// {platform.*} tokens plus org/env/cluster-scoped {vars.*} (no project/app
+// scope). Used by the template-level platform-overrides editor, which has no
+// project context. Secrets are never returned.
+export async function listPlatformConfigVariables(): Promise<ConfigVariables> {
+  const res = await api.get<ConfigVariables>(`/platform/config-variables`);
+  return { platform: res.platform ?? [], vars: res.vars ?? [] };
+}

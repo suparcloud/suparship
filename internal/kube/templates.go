@@ -361,6 +361,22 @@ func LoadChartBundle(ctx context.Context, client kubernetes.Interface, templateN
 	return cm.BinaryData[templateChartBundleKey], nil
 }
 
+// TemplateClusterStored reports whether a template is persisted as a cluster
+// ConfigMap (imported/synced) rather than shipped on disk (built-in). Used to
+// gate in-place metadata edits — disk built-ins have no ConfigMap to update.
+func TemplateClusterStored(ctx context.Context, client kubernetes.Interface, templateName string) (bool, error) {
+	_, err := client.CoreV1().ConfigMaps(systemNamespace).Get(
+		ctx, TemplateConfigMapName(templateName), metav1.GetOptions{},
+	)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get template configmap %s: %w", templateName, err)
+	}
+	return true, nil
+}
+
 // TemplateVersion describes one persisted version of a template — the
 // suparship-template-{name}-{version} archive ConfigMap.
 type TemplateVersion struct {

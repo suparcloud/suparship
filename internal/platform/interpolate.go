@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/suparcloud/suparship/internal/helmvalues"
+	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // Context is the interpolation context for one (app, env, cluster): the platform
@@ -97,6 +98,16 @@ func (c Context) replacer() *strings.Replacer {
 		"{platform.ingressClassName}", p.IngressClassName,
 		"{platform.clusterIssuer}", p.ClusterIssuer,
 	}
+	// Platform-managed per-app ConfigMap/Secret names, derived from the app name
+	// (single source of truth: secrets.AppConfigMapName/AppSecretName). Exposed so
+	// BYO/passthrough charts can wire envFrom to the platform-managed env without
+	// hardcoding. Guarded on App so an empty context doesn't emit "-config".
+	if p.App != "" {
+		pairs = append(pairs,
+			"{platform.configMapName}", secrets.AppConfigMapName(p.App),
+			"{platform.secretName}", secrets.AppSecretName(p.App),
+		)
+	}
 	for k, v := range c.Vars {
 		pairs = append(pairs, "{vars."+k+"}", v)
 	}
@@ -127,5 +138,7 @@ func PlatformTokens() []TokenInfo {
 		{Token: "{platform.routingHost}", Label: "Routing host", Group: "Routing", Description: "external host, no scheme"},
 		{Token: "{platform.ingressClassName}", Label: "Ingress class", Group: "Routing"},
 		{Token: "{platform.clusterIssuer}", Label: "Cluster issuer", Group: "Routing"},
+		{Token: "{platform.configMapName}", Label: "Config map name", Group: "Identity", Description: "platform-managed app ConfigMap ({app}-config)"},
+		{Token: "{platform.secretName}", Label: "Secret name", Group: "Identity", Description: "platform-managed app Secret ({app}-secrets)"},
 	}
 }

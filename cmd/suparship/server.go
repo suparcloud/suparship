@@ -701,6 +701,8 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 	if tmpl == nil {
 		return
 	}
+	// BYO/passthrough templates opt out of the injected canonical values base.
+	pub.SkipCanonicalBase = !tmpl.Spec.CanonicalValues()
 	def := helmvalues.DeepCopyMap(tmpl.Spec.DefaultValues)
 	var env map[string]any
 	if tmpl.Spec.EnvValues != nil {

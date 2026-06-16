@@ -53,6 +53,23 @@ type TemplateDetailDTO struct {
 	// seed the effective-values preview without a second round-trip.
 	DefaultValues map[string]any            `json:"defaultValues,omitempty"`
 	EnvValues     map[string]map[string]any `json:"envValues,omitempty"`
+	// InjectCanonicalValues is the values-mode flag (nil/true = canonical
+	// suparship-common base; false = passthrough/BYO). Surfaced so the UI can
+	// show + edit the passthrough toggle.
+	InjectCanonicalValues *bool `json:"injectCanonicalValues,omitempty"`
+	// Editable is true when metadata can be edited in place (cluster-stored and
+	// NOT managed by an external sync). Source describes provenance.
+	Editable bool               `json:"editable"`
+	Source   *TemplateSourceDTO `json:"source,omitempty"`
+}
+
+// TemplateSourceDTO describes where a template came from, for the UI's edit gating.
+type TemplateSourceDTO struct {
+	// Origin: "builtin" (disk), "imported" (BYO upload), or "synced" (external repo).
+	Origin string `json:"origin"`
+	// ExternalRepo + SyncedAt are set for synced templates.
+	ExternalRepo string `json:"externalRepo,omitempty"`
+	SyncedAt     string `json:"syncedAt,omitempty"`
 }
 
 // TemplateComponentDTO mirrors tpl.TemplateComponent for the wire,
@@ -122,7 +139,11 @@ type templateHandler struct {
 	// destructive route. Nil falls back to plain auth so test harnesses
 	// without an OrgStore keep working.
 	authMiddleware func(http.HandlerFunc) http.HandlerFunc
-	logger         *slog.Logger
+	// registryStore tells synced (git/registry) templates apart from
+	// imported/BYO ones, so metadata editing is gated (synced edits would be
+	// clobbered on the next sync). Nil → treat all cluster templates as editable.
+	registryStore *tpl.RegistryStore
+	logger        *slog.Logger
 }
 
 func newTemplateHandler(auth *authHandler, builtin []*tpl.Template, clusterLoader ClusterTemplateLoader, logger *slog.Logger) *templateHandler {
@@ -152,6 +173,7 @@ func (th *templateHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/templates/{name}/effective-values", th.auth.requireAuth(th.handlePostEffectiveValues))
 	mux.HandleFunc("GET /api/v1/templates/{name}/overrides", th.auth.requireAuth(th.handleGetTemplateOverride))
 	mux.HandleFunc("PUT /api/v1/templates/{name}/overrides", th.adminOrAuth()(th.handlePutTemplateOverride))
+	mux.HandleFunc("PATCH /api/v1/templates/{name}", th.adminOrAuth()(th.handleUpdateTemplateMetadata))
 	mux.HandleFunc("DELETE /api/v1/templates/{name}", th.adminOrAuth()(th.handleDelete))
 }
 
@@ -389,26 +411,55 @@ func (th *templateHandler) handleDetail(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "template not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, templateToDetail(t))
+	dto := templateToDetail(t)
+	src, editable := th.templateProvenance(r.Context(), name)
+	dto.Source = src
+	dto.Editable = editable
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// templateProvenance classifies a template's origin and whether its metadata is
+// editable in place. Editable = cluster-stored AND not externally synced:
+//   - synced  (registry source has an ExternalRepo): read-only — a sync would
+//     clobber the edit; fix it at the source.
+//   - builtin (no cluster ConfigMap; ships on disk): read-only.
+//   - imported (cluster ConfigMap, no external repo): editable.
+func (th *templateHandler) templateProvenance(ctx context.Context, name string) (*TemplateSourceDTO, bool) {
+	// Synced detection from the registry (when available).
+	if th.registryStore != nil {
+		if reg, err := th.registryStore.Get(ctx); err == nil && reg != nil {
+			if s := reg.FindSource(name); s != nil && s.Origin == "external" && s.ExternalRepo != "" {
+				return &TemplateSourceDTO{Origin: "synced", ExternalRepo: s.ExternalRepo, SyncedAt: s.SyncedAt}, false
+			}
+		}
+	}
+	// Cluster-stored ⇒ imported/editable; otherwise it's a disk built-in.
+	if th.kubeClient != nil {
+		if stored, err := kube.TemplateClusterStored(ctx, th.kubeClient, name); err == nil && stored {
+			return &TemplateSourceDTO{Origin: "imported"}, true
+		}
+	}
+	return &TemplateSourceDTO{Origin: "builtin"}, false
 }
 
 // --- Conversion helpers ---
 
 func templateToDetail(t *tpl.Template) TemplateDetailDTO {
 	return TemplateDetailDTO{
-		Name:           t.Metadata.Name,
-		Version:        t.Metadata.Version,
-		Title:          t.Spec.Title,
-		Description:    t.Spec.Description,
-		Category:       t.Spec.Category,
-		Engine:         t.Spec.Engine.Type,
-		Components:     componentsToTemplateDTO(t.Spec.Components),
-		Inputs:         inputsToDTO(t.Spec.Inputs),
-		AdvancedInputs: inputsToDTO(t.Spec.AdvancedInputs),
-		SecretInputs:   secretInputsToDTO(t.Spec.SecretInputs),
-		Presets:        presetsToDTO(t.Spec.Presets),
-		DefaultValues:  t.Spec.DefaultValues,
-		EnvValues:      t.Spec.EnvValues,
+		Name:                  t.Metadata.Name,
+		Version:               t.Metadata.Version,
+		Title:                 t.Spec.Title,
+		Description:           t.Spec.Description,
+		Category:              t.Spec.Category,
+		Engine:                t.Spec.Engine.Type,
+		Components:            componentsToTemplateDTO(t.Spec.Components),
+		Inputs:                inputsToDTO(t.Spec.Inputs),
+		AdvancedInputs:        inputsToDTO(t.Spec.AdvancedInputs),
+		SecretInputs:          secretInputsToDTO(t.Spec.SecretInputs),
+		Presets:               presetsToDTO(t.Spec.Presets),
+		DefaultValues:         t.Spec.DefaultValues,
+		EnvValues:             t.Spec.EnvValues,
+		InjectCanonicalValues: t.Spec.InjectCanonicalValues,
 	}
 }
 

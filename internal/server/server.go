@@ -450,6 +450,7 @@ func New(cfg Config) *Server {
 	if ah != nil {
 		th := newTemplateHandler(ah, cfg.Templates, cfg.ClusterTemplateLoader, cfg.Logger)
 		th.kubeClient = cfg.KubeClient
+		th.registryStore = cfg.TemplateRegistryStore
 		// Same admin-gating shape as the registry handler: when the org
 		// provider is wired we require org_admin on DELETE; without it we
 		// fall back to plain auth so harnesses without an OrgStore work.

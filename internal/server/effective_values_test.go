@@ -41,7 +41,7 @@ func TestComputeEffectiveValues_LayerPrecedence(t *testing.T) {
 	appRaw := map[string]any{"image": map[string]any{"tag": "dev"}}
 	envRaw := map[string]any{"replicaCount": 9}
 
-	got := computeEffectiveValues(chart, tmpl, nil, "prod", "", appRaw, envRaw)
+	got := computeEffectiveValues(chart, nil, tmpl, nil, "prod", "", appRaw, envRaw)
 
 	// envRaw (9) > template EnvValues.prod (4) > DefaultValues/chart (1).
 	if got["replicaCount"] != 9 {
@@ -66,7 +66,7 @@ func TestComputeEffectiveValues_LayerPrecedence(t *testing.T) {
 func TestComputeEffectiveValues_EnvValuesOnlyForThatEnv(t *testing.T) {
 	tmpl := valuesTemplate()
 	// staging has no EnvValues entry → falls back to DefaultValues replicaCount 1.
-	got := computeEffectiveValues(nil, tmpl, nil, "staging", "", nil, nil)
+	got := computeEffectiveValues(nil, nil, tmpl, nil, "staging", "", nil, nil)
 	if got["replicaCount"] != 1 {
 		t.Errorf("staging replicaCount = %v, want 1 (default, no env override)", got["replicaCount"])
 	}
@@ -74,7 +74,7 @@ func TestComputeEffectiveValues_EnvValuesOnlyForThatEnv(t *testing.T) {
 
 func TestComputeEffectiveValues_NilChartDegrades(t *testing.T) {
 	tmpl := valuesTemplate()
-	got := computeEffectiveValues(nil, tmpl, nil, "prod", "", nil, nil)
+	got := computeEffectiveValues(nil, nil, tmpl, nil, "prod", "", nil, nil)
 	if got["replicaCount"] != 4 {
 		t.Errorf("replicaCount = %v, want 4 (env default, no chart)", got["replicaCount"])
 	}
@@ -88,15 +88,15 @@ func TestComputeEffectiveValues_OrgLayerBetweenTemplateAndApp(t *testing.T) {
 	}
 
 	// No app override → org prod (6) wins over template prod (4).
-	if got := computeEffectiveValues(nil, tmpl, ov, "prod", "", nil, nil); got["replicaCount"] != 6 {
+	if got := computeEffectiveValues(nil, nil, tmpl, ov, "prod", "", nil, nil); got["replicaCount"] != 6 {
 		t.Errorf("replicaCount = %v, want 6 (org prod over template prod)", got["replicaCount"])
 	}
 	// App override still wins over the org layer.
-	if got := computeEffectiveValues(nil, tmpl, ov, "prod", "", map[string]any{"replicaCount": 11}, nil); got["replicaCount"] != 11 {
+	if got := computeEffectiveValues(nil, nil, tmpl, ov, "prod", "", map[string]any{"replicaCount": 11}, nil); got["replicaCount"] != 11 {
 		t.Errorf("replicaCount = %v, want 11 (app over org)", got["replicaCount"])
 	}
 	// Org default applies to an env with no org EnvValues entry.
-	if got := computeEffectiveValues(nil, tmpl, ov, "staging", "", nil, nil); got["replicaCount"] != 2 {
+	if got := computeEffectiveValues(nil, nil, tmpl, ov, "staging", "", nil, nil); got["replicaCount"] != 2 {
 		t.Errorf("staging replicaCount = %v, want 2 (org default)", got["replicaCount"])
 	}
 }
@@ -112,7 +112,7 @@ func TestComputeEffectiveValues_ClusterLayer(t *testing.T) {
 	}
 
 	// Cluster block applies for that cluster; env layer also present.
-	got := computeEffectiveValues(nil, tmpl, ov, "prod", "eks-uswest", nil, nil)
+	got := computeEffectiveValues(nil, nil, tmpl, ov, "prod", "eks-uswest", nil, nil)
 	ann := got["ingress"].(map[string]any)["annotations"].(map[string]any)
 	if ann["aws"] != "nlb" {
 		t.Errorf("aws cluster annotation missing: %v", ann)
@@ -125,7 +125,7 @@ func TestComputeEffectiveValues_ClusterLayer(t *testing.T) {
 	}
 
 	// No cluster → no cluster block.
-	none := computeEffectiveValues(nil, tmpl, ov, "prod", "", nil, nil)
+	none := computeEffectiveValues(nil, nil, tmpl, ov, "prod", "", nil, nil)
 	if _, ok := none["ingress"]; ok {
 		t.Errorf("cluster block applied without a cluster: %v", none["ingress"])
 	}
@@ -262,6 +262,76 @@ func TestHandleAppValuesPreview_ReflectsUnsavedBody(t *testing.T) {
 	// env raw 7 > app raw (ignored — body envRawValues supplied) and > env default 4.
 	if resp.Values["replicaCount"] != float64(7) {
 		t.Errorf("replicaCount = %v, want 7 (unsaved env override)", resp.Values["replicaCount"])
+	}
+}
+
+func TestHandleAppValuesPreview_IncludesCanonicalBase(t *testing.T) {
+	// The app preview must include the canonical platform↔chart base (app/
+	// components/suparship) so it matches what Helm deploys — not just chart
+	// defaults + overlays.
+	store := newMemAppStore()
+	store.addApp(&domain.App{
+		Name:        "agent",
+		ProjectName: "demo",
+		Spec:        domain.AppSpec{Template: domain.AppTemplateRef{Name: "voiceai-agent"}},
+	})
+	ah := newAppHandler(store, []*tpl.Template{valuesTemplate()}, nil, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/projects/demo/apps/agent/envs/prod/values/preview", nil)
+	req.SetPathValue("project", "demo")
+	req.SetPathValue("app", "agent")
+	req.SetPathValue("env", "prod")
+	rec := httptest.NewRecorder()
+	ah.handleAppValuesPreview(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp EffectiveValuesDTO
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	// Canonical keys the chart consumes must be present.
+	for _, k := range []string{"app", "components", "suparship"} {
+		if _, ok := resp.Values[k]; !ok {
+			t.Errorf("effective values missing canonical key %q", k)
+		}
+	}
+	app, _ := resp.Values["app"].(map[string]any)
+	if app["name"] != "agent" {
+		t.Errorf("app.name = %v, want agent", app["name"])
+	}
+}
+
+func TestHandleAppValuesPreview_PassthroughOmitsCanonicalBase(t *testing.T) {
+	// A BYO/passthrough template (injectCanonicalValues:false) → the preview must
+	// NOT include the canonical app/platform/suparship block, only chart + overlays.
+	store := newMemAppStore()
+	store.addApp(&domain.App{
+		Name:        "byo",
+		ProjectName: "demo",
+		Spec:        domain.AppSpec{Template: domain.AppTemplateRef{Name: "voiceai-agent"}},
+	})
+	passthrough := false
+	tmpl := valuesTemplate()
+	tmpl.Metadata.Name = "voiceai-agent"
+	tmpl.Spec.InjectCanonicalValues = &passthrough
+	ah := newAppHandler(store, []*tpl.Template{tmpl}, nil, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/projects/demo/apps/byo/envs/prod/values/preview", nil)
+	req.SetPathValue("project", "demo")
+	req.SetPathValue("app", "byo")
+	req.SetPathValue("env", "prod")
+	rec := httptest.NewRecorder()
+	ah.handleAppValuesPreview(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp EffectiveValuesDTO
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	for _, k := range []string{"app", "platform", "suparship", "routing"} {
+		if _, present := resp.Values[k]; present {
+			t.Errorf("passthrough preview must omit canonical key %q: %v", k, resp.Values)
+		}
 	}
 }
 
