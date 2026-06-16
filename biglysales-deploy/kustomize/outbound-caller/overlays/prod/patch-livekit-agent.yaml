@@ -1,0 +1,37 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-agent-server-outbound-caller
+spec:
+  template:
+    spec:
+      containers:
+        - name: voiceai-livekit-agent-server
+          resources:
+            requests:
+              # 3.4 cpu to be able to pack 2 pods on the 8 core node and avoid 50% resource waste
+              cpu: "4000m"
+              # on prod max usage 5260, set request to make this value 70% of max: 7520Mi
+              # OOM on 7520Mi, add 500Mi to avoid future OOMs
+              # try to put 2 agents on the comd8ls6 node, to try to run with 5Gi memory, prev value was 8020Mi
+              # oom with 30 idle and 20 slots on 5Gi
+              # oom with 30 idle and 20 slots on 6Gi with 32 slots occupied
+              # add 3Gi due to bot detection
+              memory: "15360Mi"
+              # retry-caller had eviction on 200Mi disk limit
+              ephemeral-storage: "400Mi"
+            limits:
+              # same as requests to garanteed memory and avoid node level OOM
+              memory: "15360Mi"
+              ephemeral-storage: "400Mi"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-agent-server-outbound-caller
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-agent-server-outbound-caller
+  minReplicaCount: 0
+  maxReplicaCount: 60 # 120

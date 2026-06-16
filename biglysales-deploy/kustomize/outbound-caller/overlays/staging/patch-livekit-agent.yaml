@@ -1,0 +1,29 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-agent-server-outbound-caller
+spec:
+  template:
+    spec:
+      containers:
+      - name: voiceai-livekit-agent-server
+        env:
+        - name: MAX_AGENTS
+          value: "10"
+        - name: AG__NUM_IDLE_PROCESSES
+          value: "10"
+        envFrom:
+        - secretRef:
+            name: voiceai-livekit-env 
+        - secretRef:
+            name: voiceai-livekit-self-hosted-env
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-agent-server-outbound-caller
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-agent-server-outbound-caller
+  minReplicaCount: 1

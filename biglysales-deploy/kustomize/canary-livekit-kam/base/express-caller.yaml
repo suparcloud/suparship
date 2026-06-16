@@ -1,0 +1,436 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-agent-server-express-caller-canary-lk-kam
+  labels:
+    app.biglysales.com/component-type: livekit-agent
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 5
+      # we can't afford to not have any express agent during upgrades
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: voiceai-livekit-agent-server-express-caller-canary-lk-kam
+  template:
+    metadata:
+      labels:
+        app: voiceai-livekit-agent-server-express-caller-canary-lk-kam
+        app.biglysales.com/component-type: livekit-agent
+    spec:
+      priorityClassName: high-priority-preempting
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: workload-type
+                operator: In
+                values:
+                  - compute
+                  - livekit
+      tolerations:
+      - key: "workload-type"
+        operator: Equal
+        value: compute
+        effect: NoSchedule
+      - key: "workload-type"
+        operator: Equal
+        value: livekit
+        effect: NoSchedule
+      terminationGracePeriodSeconds: 1860
+      initContainers:
+      - name: signal-watcher
+        image: acrsharedsouthcentralusbiglysales.azurecr.io/busybox:1.37.0-uclibc
+        restartPolicy: Always
+        command:
+        - sh
+        - -c
+        - |
+          trap_handler() {
+            echo 'signal-watcher terminating'
+            touch /mnt/signal/terminating || echo 'Warning: Failed to create terminating signal file'
+            REPORT_URL="http://bs-pod-status/terminating/${K8S_POD_NAME}?uid=${K8S_POD_UID}"
+            wget --post-data='' -T 5 -q -O- "$REPORT_URL" || echo 'Warning: Failed to report terminating signal'
+            echo 'signal-watcher terminated'
+            exit 0
+          }
+          trap trap_handler SIGTERM
+          while true; do
+            sleep 3
+          done
+        env:
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        volumeMounts:
+        - name: signal-vol
+          mountPath: /mnt/signal
+        resources:
+          requests:
+            cpu: "15m"
+            memory: "5Mi"
+            ephemeral-storage: "20Mi"
+          limits:
+            cpu: "50m"
+            memory: "10Mi"
+            ephemeral-storage: "50Mi"
+      - name: wait-for-node-stability
+        image: acrsharedsouthcentralusbiglysales.azurecr.io/biglysales-voiceai-livekit:latest
+        imagePullPolicy: IfNotPresent
+        # wait-time is 20s due to express should be fast to start.
+        command:
+        - /bin/report_pod_status.py
+        - --wait-time
+        - "20"
+        env:
+        - name: K8S_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: NODE_HEALTH_URL
+          value: "http://$(K8S_NODE_IP):12911"
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            cpu: "15m"
+            memory: "15Mi"
+            ephemeral-storage: "20Mi"
+          limits:
+            cpu: "90m"
+            memory: "65Mi"
+            ephemeral-storage: "50Mi"
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+      containers:
+      - name: voiceai-livekit-agent-server
+        image: acrsharedsouthcentralusbiglysales.azurecr.io/biglysales-voiceai-livekit:latest  # Replace with your image
+        imagePullPolicy: Always
+        command:
+        - python3
+        - /app/biglysales_voiceai_livekit/agents/sip_outbound.py
+        - start
+        - --log-level
+        - $(LIVEKIT_AGENT_LOG_LEVEL)
+        # agent put node free port into a `healthport` file, and we use this file to check if the agent is running
+        startupProbe:
+          exec:
+            command:
+            - /bin/healthcheck.py
+          initialDelaySeconds: 15
+          periodSeconds: 3
+          timeoutSeconds: 1
+          failureThreshold: 20
+        livenessProbe:
+          exec:
+            command:
+            - /bin/healthcheck.py
+          initialDelaySeconds: 4
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sleep
+              - "5"
+        volumeMounts:
+        - name: signal-vol
+          mountPath: /mnt/signal
+        resources:
+          requests:
+            cpu: 300m
+            memory: "4Gi"
+            ephemeral-storage: "200Mi"
+          limits:
+            memory: "4Gi"
+            ephemeral-storage: "200Mi"
+        env:
+        # we redefine this value on agent start from K8S_CPU_REQUEST.
+        - name: NUM_CPUS
+          valueFrom:
+            resourceFieldRef:
+              divisor: 1
+              resource: requests.cpu
+        - name: K8S_CPU_REQUEST
+          valueFrom:
+            resourceFieldRef:
+              divisor: 1m
+              resource: requests.cpu
+        - name: K8S_MEM_REQUEST
+          valueFrom:
+            resourceFieldRef:
+              divisor: 1Mi
+              resource: requests.memory
+        - name: LIVEKIT_AGENT_NAME
+          value: "express"
+        - name: OTEL_SERVICE_NAME
+          value: "voiceai-livekit-express-caller-canary-lk-kam"
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: K8S_POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: K8S_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://$(K8S_NODE_IP):4317"
+        - name: STATSD_HOST
+          value: "prometheus-statsd-exporter.monitoring.svc.cluster.local"
+        - name: STATSD_PORT
+          value: "8125"
+        - name: MAX_AGENTS
+          value: "7"
+        - name: AG__NUM_IDLE_PROCESSES
+          value: "7"
+        - name: AG__EGRESS__TRACK_EGRESS_ENABLED
+          value: "True"
+        - name: VALKEY_INTERNAL_URL
+          value: "redis://valkey-internal-canary-lk-kam:6379/0"
+        envFrom:
+        - secretRef:
+            name: voiceai-livekit-env
+        - secretRef:
+            name: voiceai-livekit-canary-lk-kam-env  # You'll need to create this from your .env files
+      volumes:
+      - name: signal-vol
+        emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: voiceai-livekit-agent-server-express-caller-pdb-canary-lk-kam
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: voiceai-livekit-agent-server-express-caller-canary-lk-kam
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-agent-server-express-caller-canary-lk-kam
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-agent-server-express-caller-canary-lk-kam
+  minReplicaCount: 1
+  maxReplicaCount: 4
+  triggers:
+    # Capacity-aware scaling (primary driver)
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+        query: max(lk1_queue_desired_capacity{agent_server_type="EXPRESS", release_channel="canary-livekit-kam"})
+        threshold: "7"           # slots per pod (= MAX_AGENTS env var)
+    # CPU fallback - only fires on runaway load
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "99"
+  cooldownPeriod: 600
+  advanced:
+    # scalingModifiers:
+    #   activationTarget: 40
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 600
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 15
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-cm-express-caller-canary-lk-kam
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: voiceai-livekit-cm-express-caller-canary-lk-kam
+  template:
+    metadata:
+      labels:
+        app: voiceai-livekit-cm-express-caller-canary-lk-kam
+        preoomkiller.beta.k8s.skillcoder.com/enabled: "true"
+      annotations:
+        # add 10% over the requests
+        preoomkiller.beta.k8s.skillcoder.com/memory-threshold: "220Mi"
+    spec:
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+      containers:
+      - name: voiceai-livekit-cm-express-caller
+        image: acrsharedsouthcentralusbiglysales.azurecr.io/biglysales-voiceai-livekit:latest  # Replace with your image
+        imagePullPolicy: Always
+        command:
+        - python3
+        - /app/biglysales_voiceai_livekit/capacity_manager/main.py
+        - --agent-server-type
+        - "EXPRESS"
+        ports:
+        - name: metrics
+          containerPort: 9464
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 30m
+            memory: "200Mi"
+            ephemeral-storage: "500Mi"
+          limits:
+            cpu: 1050m
+            memory: "250Mi"
+            ephemeral-storage: "500Mi"
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: "voiceai-livekit-cm-express-caller-canary-lk-kam"
+        - name: K8S_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://$(K8S_NODE_IP):4317"
+        - name: CM__INITIAL_AGENT_SERVER_CAPACITY
+          value: "7"
+        - name: CM__MAX_AGENT_SERVER_CAPACITY
+          value: "7"
+        - name: CM__CAPACITY_INCREMENT_PER_MINUTE
+          value: "5"
+        - name: CM__DISPATCH_INTERVAL_SECONDS
+          value: "1"
+        - name: CM__METRICS_PORT
+          value: "9464"
+        - name: VALKEY_INTERNAL_URL
+          value: "redis://valkey-internal-canary-lk-kam:6379/0"
+        - name: MAX_AGENTS
+          value: "7"
+        - name: AG__NUM_IDLE_PROCESSES
+          value: "7"
+        - name: AG__EGRESS__TRACK_EGRESS_ENABLED
+          value: "True"
+        envFrom:
+        - secretRef:
+            name: voiceai-livekit-env
+        - secretRef:
+            name: voiceai-livekit-canary-lk-kam-env  # You'll need to create this from your .env files
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-cm-express-caller-canary-lk-kam
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-cm-express-caller-canary-lk-kam
+  minReplicaCount: 1
+  maxReplicaCount: 1
+  triggers:
+    # CPU placeholder trigger (required by KEDA; min=max=1, no actual scaling)
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "99"
+  cooldownPeriod: 300
+  advanced:
+    # scalingModifiers:
+    #   activationTarget: 40
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 60
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+---
+# Scrape lk1_queue_desired_capacity from the CM pod into kube-prometheus-stack
+# so KEDA can use it without querying an external data source.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: voiceai-livekit-cm-express-caller-canary-lk-kam
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: voiceai-livekit-cm-express-caller-canary-lk-kam
+  namespaceSelector:
+    matchNames:
+    - voiceai
+  podMetricsEndpoints:
+  - port: metrics
+    path: /metrics
+    interval: 15s

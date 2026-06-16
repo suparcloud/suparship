@@ -7,6 +7,8 @@ import (
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
@@ -144,5 +146,40 @@ func TestSetPlatformOverlays_NilTemplateNoOp(t *testing.T) {
 	setPlatformOverlays(&pub, nil, nil, "prod")
 	if pub.PlatformDefaultValues != nil || pub.PlatformEnvValues != nil {
 		t.Fatalf("nil template should be a no-op, got %+v / %+v", pub.PlatformDefaultValues, pub.PlatformEnvValues)
+	}
+}
+
+// TestEnrichPubEnv_AlwaysEnsuresBaselineAppSecret: an app with zero secrets
+// still gets the app-scope item ensured and GlobalApp presence forced, so the
+// publisher emits a <app>-secrets ExternalSecret (→ a K8s Secret) the chart's
+// envFrom can resolve.
+func TestEnrichPubEnv_AlwaysEnsuresBaselineAppSecret(t *testing.T) {
+	vault := secrets.NewMemVaultStore()
+	a := &gitOpsPublisherAdapter{vault: vault}
+	app := &domain.App{Name: "api", ProjectName: "proj"}
+
+	var pub gitops.AppPublishEnv
+	a.enrichPubEnvWithSecrets(context.Background(), &rbac.Org{}, app, "staging", &pub)
+
+	if !pub.ScopeKeys.GlobalApp {
+		t.Fatal("expected GlobalApp presence forced true for an app with no secrets")
+	}
+	es := gitops.BuildAppExternalSecret(gitops.WorkloadExternalSecretParams{
+		App: "api", Namespace: "ns", Env: "staging", Presence: pub.ScopeKeys, UnifiedStore: true,
+	})
+	if es == nil {
+		t.Fatal("expected a non-nil ExternalSecret for an app with no secrets")
+	}
+}
+
+// TestEnrichPubEnv_NoVaultNoForce: with no vault configured there is no backend
+// to extract from, so presence is left untouched (no dangling ExternalSecret ref).
+func TestEnrichPubEnv_NoVaultNoForce(t *testing.T) {
+	a := &gitOpsPublisherAdapter{} // vault nil
+	app := &domain.App{Name: "api", ProjectName: "proj"}
+	var pub gitops.AppPublishEnv
+	a.enrichPubEnvWithSecrets(context.Background(), &rbac.Org{}, app, "staging", &pub)
+	if pub.ScopeKeys.GlobalApp {
+		t.Fatal("without a vault, GlobalApp must not be forced")
 	}
 }

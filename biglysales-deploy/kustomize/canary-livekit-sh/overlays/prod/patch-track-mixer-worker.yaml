@@ -1,0 +1,29 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-worker-track-mixer-canary-lk-sh
+spec:
+  template:
+    spec:
+      containers:
+      - name: track-mixer
+        resources:
+          requests:
+            cpu: "1050m"
+            memory: "2050Mi"
+            ephemeral-storage: "2050Mi"
+          limits:
+            cpu: "1050m"
+            memory: "2050Mi"
+            ephemeral-storage: "2050Mi"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-worker-track-mixer-canary-lk-sh
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-worker-track-mixer-canary-lk-sh
+  minReplicaCount: 1
+  maxReplicaCount: 1

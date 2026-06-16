@@ -1,0 +1,16 @@
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: voiceai-livekit-canary-lk-sh-env
+spec:
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: onepassword-connect-voiceai
+  target:
+    name: voiceai-livekit-canary-lk-sh-env  # name of the k8s Secret to be created
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: voiceai-livekit-canary-livekit-sh-env

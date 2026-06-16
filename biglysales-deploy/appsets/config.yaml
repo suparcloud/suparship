@@ -1,0 +1,69 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: voiceai-livekit-config
+  namespace: argocd
+spec:
+  generators:
+    - clusters:
+       values:
+         branch: main
+         env_path: prod
+       selector:
+         matchLabels:
+           enabled: "true"
+           env: prod
+    - clusters:
+        values:
+          branch: staging
+          env_path: staging
+        selector:
+          matchLabels:
+            enabled: "true"
+            env: staging
+          matchExpressions:
+            - key: platform
+              operator: NotIn
+              values: [eks]
+    - clusters:
+        values:
+          branch: staging
+          env_path: staging-eks
+        selector:
+          matchLabels:
+            enabled: "true"
+            env: staging
+            platform: eks
+  template:
+    metadata:
+      name: 'voiceai-livekit-config-{{name}}'
+      annotations:
+        argocd.argoproj.io/sync-wave: "-1"
+    spec:
+      project: "{{metadata.labels.env}}-voiceai"
+      source:
+        repoURL: git@github.com:Bigly-Sales/biglysales-voiceai-livekit.git
+        path: deploy/kustomize/config/overlays/{{values.env_path}}
+        targetRevision: '{{values.branch}}'
+      destination:
+        server: '{{server}}'
+        namespace: voiceai
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - Replace=false
+          - PrunePropagationPolicy=foreground
+          - PruneLast=true
+          - ServerSideApply=true
+          - SkipDryRunOnMissingResource=true
+          - RespectIgnoreDifferences=true
+          - ApplyOutOfSyncOnly=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m

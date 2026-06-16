@@ -1,0 +1,70 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-agent-server-express-caller-canary-lk-kam
+spec:
+  template:
+    spec:
+      containers:
+      - name: voiceai-livekit-agent-server
+        resources:
+          requests:
+            # we use express agent only for low volume calls,
+            # so we could save resource by requesting less cpu and scale if needed
+            cpu: 400m
+            # canary use value coefficient 0.9, max/0.9 (1560/0.9=1740 after apply round)
+            # add 500Mi to avoid future OOMs
+            memory: "8050Mi"
+            # retry-caller had eviction on 200Mi disk limit
+            ephemeral-storage: "400Mi"
+          limits:
+            # same as requests to garanteed memory and avoid node level OOM
+            memory: "8050Mi"
+            ephemeral-storage: "400Mi"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-agent-server-express-caller-canary-lk-kam
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-agent-server-express-caller-canary-lk-kam
+  minReplicaCount: 1
+  maxReplicaCount: 30
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-cm-express-caller-canary-lk-kam
+spec:
+  template:
+    metadata:
+      annotations:
+        # 10% over request; 78% of limit so alert at 80% does not fire
+        preoomkiller.beta.k8s.skillcoder.com/memory-threshold: "550Mi"
+        preoomkiller.beta.k8s.skillcoder.com/tz: "America/New_York"
+        preoomkiller.beta.k8s.skillcoder.com/restart-schedule: "39 7 * * *"
+    spec:
+      containers:
+      - name: voiceai-livekit-cm-express-caller
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "500Mi"
+            ephemeral-storage: "500Mi"
+          limits:
+            cpu: 1050m
+            # threshold = 78% of this (550Mi); alert at 80% — avoid noise
+            memory: "705Mi"
+            ephemeral-storage: "500Mi"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-cm-express-caller-canary-lk-kam
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-cm-express-caller-canary-lk-kam
+  minReplicaCount: 1
+  maxReplicaCount: 1

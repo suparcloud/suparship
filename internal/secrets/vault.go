@@ -59,6 +59,11 @@ type VaultStore interface {
 	// (scope, tier, app). Existing keys not present in data are preserved.
 	Upsert(ctx context.Context, scope Scope, tier Tier, app string, data map[string][]byte) error
 
+	// EnsureItem creates an empty item for (scope, tier, app) when it does not
+	// yet exist, so an ExternalSecret can reference it before any keys are set.
+	// No-op when the item already exists — existing keys are left untouched.
+	EnsureItem(ctx context.Context, scope Scope, tier Tier, app string) error
+
 	// ListKeys returns the key names stored in the (scope, tier, app) item.
 	// Returns an empty slice (not an error) when the item does not exist.
 	ListKeys(ctx context.Context, scope Scope, tier Tier, app string) ([]SecretEntry, error)

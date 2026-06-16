@@ -1,0 +1,13 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-web-scaler-canary-lk-sh
+spec:
+  triggers:
+    # Business hours - to avoid random 502 double the min desired replicas
+    - type: cron
+      metadata:
+        timezone: America/New_York
+        start: 45 7 * * *
+        end: 0 22 * * *
+        desiredReplicas: "3"

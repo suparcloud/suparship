@@ -39,6 +39,16 @@ func (m *MemVaultStore) Upsert(_ context.Context, scope Scope, tier Tier, app st
 	return nil
 }
 
+func (m *MemVaultStore) EnsureItem(_ context.Context, scope Scope, tier Tier, app string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := memItemKey(scope, tier, app)
+	if m.items[key] == nil {
+		m.items[key] = make(map[string][]byte)
+	}
+	return nil
+}
+
 func (m *MemVaultStore) ListKeys(_ context.Context, scope Scope, tier Tier, app string) ([]SecretEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

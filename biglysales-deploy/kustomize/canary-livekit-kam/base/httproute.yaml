@@ -1,0 +1,27 @@
+# HTTPRoute for LiveKit canary via Envoy Gateway (envoy external).
+# Replaces the canary Ingress; Gateway lives in kubernetes-platform.
+# Staging hostname in base; prod overlay patches to voiceai-livekit-canary-lk-kam.azure.biglysales.com
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: voiceai-livekit-canary-lk-kam-httproute
+spec:
+  parentRefs:
+    - name: envoy-external
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    # Staging; prod overlay patches to voiceai-livekit-canary-lk-kam.azure.biglysales.com
+    - voiceai-livekit-canary-lk-kam.azure.biglysalesstaging.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: voiceai-livekit-web-service-canary-lk-kam
+          port: 8765
+          weight: 100
+      timeouts:
+        request: 60s
+        backendRequest: 60s

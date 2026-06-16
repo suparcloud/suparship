@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: valkey-internal
+  labels:
+    app: valkey-internal
+spec:
+  serviceName: valkey-internal
+  replicas: 1
+  selector:
+    matchLabels:
+      app: valkey-internal
+  updateStrategy:
+    type: RollingUpdate
+  podManagementPolicy: OrderedReady
+  template:
+    metadata:
+      labels:
+        app: valkey-internal
+      annotations:
+        # Prevent cluster autoscaler from evicting this pod when scaling down nodes
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      terminationGracePeriodSeconds: 60
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: workload-type
+                operator: In
+                values:
+                - db
+      tolerations:
+      - key: workload-type
+        operator: Equal
+        value: db
+        effect: NoSchedule
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+      containers:
+      - name: valkey
+        image: acrsharedsouthcentralusbiglysales.azurecr.io/valkey:9.0.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+        args:
+        - --appendonly
+        - "yes"
+        - --appendfsync
+        - everysec
+        ports:
+        - containerPort: 6379
+          name: valkey
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "200Mi"
+            ephemeral-storage: "200Mi"
+          limits:
+            cpu: "500m"
+            memory: "300Mi"
+            ephemeral-storage: "300Mi"
+        startupProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 1
+          periodSeconds: 2
+          failureThreshold: 15
+        readinessProbe:
+          exec:
+            command:
+            - valkey-cli
+            - ping
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          failureThreshold: 2
+        livenessProbe:
+          exec:
+            command:
+            - valkey-cli
+            - ping
+          initialDelaySeconds: 3
+          periodSeconds: 10
+          failureThreshold: 3
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi

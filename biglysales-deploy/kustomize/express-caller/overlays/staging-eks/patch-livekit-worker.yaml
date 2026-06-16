@@ -1,0 +1,15 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-cm-express-caller
+spec:
+  template:
+    spec:
+      containers:
+      - name: voiceai-livekit-cm
+        envFrom:
+        - secretRef:
+            name: voiceai-livekit-env 
+        - secretRef:
+            name: voiceai-livekit-self-hosted-env

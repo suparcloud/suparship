@@ -1,0 +1,161 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-worker-track-mixer-canary-lk-sh
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 5
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: voiceai-livekit-worker-track-mixer-canary-lk-sh
+  template:
+    metadata:
+      labels:
+        app: voiceai-livekit-worker-track-mixer-canary-lk-sh
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: workload-type
+                operator: In
+                values:
+                  - general
+                  - livekit
+      tolerations:
+      - key: "workload-type"
+        operator: Equal
+        value: livekit
+        effect: NoSchedule
+      terminationGracePeriodSeconds: 90
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+      containers:
+      - name: track-mixer
+        image: acrsharedsouthcentralusbiglysales.azurecr.io/biglysales-voiceai-livekit:latest  # Replace with your image
+        imagePullPolicy: Always
+        command:
+        - python3
+        - /app/biglysales_voiceai_livekit/track_mixer/main.py
+        # startupProbe:
+        #   httpGet:
+        #     path: /health
+        #     port: 9000
+        #   initialDelaySeconds: 3
+        #   periodSeconds: 3
+        #   timeoutSeconds: 1
+        #   failureThreshold: 20
+        # livenessProbe:
+        #   httpGet:
+        #     path: /health
+        #     port: 9000
+        #   initialDelaySeconds: 3
+        #   periodSeconds: 10
+        #   timeoutSeconds: 3
+        #   failureThreshold: 3
+        resources:
+          requests:
+            cpu: "1050m"
+            memory: "2050Mi"
+            ephemeral-storage: "2050Mi"
+          limits:
+            cpu: "1050m"
+            memory: "2050Mi"
+            ephemeral-storage: "2050Mi"
+        env:
+        - name: K8S_CPU_REQUEST
+          valueFrom:
+            resourceFieldRef:
+              divisor: 1m
+              resource: requests.cpu
+        - name: K8S_MEM_REQUEST
+          valueFrom:
+            resourceFieldRef:
+              divisor: 1Mi
+              resource: requests.memory
+        - name: OTEL_SERVICE_NAME
+          value: "voiceai-livekit-worker-track-mixer-canary-lk-sh"
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: K8S_POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: K8S_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://$(K8S_NODE_IP):4317"
+        - name: STATSD_HOST
+          value: "prometheus-statsd-exporter.monitoring.svc.cluster.local"
+        - name: STATSD_PORT
+          value: "8125"
+        envFrom:
+        - secretRef:
+            name: voiceai-livekit-env
+        - secretRef:
+            name: voiceai-livekit-canary-lk-sh-env
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: voiceai-livekit-worker-track-mixer-canary-lk-sh
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: voiceai-livekit-worker-track-mixer-canary-lk-sh
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-worker-track-mixer-canary-lk-sh
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-worker-track-mixer-canary-lk-sh
+  minReplicaCount: 1
+  maxReplicaCount: 1
+  triggers:
+    - type: cpu
+      metricType: Utilization # Allowed types are 'Utilization' or 'AverageValue'
+      metadata:
+        value: "50"
+    # - type: prometheus
+    #   metadata:
+    #     serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+    #     threshold: "15.0"
+    #     # FIXME: need to fix this query
+    #     query: rabbitmq_detailed_queue_messages_ready{queue="canary-livekit-sh:track_mixer"}
+  cooldownPeriod: 600
+  advanced:
+    # scalingModifiers:
+    #   activationTarget: 40
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 30
+        scaleUp:
+          policies:
+          - type: Pods
+            value: 2
+            periodSeconds: 30

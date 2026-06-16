@@ -1,0 +1,62 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: voiceai-livekit-valkey-internal
+  namespace: argocd
+spec:
+  generators:
+    - clusters:
+        values:
+          branch: main
+        selector:
+          matchLabels:
+            enabled: "true"
+            env: prod
+    - clusters:
+        values:
+          branch: staging
+        selector:
+          matchLabels:
+            enabled: "true"
+            env: staging
+  template:
+    metadata:
+      name: 'voiceai-livekit-valkey-internal-{{name}}'
+      annotations:
+        argocd.argoproj.io/sync-wave: "0"
+    spec:
+      project: "{{metadata.labels.env}}-voiceai"
+      source:
+        repoURL: git@github.com:Bigly-Sales/biglysales-voiceai-livekit.git
+        path: deploy/kustomize/valkey-internal/overlays/{{metadata.labels.env}}
+        targetRevision: '{{values.branch}}'
+      destination:
+        server: '{{server}}'
+        namespace: voiceai
+      ignoreDifferences:
+        - group: apps
+          kind: StatefulSet
+          jsonPointers:
+            - /metadata/annotations/deployment.kubernetes.io~1revision
+            - /spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - Replace=false
+          - PrunePropagationPolicy=foreground
+          - PruneLast=true
+          - ServerSideApply=true
+          - SkipDryRunOnMissingResource=true
+          - RespectIgnoreDifferences=true
+          - ApplyOutOfSyncOnly=true
+          - Validate=true
+          - CreateOnly=false
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m

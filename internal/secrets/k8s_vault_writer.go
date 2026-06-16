@@ -90,6 +90,33 @@ func (w *K8sVaultStore) Upsert(ctx context.Context, scope Scope, tier Tier, app 
 	return nil
 }
 
+func (w *K8sVaultStore) EnsureItem(ctx context.Context, scope Scope, tier Tier, app string) error {
+	ns := VaultName(scope)
+	name := ItemName(scope, tier, app)
+	_, err := w.client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		return nil // already exists — leave its data untouched
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("reading secret %s/%s: %w", ns, name, err)
+	}
+	if err := w.ensureNamespace(ctx, ns); err != nil {
+		return err
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+			Labels:    map[string]string{labelManagedBy: "suparship", labelType: "vault-item"},
+		},
+		Type: corev1.SecretTypeOpaque,
+	}
+	if _, err := w.client.CoreV1().Secrets(ns).Create(ctx, secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating empty secret %s/%s: %w", ns, name, err)
+	}
+	return nil
+}
+
 func (w *K8sVaultStore) ListKeys(ctx context.Context, scope Scope, tier Tier, app string) ([]SecretEntry, error) {
 	ns := VaultName(scope)
 	name := ItemName(scope, tier, app)
