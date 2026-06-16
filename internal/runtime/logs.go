@@ -50,22 +50,32 @@ func NewK8sLogsProvider(client kubernetes.Interface) *K8sLogsProvider {
 
 const maxLogBytes = 1 << 20 // 1 MiB safety limit for non-streaming reads
 
-// ListPods returns pods in a namespace matching the service name by label.
+// ListPods returns pods in a namespace belonging to an app (serviceName is the
+// app name). It tries selectors in priority order and uses the first that
+// matches:
+//
+//  1. app.kubernetes.io/instance=<app> — the Helm release name suparship sets
+//     (ReleaseName: app.Name), stamped by every standard chart. This is the
+//     reliable handle: it works for BYO charts whose pods carry the chart name
+//     in app.kubernetes.io/name (not the app name).
+//  2. app.kubernetes.io/name=<app> — charts that name themselves after the app.
+//  3. app=<app> — legacy bare label.
 func (p *K8sLogsProvider) ListPods(ctx context.Context, namespace, serviceName string) ([]PodInfo, error) {
-	pods, err := p.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=" + serviceName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing pods in %s: %w", namespace, err)
-	}
-
-	if len(pods.Items) == 0 {
-		pods, err = p.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: "app=" + serviceName,
-		})
+	var pods *corev1.PodList
+	for _, selector := range []string{
+		instanceLabel + "=" + serviceName,
+		"app.kubernetes.io/name=" + serviceName,
+		"app=" + serviceName,
+	} {
+		list, err := p.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 		if err != nil {
 			return nil, fmt.Errorf("listing pods in %s: %w", namespace, err)
 		}
+		if len(list.Items) > 0 {
+			pods = list
+			break
+		}
+		pods = list // keep the last (empty) result so the no-match path returns []
 	}
 
 	result := make([]PodInfo, 0, len(pods.Items))
