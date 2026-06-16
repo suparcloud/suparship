@@ -616,9 +616,16 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
 	}
 
-	writeJSON(w, http.StatusOK, AppDetailResponse{
-		App: appToDetailDTO(app, envs),
-	})
+	detail := appToDetailDTO(app, envs)
+	// BYO/passthrough apps don't use the canonical component model — the chart
+	// owns its workloads — so the declared "components" topology is meaningless
+	// (older apps were created with a phantom "web" entry before this was
+	// fixed). Suppress it so the UI's Runtime-components panel disappears.
+	if t, ok := ah.lookupTemplate(r.Context(), app.Spec.Template.Name); ok && !t.Spec.CanonicalValues() {
+		detail.Components = []ComponentSummaryDTO{} // empty (not nil) → JSON [], UI renders nothing
+	}
+
+	writeJSON(w, http.StatusOK, AppDetailResponse{App: detail})
 }
 
 // handleListAppEnvironments handles GET /api/v1/projects/{project}/apps/{app}/environments.
@@ -1515,9 +1522,23 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 
 	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, env.EnvName)
 
+	// instance is the ArgoCD Application name / Helm release name ArgoCD stamps
+	// as the app.kubernetes.io/instance label on every workload — the handle the
+	// label-based discovery selects on so BYO charts (whose Deployments aren't
+	// named after the app) report real status. Matches gitops.ApplicationName.
+	instance := env.ProjectName + "-" + appName + "-" + env.EnvName
+
 	// No remote routing (single-cluster / fake mode): query the local provider.
 	if !routed {
 		if ah.runtimeProvider == nil {
+			return
+		}
+		// Prefer label-based app-native discovery when the provider is a real
+		// K8s provider; fakes/tests only implement the name-based interface.
+		if kp, ok := ah.runtimeProvider.(*runtime.K8sProvider); ok {
+			if info, err := kp.GetAppRuntime(ctx, env.Namespace, instance, appName); err == nil {
+				ah.applyRuntimeInfo(env, info)
+			}
 			return
 		}
 		if info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName); err == nil {
@@ -1543,7 +1564,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	agg := &runtime.RuntimeInfo{Status: runtime.StatusHealthy}
 	got := false
 	for _, nc := range clients {
-		info, err := runtime.NewK8sProvider(nc.client).GetServiceRuntime(ctx, env.Namespace, appName)
+		info, err := runtime.NewK8sProvider(nc.client).GetAppRuntime(ctx, env.Namespace, instance, appName)
 		if err != nil {
 			continue
 		}

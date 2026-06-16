@@ -55,6 +55,12 @@ func DefaultComponentsFromTemplate(tmpl *tpl.Template) []domain.ComponentSpec {
 // The returned slice is sorted by component name for deterministic output.
 func ComponentsFromTemplate(tmpl *tpl.Template, toggles map[string]bool) []domain.ComponentSpec {
 	if len(tmpl.Spec.Components) == 0 {
+		// BYO/passthrough templates opt out of the canonical schema entirely; the
+		// chart defines its own workloads, so synthesizing a phantom "web"
+		// component (which maps to nothing the chart renders) would be misleading.
+		if !tmpl.Spec.CanonicalValues() {
+			return nil
+		}
 		// Legacy path: no explicit component declarations — derive from category.
 		return DefaultComponentsFromTemplate(tmpl)
 	}
