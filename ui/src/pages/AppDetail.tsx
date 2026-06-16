@@ -103,6 +103,13 @@ const statusStyles: Record<string, StatusStyle> = {
     bg: "bg-gray-100 text-gray-500",
     label: "Not deployed",
   },
+  // Deployed but scaled to zero (e.g. KEDA idle off-hours) — distinct from
+  // "not deployed": the workload exists, nothing is running right now.
+  idle: {
+    dot: "bg-indigo-400",
+    bg: "bg-indigo-50 text-indigo-700",
+    label: "Idle",
+  },
 };
 
 function StatusBadge({
@@ -133,13 +140,17 @@ function overallPhase(envs: AppEnvironmentSummary[]): string {
   const active = envs.filter((e) => e.envType !== "preview");
   if (active.length === 0) return "not_deployed";
   const phases = active.map((e) => e.status.phase);
-  if (phases.every((p) => p === "healthy")) return "healthy";
+  // "up" = running or intentionally idle (scaled to zero); neither is a problem.
+  const up = (p: string) => p === "healthy" || p === "idle";
+  if (phases.every(up)) {
+    return phases.every((p) => p === "idle") ? "idle" : "healthy";
+  }
   if (phases.some((p) => p === "degraded")) return "degraded";
   if (phases.some((p) => p === "progressing")) return "progressing";
   if (phases.every((p) => p === "not_deployed")) return "not_deployed";
-  // Mixed case: some envs healthy, rest not yet deployed (e.g. staging up,
-  // prod not promoted yet). This is expected — not a degraded state.
-  if (phases.some((p) => p === "healthy")) return "healthy";
+  // Mixed case: some envs up, rest not yet deployed (e.g. staging up, prod not
+  // promoted yet). This is expected — not a degraded state.
+  if (phases.some(up)) return "healthy";
   return "degraded";
 }
 

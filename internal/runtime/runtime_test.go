@@ -358,3 +358,41 @@ func TestGetAppRuntime_FallsBackToNameWhenNoLabels(t *testing.T) {
 		t.Errorf("fallback lookup failed: status=%s replicas=%d", info.Status, info.Replicas)
 	}
 }
+
+// A multi-workload app where one Deployment is scaled to zero (KEDA idle) must
+// not be dragged to not_deployed: the running workload's health wins.
+func TestGetAppRuntime_ScaleToZeroIsIdleNotNotDeployed(t *testing.T) {
+	const ns, instance = "proj-voice-staging", "proj-voice-staging"
+	agent := deployWithInstance("voice-server", ns, instance, "img/agent:1", 0, 0) // KEDA idle
+	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 1, 1)            // healthy
+	client := fake.NewSimpleClientset(agent, cm)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), ns, instance, "voice")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusHealthy {
+		t.Errorf("status = %s, want healthy (idle agent must not drag it down)", info.Status)
+	}
+	if info.Replicas != 1 || info.Available != 1 {
+		t.Errorf("replicas = %d/%d, want 1/1", info.Available, info.Replicas)
+	}
+}
+
+// When every workload is scaled to zero the app reports idle, not not_deployed.
+func TestGetAppRuntime_AllScaledToZeroIsIdle(t *testing.T) {
+	const ns, instance = "proj-voice-staging", "proj-voice-staging"
+	agent := deployWithInstance("voice-server", ns, instance, "img/agent:1", 0, 0)
+	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 0, 0)
+	client := fake.NewSimpleClientset(agent, cm)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), ns, instance, "voice")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusIdle {
+		t.Errorf("status = %s, want idle", info.Status)
+	}
+}
