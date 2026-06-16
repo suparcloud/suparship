@@ -9,6 +9,19 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "namespaces", "services", "pods", "pods/log"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # services/proxy is a distinct RBAC resource from services: the credstore
+  # fetches the sealed-secrets controller cert via the API-server Service
+  # proxy (/api/v1/namespaces/<ns>/services/<svc>:<port>/proxy/v1/cert.pem),
+  # the same path kubeseal --fetch-cert uses.
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    verbs: ["get", "create"]
+  # SealedSecrets: UI-submitted external-template-repo credentials are sealed
+  # and applied as bitnami sealed-secrets CRs in suparship-system (never as
+  # plaintext Secrets); the controller decrypts them into the read Secret.
+  - apiGroups: ["bitnami.com"]
+    resources: ["sealedsecrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments", "replicasets"]
     verbs: ["get", "list", "watch"]
