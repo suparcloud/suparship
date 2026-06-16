@@ -301,6 +301,40 @@ func TestHandleAppValuesPreview_IncludesCanonicalBase(t *testing.T) {
 	}
 }
 
+func TestHandleAppValuesPreview_PassthroughOmitsCanonicalBase(t *testing.T) {
+	// A BYO/passthrough template (injectCanonicalValues:false) → the preview must
+	// NOT include the canonical app/platform/suparship block, only chart + overlays.
+	store := newMemAppStore()
+	store.addApp(&domain.App{
+		Name:        "byo",
+		ProjectName: "demo",
+		Spec:        domain.AppSpec{Template: domain.AppTemplateRef{Name: "voiceai-agent"}},
+	})
+	passthrough := false
+	tmpl := valuesTemplate()
+	tmpl.Metadata.Name = "voiceai-agent"
+	tmpl.Spec.InjectCanonicalValues = &passthrough
+	ah := newAppHandler(store, []*tpl.Template{tmpl}, nil, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/projects/demo/apps/byo/envs/prod/values/preview", nil)
+	req.SetPathValue("project", "demo")
+	req.SetPathValue("app", "byo")
+	req.SetPathValue("env", "prod")
+	rec := httptest.NewRecorder()
+	ah.handleAppValuesPreview(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp EffectiveValuesDTO
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	for _, k := range []string{"app", "platform", "suparship", "routing"} {
+		if _, present := resp.Values[k]; present {
+			t.Errorf("passthrough preview must omit canonical key %q: %v", k, resp.Values)
+		}
+	}
+}
+
 func TestHandleAppValuesPreview_UnknownApp404(t *testing.T) {
 	store := newMemAppStore()
 	store.apps["demo"] = map[string]*domain.App{}

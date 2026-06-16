@@ -218,9 +218,12 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 	chartVals, available := chartDefaults(r.Context(), ah.kubeClient, t)
 	ov := loadOverride(r.Context(), ah.kubeClient, app.Spec.Template.Name)
 	// Include the canonical platform↔chart base (app/components/suparship/routing)
-	// so the preview matches what Helm renders. App preview stays env-level; the
-	// per-cluster org overlay is previewed in the template editor.
-	canonicalBase := ah.canonicalBaseMap(r.Context(), app, envName)
+	// so the preview matches what Helm renders — but only for canonical templates.
+	// BYO/passthrough templates emit only their own values + overrides + tokens.
+	var canonicalBase map[string]any
+	if t == nil || t.Spec.CanonicalValues() {
+		canonicalBase = ah.canonicalBaseMap(r.Context(), app, envName)
+	}
 	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, canonicalBase, available, t, ov, envName, "", appRaw, envRaw))
 }
 

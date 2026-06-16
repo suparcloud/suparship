@@ -135,6 +135,19 @@ type TemplateSpec struct {
 	// name (e.g. "staging", "prod"), layered after DefaultValues — so an org can
 	// set a smaller staging baseline and a larger prod one.
 	EnvValues map[string]map[string]any `yaml:"envValues,omitempty"`
+	// InjectCanonicalValues controls whether the publisher injects the canonical
+	// suparship-common values base (app/platform/components/suparship/routing)
+	// into the published values.yaml. nil/true (default) = canonical, for charts
+	// built on suparship-common. Set false for BYO/passthrough charts that bring
+	// their own values structure: the platform then emits only the overlays +
+	// resolved {platform.*}/{vars.*} tokens, no injected schema.
+	InjectCanonicalValues *bool `yaml:"injectCanonicalValues,omitempty"`
+}
+
+// CanonicalValues reports whether the canonical suparship-common values base is
+// injected for this template. Defaults to true (back-compat) when unset.
+func (s TemplateSpec) CanonicalValues() bool {
+	return s.InjectCanonicalValues == nil || *s.InjectCanonicalValues
 }
 
 // TemplateAddon declares one addon shape this template's chart

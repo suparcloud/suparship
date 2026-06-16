@@ -893,3 +893,47 @@ func TestChartLocator_RoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestTemplateSpec_CanonicalValues(t *testing.T) {
+	tr, fa := true, false
+	cases := []struct {
+		name string
+		flag *bool
+		want bool
+	}{
+		{"unset defaults true", nil, true},
+		{"explicit true", &tr, true},
+		{"explicit false", &fa, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := TemplateSpec{InjectCanonicalValues: tc.flag}
+			if got := s.CanonicalValues(); got != tc.want {
+				t.Errorf("CanonicalValues() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTemplateSpec_InjectCanonicalValues_Unmarshal(t *testing.T) {
+	y := `
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata:
+  name: byo
+  version: "1.0.0"
+spec:
+  title: BYO
+  category: web
+  engine:
+    type: helm
+  injectCanonicalValues: false
+`
+	tmpl, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if tmpl.Spec.CanonicalValues() {
+		t.Error("expected passthrough (CanonicalValues false) for injectCanonicalValues: false")
+	}
+}
