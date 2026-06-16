@@ -213,3 +213,53 @@ func TestToTemplate_GeneratedAlwaysValidates(t *testing.T) {
 		t.Errorf("expected sanitized name 'my-demo', got %q", tmpl.Metadata.Name)
 	}
 }
+
+// A chart can steer inferred metadata via suparship.io/* Chart.yaml annotations
+// without shipping a full template.yaml.
+func TestToTemplate_AnnotationsDriveMetadata(t *testing.T) {
+	data := buildTGZ(t, map[string]string{
+		"voiceai-livekit-agent/Chart.yaml": `apiVersion: v2
+name: voiceai-livekit-agent
+version: 0.1.0
+description: chart-level description
+annotations:
+  suparship.io/category: worker
+  suparship.io/title: VoiceAI LiveKit Agent
+  suparship.io/description: overridden description
+`,
+		"voiceai-livekit-agent/values.yaml": "replicas: 1\n",
+	})
+	arc, err := chartimport.ParseArchive(data)
+	if err != nil {
+		t.Fatalf("ParseArchive: %v", err)
+	}
+	tmpl, err := chartimport.ToTemplate(arc)
+	if err != nil {
+		t.Fatalf("ToTemplate: %v", err)
+	}
+	if tmpl.Spec.Category != "worker" {
+		t.Errorf("category = %q, want worker (from annotation)", tmpl.Spec.Category)
+	}
+	if tmpl.Spec.Title != "VoiceAI LiveKit Agent" {
+		t.Errorf("title = %q, want annotation title", tmpl.Spec.Title)
+	}
+	if tmpl.Spec.Description != "overridden description" {
+		t.Errorf("description = %q, want annotation description", tmpl.Spec.Description)
+	}
+}
+
+// Without annotations, category falls back to the inferred "web" default.
+func TestToTemplate_NoAnnotationsDefaultsWeb(t *testing.T) {
+	data := buildTGZ(t, map[string]string{
+		"plain/Chart.yaml":  "apiVersion: v2\nname: plain\nversion: 1.0.0\n",
+		"plain/values.yaml": "k: v\n",
+	})
+	arc, _ := chartimport.ParseArchive(data)
+	tmpl, err := chartimport.ToTemplate(arc)
+	if err != nil {
+		t.Fatalf("ToTemplate: %v", err)
+	}
+	if tmpl.Spec.Category != "web" {
+		t.Errorf("category = %q, want web (default)", tmpl.Spec.Category)
+	}
+}

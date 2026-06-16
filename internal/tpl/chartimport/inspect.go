@@ -65,7 +65,20 @@ type ChartMetadata struct {
 	Description string `yaml:"description"`
 	Type        string `yaml:"type"`
 	Icon        string `yaml:"icon"`
+	// Annotations is Chart.yaml's free-form annotations map. suparship reads
+	// suparship.io/* keys (see annotation* consts) so a chart author can steer
+	// the inferred template's metadata without hand-authoring a template.yaml.
+	Annotations map[string]string `yaml:"annotations"`
 }
+
+// Chart.yaml annotation keys suparship honours on the inferred-template path.
+// A bundled template.yaml is already the author's source of truth, so these are
+// ignored there.
+const (
+	annotationCategory    = "suparship.io/category"
+	annotationTitle       = "suparship.io/title"
+	annotationDescription = "suparship.io/description"
+)
 
 // ValuesSchema is a tiny, schema-draft-7 subset that handles the shapes we
 // see in real Helm charts. We intentionally do not implement full JSON Schema
@@ -260,6 +273,22 @@ func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 	if t := strings.TrimSpace(firstNonEmpty(arc.Chart.AppVersion, arc.Chart.Version)); t != "" {
 		title = arc.Chart.Name + " " + t
 	}
+	// "web" is the most common chart shape and matches the existing built-ins;
+	// a chart can override category/title/description via suparship.io/*
+	// Chart.yaml annotations (lighter than shipping a full template.yaml).
+	category := "web"
+	description := strings.TrimSpace(arc.Chart.Description)
+	if a := arc.Chart.Annotations; a != nil {
+		if v := strings.TrimSpace(a[annotationCategory]); v != "" {
+			category = v
+		}
+		if v := strings.TrimSpace(a[annotationTitle]); v != "" {
+			title = v
+		}
+		if v := strings.TrimSpace(a[annotationDescription]); v != "" {
+			description = v
+		}
+	}
 
 	t := &tpl.Template{
 		APIVersion: tpl.CurrentAPIVersion,
@@ -270,10 +299,8 @@ func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 		},
 		Spec: tpl.TemplateSpec{
 			Title:       title,
-			Description: strings.TrimSpace(arc.Chart.Description),
-			// Operators almost always want to override this; "web" is the
-			// most common chart shape and matches the existing built-ins.
-			Category: "web",
+			Description: description,
+			Category:    category,
 			Engine: tpl.Engine{
 				Type: tpl.EngineHelm,
 				// Inferred-template path: chart sits at ./chart relative

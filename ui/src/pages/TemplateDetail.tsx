@@ -485,8 +485,11 @@ function valuesModeLabel(t: TemplateDetailType): string {
 }
 
 // MetadataSection shows category/engine + values-mode and lets an org_admin edit
-// the metadata of an imported/BYO template in place (title, category, description,
-// passthrough). Synced/built-in templates are read-only with a provenance notice.
+// the metadata. Imported/BYO templates are edited IN PLACE (title, category,
+// description, passthrough). Synced/built-in templates have a read-only body, so
+// their title/category/description are saved as a sync-safe override (the source
+// isn't touched and a re-sync won't clobber it); the passthrough toggle is only
+// available for in-place edits.
 function MetadataSection({
   template,
   onUpdated,
@@ -495,7 +498,10 @@ function MetadataSection({
   onUpdated: (t: TemplateDetailType) => void;
 }) {
   const { user } = useAuth();
-  const canEdit = user?.role === "org_admin" && template.editable === true;
+  const isOrgAdmin = user?.role === "org_admin";
+  // inPlace edits rewrite the template body (imported/BYO). Otherwise the edit
+  // is persisted as a sync-safe metadata override (synced/built-in).
+  const inPlace = template.editable === true;
 
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -521,10 +527,14 @@ function MetadataSection({
         title,
         category,
         description,
-        injectCanonicalValues: !passthrough,
+        // The passthrough toggle only applies to in-place edits; the override
+        // path is display-metadata only and rejects injectCanonicalValues.
+        ...(inPlace ? { injectCanonicalValues: !passthrough } : {}),
       });
       onUpdated(updated);
-      toast.success("Template metadata updated");
+      toast.success(
+        inPlace ? "Template metadata updated" : "Metadata override saved",
+      );
       setEditing(false);
     } catch (err) {
       toast.error(
@@ -539,7 +549,9 @@ function MetadataSection({
     return (
       <div className="rounded-xl border border-gray-200 bg-white p-5">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-gray-900">Edit metadata</h2>
+          <h2 className="text-sm font-semibold text-gray-900">
+            {inPlace ? "Edit metadata" : "Override metadata"}
+          </h2>
           <div className="flex items-center gap-2">
             <button
               onClick={reset}
@@ -557,6 +569,13 @@ function MetadataSection({
             </button>
           </div>
         </div>
+        {!inPlace && (
+          <p className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            {template.source?.origin === "synced"
+              ? "This template is managed by its source repo. Your edits are saved as a local override — the source isn't changed, and a re-sync won't overwrite them. Leave a field blank to fall back to the source value."
+              : "This is a built-in template. Your edits are saved as a local override that won't be lost on upgrade. Leave a field blank to fall back to the built-in value."}
+          </p>
+        )}
         <div className="space-y-3">
           <label className="block">
             <span className="text-xs font-medium text-gray-600">Title</span>
@@ -584,21 +603,23 @@ function MetadataSection({
               className="mt-1 w-full max-w-2xl rounded-md border border-gray-300 px-3 py-1.5 text-sm"
             />
           </label>
-          <label className="flex items-start gap-2">
-            <input
-              type="checkbox"
-              checked={passthrough}
-              onChange={(e) => setPassthrough(e.target.checked)}
-              className="mt-0.5"
-            />
-            <span className="text-sm text-gray-700">
-              Passthrough — this chart brings its own values (no canonical schema
-              injected).{" "}
-              <span className="text-xs text-gray-400">
-                Turning this on clears the auto-generated chart parameters.
+          {inPlace && (
+            <label className="flex items-start gap-2">
+              <input
+                type="checkbox"
+                checked={passthrough}
+                onChange={(e) => setPassthrough(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span className="text-sm text-gray-700">
+                Passthrough — this chart brings its own values (no canonical
+                schema injected).{" "}
+                <span className="text-xs text-gray-400">
+                  Turning this on clears the auto-generated chart parameters.
+                </span>
               </span>
-            </span>
-          </label>
+            </label>
+          )}
         </div>
       </div>
     );
@@ -619,16 +640,14 @@ function MetadataSection({
               ? " · built-in"
               : ""}
         </span>
-        {canEdit ? (
+        {isOrgAdmin && (
           <button
             onClick={() => setEditing(true)}
             className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
           >
-            Edit metadata
+            {inPlace ? "Edit metadata" : "Override metadata"}
           </button>
-        ) : template.source?.origin === "synced" ? (
-          <span className="text-xs text-gray-400">Edit at the source repo</span>
-        ) : null}
+        )}
       </div>
     </div>
   );

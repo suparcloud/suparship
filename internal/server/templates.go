@@ -8,6 +8,7 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
@@ -389,14 +390,25 @@ func (th *templateHandler) resolve(ctx context.Context) ([]*tpl.Template, map[st
 
 func (th *templateHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	merged, _ := th.resolve(r.Context())
+	// Metadata overrides (sync-safe operator edits) win over the template's own
+	// title/category/description so the gallery groups/labels correctly even for
+	// read-only synced templates. One List call, best-effort.
+	var overrides map[string]*domain.TemplateOverride
+	if th.kubeClient != nil {
+		overrides, _ = kube.ListTemplateOverrides(r.Context(), th.kubeClient)
+	}
 	list := make([]TemplateSummaryDTO, len(merged))
 	for i, t := range merged {
+		title, category, description := t.Spec.Title, t.Spec.Category, t.Spec.Description
+		if ov := overrides[t.Metadata.Name]; ov != nil {
+			title, category, description = applyMetadataOverride(title, category, description, ov.Metadata)
+		}
 		list[i] = TemplateSummaryDTO{
 			Name:        t.Metadata.Name,
 			Version:     t.Metadata.Version,
-			Title:       t.Spec.Title,
-			Description: t.Spec.Description,
-			Category:    t.Spec.Category,
+			Title:       title,
+			Description: description,
+			Category:    category,
 			Engine:      t.Spec.Engine.Type,
 		}
 	}
@@ -412,10 +424,37 @@ func (th *templateHandler) handleDetail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	dto := templateToDetail(t)
+	// Apply the sync-safe metadata override (operator edits that win over the
+	// template's own title/category/description) so even read-only synced
+	// templates show the corrected metadata.
+	if th.kubeClient != nil {
+		if ov, err := kube.LoadTemplateOverride(r.Context(), th.kubeClient, name); err == nil && ov != nil {
+			dto.Title, dto.Category, dto.Description = applyMetadataOverride(dto.Title, dto.Category, dto.Description, ov.Metadata)
+		}
+	}
 	src, editable := th.templateProvenance(r.Context(), name)
 	dto.Source = src
 	dto.Editable = editable
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// applyMetadataOverride overlays a metadata override's non-empty fields onto the
+// given title/category/description, returning the effective values. A nil
+// override (or empty fields) leaves the inputs unchanged.
+func applyMetadataOverride(title, category, description string, m *domain.TemplateMetadataOverride) (string, string, string) {
+	if m == nil {
+		return title, category, description
+	}
+	if m.Title != "" {
+		title = m.Title
+	}
+	if m.Category != "" {
+		category = m.Category
+	}
+	if m.Description != "" {
+		description = m.Description
+	}
+	return title, category, description
 }
 
 // templateProvenance classifies a template's origin and whether its metadata is

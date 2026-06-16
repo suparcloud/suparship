@@ -56,6 +56,36 @@ func LoadTemplateOverride(ctx context.Context, client kubernetes.Interface, temp
 	return &ov, nil
 }
 
+// ListTemplateOverrides loads every template override in one List call, keyed by
+// template name. Used by display paths (the gallery) that need overrides for many
+// templates without an API round-trip per template. Parse failures for a single
+// override are skipped (logged by the caller if desired) so one bad CM doesn't
+// blank the whole gallery.
+func ListTemplateOverrides(ctx context.Context, client kubernetes.Interface) (map[string]*domain.TemplateOverride, error) {
+	list, err := client.CoreV1().ConfigMaps(systemNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "suparship.io/type=" + templateOverrideType,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list template overrides: %w", err)
+	}
+	out := make(map[string]*domain.TemplateOverride, len(list.Items))
+	for i := range list.Items {
+		cm := &list.Items[i]
+		name := cm.Labels["suparship.io/template-name"]
+		if name == "" {
+			continue
+		}
+		var ov domain.TemplateOverride
+		if raw := cm.Data[templateOverrideKey]; raw != "" {
+			if err := yaml.Unmarshal([]byte(raw), &ov); err != nil {
+				continue
+			}
+		}
+		out[name] = &ov
+	}
+	return out, nil
+}
+
 // SaveTemplateOverride upserts a template's org-level platform override. An empty
 // override is deleted rather than stored, so "clear all" leaves no stale CM.
 func SaveTemplateOverride(ctx context.Context, client kubernetes.Interface, templateName string, ov *domain.TemplateOverride) error {
