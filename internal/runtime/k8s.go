@@ -94,24 +94,39 @@ func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fa
 		return p.GetServiceRuntime(ctx, namespace, fallbackName)
 	}
 
-	// Start from healthy and take the worst phase across all workloads.
+	// Worst-of phase across the running workloads, ignoring any that are scaled
+	// to zero (KEDA idle / manually stopped). A Deployment we listed exists, so
+	// desired==0 means "deployed but idle", not "not deployed" — counting it in
+	// the worst-of would drag a partly-idle app to not_deployed. If EVERY
+	// workload is idle the app reports StatusIdle.
 	info := &RuntimeInfo{Status: StatusHealthy, IngressURLs: []string{}, Namespace: namespace}
+	worst := StatusHealthy
+	allIdle := true
 	for i := range deps.Items {
 		dep := &deps.Items[i]
 		var sub RuntimeInfo
 		applyDeployment(&sub, dep)
-		phase := DeploymentStatus(sub.Replicas, dep.Status.ReadyReplicas, sub.Available)
 		info.Replicas += sub.Replicas
 		info.Available += sub.Available
-		if statusRank[phase] >= statusRank[info.Status] {
-			info.Status = phase
-		}
 		if info.Image == "" {
 			info.Image = sub.Image
 		}
 		if sub.LastDeployed > info.LastDeployed {
 			info.LastDeployed = sub.LastDeployed
 		}
+		if sub.Replicas == 0 {
+			continue // scaled to zero — idle, doesn't affect health
+		}
+		allIdle = false
+		phase := DeploymentStatus(sub.Replicas, dep.Status.ReadyReplicas, sub.Available)
+		if statusRank[phase] >= statusRank[worst] {
+			worst = phase
+		}
+	}
+	if allIdle {
+		info.Status = StatusIdle
+	} else {
+		info.Status = worst
 	}
 
 	ingList, err := p.client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
