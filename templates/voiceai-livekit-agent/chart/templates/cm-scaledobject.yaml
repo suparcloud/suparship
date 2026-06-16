@@ -1,0 +1,45 @@
+{{- if .Values.capacityManager.enabled }}
+{{- $bh := .Values.capacityManager.scaling.businessHours }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "voiceai-livekit-agent.cm.fullname" . }}
+  labels:
+    {{- include "voiceai-livekit-agent.cm.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "voiceai-livekit-agent.cm.fullname" . }}
+  minReplicaCount: {{ .Values.capacityManager.scaling.minReplicas }}
+  maxReplicaCount: {{ .Values.capacityManager.scaling.maxReplicas }}
+  cooldownPeriod: 300
+  triggers:
+    # Business hours — keep the capacity manager running.
+    - type: cron
+      metadata:
+        timezone: America/New_York
+        start: {{ $bh.start | quote }}
+        end: {{ $bh.end | quote }}
+        desiredReplicas: "1"
+    # Queue-presence ACTIVATION only.
+    - type: prometheus
+      metadata:
+        serverAddress: {{ include "voiceai-livekit-agent.prometheusServer" . }}
+        query: rabbitmq_detailed_queue_messages_ready{queue="{{ include "voiceai-livekit-agent.releaseChannel" . }}:{{ .Values.caller.serverType }}"}
+        threshold: "999999"
+        activationThreshold: "1"
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 60
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+{{- end }}

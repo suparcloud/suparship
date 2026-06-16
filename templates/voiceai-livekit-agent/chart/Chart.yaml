@@ -1,0 +1,18 @@
+apiVersion: v2
+name: voiceai-livekit-agent
+description: >-
+  BiglySales VoiceAI LiveKit agent — a LiveKit agent server (SIP caller) plus its
+  capacity manager, with KEDA autoscaling, a PodDisruptionBudget, and a PodMonitor.
+type: application
+version: 0.1.0
+# appVersion tracks the default container image tag; override image.tag per release.
+appVersion: "latest"
+keywords:
+  - voiceai
+  - livekit
+  - sip
+  - agent
+  - keda
+maintainers:
+  - name: BiglySales Platform
+home: https://biglysales.com

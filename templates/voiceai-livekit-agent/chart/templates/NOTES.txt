@@ -1,0 +1,15 @@
+{{ include "voiceai-livekit-agent.fullname" . }} installed — caller "{{ .Values.caller.name }}" ({{ .Values.caller.serverType }}).
+
+Components:
+{{- if .Values.agent.enabled }}
+  • agent           {{ include "voiceai-livekit-agent.agent.fullname" . }}  (KEDA {{ .Values.agent.scaling.minReplicas }}–{{ .Values.agent.scaling.maxReplicas }})
+{{- end }}
+{{- if .Values.capacityManager.enabled }}
+  • capacityManager {{ include "voiceai-livekit-agent.cm.fullname" . }}  (KEDA {{ .Values.capacityManager.scaling.minReplicas }}–{{ .Values.capacityManager.scaling.maxReplicas }})
+{{- end }}
+
+Image:  {{ .Values.image.repository }}:{{ .Values.image.tag }}
+Env:    from Secret "{{ .Values.envSecretName }}" (create it in this namespace — not managed by the chart).
+
+Requires in-cluster: KEDA, the Prometheus Operator (PodMonitor CRD), and
+{{ include "voiceai-livekit-agent.prometheusServer" . }} reachable from KEDA.

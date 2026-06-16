@@ -1,0 +1,236 @@
+{{- if .Values.agent.enabled }}
+{{- $hostNetwork := eq (include "voiceai-livekit-agent.hostNetwork" .) "true" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voiceai-livekit-agent.agent.fullname" . }}
+  labels:
+    {{- include "voiceai-livekit-agent.agent.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  # Replica count is owned by KEDA (the ScaledObject's HPA); do not set it here.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 5
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "voiceai-livekit-agent.agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "voiceai-livekit-agent.agent.labels" . | nindent 8 }}
+    spec:
+      priorityClassName: {{ include "voiceai-livekit-agent.priorityClassName" . }}
+      {{- if $hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- else }}
+      dnsPolicy: ClusterFirst
+      {{- end }}
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+      terminationGracePeriodSeconds: 1860
+      affinity:
+        {{- with .Values.agent.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- else }}
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: workload-type
+                operator: In
+                values:
+                  - compute
+                  - livekit
+        {{- end }}
+      tolerations:
+        {{- with .Values.agent.tolerations }}
+        {{- toYaml . | nindent 6 }}
+        {{- else }}
+        - key: workload-type
+          operator: Equal
+          value: compute
+          effect: NoSchedule
+        - key: workload-type
+          operator: Equal
+          value: livekit
+          effect: NoSchedule
+        {{- end }}
+      initContainers:
+      # On SIGTERM, write a terminating signal file + report pod status.
+      - name: signal-watcher
+        image: {{ include "voiceai-livekit-agent.busyboxImage" . }}
+        imagePullPolicy: IfNotPresent
+        restartPolicy: Always
+        command:
+        - sh
+        - -c
+        - |
+          trap_handler() {
+            echo 'signal-watcher terminating'
+            touch /mnt/signal/terminating || echo 'Warning: Failed to create terminating signal file'
+            REPORT_URL="http://bs-pod-status/terminating/${K8S_POD_NAME}?uid=${K8S_POD_UID}"
+            wget --post-data='' -T 5 -q -O- "$REPORT_URL" || echo 'Warning: Failed to report terminating signal'
+            echo 'signal-watcher terminated'
+            exit 0
+          }
+          trap trap_handler SIGTERM
+          while true; do
+            sleep 3
+          done
+        env:
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        volumeMounts:
+        - name: signal-vol
+          mountPath: /mnt/signal
+        resources:
+          requests:
+            cpu: 15m
+            memory: 5Mi
+            ephemeral-storage: 20Mi
+          limits:
+            cpu: 50m
+            memory: 10Mi
+            ephemeral-storage: 50Mi
+      # NodeReady fires too early; wait for node-local infra before running.
+      - name: wait-for-node-stability
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/report_pod_status.py
+        - --wait-time
+        - "35"
+        env:
+        - name: K8S_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: NODE_HEALTH_URL
+          value: "http://$(K8S_NODE_IP):12911"
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: K8S_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            cpu: 15m
+            memory: 15Mi
+            ephemeral-storage: 20Mi
+          limits:
+            cpu: 90m
+            memory: 65Mi
+            ephemeral-storage: 50Mi
+      containers:
+      - name: voiceai-livekit-agent-server
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: Always
+        command:
+        - python3
+        - {{ .Values.caller.commandPath }}
+        - start
+        - --log-level
+        - $(LIVEKIT_AGENT_LOG_LEVEL)
+        startupProbe:
+          exec:
+            command:
+            - /bin/healthcheck.py
+          initialDelaySeconds: 15
+          periodSeconds: 3
+          timeoutSeconds: 1
+          failureThreshold: 20
+        livenessProbe:
+          exec:
+            command:
+            - /bin/healthcheck.py
+          initialDelaySeconds: 4
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sleep
+              - "5"
+        volumeMounts:
+        - name: signal-vol
+          mountPath: /mnt/signal
+        resources:
+          {{- toYaml .Values.agent.resources | nindent 10 }}
+        env:
+        # Re-derived on agent start from K8S_CPU_REQUEST.
+        - name: NUM_CPUS
+          valueFrom:
+            resourceFieldRef:
+              divisor: "1"
+              resource: requests.cpu
+        - name: K8S_CPU_REQUEST
+          valueFrom:
+            resourceFieldRef:
+              divisor: 1m
+              resource: requests.cpu
+        - name: K8S_MEM_REQUEST
+          valueFrom:
+            resourceFieldRef:
+              divisor: 1Mi
+              resource: requests.memory
+        {{- include "voiceai-livekit-agent.downwardEnv" . | nindent 8 }}
+        - name: LIVEKIT_AGENT_LOG_LEVEL
+          value: {{ .Values.agent.logLevel | quote }}
+        - name: LIVEKIT_AGENT_NAME
+          value: {{ .Values.caller.agentName | quote }}
+        - name: OTEL_SERVICE_NAME
+          value: "voiceai-livekit-{{ .Values.caller.name }}"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://$(K8S_NODE_IP):{{ include "voiceai-livekit-agent.otelCollectorPort" . }}"
+        - name: STATSD_HOST
+          value: {{ include "voiceai-livekit-agent.statsdHost" . | quote }}
+        - name: STATSD_PORT
+          value: {{ include "voiceai-livekit-agent.statsdPort" . | quote }}
+        - name: MAX_AGENTS
+          value: {{ .Values.maxAgents | quote }}
+        - name: AG__NUM_IDLE_PROCESSES
+          value: {{ .Values.numIdleProcesses | quote }}
+        - name: VALKEY_INTERNAL_URL
+          value: {{ include "voiceai-livekit-agent.valkeyUrl" . | quote }}
+        {{- with .Values.agent.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        envFrom:
+        {{- with .Values.envConfigMapName }}
+        - configMapRef:
+            name: {{ . }}
+        {{- end }}
+        {{- with .Values.envSecretName }}
+        - secretRef:
+            name: {{ . }}
+        {{- end }}
+      volumes:
+      - name: signal-vol
+        emptyDir: {}
+{{- end }}

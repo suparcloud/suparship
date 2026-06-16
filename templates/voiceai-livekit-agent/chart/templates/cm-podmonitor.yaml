@@ -1,0 +1,30 @@
+{{- if .Values.capacityManager.enabled }}
+{{- $pm := (.Values.capacityManager | default dict).podMonitor | default dict }}
+# Scrape lk1_queue_desired_capacity from the capacity-manager pod into
+# kube-prometheus-stack so the agent's KEDA prometheus scaler can query it
+# without reaching an external source.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "voiceai-livekit-agent.cm.fullname" . }}
+  labels:
+    {{- include "voiceai-livekit-agent.cm.labels" . | nindent 4 }}
+    release: {{ $pm.release | default "kube-prometheus-stack" }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "voiceai-livekit-agent.cm.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+    {{- with $pm.namespaces }}
+      {{- range . }}
+    - {{ . }}
+      {{- end }}
+    {{- else }}
+    - {{ .Release.Namespace }}
+    {{- end }}
+  podMetricsEndpoints:
+  - port: metrics
+    path: /metrics
+    interval: {{ $pm.interval | default "15s" }}
+{{- end }}

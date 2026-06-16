@@ -1,0 +1,13 @@
+{{- if .Values.agent.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "voiceai-livekit-agent.agent.fullname" . }}
+  labels:
+    {{- include "voiceai-livekit-agent.agent.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "voiceai-livekit-agent.agent.selectorLabels" . | nindent 6 }}
+{{- end }}

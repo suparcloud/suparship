@@ -1,0 +1,35 @@
+# suparShip Template: voiceai-livekit-agent
+#
+# BiglySales VoiceAI LiveKit agent — a LiveKit SIP agent server plus its
+# capacity manager (KEDA autoscaling, PDB, PodMonitor).
+#
+# This is a BYO/passthrough template: the chart brings its own values structure,
+# so the platform does NOT inject the canonical app/platform/components/suparship/
+# routing block (injectCanonicalValues: false). Platform metadata is still
+# available inside the values as {platform.*} tokens (incl. {platform.configMapName}
+# / {platform.secretName}) and {vars.*} env-config, resolved at deploy. Apps are
+# configured via the values editor — there are no template inputs.
+#
+# Engine: Helm
+# Chart:  ./chart
+
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata:
+  name: voiceai-livekit-agent
+  version: "0.1.0"
+spec:
+  title: VoiceAI LiveKit Agent
+  description: >-
+    LiveKit SIP agent server + capacity manager with KEDA autoscaling, a
+    PodDisruptionBudget, and a PodMonitor. Configured via the values editor;
+    reference platform metadata with {platform.*} / {vars.*} tokens.
+  category: voiceai
+  engine:
+    type: helm
+    chart: ./chart
+
+  # Passthrough — do not inject the canonical suparship-common values schema.
+  # The chart's own values.yaml is the base; PE/dev overlays + token resolution
+  # layer on top.
+  injectCanonicalValues: false

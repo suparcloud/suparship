@@ -1,0 +1,73 @@
+# Day-to-day configuration for voiceai-livekit-agent.
+#
+# Production infra (hostNetwork, PDB, priorityClassName, node placement, ndots,
+# init containers, probes, KEDA behavior, …) is opinionated and baked into the
+# chart templates. Major changes ship via a chart version bump.
+#
+# Rare org/cluster overrides (priorityClassName, hostNetwork, tolerations,
+# affinity, monitoring endpoints, valkeyUrl, releaseChannel, busybox image) are
+# read by the templates from .Values.* with in-template defaults, so they are NOT
+# listed here but can still be set through the platform default-values overlay
+# (or `helm --set`) without forking the chart.
+
+# Container image shared by both components.
+image:
+  repository: acrsharedsouthcentralusbiglysales.azurecr.io/biglysales-voiceai-livekit
+  tag: latest
+
+# Env sources (created out of band; ConfigMap applied first, Secret last so
+# secret values win). Set either to "" to omit it.
+envConfigMapName: voiceai-livekit-env
+envSecretName: voiceai-livekit-env
+
+# Caller identity — one chart release per caller type. Drives the agent command,
+# LIVEKIT_AGENT_NAME, the capacity-manager --agent-server-type, and the
+# Prometheus queue/capacity queries.
+caller:
+  name: outbound-caller
+  serverType: OUTBOUND
+  agentName: outbound
+  commandPath: /app/biglysales_voiceai_livekit/agents/sip_outbound.py
+
+# Concurrency (slots per agent pod). maxAgents also sets the KEDA capacity
+# scaler threshold.
+maxAgents: 20
+numIdleProcesses: 20
+
+agent:
+  enabled: true
+  logLevel: info
+  resources:
+    requests:
+      cpu: 1700m
+      # memory limit == request to guarantee it and avoid node-level OOM.
+      memory: 5260Mi
+      ephemeral-storage: 200Mi
+    limits:
+      memory: 5260Mi
+      ephemeral-storage: 200Mi
+  scaling:
+    minReplicas: 0
+    maxReplicas: 4
+    # Keep >=1 replica warm during business hours (timezone is baked).
+    businessHours:
+      start: "45 7 * * *"
+      end: "0 22 * * *"
+
+capacityManager:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 300Mi
+      ephemeral-storage: 500Mi
+    limits:
+      cpu: 1050m
+      memory: 400Mi
+      ephemeral-storage: 500Mi
+  scaling:
+    minReplicas: 0
+    maxReplicas: 1
+    businessHours:
+      start: "45 7 * * *"
+      end: "0 22 * * *"

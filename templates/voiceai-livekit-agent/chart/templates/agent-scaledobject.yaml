@@ -1,0 +1,58 @@
+{{- if .Values.agent.enabled }}
+{{- $bh := .Values.agent.scaling.businessHours }}
+{{- $channel := include "voiceai-livekit-agent.releaseChannel" . }}
+{{- $prom := include "voiceai-livekit-agent.prometheusServer" . }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "voiceai-livekit-agent.agent.fullname" . }}
+  labels:
+    {{- include "voiceai-livekit-agent.agent.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "voiceai-livekit-agent.agent.fullname" . }}
+  minReplicaCount: {{ .Values.agent.scaling.minReplicas }}
+  maxReplicaCount: {{ .Values.agent.scaling.maxReplicas }}
+  cooldownPeriod: 600
+  triggers:
+    # Business hours — keep at least one replica warm.
+    - type: cron
+      metadata:
+        timezone: America/New_York
+        start: {{ $bh.start | quote }}
+        end: {{ $bh.end | quote }}
+        desiredReplicas: "1"
+    # Queue-presence ACTIVATION only (very high threshold → doesn't drive scaling).
+    - type: prometheus
+      metadata:
+        serverAddress: {{ $prom }}
+        query: rabbitmq_detailed_queue_messages_ready{queue="{{ $channel }}:{{ .Values.caller.serverType }}"}
+        threshold: "999999"
+        activationThreshold: "1"
+    # Capacity-aware scaling (primary driver): desired slots per pod (= maxAgents).
+    - type: prometheus
+      metadata:
+        serverAddress: {{ $prom }}
+        query: max(lk1_queue_desired_capacity{agent_server_type="{{ .Values.caller.serverType }}", release_channel="{{ $channel }}"})
+        threshold: {{ .Values.maxAgents | quote }}
+    # CPU fallback — only fires on runaway load.
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "99"
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 600
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 30
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+{{- end }}

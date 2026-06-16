@@ -1,0 +1,83 @@
+{{- if .Values.capacityManager.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voiceai-livekit-agent.cm.fullname" . }}
+  labels:
+    {{- include "voiceai-livekit-agent.cm.labels" . | nindent 4 }}
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  # Replica count is owned by KEDA.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "voiceai-livekit-agent.cm.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "voiceai-livekit-agent.cm.labels" . | nindent 8 }}
+        preoomkiller.beta.k8s.skillcoder.com/enabled: "true"
+      annotations:
+        # ~10% over the memory request.
+        preoomkiller.beta.k8s.skillcoder.com/memory-threshold: "330Mi"
+    spec:
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+      containers:
+      - name: voiceai-livekit-cm
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: Always
+        command:
+        - python3
+        - /app/biglysales_voiceai_livekit/capacity_manager/main.py
+        - --agent-server-type
+        - {{ .Values.caller.serverType | quote }}
+        ports:
+        - name: metrics
+          containerPort: 9464
+          protocol: TCP
+        resources:
+          {{- toYaml .Values.capacityManager.resources | nindent 10 }}
+        env:
+        {{- include "voiceai-livekit-agent.downwardEnv" . | nindent 8 }}
+        - name: OTEL_SERVICE_NAME
+          value: "voiceai-livekit-cm-{{ .Values.caller.name }}"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://$(K8S_NODE_IP):{{ include "voiceai-livekit-agent.otelCollectorPort" . }}"
+        - name: CM__INITIAL_AGENT_SERVER_CAPACITY
+          value: "10"
+        - name: CM__MAX_AGENT_SERVER_CAPACITY
+          value: {{ .Values.maxAgents | quote }}
+        - name: CM__CAPACITY_INCREMENT_PER_MINUTE
+          value: "5"
+        - name: CM__DISPATCH_INTERVAL_SECONDS
+          value: "1"
+        - name: CM__METRICS_PORT
+          value: "9464"
+        - name: VALKEY_INTERNAL_URL
+          value: {{ include "voiceai-livekit-agent.valkeyUrl" . | quote }}
+        - name: MAX_AGENTS
+          value: {{ .Values.maxAgents | quote }}
+        - name: AG__NUM_IDLE_PROCESSES
+          value: {{ .Values.numIdleProcesses | quote }}
+        {{- with .Values.capacityManager.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        envFrom:
+        {{- with .Values.envConfigMapName }}
+        - configMapRef:
+            name: {{ . }}
+        {{- end }}
+        {{- with .Values.envSecretName }}
+        - secretRef:
+            name: {{ . }}
+        {{- end }}
+{{- end }}
