@@ -34,6 +34,39 @@ func TestInterpolate_PlatformAndVars(t *testing.T) {
 	}
 }
 
+func TestInterpolate_PlatformManagedNames(t *testing.T) {
+	c := testCtx() // App: hello
+	cases := map[string]string{
+		"{platform.configMapName}": "hello-config",
+		"{platform.secretName}":    "hello-secrets",
+	}
+	for in, want := range cases {
+		if got := c.Interpolate(in); got != want {
+			t.Errorf("Interpolate(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestInterpolate_PlatformManagedNames_EmptyAppLeftLiteral(t *testing.T) {
+	// With no App in context, the token is not a "present" token → left literal.
+	c := Context{Platform: helmvalues.PlatformValues{}}
+	if got := c.Interpolate("{platform.configMapName}"); got != "{platform.configMapName}" {
+		t.Errorf("empty App should leave token literal, got %q", got)
+	}
+}
+
+func TestPlatformTokens_IncludesManagedNames(t *testing.T) {
+	found := map[string]bool{}
+	for _, tok := range PlatformTokens() {
+		found[tok.Token] = true
+	}
+	for _, want := range []string{"{platform.configMapName}", "{platform.secretName}"} {
+		if !found[want] {
+			t.Errorf("PlatformTokens() missing %q", want)
+		}
+	}
+}
+
 func TestInterpolate_LeavesHelmAndUnknownUntouched(t *testing.T) {
 	c := testCtx()
 	for _, s := range []string{
