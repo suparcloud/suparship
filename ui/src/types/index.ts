@@ -320,6 +320,27 @@ export interface TemplateDetail {
   // layered above chart defaults and below developer overrides.
   defaultValues?: Record<string, unknown>;
   envValues?: Record<string, Record<string, unknown>>;
+  // Values mode: undefined/true = canonical suparship-common base; false =
+  // passthrough/BYO.
+  injectCanonicalValues?: boolean;
+  // editable = metadata can be edited in place (imported/BYO + cluster-stored).
+  editable?: boolean;
+  source?: TemplateProvenance;
+}
+
+// TemplateProvenance describes where a template came from, for edit gating.
+export interface TemplateProvenance {
+  origin: "builtin" | "imported" | "synced";
+  externalRepo?: string;
+  syncedAt?: string;
+}
+
+// TemplateMetadataPatch is the partial body for PATCH /templates/{name}.
+export interface TemplateMetadataPatch {
+  title?: string;
+  category?: string;
+  description?: string;
+  injectCanonicalValues?: boolean;
 }
 
 // TemplateOverride is the org-level platform values overlay a PE/SRE authors for

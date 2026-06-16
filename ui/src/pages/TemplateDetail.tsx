@@ -9,6 +9,7 @@ import {
   fetchTemplate,
   fetchTemplateOverride,
   previewTemplateEffectiveValues,
+  updateTemplateMetadata,
   updateTemplateOverride,
 } from "../lib/templates";
 import { listOrgEnvironments } from "../lib/settings";
@@ -186,11 +187,8 @@ export function TemplateDetail() {
         </button>
       </div>
 
-      {/* Quick stats */}
-      <div className="grid grid-cols-2 gap-4">
-        <StatCard label="Category" value={template.category} />
-        <StatCard label="Engine" value={template.engine} />
-      </div>
+      {/* Metadata — editable for org_admins on imported templates */}
+      <MetadataSection template={template} onUpdated={setTemplate} />
 
       {/* Template inputs are deprecated and not shown — apps are configured via
           the values editor, and the effective-values preview is the real "what
@@ -476,6 +474,162 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
       {yamlError && (
         <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
       )}
+    </div>
+  );
+}
+
+function valuesModeLabel(t: TemplateDetailType): string {
+  return t.injectCanonicalValues === false
+    ? "Passthrough (BYO chart)"
+    : "Canonical values";
+}
+
+// MetadataSection shows category/engine + values-mode and lets an org_admin edit
+// the metadata of an imported/BYO template in place (title, category, description,
+// passthrough). Synced/built-in templates are read-only with a provenance notice.
+function MetadataSection({
+  template,
+  onUpdated,
+}: {
+  template: TemplateDetailType;
+  onUpdated: (t: TemplateDetailType) => void;
+}) {
+  const { user } = useAuth();
+  const canEdit = user?.role === "org_admin" && template.editable === true;
+
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [title, setTitle] = useState(template.title);
+  const [category, setCategory] = useState(template.category);
+  const [description, setDescription] = useState(template.description ?? "");
+  const [passthrough, setPassthrough] = useState(
+    template.injectCanonicalValues === false,
+  );
+
+  function reset() {
+    setTitle(template.title);
+    setCategory(template.category);
+    setDescription(template.description ?? "");
+    setPassthrough(template.injectCanonicalValues === false);
+    setEditing(false);
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const updated = await updateTemplateMetadata(template.name, {
+        title,
+        category,
+        description,
+        injectCanonicalValues: !passthrough,
+      });
+      onUpdated(updated);
+      toast.success("Template metadata updated");
+      setEditing(false);
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to update metadata",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-white p-5">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-900">Edit metadata</h2>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={reset}
+              disabled={saving}
+              className="rounded-md px-3 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600">Title</span>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="mt-1 w-full max-w-xl rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600">Category</span>
+            <input
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              placeholder="e.g. web, worker, voiceai"
+              className="mt-1 w-full max-w-xs rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-gray-600">Description</span>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              className="mt-1 w-full max-w-2xl rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+            />
+          </label>
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              checked={passthrough}
+              onChange={(e) => setPassthrough(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span className="text-sm text-gray-700">
+              Passthrough — this chart brings its own values (no canonical schema
+              injected).{" "}
+              <span className="text-xs text-gray-400">
+                Turning this on clears the auto-generated chart parameters.
+              </span>
+            </span>
+          </label>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="grid grid-cols-2 gap-4">
+        <StatCard label="Category" value={template.category} />
+        <StatCard label="Engine" value={template.engine} />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-3">
+        <span className="text-xs text-gray-400">
+          {valuesModeLabel(template)}
+          {template.source?.origin === "synced" && template.source.externalRepo
+            ? ` · managed by ${template.source.externalRepo}`
+            : template.source?.origin === "builtin"
+              ? " · built-in"
+              : ""}
+        </span>
+        {canEdit ? (
+          <button
+            onClick={() => setEditing(true)}
+            className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+          >
+            Edit metadata
+          </button>
+        ) : template.source?.origin === "synced" ? (
+          <span className="text-xs text-gray-400">Edit at the source repo</span>
+        ) : null}
+      </div>
     </div>
   );
 }

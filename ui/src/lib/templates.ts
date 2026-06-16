@@ -5,6 +5,7 @@ import type {
   TemplateCredentialsRequest,
   TemplateCredentialsResponse,
   TemplateDetail,
+  TemplateMetadataPatch,
   TemplateImportPreview,
   TemplateImportResult,
   TemplateRegistry,
@@ -21,6 +22,18 @@ export function fetchTemplates(): Promise<TemplatesResponse> {
 
 export function fetchTemplate(name: string): Promise<TemplateDetail> {
   return api.get<TemplateDetail>(`/templates/${encodeURIComponent(name)}`);
+}
+
+// updateTemplateMetadata edits an imported/BYO template's metadata in place
+// (title/category/description/passthrough). org_admin; 409 for synced templates.
+export function updateTemplateMetadata(
+  name: string,
+  patch: TemplateMetadataPatch,
+): Promise<TemplateDetail> {
+  return api.patch<TemplateDetail>(
+    `/templates/${encodeURIComponent(name)}`,
+    patch,
+  );
 }
 
 // fetchTemplateEffectiveValues returns the starting values document for a
