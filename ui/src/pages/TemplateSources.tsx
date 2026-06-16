@@ -60,7 +60,7 @@ const emptyRepo: ExternalTemplateRepo = {
 
 // Source-type dropdown options. Each maps to a fetcher in registrysync.
 const SOURCE_TYPES: ReadonlyArray<{
-  value: "git" | "oci" | "chartmuseum" | "gittgz";
+  value: "git" | "gitcharts" | "oci" | "chartmuseum" | "gittgz";
   label: string;
   description: string;
 }> = [
@@ -68,6 +68,11 @@ const SOURCE_TYPES: ReadonlyArray<{
     value: "git",
     label: "Git templates repo",
     description: "Clone a repo and discover templates under a path. Mixes inline charts and external (registry-ref) wrapper templates.",
+  },
+  {
+    value: "gitcharts",
+    label: "Git charts repo",
+    description: "Clone a repo and import every standard Helm chart under a subpath (default charts/) as a passthrough template. Charts that ship their own template.yaml keep their authored metadata.",
   },
   {
     value: "oci",
@@ -86,9 +91,10 @@ const SOURCE_TYPES: ReadonlyArray<{
   },
 ];
 
-// usesGit returns true when ref+path apply (git-type sources).
+// usesGit returns true when ref+path + git credentials apply (git-clone
+// sources: a suparship templates repo or a plain Helm charts repo).
 function usesGit(t: ExternalTemplateRepo["type"]): boolean {
-  return !t || t === "git";
+  return !t || t === "git" || t === "gitcharts";
 }
 
 // usesChart returns true when chart+version apply (registry-type sources).
@@ -571,13 +577,17 @@ function AddSourceForm({
             </Field>
             <Field
               label="Path"
-              help="Directory under the repo containing template folders. Empty for repo root."
+              help={
+                sourceType === "gitcharts"
+                  ? "Directory of Helm charts under the repo. Defaults to charts/."
+                  : "Directory under the repo containing template folders. Empty for repo root."
+              }
             >
               <input
                 className={inputClass}
                 value={draft.path}
                 onChange={(e) => set({ path: e.target.value })}
-                placeholder="templates"
+                placeholder={sourceType === "gitcharts" ? "charts" : "templates"}
               />
             </Field>
           </>

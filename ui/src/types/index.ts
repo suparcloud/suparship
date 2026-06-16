@@ -187,11 +187,12 @@ export interface ExternalTemplateRepo {
 }
 
 // TemplateSourceType matches internal/tpl/registry.go SourceType*
-// constants. Only "git" and "oci" are wired in the backend today;
+// constants. "git", "gitcharts", and "oci" are wired in the backend today;
 // "chartmuseum" / "gittgz" are reserved for future fetchers and
 // surface as ErrUnsupportedSourceType when an operator picks them.
 export type TemplateSourceType =
   | "git"
+  | "gitcharts"
   | "oci"
   | "chartmuseum"
   | "gittgz";
