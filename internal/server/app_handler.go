@@ -1522,11 +1522,14 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 
 	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, env.EnvName)
 
-	// instance is the ArgoCD Application name / Helm release name ArgoCD stamps
-	// as the app.kubernetes.io/instance label on every workload — the handle the
-	// label-based discovery selects on so BYO charts (whose Deployments aren't
-	// named after the app) report real status. Matches gitops.ApplicationName.
-	instance := env.ProjectName + "-" + appName + "-" + env.EnvName
+	// instance is the Helm release name suparship sets on every app
+	// Application/ApplicationSet (ReleaseName: app.Name), which Helm stamps as
+	// the app.kubernetes.io/instance label on every rendered resource. It's the
+	// handle the label-based discovery selects on, so BYO charts (whose
+	// Deployments are named by their own fullname template, not the app name)
+	// still report real status. NOTE: this is the app name, NOT the ArgoCD
+	// Application name {project}-{app}-{env}.
+	instance := appName
 
 	// No remote routing (single-cluster / fake mode): query the local provider.
 	if !routed {
