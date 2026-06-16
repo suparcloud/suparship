@@ -1,0 +1,18 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-web-scaler
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: voiceai-livekit-web
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  triggers:
+    # Business hours - to avoid random 502 double the min desired replicas
+    - type: cron
+      metadata:
+        timezone: America/New_York
+        start: 45 7 * * *
+        end: 0 22 * * *
+        desiredReplicas: "4"

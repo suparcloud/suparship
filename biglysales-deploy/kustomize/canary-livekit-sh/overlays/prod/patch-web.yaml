@@ -1,0 +1,35 @@
+# Patch HTTPRoute hostname for prod (Envoy Gateway; TLS via envoy wildcard)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: voiceai-livekit-canary-httproute
+spec:
+  hostnames:
+    - voiceai-livekit-canary-livekit-sh.azure.biglysales.com
+---
+# Patch web Deployment: preoomkiller annotation + resources
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-web-canary-lk-sh
+spec:
+  template:
+    metadata:
+      annotations:
+        # 10% over request; 78% of limit so alert at 80% does not fire
+        preoomkiller.beta.k8s.skillcoder.com/memory-threshold: "1155Mi"
+        preoomkiller.beta.k8s.skillcoder.com/tz: "America/New_York"
+        preoomkiller.beta.k8s.skillcoder.com/restart-schedule: "40 7 * * *"
+    spec:
+      containers:
+      - name: voiceai-livekit-web
+        resources:
+          requests:
+            cpu: 300m
+            memory: "1050Mi"
+            ephemeral-storage: "500Mi"
+          limits:
+            cpu: 3050m
+            # threshold = 78% of this (1155Mi); alert at 80% — avoid noise
+            memory: "1480Mi"
+            ephemeral-storage: "500Mi"

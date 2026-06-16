@@ -1,0 +1,127 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-web-canary-lk-sh
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: voiceai-livekit-web-canary-lk-sh
+  template:
+    metadata:
+      labels:
+        app: voiceai-livekit-web-canary-lk-sh
+        preoomkiller.beta.k8s.skillcoder.com/enabled: "true"
+      annotations:
+        # 10% over request; 78% of limit so alert at 80% does not fire
+        preoomkiller.beta.k8s.skillcoder.com/memory-threshold: "1155Mi"
+    spec:
+      nodeSelector:
+        workload-type: general
+      terminationGracePeriodSeconds: 300
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+      containers:
+      - name: voiceai-livekit-web
+        image: acrsharedsouthcentralusbiglysales.azurecr.io/biglysales-voiceai-livekit:latest  # Replace with your image
+        imagePullPolicy: Always
+        command:
+        - uvicorn
+        - biglysales_voiceai_livekit.web.api:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8765"
+        - --workers
+        - "5"
+        - --limit-concurrency
+        - "250"
+        - --backlog
+        - "2048"
+        - --timeout-graceful-shutdown
+        - "270"
+        ports:
+        - containerPort: 8765
+          name: health
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - sleep 15
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8765
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8765
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 1
+        resources:
+          requests:
+            cpu: 300m
+            memory: "1050Mi"
+            ephemeral-storage: "500Mi"
+          limits:
+            cpu: 3050m
+            # threshold = 78% of this (1155Mi); alert at 80% — avoid noise
+            memory: "1480Mi"
+            ephemeral-storage: "500Mi"
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: "voiceai-livekit-web-canary-lk-sh"
+        - name: K8S_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: K8S_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://$(K8S_NODE_IP):4317"
+        envFrom:
+        - secretRef:
+            name: voiceai-livekit-env
+        - secretRef:
+            name: voiceai-livekit-canary-lk-sh-env
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: voiceai-livekit-web-pdb-canary-lk-sh
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: voiceai-livekit-web-canary-lk-sh
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: voiceai-livekit-web-service-canary-lk-sh
+spec:
+  selector:
+    app: voiceai-livekit-web-canary-lk-sh
+  ports:
+  - port: 8765
+    targetPort: 8765
+    protocol: TCP
+    name: http

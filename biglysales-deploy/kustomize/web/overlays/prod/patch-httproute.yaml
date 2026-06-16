@@ -1,0 +1,24 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: voiceai-livekit-httproute
+spec:
+  hostnames:
+    - voiceai-livekit.azure.biglysales.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # 0% → main (voiceai-livekit-web-service)
+        - name: voiceai-livekit-web-service
+          port: 8765
+          weight: 0
+        # 100% → canary (voiceai-livekit-web-service-canary-lk-sh)
+        - name: voiceai-livekit-web-service-canary-lk-sh
+          port: 8765
+          weight: 100
+      timeouts:
+        request: 60s
+        backendRequest: 60s

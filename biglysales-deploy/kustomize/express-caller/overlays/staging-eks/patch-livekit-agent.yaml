@@ -1,0 +1,23 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-agent-server-express-caller
+spec:
+  template:
+    spec:
+      containers:
+        - name: voiceai-livekit-agent-server
+          env:
+            - name: VALKEY_INTERNAL_URL
+              value: "redis://livekit-redis.internal.aws.biglysalesstaging.com:6379/0"
+          envFrom:
+            - secretRef:
+                name: voiceai-livekit-env
+            - secretRef:
+                name: voiceai-livekit-self-hosted-env
+          resources:
+            requests:
+              memory: 6Gi
+            limits:
+              memory: 6Gi

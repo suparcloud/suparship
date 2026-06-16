@@ -1012,6 +1012,22 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, or
 	}
 
 	pub.ScopeKeys = a.collectScopeKeys(ctx, app, envName, pub.ClusterRef)
+
+	// Guarantee every app gets a <app>-secrets ExternalSecret (and thus a K8s
+	// Secret) even with no secrets configured: the chart's envFrom references it
+	// unconditionally, so without this the pod fails to resolve the ref. The
+	// global-app item is the env-agnostic home for an app's own secrets — ensure
+	// it exists (empty) in the backend and always include it in the merged
+	// ExternalSecret. Only when a vault is configured: without a backend there is
+	// nothing for ESO to extract, and forcing the ref would dangle.
+	if a.vault != nil {
+		if err := a.vault.EnsureItem(ctx, secrets.GlobalScope(), secrets.TierApp, app.Name); err != nil {
+			slog.Warn("gitops: ensuring baseline app secret item",
+				"app", app.Name, "err", err)
+		} else {
+			pub.ScopeKeys.GlobalApp = true
+		}
+	}
 }
 
 // ReconcileSecretStores implements server.SecretStoreReconciler. It computes the

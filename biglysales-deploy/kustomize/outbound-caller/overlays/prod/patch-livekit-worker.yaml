@@ -1,0 +1,36 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-cm-outbound-caller
+spec:
+  template:
+    metadata:
+      annotations:
+        # 10% over request; 78% of limit so alert at 80% does not fire
+        preoomkiller.beta.k8s.skillcoder.com/memory-threshold: "550Mi"
+        preoomkiller.beta.k8s.skillcoder.com/tz: "America/New_York"
+        preoomkiller.beta.k8s.skillcoder.com/restart-schedule: "41 7 * * *"
+    spec:
+      containers:
+      - name: voiceai-livekit-cm
+        resources:
+          requests:
+            cpu: "300m"
+            memory: "500Mi"
+            ephemeral-storage: "500Mi"
+          limits:
+            cpu: 1050m
+            # threshold = 78% of this (550Mi); alert at 80% — avoid noise
+            memory: "705Mi"
+            ephemeral-storage: "500Mi"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-cm-outbound-caller
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-cm-outbound-caller
+  minReplicaCount: 0
+  maxReplicaCount: 1

@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: voiceai-livekit-canary-prod-root-application
+  namespace: argocd
+spec:
+  project: apps
+  source:
+    repoURL: git@github.com:Bigly-Sales/biglysales-voiceai-livekit.git
+    targetRevision: main
+    path: deploy/canaries/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -1,0 +1,34 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-agent-server-inbound-caller
+spec:
+  template:
+    spec:
+      containers:
+      - name: voiceai-livekit-agent-server
+        resources:
+          requests:
+            # 1.7 cpu to run 4 agents per node
+            cpu: 1700m
+            # on prod max usage 3610, set request to make this value 70% of max: 5160Mi
+            # canry pod has OOM on 5160Mi, add 500Mi
+            # 80% memory alert on 6160Mi, add 500Mi
+            memory: "6660Mi"
+            # retry-caller had eviction on 200Mi disk limit
+            ephemeral-storage: "400Mi"
+          limits:
+            # same as requests to garanteed memory and avoid node level OOM
+            memory: "6660Mi"
+            ephemeral-storage: "400Mi"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-agent-server-inbound-caller
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-agent-server-inbound-caller
+  minReplicaCount: 2
+  maxReplicaCount: 24

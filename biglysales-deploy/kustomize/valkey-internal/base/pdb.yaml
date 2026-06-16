@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: valkey-internal
+  labels:
+    app: valkey-internal
+spec:
+  # Critical component: do not allow voluntary disruptions (node drain, etc.)
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: valkey-internal

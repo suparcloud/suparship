@@ -1,0 +1,7 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: voiceai-worker-config
+data:
+  LIVEKIT_AGENT_NAME: "REPLACE_ME_FROM_ENV"

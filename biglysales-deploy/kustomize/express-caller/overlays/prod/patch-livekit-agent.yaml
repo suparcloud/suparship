@@ -1,0 +1,33 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-agent-server-express-caller
+spec:
+  template:
+    spec:
+      containers:
+      - name: voiceai-livekit-agent-server
+        resources:
+          requests:
+            # we use express agent only for low volume calls,
+            # so we could save resource by requesting less cpu and scale if needed
+            cpu: 400m
+            # on prod max usage 1560, set request to make this value 70% of max: 2230Mi
+            memory: "8050Mi"
+            # retry-caller had eviction on 200Mi disk limit
+            ephemeral-storage: "400Mi"
+          limits:
+            # same as requests to garanteed memory and avoid node level OOM
+            memory: "8050Mi"
+            ephemeral-storage: "400Mi"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-agent-server-express-caller
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-agent-server-express-caller
+  minReplicaCount: 1
+  maxReplicaCount: 30

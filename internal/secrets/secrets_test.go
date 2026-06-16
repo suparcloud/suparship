@@ -142,3 +142,36 @@ func TestVaultStores_Isolation(t *testing.T) {
 		})
 	}
 }
+
+// TestEnsureItem covers the baseline-item guarantee: an app with no secrets
+// still gets an item so its ExternalSecret resolves, and EnsureItem never
+// clobbers an existing item's keys.
+func TestEnsureItem(t *testing.T) {
+	stores := map[string]VaultStore{
+		"mem": NewMemVaultStore(),
+		"k8s": NewK8sVaultStore(fake.NewSimpleClientset()),
+	}
+	ctx := context.Background()
+	for name, store := range stores {
+		t.Run(name, func(t *testing.T) {
+			scope := GlobalScope()
+			// Create on first call.
+			if err := store.EnsureItem(ctx, scope, TierApp, "api"); err != nil {
+				t.Fatalf("ensure: %v", err)
+			}
+			if keys, _ := store.ListKeys(ctx, scope, TierApp, "api"); len(keys) != 0 {
+				t.Errorf("baseline item should be empty, got %+v", keys)
+			}
+			// Add a key, then ensure again — must not wipe it (idempotent).
+			if err := store.Upsert(ctx, scope, TierApp, "api", map[string][]byte{"K": []byte("v")}); err != nil {
+				t.Fatalf("upsert: %v", err)
+			}
+			if err := store.EnsureItem(ctx, scope, TierApp, "api"); err != nil {
+				t.Fatalf("ensure again: %v", err)
+			}
+			if keys, _ := store.ListKeys(ctx, scope, TierApp, "api"); len(keys) != 1 || keys[0].Key != "K" {
+				t.Errorf("EnsureItem clobbered existing keys: %+v", keys)
+			}
+		})
+	}
+}

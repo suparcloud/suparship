@@ -1,0 +1,72 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-agent-server-retry-caller-canary-lk-sh
+spec:
+  template:
+    spec:
+      containers:
+        - name: voiceai-livekit-agent-server
+          resources:
+            requests:
+              # 3.4 cpu to be able to pack 2 pods on the 8 core node and avoid 50% resource waste
+              cpu: "4000m"
+              # on prod max usage 5680, set request to make this value 70% of max: 8120Mi
+              # OOM on 8120Mi, add 500Mi
+              # OOM on 8620Mi, add 500Mi
+              # OOM on 9120Mi, add 500Mi
+              # OOM on 9620Mi, add 500Mi
+              memory: "15360Mi"
+              # retry-caller had eviction on 200Mi disk limit
+              ephemeral-storage: "400Mi"
+            limits:
+              # same as requests to garanteed memory and avoid node level OOM
+              memory: "15360Mi"
+              ephemeral-storage: "400Mi"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-agent-server-retry-caller-canary-lk-sh
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-agent-server-retry-caller-canary-lk-sh
+  minReplicaCount: 0
+  maxReplicaCount: 36 # 120
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-cm-retry-caller-canary-lk-sh
+spec:
+  template:
+    metadata:
+      annotations:
+        # 10% over request; 78% of limit so alert at 80% does not fire
+        preoomkiller.beta.k8s.skillcoder.com/memory-threshold: "550Mi"
+        preoomkiller.beta.k8s.skillcoder.com/tz: "America/New_York"
+        preoomkiller.beta.k8s.skillcoder.com/restart-schedule: "39 7 * * *"
+    spec:
+      containers:
+        - name: voiceai-livekit-cm-retry-caller
+          resources:
+            requests:
+              cpu: "150m"
+              memory: "500Mi"
+              ephemeral-storage: "500Mi"
+            limits:
+              cpu: 1050m
+              # threshold = 78% of this (550Mi); alert at 80% — avoid noise
+              memory: "705Mi"
+              ephemeral-storage: "500Mi"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: voiceai-livekit-cm-retry-caller-canary-lk-sh
+spec:
+  scaleTargetRef:
+    name: voiceai-livekit-cm-retry-caller-canary-lk-sh
+  minReplicaCount: 0
+  maxReplicaCount: 1

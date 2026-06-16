@@ -1,0 +1,24 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voiceai-livekit-cm-followup-caller
+spec:
+  template:
+    spec:
+      containers:
+      - name: voiceai-livekit-cm
+        env:
+        - name: MAX_AGENTS
+          value: "10"
+        - name: AG__NUM_IDLE_PROCESSES
+          value: "10"
+        - name: CM__MAX_AGENT_SERVER_CAPACITY
+          value: "10"
+        - name: CM__INITIAL_AGENT_SERVER_CAPACITY
+          value: "5"
+        envFrom:
+        - secretRef:
+            name: voiceai-livekit-env
+        - secretRef:
+            name: voiceai-livekit-self-hosted-env

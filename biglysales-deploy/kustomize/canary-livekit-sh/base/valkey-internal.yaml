@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: valkey-internal-canary-lk-sh
+  labels:
+    app: valkey-internal-canary-lk-sh
+spec:
+  serviceName: valkey-internal-canary-lk-sh
+  replicas: 1
+  selector:
+    matchLabels:
+      app: valkey-internal-canary-lk-sh
+  updateStrategy:
+    type: RollingUpdate
+  podManagementPolicy: OrderedReady
+  template:
+    metadata:
+      labels:
+        app: valkey-internal-canary-lk-sh
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      terminationGracePeriodSeconds: 60
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: workload-type
+                operator: In
+                values:
+                - db
+      tolerations:
+      - key: workload-type
+        operator: Equal
+        value: db
+        effect: NoSchedule
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+      containers:
+      - name: valkey
+        image: acrsharedsouthcentralusbiglysales.azurecr.io/valkey:9.0.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+        args:
+        - --appendonly
+        - "yes"
+        - --appendfsync
+        - everysec
+        ports:
+        - containerPort: 6379
+          name: valkey
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "200Mi"
+            ephemeral-storage: "200Mi"
+          limits:
+            cpu: "500m"
+            memory: "300Mi"
+            ephemeral-storage: "300Mi"
+        startupProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 1
+          periodSeconds: 2
+          failureThreshold: 15
+        readinessProbe:
+          exec:
+            command:
+            - valkey-cli
+            - ping
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          failureThreshold: 2
+        livenessProbe:
+          exec:
+            command:
+            - valkey-cli
+            - ping
+          initialDelaySeconds: 3
+          periodSeconds: 10
+          failureThreshold: 3
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-internal-canary-lk-sh
+  labels:
+    app: valkey-internal-canary-lk-sh
+spec:
+  clusterIP: None
+  ports:
+  - name: valkey
+    port: 6379
+    targetPort: valkey
+  selector:
+    app: valkey-internal-canary-lk-sh
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: valkey-internal-canary-lk-sh
+  labels:
+    app: valkey-internal-canary-lk-sh
+spec:
+  # Critical component: do not allow voluntary disruptions (node drain, etc.)
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: valkey-internal-canary-lk-sh
