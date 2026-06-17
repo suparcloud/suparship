@@ -23,6 +23,31 @@ func TestVaultName(t *testing.T) {
 	}
 }
 
+func TestProjectScopeNames(t *testing.T) {
+	// Project-global: lives in the org global vault + global store.
+	pg := ProjectScope("voiceai")
+	if got := VaultName(pg); got != "suparship-secrets-global" {
+		t.Errorf("VaultName(project) = %q, want global vault", got)
+	}
+	if got := SharedItemName(pg); got != "shared-project-voiceai" {
+		t.Errorf("SharedItemName(project) = %q", got)
+	}
+	if got := StoreName(pg); got != GlobalStoreName() {
+		t.Errorf("StoreName(project) = %q, want global store %q", got, GlobalStoreName())
+	}
+	// Project-env: lives in the env vault + env store.
+	pe := ProjectEnvScope("voiceai", "staging")
+	if got := VaultName(pe); got != "suparship-secrets-env-staging" {
+		t.Errorf("VaultName(project-env) = %q, want env vault", got)
+	}
+	if got := SharedItemName(pe); got != "shared-project-voiceai-env-staging" {
+		t.Errorf("SharedItemName(project-env) = %q", got)
+	}
+	if got := StoreName(pe); got != EnvStoreName("staging") {
+		t.Errorf("StoreName(project-env) = %q, want env store %q", got, EnvStoreName("staging"))
+	}
+}
+
 func TestItemAndStoreAndWorkloadNames(t *testing.T) {
 	env := EnvScope("staging")
 	if got := SharedItemName(env); got != "shared-env-staging" {
@@ -61,9 +86,11 @@ func TestItemAndStoreAndWorkloadNames(t *testing.T) {
 
 func TestResolveScopes(t *testing.T) {
 	got := ResolveScopes(
-		ScopeKeys{Shared: []string{"A"}, App: []string{"B"}},
-		ScopeKeys{Shared: []string{"B"}, App: []string{"C"}},
-		ScopeKeys{App: []string{"A"}},
+		ScopeKeys{Shared: []string{"A"}, App: []string{"B"}}, // global
+		ScopeKeys{},                                          // projectGlobal
+		ScopeKeys{Shared: []string{"B"}, App: []string{"C"}}, // env
+		ScopeKeys{},                                          // projectEnv
+		ScopeKeys{App: []string{"A"}},                        // cluster
 	)
 	// A: set by global-shared, overwritten by cluster-app → cluster/app.
 	if got["A"].Source != SourceCluster || got["A"].Tier != string(TierApp) {
@@ -76,6 +103,26 @@ func TestResolveScopes(t *testing.T) {
 	// C: only env-app.
 	if got["C"].Source != SourceEnv || got["C"].Tier != string(TierApp) {
 		t.Errorf("C resolved to %+v, want env/app", got["C"])
+	}
+}
+
+// Project layers sit between org-shared and app within each band: a project
+// secret overrides the org-shared value, but the app's own value still wins.
+func TestResolveScopes_ProjectPrecedence(t *testing.T) {
+	got := ResolveScopes(
+		ScopeKeys{Shared: []string{"K", "P"}}, // global-shared: K, P
+		ScopeKeys{Shared: []string{"K"}},      // project-global: K (overrides global K)
+		ScopeKeys{},                           // env
+		ScopeKeys{Shared: []string{"P"}},      // project-env: P (overrides global P)
+		ScopeKeys{App: []string{"K"}},         // cluster-app: K (overrides everything)
+	)
+	// K: global → project-global → cluster-app; cluster wins.
+	if got["K"].Source != SourceCluster {
+		t.Errorf("K = %+v, want cluster (highest)", got["K"])
+	}
+	// P: global-shared → project-env-shared; project wins (no app/cluster override).
+	if got["P"].Source != SourceProject || got["P"].Tier != string(TierShared) {
+		t.Errorf("P = %+v, want project/shared", got["P"])
 	}
 }
 

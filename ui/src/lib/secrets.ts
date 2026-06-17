@@ -196,6 +196,31 @@ export function deleteSharedClusterSecretKey(env: string, cluster: string, key: 
   );
 }
 
+// ── Project-scope shared secrets (shared by every app in the project) ────────
+
+const projectBase = (project: string) =>
+  `/projects/${encodeURIComponent(project)}/secrets`;
+
+export function listProjectGlobalSecretKeys(project: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(`${projectBase(project)}/global`);
+}
+export function upsertProjectGlobalSecrets(project: string, entries: Record<string, string>): Promise<void> {
+  return api.post(`${projectBase(project)}/global`, { entries });
+}
+export function deleteProjectGlobalSecretKey(project: string, key: string): Promise<void> {
+  return api.del(`${projectBase(project)}/global/${encodeURIComponent(key)}`);
+}
+
+export function listProjectEnvSecretKeys(project: string, env: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(`${projectBase(project)}/env/${encodeURIComponent(env)}`);
+}
+export function upsertProjectEnvSecrets(project: string, env: string, entries: Record<string, string>): Promise<void> {
+  return api.post(`${projectBase(project)}/env/${encodeURIComponent(env)}`, { entries });
+}
+export function deleteProjectEnvSecretKey(project: string, env: string, key: string): Promise<void> {
+  return api.del(`${projectBase(project)}/env/${encodeURIComponent(env)}/${encodeURIComponent(key)}`);
+}
+
 // ── App-tier secrets (project devs) ──────────────────────────────────────────
 
 const appBase = (project: string, app: string) =>
