@@ -5,6 +5,7 @@ const (
 	SourceGlobal  = "global"
 	SourceEnv     = "env"
 	SourceCluster = "cluster"
+	SourceProject = "project"
 )
 
 // ResolvedSecret describes a single secret key in the fully merged
@@ -23,15 +24,18 @@ type ScopeKeys struct {
 	App    []string
 }
 
-// ResolveScopes merges key names from the three scopes using last-wins
-// semantics (global < env < cluster). Within a scope, app overrides shared.
+// ResolveScopes merges key names using last-wins semantics. Env specificity is
+// primary (global band < env band < cluster band); within each band ownership
+// runs org-shared < project-shared < app. Project layers are shared-tier only
+// (a project secret applies to every app in the project); their App slices are
+// ignored.
 //
 // Cluster wins last as a platform-engineering escape hatch (incident
 // break-glass, per-cluster kill-switches, regional tuning) — overriding the
-// app's env and global values.
+// app's env, project, and global values.
 //
 // The output maps each unique key to its winning source scope and tier.
-func ResolveScopes(global, env, cluster ScopeKeys) map[string]ResolvedSecret {
+func ResolveScopes(global, projectGlobal, env, projectEnv, cluster ScopeKeys) map[string]ResolvedSecret {
 	resolved := make(map[string]ResolvedSecret)
 
 	type layer struct {
@@ -42,8 +46,10 @@ func ResolveScopes(global, env, cluster ScopeKeys) map[string]ResolvedSecret {
 	// Order matters: later layers overwrite earlier ones.
 	ordered := []layer{
 		{SourceGlobal, TierShared, global.Shared},
+		{SourceProject, TierShared, projectGlobal.Shared},
 		{SourceGlobal, TierApp, global.App},
 		{SourceEnv, TierShared, env.Shared},
+		{SourceProject, TierShared, projectEnv.Shared},
 		{SourceEnv, TierApp, env.App},
 		{SourceCluster, TierShared, cluster.Shared},
 		{SourceCluster, TierApp, cluster.App},

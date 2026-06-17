@@ -255,6 +255,17 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/org/secrets/env/{env}/cluster/{cluster}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUpsertSecrets)))
 		mux.HandleFunc("DELETE /api/v1/org/secrets/env/{env}/cluster/{cluster}/{key}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleDeleteSecret)))
 
+		// ── Project-scope shared secrets (shared by every app in the project) ──
+		// Global (all envs) + per-env. Project-scope items live in the org
+		// global / env vaults; scopeFromPath returns the project scope because
+		// {project} is set without {app}.
+		mux.HandleFunc("GET /api/v1/projects/{project}/secrets/global", viewProject(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/secrets/global", manageProject(sh.handleUpsertSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/secrets/global/{key}", manageProject(sh.handleDeleteSecret))
+		mux.HandleFunc("GET /api/v1/projects/{project}/secrets/env/{env}", viewProject(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/secrets/env/{env}", manageProject(sh.handleUpsertSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/secrets/env/{env}/{key}", manageProject(sh.handleDeleteSecret))
+
 		// ── App-tier secrets (project devs) across the 3 scopes ──
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets/global", viewProject(sh.handleListSecrets))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/global", devProject(sh.handleUpsertSecrets))

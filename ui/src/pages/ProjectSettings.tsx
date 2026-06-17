@@ -15,7 +15,16 @@ import {
 import type { ProjectEnvironment, ProjectNaming } from "../lib/projects";
 import { deleteProject } from "../lib/settings";
 import { getProjectEnvConfig, updateProjectEnvConfig } from "../lib/envconfig";
+import {
+  listProjectGlobalSecretKeys,
+  upsertProjectGlobalSecrets,
+  deleteProjectGlobalSecretKey,
+  listProjectEnvSecretKeys,
+  upsertProjectEnvSecrets,
+  deleteProjectEnvSecretKey,
+} from "../lib/secrets";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
+import { SecretEditor } from "../components/SecretEditor";
 
 // ── Origin badge ──────────────────────────────────────────────────────────────
 
@@ -326,6 +335,53 @@ const PROJECT_NS_PRESETS = [
   { label: "{project}", value: "{project}" },
   { label: "{org}-{project}-{env}", value: "{org}-{project}-{env}" },
 ];
+
+// ProjectSecretsSection edits the project-scope secrets shared by every app in
+// the project: a global (all-environments) editor plus one per environment.
+// Reuses the callback-driven SecretEditor — values are write-only and stored
+// in the platform secret backend (never shown after saving).
+function ProjectSecretsSection({
+  projectName,
+  envs,
+}: {
+  projectName: string;
+  envs: ProjectEnvironment[];
+}) {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-6 py-4">
+        <h2 className="text-base font-medium text-gray-900">
+          Project-level secrets
+        </h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Applied to every app in this project. Override org secrets; overridden
+          by app-level secrets. An app's own key wins over the project's.
+        </p>
+      </div>
+      <div className="space-y-6 p-6">
+        <SecretEditor
+          title="Global (all environments)"
+          description="Project secrets that are the same in every environment."
+          fetchFn={() => listProjectGlobalSecretKeys(projectName)}
+          upsertFn={(entries) => upsertProjectGlobalSecrets(projectName, entries)}
+          deleteFn={(key) => deleteProjectGlobalSecretKey(projectName, key)}
+        />
+        {envs.map((env) => (
+          <SecretEditor
+            key={env.name}
+            title={`${env.displayName || env.name} secrets`}
+            description={`Project secrets for the ${env.name} environment. Override the global project secrets above.`}
+            fetchFn={() => listProjectEnvSecretKeys(projectName, env.name)}
+            upsertFn={(entries) =>
+              upsertProjectEnvSecrets(projectName, env.name, entries)
+            }
+            deleteFn={(key) => deleteProjectEnvSecretKey(projectName, env.name, key)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function ProjectNamespaceSection({ projectName }: { projectName: string }) {
   const [naming, setNaming] = useState<ProjectNaming>({});
@@ -758,6 +814,9 @@ export function ProjectSettings() {
         fetchFn={fetchProjectEnvConfig}
         saveFn={saveProjectEnvConfig}
       />
+
+      {/* Project-level secrets — shared by every app in the project. */}
+      <ProjectSecretsSection projectName={project} envs={envs} />
       {/* Modals */}
       {showAdd && (
         <EnvForm

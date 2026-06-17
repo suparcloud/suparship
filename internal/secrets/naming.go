@@ -22,9 +22,11 @@ func EnvVaultName(env string) string { return envVaultPrefix + env }
 // live in their environment's vault.
 func VaultName(scope Scope) string {
 	switch scope.Kind {
-	case ScopeEnv, ScopeCluster:
+	case ScopeEnv, ScopeCluster, ScopeProjectEnv:
 		return EnvVaultName(scope.Env)
 	default:
+		// ScopeGlobal and ScopeProject both live in the org global vault —
+		// project items are scope-unique by name, so they don't collide.
 		return GlobalVaultName()
 	}
 }
@@ -33,13 +35,18 @@ func VaultName(scope Scope) string {
 // vault additionally holds cluster-override items per bound cluster) ────────
 
 // scopeSuffix renders the scope-specific tail used in item and store names:
-// "global", "env-<env>", or "cluster-<cluster>".
+// "global", "env-<env>", "cluster-<cluster>", "project-<project>", or
+// "project-<project>-env-<env>".
 func scopeSuffix(scope Scope) string {
 	switch scope.Kind {
 	case ScopeEnv:
 		return "env-" + scope.Env
 	case ScopeCluster:
 		return "cluster-" + scope.Cluster
+	case ScopeProject:
+		return "project-" + scope.Project
+	case ScopeProjectEnv:
+		return "project-" + scope.Project + "-env-" + scope.Env
 	default:
 		return "global"
 	}
@@ -92,10 +99,16 @@ func UnifiedStoreName() string { return unifiedStoreName }
 // items live in the env vault, so item and store suffixes intentionally
 // diverge for cluster scope.
 func StoreName(scope Scope) string {
-	if scope.Kind == ScopeCluster {
+	switch scope.Kind {
+	case ScopeCluster, ScopeProjectEnv:
+		// Both live in the env vault → read from the env store.
 		return "suparship-store-" + scopeSuffix(EnvScope(scope.Env))
+	case ScopeProject:
+		// Lives in the global vault → read from the global store.
+		return "suparship-store-" + scopeSuffix(GlobalScope())
+	default:
+		return "suparship-store-" + scopeSuffix(scope)
 	}
-	return "suparship-store-" + scopeSuffix(scope)
 }
 
 // GlobalStoreName returns the ClusterSecretStore name for the global vault.

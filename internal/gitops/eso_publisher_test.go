@@ -148,6 +148,53 @@ func TestBuildAppExternalSecret_PresenceDriven(t *testing.T) {
 	}
 }
 
+func TestBuildAppExternalSecret_ProjectItemsOrderedWithinBands(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App:       "web",
+		Namespace: "acme-web-prod",
+		Env:       "prod",
+		Project:   "acme",
+		Presence: ScopePresence{
+			GlobalShared: true, GlobalApp: true, ProjectShared: true,
+			EnvShared: true, EnvApp: true, ProjectEnvShared: true,
+		},
+	})
+	if cfg == nil {
+		t.Fatal("expected a config")
+	}
+	// Within each band: org-shared → project-shared → app.
+	wantKeys := []string{
+		"shared-global", "shared-project-acme", "web-global",
+		"shared-env-prod", "shared-project-acme-env-prod", "web-env-prod",
+	}
+	if len(cfg.Items) != len(wantKeys) {
+		t.Fatalf("expected %d items, got %d: %+v", len(wantKeys), len(cfg.Items), cfg.Items)
+	}
+	for i, k := range wantKeys {
+		if cfg.Items[i].Key != k {
+			t.Errorf("item %d: got %q, want %q", i, cfg.Items[i].Key, k)
+		}
+	}
+	// project-global resolves to the global store; project-env to the env store.
+	if cfg.Items[1].StoreName != "suparship-store-global" {
+		t.Errorf("project-global store = %q, want global store", cfg.Items[1].StoreName)
+	}
+	if cfg.Items[4].StoreName != "suparship-store-env-prod" {
+		t.Errorf("project-env store = %q, want env store", cfg.Items[4].StoreName)
+	}
+}
+
+// Project presence is ignored when no project is set (e.g. legacy callers).
+func TestBuildAppExternalSecret_NoProjectSkipsProjectItems(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App: "web", Namespace: "ns", Env: "prod",
+		Presence: ScopePresence{GlobalApp: true, ProjectShared: true, ProjectEnvShared: true},
+	})
+	if cfg == nil || len(cfg.Items) != 1 || cfg.Items[0].Key != "web-global" {
+		t.Fatalf("expected only the app-global item, got %+v", cfg)
+	}
+}
+
 func TestBuildAppExternalSecret_ClusterItemsUseEnvStore(t *testing.T) {
 	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 		App:       "web",
