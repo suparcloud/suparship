@@ -231,3 +231,20 @@ func TestEnsureItem(t *testing.T) {
 		})
 	}
 }
+
+func TestExternalSecretSettings_EffectiveRefreshInterval(t *testing.T) {
+	if got := (ExternalSecretSettings{}).EffectiveRefreshInterval(); got != "1m" {
+		t.Errorf("empty refresh interval = %q, want 1m (default)", got)
+	}
+	if got := (ExternalSecretSettings{RefreshInterval: "  "}).EffectiveRefreshInterval(); got != "1m" {
+		t.Errorf("blank refresh interval = %q, want 1m (default)", got)
+	}
+	if got := (ExternalSecretSettings{RefreshInterval: "30s"}).EffectiveRefreshInterval(); got != "30s" {
+		t.Errorf("custom refresh interval = %q, want 30s", got)
+	}
+	// Reachable via BackendConfig (round-trips through the org secret-backend API).
+	bc := BackendConfig{ExternalSecrets: ExternalSecretSettings{RefreshInterval: "2m"}}
+	if got := bc.ExternalSecrets.EffectiveRefreshInterval(); got != "2m" {
+		t.Errorf("backend refresh interval = %q, want 2m", got)
+	}
+}

@@ -51,9 +51,16 @@ export interface OnePasswordConfig {
   clusterTokens?: ClusterTokenRef[];
 }
 
+export interface ExternalSecretSettings {
+  // refreshInterval is how often ESO re-pulls secret values (Go duration, e.g.
+  // "1m", "30s", "1h"). Empty defaults to "1m" server-side.
+  refreshInterval?: string;
+}
+
 export interface SecretBackendConfig {
   type: string;
   onePassword?: OnePasswordConfig;
+  externalSecrets?: ExternalSecretSettings;
 }
 
 export interface SATokenResponse {
