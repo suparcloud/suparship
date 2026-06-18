@@ -309,6 +309,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			"app", req.Name,
 			"envs", len(result.Environments),
 		)
+		ah.ensureAppNamespaces(r.Context(), result.App, result.Environments)
 		if err := ah.gitOpsPublisher.PublishApp(r.Context(), result.App, result.Environments); err != nil {
 			slog.Error("gitops publish failed — app saved to store but not committed to git",
 				"project", projectName,
@@ -503,6 +504,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		if len(stableEnvs) == 0 {
 			stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
 		}
+		ah.ensureAppNamespaces(r.Context(), app, stableEnvs)
 		if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
 			app.Spec.Values, app.Spec.DisplayName, app.Spec.Description = prevValues, prevDisplay, prevDesc
 			app.Spec.EnvironmentDefaults = prevEnvDefaults
@@ -901,6 +903,7 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 		"app", appName,
 		"envs", len(stableEnvs),
 	)
+	ah.ensureAppNamespaces(r.Context(), app, stableEnvs)
 	if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
 		slog.Error("gitops sync failed",
 			"project", projectName,
@@ -1035,6 +1038,7 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
 	}
 
+	ah.ensureAppNamespaces(r.Context(), app, stableEnvs)
 	if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
 		// Roll the version pin back so the operator can retry without
 		// the saved state being stuck on a version that didn't publish.
@@ -1278,6 +1282,7 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 	if ah.gitOpsPublisher != nil {
 		app, appErr := ah.appStore.GetApp(r.Context(), projectName, appName)
 		if appErr == nil {
+			ah.ensureAppNamespace(r.Context(), app, targetEnv)
 			if pubErr := ah.gitOpsPublisher.PublishAppEnv(r.Context(), app, targetEnv); pubErr != nil {
 				slog.Warn("promote: failed to publish env files — proceeding with promotion",
 					"project", projectName, "app", appName,
