@@ -171,6 +171,15 @@ func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, 
 // usesUnifiedStore reports whether app ExternalSecrets should extract from the
 // single per-cluster ClusterSecretStore (1Password backend) instead of the
 // per-vault stores (k8s backend).
+// externalSecretRefreshInterval is the org-configured ExternalSecret refresh
+// interval (secrets.DefaultRefreshInterval when unset / no backend config).
+func (p *Publisher) externalSecretRefreshInterval() string {
+	if p.cfg.BackendConfig == nil {
+		return secrets.DefaultRefreshInterval
+	}
+	return p.cfg.BackendConfig.ExternalSecrets.EffectiveRefreshInterval()
+}
+
 func (p *Publisher) usesUnifiedStore() bool {
 	return p.cfg.BackendConfig != nil && p.cfg.BackendConfig.Effective() == secrets.Backend1Password
 }
@@ -834,14 +843,15 @@ func (p *Publisher) writeAppPlatformResources(
 ) error {
 	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
 	esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
-		App:          app.Name,
-		Namespace:    namespace,
-		Env:          env.EnvName,
-		Project:      app.ProjectName,
-		Cluster:      env.ClusterRef,
-		Presence:     env.ScopeKeys,
-		UnifiedStore: p.usesUnifiedStore(),
-		Branding:     p.cfg.Branding,
+		App:             app.Name,
+		Namespace:       namespace,
+		Env:             env.EnvName,
+		Project:         app.ProjectName,
+		Cluster:         env.ClusterRef,
+		Presence:        env.ScopeKeys,
+		UnifiedStore:    p.usesUnifiedStore(),
+		Branding:        p.cfg.Branding,
+		RefreshInterval: p.externalSecretRefreshInterval(),
 	})
 	meta := PlatformAppMeta{Name: app.Name, Project: app.ProjectName, Namespace: namespace}
 	if err := p.writePlatformDir(resDir, app.Name, namespace, envVars, esCfg, meta); err != nil {
@@ -1313,13 +1323,14 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		previewDir := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName)
 		resDir := p.outputDir(repoDir, "_app-resources", "previews", app.ProjectName, preview.PreviewName)
 		esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
-			App:          app.Name,
-			Namespace:    preview.Namespace,
-			Env:          preview.PreviewName,
-			Project:      app.ProjectName,
-			Presence:     preview.ScopeKeys,
-			UnifiedStore: p.usesUnifiedStore(),
-			Branding:     p.cfg.Branding,
+			App:             app.Name,
+			Namespace:       preview.Namespace,
+			Env:             preview.PreviewName,
+			Project:         app.ProjectName,
+			Presence:        preview.ScopeKeys,
+			UnifiedStore:    p.usesUnifiedStore(),
+			Branding:        p.cfg.Branding,
+			RefreshInterval: p.externalSecretRefreshInterval(),
 		})
 		meta := PlatformAppMeta{
 			Name:          preview.PreviewName,

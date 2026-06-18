@@ -67,6 +67,9 @@ type ESOExternalSecretConfig struct {
 	StoreName string // default ClusterSecretStore (global store)
 	Items     []ESOItemRef
 	Branding  branding.Config
+	// RefreshInterval is the ExternalSecret spec.refreshInterval (org-configured).
+	// Empty falls back to secrets.DefaultRefreshInterval.
+	RefreshInterval string
 }
 
 // BuildClusterSecretStoreYAML renders one per-vault ClusterSecretStore
@@ -149,6 +152,10 @@ spec:
 // secretStoreRef — letting one ExternalSecret pull from the global, env, and
 // cluster ClusterSecretStores into one target Secret.
 func BuildExternalSecretYAML(cfg ESOExternalSecretConfig) string {
+	refreshInterval := cfg.RefreshInterval
+	if strings.TrimSpace(refreshInterval) == "" {
+		refreshInterval = secrets.DefaultRefreshInterval
+	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ExternalSecret
@@ -158,7 +165,7 @@ metadata:
   labels:
 %s
 spec:
-  refreshInterval: 1h
+  refreshInterval: %s
   secretStoreRef:
     name: %s
     kind: ClusterSecretStore
@@ -166,7 +173,7 @@ spec:
     name: %s
     creationPolicy: Owner
   dataFrom:
-`, cfg.Name, cfg.Namespace, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), cfg.StoreName, cfg.Name))
+`, cfg.Name, cfg.Namespace, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), refreshInterval, cfg.StoreName, cfg.Name))
 
 	for _, item := range cfg.Items {
 		sb.WriteString(fmt.Sprintf("  - extract:\n      key: %q\n", item.Key))
@@ -241,6 +248,9 @@ type WorkloadExternalSecretParams struct {
 	// sourceRef is emitted. False = k8s layout with per-vault stores.
 	UnifiedStore bool
 	Branding     branding.Config
+	// RefreshInterval is the org-configured ExternalSecret refresh interval.
+	// Empty falls back to secrets.DefaultRefreshInterval at render time.
+	RefreshInterval string
 }
 
 // BuildAppExternalSecret returns the single merged ExternalSecret config for an
@@ -310,11 +320,12 @@ func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretCo
 		return nil
 	}
 	return &ESOExternalSecretConfig{
-		Name:      secrets.AppSecretName(p.App),
-		Namespace: p.Namespace,
-		StoreName: defaultStore,
-		Items:     items,
-		Branding:  p.Branding,
+		Name:            secrets.AppSecretName(p.App),
+		Namespace:       p.Namespace,
+		StoreName:       defaultStore,
+		Items:           items,
+		Branding:        p.Branding,
+		RefreshInterval: p.RefreshInterval,
 	}
 }
 

@@ -116,6 +116,31 @@ type BackendConfig struct {
 	// OnePassword holds 1Password-specific configuration.
 	// Only used when Type is "onepassword".
 	OnePassword *OnePasswordConfig `json:"onePassword,omitempty" yaml:"onePassword,omitempty"`
+	// ExternalSecrets holds org-level settings for the ExternalSecret resources
+	// suparship generates (independent of the backend type).
+	ExternalSecrets ExternalSecretSettings `json:"externalSecrets,omitempty" yaml:"externalSecrets,omitempty"`
+}
+
+// ExternalSecretSettings holds org-level knobs applied to every generated
+// ExternalSecret.
+type ExternalSecretSettings struct {
+	// RefreshInterval is how often ESO re-pulls secret values from the backend
+	// (ExternalSecret spec.refreshInterval, a Go duration like "1m", "30s",
+	// "1h"). Empty defaults to DefaultRefreshInterval.
+	RefreshInterval string `json:"refreshInterval,omitempty" yaml:"refreshInterval,omitempty"`
+}
+
+// DefaultRefreshInterval is the ExternalSecret refresh interval used when the
+// org hasn't configured one.
+const DefaultRefreshInterval = "1m"
+
+// EffectiveRefreshInterval returns the configured refresh interval, or
+// DefaultRefreshInterval when unset.
+func (s ExternalSecretSettings) EffectiveRefreshInterval() string {
+	if strings.TrimSpace(s.RefreshInterval) == "" {
+		return DefaultRefreshInterval
+	}
+	return strings.TrimSpace(s.RefreshInterval)
 }
 
 // Effective returns the backend type, falling back to "k8s" when empty.

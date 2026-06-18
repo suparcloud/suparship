@@ -305,3 +305,34 @@ func TestBuildAppConfigMapYAML_Empty(t *testing.T) {
 		t.Errorf("expected empty data block, got:\n%s", yaml)
 	}
 }
+
+func TestBuildExternalSecretYAML_RefreshInterval(t *testing.T) {
+	// Configured value is emitted.
+	yaml := BuildExternalSecretYAML(ESOExternalSecretConfig{
+		Name: "web-secrets", Namespace: "ns", StoreName: "s",
+		Items:           []ESOItemRef{{Key: "web-global", StoreName: "s"}},
+		RefreshInterval: "30s",
+	})
+	if !strings.Contains(yaml, "refreshInterval: 30s") {
+		t.Errorf("expected refreshInterval: 30s, got:\n%s", yaml)
+	}
+	// Empty falls back to the 1m default.
+	yaml = BuildExternalSecretYAML(ESOExternalSecretConfig{
+		Name: "web-secrets", Namespace: "ns", StoreName: "s",
+		Items: []ESOItemRef{{Key: "web-global", StoreName: "s"}},
+	})
+	if !strings.Contains(yaml, "refreshInterval: 1m") {
+		t.Errorf("expected default refreshInterval: 1m, got:\n%s", yaml)
+	}
+}
+
+func TestBuildAppExternalSecret_PassesRefreshInterval(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App: "web", Namespace: "ns", Env: "prod",
+		Presence:        ScopePresence{GlobalApp: true},
+		RefreshInterval: "45s",
+	})
+	if cfg == nil || cfg.RefreshInterval != "45s" {
+		t.Fatalf("expected RefreshInterval threaded to config, got %+v", cfg)
+	}
+}

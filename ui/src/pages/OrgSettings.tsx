@@ -1276,6 +1276,60 @@ function SecretsBackendSection() {
               ))}
             </div>
 
+            {/* ExternalSecret settings (apply to every backend) */}
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-gray-700">
+                ExternalSecret refresh interval
+              </label>
+              <p className="text-xs text-gray-500">
+                How often External Secrets Operator re-pulls secret values into
+                app namespaces (<code className="font-mono">spec.refreshInterval</code>
+                on every generated ExternalSecret). Go duration, e.g.{" "}
+                <code className="font-mono">1m</code>,{" "}
+                <code className="font-mono">30s</code>,{" "}
+                <code className="font-mono">1h</code>. Defaults to{" "}
+                <code className="font-mono">1m</code>.
+              </p>
+              <div className="flex items-end gap-3">
+                <input
+                  type="text"
+                  className="w-40 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+                  placeholder="1m"
+                  defaultValue={config.externalSecrets?.refreshInterval ?? ""}
+                  id="es-refresh-interval-input"
+                />
+                <button
+                  onClick={async () => {
+                    const val = (
+                      document.getElementById(
+                        "es-refresh-interval-input",
+                      ) as HTMLInputElement
+                    )?.value?.trim();
+                    setSaving(true);
+                    try {
+                      const updated = await updateSecretsBackend({
+                        ...config,
+                        externalSecrets: { refreshInterval: val },
+                      });
+                      setConfig(updated);
+                    } finally {
+                      setSaving(false);
+                    }
+                  }}
+                  disabled={saving}
+                  className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+                >
+                  {saving ? "Saving…" : "Save"}
+                </button>
+              </div>
+              <p className="text-xs text-gray-400">
+                Current:{" "}
+                <span className="font-mono">
+                  {config.externalSecrets?.refreshInterval || "1m (default)"}
+                </span>
+              </p>
+            </div>
+
             {/* 1Password section */}
             {config.type === "onepassword" && (
               <div className="space-y-5">
