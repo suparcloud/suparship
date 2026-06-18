@@ -150,6 +150,15 @@ func TestBackendConfig_VaultRefs(t *testing.T) {
 		t.Error("expected error for unprovisioned env vault")
 	}
 
+	// Project-global is env-agnostic → global vault. Project-env is env-bound →
+	// the env vault (regression: it previously fell through to the global vault).
+	if id, err := c.VaultIDForScope(ProjectScope("voiceai")); err != nil || id != "g1" {
+		t.Errorf("project-global vault id = %q, %v (want global vault g1)", id, err)
+	}
+	if id, err := c.VaultIDForScope(ProjectEnvScope("voiceai", "staging")); err != nil || id != "e1" {
+		t.Errorf("project-env vault id = %q, %v (want env vault e1)", id, err)
+	}
+
 	c.RemoveVault(EnvScope("staging"))
 	if c.FindVault(EnvScope("staging")) != nil {
 		t.Error("expected env vault removed")
