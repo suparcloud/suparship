@@ -12,15 +12,23 @@ const (
 	ScopeGlobal  ScopeKind = "global"
 	ScopeEnv     ScopeKind = "env"
 	ScopeCluster ScopeKind = "cluster"
+	// ScopeProject holds secrets shared by every app in a project, in every
+	// environment. Items live in the org global vault (names are scope-unique).
+	ScopeProject ScopeKind = "project"
+	// ScopeProjectEnv holds secrets shared by every app in a project, in one
+	// environment. Items live in that env's vault (alongside cluster overrides).
+	ScopeProjectEnv ScopeKind = "projectenv"
 )
 
-// Scope identifies which vault a secret lives in. Env is set for ScopeEnv and
-// ScopeCluster (cluster overrides are per-(env, cluster) items stored inside
-// the env vault); Cluster only for ScopeCluster.
+// Scope identifies which vault a secret lives in. Env is set for ScopeEnv,
+// ScopeCluster and ScopeProjectEnv; Cluster only for ScopeCluster; Project for
+// ScopeProject and ScopeProjectEnv. Cluster overrides and project-env secrets
+// are per-key items stored inside the env vault.
 type Scope struct {
 	Kind    ScopeKind
 	Env     string
 	Cluster string
+	Project string
 }
 
 // GlobalScope returns the global scope.
@@ -33,6 +41,18 @@ func EnvScope(env string) Scope { return Scope{Kind: ScopeEnv, Env: env} }
 // environment. The items live in the env vault, named after the cluster.
 func ClusterScope(env, cluster string) Scope {
 	return Scope{Kind: ScopeCluster, Env: env, Cluster: cluster}
+}
+
+// ProjectScope returns the scope for a project's secrets shared across every
+// environment. The items live in the org global vault.
+func ProjectScope(project string) Scope {
+	return Scope{Kind: ScopeProject, Project: project}
+}
+
+// ProjectEnvScope returns the scope for a project's secrets in one environment.
+// The items live in that environment's vault.
+func ProjectEnvScope(project, env string) Scope {
+	return Scope{Kind: ScopeProjectEnv, Project: project, Env: env}
 }
 
 // Tier identifies ownership within a scope: TierShared holds org-admin,
@@ -58,6 +78,11 @@ type VaultStore interface {
 	// Upsert creates or merges key/value pairs into the item identified by
 	// (scope, tier, app). Existing keys not present in data are preserved.
 	Upsert(ctx context.Context, scope Scope, tier Tier, app string, data map[string][]byte) error
+
+	// EnsureItem creates an empty item for (scope, tier, app) when it does not
+	// yet exist, so an ExternalSecret can reference it before any keys are set.
+	// No-op when the item already exists — existing keys are left untouched.
+	EnsureItem(ctx context.Context, scope Scope, tier Tier, app string) error
 
 	// ListKeys returns the key names stored in the (scope, tier, app) item.
 	// Returns an empty slice (not an error) when the item does not exist.

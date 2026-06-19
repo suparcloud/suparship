@@ -178,11 +178,24 @@ type gitFetcher struct {
 	client     kubernetes.Interface
 	logger     *slog.Logger
 	cloneDepth int
+	// chartsRepo selects the plain-Helm-charts-monorepo behavior: the scan
+	// path defaults to "charts/", only inline charts are discovered (no
+	// external-mode template.yaml scan), and charts without a bundled
+	// template.yaml import as passthrough/BYO.
+	chartsRepo bool
 }
 
 func newGitFetcher(client kubernetes.Interface, logger *slog.Logger, cloneDepth int) *gitFetcher {
 	return &gitFetcher{client: client, logger: logger, cloneDepth: cloneDepth}
 }
+
+// newGitChartsFetcher builds a gitFetcher in charts-repo mode (SourceTypeGitCharts).
+func newGitChartsFetcher(client kubernetes.Interface, logger *slog.Logger, cloneDepth int) *gitFetcher {
+	return &gitFetcher{client: client, logger: logger, cloneDepth: cloneDepth, chartsRepo: true}
+}
+
+// defaultChartsPath is the subpath gitcharts sources scan when Path is empty.
+const defaultChartsPath = "charts"
 
 // Fetch satisfies fetcher.Fetcher. Source must be tpl.ExternalTemplateRepo.
 func (f *gitFetcher) Fetch(ctx context.Context, source any) (fetcher.FetchResult, error) {
@@ -224,31 +237,44 @@ func (f *gitFetcher) fetchRepo(ctx context.Context, repo tpl.ExternalTemplateRep
 		return fetcher.FetchResult{}, fmt.Errorf("clone %s: %w", repo.RepoURL, err)
 	}
 
-	chartDir := filepath.Join(repoDir, strings.TrimPrefix(repo.Path, "/"))
+	// gitcharts mode scans "charts/" by default; the templates-repo mode
+	// defaults to the repo root.
+	scanPath := repo.Path
+	if scanPath == "" && f.chartsRepo {
+		scanPath = defaultChartsPath
+	}
+	chartDir := filepath.Join(repoDir, strings.TrimPrefix(scanPath, "/"))
 	if info, err := os.Stat(chartDir); err != nil || !info.IsDir() {
-		return fetcher.FetchResult{}, fmt.Errorf("path %q not found in repo", repo.Path)
+		return fetcher.FetchResult{}, fmt.Errorf("path %q not found in repo", scanPath)
 	}
 
 	chartPaths, err := findChartDirs(chartDir)
 	if err != nil {
 		return fetcher.FetchResult{}, fmt.Errorf("walk %s: %w", chartDir, err)
 	}
-	externalTemplates, err := findExternalTemplates(chartDir)
-	if err != nil {
-		return fetcher.FetchResult{}, fmt.Errorf("walk for external templates %s: %w", chartDir, err)
+	// External-mode template discovery only applies to suparship templates
+	// repos. A plain charts repo has none, and a chart shipping its own
+	// template.yaml would otherwise be double-processed / mis-flagged.
+	var externalTemplates []string
+	if !f.chartsRepo {
+		externalTemplates, err = findExternalTemplates(chartDir)
+		if err != nil {
+			return fetcher.FetchResult{}, fmt.Errorf("walk for external templates %s: %w", chartDir, err)
+		}
 	}
 	if len(chartPaths) == 0 && len(externalTemplates) == 0 {
 		// Empty path is technically valid (operator may not have added
 		// templates yet) — return success with no templates so the
 		// source's last-synced timestamp still updates.
-		f.logger.Info("registrysync: no templates found", "source", repo.Name, "path", repo.Path)
+		f.logger.Info("registrysync: no templates found", "source", repo.Name, "path", scanPath)
 		return fetcher.FetchResult{}, nil
 	}
 
 	out := fetcher.FetchResult{}
-	// Inline-mode templates: <name>/chart/Chart.yaml present. The
-	// existing chartimport pipeline handles bundled-template-yaml
-	// pickup and inferred-template fallback.
+	// Inline-mode templates: a Chart.yaml is present. The existing
+	// chartimport pipeline handles bundled-template-yaml pickup and
+	// inferred-template fallback; charts-repo mode additionally folds a
+	// template-less chart into passthrough/BYO.
 	for _, dir := range chartPaths {
 		rt, err := f.resolveChart(dir)
 		if err != nil {
@@ -293,7 +319,33 @@ func (f *gitFetcher) resolveChart(chartDir string) (fetcher.ResolvedTemplate, er
 	if err != nil {
 		return fetcher.ResolvedTemplate{}, fmt.Errorf("to template: %w", err)
 	}
+	// In charts-repo mode, a chart that didn't ship its own template.yaml
+	// got best-effort inferred metadata assuming the suparship-common
+	// schema. That's wrong for an arbitrary Helm chart — import it as
+	// passthrough/BYO so its own values.yaml is the base. A chart that DID
+	// ship a template.yaml (arc.TemplateYAML != nil) is honored as-authored.
+	if f.chartsRepo && arc.TemplateYAML == nil {
+		makePassthrough(tmpl)
+		if err := tmpl.Validate(); err != nil {
+			return fetcher.ResolvedTemplate{}, fmt.Errorf("passthrough template invalid: %w", err)
+		}
+	}
 	return fetcher.ResolvedTemplate{Template: tmpl, ChartBytes: bundle}, nil
+}
+
+// makePassthrough converts an inferred (canonical) template into a passthrough/
+// BYO one: the platform injects no canonical values base and exposes only
+// {platform.*}/{vars.*} tokens, with the chart's own values.yaml as the base.
+// The inferred inputs/mappings/components describe the canonical schema the
+// chart doesn't use, so they're dropped. Mirrors the clearing in
+// internal/server/template_metadata_handler.go.
+func makePassthrough(t *tpl.Template) {
+	no := false
+	t.Spec.InjectCanonicalValues = &no
+	t.Spec.Inputs = nil
+	t.Spec.AdvancedInputs = nil
+	t.Spec.Mappings = nil
+	t.Spec.Components = nil
 }
 
 // resolveExternalTemplate parses a template.yaml file that has no sibling
@@ -356,6 +408,8 @@ func (e *Engine) fetcherForType(sourceType string, logger *slog.Logger) (fetcher
 	switch sourceType {
 	case tpl.SourceTypeGit:
 		return newGitFetcher(e.Client, logger, e.CloneDepth), nil
+	case tpl.SourceTypeGitCharts:
+		return newGitChartsFetcher(e.Client, logger, e.CloneDepth), nil
 	case tpl.SourceTypeOCI:
 		return newOCIFetcher(e.Client, logger), nil
 	case tpl.SourceTypeChartMuseum:

@@ -515,6 +515,9 @@ func New(cfg Config) *Server {
 				rh.appHandler.clusterPool = cfg.ClusterPool
 				cfg.Logger.Info("workload-cluster routing enabled — live status + logs read from each env's workload cluster")
 			}
+			if cfg.VaultStore != nil {
+				rh.appHandler.vault = cfg.VaultStore
+			}
 			if cfg.GitOpsPublisher != nil {
 				rh.appHandler.gitOpsPublisher = cfg.GitOpsPublisher
 				cfg.Logger.Info("app gitops publisher enabled")

@@ -81,6 +81,25 @@ func (w *SAVaultStore) Upsert(ctx context.Context, scope secrets.Scope, tier sec
 	return nil
 }
 
+func (w *SAVaultStore) EnsureItem(ctx context.Context, scope secrets.Scope, tier secrets.Tier, app string) error {
+	vaultID, err := w.resolver(scope)
+	if err != nil {
+		return err
+	}
+	title := secrets.ItemName(scope, tier, app)
+	id, err := w.findItemID(ctx, vaultID, title)
+	if err != nil {
+		return err
+	}
+	if id != "" {
+		return nil // already exists — leave its fields untouched
+	}
+	if _, err := w.client.UpsertItem(ctx, vaultID, title, nil); err != nil {
+		return fmt.Errorf("create empty item %q: %w", title, err)
+	}
+	return nil
+}
+
 func (w *SAVaultStore) ListKeys(ctx context.Context, scope secrets.Scope, tier secrets.Tier, app string) ([]secrets.SecretEntry, error) {
 	vaultID, err := w.resolver(scope)
 	if err != nil {

@@ -23,6 +23,25 @@ type TemplateOverride struct {
 	// express. Simple per-cluster values can instead use {platform.cluster} or
 	// cluster-scoped {vars.*}.
 	ClusterValues map[string]map[string]any `json:"clusterValues,omitempty" yaml:"clusterValues,omitempty"`
+	// Metadata holds operator-set display-metadata overrides (title/category/
+	// description) that win over the template's own. Lets operators fix
+	// auto-import mistakes on read-only synced/built-in templates from the UI
+	// without editing the source — stored here so a re-sync can't clobber it.
+	Metadata *TemplateMetadataOverride `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+// TemplateMetadataOverride carries display-metadata overrides. Each field is
+// applied only when non-empty (an empty string means "no override — use the
+// template's own value").
+type TemplateMetadataOverride struct {
+	Title       string `json:"title,omitempty" yaml:"title,omitempty"`
+	Category    string `json:"category,omitempty" yaml:"category,omitempty"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
+// IsEmpty reports whether the metadata override carries nothing.
+func (m *TemplateMetadataOverride) IsEmpty() bool {
+	return m == nil || (m.Title == "" && m.Category == "" && m.Description == "")
 }
 
 // IsEmpty reports whether the override carries nothing — used to decide whether
@@ -44,5 +63,5 @@ func (o *TemplateOverride) IsEmpty() bool {
 			return false
 		}
 	}
-	return true
+	return o.Metadata.IsEmpty()
 }

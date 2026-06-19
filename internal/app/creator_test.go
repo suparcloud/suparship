@@ -465,6 +465,18 @@ func TestComponentsFromTemplate_FallbackWhenNoComponentsDefined(t *testing.T) {
 	}
 }
 
+// A BYO/passthrough template (injectCanonicalValues:false) opts out of the
+// canonical component model: no phantom "web" component is synthesized, since
+// the chart owns its own workloads.
+func TestComponentsFromTemplate_PassthroughGetsNoComponents(t *testing.T) {
+	tmpl := webTemplate()
+	passthrough := false
+	tmpl.Spec.InjectCanonicalValues = &passthrough
+	if comps := ComponentsFromTemplate(tmpl, nil); len(comps) != 0 {
+		t.Errorf("passthrough template should yield no components, got %+v", comps)
+	}
+}
+
 func TestComponentsFromTemplate_RequiredAlwaysEnabled(t *testing.T) {
 	comps := ComponentsFromTemplate(templateWithComponents(), nil)
 	var web *domain.ComponentSpec

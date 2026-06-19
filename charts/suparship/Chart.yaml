@@ -4,7 +4,7 @@ description: >-
   suparShip — GitOps-native platform runtime. Vercel-like developer experience
   on Kubernetes, powered by ArgoCD and Kargo.
 type: application
-version: 0.1.0-1
+version: 0.1.0-2
 appVersion: "0.1.0"
 home: https://github.com/suparcloud/suparship
 sources:

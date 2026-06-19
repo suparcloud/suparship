@@ -296,3 +296,103 @@ func TestIngressReferencesService(t *testing.T) {
 		}
 	}
 }
+
+// deployWithInstance builds a Deployment labelled for app-native discovery.
+func deployWithInstance(name, ns, instance, image string, replicas, available int32) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			CreationTimestamp: metav1.Now(),
+			Labels:            map[string]string{"app.kubernetes.io/instance": instance},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32p(replicas),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: image}}},
+			},
+		},
+		Status: appsv1.DeploymentStatus{Replicas: replicas, ReadyReplicas: available, AvailableReplicas: available},
+	}
+}
+
+// GetAppRuntime aggregates across every labelled Deployment regardless of name,
+// so a BYO chart (Deployments named <release>-server / <release>-cm, not the app
+// name) reports real replicas instead of a name-miss 0/0.
+func TestGetAppRuntime_AggregatesLabelledWorkloads(t *testing.T) {
+	const ns, instance = "proj-voice-staging", "proj-voice-staging"
+	agent := deployWithInstance("voice-server", ns, instance, "img/agent:1", 3, 3)
+	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 1, 0) // progressing
+	client := fake.NewSimpleClientset(agent, cm)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), ns, instance, "voice")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Replicas != 4 || info.Available != 3 {
+		t.Errorf("aggregate replicas = %d/%d, want 4/3", info.Available, info.Replicas)
+	}
+	// worst-of: one workload progressing → app is not healthy.
+	if info.Status != StatusProgressing {
+		t.Errorf("status = %s, want progressing (worst-of)", info.Status)
+	}
+}
+
+// With no labelled workloads (label tracking off / canonical app), GetAppRuntime
+// falls back to the name-based single-Deployment lookup.
+func TestGetAppRuntime_FallsBackToNameWhenNoLabels(t *testing.T) {
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "myapi-dev", CreationTimestamp: metav1.Now()},
+		Spec:       appsv1.DeploymentSpec{Replicas: int32p(2)},
+		Status:     appsv1.DeploymentStatus{Replicas: 2, ReadyReplicas: 2, AvailableReplicas: 2},
+	}
+	client := fake.NewSimpleClientset(dep) // no instance label
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), "myapi-dev", "myapi-api-dev", "api")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusHealthy || info.Replicas != 2 {
+		t.Errorf("fallback lookup failed: status=%s replicas=%d", info.Status, info.Replicas)
+	}
+}
+
+// A multi-workload app where one Deployment is scaled to zero (KEDA idle) must
+// not be dragged to not_deployed: the running workload's health wins.
+func TestGetAppRuntime_ScaleToZeroIsIdleNotNotDeployed(t *testing.T) {
+	const ns, instance = "proj-voice-staging", "proj-voice-staging"
+	agent := deployWithInstance("voice-server", ns, instance, "img/agent:1", 0, 0) // KEDA idle
+	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 1, 1)            // healthy
+	client := fake.NewSimpleClientset(agent, cm)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), ns, instance, "voice")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusHealthy {
+		t.Errorf("status = %s, want healthy (idle agent must not drag it down)", info.Status)
+	}
+	if info.Replicas != 1 || info.Available != 1 {
+		t.Errorf("replicas = %d/%d, want 1/1", info.Available, info.Replicas)
+	}
+}
+
+// When every workload is scaled to zero the app reports idle, not not_deployed.
+func TestGetAppRuntime_AllScaledToZeroIsIdle(t *testing.T) {
+	const ns, instance = "proj-voice-staging", "proj-voice-staging"
+	agent := deployWithInstance("voice-server", ns, instance, "img/agent:1", 0, 0)
+	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 0, 0)
+	client := fake.NewSimpleClientset(agent, cm)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), ns, instance, "voice")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusIdle {
+		t.Errorf("status = %s, want idle", info.Status)
+	}
+}

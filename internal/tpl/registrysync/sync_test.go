@@ -352,3 +352,79 @@ func TestSyncOne_MixedInlineAndExternal(t *testing.T) {
 		t.Errorf("external ConfigMap unexpectedly carries chart.tgz (%d bytes)", len(externalCM.BinaryData["chart.tgz"]))
 	}
 }
+
+// TestSyncOne_GitCharts covers the gitcharts source type: the scan path
+// defaults to charts/, a plain chart imports as passthrough/BYO, and a chart
+// shipping its own template.yaml is honored as-authored (canonical).
+func TestSyncOne_GitCharts(t *testing.T) {
+	requireGit(t)
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+
+	// charts/foo: a plain chart, no template.yaml → passthrough.
+	writeFile(t, filepath.Join(repoDir, "charts/foo/Chart.yaml"),
+		"apiVersion: v2\nname: foo\nversion: 1.0.0\n")
+	writeFile(t, filepath.Join(repoDir, "charts/foo/values.yaml"),
+		"replicas: 1\nimage:\n  repository: foo\n")
+	// charts/bar: ships its own template.yaml (canonical, declares an input).
+	writeFile(t, filepath.Join(repoDir, "charts/bar/Chart.yaml"),
+		"apiVersion: v2\nname: bar\nversion: 0.2.0\n")
+	writeFile(t, filepath.Join(repoDir, "charts/bar/values.yaml"),
+		"replicas: 2\n")
+	writeFile(t, filepath.Join(repoDir, "charts/bar/template.yaml"),
+		"apiVersion: suparship.io/v1alpha1\nkind: Template\n"+
+			"metadata:\n  name: bar\n  version: 0.2.0\n"+
+			"spec:\n  title: Bar\n  category: web\n"+
+			"  engine:\n    type: helm\n    chart:\n      path: ./chart\n"+
+			"  inputs:\n    - name: greeting\n      title: Greeting\n      type: string\n")
+	gitCommit(t, repoDir, "initial")
+
+	client := k8sfake.NewClientset()
+	eng := &registrysync.Engine{Client: client}
+	// Note: no Path set — gitcharts must default to charts/.
+	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
+		Name:    "mycharts",
+		Type:    tpl.SourceTypeGitCharts,
+		RepoURL: repoDir,
+		Ref:     "main",
+	})
+	if res.Err != nil {
+		t.Fatalf("SyncOne returned error: %v", res.Err)
+	}
+	if len(res.Templates) != 2 {
+		t.Fatalf("expected 2 templates imported, got %d (%v)", len(res.Templates), res.Templates)
+	}
+
+	load := func(name string) *tpl.Template {
+		t.Helper()
+		cm, err := client.CoreV1().ConfigMaps("suparship-system").Get(
+			context.Background(), "suparship-template-"+name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("template %s: %v", name, err)
+		}
+		parsed, err := tpl.Parse([]byte(cm.Data["template.yaml"]))
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		return parsed
+	}
+
+	// foo: passthrough — no canonical base, no inferred inputs.
+	foo := load("foo")
+	if foo.Spec.CanonicalValues() {
+		t.Errorf("foo should be passthrough (CanonicalValues false), got injectCanonicalValues=%v", foo.Spec.InjectCanonicalValues)
+	}
+	if len(foo.Spec.Inputs) != 0 || len(foo.Spec.Mappings) != 0 {
+		t.Errorf("foo passthrough should have no inputs/mappings, got %d inputs / %d mappings", len(foo.Spec.Inputs), len(foo.Spec.Mappings))
+	}
+
+	// bar: authored template.yaml honored — canonical (default) + its input kept.
+	bar := load("bar")
+	if !bar.Spec.CanonicalValues() {
+		t.Errorf("bar shipped a template.yaml and should stay canonical, got injectCanonicalValues=%v", bar.Spec.InjectCanonicalValues)
+	}
+	if len(bar.Spec.Inputs) != 1 || bar.Spec.Inputs[0].Name != "greeting" {
+		t.Errorf("bar should keep its authored input, got %+v", bar.Spec.Inputs)
+	}
+}

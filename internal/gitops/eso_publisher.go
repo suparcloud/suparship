@@ -67,6 +67,9 @@ type ESOExternalSecretConfig struct {
 	StoreName string // default ClusterSecretStore (global store)
 	Items     []ESOItemRef
 	Branding  branding.Config
+	// RefreshInterval is the ExternalSecret spec.refreshInterval (org-configured).
+	// Empty falls back to secrets.DefaultRefreshInterval.
+	RefreshInterval string
 }
 
 // BuildClusterSecretStoreYAML renders one per-vault ClusterSecretStore
@@ -149,6 +152,10 @@ spec:
 // secretStoreRef — letting one ExternalSecret pull from the global, env, and
 // cluster ClusterSecretStores into one target Secret.
 func BuildExternalSecretYAML(cfg ESOExternalSecretConfig) string {
+	refreshInterval := cfg.RefreshInterval
+	if strings.TrimSpace(refreshInterval) == "" {
+		refreshInterval = secrets.DefaultRefreshInterval
+	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1
 kind: ExternalSecret
@@ -158,7 +165,7 @@ metadata:
   labels:
 %s
 spec:
-  refreshInterval: 1h
+  refreshInterval: %s
   secretStoreRef:
     name: %s
     kind: ClusterSecretStore
@@ -166,7 +173,7 @@ spec:
     name: %s
     creationPolicy: Owner
   dataFrom:
-`, cfg.Name, cfg.Namespace, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), cfg.StoreName, cfg.Name))
+`, cfg.Name, cfg.Namespace, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), refreshInterval, cfg.StoreName, cfg.Name))
 
 	for _, item := range cfg.Items {
 		sb.WriteString(fmt.Sprintf("  - extract:\n      key: %q\n", item.Key))
@@ -218,6 +225,9 @@ type ScopePresence struct {
 	GlobalShared, GlobalApp   bool
 	EnvShared, EnvApp         bool
 	ClusterShared, ClusterApp bool
+	// ProjectShared / ProjectEnvShared mark project-scope secrets (shared by
+	// every app in the project) present in the global / env vaults.
+	ProjectShared, ProjectEnvShared bool
 }
 
 // WorkloadExternalSecretParams captures the per-app-env info for the single
@@ -226,6 +236,9 @@ type WorkloadExternalSecretParams struct {
 	App       string
 	Namespace string
 	Env       string
+	// Project is the app's project, used to locate project-scope shared items.
+	// Empty skips the project scopes regardless of presence.
+	Project string
 	// Cluster is the registered cluster bound to Env. Empty skips the cluster
 	// scope regardless of presence.
 	Cluster  string
@@ -235,13 +248,18 @@ type WorkloadExternalSecretParams struct {
 	// sourceRef is emitted. False = k8s layout with per-vault stores.
 	UnifiedStore bool
 	Branding     branding.Config
+	// RefreshInterval is the org-configured ExternalSecret refresh interval.
+	// Empty falls back to secrets.DefaultRefreshInterval at render time.
+	RefreshInterval string
 }
 
 // BuildAppExternalSecret returns the single merged ExternalSecret config for an
-// app-env, or nil when no scope has keys. dataFrom items are ordered
-// global→env→cluster, shared-before-app within each scope, so cluster/app wins.
-// Cluster-override items live in the env vault and are included only when the
-// env is bound to a cluster.
+// app-env, or nil when no scope has keys. dataFrom items are ordered by band
+// (global → env → cluster) and within each band org-shared → project-shared →
+// app, so the later (more specific) entry wins on a key collision. Project-
+// shared items live in the global (project-global) / env (project-env) vault;
+// cluster items live in the env vault and are included only when the env is
+// bound to a cluster.
 //
 // Store wiring depends on the backend: with UnifiedStore (1Password) every
 // item extracts from the single per-cluster store, so no sourceRef is emitted;
@@ -257,31 +275,57 @@ func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretCo
 	defaultStore := storeFor(secrets.GlobalScope())
 	var items []ESOItemRef
 
-	add := func(scope secrets.Scope, shared, app bool) {
-		store := storeFor(scope)
-		if shared {
-			items = append(items, ESOItemRef{Key: secrets.SharedItemName(scope), StoreName: store})
-		}
-		if app {
-			items = append(items, ESOItemRef{Key: secrets.AppItemName(scope, p.App), StoreName: store})
-		}
+	sharedItem := func(scope secrets.Scope) {
+		items = append(items, ESOItemRef{Key: secrets.SharedItemName(scope), StoreName: storeFor(scope)})
+	}
+	appItem := func(scope secrets.Scope) {
+		items = append(items, ESOItemRef{Key: secrets.AppItemName(scope, p.App), StoreName: storeFor(scope)})
+	}
+	hasProject := p.Project != ""
+
+	// Global band: org-shared → project-global-shared → app.
+	if p.Presence.GlobalShared {
+		sharedItem(secrets.GlobalScope())
+	}
+	if hasProject && p.Presence.ProjectShared {
+		sharedItem(secrets.ProjectScope(p.Project))
+	}
+	if p.Presence.GlobalApp {
+		appItem(secrets.GlobalScope())
 	}
 
-	add(secrets.GlobalScope(), p.Presence.GlobalShared, p.Presence.GlobalApp)
-	add(secrets.EnvScope(p.Env), p.Presence.EnvShared, p.Presence.EnvApp)
+	// Env band: org-shared → project-env-shared → app.
+	if p.Presence.EnvShared {
+		sharedItem(secrets.EnvScope(p.Env))
+	}
+	if hasProject && p.Presence.ProjectEnvShared {
+		sharedItem(secrets.ProjectEnvScope(p.Project, p.Env))
+	}
+	if p.Presence.EnvApp {
+		appItem(secrets.EnvScope(p.Env))
+	}
+
+	// Cluster band: shared → app (highest precedence escape hatch).
 	if p.Cluster != "" {
-		add(secrets.ClusterScope(p.Env, p.Cluster), p.Presence.ClusterShared, p.Presence.ClusterApp)
+		cluster := secrets.ClusterScope(p.Env, p.Cluster)
+		if p.Presence.ClusterShared {
+			sharedItem(cluster)
+		}
+		if p.Presence.ClusterApp {
+			appItem(cluster)
+		}
 	}
 
 	if len(items) == 0 {
 		return nil
 	}
 	return &ESOExternalSecretConfig{
-		Name:      secrets.AppSecretName(p.App),
-		Namespace: p.Namespace,
-		StoreName: defaultStore,
-		Items:     items,
-		Branding:  p.Branding,
+		Name:            secrets.AppSecretName(p.App),
+		Namespace:       p.Namespace,
+		StoreName:       defaultStore,
+		Items:           items,
+		Branding:        p.Branding,
+		RefreshInterval: p.RefreshInterval,
 	}
 }
 

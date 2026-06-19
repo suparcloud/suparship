@@ -145,6 +145,51 @@ func TestAppSecrets_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestProjectSecrets_RoundTrip exercises the project-scope routes (global +
+// per-env) and confirms a project secret surfaces in an app's resolved view
+// with source=project.
+func TestProjectSecrets_RoundTrip(t *testing.T) {
+	mux, ah := newSecretsMux()
+
+	// Project-global + project-env writes require project admin (org_admin
+	// satisfies it). alice is org_admin in testRBACOrg.
+	for _, p := range []string{
+		"/api/v1/projects/api/secrets/global",
+		"/api/v1/projects/api/secrets/env/staging",
+	} {
+		rec := do(t, mux, ah, "POST", p, "alice", "org_admin", UpsertSecretsRequest{Entries: map[string]string{"PROJ_K": "v"}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("upsert %s: expected 200, got %d: %s", p, rec.Code, rec.Body.String())
+		}
+		rec = do(t, mux, ah, "GET", p, "bob", "developer", nil)
+		var resp SecretKeysResponse
+		mustDecode(t, rec.Body.Bytes(), &resp)
+		if len(resp.Keys) != 1 || resp.Keys[0].Key != "PROJ_K" {
+			t.Fatalf("list %s: expected [PROJ_K], got %+v", p, resp.Keys)
+		}
+	}
+
+	// A developer must not be able to set project secrets (needs project admin).
+	rec := do(t, mux, ah, "POST", "/api/v1/projects/api/secrets/global", "bob", "developer", UpsertSecretsRequest{Entries: map[string]string{"X": "y"}})
+	if rec.Code == http.StatusOK {
+		t.Errorf("developer should not be able to write project secrets, got 200")
+	}
+
+	// The app's resolved view includes the project key, attributed to project.
+	rec = do(t, mux, ah, "GET", "/api/v1/projects/api/apps/backend/envs/staging/secrets/resolved", "bob", "developer", nil)
+	var resolved ResolvedSecretsResponse
+	mustDecode(t, rec.Body.Bytes(), &resolved)
+	var found *ResolvedSecretDTO
+	for i := range resolved.Secrets {
+		if resolved.Secrets[i].Key == "PROJ_K" {
+			found = &resolved.Secrets[i]
+		}
+	}
+	if found == nil || found.Source != secrets.SourceProject {
+		t.Errorf("expected PROJ_K resolved with source=project, got %+v", resolved.Secrets)
+	}
+}
+
 // TestResolvedSecrets merges shared + app across scopes; cluster/app wins.
 func TestResolvedSecrets(t *testing.T) {
 	mux, ah := newSecretsMux()

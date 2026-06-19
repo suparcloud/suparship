@@ -57,3 +57,20 @@ func TestTemplateRegistry_UpsertSource_Update(t *testing.T) {
 		t.Errorf("version = %q, want 2.0.0", src.Version)
 	}
 }
+
+func TestExternalTemplateRepo_GitChartsValidate(t *testing.T) {
+	// A gitcharts source needs only name + repoURL; path/ref are optional
+	// (path defaults to charts/, ref to main).
+	r := &ExternalTemplateRepo{Name: "charts", Type: SourceTypeGitCharts, RepoURL: "https://example.com/charts.git"}
+	if err := r.Validate(); err != nil {
+		t.Fatalf("gitcharts with name+repoURL should validate, got %v", err)
+	}
+	if r.EffectiveType() != SourceTypeGitCharts {
+		t.Errorf("EffectiveType = %q, want %q", r.EffectiveType(), SourceTypeGitCharts)
+	}
+	// Missing repoURL is still rejected.
+	bad := &ExternalTemplateRepo{Name: "charts", Type: SourceTypeGitCharts}
+	if err := bad.Validate(); err == nil {
+		t.Error("expected error when repoURL is missing")
+	}
+}

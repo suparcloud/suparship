@@ -135,6 +135,76 @@ func EnsureNamespace(ctx context.Context, client kubernetes.Interface, ns string
 	return nil
 }
 
+// EnsureNamespaceOwned creates the namespace with the given labels when it does
+// not exist (returning created=true), or adopts a pre-existing namespace
+// without modifying it (returning created=false). The labels — which encode
+// suparship ownership — are therefore applied ONLY to namespaces suparship
+// creates, so an adopted namespace can never be mistaken for an owned one and
+// won't be deleted at project teardown. A namespace racing into existence
+// (IsAlreadyExists) is treated as adopted.
+func EnsureNamespaceOwned(ctx context.Context, client kubernetes.Interface, ns string, labels map[string]string) (created bool, err error) {
+	if _, err := client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{}); err == nil {
+		return false, nil // already exists → adopt, don't mutate
+	} else if !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("checking namespace %q: %w", ns, err)
+	}
+	_, err = client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: ns, Labels: labels},
+	}, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		return false, nil // raced with another creator → adopt
+	}
+	if err != nil {
+		return false, fmt.Errorf("creating namespace %q: %w", ns, err)
+	}
+	return true, nil
+}
+
+// DeleteNamespaceIfOwned deletes a single namespace by name, but only when it
+// carries all of ownerLabels (i.e. suparship created it). Returns true if it
+// was deleted. A missing namespace, or one lacking the ownership labels (an
+// adopted/external namespace that happens to be the app's), is left untouched
+// and returns false. Used on app rename to reclaim the old app's namespaces
+// without ever removing one suparship didn't create.
+func DeleteNamespaceIfOwned(ctx context.Context, client kubernetes.Interface, name string, ownerLabels map[string]string) (bool, error) {
+	ns, err := client.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading namespace %q: %w", name, err)
+	}
+	for k, v := range ownerLabels {
+		if ns.Labels[k] != v {
+			return false, nil // not suparship-owned — leave it
+		}
+	}
+	if err := client.CoreV1().Namespaces().Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("deleting namespace %q: %w", name, err)
+	}
+	return true, nil
+}
+
+// DeleteOwnedNamespaces deletes every namespace matching labelSelector and
+// returns the names it deleted. Only suparship-stamped (owned) namespaces carry
+// the ownership labels, so a selector targeting them never touches adopted or
+// external namespaces. NotFound on an individual delete is ignored (idempotent).
+func DeleteOwnedNamespaces(ctx context.Context, client kubernetes.Interface, labelSelector string) ([]string, error) {
+	list, err := client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		return nil, fmt.Errorf("listing namespaces %q: %w", labelSelector, err)
+	}
+	var deleted []string
+	for i := range list.Items {
+		name := list.Items[i].Name
+		if err := client.CoreV1().Namespaces().Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return deleted, fmt.Errorf("deleting namespace %q: %w", name, err)
+		}
+		deleted = append(deleted, name)
+	}
+	return deleted, nil
+}
+
 // UpsertSecretData creates or updates a K8s Secret in the given namespace,
 // merging the provided data into existing keys.
 func UpsertSecretData(ctx context.Context, client kubernetes.Interface, ns, name string, data map[string][]byte) error {

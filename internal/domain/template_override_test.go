@@ -26,3 +26,20 @@ func TestTemplateOverride_IsEmpty(t *testing.T) {
 		})
 	}
 }
+
+func TestTemplateOverride_IsEmpty_Metadata(t *testing.T) {
+	// A metadata-only override must NOT be considered empty (else it'd be
+	// deleted instead of persisted).
+	o := &TemplateOverride{Metadata: &TemplateMetadataOverride{Category: "worker"}}
+	if o.IsEmpty() {
+		t.Error("override with metadata category should not be empty")
+	}
+	// An override with an empty metadata block and no values IS empty.
+	o2 := &TemplateOverride{Metadata: &TemplateMetadataOverride{}}
+	if !o2.IsEmpty() {
+		t.Error("override with empty metadata and no values should be empty")
+	}
+	if !(&TemplateOverride{}).IsEmpty() {
+		t.Error("zero override should be empty")
+	}
+}

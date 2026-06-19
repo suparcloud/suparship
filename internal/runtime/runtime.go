@@ -17,6 +17,11 @@ const (
 	StatusProgressing = "progressing"
 	StatusNotDeployed = "not_deployed"
 	StatusUnknown     = "unknown"
+	// StatusIdle is a deployed workload intentionally scaled to zero replicas
+	// (e.g. KEDA scale-to-zero off-hours). It exists in the cluster — so it is
+	// NOT "not deployed" — but has nothing running, so it must not be reported
+	// as "healthy" either, nor drag a multi-workload app to "not deployed".
+	StatusIdle = "idle"
 )
 
 // RuntimeInfo describes the live state of a single workload (service or app

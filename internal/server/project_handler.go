@@ -129,7 +129,13 @@ func (rh *rbacHandler) handleDeleteProject(w http.ResponseWriter, r *http.Reques
 	if rh.appHandler != nil && rh.appHandler.gitOpsPublisher != nil {
 		pub := rh.appHandler.gitOpsPublisher
 		counter := rh.projectAppCounter
-		go unpublishProjectTwoPhase(context.Background(), pub, counter, projectName)
+		ah := rh.appHandler
+		// afterPrune runs only once the project's workloads are gone (phase 2
+		// complete), so reclaiming namespaces can't orphan running pods. Only
+		// namespaces suparship created (ownership-labelled) are removed; adopted
+		// ones are left in place.
+		afterPrune := func() { ah.deleteOwnedProjectNamespaces(context.Background(), projectName) }
+		go unpublishProjectTwoPhase(context.Background(), pub, counter, projectName, afterPrune)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -152,7 +158,10 @@ var (
 // commits: app sources first, then — once ArgoCD has pruned the project's
 // generated Applications (or after a grace delay when no counter is wired) —
 // the AppProject. All best-effort; failures are logged, never retried here.
-func unpublishProjectTwoPhase(ctx context.Context, pub GitOpsPublisher, counter ProjectAppCounter, projectName string) {
+// afterPrune, when non-nil, runs after phase 2 completes (the project's
+// AppProject and all its Applications/workloads are pruned) — the safe point to
+// reclaim owned namespaces.
+func unpublishProjectTwoPhase(ctx context.Context, pub GitOpsPublisher, counter ProjectAppCounter, projectName string, afterPrune func()) {
 	if err := pub.UnpublishProjectApps(ctx, projectName); err != nil {
 		slog.Warn("project delete: gitops app cleanup failed; AppProject kept",
 			"project", projectName, "error", err)
@@ -186,6 +195,11 @@ func unpublishProjectTwoPhase(ctx context.Context, pub GitOpsPublisher, counter 
 		return
 	}
 	slog.Info("project delete: gitops cleanup complete", "project", projectName)
+
+	// Workloads are gone — safe to reclaim the namespaces suparship created.
+	if afterPrune != nil {
+		afterPrune()
+	}
 }
 
 // ── requireOrgAdminForProject ─────────────────────────────────────────────────

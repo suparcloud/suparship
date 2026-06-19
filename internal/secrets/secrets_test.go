@@ -23,6 +23,31 @@ func TestVaultName(t *testing.T) {
 	}
 }
 
+func TestProjectScopeNames(t *testing.T) {
+	// Project-global: lives in the org global vault + global store.
+	pg := ProjectScope("voiceai")
+	if got := VaultName(pg); got != "suparship-secrets-global" {
+		t.Errorf("VaultName(project) = %q, want global vault", got)
+	}
+	if got := SharedItemName(pg); got != "shared-project-voiceai" {
+		t.Errorf("SharedItemName(project) = %q", got)
+	}
+	if got := StoreName(pg); got != GlobalStoreName() {
+		t.Errorf("StoreName(project) = %q, want global store %q", got, GlobalStoreName())
+	}
+	// Project-env: lives in the env vault + env store.
+	pe := ProjectEnvScope("voiceai", "staging")
+	if got := VaultName(pe); got != "suparship-secrets-env-staging" {
+		t.Errorf("VaultName(project-env) = %q, want env vault", got)
+	}
+	if got := SharedItemName(pe); got != "shared-project-voiceai-env-staging" {
+		t.Errorf("SharedItemName(project-env) = %q", got)
+	}
+	if got := StoreName(pe); got != EnvStoreName("staging") {
+		t.Errorf("StoreName(project-env) = %q, want env store %q", got, EnvStoreName("staging"))
+	}
+}
+
 func TestItemAndStoreAndWorkloadNames(t *testing.T) {
 	env := EnvScope("staging")
 	if got := SharedItemName(env); got != "shared-env-staging" {
@@ -61,9 +86,11 @@ func TestItemAndStoreAndWorkloadNames(t *testing.T) {
 
 func TestResolveScopes(t *testing.T) {
 	got := ResolveScopes(
-		ScopeKeys{Shared: []string{"A"}, App: []string{"B"}},
-		ScopeKeys{Shared: []string{"B"}, App: []string{"C"}},
-		ScopeKeys{App: []string{"A"}},
+		ScopeKeys{Shared: []string{"A"}, App: []string{"B"}}, // global
+		ScopeKeys{},                                          // projectGlobal
+		ScopeKeys{Shared: []string{"B"}, App: []string{"C"}}, // env
+		ScopeKeys{},                                          // projectEnv
+		ScopeKeys{App: []string{"A"}},                        // cluster
 	)
 	// A: set by global-shared, overwritten by cluster-app → cluster/app.
 	if got["A"].Source != SourceCluster || got["A"].Tier != string(TierApp) {
@@ -76,6 +103,26 @@ func TestResolveScopes(t *testing.T) {
 	// C: only env-app.
 	if got["C"].Source != SourceEnv || got["C"].Tier != string(TierApp) {
 		t.Errorf("C resolved to %+v, want env/app", got["C"])
+	}
+}
+
+// Project layers sit between org-shared and app within each band: a project
+// secret overrides the org-shared value, but the app's own value still wins.
+func TestResolveScopes_ProjectPrecedence(t *testing.T) {
+	got := ResolveScopes(
+		ScopeKeys{Shared: []string{"K", "P"}}, // global-shared: K, P
+		ScopeKeys{Shared: []string{"K"}},      // project-global: K (overrides global K)
+		ScopeKeys{},                           // env
+		ScopeKeys{Shared: []string{"P"}},      // project-env: P (overrides global P)
+		ScopeKeys{App: []string{"K"}},         // cluster-app: K (overrides everything)
+	)
+	// K: global → project-global → cluster-app; cluster wins.
+	if got["K"].Source != SourceCluster {
+		t.Errorf("K = %+v, want cluster (highest)", got["K"])
+	}
+	// P: global-shared → project-env-shared; project wins (no app/cluster override).
+	if got["P"].Source != SourceProject || got["P"].Tier != string(TierShared) {
+		t.Errorf("P = %+v, want project/shared", got["P"])
 	}
 }
 
@@ -101,6 +148,15 @@ func TestBackendConfig_VaultRefs(t *testing.T) {
 	}
 	if _, err := c.VaultIDForScope(EnvScope("unknown")); err == nil {
 		t.Error("expected error for unprovisioned env vault")
+	}
+
+	// Project-global is env-agnostic → global vault. Project-env is env-bound →
+	// the env vault (regression: it previously fell through to the global vault).
+	if id, err := c.VaultIDForScope(ProjectScope("voiceai")); err != nil || id != "g1" {
+		t.Errorf("project-global vault id = %q, %v (want global vault g1)", id, err)
+	}
+	if id, err := c.VaultIDForScope(ProjectEnvScope("voiceai", "staging")); err != nil || id != "e1" {
+		t.Errorf("project-env vault id = %q, %v (want env vault e1)", id, err)
 	}
 
 	c.RemoveVault(EnvScope("staging"))
@@ -140,5 +196,55 @@ func TestVaultStores_Isolation(t *testing.T) {
 				t.Errorf("after delete, app api keys = %+v", keys)
 			}
 		})
+	}
+}
+
+// TestEnsureItem covers the baseline-item guarantee: an app with no secrets
+// still gets an item so its ExternalSecret resolves, and EnsureItem never
+// clobbers an existing item's keys.
+func TestEnsureItem(t *testing.T) {
+	stores := map[string]VaultStore{
+		"mem": NewMemVaultStore(),
+		"k8s": NewK8sVaultStore(fake.NewSimpleClientset()),
+	}
+	ctx := context.Background()
+	for name, store := range stores {
+		t.Run(name, func(t *testing.T) {
+			scope := GlobalScope()
+			// Create on first call.
+			if err := store.EnsureItem(ctx, scope, TierApp, "api"); err != nil {
+				t.Fatalf("ensure: %v", err)
+			}
+			if keys, _ := store.ListKeys(ctx, scope, TierApp, "api"); len(keys) != 0 {
+				t.Errorf("baseline item should be empty, got %+v", keys)
+			}
+			// Add a key, then ensure again — must not wipe it (idempotent).
+			if err := store.Upsert(ctx, scope, TierApp, "api", map[string][]byte{"K": []byte("v")}); err != nil {
+				t.Fatalf("upsert: %v", err)
+			}
+			if err := store.EnsureItem(ctx, scope, TierApp, "api"); err != nil {
+				t.Fatalf("ensure again: %v", err)
+			}
+			if keys, _ := store.ListKeys(ctx, scope, TierApp, "api"); len(keys) != 1 || keys[0].Key != "K" {
+				t.Errorf("EnsureItem clobbered existing keys: %+v", keys)
+			}
+		})
+	}
+}
+
+func TestExternalSecretSettings_EffectiveRefreshInterval(t *testing.T) {
+	if got := (ExternalSecretSettings{}).EffectiveRefreshInterval(); got != "1m" {
+		t.Errorf("empty refresh interval = %q, want 1m (default)", got)
+	}
+	if got := (ExternalSecretSettings{RefreshInterval: "  "}).EffectiveRefreshInterval(); got != "1m" {
+		t.Errorf("blank refresh interval = %q, want 1m (default)", got)
+	}
+	if got := (ExternalSecretSettings{RefreshInterval: "30s"}).EffectiveRefreshInterval(); got != "30s" {
+		t.Errorf("custom refresh interval = %q, want 30s", got)
+	}
+	// Reachable via BackendConfig (round-trips through the org secret-backend API).
+	bc := BackendConfig{ExternalSecrets: ExternalSecretSettings{RefreshInterval: "2m"}}
+	if got := bc.ExternalSecrets.EffectiveRefreshInterval(); got != "2m" {
+		t.Errorf("backend refresh interval = %q, want 2m", got)
 	}
 }

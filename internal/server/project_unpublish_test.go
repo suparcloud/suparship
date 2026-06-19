@@ -78,10 +78,14 @@ func TestUnpublishProjectTwoPhase_WaitsForPrune(t *testing.T) {
 	pub := &twoPhasePublisher{}
 	counter := &countdownCounter{counts: []int{2, 1}} // then 0 forever
 
-	unpublishProjectTwoPhase(context.Background(), pub, counter, "demo")
+	pruned := false
+	unpublishProjectTwoPhase(context.Background(), pub, counter, "demo", func() { pruned = true })
 
 	if got := pub.recorded(); len(got) != 2 || got[0] != "apps" || got[1] != "infra" {
 		t.Fatalf("expected [apps infra], got %v", got)
+	}
+	if !pruned {
+		t.Error("expected afterPrune to run after phase 2 completed")
 	}
 }
 
@@ -99,10 +103,14 @@ func TestUnpublishProjectTwoPhase_TimeoutKeepsAppProject(t *testing.T) {
 		return c
 	}()}
 
-	unpublishProjectTwoPhase(context.Background(), pub, counter, "demo")
+	pruned := false
+	unpublishProjectTwoPhase(context.Background(), pub, counter, "demo", func() { pruned = true })
 
 	if got := pub.recorded(); len(got) != 1 || got[0] != "apps" {
 		t.Fatalf("expected only [apps] on timeout, got %v", got)
+	}
+	if pruned {
+		t.Error("afterPrune must NOT run when phase 2 didn't complete (workloads still present)")
 	}
 }
 
@@ -112,9 +120,13 @@ func TestUnpublishProjectTwoPhase_NoCounterFallsBackToGraceDelay(t *testing.T) {
 	withFastUnpublishTimings(t, time.Second)
 	pub := &twoPhasePublisher{}
 
-	unpublishProjectTwoPhase(context.Background(), pub, nil, "demo")
+	pruned := false
+	unpublishProjectTwoPhase(context.Background(), pub, nil, "demo", func() { pruned = true })
 
 	if got := pub.recorded(); len(got) != 2 || got[0] != "apps" || got[1] != "infra" {
 		t.Fatalf("expected [apps infra], got %v", got)
+	}
+	if !pruned {
+		t.Error("expected afterPrune to run after phase 2 completed")
 	}
 }

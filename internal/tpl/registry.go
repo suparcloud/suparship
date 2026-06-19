@@ -25,6 +25,12 @@ const (
 	// inline-mode templates (chart/ sibling) and external-mode
 	// templates (template.yaml only, engine.chart points at a registry).
 	SourceTypeGit = "git"
+	// SourceTypeGitCharts clones a plain Helm charts monorepo and imports
+	// every standard chart found under a subpath (default "charts/") as a
+	// template. Unlike SourceTypeGit it does not expect the suparship
+	// templates-repo convention: charts without a bundled template.yaml are
+	// imported as passthrough/BYO (the chart's own values.yaml is the base).
+	SourceTypeGitCharts = "gitcharts"
 	// SourceTypeOCI pulls a single chart from an OCI registry. The
 	// chart's bundled template.yaml drives the template metadata when
 	// present; chartimport's inferred fallback runs otherwise.
@@ -115,9 +121,9 @@ func (r *ExternalTemplateRepo) Validate() error {
 		return fmt.Errorf("%w: %q", ErrInvalidProvider, r.Provider)
 	}
 	switch r.EffectiveType() {
-	case SourceTypeGit:
-		// Path defaults to repo root; Ref defaults to "main" — both
-		// optional. Nothing else to enforce.
+	case SourceTypeGit, SourceTypeGitCharts:
+		// Path defaults to repo root (charts/ for gitcharts); Ref defaults
+		// to "main" — both optional. Nothing else to enforce.
 	case SourceTypeOCI, SourceTypeChartMuseum:
 		// Registry-pull sources name a single chart at a single version.
 		if r.Chart == "" {

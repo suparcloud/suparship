@@ -19,6 +19,7 @@ import (
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
@@ -58,6 +59,9 @@ type appHandler struct {
 	// suparship's own tooling cluster. Optional — nil falls back to the
 	// locally-injected runtime/logs providers (single-cluster installs).
 	clusterPool *k8s.ClusterClientPool
+	// vault is the org-configured secret store. Optional — when set, app rename
+	// empties the old app's app-tier vault items best-effort. nil skips that.
+	vault secrets.VaultStore
 }
 
 // newAppHandler creates an appHandler.
@@ -309,6 +313,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			"app", req.Name,
 			"envs", len(result.Environments),
 		)
+		ah.ensureAppNamespaces(r.Context(), result.App, result.Environments)
 		if err := ah.gitOpsPublisher.PublishApp(r.Context(), result.App, result.Environments); err != nil {
 			slog.Error("gitops publish failed — app saved to store but not committed to git",
 				"project", projectName,
@@ -503,6 +508,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		if len(stableEnvs) == 0 {
 			stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
 		}
+		ah.ensureAppNamespaces(r.Context(), app, stableEnvs)
 		if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
 			app.Spec.Values, app.Spec.DisplayName, app.Spec.Description = prevValues, prevDisplay, prevDesc
 			app.Spec.EnvironmentDefaults = prevEnvDefaults
@@ -553,6 +559,110 @@ func (ah *appHandler) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// renameAppRequest is the body for POST /api/v1/projects/{project}/apps/{app}/rename.
+type renameAppRequest struct {
+	NewName string `json:"newName"`
+}
+
+// handleRenameApp handles POST /api/v1/projects/{project}/apps/{app}/rename.
+//
+// An app name is the identity key across the store, gitops, ArgoCD/Kargo,
+// namespaces, and secret items, so a rename is a recreate-under-the-new-name
+// followed by teardown of the old. To minimise downtime for a live app the new
+// name is created + published first (the old keeps running), then the old is
+// torn down. App-tier secret VALUES cannot be migrated (write-only vault), so
+// they must be re-entered under the new name — the UI warns.
+func (ah *appHandler) handleRenameApp(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	oldName := r.PathValue("app")
+
+	var req renameAppRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	newName := strings.TrimSpace(req.NewName)
+	if newName == oldName {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "new name is the same as the current name"})
+		return
+	}
+	if err := domain.ValidateAppName(newName); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
+	oldApp, err := ah.appStore.GetApp(r.Context(), projectName, oldName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + oldName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+	if _, err := ah.appStore.GetApp(r.Context(), projectName, newName); err == nil {
+		writeJSON(w, http.StatusConflict, errorResponse{
+			Error: "app \"" + newName + "\" already exists in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	oldEnvs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, oldName)
+
+	// Build the renamed app + envs. Spec is carried over verbatim; only the
+	// identity (name) and derived namespaces change.
+	newApp := *oldApp
+	newApp.Name = newName
+	newEnvs := make([]*domain.AppEnvironment, 0, len(oldEnvs))
+	for _, oldEnv := range oldEnvs {
+		ne := *oldEnv
+		ne.AppName = newName
+		ne.Namespace = ""                                                  // recomputed below
+		ne.Status = domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed} // fresh; live status refreshes
+		ne.URLs = []string{}
+		ne.Release = nil
+		newEnvs = append(newEnvs, &ne)
+	}
+	ah.resolveEnvNamespaces(r.Context(), &newApp, newEnvs)
+
+	// Persist the new app + envs.
+	if err := ah.appStore.SaveApp(r.Context(), projectName, &newApp); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save renamed app"})
+		return
+	}
+	for _, env := range newEnvs {
+		if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
+			slog.Warn("rename: failed to persist env for new app", "app", newName, "env", env.EnvName, "error", err)
+		}
+	}
+
+	// Create-then-teardown: stand up the new name, then reclaim the old.
+	ah.ensureAppNamespaces(r.Context(), &newApp, newEnvs)
+	if ah.gitOpsPublisher != nil {
+		if err := ah.gitOpsPublisher.PublishApp(r.Context(), &newApp, newEnvs); err != nil {
+			// Roll back the new app so a failed rename leaves the old one intact.
+			_ = ah.appStore.DeleteApp(r.Context(), projectName, newName)
+			slog.Error("rename: publish of new app failed — rolled back, old app left intact",
+				"project", projectName, "old", oldName, "new", newName, "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish renamed app: " + err.Error()})
+			return
+		}
+	}
+
+	// Teardown of the old app — best-effort; the rename has already succeeded.
+	if ah.gitOpsPublisher != nil {
+		if err := ah.gitOpsPublisher.UnpublishApp(r.Context(), projectName, oldName); err != nil {
+			slog.Error("rename: gitops unpublish of old app failed", "project", projectName, "app", oldName, "error", err)
+		}
+	}
+	if err := ah.appStore.DeleteApp(r.Context(), projectName, oldName); err != nil {
+		slog.Error("rename: failed to delete old app from store", "project", projectName, "app", oldName, "error", err)
+	}
+	ah.deleteOldAppNamespaces(r.Context(), projectName, oldEnvs)
+	ah.emptyAppVaultItems(r.Context(), projectName, oldName, oldEnvs)
+
+	slog.Info("renamed app", "project", projectName, "old", oldName, "new", newName)
+	writeJSON(w, http.StatusOK, AppDetailResponse{App: appToDetailDTO(&newApp, newEnvs)})
 }
 
 // itoa converts a small non-negative int to its decimal string representation
@@ -616,9 +726,16 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
 	}
 
-	writeJSON(w, http.StatusOK, AppDetailResponse{
-		App: appToDetailDTO(app, envs),
-	})
+	detail := appToDetailDTO(app, envs)
+	// BYO/passthrough apps don't use the canonical component model — the chart
+	// owns its workloads — so the declared "components" topology is meaningless
+	// (older apps were created with a phantom "web" entry before this was
+	// fixed). Suppress it so the UI's Runtime-components panel disappears.
+	if t, ok := ah.lookupTemplate(r.Context(), app.Spec.Template.Name); ok && !t.Spec.CanonicalValues() {
+		detail.Components = []ComponentSummaryDTO{} // empty (not nil) → JSON [], UI renders nothing
+	}
+
+	writeJSON(w, http.StatusOK, AppDetailResponse{App: detail})
 }
 
 // handleListAppEnvironments handles GET /api/v1/projects/{project}/apps/{app}/environments.
@@ -894,6 +1011,7 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 		"app", appName,
 		"envs", len(stableEnvs),
 	)
+	ah.ensureAppNamespaces(r.Context(), app, stableEnvs)
 	if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
 		slog.Error("gitops sync failed",
 			"project", projectName,
@@ -1028,6 +1146,7 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
 	}
 
+	ah.ensureAppNamespaces(r.Context(), app, stableEnvs)
 	if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
 		// Roll the version pin back so the operator can retry without
 		// the saved state being stuck on a version that didn't publish.
@@ -1271,6 +1390,7 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 	if ah.gitOpsPublisher != nil {
 		app, appErr := ah.appStore.GetApp(r.Context(), projectName, appName)
 		if appErr == nil {
+			ah.ensureAppNamespace(r.Context(), app, targetEnv)
 			if pubErr := ah.gitOpsPublisher.PublishAppEnv(r.Context(), app, targetEnv); pubErr != nil {
 				slog.Warn("promote: failed to publish env files — proceeding with promotion",
 					"project", projectName, "app", appName,
@@ -1515,9 +1635,26 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 
 	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, env.EnvName)
 
+	// instance is the Helm release name suparship sets on every app
+	// Application/ApplicationSet (ReleaseName: app.Name), which Helm stamps as
+	// the app.kubernetes.io/instance label on every rendered resource. It's the
+	// handle the label-based discovery selects on, so BYO charts (whose
+	// Deployments are named by their own fullname template, not the app name)
+	// still report real status. NOTE: this is the app name, NOT the ArgoCD
+	// Application name {project}-{app}-{env}.
+	instance := appName
+
 	// No remote routing (single-cluster / fake mode): query the local provider.
 	if !routed {
 		if ah.runtimeProvider == nil {
+			return
+		}
+		// Prefer label-based app-native discovery when the provider is a real
+		// K8s provider; fakes/tests only implement the name-based interface.
+		if kp, ok := ah.runtimeProvider.(*runtime.K8sProvider); ok {
+			if info, err := kp.GetAppRuntime(ctx, env.Namespace, instance, appName); err == nil {
+				ah.applyRuntimeInfo(env, info)
+			}
 			return
 		}
 		if info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName); err == nil {
@@ -1543,7 +1680,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	agg := &runtime.RuntimeInfo{Status: runtime.StatusHealthy}
 	got := false
 	for _, nc := range clients {
-		info, err := runtime.NewK8sProvider(nc.client).GetServiceRuntime(ctx, env.Namespace, appName)
+		info, err := runtime.NewK8sProvider(nc.client).GetAppRuntime(ctx, env.Namespace, instance, appName)
 		if err != nil {
 			continue
 		}
