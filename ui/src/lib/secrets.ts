@@ -228,6 +228,31 @@ export function deleteProjectEnvSecretKey(project: string, env: string, key: str
   return api.del(`${projectBase(project)}/env/${encodeURIComponent(env)}/${encodeURIComponent(key)}`);
 }
 
+// ── Stack-scope shared secrets (shared by every app in the stack) ────────────
+
+const stackBase = (project: string, stack: string) =>
+  `/projects/${encodeURIComponent(project)}/stacks/${encodeURIComponent(stack)}/secrets`;
+
+export function listStackGlobalSecretKeys(project: string, stack: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(`${stackBase(project, stack)}/global`);
+}
+export function upsertStackGlobalSecrets(project: string, stack: string, entries: Record<string, string>): Promise<void> {
+  return api.post(`${stackBase(project, stack)}/global`, { entries });
+}
+export function deleteStackGlobalSecretKey(project: string, stack: string, key: string): Promise<void> {
+  return api.del(`${stackBase(project, stack)}/global/${encodeURIComponent(key)}`);
+}
+
+export function listStackEnvSecretKeys(project: string, stack: string, env: string): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(`${stackBase(project, stack)}/env/${encodeURIComponent(env)}`);
+}
+export function upsertStackEnvSecrets(project: string, stack: string, env: string, entries: Record<string, string>): Promise<void> {
+  return api.post(`${stackBase(project, stack)}/env/${encodeURIComponent(env)}`, { entries });
+}
+export function deleteStackEnvSecretKey(project: string, stack: string, env: string, key: string): Promise<void> {
+  return api.del(`${stackBase(project, stack)}/env/${encodeURIComponent(env)}/${encodeURIComponent(key)}`);
+}
+
 // ── App-tier secrets (project devs) ──────────────────────────────────────────
 
 const appBase = (project: string, app: string) =>
