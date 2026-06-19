@@ -237,12 +237,12 @@ export function ProjectDetail() {
                 <div className="flex items-center justify-between">
                   <span className="font-semibold text-gray-900">{s.displayName || s.name}</span>
                   <span className="rounded-full bg-white px-2 py-0.5 text-xs text-gray-500">
-                    {s.apps.length} {s.apps.length === 1 ? "app" : "apps"}
+                    {(s.apps ?? []).length} {(s.apps ?? []).length === 1 ? "app" : "apps"}
                   </span>
                 </div>
-                {s.apps.length > 0 && (
+                {(s.apps ?? []).length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
-                    {s.apps.map((a) => (
+                    {(s.apps ?? []).map((a) => (
                       <span key={a} className="rounded bg-white px-1.5 py-0.5 font-mono text-xs text-gray-600">{a}</span>
                     ))}
                   </div>
@@ -255,7 +255,7 @@ export function ProjectDetail() {
 
       {/* Apps not in a stack */}
       {(() => {
-        const grouped = new Set(stacks.flatMap((s) => s.apps));
+        const grouped = new Set(stacks.flatMap((s) => s.apps ?? []));
         const loose = apps.filter((a) => !grouped.has(a.name));
         if (apps.length === 0) return <EmptyApps project={project!} />;
         return (
