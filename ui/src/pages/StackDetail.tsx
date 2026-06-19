@@ -58,7 +58,8 @@ export function StackDetail() {
   if (error) return <div className="p-6 text-sm text-red-600">{error}</div>;
   if (!stack) return <div className="p-6 text-sm text-gray-400">Loading…</div>;
 
-  const members = new Set(stack.apps);
+  const memberApps = stack.apps ?? [];
+  const members = new Set(memberApps);
   const addable = allApps.filter((a) => !members.has(a.name)).map((a) => a.name);
 
   async function move(app: string, toStack: string) {
@@ -119,10 +120,10 @@ export function StackDetail() {
           </p>
         </div>
         <div className="divide-y divide-gray-50">
-          {stack.apps.length === 0 && (
+          {memberApps.length === 0 && (
             <p className="px-6 py-4 text-sm text-gray-400">No apps yet. Add one below.</p>
           )}
-          {stack.apps.map((a) => (
+          {memberApps.map((a) => (
             <div key={a} className="flex items-center justify-between px-6 py-3">
               <Link
                 to={`/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(a)}`}

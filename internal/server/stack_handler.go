@@ -56,6 +56,9 @@ type setAppStackRequest struct {
 }
 
 func stackToDTO(s *domain.Stack, appNames []string) StackDTO {
+	if appNames == nil {
+		appNames = []string{} // marshal as [] not null so the UI can map over it
+	}
 	sort.Strings(appNames)
 	return StackDTO{
 		Name:             s.Name,
