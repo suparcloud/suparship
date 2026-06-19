@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, promoteApp, syncApp, deleteApp, updateApp, upgradeAppTemplate } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, promoteApp, syncApp, deleteApp, renameApp, updateApp, upgradeAppTemplate } from "../lib/apps";
 import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
@@ -806,6 +806,12 @@ export function AppDetail() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  // Rename app
+  const [showRename, setShowRename] = useState(false);
+  const [renameInput, setRenameInput] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+
   // Template upgrade
   const [templateVersions, setTemplateVersions] = useState<TemplateVersionInfo[]>([]);
   const [showUpgradeDialog, setShowUpgradeDialog] = useState(false);
@@ -1086,6 +1092,20 @@ export function AppDetail() {
               </button>
             );
           })()}
+          <button
+            onClick={() => {
+              setRenameInput("");
+              setRenameError(null);
+              setShowRename(true);
+            }}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
+            title="Rename this app"
+          >
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Z" />
+            </svg>
+            Rename
+          </button>
           <button
             onClick={() => {
               setDeleteConfirmInput("");
@@ -1469,6 +1489,85 @@ export function AppDetail() {
           </div>
         </div>
       )}
+
+      {/* Rename app modal */}
+      {showRename &&
+        (() => {
+          const trimmed = renameInput.trim();
+          const validName = /^[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(trimmed);
+          const canRename =
+            !renaming && validName && trimmed !== appName;
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+              <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+                <h3 className="text-lg font-semibold text-gray-900">
+                  Rename {appName}
+                </h3>
+                <div className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                  Renaming recreates the app under the new name and tears down the
+                  old one. If it's deployed it will briefly redeploy into a new
+                  namespace, and <strong>app-level secrets must be re-entered</strong>{" "}
+                  under the new name (they can't be migrated). Values that hardcode
+                  the old name aren't rewritten.
+                </div>
+                <p className="mt-3 text-sm text-gray-700">New name</p>
+                <input
+                  type="text"
+                  value={renameInput}
+                  onChange={(e) => setRenameInput(e.target.value)}
+                  placeholder="new-app-name"
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                  autoFocus
+                />
+                <p className="mt-1 text-xs text-gray-400">
+                  Lowercase letters, digits and hyphens (DNS label), 2–63 chars,
+                  starting with a letter.
+                </p>
+                {renameError && (
+                  <div className="mt-3 rounded-md bg-red-50 px-3 py-2">
+                    <p className="text-sm text-red-700">{renameError}</p>
+                  </div>
+                )}
+                <div className="mt-6 flex gap-3">
+                  <button
+                    onClick={async () => {
+                      if (!project || !appName || !canRename) return;
+                      setRenaming(true);
+                      setRenameError(null);
+                      try {
+                        await renameApp(project, appName, trimmed);
+                        toast.success("App renamed", {
+                          description: `${appName} → ${trimmed}`,
+                        });
+                        navigate(
+                          `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(trimmed)}`,
+                        );
+                      } catch (err) {
+                        const msg =
+                          err instanceof Error ? err.message : "Rename failed";
+                        setRenameError(msg);
+                        toast.error("Failed to rename app", { description: msg });
+                      } finally {
+                        setRenaming(false);
+                      }
+                    }}
+                    disabled={!canRename}
+                    className="flex-1 rounded-lg bg-gray-900 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700 disabled:opacity-50"
+                  >
+                    {renaming ? "Renaming…" : "Rename app"}
+                  </button>
+                  <button
+                    onClick={() => setShowRename(false)}
+                    disabled={renaming}
+                    className="flex-1 rounded-lg border border-gray-300 bg-white py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
       {/* Environment pipeline bar: stable envs as pipeline nodes, previews as pills */}
       <EnvPipelineBar

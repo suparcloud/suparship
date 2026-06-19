@@ -9,6 +9,7 @@ import (
 	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // Ownership-aware project namespaces.
@@ -96,6 +97,68 @@ func (ah *appHandler) ensureAppNamespace(ctx context.Context, app *domain.App, e
 func (ah *appHandler) ensureAppNamespaces(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) {
 	for _, env := range envs {
 		ah.ensureAppNamespace(ctx, app, env)
+	}
+}
+
+// deleteOldAppNamespaces reclaims the old app's namespaces after a rename: for
+// each old env it deletes that env's namespace on its workload cluster, but only
+// when suparship owns it (carries the managed-by + project labels). Adopted/
+// external namespaces are left untouched. Best-effort.
+func (ah *appHandler) deleteOldAppNamespaces(ctx context.Context, projectName string, oldEnvs []*domain.AppEnvironment) {
+	for _, env := range oldEnvs {
+		if env.Namespace == "" {
+			continue
+		}
+		client, _, brand := ah.envWorkloadClient(ctx, env.EnvName)
+		if client == nil {
+			continue
+		}
+		ownerLabels := map[string]string{
+			"app.kubernetes.io/managed-by": brand.EffectiveName(),
+			brand.LabelKey("project"):      projectName,
+		}
+		if deleted, err := k8s.DeleteNamespaceIfOwned(ctx, client, env.Namespace, ownerLabels); err != nil {
+			slog.Warn("rename: old namespace cleanup failed", "namespace", env.Namespace, "err", err)
+		} else if deleted {
+			slog.Info("rename: deleted old owned namespace", "namespace", env.Namespace)
+		}
+	}
+}
+
+// emptyAppVaultItems best-effort empties the old app's app-tier secret items
+// across every scope (global, per-env, per bound cluster) after a rename, so the
+// renamed app's secrets don't shadow stale values. The VaultStore has no
+// item-delete, so 1Password leaves an empty item shell — harmless and
+// unreferenced. No-op when no vault is wired.
+func (ah *appHandler) emptyAppVaultItems(ctx context.Context, projectName, appName string, oldEnvs []*domain.AppEnvironment) {
+	if ah.vault == nil {
+		return
+	}
+	clusterRefByEnv := map[string]string{}
+	if ah.orgProvider != nil {
+		if org, err := ah.orgProvider.GetOrg(ctx); err == nil && org != nil {
+			for _, e := range org.Environments {
+				clusterRefByEnv[e.Name] = e.EffectiveClusterRef()
+			}
+		}
+	}
+	scopes := []secrets.Scope{secrets.GlobalScope()}
+	for _, env := range oldEnvs {
+		scopes = append(scopes, secrets.EnvScope(env.EnvName))
+		if ref := clusterRefByEnv[env.EnvName]; ref != "" {
+			scopes = append(scopes, secrets.ClusterScope(env.EnvName, ref))
+		}
+	}
+	for _, scope := range scopes {
+		entries, err := ah.vault.ListKeys(ctx, scope, secrets.TierApp, appName)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if err := ah.vault.DeleteKey(ctx, scope, secrets.TierApp, appName, e.Key); err != nil {
+				slog.Warn("rename: failed to clear old app secret key", "app", appName, "key", e.Key, "err", err)
+			}
+		}
 	}
 }
 

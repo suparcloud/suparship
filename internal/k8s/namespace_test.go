@@ -79,3 +79,32 @@ func TestDeleteOwnedNamespaces_OnlyMatchingLabels(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteNamespaceIfOwned(t *testing.T) {
+	owned := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   "proj-web-staging",
+		Labels: map[string]string{"app.kubernetes.io/managed-by": "suparship", "suparship.io/project": "proj"},
+	}}
+	adopted := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "proj-legacy-staging"}} // no labels
+	client := fake.NewSimpleClientset(owned, adopted)
+	want := map[string]string{"app.kubernetes.io/managed-by": "suparship", "suparship.io/project": "proj"}
+
+	// Owned → deleted.
+	if deleted, err := DeleteNamespaceIfOwned(context.Background(), client, "proj-web-staging", want); err != nil || !deleted {
+		t.Fatalf("owned namespace: deleted=%v err=%v, want deleted=true", deleted, err)
+	}
+	if _, err := client.CoreV1().Namespaces().Get(context.Background(), "proj-web-staging", metav1.GetOptions{}); err == nil {
+		t.Error("expected owned namespace removed")
+	}
+	// Not owned (no labels) → skipped.
+	if deleted, err := DeleteNamespaceIfOwned(context.Background(), client, "proj-legacy-staging", want); err != nil || deleted {
+		t.Errorf("adopted namespace: deleted=%v err=%v, want deleted=false", deleted, err)
+	}
+	if _, err := client.CoreV1().Namespaces().Get(context.Background(), "proj-legacy-staging", metav1.GetOptions{}); err != nil {
+		t.Error("adopted namespace must survive")
+	}
+	// Missing → no error, not deleted.
+	if deleted, err := DeleteNamespaceIfOwned(context.Background(), client, "nope", want); err != nil || deleted {
+		t.Errorf("missing namespace: deleted=%v err=%v, want false/nil", deleted, err)
+	}
+}

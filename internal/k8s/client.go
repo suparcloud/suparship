@@ -160,6 +160,31 @@ func EnsureNamespaceOwned(ctx context.Context, client kubernetes.Interface, ns s
 	return true, nil
 }
 
+// DeleteNamespaceIfOwned deletes a single namespace by name, but only when it
+// carries all of ownerLabels (i.e. suparship created it). Returns true if it
+// was deleted. A missing namespace, or one lacking the ownership labels (an
+// adopted/external namespace that happens to be the app's), is left untouched
+// and returns false. Used on app rename to reclaim the old app's namespaces
+// without ever removing one suparship didn't create.
+func DeleteNamespaceIfOwned(ctx context.Context, client kubernetes.Interface, name string, ownerLabels map[string]string) (bool, error) {
+	ns, err := client.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading namespace %q: %w", name, err)
+	}
+	for k, v := range ownerLabels {
+		if ns.Labels[k] != v {
+			return false, nil // not suparship-owned — leave it
+		}
+	}
+	if err := client.CoreV1().Namespaces().Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("deleting namespace %q: %w", name, err)
+	}
+	return true, nil
+}
+
 // DeleteOwnedNamespaces deletes every namespace matching labelSelector and
 // returns the names it deleted. Only suparship-stamped (owned) namespaces carry
 // the ownership labels, so a selector targeting them never touches adopted or
