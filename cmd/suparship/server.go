@@ -132,6 +132,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		runtimeProvider         runtime.Provider
 		logsProvider            runtime.LogsProvider
 		appStore                domain.AppStore
+		stackStore              domain.StackStore
 		clusterStore            domain.ClusterStore
 		vaultStore              secrets.VaultStore
 		templates               []*tpl.Template
@@ -273,6 +274,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		runtimeProvider = kubeDeps.RuntimeProvider
 		logsProvider = kubeDeps.LogsProvider
 		appStore = kubeDeps.AppStore
+		stackStore = kube.NewK8sStackStore(client)
 		clusterStore = kubeDeps.ClusterStore
 		// Default: k8s backend (vault = namespace). Overridden below when the
 		// org is configured for 1Password and an SA token is available.
@@ -589,6 +591,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		LogsProvider:            logsProvider,
 		PreviewStore:            previewStore,
 		AppStore:                appStore,
+		StackStore:              stackStore,
 		ClusterStore:            clusterStore,
 		VaultStore:              vaultStore,
 		GitOpsPublisher:         publisherHolder,

@@ -665,6 +665,28 @@ func (ah *appHandler) handleRenameApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, AppDetailResponse{App: appToDetailDTO(&newApp, newEnvs)})
 }
 
+// republishApp re-resolves the app's stable environments and republishes them.
+// Used when a higher layer changes the app's effective config (e.g. a stack
+// override or stack membership change). Best-effort; no-op without a publisher.
+func (ah *appHandler) republishApp(ctx context.Context, app *domain.App) error {
+	if ah.gitOpsPublisher == nil {
+		return nil
+	}
+	envs, _ := ah.appStore.ListAppEnvironments(ctx, app.ProjectName, app.Name)
+	var stable []*domain.AppEnvironment
+	for _, e := range envs {
+		if e.EnvType != domain.AppEnvPreview {
+			stable = append(stable, e)
+		}
+	}
+	if len(stable) == 0 {
+		stable = ah.stableEnvsFromOrg(ctx, app)
+	}
+	ah.resolveEnvNamespaces(ctx, app, stable)
+	ah.ensureAppNamespaces(ctx, app, stable)
+	return ah.gitOpsPublisher.PublishApp(ctx, app, stable)
+}
+
 // itoa converts a small non-negative int to its decimal string representation
 // without importing strconv (avoids an import just for error messages).
 func itoa(n int) string {
