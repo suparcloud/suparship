@@ -292,6 +292,17 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /api/v1/projects/{project}/stacks/{stack}", viewProject(rh.handleGetStack))
 		mux.HandleFunc("PATCH /api/v1/projects/{project}/stacks/{stack}", manageProject(rh.handlePatchStack))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}", manageProject(rh.handleDeleteStack))
+
+		// Stack-scope shared secrets (shared by every app in the stack).
+		if rh.secretsHandler != nil {
+			sh := rh.secretsHandler
+			mux.HandleFunc("GET /api/v1/projects/{project}/stacks/{stack}/secrets/global", viewProject(sh.handleListSecrets))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/secrets/global", manageProject(sh.handleUpsertSecrets))
+			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/secrets/global/{key}", manageProject(sh.handleDeleteSecret))
+			mux.HandleFunc("GET /api/v1/projects/{project}/stacks/{stack}/secrets/env/{env}", viewProject(sh.handleListSecrets))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/secrets/env/{env}", manageProject(sh.handleUpsertSecrets))
+			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/secrets/env/{env}/{key}", manageProject(sh.handleDeleteSecret))
+		}
 	}
 
 	if rh.appHandler != nil {

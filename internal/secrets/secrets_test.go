@@ -48,6 +48,31 @@ func TestProjectScopeNames(t *testing.T) {
 	}
 }
 
+func TestStackScopeNames(t *testing.T) {
+	// Stack-global: lives in the org global vault + global store.
+	sg := StackScope("voiceproj", "voiceai")
+	if got := VaultName(sg); got != "suparship-secrets-global" {
+		t.Errorf("VaultName(stack) = %q, want global vault", got)
+	}
+	if got := SharedItemName(sg); got != "shared-stack-voiceproj-voiceai" {
+		t.Errorf("SharedItemName(stack) = %q", got)
+	}
+	if got := StoreName(sg); got != GlobalStoreName() {
+		t.Errorf("StoreName(stack) = %q, want global store", got)
+	}
+	// Stack-env: lives in the env vault + env store.
+	se := StackEnvScope("voiceproj", "voiceai", "staging")
+	if got := VaultName(se); got != "suparship-secrets-env-staging" {
+		t.Errorf("VaultName(stack-env) = %q, want env vault", got)
+	}
+	if got := SharedItemName(se); got != "shared-stack-voiceproj-voiceai-env-staging" {
+		t.Errorf("SharedItemName(stack-env) = %q", got)
+	}
+	if got := StoreName(se); got != EnvStoreName("staging") {
+		t.Errorf("StoreName(stack-env) = %q, want env store", got)
+	}
+}
+
 func TestItemAndStoreAndWorkloadNames(t *testing.T) {
 	env := EnvScope("staging")
 	if got := SharedItemName(env); got != "shared-env-staging" {
@@ -88,8 +113,10 @@ func TestResolveScopes(t *testing.T) {
 	got := ResolveScopes(
 		ScopeKeys{Shared: []string{"A"}, App: []string{"B"}}, // global
 		ScopeKeys{},                                          // projectGlobal
+		ScopeKeys{},                                          // stackGlobal
 		ScopeKeys{Shared: []string{"B"}, App: []string{"C"}}, // env
 		ScopeKeys{},                                          // projectEnv
+		ScopeKeys{},                                          // stackEnv
 		ScopeKeys{App: []string{"A"}},                        // cluster
 	)
 	// A: set by global-shared, overwritten by cluster-app → cluster/app.
@@ -112,8 +139,10 @@ func TestResolveScopes_ProjectPrecedence(t *testing.T) {
 	got := ResolveScopes(
 		ScopeKeys{Shared: []string{"K", "P"}}, // global-shared: K, P
 		ScopeKeys{Shared: []string{"K"}},      // project-global: K (overrides global K)
+		ScopeKeys{},                           // stackGlobal
 		ScopeKeys{},                           // env
 		ScopeKeys{Shared: []string{"P"}},      // project-env: P (overrides global P)
+		ScopeKeys{},                           // stackEnv
 		ScopeKeys{App: []string{"K"}},         // cluster-app: K (overrides everything)
 	)
 	// K: global → project-global → cluster-app; cluster wins.
@@ -123,6 +152,28 @@ func TestResolveScopes_ProjectPrecedence(t *testing.T) {
 	// P: global-shared → project-env-shared; project wins (no app/cluster override).
 	if got["P"].Source != SourceProject || got["P"].Tier != string(TierShared) {
 		t.Errorf("P = %+v, want project/shared", got["P"])
+	}
+}
+
+// Stack secrets sit between project-shared and app within each band: a stack
+// secret overrides project + org, but the app's own value still wins.
+func TestResolveScopes_StackPrecedence(t *testing.T) {
+	got := ResolveScopes(
+		ScopeKeys{Shared: []string{"X", "Y"}}, // global-shared: X, Y
+		ScopeKeys{Shared: []string{"X"}},      // project-global: X
+		ScopeKeys{Shared: []string{"X", "Y"}}, // stack-global: X, Y (overrides project+global)
+		ScopeKeys{},                           // env
+		ScopeKeys{},                           // projectEnv
+		ScopeKeys{},                           // stackEnv
+		ScopeKeys{App: []string{"X"}},         // cluster-app: X
+	)
+	// X: ... → stack-global → cluster-app; cluster wins.
+	if got["X"].Source != SourceCluster {
+		t.Errorf("X = %+v, want cluster (highest)", got["X"])
+	}
+	// Y: global-shared → stack-global-shared; stack wins.
+	if got["Y"].Source != SourceStack || got["Y"].Tier != string(TierShared) {
+		t.Errorf("Y = %+v, want stack/shared", got["Y"])
 	}
 }
 

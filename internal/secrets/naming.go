@@ -22,11 +22,11 @@ func EnvVaultName(env string) string { return envVaultPrefix + env }
 // live in their environment's vault.
 func VaultName(scope Scope) string {
 	switch scope.Kind {
-	case ScopeEnv, ScopeCluster, ScopeProjectEnv:
+	case ScopeEnv, ScopeCluster, ScopeProjectEnv, ScopeStackEnv:
 		return EnvVaultName(scope.Env)
 	default:
-		// ScopeGlobal and ScopeProject both live in the org global vault —
-		// project items are scope-unique by name, so they don't collide.
+		// ScopeGlobal, ScopeProject and ScopeStack all live in the org global
+		// vault — items are scope-unique by name, so they don't collide.
 		return GlobalVaultName()
 	}
 }
@@ -47,6 +47,10 @@ func scopeSuffix(scope Scope) string {
 		return "project-" + scope.Project
 	case ScopeProjectEnv:
 		return "project-" + scope.Project + "-env-" + scope.Env
+	case ScopeStack:
+		return "stack-" + scope.Project + "-" + scope.Stack
+	case ScopeStackEnv:
+		return "stack-" + scope.Project + "-" + scope.Stack + "-env-" + scope.Env
 	default:
 		return "global"
 	}
@@ -100,11 +104,11 @@ func UnifiedStoreName() string { return unifiedStoreName }
 // diverge for cluster scope.
 func StoreName(scope Scope) string {
 	switch scope.Kind {
-	case ScopeCluster, ScopeProjectEnv:
-		// Both live in the env vault → read from the env store.
+	case ScopeCluster, ScopeProjectEnv, ScopeStackEnv:
+		// All live in the env vault → read from the env store.
 		return "suparship-store-" + scopeSuffix(EnvScope(scope.Env))
-	case ScopeProject:
-		// Lives in the global vault → read from the global store.
+	case ScopeProject, ScopeStack:
+		// Live in the global vault → read from the global store.
 		return "suparship-store-" + scopeSuffix(GlobalScope())
 	default:
 		return "suparship-store-" + scopeSuffix(scope)

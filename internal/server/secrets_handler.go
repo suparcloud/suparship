@@ -717,9 +717,16 @@ func scopeFromPath(r *http.Request) secrets.Scope {
 	if c := r.PathValue("cluster"); c != "" {
 		return secrets.ClusterScope(r.PathValue("env"), c)
 	}
-	// Project-scope shared secrets: {project} present WITHOUT {app}. (App-tier
-	// routes carry both {project} and {app} and fall through to the global/env
-	// scopes below, where tierAndApp returns the app tier.)
+	// Stack-scope shared secrets: {project} + {stack} present WITHOUT {app}.
+	if p, s := r.PathValue("project"), r.PathValue("stack"); p != "" && s != "" && r.PathValue("app") == "" {
+		if e := r.PathValue("env"); e != "" {
+			return secrets.StackEnvScope(p, s, e)
+		}
+		return secrets.StackScope(p, s)
+	}
+	// Project-scope shared secrets: {project} present WITHOUT {app}/{stack}.
+	// (App-tier routes carry both {project} and {app} and fall through to the
+	// global/env scopes below, where tierAndApp returns the app tier.)
 	if p := r.PathValue("project"); p != "" && r.PathValue("app") == "" {
 		if e := r.PathValue("env"); e != "" {
 			return secrets.ProjectEnvScope(p, e)
@@ -809,12 +816,20 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 		projectGlobal = read(secrets.ProjectScope(project))
 		projectEnv = read(secrets.ProjectEnvScope(project, envName))
 	}
+	// Stack layers — only when the app belongs to a stack.
+	var stackGlobal, stackEnv secrets.ScopeKeys
+	if h.appStore != nil {
+		if app, err := h.appStore.GetApp(ctx, project, appName); err == nil && app != nil && app.Spec.Stack != "" {
+			stackGlobal = read(secrets.StackScope(project, app.Spec.Stack))
+			stackEnv = read(secrets.StackEnvScope(project, app.Spec.Stack, envName))
+		}
+	}
 	var cluster secrets.ScopeKeys
 	if clusterRef := h.resolveClusterRef(r, envName); clusterRef != "" {
 		cluster = read(secrets.ClusterScope(envName, clusterRef))
 	}
 
-	resolved := secrets.ResolveScopes(global, projectGlobal, env, projectEnv, cluster)
+	resolved := secrets.ResolveScopes(global, projectGlobal, stackGlobal, env, projectEnv, stackEnv, cluster)
 	sortedKeys := make([]string, 0, len(resolved))
 	for k := range resolved {
 		sortedKeys = append(sortedKeys, k)
