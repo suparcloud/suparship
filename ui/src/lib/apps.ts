@@ -244,3 +244,18 @@ export function deleteApp(project: string, app: string): Promise<void> {
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}`,
   );
 }
+
+// renameApp changes an app's identity name. The server recreates the app under
+// the new name (new ArgoCD Apps, Kargo CRs, namespaces) and tears down the old.
+// A deployed app briefly redeploys; app-level secrets must be re-entered under
+// the new name. Returns the renamed app's detail.
+export function renameApp(
+  project: string,
+  app: string,
+  newName: string,
+): Promise<AppDetailResponse> {
+  return api.post<AppDetailResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/rename`,
+    { newName },
+  );
+}
