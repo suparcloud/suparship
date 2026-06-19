@@ -349,6 +349,13 @@ type AppSpec struct {
 	// Tokens: {org}, {project}, {app}, {env}.
 	// Empty: inherits from project, org environment, or org-level defaults.
 	NamespacePattern string `json:"namespacePattern,omitempty" yaml:"namespacePattern,omitempty"`
+	// Stack is the name of the stack this app belongs to within its project
+	// (empty = the app sits directly in the project, not in any stack). A stack
+	// is a logical grouping of tightly-coupled apps that share an override layer
+	// (org → project → stack → app), optionally a namespace, and batch lifecycle
+	// actions. Membership is just this label — the app keeps its own identity,
+	// ArgoCD Application, and Kargo pipeline.
+	Stack string `json:"stack,omitempty" yaml:"stack,omitempty"`
 }
 
 // App is a deployable unit owned by a project. It combines identity metadata
