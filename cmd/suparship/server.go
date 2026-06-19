@@ -422,6 +422,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					clusterStore:    clusterStore,
 					vault:           vaultStore,
 					projectStore:    projectStore,
+					stackStore:      stackStore,
 					envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(cmd.Context(), orgProvider)),
 					builtin:         templates,
 					clusterLoader:   clusterTemplateLoaderFromClient(kubeClient),
@@ -559,6 +560,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				clusterStore:    clusterStore,
 				vault:           vaultStore,
 				projectStore:    projectStore,
+				stackStore:      stackStore,
 				envConfigReader: envConfigReaderFromClient(kubeClient, brandingFromOrg(ctx, orgProvider)),
 				builtin:         templates,
 				clusterLoader:   clusterTemplateLoaderFromClient(kubeClient),
@@ -660,6 +662,10 @@ type gitOpsPublisherAdapter struct {
 	// projectStore reads the project's own EnvConfig (project-scope env vars).
 	// Optional: when nil, the project layer contributes no vars.
 	projectStore project.Store
+	// stackStore reads an app's stack record (Spec.Stack) for the stack-scope
+	// override layer (env vars + raw values) that sits between project and app.
+	// Optional: nil → no stack layer.
+	stackStore domain.StackStore
 	// envConfigReader reads the cluster-scope env-var ConfigMap from
 	// suparship-system. Optional: when nil, the cluster layer contributes no
 	// vars.
@@ -729,6 +735,24 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 	}
 	pub.PlatformDefaultValues = def
 	pub.PlatformEnvValues = env
+}
+
+// setStackOverlays populates the app's stack shared Helm-values overlay onto the
+// publish env (StackRawValues for all envs + StackEnvRawValues for this env),
+// layered below the developer RawValues. No-op when the app isn't in a stack or
+// the stack has no values. Best-effort — a load error degrades to no stack layer.
+func (a *gitOpsPublisherAdapter) setStackOverlays(ctx context.Context, pub *gitops.AppPublishEnv, app *domain.App, envName string) {
+	if app.Spec.Stack == "" || a.stackStore == nil {
+		return
+	}
+	st, err := a.stackStore.GetStack(ctx, app.ProjectName, app.Spec.Stack)
+	if err != nil || st == nil {
+		return
+	}
+	pub.StackRawValues = st.Spec.RawValues
+	if ev, ok := st.Spec.EnvRawValues[envName]; ok {
+		pub.StackEnvRawValues = ev
+	}
 }
 
 // loadOverride best-effort reads a template's org-level platform override.
@@ -971,6 +995,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 		// pod will see — no chart-side multi-source merging.
 		pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
 		setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
+		a.setStackOverlays(ctx, &pub, app, env.EnvName)
 
 		pubEnvs = append(pubEnvs, pub)
 	}
@@ -1049,6 +1074,23 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, or
 					"project", app.ProjectName, "env", envName, "err", err)
 			} else {
 				pub.ScopeKeys.ProjectEnvShared = true
+			}
+		}
+
+		// Stack-scope shared secrets apply to every app in the stack (same
+		// ensure-and-always-reference pattern as project secrets).
+		if app.Spec.Stack != "" && app.ProjectName != "" {
+			if err := a.vault.EnsureItem(ctx, secrets.StackScope(app.ProjectName, app.Spec.Stack), secrets.TierShared, ""); err != nil {
+				slog.Warn("gitops: ensuring stack-global secret item",
+					"project", app.ProjectName, "stack", app.Spec.Stack, "err", err)
+			} else {
+				pub.ScopeKeys.StackShared = true
+			}
+			if err := a.vault.EnsureItem(ctx, secrets.StackEnvScope(app.ProjectName, app.Spec.Stack, envName), secrets.TierShared, ""); err != nil {
+				slog.Warn("gitops: ensuring stack-env secret item",
+					"project", app.ProjectName, "stack", app.Spec.Stack, "env", envName, "err", err)
+			} else {
+				pub.ScopeKeys.StackEnvShared = true
 			}
 		}
 	}
@@ -1149,6 +1191,16 @@ func (a *gitOpsPublisherAdapter) mergeAllEnvVars(ctx context.Context, app *domai
 		}
 	}
 
+	// Stack layer (between project and app): a stack's shared env vars apply to
+	// every member app, overriding project and overridden by the app.
+	if app.Spec.Stack != "" && a.stackStore != nil {
+		if st, err := a.stackStore.GetStack(ctx, app.ProjectName, app.Spec.Stack); err == nil && st != nil {
+			for k, v := range st.Spec.EnvConfig.Vars {
+				merged[k] = v
+			}
+		}
+	}
+
 	for k, v := range app.Spec.EnvConfig.Vars {
 		merged[k] = v
 	}
@@ -1214,6 +1266,7 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 	}
 	pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
 	setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
+	a.setStackOverlays(ctx, &pub, app, env.EnvName)
 
 	return a.inner.PublishAppEnv(ctx, app, pub)
 }

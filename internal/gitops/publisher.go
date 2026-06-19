@@ -703,7 +703,8 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 //  1. template/org PlatformDefaultValues (PE, all envs)
 //  2. template/org PlatformEnvValues     (PE, this env)
 //  3. org PlatformClusterValues[cluster] (PE, this cluster — env-agnostic)
-//  4. app + env developer RawValues      (rawValuesOverlay)
+//  4. stack RawValues + StackEnvRawValues (shared by the app's stack)
+//  5. app + env developer RawValues      (rawValuesOverlay)
 //
 // cluster is the target cluster ref for the values.yaml being written (the active
 // cluster in active mode, or one fan-out member); "" applies no cluster layer.
@@ -713,6 +714,10 @@ func envOverlay(app *domain.App, env AppPublishEnv, cluster string) map[string]a
 	if cluster != "" && env.PlatformClusterValues != nil {
 		overlay = deepMerge(overlay, deepCopyMap(env.PlatformClusterValues[cluster]))
 	}
+	// Stack layer: shared overlay for the app's stack (all envs, then this env),
+	// below the developer's app/app-env RawValues.
+	overlay = deepMerge(overlay, deepCopyMap(env.StackRawValues))
+	overlay = deepMerge(overlay, deepCopyMap(env.StackEnvRawValues))
 	return deepMerge(overlay, rawValuesOverlay(app, env.EnvName))
 }
 
@@ -847,6 +852,7 @@ func (p *Publisher) writeAppPlatformResources(
 		Namespace:       namespace,
 		Env:             env.EnvName,
 		Project:         app.ProjectName,
+		Stack:           app.Spec.Stack,
 		Cluster:         env.ClusterRef,
 		Presence:        env.ScopeKeys,
 		UnifiedStore:    p.usesUnifiedStore(),
@@ -1252,6 +1258,12 @@ type AppPublishEnv struct {
 	// values.yaml is applied (see envOverlay). Populated by the publish adapter
 	// from the org template override.
 	PlatformClusterValues map[string]map[string]any
+	// StackRawValues / StackEnvRawValues are the app's stack's shared Helm values
+	// overlay (all envs / this env), layered above the platform values and below
+	// the developer RawValues. Empty when the app isn't in a stack. Populated by
+	// the publish adapter from the stack record.
+	StackRawValues    map[string]any
+	StackEnvRawValues map[string]any
 	// SkipCanonicalBase, when true, omits the canonical suparship-common values
 	// base (app/platform/components/suparship/routing) from the published
 	// values.yaml — for BYO/passthrough templates (Spec.CanonicalValues()==false).
@@ -1327,6 +1339,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 			Namespace:       preview.Namespace,
 			Env:             preview.PreviewName,
 			Project:         app.ProjectName,
+			Stack:           app.Spec.Stack,
 			Presence:        preview.ScopeKeys,
 			UnifiedStore:    p.usesUnifiedStore(),
 			Branding:        p.cfg.Branding,

@@ -18,17 +18,24 @@ const (
 	// ScopeProjectEnv holds secrets shared by every app in a project, in one
 	// environment. Items live in that env's vault (alongside cluster overrides).
 	ScopeProjectEnv ScopeKind = "projectenv"
+	// ScopeStack holds secrets shared by every app in a stack, in every
+	// environment. Items live in the org global vault (names are scope-unique).
+	ScopeStack ScopeKind = "stack"
+	// ScopeStackEnv holds secrets shared by every app in a stack, in one
+	// environment. Items live in that env's vault.
+	ScopeStackEnv ScopeKind = "stackenv"
 )
 
 // Scope identifies which vault a secret lives in. Env is set for ScopeEnv,
-// ScopeCluster and ScopeProjectEnv; Cluster only for ScopeCluster; Project for
-// ScopeProject and ScopeProjectEnv. Cluster overrides and project-env secrets
-// are per-key items stored inside the env vault.
+// ScopeCluster, ScopeProjectEnv and ScopeStackEnv; Cluster only for ScopeCluster;
+// Project for the project/stack scopes; Stack for the stack scopes. Cluster,
+// project-env and stack-env items are per-key items stored inside the env vault.
 type Scope struct {
 	Kind    ScopeKind
 	Env     string
 	Cluster string
 	Project string
+	Stack   string
 }
 
 // GlobalScope returns the global scope.
@@ -53,6 +60,18 @@ func ProjectScope(project string) Scope {
 // The items live in that environment's vault.
 func ProjectEnvScope(project, env string) Scope {
 	return Scope{Kind: ScopeProjectEnv, Project: project, Env: env}
+}
+
+// StackScope returns the scope for a stack's secrets shared across every
+// environment. The items live in the org global vault.
+func StackScope(project, stack string) Scope {
+	return Scope{Kind: ScopeStack, Project: project, Stack: stack}
+}
+
+// StackEnvScope returns the scope for a stack's secrets in one environment.
+// The items live in that environment's vault.
+func StackEnvScope(project, stack, env string) Scope {
+	return Scope{Kind: ScopeStackEnv, Project: project, Stack: stack, Env: env}
 }
 
 // Tier identifies ownership within a scope: TierShared holds org-admin,
