@@ -70,20 +70,30 @@ plumbing.
   shared namespace siblings rely on.
 - UI: a SharedNamespace toggle on the StackDetail page.
 
-## Phase 3 — Batch lifecycle (planned)
+## Phase 3 — Batch lifecycle ✅ (shipped)
 
-Goal: act on the whole collection in one call — orchestration over the existing
-per-app handlers, **no new ArgoCD/Kargo generators**.
+Act on the whole collection in one call — orchestration over the existing
+per-app flows, **no new ArgoCD/Kargo generators**. Every op is best-effort and
+returns a per-app result summary (`stackBatchResponse` — `{app, ok, message,
+error}` rows) so partial failures are visible.
 
-- `POST .../stacks/{stack}/sync` — republish every member app.
-- `POST .../stacks/{stack}/promote {targetEnv}` — promote every member
-  (per-app `handlePromoteApp` / `domainapp.Promote`).
-- `POST .../stacks/{stack}/previews {name}` / `DELETE …` — preview/tear down the
-  whole collection in a shared preview namespace
-  `{project}-{stack}-preview-{name}` so it's co-located + discoverable.
-- `DELETE .../stacks/{stack}?deleteApps=true` — delete all members
-  (`handleDeleteApp`) + the stack record + reclaim the stack namespace.
-- Best-effort with a per-app result summary.
+- `POST .../stacks/{stack}/sync` — `republishApp` for every member.
+- `POST .../stacks/{stack}/promote {targetEnvironment}` — `promoteAppEnv` for
+  every member. The promote core was extracted from `handlePromoteApp` into
+  `appHandler.promoteAppEnv` (Kargo Promotion when wired, else store-copy) so the
+  per-app handler and the batch share one path; status mapping via
+  `statusForPromoteErr`.
+- `POST .../stacks/{stack}/previews {name}` / `DELETE …/previews/{name}` —
+  preview/tear down the whole collection co-located in one
+  `{project}-{stack}-preview-{name}` namespace (`createStackPreview` overrides
+  each member's preview namespace + stamps the stack ownership label + publishes).
+- `DELETE .../stacks/{stack}?deleteApps=true` — delete every member app (store +
+  gitops) and reclaim the stack's shared namespaces
+  (`deleteOwnedStackNamespaces`, by the `suparship.io/stack` selector). Without
+  the flag the apps are detached and kept (default), and `relocateApp` moves them
+  back to their own namespaces.
+- UI: a "Batch actions" card on the StackDetail page (sync all, promote all to an
+  env, preview the stack, delete stack + all apps), `lib/stacks.ts` clients.
 
 ## Phase 4 — Clone stack (planned)
 

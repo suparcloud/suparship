@@ -243,6 +243,51 @@ func (ah *appHandler) emptyAppVaultItems(ctx context.Context, projectName, appNa
 	}
 }
 
+// deleteOwnedStackNamespaces removes every namespace suparship created for a
+// shared-namespace stack (managed-by + project + stack labels) across all bound
+// workload clusters (plus the local cluster), leaving adopted/external ones
+// untouched. Best-effort; call only after the stack's apps have been pruned.
+func (ah *appHandler) deleteOwnedStackNamespaces(ctx context.Context, projectName, stackName string) {
+	if ah.orgProvider == nil || stackName == "" {
+		return
+	}
+	org, err := ah.orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		return
+	}
+	selector := ownedNamespaceSelector(org.Branding, projectName) + "," + org.Branding.LabelKey("stack") + "=" + stackName
+
+	clients := map[string]kubernetes.Interface{}
+	for _, e := range org.Environments {
+		if ref := e.EffectiveClusterRef(); ref != "" && ah.clusterPool != nil {
+			if _, seen := clients[ref]; seen {
+				continue
+			}
+			if c, err := ah.clusterPool.Get(ctx, ref); err == nil {
+				clients[ref] = c
+			} else {
+				slog.Warn("stack namespace cleanup: cluster unavailable", "cluster", ref, "project", projectName, "stack", stackName, "err", err)
+			}
+		} else if ah.kubeClient != nil {
+			clients[""] = ah.kubeClient
+		}
+	}
+	if len(clients) == 0 && ah.kubeClient != nil {
+		clients[""] = ah.kubeClient
+	}
+
+	for ref, c := range clients {
+		deleted, err := k8s.DeleteOwnedNamespaces(ctx, c, selector)
+		if err != nil {
+			slog.Warn("stack namespace cleanup failed", "cluster", ref, "project", projectName, "stack", stackName, "err", err)
+			continue
+		}
+		if len(deleted) > 0 {
+			slog.Info("stack namespace cleanup: deleted owned namespaces", "cluster", ref, "project", projectName, "stack", stackName, "namespaces", deleted)
+		}
+	}
+}
+
 // deleteOwnedProjectNamespaces removes every namespace suparship created for the
 // project across all bound workload clusters (plus the local cluster), leaving
 // adopted/external ones untouched — they carry no ownership labels. Best-effort.

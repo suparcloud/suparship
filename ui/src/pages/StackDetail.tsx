@@ -7,12 +7,15 @@ import { listApps } from "../lib/apps";
 import { listProjectEnvironments } from "../lib/projects";
 import type { ProjectEnvironment } from "../lib/projects";
 import {
+  createStackPreview,
   deleteStack,
   getStack,
+  promoteStack,
   setAppStack,
+  syncStack,
   updateStack,
 } from "../lib/stacks";
-import type { Stack } from "../lib/stacks";
+import type { Stack, StackBatchResponse } from "../lib/stacks";
 import type { EnvConfig } from "../lib/envconfig";
 import {
   listStackGlobalSecretKeys,
@@ -33,6 +36,9 @@ export function StackDetail() {
   const [envs, setEnvs] = useState<ProjectEnvironment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [addApp, setAddApp] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [promoteEnv, setPromoteEnv] = useState("");
+  const [previewName, setPreviewName] = useState("");
 
   const reload = useCallback(async () => {
     if (!project || !stackName) return;
@@ -74,15 +80,44 @@ export function StackDetail() {
     }
   }
 
-  async function onDelete() {
+  async function onDelete(deleteApps: boolean) {
     if (!project) return;
-    if (!confirm(`Delete stack "${stackName}"? Member apps stay in the project (detached from the stack).`)) return;
+    const msg = deleteApps
+      ? `Delete stack "${stackName}" AND all its member apps? This tears down every app in the collection — this cannot be undone.`
+      : `Delete stack "${stackName}"? Member apps stay in the project (detached from the stack).`;
+    if (!confirm(msg)) return;
     try {
-      await deleteStack(project, stackName!);
-      toast.success(`Stack ${stackName} deleted`);
+      await deleteStack(project, stackName!, deleteApps);
+      toast.success(deleteApps ? `Stack ${stackName} and its apps deleted` : `Stack ${stackName} deleted`);
       navigate(`/projects/${encodeURIComponent(project)}`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Failed to delete stack");
+    }
+  }
+
+  // summarize toasts the per-app outcome of a batch op.
+  function summarize(action: string, res: StackBatchResponse) {
+    const failed = res.results.filter((r) => !r.ok);
+    if (failed.length === 0) {
+      toast.success(`${action}: ${res.results.length} app(s) succeeded`);
+    } else {
+      toast.error(
+        `${action}: ${failed.length}/${res.results.length} failed — ${failed
+          .map((r) => `${r.app}: ${r.error}`)
+          .join("; ")}`,
+      );
+    }
+  }
+
+  async function runBatch(action: string, fn: () => Promise<StackBatchResponse>) {
+    setBusy(action);
+    try {
+      summarize(action, await fn());
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : `Failed to ${action}`);
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -103,7 +138,7 @@ export function StackDetail() {
             {stack.description && <p className="mt-1 text-sm text-gray-500">{stack.description}</p>}
           </div>
           <button
-            onClick={onDelete}
+            onClick={() => onDelete(false)}
             className="rounded-md border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
           >
             Delete stack
@@ -144,6 +179,104 @@ export function StackDetail() {
             </span>
           </span>
         </label>
+      </div>
+
+      {/* Batch lifecycle */}
+      <div className="rounded-xl border border-gray-200 bg-white">
+        <div className="border-b border-gray-100 px-6 py-4">
+          <h2 className="text-base font-medium text-gray-900">Batch actions</h2>
+          <p className="mt-0.5 text-sm text-gray-500">
+            Act on every app in this stack at once. Each app keeps its own ArgoCD/Kargo pipeline — these
+            just fan out over the members.
+          </p>
+        </div>
+        <div className="space-y-4 p-6">
+          {/* Sync all */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm">
+              <span className="font-medium text-gray-900">Sync all</span>
+              <span className="block text-xs text-gray-500">Republish every member app's GitOps manifests.</span>
+            </div>
+            <button
+              onClick={() => runBatch("sync", () => syncStack(project, stackName))}
+              disabled={busy !== null || memberApps.length === 0}
+              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {busy === "sync" ? "Syncing…" : "Sync all"}
+            </button>
+          </div>
+
+          {/* Promote all */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm">
+              <span className="font-medium text-gray-900">Promote all</span>
+              <span className="block text-xs text-gray-500">Promote every member to the chosen environment.</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                value={promoteEnv}
+                onChange={(e) => setPromoteEnv(e.target.value)}
+                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+              >
+                <option value="">Target env…</option>
+                {envs.map((env) => (
+                  <option key={env.name} value={env.name}>{env.displayName || env.name}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => promoteEnv && runBatch("promote", () => promoteStack(project, stackName, promoteEnv))}
+                disabled={busy !== null || !promoteEnv || memberApps.length === 0}
+                className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {busy === "promote" ? "Promoting…" : "Promote all"}
+              </button>
+            </div>
+          </div>
+
+          {/* Preview the whole stack */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm">
+              <span className="font-medium text-gray-900">Preview the stack</span>
+              <span className="block text-xs text-gray-500">
+                Bring up a preview of every member co-located in one{" "}
+                <code className="font-mono">{project}-{stack.name}-preview-&lt;name&gt;</code> namespace.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={previewName}
+                onChange={(e) => setPreviewName(e.target.value)}
+                placeholder="preview name"
+                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+              />
+              <button
+                onClick={() =>
+                  previewName &&
+                  runBatch("preview", () => createStackPreview(project, stackName, previewName)).then(() => setPreviewName(""))
+                }
+                disabled={busy !== null || !previewName || memberApps.length === 0}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {busy === "preview" ? "Creating…" : "Preview"}
+              </button>
+            </div>
+          </div>
+
+          {/* Destroy everything */}
+          <div className="flex items-center justify-between gap-3 border-t border-gray-100 pt-4">
+            <div className="text-sm">
+              <span className="font-medium text-red-700">Delete stack + all apps</span>
+              <span className="block text-xs text-gray-500">Tear down every member app and reclaim the stack namespaces.</span>
+            </div>
+            <button
+              onClick={() => onDelete(true)}
+              disabled={busy !== null}
+              className="rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+            >
+              Delete everything
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Members */}

@@ -198,9 +198,10 @@ func (rh *rbacHandler) handlePatchStack(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, stackToDTO(s, rh.stackMemberNames(r.Context(), project, name)))
 }
 
-// handleDeleteStack removes the stack record and detaches its member apps (their
-// Spec.Stack is cleared and they're republished as loose project apps). The apps
-// themselves are NOT deleted — that's the batch stack-delete (Phase 3).
+// handleDeleteStack removes the stack record. By default its member apps are
+// detached (Spec.Stack cleared + republished as loose project apps) and kept.
+// With ?deleteApps=true it instead deletes every member app and reclaims the
+// stack's shared namespaces — a full teardown of the collection.
 func (rh *rbacHandler) handleDeleteStack(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	name := r.PathValue("stack")
@@ -208,7 +209,22 @@ func (rh *rbacHandler) handleDeleteStack(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "stack not found: " + name})
 		return
 	}
-	// Detach members.
+
+	if r.URL.Query().Get("deleteApps") == "true" {
+		results := rh.deleteStackApps(r.Context(), project, name)
+		if err := rh.stackStore.DeleteStack(r.Context(), project, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete stack"})
+			return
+		}
+		// Reclaim the stack's owned shared namespaces after its apps are pruned.
+		if rh.appHandler != nil {
+			rh.appHandler.deleteOwnedStackNamespaces(r.Context(), project, name)
+		}
+		writeJSON(w, http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "delete", Results: results})
+		return
+	}
+
+	// Default: detach members, keep the apps.
 	if rh.appHandler != nil {
 		apps, _ := rh.appHandler.appStore.ListApps(r.Context(), project)
 		for _, a := range apps {
@@ -219,7 +235,9 @@ func (rh *rbacHandler) handleDeleteStack(w http.ResponseWriter, r *http.Request)
 			if err := rh.appHandler.appStore.SaveApp(r.Context(), project, a); err != nil {
 				continue
 			}
-			_ = rh.appHandler.republishApp(r.Context(), a)
+			// relocateApp moves the app out of a shared stack namespace back to
+			// its own, reclaiming the (now app-exclusive) old namespace.
+			_ = rh.appHandler.relocateApp(r.Context(), a)
 		}
 	}
 	if err := rh.stackStore.DeleteStack(r.Context(), project, name); err != nil {
@@ -227,6 +245,31 @@ func (rh *rbacHandler) handleDeleteStack(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteStackApps deletes every member app of a stack (store + gitops) and
+// reclaims each app's previous namespaces. Best-effort, returning a per-app
+// summary. The shared stack namespace is reclaimed by the caller afterwards.
+func (rh *rbacHandler) deleteStackApps(ctx context.Context, project, name string) []stackOpResult {
+	members := rh.stackMemberApps(ctx, project, name)
+	results := make([]stackOpResult, 0, len(members))
+	for _, a := range members {
+		envs, _ := rh.appHandler.appStore.ListAppEnvironments(ctx, project, a.Name)
+		if err := rh.appHandler.appStore.DeleteApp(ctx, project, a.Name); err != nil {
+			results = append(results, errResult(a.Name, err))
+			continue
+		}
+		if rh.appHandler.gitOpsPublisher != nil {
+			_ = rh.appHandler.gitOpsPublisher.UnpublishApp(ctx, project, a.Name)
+		}
+		// Reclaim app-exclusive namespaces; the shared stack namespace is left
+		// for deleteOwnedStackNamespaces (it carries the stack ownership label).
+		for _, e := range envs {
+			rh.appHandler.reclaimAppExclusiveNamespace(ctx, project, e.EnvName, e.Namespace)
+		}
+		results = append(results, okResult(a.Name, "deleted"))
+	}
+	return results
 }
 
 // handleSetAppStack adds an app to a stack (or removes it when stack is empty),

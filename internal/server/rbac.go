@@ -293,6 +293,14 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("PATCH /api/v1/projects/{project}/stacks/{stack}", manageProject(rh.handlePatchStack))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}", manageProject(rh.handleDeleteStack))
 
+		// Batch lifecycle (Phase 3): fan out over the stack's member apps.
+		if rh.appHandler != nil {
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/sync", manageProject(rh.handleSyncStack))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/promote", manageProject(rh.handlePromoteStack))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/previews", manageProject(rh.handleCreateStackPreview))
+			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/previews/{name}", manageProject(rh.handleDeleteStackPreview))
+		}
+
 		// Stack-scope shared secrets (shared by every app in the stack).
 		if rh.secretsHandler != nil {
 			sh := rh.secretsHandler
