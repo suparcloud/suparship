@@ -16,9 +16,16 @@ const (
 	kargoTag = "9275cbe0"
 )
 
+// rootImageMapping is the template image mapping for a chart whose tag lives at
+// the root "image.tag" key (as in the voiceai-livekit chart). The publish
+// adapter normally derives this from the template; tests pass it on the env.
+var rootImageMapping = []gitops.KargoImage{{
+	Repository: "registry.example.com/demo/hello",
+	TagKey:     "image.tag",
+}}
+
 // cdManagedApp returns an app whose image tag lives at the root "image.tag"
-// key (as in the voiceai-livekit chart), seeded to seedTag, with external-CD
-// (Kargo) ownership enabled.
+// key, seeded to seedTag, with external-CD (Kargo) ownership toggled by managed.
 func cdManagedApp(managed bool) *domain.App {
 	return &domain.App{
 		Name:        "hello",
@@ -31,7 +38,7 @@ func cdManagedApp(managed bool) *domain.App {
 					"tag":        seedTag,
 				},
 			},
-			CD: domain.CDConfig{Managed: managed, ImageTagPath: "image.tag"},
+			CD: domain.CDConfig{Managed: managed},
 		},
 	}
 }
@@ -86,8 +93,8 @@ func TestPublish_CDManaged_PreservesTagOnRepublish(t *testing.T) {
 	dir := t.TempDir()
 	app := cdManagedApp(true)
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost"},
-		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, BaseDomain: "localhost"},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost", TemplateImages: rootImageMapping},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, BaseDomain: "localhost", TemplateImages: rootImageMapping},
 	}
 	p := newTestPublisher(t)
 
@@ -121,7 +128,7 @@ func TestPublish_CDUnmanaged_ClobbersTagOnRepublish(t *testing.T) {
 	dir := t.TempDir()
 	app := cdManagedApp(false) // CD ownership disabled
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost"},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost", TemplateImages: rootImageMapping},
 	}
 	p := newTestPublisher(t)
 
@@ -143,7 +150,7 @@ func TestPublish_CDManaged_PreviewNotPreserved(t *testing.T) {
 	dir := t.TempDir()
 	app := cdManagedApp(true)
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "pr-42", EnvType: domain.AppEnvPreview, Order: 0, Bound: true, BaseDomain: "localhost"},
+		{EnvName: "pr-42", EnvType: domain.AppEnvPreview, Order: 0, Bound: true, BaseDomain: "localhost", TemplateImages: rootImageMapping},
 	}
 	p := newTestPublisher(t)
 

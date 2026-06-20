@@ -631,7 +631,14 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// republish rolls the deployed image back. Preview envs always deploy
 		// their own pipeline's tag, so they are never preserved.
 		preserveTag := app.Spec.CD.Managed && env.EnvType != domain.AppEnvPreview
-		tagKey := ImageTagValuesKey(app)
+		// The tag keys Kargo owns for this app — one per image source. Preserve
+		// each on republish so we never roll a CD-managed deployment back to the
+		// create-time seed. Falls back to the canonical single key when the
+		// template declares no Images mapping.
+		var tagKeys []string
+		for _, img := range resolveKargoImages(app, env.TemplateImages) {
+			tagKeys = append(tagKeys, img.TagKey)
+		}
 
 		// outPath is the values.yaml the bytes will be written to; it doubles as
 		// the source to read back a CD-committed tag for preservation.
@@ -643,8 +650,10 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
 			overlay := envOverlay(app, env, c.Name)
 			if preserveTag {
-				if tag := existingImageTag(outPath, tagKey); tag != "" {
-					setStringAtPath(overlay, tagKey, tag)
+				for _, tagKey := range tagKeys {
+					if tag := existingImageTag(outPath, tagKey); tag != "" {
+						setStringAtPath(overlay, tagKey, tag)
+					}
 				}
 			}
 			if env.SkipCanonicalBase {
@@ -1156,6 +1165,25 @@ const maxChartEntrySize = 4 * 1024 * 1024
 // Environments are sorted by Order (then Name for tie-breaking); each stage
 // declares the previous stage as its upstream gate. The first stage (lowest
 // Order) pulls directly from the Warehouse with auto-promotion enabled.
+// resolveKargoImages returns the image sources the Kargo CRs should target.
+// When the template declares an Images mapping (tmplImages), those are used
+// verbatim — supporting charts with one or many services, each with its own
+// repo + values tag-key. Otherwise it falls back to a single legacy image
+// derived from the app's image_repository value (canonical tag key), preserving
+// behaviour for suparship-common charts.
+func resolveKargoImages(app *domain.App, tmplImages []KargoImage) []KargoImage {
+	if len(tmplImages) > 0 {
+		return tmplImages
+	}
+	if repo, ok := app.Spec.Values["image_repository"].(string); ok && repo != "" {
+		// Concrete image, no template mapping: accept any tag (operators can
+		// tighten the pattern via the template Images mapping).
+		return []KargoImage{{Repository: repo, TagKey: DefaultImageTagKey, TagPattern: ".*"}}
+	}
+	// No mapping and no image set — caller decides whether to warn.
+	return nil
+}
+
 func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	projectNS := KargoNamespaceForProject(app.ProjectName)
 	kargoDir := p.outputDir(repoDir, "_infra", "kargo")
@@ -1203,26 +1231,30 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	}
 	slog.Debug("gitops: wrote kargo project", "project", projectNS)
 
+	// ── Resolve the app's image sources ────────────────────────────────────────
+	// Prefer the template's per-service Images mapping (threaded via
+	// TemplateImages on each env — app-level, so any env carries the full set);
+	// otherwise fall back to a single legacy image from image_repository.
+	var tmplImages []KargoImage
+	if len(stableEnvs) > 0 {
+		tmplImages = stableEnvs[0].TemplateImages
+	}
+	images := resolveKargoImages(app, tmplImages)
+	if len(images) == 0 {
+		// No template mapping and no image set — applyKargoDefaults will seed a
+		// ghcr.io/{project}/{app} placeholder that won't pull. Warn rather than
+		// fail silently so the operator knows to declare images in the template.
+		slog.Warn("gitops: app has no template image mapping or image_repository — Kargo Warehouse will use a placeholder that won't pull; declare images in the template settings",
+			"project", app.ProjectName, "app", app.Name,
+			"placeholder", DefaultImageRepoURL(app.ProjectName, app.Name))
+	}
+
 	// ── Warehouse ──────────────────────────────────────────────────────────────
-	// Use the app's explicitly-set image repository when available.
-	// Falls back to the default ghcr.io/{project}/{app} placeholder.
 	whOpts := KargoBuildOptions{
+		Images:                images,
 		InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
 		Branding:              p.cfg.Branding,
 		SubPath:               p.cfg.SubPath,
-	}
-	if repo, ok := app.Spec.Values["image_repository"].(string); ok && repo != "" {
-		whOpts.ImageRepoURL = repo
-		// When the app specifies a concrete image, accept any tag (the tag
-		// pattern can always be tightened via the Warehouse directly).
-		whOpts.ImageTagPattern = ".*"
-	} else {
-		// No image set — applyKargoDefaults will use the ghcr.io/{project}/{app}
-		// placeholder, which won't resolve and leaves pods in InvalidImageName.
-		// Warn loudly rather than failing silently.
-		slog.Warn("gitops: app has no image_repository — Kargo Warehouse will use a placeholder that won't pull; set the app's image repository",
-			"project", app.ProjectName, "app", app.Name,
-			"placeholder", DefaultImageRepoURL(app.ProjectName, app.Name))
 	}
 	warehouse := BuildKargoWarehouse(app, whOpts)
 	whBytes, err := yaml.Marshal(warehouse)
@@ -1251,8 +1283,8 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			EnvType:     env.EnvType,
 		}
 		stageOpts := KargoBuildOptions{
+			Images:                images,
 			InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
-			ImageRepoURL:          whOpts.ImageRepoURL,
 			GitOpsRepoURL:         p.kargoGitRepoURL(),
 			GitOpsRepoInsecure:    p.cfg.InsecureRegistry,
 			Branding:              p.cfg.Branding,
@@ -1353,6 +1385,13 @@ type AppPublishEnv struct {
 	// The platform context is still built so {platform.*}/{vars.*} tokens in the
 	// overlay resolve; only the injected schema is dropped.
 	SkipCanonicalBase bool
+	// TemplateImages are the app's resolved image sources (one per service),
+	// derived from the template's Images mapping by the publish adapter. They
+	// drive the Kargo Warehouse subscriptions + Stage image updates, and the
+	// set of tag keys the publisher preserves for CD-managed apps. App-level
+	// (identical across envs); empty means the template declares no mapping and
+	// the publisher falls back to a single legacy image.
+	TemplateImages []KargoImage
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD

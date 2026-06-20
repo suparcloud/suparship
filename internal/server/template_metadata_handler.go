@@ -16,6 +16,10 @@ type templateMetadataPatch struct {
 	Category              *string `json:"category,omitempty"`
 	Description           *string `json:"description,omitempty"`
 	InjectCanonicalValues *bool   `json:"injectCanonicalValues,omitempty"`
+	// Images, when non-nil, replaces the template's per-service image mapping
+	// (external-CD wiring). Only honored for editable (imported) templates; send
+	// an empty array to clear it. Read-only/synced templates reject it.
+	Images *[]TemplateImageDTO `json:"images,omitempty"`
 }
 
 // handleUpdateTemplateMetadata serves PATCH /api/v1/templates/{name}.
@@ -87,6 +91,9 @@ func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r
 			updated.Spec.Mappings = nil
 		}
 	}
+	if patch.Images != nil {
+		updated.Spec.Images = imagesFromDTO(*patch.Images)
+	}
 
 	if err := updated.Validate(); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -130,6 +137,16 @@ func (th *templateHandler) updateMetadataViaOverride(
 		}
 		writeJSON(w, http.StatusConflict, errorResponse{
 			Error: "values mode for template " + name + " can only be changed at " + where + " — it isn't a display-metadata override",
+		})
+		return
+	}
+	if patch.Images != nil {
+		where := "the source repo's template.yaml"
+		if src.Origin == "builtin" {
+			where = "an imported copy"
+		}
+		writeJSON(w, http.StatusConflict, errorResponse{
+			Error: "image mappings for template " + name + " can only be changed at " + where + " — they aren't a display-metadata override",
 		})
 		return
 	}

@@ -70,6 +70,7 @@ type templateImportSummary struct {
 	HasSchema      bool   `json:"hasSchema"`
 	InputCount     int    `json:"inputCount"`
 	MappingCount   int    `json:"mappingCount"`
+	ImageCount     int    `json:"imageCount"`
 	ArchiveSize    int    `json:"archiveSize"`
 }
 
@@ -122,6 +123,7 @@ func (h *templateImportHandler) handlePreview(w http.ResponseWriter, r *http.Req
 			HasSchema:    arc.Schema != nil,
 			InputCount:   len(tmpl.Spec.Inputs),
 			MappingCount: len(tmpl.Spec.Mappings),
+			ImageCount:   len(tmpl.Spec.Images),
 			ArchiveSize:  len(chartBytes),
 		},
 		ChartFiles: files,

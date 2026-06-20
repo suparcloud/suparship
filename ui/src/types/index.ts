@@ -142,7 +142,18 @@ export interface TemplateImportSummary {
   hasSchema: boolean;
   inputCount: number;
   mappingCount: number;
+  imageCount: number;
   archiveSize: number;
+}
+
+// TemplateImage maps one of a chart's services to its image source + the Helm
+// values key holding its tag, driving external-CD (Kargo) wiring.
+export interface TemplateImage {
+  name: string;
+  repository: string;
+  tagKey: string;
+  tagPattern?: string;
+  selectionStrategy?: string;
 }
 
 export interface TemplateImportChartFile {
@@ -324,6 +335,8 @@ export interface TemplateDetail {
   // Values mode: undefined/true = canonical suparship-common base; false =
   // passthrough/BYO.
   injectCanonicalValues?: boolean;
+  // Per-service image mapping for external-CD (Kargo) wiring.
+  images?: TemplateImage[];
   // editable = metadata can be edited in place (imported/BYO + cluster-stored).
   editable?: boolean;
   source?: TemplateProvenance;
@@ -342,6 +355,9 @@ export interface TemplateMetadataPatch {
   category?: string;
   description?: string;
   injectCanonicalValues?: boolean;
+  // images, when present, replaces the per-service image mapping (editable
+  // templates only). Send [] to clear.
+  images?: TemplateImage[];
 }
 
 // TemplateOverride is the org-level platform values overlay a PE/SRE authors for
@@ -553,12 +569,11 @@ export interface AppDetail {
 
 // CDConfig configures who owns the deployed image tag. When managed is true an
 // external CD controller (Kargo) writes the tag and the platform preserves it
-// across republishes instead of overwriting it with the create-time seed.
+// across republishes instead of overwriting it with the create-time seed. Which
+// repositories/tag-keys Kargo manages is declared at the template level
+// (TemplateImage), not per app.
 export interface CDConfig {
   managed?: boolean;
-  /** Dotted Helm-values key holding the image tag (e.g. "image.tag").
-   *  Empty defaults to "components.web.image.tag". */
-  imageTagPath?: string;
 }
 
 // ComponentResources holds raw k8s resource quantities (cpu/memory/…).

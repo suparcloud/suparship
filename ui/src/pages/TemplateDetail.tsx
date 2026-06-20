@@ -20,6 +20,7 @@ import type { ConfigVariables } from "../lib/configVars";
 import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   TemplateDetail as TemplateDetailType,
+  TemplateImage,
   TemplateOverride,
   TemplateSecretInput,
 } from "../types";
@@ -189,6 +190,9 @@ export function TemplateDetail() {
 
       {/* Metadata — editable for org_admins on imported templates */}
       <MetadataSection template={template} onUpdated={setTemplate} />
+
+      {/* Image mappings — drive external-CD (Kargo) wiring */}
+      <ImagesSection template={template} onUpdated={setTemplate} />
 
       {/* Template inputs are deprecated and not shown — apps are configured via
           the values editor, and the effective-values preview is the real "what
@@ -482,6 +486,206 @@ function valuesModeLabel(t: TemplateDetailType): string {
   return t.injectCanonicalValues === false
     ? "Passthrough (BYO chart)"
     : "Canonical values";
+}
+
+const IMAGE_STRATEGIES = ["", "NewestBuild", "SemVer", "Digest", "Lexical"];
+
+// ImagesSection shows + edits the template's per-service image mapping, which
+// drives external-CD (Kargo): which repository each service watches and which
+// Helm values key holds its tag. Editable in place only for imported/BYO
+// templates (synced/built-in mappings come from the source's template.yaml).
+function ImagesSection({
+  template,
+  onUpdated,
+}: {
+  template: TemplateDetailType;
+  onUpdated: (t: TemplateDetailType) => void;
+}) {
+  const { user } = useAuth();
+  const isOrgAdmin = user?.role === "org_admin";
+  const inPlace = template.editable === true;
+
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [rows, setRows] = useState<TemplateImage[]>(template.images ?? []);
+
+  function reset() {
+    setRows(template.images ?? []);
+    setEditing(false);
+  }
+
+  function setRow(i: number, patch: Partial<TemplateImage>) {
+    setRows((cur) => cur.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const cleaned = rows.map((r) => ({
+        name: r.name.trim(),
+        repository: r.repository.trim(),
+        tagKey: r.tagKey.trim(),
+        tagPattern: r.tagPattern?.trim() || undefined,
+        selectionStrategy: r.selectionStrategy || undefined,
+      }));
+      const updated = await updateTemplateMetadata(template.name, {
+        images: cleaned,
+      });
+      onUpdated(updated);
+      toast.success("Image mappings updated");
+      setEditing(false);
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to update image mappings",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const images = template.images ?? [];
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-5">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-900">Images</h2>
+          <p className="text-xs text-gray-400">
+            Per-service image mapping for continuous delivery (Kargo): the repo
+            to watch and the values key holding each tag.
+          </p>
+        </div>
+        {isOrgAdmin && inPlace && !editing && (
+          <button
+            onClick={() => setEditing(true)}
+            className="rounded-md px-3 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
+          >
+            Edit
+          </button>
+        )}
+        {editing && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={reset}
+              disabled={saving}
+              className="rounded-md px-3 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {!inPlace && (
+        <p className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          This template's body is managed by its source — edit image mappings in
+          the chart's bundled template.yaml, not here.
+        </p>
+      )}
+
+      {!editing ? (
+        images.length === 0 ? (
+          <p className="text-xs text-gray-400">
+            No image mappings. {inPlace && "Add one to wire up Kargo-driven CD."}
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-left text-gray-400">
+                <tr>
+                  <th className="py-1 pr-3 font-medium">Service</th>
+                  <th className="py-1 pr-3 font-medium">Repository</th>
+                  <th className="py-1 pr-3 font-medium">Tag key</th>
+                  <th className="py-1 pr-3 font-medium">Tag pattern</th>
+                  <th className="py-1 font-medium">Strategy</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono text-gray-700">
+                {images.map((im) => (
+                  <tr key={im.name} className="border-t border-gray-100">
+                    <td className="py-1 pr-3">{im.name}</td>
+                    <td className="py-1 pr-3">{im.repository}</td>
+                    <td className="py-1 pr-3">{im.tagKey}</td>
+                    <td className="py-1 pr-3">{im.tagPattern || "—"}</td>
+                    <td className="py-1">{im.selectionStrategy || "SemVer"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      ) : (
+        <div className="space-y-3">
+          {rows.map((r, i) => (
+            <div
+              key={i}
+              className="grid grid-cols-1 gap-2 rounded-lg border border-gray-200 p-3 sm:grid-cols-2"
+            >
+              <input
+                className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                placeholder="service name (e.g. agent)"
+                value={r.name}
+                onChange={(e) => setRow(i, { name: e.target.value })}
+              />
+              <input
+                className="rounded-md border border-gray-300 px-2 py-1 font-mono text-xs"
+                placeholder="repository (e.g. acr.io/org/agent)"
+                value={r.repository}
+                onChange={(e) => setRow(i, { repository: e.target.value })}
+              />
+              <input
+                className="rounded-md border border-gray-300 px-2 py-1 font-mono text-xs"
+                placeholder="tag key (e.g. image.tag)"
+                value={r.tagKey}
+                onChange={(e) => setRow(i, { tagKey: e.target.value })}
+              />
+              <input
+                className="rounded-md border border-gray-300 px-2 py-1 font-mono text-xs"
+                placeholder="tag pattern (regex, optional)"
+                value={r.tagPattern ?? ""}
+                onChange={(e) => setRow(i, { tagPattern: e.target.value })}
+              />
+              <select
+                className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                value={r.selectionStrategy ?? ""}
+                onChange={(e) => setRow(i, { selectionStrategy: e.target.value })}
+              >
+                {IMAGE_STRATEGIES.map((s) => (
+                  <option key={s} value={s}>
+                    {s === "" ? "SemVer (default)" : s}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => setRows((cur) => cur.filter((_, idx) => idx !== i))}
+                className="justify-self-start rounded-md px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={() =>
+              setRows((cur) => [
+                ...cur,
+                { name: "", repository: "", tagKey: "", tagPattern: "", selectionStrategy: "" },
+              ])
+            }
+            className="rounded-md border border-dashed border-gray-300 px-3 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
+          >
+            + Add image
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // MetadataSection shows category/engine + values-mode and lets an org_admin edit

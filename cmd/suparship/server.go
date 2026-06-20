@@ -735,6 +735,22 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 	}
 	pub.PlatformDefaultValues = def
 	pub.PlatformEnvValues = env
+
+	// Translate the template's per-service image mapping into the publisher's
+	// resolved form so the Kargo Warehouse/Stage and the CD tag-preservation
+	// target the chart's real repos + tag keys (works for 1..N services).
+	if len(tmpl.Spec.Images) > 0 {
+		imgs := make([]gitops.KargoImage, 0, len(tmpl.Spec.Images))
+		for _, im := range tmpl.Spec.Images {
+			imgs = append(imgs, gitops.KargoImage{
+				Repository:        im.Repository,
+				TagKey:            im.TagKey,
+				TagPattern:        im.TagPattern,
+				SelectionStrategy: im.SelectionStrategy,
+			})
+		}
+		pub.TemplateImages = imgs
+	}
 }
 
 // setStackOverlays populates the app's stack shared Helm-values overlay onto the

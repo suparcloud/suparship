@@ -288,7 +288,6 @@ function ConfigureStep({
   const [namespaceScope, setNamespaceScope] = useState<"app" | "project">("app");
   const [namespacePattern, setNamespacePattern] = useState("");
   const [cdManaged, setCdManaged] = useState(false);
-  const [cdImageTagPath, setCdImageTagPath] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
@@ -376,9 +375,7 @@ function ConfigureStep({
         namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
         namespacePattern: namespacePattern.trim() || undefined,
         rawValues: Object.keys(overlay).length > 0 ? overlay : undefined,
-        cd: cdManaged
-          ? { managed: true, imageTagPath: cdImageTagPath.trim() || undefined }
-          : undefined,
+        cd: cdManaged ? { managed: true } : undefined,
       });
       navigate(`/projects/${project}/apps/${appName}`);
     } catch (err) {
@@ -545,31 +542,9 @@ function ConfigureStep({
           When enabled, Kargo owns the image tag: it commits the
           discovered/promoted tag and re-publishing preserves it instead of
           resetting to your overrides. The tag you set in values acts only as the
-          initial seed.
+          initial seed. Which images Kargo watches (and the values keys it writes)
+          comes from the template's image mapping.
         </p>
-        {cdManaged && (
-          <div className="mt-3">
-            <label className="mb-1 block text-xs font-medium text-gray-700">
-              Image tag path{" "}
-              <span className="font-normal text-gray-400">
-                (optional — auto-detected)
-              </span>
-            </label>
-            <input
-              type="text"
-              className="w-full max-w-sm rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              placeholder="auto-detect from chart shape"
-              value={cdImageTagPath}
-              onChange={(e) => setCdImageTagPath(e.target.value)}
-            />
-            <p className="mt-1 text-xs text-gray-400">
-              Leave blank to infer the key from the chart and your overrides
-              (e.g. <code className="font-mono">image.tag</code> or{" "}
-              <code className="font-mono">components.web.image.tag</code>).
-              Set it only to override what detection picks.
-            </p>
-          </div>
-        )}
       </FormSection>
 
       {/* Secret inputs */}
