@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
 )
@@ -58,6 +60,70 @@ func TestPublishKargoCRs_WritesExpectedFiles(t *testing.T) {
 	previewStage := filepath.Join(kargoDir, "demo-hello-pr-42-stage.yaml")
 	if _, err := os.Stat(previewStage); !os.IsNotExist(err) {
 		t.Error("preview environment should not produce a Stage file, but demo-hello-pr-42-stage.yaml exists")
+	}
+}
+
+// TestPublishKargoCRs_TemplateImageMappingRoundTrip is the regression guard for
+// the voiceai case: a template image mapping carrying a tag pattern + selection
+// strategy must flow through to the published Warehouse subscription (allowTags
+// + imageSelectionStrategy) and the Stage's helm image update (image + key).
+// Without this the Warehouse silently falls back to Kargo's SemVer default and
+// discovers nothing for bare-SHA tags.
+func TestPublishKargoCRs_TemplateImageMappingRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{Name: "livekit-express-caller", ProjectName: "voiceai"}
+	envs := []gitops.AppPublishEnv{
+		{
+			EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+			TemplateImages: []gitops.KargoImage{{
+				Repository:        "acr.example.com/voiceai-livekit",
+				TagKey:            "image.tag",
+				TagPattern:        `^[0-9a-f]{7,40}$`,
+				SelectionStrategy: "NewestBuild",
+			}},
+		},
+	}
+
+	p := newTestPublisher(t)
+	if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishKargoCRsForTest: %v", err)
+	}
+	kargoDir := filepath.Join(dir, "_infra", "kargo")
+
+	// Warehouse: subscription must carry the mapping's repo + pattern + strategy.
+	var wh gitops.KargoWarehouse
+	readYAMLInto(t, filepath.Join(kargoDir, "voiceai-livekit-express-caller-warehouse.yaml"), &wh)
+	if len(wh.Spec.Subscriptions) != 1 || wh.Spec.Subscriptions[0].Image == nil {
+		t.Fatalf("expected 1 image subscription, got %+v", wh.Spec.Subscriptions)
+	}
+	img := wh.Spec.Subscriptions[0].Image
+	if img.RepoURL != "acr.example.com/voiceai-livekit" {
+		t.Errorf("subscription repoURL = %q, want acr.example.com/voiceai-livekit", img.RepoURL)
+	}
+	if img.AllowTags != `^[0-9a-f]{7,40}$` {
+		t.Errorf("subscription allowTags = %q, want the SHA pattern", img.AllowTags)
+	}
+	if img.ImageSelectionStrategy != "NewestBuild" {
+		t.Errorf("subscription imageSelectionStrategy = %q, want NewestBuild", img.ImageSelectionStrategy)
+	}
+
+	// Stage: the helm image update must target the mapped repo + tag key.
+	var stage gitops.KargoStage
+	readYAMLInto(t, filepath.Join(kargoDir, "voiceai-livekit-express-caller-staging-stage.yaml"), &stage)
+	imgs := stage.Spec.PromotionMechanisms.GitRepoUpdates[0].Helm.Images
+	if len(imgs) != 1 || imgs[0].Image != "acr.example.com/voiceai-livekit" || imgs[0].Key != "image.tag" {
+		t.Errorf("stage helm image update = %+v, want repo acr.example.com/voiceai-livekit key image.tag", imgs)
+	}
+}
+
+func readYAMLInto(t *testing.T, path string, out any) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if err := yaml.Unmarshal(data, out); err != nil {
+		t.Fatalf("unmarshal %s: %v", path, err)
 	}
 }
 
