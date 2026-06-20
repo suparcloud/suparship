@@ -250,7 +250,7 @@ func (c *SDKClient) ListItems(ctx context.Context, vaultID string) ([]ItemOvervi
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	items, err := c.client.Items().List(ctx, vaultID)
+	items, err := c.client.Items().List(ctx, vaultID, activeItemsFilter())
 	if err != nil {
 		return nil, fmt.Errorf("onepassword: list items in vault %q: %w", vaultID, err)
 	}
@@ -280,7 +280,7 @@ func (c *SDKClient) DeleteItem(ctx context.Context, vaultID, itemID string) erro
 }
 
 func (c *SDKClient) findItemByTitle(ctx context.Context, vaultID, title string) (string, error) {
-	items, err := c.client.Items().List(ctx, vaultID)
+	items, err := c.client.Items().List(ctx, vaultID, activeItemsFilter())
 	if err != nil {
 		return "", fmt.Errorf("onepassword: list items for title lookup: %w", err)
 	}
@@ -291,6 +291,21 @@ func (c *SDKClient) findItemByTitle(ctx context.Context, vaultID, title string) 
 		}
 	}
 	return "", nil
+}
+
+// activeItemsFilter is the ByState filter passed to every Items().List call.
+//
+// We pass an explicit filter rather than calling List with no filters: the
+// v0.4.0 WASM core traps with "out of bounds memory access" in load_input on a
+// no-filter ItemsList invocation (writes via Items().Create/Put work fine — the
+// filters argument is the only thing unique to ItemsList). The SDK's own
+// service_account example uses this same ByState form for its archived listing,
+// so the filtered path is supported. Active items are what we create.
+func activeItemsFilter() onepasswordsdk.ItemListFilter {
+	return onepasswordsdk.NewItemListFilterTypeVariantByState(&onepasswordsdk.ItemListFilterByStateInner{
+		Active:   true,
+		Archived: false,
+	})
 }
 
 // Compile-time check.
