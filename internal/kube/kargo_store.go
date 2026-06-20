@@ -187,6 +187,20 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 		)
 	}
 
+	// Kargo v1.x requires every Promotion to carry its own spec.steps. The Kargo
+	// API server copies them from the target Stage's promotionTemplate when
+	// promoting via its UI/CLI, but a Promotion created directly through the
+	// Kubernetes API (as we do here) receives no such defaulting — the admission
+	// webhook then rejects it with "Stage ... defines no promotion steps". So we
+	// read the live Stage's promotionTemplate steps and embed them ourselves.
+	steps, err := s.stagePromotionSteps(ctx, projectNS, qualifiedToStage)
+	if err != nil {
+		return nil, fmt.Errorf("resolve promotion steps for stage %q: %w", qualifiedToStage, err)
+	}
+	if len(steps) == 0 {
+		return nil, fmt.Errorf("target stage %q defines no promotion steps (spec.promotionTemplate.spec.steps is empty) — re-publish the app's Kargo CRs", qualifiedToStage)
+	}
+
 	promotionName := fmt.Sprintf("%s-%s-%d", appName, toStage, time.Now().Unix())
 
 	slog.Debug("kargo create promotion: submitting Promotion CR",
@@ -194,6 +208,7 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 		"promotion", promotionName,
 		"stage", qualifiedToStage,
 		"freight", freight,
+		"steps", len(steps),
 	)
 
 	obj := &unstructured.Unstructured{
@@ -213,6 +228,7 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 			"spec": map[string]any{
 				"stage":   qualifiedToStage,
 				"freight": freight,
+				"steps":   steps,
 			},
 		},
 	}
@@ -326,6 +342,31 @@ func (s *KargoStore) getCurrentFreight(ctx context.Context, projectNS, stageName
 	// is used without image substitution — Kargo marks the Promotion Succeeded
 	// but never sets status.currentFreight because it cannot verify delivery.
 	return s.latestSuccessfulPromotionFreight(ctx, projectNS, stageName)
+}
+
+// stagePromotionSteps returns the promotion steps defined on the target Stage's
+// spec.promotionTemplate.spec.steps (Kargo v1.x). These must be embedded in the
+// Promotion CR we create directly via the Kubernetes API, because — unlike the
+// Kargo API server — a raw dynamic-client create gets no step defaulting from
+// the webhook. Returns a nil slice (no error) when the Stage defines no steps,
+// which CreatePromotion treats as a fail-fast condition.
+//
+// The returned slice is a deep copy (via unstructured.NestedSlice) of
+// dynamic-client-safe values, so it can be assigned straight into a new
+// Promotion's spec.
+func (s *KargoStore) stagePromotionSteps(ctx context.Context, projectNS, stageName string) ([]any, error) {
+	obj, err := s.dynamic.Resource(kargoStageGVR).Namespace(projectNS).Get(ctx, stageName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get kargo stage %s/%s: %w", projectNS, stageName, err)
+	}
+	steps, found, err := unstructured.NestedSlice(obj.Object, "spec", "promotionTemplate", "spec", "steps")
+	if err != nil {
+		return nil, fmt.Errorf("read promotion steps from stage %s/%s: %w", projectNS, stageName, err)
+	}
+	if !found {
+		return nil, nil
+	}
+	return steps, nil
 }
 
 // latestSuccessfulPromotionFreight scans Promotion CRs in projectNS for the
