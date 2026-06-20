@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/branding"
@@ -25,13 +27,19 @@ import (
 // ownedNamespaceLabels are the labels suparship stamps on namespaces it creates.
 // Mirrors gitops.BuildProjectNamespaceManifest's convention so a namespace
 // created here looks identical to a gitops-managed one.
-func ownedNamespaceLabels(brand branding.Config, project, cluster string) map[string]string {
+func ownedNamespaceLabels(brand branding.Config, project, stack, cluster string) map[string]string {
 	labels := branding.MergeLabels(
 		brand.ManagedByLabels(),
 		map[string]string{brand.LabelKey("project"): project},
 	)
 	if cluster != "" {
 		labels[brand.LabelKey("cluster")] = cluster
+	}
+	// Marks a shared stack namespace ({project}-{stack}-{env}) so it's reclaimed
+	// on stack delete and never reclaimed as an app-exclusive namespace on
+	// rename/move (siblings share it).
+	if stack != "" {
+		labels[brand.LabelKey("stack")] = stack
 	}
 	return labels
 }
@@ -88,9 +96,60 @@ func (ah *appHandler) ensureAppNamespace(ctx context.Context, app *domain.App, e
 	if client == nil {
 		return // bound cluster unreachable — ArgoCD CreateNamespace=true covers it
 	}
-	if _, err := k8s.EnsureNamespaceOwned(ctx, client, env.Namespace, ownedNamespaceLabels(brand, app.ProjectName, clusterRef)); err != nil {
+	if _, err := k8s.EnsureNamespaceOwned(ctx, client, env.Namespace, ownedNamespaceLabels(brand, app.ProjectName, ah.sharedStackName(ctx, app), clusterRef)); err != nil {
 		slog.Warn("ensure app namespace", "namespace", env.Namespace, "app", app.Name, "err", err)
 	}
+}
+
+// sharedStackName returns the app's stack name only when that stack co-locates
+// its apps (SharedNamespace) — i.e. when the app's namespace genuinely belongs
+// to the stack. Empty otherwise. Used to stamp the stack ownership label.
+func (ah *appHandler) sharedStackName(ctx context.Context, app *domain.App) string {
+	if app.Spec.Stack == "" || ah.stackStore == nil {
+		return ""
+	}
+	st, err := ah.stackStore.GetStack(ctx, app.ProjectName, app.Spec.Stack)
+	if err != nil || st == nil || !st.Spec.SharedNamespace {
+		return ""
+	}
+	return app.Spec.Stack
+}
+
+// relocateApp republishes an app, accounting for a possibly-changed namespace
+// (e.g. after joining/leaving a shared-namespace stack, or a stack toggling
+// SharedNamespace). It recomputes + persists each stable env's namespace,
+// ensures the new namespaces exist, republishes, and reclaims any previous
+// app-exclusive namespace that changed. Best-effort; returns the publish error.
+func (ah *appHandler) relocateApp(ctx context.Context, app *domain.App) error {
+	envs, _ := ah.appStore.ListAppEnvironments(ctx, app.ProjectName, app.Name)
+	oldNS := map[string]string{}
+	var stable []*domain.AppEnvironment
+	for _, e := range envs {
+		oldNS[e.EnvName] = e.Namespace
+		if e.EnvType != domain.AppEnvPreview {
+			stable = append(stable, e)
+		}
+	}
+	if len(stable) == 0 {
+		stable = ah.stableEnvsFromOrg(ctx, app)
+	}
+	ah.resolveEnvNamespaces(ctx, app, stable)
+	for _, e := range stable {
+		if err := ah.appStore.SaveAppEnvironment(ctx, app.ProjectName, e); err != nil {
+			slog.Warn("relocate: persist namespace failed", "app", app.Name, "env", e.EnvName, "err", err)
+		}
+	}
+	ah.ensureAppNamespaces(ctx, app, stable)
+	var pubErr error
+	if ah.gitOpsPublisher != nil {
+		pubErr = ah.gitOpsPublisher.PublishApp(ctx, app, stable)
+	}
+	for _, e := range stable {
+		if old := oldNS[e.EnvName]; old != "" && old != e.Namespace {
+			ah.reclaimAppExclusiveNamespace(ctx, app.ProjectName, e.EnvName, old)
+		}
+	}
+	return pubErr
 }
 
 // ensureAppNamespaces ensures every env's namespace (create-or-adopt).
@@ -100,29 +159,51 @@ func (ah *appHandler) ensureAppNamespaces(ctx context.Context, app *domain.App, 
 	}
 }
 
-// deleteOldAppNamespaces reclaims the old app's namespaces after a rename: for
-// each old env it deletes that env's namespace on its workload cluster, but only
-// when suparship owns it (carries the managed-by + project labels). Adopted/
-// external namespaces are left untouched. Best-effort.
+// deleteOldAppNamespaces reclaims the old app's namespaces after a rename — see
+// reclaimAppExclusiveNamespace for the safety rules (it never deletes a shared
+// stack namespace, which siblings rely on). Best-effort.
 func (ah *appHandler) deleteOldAppNamespaces(ctx context.Context, projectName string, oldEnvs []*domain.AppEnvironment) {
 	for _, env := range oldEnvs {
-		if env.Namespace == "" {
-			continue
-		}
-		client, _, brand := ah.envWorkloadClient(ctx, env.EnvName)
-		if client == nil {
-			continue
-		}
-		ownerLabels := map[string]string{
-			"app.kubernetes.io/managed-by": brand.EffectiveName(),
-			brand.LabelKey("project"):      projectName,
-		}
-		if deleted, err := k8s.DeleteNamespaceIfOwned(ctx, client, env.Namespace, ownerLabels); err != nil {
-			slog.Warn("rename: old namespace cleanup failed", "namespace", env.Namespace, "err", err)
-		} else if deleted {
-			slog.Info("rename: deleted old owned namespace", "namespace", env.Namespace)
-		}
+		ah.reclaimAppExclusiveNamespace(ctx, projectName, env.EnvName, env.Namespace)
 	}
+}
+
+// reclaimAppExclusiveNamespace deletes a namespace on its workload cluster only
+// when it is (a) owned by suparship (managed-by + project labels) and (b)
+// app-exclusive — i.e. it does NOT carry the stack ownership label. A shared
+// stack namespace ({project}-{stack}-{env}) is left intact because sibling apps
+// in the stack share it. Used by rename and stack-move to drop the app's
+// previous standalone namespace without breaking a stack. Best-effort, no-op on
+// empty name / unreachable cluster.
+func (ah *appHandler) reclaimAppExclusiveNamespace(ctx context.Context, projectName, envName, namespace string) {
+	if namespace == "" {
+		return
+	}
+	client, _, brand := ah.envWorkloadClient(ctx, envName)
+	if client == nil {
+		return
+	}
+	ns, err := client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return
+	}
+	if err != nil {
+		slog.Warn("namespace reclaim: read failed", "namespace", namespace, "err", err)
+		return
+	}
+	owned := ns.Labels["app.kubernetes.io/managed-by"] == brand.EffectiveName() &&
+		ns.Labels[brand.LabelKey("project")] == projectName
+	if !owned {
+		return // adopted/external — never delete
+	}
+	if ns.Labels[brand.LabelKey("stack")] != "" {
+		return // shared stack namespace — siblings rely on it
+	}
+	if err := client.CoreV1().Namespaces().Delete(ctx, namespace, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		slog.Warn("namespace reclaim: delete failed", "namespace", namespace, "err", err)
+		return
+	}
+	slog.Info("reclaimed app-exclusive namespace", "namespace", namespace)
 }
 
 // emptyAppVaultItems best-effort empties the old app's app-tier secret items

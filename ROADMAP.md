@@ -453,7 +453,7 @@ agents), with a shared override layer, optional shared namespace, batch
 lifecycle, and clone. Full design + phase plan: **[docs/stacks.md](docs/stacks.md)**.
 
 - **Phase 1 — Grouping + override cascade (env/values/secrets) + membership + UI** — ✅ shipped
-- **Phase 2 — Shared stack namespace + intra-stack DNS** — planned
+- **Phase 2 — Shared stack namespace + intra-stack DNS** — ✅ shipped
 - **Phase 3 — Batch lifecycle (deploy/promote/preview/delete the whole stack)** — planned
 - **Phase 4 — Clone stack with overrides (e.g. livekit-cloud vs self-hosted)** — planned
 

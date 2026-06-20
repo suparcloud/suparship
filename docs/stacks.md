@@ -49,22 +49,26 @@ ArgoCD/Kargo pipeline) — too large a rework and weaker per-app isolation.
 - UI: `lib/stacks.ts`, `StackDetail` page (members, variables, secrets, delete),
   project page Stacks section + grouping + inline create.
 
-## Phase 2 — Shared stack namespace + intra-stack DNS (planned)
+## Phase 2 — Shared stack namespace + intra-stack DNS ✅ (shipped)
 
-Goal: member apps optionally co-locate in one `{project}-{stack}-{env}` namespace
-so `web` reaches `agent-server-web` by in-cluster DNS without cross-namespace
+Member apps optionally co-locate in one `{project}-{stack}-{env}` namespace so
+`web` reaches `agent-server-web` by in-cluster DNS without cross-namespace
 plumbing.
 
-- Add a `{stack}` token to `domain.ResolveNamespace` /
-  `GenerateNamespaceFromPattern`, and honor `StackSpec.SharedNamespace`
-  (or a `NamespaceScopeStack`): member apps resolve to the shared namespace.
-- Moving an app into/out of a shared-namespace stack changes its namespace →
-  reuse the rename "recreate-under-new-name" path in `handleSetAppStack`
-  (reclaim old owned namespace via `DeleteNamespaceIfOwned`, ensure new via
-  `ensureAppNamespaces`).
-- Add `suparship.io/stack` to `ownedNamespaceLabels`
-  (internal/server/namespace_ownership.go); stack delete reclaims the stack
-  namespace via the existing owned-namespace cleanup.
+- `{stack}` token in `secrets.RenderPattern`; `ResolveNamespace` gains
+  `StackName`/`StackShared`/`StackPattern` and a shared-stack branch that wins
+  over app/project scope (default `{project}-{stack}-{env}`, dedicated
+  `{project}-{stack}`). `resolveEnvNamespaces` loads the app's stack (appHandler
+  gained `stackStore`) and applies it.
+- Shared stack namespaces carry the `suparship.io/stack` ownership label
+  (`ownedNamespaceLabels`), so stack delete can reclaim them and rename/move
+  never reclaim them as app-exclusive.
+- `relocateApp` (namespace_ownership.go): recompute + persist namespaces, ensure
+  new, republish, and reclaim the previous **app-exclusive** namespace — used by
+  membership change (`handleSetAppStack`) and SharedNamespace toggle
+  (`republishStackMembers`). `reclaimAppExclusiveNamespace` never deletes a
+  shared namespace siblings rely on.
+- UI: a SharedNamespace toggle on the StackDetail page.
 
 ## Phase 3 — Batch lifecycle (planned)
 

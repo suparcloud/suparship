@@ -62,6 +62,9 @@ type appHandler struct {
 	// vault is the org-configured secret store. Optional — when set, app rename
 	// empties the old app's app-tier vault items best-effort. nil skips that.
 	vault secrets.VaultStore
+	// stackStore resolves an app's stack (Spec.Stack) so a shared-namespace stack
+	// co-locates its apps. Optional — nil → apps never use a shared stack namespace.
+	stackStore domain.StackStore
 }
 
 // newAppHandler creates an appHandler.
@@ -1236,6 +1239,17 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 		}
 	}
 
+	// Resolve the app's stack once: a shared-namespace stack co-locates its apps.
+	var stackName, stackPattern string
+	var stackShared bool
+	if app.Spec.Stack != "" && ah.stackStore != nil {
+		if st, err := ah.stackStore.GetStack(ctx, app.ProjectName, app.Spec.Stack); err == nil && st != nil && st.Spec.SharedNamespace {
+			stackName = st.Name
+			stackShared = true
+			stackPattern = st.Spec.NamespacePattern
+		}
+	}
+
 	for _, env := range envs {
 		ns, resolveErr := domain.ResolveNamespace(domain.NamespaceResolveInput{
 			AppName:           app.Name,
@@ -1244,6 +1258,9 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 			OrgName:           org.Name,
 			Scope:             app.Spec.NamespaceScope,
 			Dedicated:         dedicated,
+			StackName:         stackName,
+			StackShared:       stackShared,
+			StackPattern:      stackPattern,
 			AppPattern:        app.Spec.NamespacePattern,
 			OrgEnvAppPattern:  orgEnvAppPatterns[env.EnvName],
 			OrgEnvProjPattern: orgEnvProjPatterns[env.EnvName],

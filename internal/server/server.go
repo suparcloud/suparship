@@ -520,6 +520,7 @@ func New(cfg Config) *Server {
 			if cfg.VaultStore != nil {
 				rh.appHandler.vault = cfg.VaultStore
 			}
+			rh.appHandler.stackStore = cfg.StackStore
 			if cfg.GitOpsPublisher != nil {
 				rh.appHandler.gitOpsPublisher = cfg.GitOpsPublisher
 				cfg.Logger.Info("app gitops publisher enabled")
