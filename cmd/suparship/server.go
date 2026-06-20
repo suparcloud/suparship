@@ -736,12 +736,21 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 	pub.PlatformDefaultValues = def
 	pub.PlatformEnvValues = env
 
-	// Translate the template's per-service image mapping into the publisher's
-	// resolved form so the Kargo Warehouse/Stage and the CD tag-preservation
-	// target the chart's real repos + tag keys (works for 1..N services).
-	if len(tmpl.Spec.Images) > 0 {
-		imgs := make([]gitops.KargoImage, 0, len(tmpl.Spec.Images))
-		for _, im := range tmpl.Spec.Images {
+	// Translate the per-service image mapping into the publisher's resolved form
+	// so the Kargo Warehouse/Stage and the CD tag-preservation target the chart's
+	// real repos + tag keys (works for 1..N services). A sync-safe override
+	// mapping (set from the UI on a read-only/BYO template) wins over the
+	// template's own.
+	pub.TemplateImages = resolveTemplateImages(tmpl, ov)
+}
+
+// resolveTemplateImages returns the effective per-service image mapping for an
+// app's template, as Kargo images. An override mapping (set from the UI on a
+// read-only/BYO template) replaces the template's own when present.
+func resolveTemplateImages(tmpl *tpl.Template, ov *domain.TemplateOverride) []gitops.KargoImage {
+	if ov != nil && len(ov.Images) > 0 {
+		imgs := make([]gitops.KargoImage, 0, len(ov.Images))
+		for _, im := range ov.Images {
 			imgs = append(imgs, gitops.KargoImage{
 				Repository:        im.Repository,
 				TagKey:            im.TagKey,
@@ -749,8 +758,21 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 				SelectionStrategy: im.SelectionStrategy,
 			})
 		}
-		pub.TemplateImages = imgs
+		return imgs
 	}
+	if tmpl == nil || len(tmpl.Spec.Images) == 0 {
+		return nil
+	}
+	imgs := make([]gitops.KargoImage, 0, len(tmpl.Spec.Images))
+	for _, im := range tmpl.Spec.Images {
+		imgs = append(imgs, gitops.KargoImage{
+			Repository:        im.Repository,
+			TagKey:            im.TagKey,
+			TagPattern:        im.TagPattern,
+			SelectionStrategy: im.SelectionStrategy,
+		})
+	}
+	return imgs
 }
 
 // setStackOverlays populates the app's stack shared Helm-values overlay onto the

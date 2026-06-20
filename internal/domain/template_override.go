@@ -28,6 +28,12 @@ type TemplateOverride struct {
 	// auto-import mistakes on read-only synced/built-in templates from the UI
 	// without editing the source — stored here so a re-sync can't clobber it.
 	Metadata *TemplateMetadataOverride `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	// Images holds the per-service image mapping (external-CD / Kargo wiring)
+	// when set from the UI for a read-only synced/built-in template. When
+	// non-empty it REPLACES the template's own image mapping at read + publish,
+	// so operators can wire up CD for a BYO chart without editing its source.
+	// Mirrors tpl.TemplateImage; the server layer converts.
+	Images []TemplateImageOverride `json:"images,omitempty" yaml:"images,omitempty"`
 }
 
 // TemplateMetadataOverride carries display-metadata overrides. Each field is
@@ -37,6 +43,16 @@ type TemplateMetadataOverride struct {
 	Title       string `json:"title,omitempty" yaml:"title,omitempty"`
 	Category    string `json:"category,omitempty" yaml:"category,omitempty"`
 	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
+// TemplateImageOverride mirrors tpl.TemplateImage for storage in a sync-safe
+// override (domain must not import tpl). The server layer converts between them.
+type TemplateImageOverride struct {
+	Name              string `json:"name" yaml:"name"`
+	Repository        string `json:"repository" yaml:"repository"`
+	TagKey            string `json:"tagKey" yaml:"tagKey"`
+	TagPattern        string `json:"tagPattern,omitempty" yaml:"tagPattern,omitempty"`
+	SelectionStrategy string `json:"selectionStrategy,omitempty" yaml:"selectionStrategy,omitempty"`
 }
 
 // IsEmpty reports whether the metadata override carries nothing.
@@ -62,6 +78,9 @@ func (o *TemplateOverride) IsEmpty() bool {
 		if len(cv) > 0 {
 			return false
 		}
+	}
+	if len(o.Images) > 0 {
+		return false
 	}
 	return o.Metadata.IsEmpty()
 }

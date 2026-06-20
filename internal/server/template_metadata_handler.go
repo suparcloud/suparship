@@ -122,11 +122,13 @@ func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r
 	writeJSON(w, http.StatusOK, dto)
 }
 
-// updateMetadataViaOverride persists title/category/description for a read-only
-// (synced or built-in) template into the sync-safe override ConfigMap, leaving
-// the template body untouched. Returns the template DTO with the override
-// applied. injectCanonicalValues is refused here — it changes values semantics,
-// not display metadata, and a re-sync/rebuild would not honor it from an override.
+// updateMetadataViaOverride persists title/category/description and the image
+// mapping for a read-only (synced or built-in) template into the sync-safe
+// override ConfigMap, leaving the template body untouched. Returns the template
+// DTO with the override applied. injectCanonicalValues is refused here — it
+// changes values semantics, not display metadata, and a re-sync/rebuild would
+// not honor it from an override. Image mappings ARE allowed: they're CD wiring,
+// stored sync-safe so a re-sync can't drop them.
 func (th *templateHandler) updateMetadataViaOverride(
 	w http.ResponseWriter, r *http.Request, name string, src *TemplateSourceDTO, t *tpl.Template, patch templateMetadataPatch,
 ) {
@@ -137,16 +139,6 @@ func (th *templateHandler) updateMetadataViaOverride(
 		}
 		writeJSON(w, http.StatusConflict, errorResponse{
 			Error: "values mode for template " + name + " can only be changed at " + where + " — it isn't a display-metadata override",
-		})
-		return
-	}
-	if patch.Images != nil {
-		where := "the source repo's template.yaml"
-		if src.Origin == "builtin" {
-			where = "an imported copy"
-		}
-		writeJSON(w, http.StatusConflict, errorResponse{
-			Error: "image mappings for template " + name + " can only be changed at " + where + " — they aren't a display-metadata override",
 		})
 		return
 	}
@@ -176,6 +168,19 @@ func (th *templateHandler) updateMetadataViaOverride(
 	if patch.Description != nil {
 		ov.Metadata.Description = *patch.Description
 	}
+	// Image mappings ARE supported as a sync-safe override: they're CD wiring
+	// (which image repos to watch + which values keys hold the tags), not source
+	// chart content, so a re-sync must not drop them. Validate by reusing the
+	// template's own validation with the proposed images applied.
+	if patch.Images != nil {
+		check := *t
+		check.Spec.Images = imagesFromDTO(*patch.Images)
+		if err := check.Validate(); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		ov.Images = imagesToOverride(*patch.Images)
+	}
 
 	if err := kube.SaveTemplateOverride(r.Context(), th.kubeClient, name, ov); err != nil {
 		if th.logger != nil {
@@ -187,6 +192,9 @@ func (th *templateHandler) updateMetadataViaOverride(
 
 	dto := templateToDetail(t)
 	dto.Title, dto.Category, dto.Description = applyMetadataOverride(dto.Title, dto.Category, dto.Description, ov.Metadata)
+	if len(ov.Images) > 0 {
+		dto.Images = imagesOverrideToDTO(ov.Images)
+	}
 	dto.Source, dto.Editable = th.templateProvenance(r.Context(), name)
 	writeJSON(w, http.StatusOK, dto)
 }

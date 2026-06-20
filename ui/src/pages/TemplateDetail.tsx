@@ -555,7 +555,7 @@ function ImagesSection({
             to watch and the values key holding each tag.
           </p>
         </div>
-        {isOrgAdmin && inPlace && !editing && (
+        {isOrgAdmin && !editing && (
           <button
             onClick={() => setEditing(true)}
             className="rounded-md px-3 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
@@ -584,16 +584,17 @@ function ImagesSection({
       </div>
 
       {!inPlace && (
-        <p className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
-          This template's body is managed by its source — edit image mappings in
-          the chart's bundled template.yaml, not here.
+        <p className="mb-3 rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-700">
+          This template is managed by its source. Image mappings you set here are
+          saved as a local override (sync-safe) — a re-sync won't clobber them.
         </p>
       )}
 
       {!editing ? (
         images.length === 0 ? (
           <p className="text-xs text-gray-400">
-            No image mappings. {inPlace && "Add one to wire up Kargo-driven CD."}
+            No image mappings.{" "}
+            {isOrgAdmin && "Add one to wire up Kargo-driven CD."}
           </p>
         ) : (
           <div className="overflow-x-auto">
