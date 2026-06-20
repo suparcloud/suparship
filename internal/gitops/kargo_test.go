@@ -245,6 +245,60 @@ func TestBuildKargoStage_ImageTagKeyFromCDConfig(t *testing.T) {
 	}
 }
 
+func TestDetectImageTagKey(t *testing.T) {
+	cases := []struct {
+		name   string
+		values map[string]any
+		want   string
+	}{
+		{
+			name:   "root image block",
+			values: map[string]any{"image": map[string]any{"repository": "r", "tag": "t"}},
+			want:   "image.tag",
+		},
+		{
+			name: "web component image",
+			values: map[string]any{"components": map[string]any{
+				"web": map[string]any{"image": map[string]any{"tag": "t"}},
+			}},
+			want: "components.web.image.tag",
+		},
+		{
+			name: "non-web component falls to lexically first",
+			values: map[string]any{"components": map[string]any{
+				"worker": map[string]any{"image": map[string]any{"tag": "t"}},
+				"api":    map[string]any{"image": map[string]any{"tag": "t"}},
+			}},
+			want: "components.api.image.tag",
+		},
+		{
+			name: "web preferred over other components",
+			values: map[string]any{"components": map[string]any{
+				"api": map[string]any{"image": map[string]any{"tag": "t"}},
+				"web": map[string]any{"image": map[string]any{"tag": "t"}},
+			}},
+			want: "components.web.image.tag",
+		},
+		{
+			name:   "no image block",
+			values: map[string]any{"replicas": 2},
+			want:   "",
+		},
+		{
+			name:   "image is a string, not a map",
+			values: map[string]any{"image": "repo:tag"},
+			want:   "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := gitops.DetectImageTagKey(tc.values); got != tc.want {
+				t.Errorf("DetectImageTagKey = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildKargoStage_NoGitRepoUpdatesWithoutRepoURL(t *testing.T) {
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}

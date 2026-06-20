@@ -14,6 +14,7 @@ import (
 
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/project"
@@ -296,6 +297,10 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// Falls back to the hardcoded defaults when no org provider is configured.
 	result.Environments = ah.stableEnvsFromOrg(r.Context(), result.App)
 
+	// Infer the image-tag key for CD-managed apps when the operator left it
+	// blank, so the publisher/Kargo write the chart's actual key.
+	ah.defaultCDImageTagPath(r.Context(), result.App, tmpl)
+
 	if err := ah.appStore.SaveApp(r.Context(), projectName, result.App); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
 		return
@@ -492,6 +497,13 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			ed[envName] = ov
 		}
 		app.Spec.EnvironmentDefaults = ed
+	}
+
+	// Infer the image-tag key for CD-managed apps when it's still blank (e.g. CD
+	// was just enabled), using the same chart-shape inference as create.
+	if app.Spec.CD.Managed && app.Spec.CD.ImageTagPath == "" {
+		tmpl, _ := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
+		ah.defaultCDImageTagPath(r.Context(), app, tmpl)
 	}
 
 	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
@@ -1888,6 +1900,28 @@ func appToSummaryDTO(app *domain.App, envs []*domain.AppEnvironment) AppSummaryD
 		dto.URLs = []string{}
 	}
 	return dto
+}
+
+// defaultCDImageTagPath fills CD.ImageTagPath for a CD-managed app when the
+// operator left it blank, inferring the chart shape so they don't have to know
+// whether the tag lives at "image.tag" or "components.web.image.tag". It infers
+// from the app's own overrides first (the only signal available for
+// external-mode charts) then the chart bundle's default values. A no-op when CD
+// is disabled or a path is already set; leaves it blank when nothing is found
+// (ImageTagValuesKey then falls back to the canonical key).
+func (ah *appHandler) defaultCDImageTagPath(ctx context.Context, app *domain.App, tmpl *tpl.Template) {
+	if !app.Spec.CD.Managed || app.Spec.CD.ImageTagPath != "" {
+		return
+	}
+	if k := gitops.DetectImageTagKey(app.Spec.RawValues); k != "" {
+		app.Spec.CD.ImageTagPath = k
+		return
+	}
+	if cv, ok := chartDefaults(ctx, ah.kubeClient, tmpl); ok {
+		if k := gitops.DetectImageTagKey(cv); k != "" {
+			app.Spec.CD.ImageTagPath = k
+		}
+	}
 }
 
 // cdConfigFromDTO converts the optional wire CD config into the domain type.
