@@ -2,7 +2,6 @@ package gitops
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/domain"
@@ -59,6 +58,10 @@ type ImageSubscription struct {
 	// SemverConstraint is an optional semver range (e.g. ">=1.0.0").
 	// Use instead of AllowTags when the image follows semantic versioning.
 	SemverConstraint string `yaml:"semverConstraint,omitempty"`
+	// ImageSelectionStrategy is how Kargo discovers/selects the tag to promote:
+	// "NewestBuild" (most-recently-pushed, used for "latest from main"),
+	// "SemVer" (default), "Digest", or "Lexical". Empty = Kargo's default (SemVer).
+	ImageSelectionStrategy string `yaml:"imageSelectionStrategy,omitempty"`
 	// InsecureSkipTLSVerify skips TLS certificate verification when
 	// connecting to the registry. Required for HTTP-only registries
 	// like the local kind-registry in dev mode.
@@ -160,21 +163,32 @@ type FreightSources struct {
 
 // ── Build options ─────────────────────────────────────────────────────────────
 
+// KargoImage is one resolved image source for an app: the repository the
+// Warehouse watches and the values key the Stage rewrites on promotion. It is
+// the resolved, publish-time form of a tpl.TemplateImage (or a single legacy
+// image derived from the app's image_repository).
+type KargoImage struct {
+	// Repository is the container image repository to watch (no tag).
+	Repository string
+	// TagKey is the dotted Helm values key holding this image's tag.
+	TagKey string
+	// TagPattern limits which tags Kargo considers (allowTags). Empty = any.
+	TagPattern string
+	// SelectionStrategy maps to the subscription's imageSelectionStrategy.
+	SelectionStrategy string
+}
+
 // KargoBuildOptions carries the Kargo-specific options used by the builders.
 type KargoBuildOptions struct {
 	// KargoNamespace is the Kubernetes namespace for Kargo CRs (= Kargo project).
 	// Defaults to the suparship project name.
 	KargoNamespace string
 
-	// ImageRepoURL is the container image repository the Warehouse monitors.
-	// When empty a placeholder is used; operators should override this to their
-	// actual registry path.
-	ImageRepoURL string
-
-	// ImageTagPattern is a regex that filters which tags Kargo promotes.
-	// Maps to the Kargo v1alpha1 "allowTags" field.
-	// Defaults to semver tags (^\d+\.\d+\.\d+$) when empty.
-	ImageTagPattern string
+	// Images are the resolved image sources for the app — one per service. The
+	// Warehouse gets one subscription per entry and the Stage one helm image
+	// update per entry. When empty, applyKargoDefaults seeds a single
+	// placeholder image so the CRs are still well-formed.
+	Images []KargoImage
 
 	// InsecureSkipTLSVerify disables TLS verification for image registry
 	// access. Required for HTTP-only registries (e.g. local dev registries).
@@ -212,8 +226,17 @@ type KargoBuildOptions struct {
 func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehouse {
 	opts = applyKargoDefaults(opts, app)
 
-	repoURL := opts.ImageRepoURL
-	tagPattern := opts.ImageTagPattern
+	subs := make([]WarehouseSubscription, 0, len(opts.Images))
+	for _, img := range opts.Images {
+		subs = append(subs, WarehouseSubscription{
+			Image: &ImageSubscription{
+				RepoURL:                img.Repository,
+				AllowTags:              img.TagPattern,
+				ImageSelectionStrategy: img.SelectionStrategy,
+				InsecureSkipTLSVerify:  opts.InsecureSkipTLSVerify,
+			},
+		})
+	}
 
 	return &KargoWarehouse{
 		APIVersion: kargoAPIVersion,
@@ -232,15 +255,7 @@ func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehous
 		},
 		Spec: WarehouseSpec{
 			FreightCreationPolicy: "Automatic",
-			Subscriptions: []WarehouseSubscription{
-				{
-					Image: &ImageSubscription{
-						RepoURL:               repoURL,
-						AllowTags:              tagPattern,
-						InsecureSkipTLSVerify:  opts.InsecureSkipTLSVerify,
-					},
-				},
-			},
+			Subscriptions:         subs,
 		},
 	}
 }
@@ -294,24 +309,25 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 	}
 
 	// When the gitops repo URL is configured, add gitRepoUpdates so Kargo
-	// commits new image tags to values.yaml before triggering the ArgoCD sync.
+	// commits new image tags to values.yaml before triggering the ArgoCD sync —
+	// one helm image update per image source so multi-service charts work.
 	if opts.GitOpsRepoURL != "" {
+		imgUpdates := make([]HelmImageUpdate, 0, len(opts.Images))
+		for _, img := range opts.Images {
+			imgUpdates = append(imgUpdates, HelmImageUpdate{
+				Image:          img.Repository,
+				ValuesFilePath: valuesFilePath,
+				Key:            img.TagKey,
+				Value:          "Tag",
+			})
+		}
 		pm.GitRepoUpdates = []GitRepoUpdate{
 			{
 				RepoURL:               opts.GitOpsRepoURL,
 				ReadBranch:            "main",
 				WriteBranch:           "main",
 				InsecureSkipTLSVerify: opts.GitOpsRepoInsecure,
-				Helm: &HelmPromUpdate{
-					Images: []HelmImageUpdate{
-						{
-							Image:          opts.ImageRepoURL,
-							ValuesFilePath: valuesFilePath,
-							Key:            ImageTagValuesKey(app),
-							Value:          "Tag",
-						},
-					},
-				},
+				Helm:                  &HelmPromUpdate{Images: imgUpdates},
 			},
 		}
 	}
@@ -468,60 +484,10 @@ func KargoStageName(appName, envName string) string {
 	return appName + "-" + envName
 }
 
-// defaultImageTagKey is the canonical Helm-values key for the deploy image tag
-// when an app does not override AppSpec.CD.ImageTagPath.
-const defaultImageTagKey = "components.web.image.tag"
-
-// ImageTagValuesKey returns the dotted Helm-values key that holds the deploy
-// image tag for an app. Kargo writes this key during promotion and the
-// publisher preserves it on republish, so BOTH must resolve it identically —
-// hence this single source of truth. Defaults to the canonical
-// "components.web.image.tag" when the app sets no override.
-func ImageTagValuesKey(app *domain.App) string {
-	if app != nil && app.Spec.CD.ImageTagPath != "" {
-		return app.Spec.CD.ImageTagPath
-	}
-	return defaultImageTagKey
-}
-
-// DetectImageTagKey infers the dotted Helm-values key that holds the image tag
-// by inspecting a values document (chart defaults or an app's overrides). It
-// returns "" when no image block is found, so callers can fall back to the
-// canonical default. Preference order: a "web" component, then the lexically
-// first component carrying an image block (canonical suparship layout), then a
-// root-level image block (common in BYO/external charts like voiceai-livekit).
-func DetectImageTagKey(values map[string]any) string {
-	if comps, ok := values["components"].(map[string]any); ok {
-		if componentHasImage(comps["web"]) {
-			return "components.web.image.tag"
-		}
-		names := make([]string, 0, len(comps))
-		for n := range comps {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		for _, n := range names {
-			if componentHasImage(comps[n]) {
-				return "components." + n + ".image.tag"
-			}
-		}
-	}
-	if _, ok := values["image"].(map[string]any); ok {
-		return "image.tag"
-	}
-	return ""
-}
-
-// componentHasImage reports whether a component values block contains an image
-// map (i.e. the place a tag would live).
-func componentHasImage(v any) bool {
-	cm, ok := v.(map[string]any)
-	if !ok {
-		return false
-	}
-	_, ok = cm["image"].(map[string]any)
-	return ok
-}
+// DefaultImageTagKey is the canonical Helm-values key for the deploy image tag,
+// used as the legacy single-image fallback when a template declares no Images
+// mapping (charts built on suparship-common).
+const DefaultImageTagKey = "components.web.image.tag"
 
 // KargoNamespaceForProject returns the Kargo namespace for a suparship project.
 // By convention Kargo namespaces match the suparship project name.
@@ -538,16 +504,20 @@ func DefaultImageRepoURL(projectName, appName string) string {
 }
 
 // applyKargoDefaults fills zero-valued KargoBuildOptions with sensible defaults.
+// When the caller supplies no Images it seeds a single placeholder image so the
+// generated CRs are still well-formed (the placeholder repo won't resolve —
+// operators are expected to supply real images via the template mapping).
 func applyKargoDefaults(opts KargoBuildOptions, app *domain.App) KargoBuildOptions {
 	if opts.KargoNamespace == "" {
 		opts.KargoNamespace = app.ProjectName
 	}
-	if opts.ImageRepoURL == "" {
-		opts.ImageRepoURL = DefaultImageRepoURL(app.ProjectName, app.Name)
-	}
-	if opts.ImageTagPattern == "" {
-		// Match SemVer tags: 1.0.0, 2.3.14, etc.
-		opts.ImageTagPattern = `^\d+\.\d+\.\d+$`
+	if len(opts.Images) == 0 {
+		opts.Images = []KargoImage{{
+			Repository: DefaultImageRepoURL(app.ProjectName, app.Name),
+			TagKey:     DefaultImageTagKey,
+			// Match SemVer tags: 1.0.0, 2.3.14, etc.
+			TagPattern: `^\d+\.\d+\.\d+$`,
+		}}
 	}
 	return opts
 }

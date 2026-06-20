@@ -50,8 +50,12 @@ func TestBuildKargoWarehouse_WithOverrides(t *testing.T) {
 
 	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{
 		KargoNamespace: "kargo-myproject",
-		ImageRepoURL:   "registry.example.com/myproject/api",
-		ImageTagPattern: `^v\d+\.\d+\.\d+$`,
+		Images: []gitops.KargoImage{{
+			Repository:        "registry.example.com/myproject/api",
+			TagKey:            "image.tag",
+			TagPattern:        `^v\d+\.\d+\.\d+$`,
+			SelectionStrategy: "NewestBuild",
+		}},
 	})
 
 	if wh.Metadata.Namespace != "kargo-myproject" {
@@ -62,6 +66,26 @@ func TestBuildKargoWarehouse_WithOverrides(t *testing.T) {
 	}
 	if wh.Spec.Subscriptions[0].Image.AllowTags != `^v\d+\.\d+\.\d+$` {
 		t.Errorf("AllowTags override not applied: got %q", wh.Spec.Subscriptions[0].Image.AllowTags)
+	}
+	if wh.Spec.Subscriptions[0].Image.ImageSelectionStrategy != "NewestBuild" {
+		t.Errorf("ImageSelectionStrategy: got %q want NewestBuild", wh.Spec.Subscriptions[0].Image.ImageSelectionStrategy)
+	}
+}
+
+func TestBuildKargoWarehouse_MultipleImages(t *testing.T) {
+	app := &domain.App{Name: "multi", ProjectName: "demo"}
+	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{
+		Images: []gitops.KargoImage{
+			{Repository: "acr.example.com/agent", TagKey: "agent.image.tag"},
+			{Repository: "acr.example.com/caller", TagKey: "caller.image.tag"},
+		},
+	})
+	if len(wh.Spec.Subscriptions) != 2 {
+		t.Fatalf("Subscriptions: got %d want 2", len(wh.Spec.Subscriptions))
+	}
+	if wh.Spec.Subscriptions[0].Image.RepoURL != "acr.example.com/agent" ||
+		wh.Spec.Subscriptions[1].Image.RepoURL != "acr.example.com/caller" {
+		t.Errorf("per-image subscriptions not built: %+v", wh.Spec.Subscriptions)
 	}
 }
 
@@ -178,8 +202,11 @@ func TestBuildKargoStage_GitRepoUpdates(t *testing.T) {
 	}
 
 	opts := gitops.KargoBuildOptions{
-		ImageRepoURL:   "kind-registry:5000/demo/color-app",
-		GitOpsRepoURL:  "http://gitea-http.gitea.svc:3000/gitops/gitops.git",
+		Images: []gitops.KargoImage{{
+			Repository: "kind-registry:5000/demo/color-app",
+			TagKey:     "components.web.image.tag",
+		}},
+		GitOpsRepoURL:      "http://gitea-http.gitea.svc:3000/gitops/gitops.git",
 		GitOpsRepoInsecure: true,
 	}
 	stage := gitops.BuildKargoStage(app, env, nil, opts)
@@ -222,80 +249,28 @@ func TestBuildKargoStage_GitRepoUpdates(t *testing.T) {
 	}
 }
 
-func TestBuildKargoStage_ImageTagKeyFromCDConfig(t *testing.T) {
-	// An app whose chart keeps the tag at the root "image.tag" key (e.g. the
-	// voiceai-livekit chart) must have Kargo write that same key — otherwise
-	// the promotion edits a non-existent path and the publisher preserves a
-	// different one. CD.ImageTagPath is the single source of truth for both.
-	app := &domain.App{
-		Name:        "livekit-express-caller",
-		ProjectName: "voiceai",
-		Spec:        domain.AppSpec{CD: domain.CDConfig{Managed: true, ImageTagPath: "image.tag"}},
-	}
+func TestBuildKargoStage_MultipleImageKeys(t *testing.T) {
+	// A multi-service chart must produce one helm image update per service, each
+	// writing that service's own tag key.
+	app := &domain.App{Name: "multi", ProjectName: "demo"}
 	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}
 	opts := gitops.KargoBuildOptions{
-		ImageRepoURL:  "acr.example.com/voiceai-livekit",
+		Images: []gitops.KargoImage{
+			{Repository: "acr.example.com/agent", TagKey: "agent.image.tag"},
+			{Repository: "acr.example.com/caller", TagKey: "caller.image.tag"},
+		},
 		GitOpsRepoURL: "http://gitops.example.com/gitops.git",
 	}
-
 	stage := gitops.BuildKargoStage(app, env, nil, opts)
-	img := stage.Spec.PromotionMechanisms.GitRepoUpdates[0].Helm.Images[0]
-	if img.Key != "image.tag" {
-		t.Errorf("Key: got %q want %q", img.Key, "image.tag")
+	imgs := stage.Spec.PromotionMechanisms.GitRepoUpdates[0].Helm.Images
+	if len(imgs) != 2 {
+		t.Fatalf("Helm images: got %d want 2", len(imgs))
 	}
-}
-
-func TestDetectImageTagKey(t *testing.T) {
-	cases := []struct {
-		name   string
-		values map[string]any
-		want   string
-	}{
-		{
-			name:   "root image block",
-			values: map[string]any{"image": map[string]any{"repository": "r", "tag": "t"}},
-			want:   "image.tag",
-		},
-		{
-			name: "web component image",
-			values: map[string]any{"components": map[string]any{
-				"web": map[string]any{"image": map[string]any{"tag": "t"}},
-			}},
-			want: "components.web.image.tag",
-		},
-		{
-			name: "non-web component falls to lexically first",
-			values: map[string]any{"components": map[string]any{
-				"worker": map[string]any{"image": map[string]any{"tag": "t"}},
-				"api":    map[string]any{"image": map[string]any{"tag": "t"}},
-			}},
-			want: "components.api.image.tag",
-		},
-		{
-			name: "web preferred over other components",
-			values: map[string]any{"components": map[string]any{
-				"api": map[string]any{"image": map[string]any{"tag": "t"}},
-				"web": map[string]any{"image": map[string]any{"tag": "t"}},
-			}},
-			want: "components.web.image.tag",
-		},
-		{
-			name:   "no image block",
-			values: map[string]any{"replicas": 2},
-			want:   "",
-		},
-		{
-			name:   "image is a string, not a map",
-			values: map[string]any{"image": "repo:tag"},
-			want:   "",
-		},
+	if imgs[0].Key != "agent.image.tag" || imgs[1].Key != "caller.image.tag" {
+		t.Errorf("per-service keys not written: %+v", imgs)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := gitops.DetectImageTagKey(tc.values); got != tc.want {
-				t.Errorf("DetectImageTagKey = %q, want %q", got, tc.want)
-			}
-		})
+	if imgs[0].Image != "acr.example.com/agent" || imgs[1].Image != "acr.example.com/caller" {
+		t.Errorf("per-service images not written: %+v", imgs)
 	}
 }
 

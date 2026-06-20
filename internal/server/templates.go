@@ -58,10 +58,23 @@ type TemplateDetailDTO struct {
 	// suparship-common base; false = passthrough/BYO). Surfaced so the UI can
 	// show + edit the passthrough toggle.
 	InjectCanonicalValues *bool `json:"injectCanonicalValues,omitempty"`
+	// Images is the per-service image mapping that drives external-CD (Kargo)
+	// wiring: which repo to watch and which values key holds each tag. Editable
+	// in template settings; auto-detected at import.
+	Images []TemplateImageDTO `json:"images,omitempty"`
 	// Editable is true when metadata can be edited in place (cluster-stored and
 	// NOT managed by an external sync). Source describes provenance.
 	Editable bool               `json:"editable"`
 	Source   *TemplateSourceDTO `json:"source,omitempty"`
+}
+
+// TemplateImageDTO mirrors tpl.TemplateImage on the wire.
+type TemplateImageDTO struct {
+	Name              string `json:"name"`
+	Repository        string `json:"repository"`
+	TagKey            string `json:"tagKey"`
+	TagPattern        string `json:"tagPattern,omitempty"`
+	SelectionStrategy string `json:"selectionStrategy,omitempty"`
 }
 
 // TemplateSourceDTO describes where a template came from, for the UI's edit gating.
@@ -499,7 +512,44 @@ func templateToDetail(t *tpl.Template) TemplateDetailDTO {
 		DefaultValues:         t.Spec.DefaultValues,
 		EnvValues:             t.Spec.EnvValues,
 		InjectCanonicalValues: t.Spec.InjectCanonicalValues,
+		Images:                imagesToDTO(t.Spec.Images),
 	}
+}
+
+// imagesToDTO / imagesFromDTO convert the template image mapping to/from the
+// wire form.
+func imagesToDTO(images []tpl.TemplateImage) []TemplateImageDTO {
+	if len(images) == 0 {
+		return nil
+	}
+	out := make([]TemplateImageDTO, len(images))
+	for i, im := range images {
+		out[i] = TemplateImageDTO{
+			Name:              im.Name,
+			Repository:        im.Repository,
+			TagKey:            im.TagKey,
+			TagPattern:        im.TagPattern,
+			SelectionStrategy: im.SelectionStrategy,
+		}
+	}
+	return out
+}
+
+func imagesFromDTO(dtos []TemplateImageDTO) []tpl.TemplateImage {
+	if len(dtos) == 0 {
+		return nil
+	}
+	out := make([]tpl.TemplateImage, len(dtos))
+	for i, d := range dtos {
+		out[i] = tpl.TemplateImage{
+			Name:              d.Name,
+			Repository:        d.Repository,
+			TagKey:            d.TagKey,
+			TagPattern:        d.TagPattern,
+			SelectionStrategy: d.SelectionStrategy,
+		}
+	}
+	return out
 }
 
 func componentsToTemplateDTO(components []tpl.TemplateComponent) []TemplateComponentDTO {

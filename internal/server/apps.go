@@ -161,10 +161,10 @@ type AppDetailDTO struct {
 
 // CDConfigDTO mirrors domain.CDConfig on the wire. When Managed is true an
 // external CD controller (Kargo) owns the deployed image tag and the publisher
-// preserves it across republishes (see domain.CDConfig).
+// preserves it across republishes (see domain.CDConfig). The per-service image
+// repositories and tag-keys are declared at the template level, not here.
 type CDConfigDTO struct {
-	Managed      bool   `json:"managed"`
-	ImageTagPath string `json:"imageTagPath,omitempty"`
+	Managed bool `json:"managed"`
 }
 
 // AddonClaimDTO mirrors domain.AddonSpec for the wire. Per-app values

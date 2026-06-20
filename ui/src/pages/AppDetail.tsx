@@ -1821,7 +1821,6 @@ function AppValuesEditor({
   const [preview, setPreview] = useState<string>("");
   const [chartAvailable, setChartAvailable] = useState(true);
   const [cdManaged, setCdManaged] = useState(false);
-  const [cdImageTagPath, setCdImageTagPath] = useState("");
   const [cdSaving, setCdSaving] = useState(false);
 
   // Seed editors from the persisted overlays whenever the app data changes.
@@ -1833,7 +1832,6 @@ function AppValuesEditor({
     }
     setEnvTexts(next);
     setCdManaged(data.cd?.managed ?? false);
-    setCdImageTagPath(data.cd?.imageTagPath ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
@@ -1898,16 +1896,12 @@ function AppValuesEditor({
     }
   }
 
-  const cdDirty =
-    cdManaged !== (data.cd?.managed ?? false) ||
-    cdImageTagPath.trim() !== (data.cd?.imageTagPath ?? "");
+  const cdDirty = cdManaged !== (data.cd?.managed ?? false);
 
   async function saveCD() {
     setCdSaving(true);
     try {
-      await updateApp(project, data.name, {
-        cd: { managed: cdManaged, imageTagPath: cdImageTagPath.trim() },
-      });
+      await updateApp(project, data.name, { cd: { managed: cdManaged } });
       toast.success("CD settings saved — re-publishing to GitOps.");
       await onSaved();
     } catch (err) {
@@ -2020,7 +2014,8 @@ function AppValuesEditor({
                 When enabled, Kargo owns the image tag: it commits the
                 discovered/promoted tag and re-publishing preserves it instead of
                 resetting to the value in your overrides. Leave the tag out of the
-                overrides above once this is on.
+                overrides above once this is on. Which images Kargo watches comes
+                from the template's image mapping.
               </p>
             </div>
             <button
@@ -2031,24 +2026,6 @@ function AppValuesEditor({
               {cdSaving ? "Saving…" : "Save CD"}
             </button>
           </div>
-          {cdManaged && (
-            <label className="mt-3 block text-xs text-gray-500">
-              Image tag path
-              <input
-                type="text"
-                value={cdImageTagPath}
-                onChange={(e) => setCdImageTagPath(e.target.value)}
-                placeholder="auto-detect from chart shape"
-                className="mt-1 block w-full max-w-sm rounded-md border border-gray-300 px-2 py-1 font-mono text-xs"
-              />
-              <span className="mt-1 block text-gray-400">
-                Leave blank to infer the key from the chart and your overrides
-                (e.g. <code className="font-mono">image.tag</code> or{" "}
-                <code className="font-mono">components.web.image.tag</code>). Set
-                it only to override what detection picks.
-              </span>
-            </label>
-          )}
         </div>
       </div>
     </div>

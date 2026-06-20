@@ -388,7 +388,8 @@ function PreviewPanel({ preview }: { preview: TemplateImportPreview }) {
           <dt className="text-xs uppercase tracking-wide text-gray-400">Inputs</dt>
           <dd className="mt-1 text-gray-900">
             {s.inputCount} input{s.inputCount === 1 ? "" : "s"}, {s.mappingCount} mapping
-            {s.mappingCount === 1 ? "" : "s"}
+            {s.mappingCount === 1 ? "" : "s"}, {s.imageCount} image
+            {s.imageCount === 1 ? "" : "s"}
           </dd>
         </div>
       </dl>

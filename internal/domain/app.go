@@ -369,16 +369,14 @@ type AppSpec struct {
 // promote of another env) would overwrite the live tag and roll the deployment
 // back to the seed. Preservation applies only to stable (non-preview)
 // environments — preview envs always deploy the tag from their own pipeline.
+//
+// Which image repositories and values tag-keys Kargo manages is declared at the
+// template level (tpl.TemplateSpec.Images), not here, so a chart with one or
+// many services is handled uniformly.
 type CDConfig struct {
 	// Managed enables external-CD tag ownership (see CDConfig docs). Default
 	// false preserves the legacy behaviour where the platform writes the tag.
 	Managed bool `json:"managed,omitempty" yaml:"managed,omitempty"`
-	// ImageTagPath is the dotted Helm-values key that holds the deploy image
-	// tag (e.g. "image.tag" for a root-level image, or
-	// "components.web.image.tag" for the canonical suparship layout). The CD
-	// controller writes this key and the publisher preserves it, so the two
-	// MUST agree. Empty defaults to the canonical "components.web.image.tag".
-	ImageTagPath string `json:"imageTagPath,omitempty" yaml:"imageTagPath,omitempty"`
 }
 
 // App is a deployable unit owned by a project. It combines identity metadata

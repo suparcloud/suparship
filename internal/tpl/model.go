@@ -142,6 +142,34 @@ type TemplateSpec struct {
 	// their own values structure: the platform then emits only the overlays +
 	// resolved {platform.*}/{vars.*} tokens, no injected schema.
 	InjectCanonicalValues *bool `yaml:"injectCanonicalValues,omitempty"`
+	// Images declares the container images this chart deploys, one entry per
+	// service, so external-CD (Kargo) can be wired generically: each entry says
+	// which image repository to watch and which Helm values key holds its tag.
+	// Auto-detected at chart import and editable in template settings. Empty for
+	// templates that don't opt into image-driven CD (the publisher then falls
+	// back to the legacy single-image behaviour).
+	Images []TemplateImage `yaml:"images,omitempty"`
+}
+
+// TemplateImage maps one of a chart's services to its image source and the Helm
+// values key that holds its tag. It carries everything Kargo needs: the repo to
+// watch (Warehouse subscription), the values key to rewrite on promotion (Stage
+// helm image update), and how to discover/select tags.
+type TemplateImage struct {
+	// Name is a logical service identifier (e.g. "agent", "web"). Unique per template.
+	Name string `yaml:"name"`
+	// Repository is the container image repository to watch (no tag).
+	Repository string `yaml:"repository"`
+	// TagKey is the dotted Helm values key that holds this image's tag
+	// (e.g. "image.tag" or "components.web.image.tag").
+	TagKey string `yaml:"tagKey"`
+	// TagPattern is an optional regex limiting which tags Kargo considers
+	// (maps to the Warehouse subscription's allowTags).
+	TagPattern string `yaml:"tagPattern,omitempty"`
+	// SelectionStrategy is how Kargo picks the tag to promote: one of
+	// "NewestBuild", "SemVer", "Digest", "Lexical". Empty defaults to "SemVer"
+	// (Kargo's own default).
+	SelectionStrategy string `yaml:"selectionStrategy,omitempty"`
 }
 
 // CanonicalValues reports whether the canonical suparship-common values base is
