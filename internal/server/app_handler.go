@@ -1391,50 +1391,71 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{
-			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
-		})
-		return
-	}
-
-	targetEnv, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, req.TargetEnvironment)
+	resp, err := ah.promoteAppEnv(r.Context(), projectName, appName, req.TargetEnvironment)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{
-			Error: "environment \"" + req.TargetEnvironment + "\" not found for app \"" + appName + "\"",
-		})
+		writeJSON(w, statusForPromoteErr(err), errorResponse{Error: err.Error()})
 		return
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
+// Sentinels let the per-app HTTP handler map promoteAppEnv failures back to the
+// status codes it returned before the core was extracted; the stack batch path
+// just surfaces err.Error() per app.
+var (
+	errPromoteAppNotFound = errors.New("app not found")
+	errPromoteBadRequest  = errors.New("invalid promotion")
+)
+
+// statusForPromoteErr maps a promoteAppEnv error to an HTTP status.
+func statusForPromoteErr(err error) int {
+	switch {
+	case errors.Is(err, errPromoteAppNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, errPromoteBadRequest), errors.Is(err, domainapp.ErrNoRelease):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// promoteAppEnv promotes a single app to targetEnvName: it resolves the source
+// env, publishes the target env's GitOps files (best-effort), then either
+// creates a Kargo Promotion CR (when Kargo is wired) or copies the release
+// bundle in the local store. It is the shared core of the per-app promote
+// handler and the stack batch promote. Returns the populated response.
+func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, targetEnvName string) (*AppPromoteResponse, error) {
+	app, err := ah.appStore.GetApp(ctx, projectName, appName)
+	if err != nil {
+		return nil, fmt.Errorf("%w: app %q not found in project %q", errPromoteAppNotFound, appName, projectName)
+	}
+
+	targetEnv, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, targetEnvName)
+	if err != nil {
+		return nil, fmt.Errorf("%w: environment %q not found for app %q", errPromoteBadRequest, targetEnvName, appName)
+	}
 	if targetEnv.EnvType == domain.AppEnvPreview {
-		writeJSON(w, http.StatusBadRequest, errorResponse{
-			Error: "cannot promote to a preview environment",
-		})
-		return
+		return nil, fmt.Errorf("%w: cannot promote to a preview environment", errPromoteBadRequest)
 	}
 
 	// Resolve the source: the stable env with the highest Order strictly below
 	// the target's Order (closest predecessor). Falls back to preview envs when
 	// no stable predecessor exists.
-	sourceEnv, err := ah.findPromotionSource(r.Context(), projectName, appName, targetEnv)
+	sourceEnv, err := ah.findPromotionSource(ctx, projectName, appName, targetEnv)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
-		return
+		return nil, fmt.Errorf("%w: %s", errPromoteBadRequest, err.Error())
 	}
 
 	// Write GitOps files for the target environment before triggering the
 	// promotion. This ensures ArgoCD can find app.yaml + values.yaml when
 	// Kargo (or the store fallback) signals a sync. Best-effort: a publish
-	// failure is logged but does not abort the promotion response.
+	// failure is logged but does not abort the promotion.
 	if ah.gitOpsPublisher != nil {
-		app, appErr := ah.appStore.GetApp(r.Context(), projectName, appName)
-		if appErr == nil {
-			ah.ensureAppNamespace(r.Context(), app, targetEnv)
-			if pubErr := ah.gitOpsPublisher.PublishAppEnv(r.Context(), app, targetEnv); pubErr != nil {
-				slog.Warn("promote: failed to publish env files — proceeding with promotion",
-					"project", projectName, "app", appName,
-					"env", req.TargetEnvironment, "err", pubErr)
-			}
+		ah.ensureAppNamespace(ctx, app, targetEnv)
+		if pubErr := ah.gitOpsPublisher.PublishAppEnv(ctx, app, targetEnv); pubErr != nil {
+			slog.Warn("promote: failed to publish env files — proceeding with promotion",
+				"project", projectName, "app", appName,
+				"env", targetEnvName, "err", pubErr)
 		}
 	}
 
@@ -1442,76 +1463,58 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 	// drives the actual release copy through the Kargo pipeline; suparship
 	// then returns the Promotion details rather than the local release copy.
 	if ah.kargoPromoter != nil {
-		kargoResult, err := ah.kargoPromoter.CreatePromotion(
-			r.Context(),
-			projectName, // Kargo namespace = suparship project name by convention
-			appName,
-			sourceEnv.EnvName,
-			req.TargetEnvironment,
-		)
+		kargoResult, err := ah.kargoPromoter.CreatePromotion(ctx, projectName, appName, sourceEnv.EnvName, targetEnvName)
 		if err != nil {
 			slog.Error("kargo promotion failed",
 				"project", projectName, "app", appName,
-				"from", sourceEnv.EnvName, "to", req.TargetEnvironment,
-				"error", err,
-			)
-			writeJSON(w, http.StatusInternalServerError, errorResponse{
-				Error: "failed to create Kargo promotion: " + err.Error(),
-			})
-			return
+				"from", sourceEnv.EnvName, "to", targetEnvName, "error", err)
+			return nil, fmt.Errorf("failed to create Kargo promotion: %w", err)
 		}
 		slog.Info("kargo promotion created",
-			"promotion", kargoResult.Name,
-			"stage", kargoResult.Stage,
-			"freight", kargoResult.Freight,
-		)
-		writeJSON(w, http.StatusOK, AppPromoteResponse{
+			"promotion", kargoResult.Name, "stage", kargoResult.Stage, "freight", kargoResult.Freight)
+		return &AppPromoteResponse{
 			Project:     projectName,
 			App:         appName,
 			Source:      sourceEnv.EnvName,
-			Destination: req.TargetEnvironment,
+			Destination: targetEnvName,
 			Namespace:   targetEnv.Namespace,
-			Message:     fmt.Sprintf("Kargo promotion %q created — freight %q is being promoted to %s", kargoResult.Name, kargoResult.Freight, req.TargetEnvironment),
+			Message:     fmt.Sprintf("Kargo promotion %q created — freight %q is being promoted to %s", kargoResult.Name, kargoResult.Freight, targetEnvName),
 			KargoPromotion: &KargoPromotionDTO{
 				Name:    kargoResult.Name,
 				Stage:   kargoResult.Stage,
 				Freight: kargoResult.Freight,
 				Phase:   kargoResult.Phase,
 			},
-		})
-		return
+		}, nil
 	}
 
 	// Fallback: copy the release bundle in the local store (MVP stub, no Kargo).
-	result, err := domainapp.Promote(r.Context(), ah.appStore, domainapp.PromoteRequest{
+	result, err := domainapp.Promote(ctx, ah.appStore, domainapp.PromoteRequest{
 		ProjectName: projectName,
 		AppName:     appName,
 		FromEnv:     sourceEnv.EnvName,
-		ToEnv:       req.TargetEnvironment,
+		ToEnv:       targetEnvName,
 	})
 	if err != nil {
 		if errors.Is(err, domainapp.ErrNoRelease) {
-			writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
-			return
+			return nil, err
 		}
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to promote app"})
-		return
+		return nil, fmt.Errorf("failed to promote app: %w", err)
 	}
 
-	resp := AppPromoteResponse{
+	return &AppPromoteResponse{
 		Project:     projectName,
 		App:         appName,
 		Source:      sourceEnv.EnvName,
-		Destination: req.TargetEnvironment,
+		Destination: targetEnvName,
 		Namespace:   targetEnv.Namespace,
-		Message:     "Promotion of " + appName + " from " + sourceEnv.EnvName + " to " + req.TargetEnvironment + " succeeded",
+		Message:     "Promotion of " + appName + " from " + sourceEnv.EnvName + " to " + targetEnvName + " succeeded",
 		Release: &AppReleaseRefDTO{
 			Image:  result.Release.Image,
 			Tag:    result.Release.Tag,
 			Commit: result.Release.Commit,
 		},
-	}
-	writeJSON(w, http.StatusOK, resp)
+	}, nil
 }
 
 // findPromotionSource returns the best source environment for a promotion to

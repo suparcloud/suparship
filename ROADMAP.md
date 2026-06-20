@@ -454,7 +454,7 @@ lifecycle, and clone. Full design + phase plan: **[docs/stacks.md](docs/stacks.m
 
 - **Phase 1 — Grouping + override cascade (env/values/secrets) + membership + UI** — ✅ shipped
 - **Phase 2 — Shared stack namespace + intra-stack DNS** — ✅ shipped
-- **Phase 3 — Batch lifecycle (deploy/promote/preview/delete the whole stack)** — planned
+- **Phase 3 — Batch lifecycle (deploy/promote/preview/delete the whole stack)** — ✅ shipped
 - **Phase 4 — Clone stack with overrides (e.g. livekit-cloud vs self-hosted)** — planned
 
 Decoupled / future: reusable stack blueprints; project/stack-scope gateway
