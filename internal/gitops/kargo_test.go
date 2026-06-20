@@ -222,6 +222,29 @@ func TestBuildKargoStage_GitRepoUpdates(t *testing.T) {
 	}
 }
 
+func TestBuildKargoStage_ImageTagKeyFromCDConfig(t *testing.T) {
+	// An app whose chart keeps the tag at the root "image.tag" key (e.g. the
+	// voiceai-livekit chart) must have Kargo write that same key — otherwise
+	// the promotion edits a non-existent path and the publisher preserves a
+	// different one. CD.ImageTagPath is the single source of truth for both.
+	app := &domain.App{
+		Name:        "livekit-express-caller",
+		ProjectName: "voiceai",
+		Spec:        domain.AppSpec{CD: domain.CDConfig{Managed: true, ImageTagPath: "image.tag"}},
+	}
+	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}
+	opts := gitops.KargoBuildOptions{
+		ImageRepoURL:  "acr.example.com/voiceai-livekit",
+		GitOpsRepoURL: "http://gitops.example.com/gitops.git",
+	}
+
+	stage := gitops.BuildKargoStage(app, env, nil, opts)
+	img := stage.Spec.PromotionMechanisms.GitRepoUpdates[0].Helm.Images[0]
+	if img.Key != "image.tag" {
+		t.Errorf("Key: got %q want %q", img.Key, "image.tag")
+	}
+}
+
 func TestBuildKargoStage_NoGitRepoUpdatesWithoutRepoURL(t *testing.T) {
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}
