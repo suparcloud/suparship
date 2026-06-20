@@ -443,6 +443,11 @@ func (th *templateHandler) handleDetail(w http.ResponseWriter, r *http.Request) 
 	if th.kubeClient != nil {
 		if ov, err := kube.LoadTemplateOverride(r.Context(), th.kubeClient, name); err == nil && ov != nil {
 			dto.Title, dto.Category, dto.Description = applyMetadataOverride(dto.Title, dto.Category, dto.Description, ov.Metadata)
+			// An override image mapping (set from the UI on a read-only template)
+			// replaces the template's own.
+			if len(ov.Images) > 0 {
+				dto.Images = imagesOverrideToDTO(ov.Images)
+			}
 		}
 	}
 	src, editable := th.templateProvenance(r.Context(), name)
@@ -547,6 +552,43 @@ func imagesFromDTO(dtos []TemplateImageDTO) []tpl.TemplateImage {
 			TagKey:            d.TagKey,
 			TagPattern:        d.TagPattern,
 			SelectionStrategy: d.SelectionStrategy,
+		}
+	}
+	return out
+}
+
+// imagesToOverride / imagesOverrideToDTO bridge the wire DTO and the sync-safe
+// override storage form (used when image mappings are edited on a read-only
+// synced/built-in template).
+func imagesToOverride(dtos []TemplateImageDTO) []domain.TemplateImageOverride {
+	if len(dtos) == 0 {
+		return nil
+	}
+	out := make([]domain.TemplateImageOverride, len(dtos))
+	for i, d := range dtos {
+		out[i] = domain.TemplateImageOverride{
+			Name:              d.Name,
+			Repository:        d.Repository,
+			TagKey:            d.TagKey,
+			TagPattern:        d.TagPattern,
+			SelectionStrategy: d.SelectionStrategy,
+		}
+	}
+	return out
+}
+
+func imagesOverrideToDTO(ovs []domain.TemplateImageOverride) []TemplateImageDTO {
+	if len(ovs) == 0 {
+		return nil
+	}
+	out := make([]TemplateImageDTO, len(ovs))
+	for i, o := range ovs {
+		out[i] = TemplateImageDTO{
+			Name:              o.Name,
+			Repository:        o.Repository,
+			TagKey:            o.TagKey,
+			TagPattern:        o.TagPattern,
+			SelectionStrategy: o.SelectionStrategy,
 		}
 	}
 	return out

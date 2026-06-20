@@ -129,6 +129,59 @@ func TestUpdateTemplateMetadata_SyncedSavesOverride(t *testing.T) {
 	}
 }
 
+func TestUpdateTemplateMetadata_SyncedSavesImageOverride(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	if err := kube.SaveTemplate(context.Background(), client, metadataTestTemplate(), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	regStore := tpl.NewRegistryStore(client)
+	reg := &tpl.TemplateRegistry{}
+	reg.UpsertSource(tpl.TemplateSource{Name: "voiceai-livekit-agent", Origin: "external", ExternalRepo: "https://x/y.git"})
+	if err := regStore.Save(context.Background(), reg); err != nil {
+		t.Fatal(err)
+	}
+	th := &templateHandler{
+		kubeClient: client, registryStore: regStore,
+		clusterLoader: func(ctx context.Context) ([]*tpl.Template, error) { return kube.LoadTemplates(ctx, client) },
+	}
+
+	images := []TemplateImageDTO{{
+		Name: "agent", Repository: "acr.io/org/livekit", TagKey: "image.tag",
+		TagPattern: `^[0-9a-f]{7,40}$`, SelectionStrategy: "NewestBuild",
+	}}
+	rec := httptest.NewRecorder()
+	th.handleUpdateTemplateMetadata(rec, patchReq("voiceai-livekit-agent", templateMetadataPatch{Images: &images}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 saving image override on synced template, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var dto TemplateDetailDTO
+	_ = json.NewDecoder(rec.Body).Decode(&dto)
+	if len(dto.Images) != 1 || dto.Images[0].TagKey != "image.tag" || dto.Images[0].SelectionStrategy != "NewestBuild" {
+		t.Errorf("DTO images = %+v, want one image.tag/NewestBuild mapping", dto.Images)
+	}
+
+	// Persisted sync-safe; the template body stays imageless.
+	ov, err := kube.LoadTemplateOverride(context.Background(), client, "voiceai-livekit-agent")
+	if err != nil || ov == nil || len(ov.Images) != 1 || ov.Images[0].Repository != "acr.io/org/livekit" {
+		t.Fatalf("expected image override persisted, got %+v (err=%v)", ov, err)
+	}
+	got, _ := kube.LoadTemplates(context.Background(), client)
+	if len(got) != 1 || len(got[0].Spec.Images) != 0 {
+		t.Errorf("synced template body must not gain images, got %+v", got[0].Spec.Images)
+	}
+
+	// A subsequent detail GET reflects the override mapping.
+	getReq := httptest.NewRequest("GET", "/api/v1/templates/voiceai-livekit-agent", nil)
+	getReq.SetPathValue("name", "voiceai-livekit-agent")
+	getRec := httptest.NewRecorder()
+	th.handleDetail(getRec, getReq)
+	var detail TemplateDetailDTO
+	_ = json.NewDecoder(getRec.Body).Decode(&detail)
+	if len(detail.Images) != 1 || detail.Images[0].TagKey != "image.tag" {
+		t.Errorf("detail GET images = %+v, want override mapping applied", detail.Images)
+	}
+}
+
 func TestUpdateTemplateMetadata_SyncedRejectsValuesMode(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	_ = kube.SaveTemplate(context.Background(), client, metadataTestTemplate(), nil)
