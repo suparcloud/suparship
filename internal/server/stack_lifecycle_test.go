@@ -201,6 +201,86 @@ func TestStackDelete_WithApps(t *testing.T) {
 	}
 }
 
+// TestStackClone_CopiesMembersUnderNewNames clones a stack: the source stays
+// intact, the new stack exists, and each member is copied under {newStack}-{old}
+// (or an explicit override) with Spec.Stack pointing at the new stack.
+func TestStackClone_CopiesMembersUnderNewNames(t *testing.T) {
+	mux, ah, store, stackStore := newTestStackMux(testProject)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{
+		Name: "voiceai", ProjectName: testProject,
+		Spec: domain.StackSpec{DisplayName: "VoiceAI", RawValues: map[string]any{"replicas": 2}},
+	})
+	seedStackMember(store, testProject, "web", "voiceai")
+	seedStackMember(store, testProject, "agent", "voiceai")
+
+	rec := postStackJSON(mux, sessionCookieFor(ah, "alice", "org_admin"),
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/clone",
+		cloneStackRequest{
+			NewName:  "voiceai-selfhosted",
+			AppNames: map[string]string{"web": "selfhosted-web"}, // override one
+		})
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp cloneStackResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("expected 2 copy results, got %d: %+v", len(resp.Results), resp.Results)
+	}
+	for _, r := range resp.Results {
+		if !r.OK {
+			t.Errorf("clone of %q failed: %s", r.App, r.Error)
+		}
+	}
+	ctx := context.Background()
+	// Overridden name.
+	if a, err := store.GetApp(ctx, testProject, "selfhosted-web"); err != nil {
+		t.Errorf("expected cloned app 'selfhosted-web': %v", err)
+	} else if a.Spec.Stack != "voiceai-selfhosted" {
+		t.Errorf("cloned app Stack = %q, want %q", a.Spec.Stack, "voiceai-selfhosted")
+	}
+	// Derived name.
+	if _, err := store.GetApp(ctx, testProject, "voiceai-selfhosted-agent"); err != nil {
+		t.Errorf("expected derived clone 'voiceai-selfhosted-agent': %v", err)
+	}
+	// Source intact.
+	if _, err := store.GetApp(ctx, testProject, "web"); err != nil {
+		t.Errorf("source app 'web' should still exist: %v", err)
+	}
+	if _, err := stackStore.GetStack(ctx, testProject, "voiceai"); err != nil {
+		t.Errorf("source stack should still exist: %v", err)
+	}
+	// New stack carries the copied override but a reset (empty) display name.
+	ns, err := stackStore.GetStack(ctx, testProject, "voiceai-selfhosted")
+	if err != nil {
+		t.Fatalf("new stack missing: %v", err)
+	}
+	if ns.Spec.DisplayName != "" {
+		t.Errorf("clone DisplayName = %q, want empty (falls back to name)", ns.Spec.DisplayName)
+	}
+	if ns.Spec.RawValues["replicas"] != 2 {
+		t.Errorf("clone should carry source RawValues, got %+v", ns.Spec.RawValues)
+	}
+}
+
+// TestStackClone_ConflictOnExistingName rejects cloning onto an existing stack.
+func TestStackClone_ConflictOnExistingName(t *testing.T) {
+	mux, ah, _, stackStore := newTestStackMux(testProject)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "taken", ProjectName: testProject})
+
+	rec := postStackJSON(mux, sessionCookieFor(ah, "alice", "org_admin"),
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/clone",
+		cloneStackRequest{NewName: "taken"})
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestStackDelete_DefaultDetaches keeps the apps and clears their Stack field.
 func TestStackDelete_DefaultDetaches(t *testing.T) {
 	mux, ah, store, stackStore := newTestStackMux(testProject)

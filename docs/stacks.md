@@ -7,6 +7,9 @@ scale, and route together. A stack lets you group them, share config/secrets
 across the group, co-locate them, act on them as a unit, and clone the whole
 collection with variations.
 
+**Status:** all four phases shipped (grouping + cascade, shared namespace, batch
+lifecycle, clone). The remaining items are under "Out of scope (future)".
+
 ## Design principle: config-cascade + orchestration, not a deployment engine
 
 A stack is **lightweight**. Apps remain the deployment unit — each keeps its own
@@ -95,18 +98,27 @@ error}` rows) so partial failures are visible.
 - UI: a "Batch actions" card on the StackDetail page (sync all, promote all to an
   env, preview the stack, delete stack + all apps), `lib/stacks.ts` clients.
 
-## Phase 4 — Clone stack (planned)
+## Phase 4 — Clone stack ✅ (shipped)
 
-Goal: duplicate a collection with a few config diffs — the canonical case being
+Duplicate a collection with a few config diffs — the canonical case being
 voiceai → livekit-cloud vs voiceai → self-hosted.
 
-- `POST .../stacks/{stack}/clone { newName, appNames?: map[old]new, overrides? }`:
-  create the new stack record (copy spec ⊕ override diffs), then recreate each
-  member app under the new stack via the rename recreate-under-new-name path
-  (copy, not move — old stack stays). New app names are derived (default
-  `{newStack}-{oldApp}`, user-overridable) since app names stay project-unique.
+- `POST .../stacks/{stack}/clone { newName, appNames?, displayName?, description?,
+  sharedNamespace?, namespacePattern?, rawValues?, envRawValues?, envConfig? }`:
+  creates the new stack record (the source spec ⊕ any override fields — a set
+  field REPLACES the copied value; omitted carries over; `displayName` resets to
+  empty so the clone shows its own name unless named), then recreates each member
+  app under the new stack via `appHandler.copyAppAs` — the recreate half of the
+  rename path, but a COPY: the source stack and its apps stay intact.
+- New app names are derived (default `{newStack}-{oldApp}`, overridable per app
+  via `appNames[old]=new`) since app names stay project-unique. Returns
+  `cloneStackResponse {stack, results}` with a per-app summary.
+- The new stack is saved **before** copying apps so `resolveEnvNamespaces` can
+  read its `SharedNamespace` and co-locate the clones. Preview envs aren't copied
+  (ephemeral); a failed publish rolls the half-app back.
 - Limitation (as with rename): app-tier secret **values** can't be migrated
-  (write-only vault) — re-enter under the new stack; the UI warns.
+  (write-only vault) — re-enter under the new apps; the UI warns.
+- UI: a "Clone this stack" control in the StackDetail batch-actions card.
 
 ## Out of scope (future)
 

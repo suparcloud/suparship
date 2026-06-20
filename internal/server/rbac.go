@@ -297,6 +297,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		if rh.appHandler != nil {
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/sync", manageProject(rh.handleSyncStack))
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/promote", manageProject(rh.handlePromoteStack))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/clone", manageProject(rh.handleCloneStack))
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/previews", manageProject(rh.handleCreateStackPreview))
 			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/previews/{name}", manageProject(rh.handleDeleteStackPreview))
 		}
