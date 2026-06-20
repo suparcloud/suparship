@@ -306,7 +306,7 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 						{
 							Image:          opts.ImageRepoURL,
 							ValuesFilePath: valuesFilePath,
-							Key:            "components.web.image.tag",
+							Key:            ImageTagValuesKey(app),
 							Value:          "Tag",
 						},
 					},
@@ -465,6 +465,22 @@ func BuildKargoProjectNamespace(projectName string) KubernetesNamespace {
 // Uses "{app}-{env}" to avoid collisions when multiple apps share a project.
 func KargoStageName(appName, envName string) string {
 	return appName + "-" + envName
+}
+
+// defaultImageTagKey is the canonical Helm-values key for the deploy image tag
+// when an app does not override AppSpec.CD.ImageTagPath.
+const defaultImageTagKey = "components.web.image.tag"
+
+// ImageTagValuesKey returns the dotted Helm-values key that holds the deploy
+// image tag for an app. Kargo writes this key during promotion and the
+// publisher preserves it on republish, so BOTH must resolve it identically —
+// hence this single source of truth. Defaults to the canonical
+// "components.web.image.tag" when the app sets no override.
+func ImageTagValuesKey(app *domain.App) string {
+	if app != nil && app.Spec.CD.ImageTagPath != "" {
+		return app.Spec.CD.ImageTagPath
+	}
+	return defaultImageTagKey
 }
 
 // KargoNamespaceForProject returns the Kargo namespace for a suparship project.
