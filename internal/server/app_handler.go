@@ -14,10 +14,12 @@ import (
 
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/registry"
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/tpl"
@@ -65,6 +67,23 @@ type appHandler struct {
 	// stackStore resolves an app's stack (Spec.Stack) so a shared-namespace stack
 	// co-locates its apps. Optional — nil → apps never use a shared stack namespace.
 	stackStore domain.StackStore
+	// registryStore, when set, provisions the Kargo image-credential Secret in
+	// the app's Kargo Project namespace after publish so Warehouses can pull tags.
+	registryStore *registry.Store
+}
+
+// ensureKargoRegistryCred provisions/refreshes the Kargo image-credential Secret
+// in the project's Kargo namespace from the org registry config. Best-effort: a
+// failure is logged, never surfaced (publish already succeeded). No-op when no
+// registry store is wired or the registry is disabled.
+func (ah *appHandler) ensureKargoRegistryCred(ctx context.Context, projectName string) {
+	if ah.registryStore == nil {
+		return
+	}
+	ns := gitops.KargoNamespaceForProject(projectName)
+	if err := ah.registryStore.EnsureKargoCred(ctx, ns); err != nil {
+		slog.Warn("ensure kargo registry cred", "project", projectName, "namespace", ns, "err", err)
+	}
 }
 
 // newAppHandler creates an appHandler.
@@ -329,6 +348,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 				"project", projectName,
 				"app", req.Name,
 			)
+			ah.ensureKargoRegistryCred(r.Context(), projectName)
 		}
 	} else {
 		slog.Debug("gitops publisher not configured — skipping git commit for app",
@@ -531,6 +551,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		ah.ensureKargoRegistryCred(r.Context(), projectName)
 	}
 
 	saved, _ := ah.appStore.GetApp(r.Context(), projectName, appName)

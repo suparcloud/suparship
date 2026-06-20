@@ -502,6 +502,7 @@ func New(cfg Config) *Server {
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ClusterTemplateLoader, cfg.ProjectStore)
 			rh.appHandler.kubeClient = cfg.KubeClient
+			rh.appHandler.registryStore = cfg.RegistryStore
 			if cfg.OrgProvider != nil {
 				rh.appHandler.orgProvider = cfg.OrgProvider
 			}
@@ -691,9 +692,10 @@ func New(cfg Config) *Server {
 
 	if cfg.RegistryStore != nil && ah != nil {
 		rgh := &registryHandler{
-			store:  cfg.RegistryStore,
-			auth:   ah,
-			logger: cfg.Logger,
+			store:        cfg.RegistryStore,
+			auth:         ah,
+			logger:       cfg.Logger,
+			projectStore: cfg.ProjectStore,
 		}
 		rgh.registerRoutes(mux)
 		cfg.Logger.Info("container registry config endpoints enabled")
