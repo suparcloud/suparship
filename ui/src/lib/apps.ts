@@ -1,5 +1,6 @@
 import { api } from "./api";
 import type {
+  CDConfig,
   ComponentConfig,
   AppDeploymentHistoryResponse,
   AppDetailResponse,
@@ -85,6 +86,9 @@ export interface UpdateAppRequest {
   componentConfigs?: Record<string, ComponentConfig>;
   // envComponents replaces per-(env, component) overrides keyed env → component.
   envComponents?: Record<string, Record<string, ComponentConfig>>;
+  // cd replaces the app's continuous-delivery settings (external-CD tag
+  // ownership). Omit to leave unchanged.
+  cd?: CDConfig;
 }
 
 export function updateApp(

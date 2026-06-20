@@ -547,6 +547,18 @@ export interface AppDetail {
   componentConfigs?: Record<string, ComponentConfig>;
   // Per-(env, component) overrides keyed env → component.
   envComponents?: Record<string, Record<string, ComponentConfig>>;
+  // Continuous-delivery settings (external-CD tag ownership). Always present.
+  cd: CDConfig;
+}
+
+// CDConfig configures who owns the deployed image tag. When managed is true an
+// external CD controller (Kargo) writes the tag and the platform preserves it
+// across republishes instead of overwriting it with the create-time seed.
+export interface CDConfig {
+  managed?: boolean;
+  /** Dotted Helm-values key holding the image tag (e.g. "image.tag").
+   *  Empty defaults to "components.web.image.tag". */
+  imageTagPath?: string;
 }
 
 // ComponentResources holds raw k8s resource quantities (cpu/memory/…).
@@ -720,6 +732,8 @@ export interface CreateAppRequest {
   componentConfigs?: Record<string, ComponentConfig>;
   /** Per-(env, component) overrides keyed env → component. */
   envComponents?: Record<string, Record<string, ComponentConfig>>;
+  /** Continuous-delivery settings (external-CD tag ownership). */
+  cd?: CDConfig;
 }
 
 export interface CreateAppResponse {

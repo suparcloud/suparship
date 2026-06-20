@@ -287,6 +287,8 @@ function ConfigureStep({
   );
   const [namespaceScope, setNamespaceScope] = useState<"app" | "project">("app");
   const [namespacePattern, setNamespacePattern] = useState("");
+  const [cdManaged, setCdManaged] = useState(false);
+  const [cdImageTagPath, setCdImageTagPath] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
@@ -374,6 +376,9 @@ function ConfigureStep({
         namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
         namespacePattern: namespacePattern.trim() || undefined,
         rawValues: Object.keys(overlay).length > 0 ? overlay : undefined,
+        cd: cdManaged
+          ? { managed: true, imageTagPath: cdImageTagPath.trim() || undefined }
+          : undefined,
       });
       navigate(`/projects/${project}/apps/${appName}`);
     } catch (err) {
@@ -523,6 +528,45 @@ function ConfigureStep({
             </div>
           )}
         </div>
+      </FormSection>
+
+      {/* Continuous delivery */}
+      <FormSection title="Continuous delivery">
+        <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+          <input
+            type="checkbox"
+            checked={cdManaged}
+            onChange={(e) => setCdManaged(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-300"
+          />
+          Image tag managed by Kargo
+        </label>
+        <p className="mt-1 text-xs text-gray-400">
+          When enabled, Kargo owns the image tag: it commits the
+          discovered/promoted tag and re-publishing preserves it instead of
+          resetting to your overrides. The tag you set in values acts only as the
+          initial seed.
+        </p>
+        {cdManaged && (
+          <div className="mt-3">
+            <label className="mb-1 block text-xs font-medium text-gray-700">
+              Image tag path{" "}
+              <span className="font-normal text-gray-400">(optional)</span>
+            </label>
+            <input
+              type="text"
+              className="w-full max-w-sm rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder="components.web.image.tag"
+              value={cdImageTagPath}
+              onChange={(e) => setCdImageTagPath(e.target.value)}
+            />
+            <p className="mt-1 text-xs text-gray-400">
+              Dotted Helm-values key holding the tag. Empty defaults to{" "}
+              <code className="font-mono">components.web.image.tag</code>; use{" "}
+              <code className="font-mono">image.tag</code> for root-image charts.
+            </p>
+          </div>
+        )}
       </FormSection>
 
       {/* Secret inputs */}

@@ -1820,6 +1820,9 @@ function AppValuesEditor({
   const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
   const [preview, setPreview] = useState<string>("");
   const [chartAvailable, setChartAvailable] = useState(true);
+  const [cdManaged, setCdManaged] = useState(false);
+  const [cdImageTagPath, setCdImageTagPath] = useState("");
+  const [cdSaving, setCdSaving] = useState(false);
 
   // Seed editors from the persisted overlays whenever the app data changes.
   useEffect(() => {
@@ -1829,6 +1832,8 @@ function AppValuesEditor({
       next[env] = stringifyOverlay(data.envRawValues?.[env]);
     }
     setEnvTexts(next);
+    setCdManaged(data.cd?.managed ?? false);
+    setCdImageTagPath(data.cd?.imageTagPath ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
@@ -1890,6 +1895,25 @@ function AppValuesEditor({
       toast.error(err instanceof Error ? err.message : "Failed to save values");
     } finally {
       setSaving(false);
+    }
+  }
+
+  const cdDirty =
+    cdManaged !== (data.cd?.managed ?? false) ||
+    cdImageTagPath.trim() !== (data.cd?.imageTagPath ?? "");
+
+  async function saveCD() {
+    setCdSaving(true);
+    try {
+      await updateApp(project, data.name, {
+        cd: { managed: cdManaged, imageTagPath: cdImageTagPath.trim() },
+      });
+      toast.success("CD settings saved — re-publishing to GitOps.");
+      await onSaved();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save CD settings");
+    } finally {
+      setCdSaving(false);
     }
   }
 
@@ -1979,6 +2003,52 @@ function AppValuesEditor({
         {yamlError && (
           <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
         )}
+
+        <div className="mt-4 border-t border-gray-100 pt-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={cdManaged}
+                  onChange={(e) => setCdManaged(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                Image tag managed by Kargo
+              </label>
+              <p className="mt-1 text-xs text-gray-400">
+                When enabled, Kargo owns the image tag: it commits the
+                discovered/promoted tag and re-publishing preserves it instead of
+                resetting to the value in your overrides. Leave the tag out of the
+                overrides above once this is on.
+              </p>
+            </div>
+            <button
+              onClick={saveCD}
+              disabled={cdSaving || !cdDirty}
+              className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            >
+              {cdSaving ? "Saving…" : "Save CD"}
+            </button>
+          </div>
+          {cdManaged && (
+            <label className="mt-3 block text-xs text-gray-500">
+              Image tag path
+              <input
+                type="text"
+                value={cdImageTagPath}
+                onChange={(e) => setCdImageTagPath(e.target.value)}
+                placeholder="components.web.image.tag"
+                className="mt-1 block w-full max-w-sm rounded-md border border-gray-300 px-2 py-1 font-mono text-xs"
+              />
+              <span className="mt-1 block text-gray-400">
+                Dotted Helm-values key that holds the tag. Empty defaults to{" "}
+                <code className="font-mono">components.web.image.tag</code>; use{" "}
+                <code className="font-mono">image.tag</code> for root-image charts.
+              </span>
+            </label>
+          )}
+        </div>
       </div>
     </div>
   );

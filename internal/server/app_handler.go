@@ -226,6 +226,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		RawValues:          req.RawValues,
 		ComponentConfigs:   req.ComponentConfigs,
 		EnvComponents:      req.EnvComponents,
+		CD:                 cdConfigFromDTO(req.CD),
 	})
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -384,6 +385,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	prevEnvDefaults := app.Spec.EnvironmentDefaults
 	prevRawValues := app.Spec.RawValues
 	prevComponents := append([]domain.ComponentSpec(nil), app.Spec.Components...)
+	prevCD := app.Spec.CD
 
 	if req.Values != nil {
 		newValues := *req.Values
@@ -444,6 +446,9 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RawValues != nil {
 		app.Spec.RawValues = *req.RawValues
+	}
+	if req.CD != nil {
+		app.Spec.CD = cdConfigFromDTO(req.CD)
 	}
 	if req.ComponentConfigs != nil {
 		// Apply app-level per-component config onto the matching ComponentSpec.
@@ -517,6 +522,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			app.Spec.EnvironmentDefaults = prevEnvDefaults
 			app.Spec.RawValues = prevRawValues
 			app.Spec.Components = prevComponents
+			app.Spec.CD = prevCD
 			_ = ah.appStore.SaveApp(r.Context(), projectName, app)
 			slog.Error("update-app: publish failed; rolled back config change",
 				"project", projectName, "app", appName, "err", err)
@@ -1884,6 +1890,18 @@ func appToSummaryDTO(app *domain.App, envs []*domain.AppEnvironment) AppSummaryD
 	return dto
 }
 
+// cdConfigFromDTO converts the optional wire CD config into the domain type.
+// A nil DTO yields the zero CDConfig (external-CD ownership disabled).
+func cdConfigFromDTO(dto *CDConfigDTO) domain.CDConfig {
+	if dto == nil {
+		return domain.CDConfig{}
+	}
+	return domain.CDConfig{
+		Managed:      dto.Managed,
+		ImageTagPath: dto.ImageTagPath,
+	}
+}
+
 func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO {
 	secretRefs := make([]AppSecretRefDTO, 0, len(app.Spec.SecretRefs))
 	for _, ref := range app.Spec.SecretRefs {
@@ -1922,6 +1940,10 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		EnvRawValues:     envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
 		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
+		CD: CDConfigDTO{
+			Managed:      app.Spec.CD.Managed,
+			ImageTagPath: app.Spec.CD.ImageTagPath,
+		},
 	}
 }
 
