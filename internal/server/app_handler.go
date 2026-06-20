@@ -690,6 +690,55 @@ func (ah *appHandler) republishApp(ctx context.Context, app *domain.App) error {
 	return ah.gitOpsPublisher.PublishApp(ctx, app, stable)
 }
 
+// copyAppAs creates a copy of src under newName, reassigned to stackName,
+// recomputes its stable-env namespaces, persists, ensures the namespaces, and
+// publishes. Unlike rename it does NOT tear down the source — the source stack
+// and its apps stay intact (this is the recreate half of the rename path, used
+// by stack clone). Preview envs are skipped (ephemeral). App-tier secret VALUES
+// are not migrated (write-only vault): the clone's app secrets start empty and
+// must be re-entered. Rolls the copy back if the publish fails.
+func (ah *appHandler) copyAppAs(ctx context.Context, src *domain.App, newName, stackName string) error {
+	if _, err := ah.appStore.GetApp(ctx, src.ProjectName, newName); err == nil {
+		return fmt.Errorf("app %q already exists in project %q", newName, src.ProjectName)
+	}
+	oldEnvs, _ := ah.appStore.ListAppEnvironments(ctx, src.ProjectName, src.Name)
+
+	newApp := *src
+	newApp.Name = newName
+	newApp.Spec.Stack = stackName
+	newEnvs := make([]*domain.AppEnvironment, 0, len(oldEnvs))
+	for _, oldEnv := range oldEnvs {
+		if oldEnv.EnvType == domain.AppEnvPreview {
+			continue // previews are ephemeral — don't clone them
+		}
+		ne := *oldEnv
+		ne.AppName = newName
+		ne.Namespace = ""                                                    // recomputed below
+		ne.Status = domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed} // fresh; live status refreshes
+		ne.URLs = []string{}
+		ne.Release = nil
+		newEnvs = append(newEnvs, &ne)
+	}
+	ah.resolveEnvNamespaces(ctx, &newApp, newEnvs)
+
+	if err := ah.appStore.SaveApp(ctx, src.ProjectName, &newApp); err != nil {
+		return fmt.Errorf("save cloned app: %w", err)
+	}
+	for _, env := range newEnvs {
+		if err := ah.appStore.SaveAppEnvironment(ctx, src.ProjectName, env); err != nil {
+			slog.Warn("clone: persist env failed", "app", newName, "env", env.EnvName, "err", err)
+		}
+	}
+	ah.ensureAppNamespaces(ctx, &newApp, newEnvs)
+	if ah.gitOpsPublisher != nil {
+		if err := ah.gitOpsPublisher.PublishApp(ctx, &newApp, newEnvs); err != nil {
+			_ = ah.appStore.DeleteApp(ctx, src.ProjectName, newName) // roll back so a failed clone leaves no half-app
+			return fmt.Errorf("publish cloned app: %w", err)
+		}
+	}
+	return nil
+}
+
 // itoa converts a small non-negative int to its decimal string representation
 // without importing strconv (avoids an import just for error messages).
 func itoa(n int) string {

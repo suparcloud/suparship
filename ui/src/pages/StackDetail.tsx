@@ -7,6 +7,7 @@ import { listApps } from "../lib/apps";
 import { listProjectEnvironments } from "../lib/projects";
 import type { ProjectEnvironment } from "../lib/projects";
 import {
+  cloneStack,
   createStackPreview,
   deleteStack,
   getStack,
@@ -39,6 +40,7 @@ export function StackDetail() {
   const [busy, setBusy] = useState<string | null>(null);
   const [promoteEnv, setPromoteEnv] = useState("");
   const [previewName, setPreviewName] = useState("");
+  const [cloneName, setCloneName] = useState("");
 
   const reload = useCallback(async () => {
     if (!project || !stackName) return;
@@ -116,6 +118,29 @@ export function StackDetail() {
       await reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : `Failed to ${action}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onClone() {
+    if (!project || !cloneName) return;
+    setBusy("clone");
+    try {
+      const res = await cloneStack(project, stackName!, { newName: cloneName });
+      const failed = res.results.filter((r) => !r.ok);
+      if (failed.length) {
+        toast.error(
+          `Cloned, but ${failed.length} app(s) failed — ${failed.map((r) => `${r.app}: ${r.error}`).join("; ")}`,
+        );
+      } else {
+        toast.success(
+          `Cloned to ${cloneName} (${res.results.length} app(s)). Re-enter app-level secrets under the new apps.`,
+        );
+      }
+      navigate(`/projects/${encodeURIComponent(project)}/stacks/${encodeURIComponent(cloneName)}`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to clone stack");
     } finally {
       setBusy(null);
     }
@@ -258,6 +283,33 @@ export function StackDetail() {
                 className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
               >
                 {busy === "preview" ? "Creating…" : "Preview"}
+              </button>
+            </div>
+          </div>
+
+          {/* Clone the stack */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm">
+              <span className="font-medium text-gray-900">Clone this stack</span>
+              <span className="block text-xs text-gray-500">
+                Duplicate the collection with variations (e.g. livekit-cloud vs self-hosted). Members are
+                copied as <code className="font-mono">&lt;new-stack&gt;-&lt;app&gt;</code>; the source stays
+                intact. App-level secret values aren't migrated — re-enter them under the new apps.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={cloneName}
+                onChange={(e) => setCloneName(e.target.value)}
+                placeholder="new stack name"
+                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+              />
+              <button
+                onClick={onClone}
+                disabled={busy !== null || !cloneName}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {busy === "clone" ? "Cloning…" : "Clone"}
               </button>
             </div>
           </div>

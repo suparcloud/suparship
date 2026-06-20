@@ -128,6 +128,36 @@ export function createStackPreview(
   });
 }
 
+// CloneStackRequest duplicates a stack. Override fields, when set, replace the
+// value copied from the source; appNames maps source app name -> new app name
+// (default {newName}-{oldApp}).
+export interface CloneStackRequest {
+  newName: string;
+  appNames?: Record<string, string>;
+  displayName?: string;
+  description?: string;
+  sharedNamespace?: boolean;
+  namespacePattern?: string;
+  rawValues?: Record<string, unknown>;
+  envRawValues?: Record<string, Record<string, unknown>>;
+  envConfig?: EnvConfig;
+}
+
+export interface CloneStackResponse {
+  stack: Stack;
+  results: StackOpResult[];
+}
+
+// cloneStack creates a copy of the stack (source stays intact) with each member
+// recreated under a derived name. App-tier secret values are NOT migrated.
+export function cloneStack(
+  project: string,
+  stack: string,
+  req: CloneStackRequest,
+): Promise<CloneStackResponse> {
+  return api.post<CloneStackResponse>(`${stackBase(project, stack)}/clone`, req);
+}
+
 // deleteStackPreview tears down a stack preview across all members.
 export function deleteStackPreview(
   project: string,
