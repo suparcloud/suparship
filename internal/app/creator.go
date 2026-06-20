@@ -223,6 +223,9 @@ type CreateRequest struct {
 	// EnvComponents holds per-(env, component) overrides keyed env → component,
 	// folded into the app's EnvironmentDefaults at creation. Optional.
 	EnvComponents map[string]map[string]domain.ComponentConfig
+	// CD configures external-CD (Kargo) ownership of the deployed image tag.
+	// Zero value disables it (the platform owns the tag). Optional.
+	CD domain.CDConfig
 }
 
 // CreateResult holds the pure-function outputs of Create.
@@ -297,6 +300,7 @@ func Create(req CreateRequest) (*CreateResult, error) {
 	}
 	app.Spec.Addons = req.Addons
 	app.Spec.RawValues = req.RawValues
+	app.Spec.CD = req.CD
 
 	// Apply per-component config (app level) over the template defaults.
 	for i := range app.Spec.Components {
