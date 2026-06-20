@@ -16,6 +16,7 @@ import { Onboarding } from "./pages/Onboarding";
 import { OrgSettings } from "./pages/OrgSettings";
 import { Previews } from "./pages/Previews";
 import { ProjectDetail } from "./pages/ProjectDetail";
+import { StackDetail } from "./pages/StackDetail";
 import { ProjectSettings } from "./pages/ProjectSettings";
 import { NewService } from "./pages/NewService";
 import { ServiceDetail } from "./pages/ServiceDetail";
@@ -44,6 +45,10 @@ export function App() {
               <Route
                 path="/projects/:project/settings"
                 element={<ProjectSettings />}
+              />
+              <Route
+                path="/projects/:project/stacks/:stack"
+                element={<StackDetail />}
               />
               <Route
                 path="/projects/:project/apps/:app"

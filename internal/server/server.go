@@ -365,6 +365,7 @@ type Config struct {
 	LogsProvider            runtime.LogsProvider    // optional: enables logs endpoint when set
 	PreviewStore            preview.Store           // optional: enables preview endpoints when set
 	AppStore                domain.AppStore         // optional: enables app read endpoints when set
+	StackStore              domain.StackStore       // optional: enables stack grouping endpoints when set
 	ClusterStore            domain.ClusterStore     // optional: enables /api/v1/clusters endpoints when set
 	GitOpsPublisher         GitOpsPublisher         // optional: commits app manifests to gitops repo on create
 	KargoPromoter           KargoPromoter           // optional: enables real Kargo-backed promotions
@@ -476,6 +477,7 @@ func New(cfg Config) *Server {
 		rh.projectAppCounter = cfg.ProjectAppCounter
 		rh.stuckApps = cfg.StuckAppManager
 		rh.kubeClient = cfg.KubeClient
+		rh.stackStore = cfg.StackStore
 		if cfg.ProjectStore != nil {
 			rh.serviceHandler = newServiceHandler(cfg.ProjectStore, cfg.Templates, cfg.ClusterTemplateLoader)
 			cfg.Logger.Info("service creation endpoint enabled")
@@ -518,6 +520,7 @@ func New(cfg Config) *Server {
 			if cfg.VaultStore != nil {
 				rh.appHandler.vault = cfg.VaultStore
 			}
+			rh.appHandler.stackStore = cfg.StackStore
 			if cfg.GitOpsPublisher != nil {
 				rh.appHandler.gitOpsPublisher = cfg.GitOpsPublisher
 				cfg.Logger.Info("app gitops publisher enabled")

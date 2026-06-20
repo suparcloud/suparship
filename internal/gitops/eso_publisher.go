@@ -228,6 +228,9 @@ type ScopePresence struct {
 	// ProjectShared / ProjectEnvShared mark project-scope secrets (shared by
 	// every app in the project) present in the global / env vaults.
 	ProjectShared, ProjectEnvShared bool
+	// StackShared / StackEnvShared mark stack-scope secrets (shared by every app
+	// in the stack) present in the global / env vaults.
+	StackShared, StackEnvShared bool
 }
 
 // WorkloadExternalSecretParams captures the per-app-env info for the single
@@ -239,6 +242,9 @@ type WorkloadExternalSecretParams struct {
 	// Project is the app's project, used to locate project-scope shared items.
 	// Empty skips the project scopes regardless of presence.
 	Project string
+	// Stack is the app's stack (if any), used to locate stack-scope shared items.
+	// Empty skips the stack scopes regardless of presence.
+	Stack string
 	// Cluster is the registered cluster bound to Env. Empty skips the cluster
 	// scope regardless of presence.
 	Cluster  string
@@ -282,24 +288,31 @@ func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretCo
 		items = append(items, ESOItemRef{Key: secrets.AppItemName(scope, p.App), StoreName: storeFor(scope)})
 	}
 	hasProject := p.Project != ""
+	hasStack := p.Stack != ""
 
-	// Global band: org-shared → project-global-shared → app.
+	// Global band: org-shared → project-global-shared → stack-global-shared → app.
 	if p.Presence.GlobalShared {
 		sharedItem(secrets.GlobalScope())
 	}
 	if hasProject && p.Presence.ProjectShared {
 		sharedItem(secrets.ProjectScope(p.Project))
 	}
+	if hasStack && p.Presence.StackShared {
+		sharedItem(secrets.StackScope(p.Project, p.Stack))
+	}
 	if p.Presence.GlobalApp {
 		appItem(secrets.GlobalScope())
 	}
 
-	// Env band: org-shared → project-env-shared → app.
+	// Env band: org-shared → project-env-shared → stack-env-shared → app.
 	if p.Presence.EnvShared {
 		sharedItem(secrets.EnvScope(p.Env))
 	}
 	if hasProject && p.Presence.ProjectEnvShared {
 		sharedItem(secrets.ProjectEnvScope(p.Project, p.Env))
+	}
+	if hasStack && p.Presence.StackEnvShared {
+		sharedItem(secrets.StackEnvScope(p.Project, p.Stack, p.Env))
 	}
 	if p.Presence.EnvApp {
 		appItem(secrets.EnvScope(p.Env))

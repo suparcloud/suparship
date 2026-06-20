@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { toast } from "sonner";
 
 import { getAppEnvironments, listApps } from "../lib/apps";
+import { createStack, listStacks } from "../lib/stacks";
+import type { Stack } from "../lib/stacks";
+import { ApiError } from "../lib/api";
 import type { AppEnvironmentSummary, AppSummary } from "../types";
 
 // --- Status helpers ---
@@ -64,9 +68,19 @@ interface AppWithEnvs extends AppSummary {
 
 export function ProjectDetail() {
   const { project } = useParams<{ project: string }>();
+  const navigate = useNavigate();
   const [apps, setApps] = useState<AppWithEnvs[]>([]);
+  const [stacks, setStacks] = useState<Stack[]>([]);
+  const [newStack, setNewStack] = useState<string | null>(null); // null = form hidden
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!project) return;
+    listStacks(project)
+      .then((r) => setStacks(r.stacks))
+      .catch(() => setStacks([]));
+  }, [project]);
 
   useEffect(() => {
     if (!project) return;
@@ -156,6 +170,12 @@ export function ProjectDetail() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => setNewStack("")}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+            >
+              New stack
+            </button>
             <Link
               to={`/projects/${project}/settings`}
               className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
@@ -172,16 +192,89 @@ export function ProjectDetail() {
         </div>
       </div>
 
-      {/* App grid */}
-      {apps.length === 0 ? (
-        <EmptyApps project={project!} />
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2">
-          {apps.map((app) => (
-            <AppCard key={app.name} project={project!} app={app} />
-          ))}
+      {/* New stack inline form */}
+      {newStack !== null && (
+        <div className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white p-4">
+          <input
+            autoFocus
+            value={newStack}
+            onChange={(e) => setNewStack(e.target.value)}
+            placeholder="stack-name (e.g. voiceai)"
+            className="w-64 rounded-md border border-gray-300 px-3 py-1.5 font-mono text-sm"
+          />
+          <button
+            onClick={async () => {
+              const name = (newStack ?? "").trim();
+              if (!name || !project) return;
+              try {
+                await createStack(project, { name });
+                navigate(`/projects/${encodeURIComponent(project)}/stacks/${encodeURIComponent(name)}`);
+              } catch (err) {
+                toast.error(err instanceof ApiError ? err.message : "Failed to create stack");
+              }
+            }}
+            className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700"
+          >
+            Create
+          </button>
+          <button onClick={() => setNewStack(null)} className="px-2 text-sm text-gray-500 hover:text-gray-700">
+            Cancel
+          </button>
         </div>
       )}
+
+      {/* Stacks */}
+      {stacks.length > 0 && (
+        <div>
+          <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-gray-400">Stacks</h2>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {stacks.map((s) => (
+              <Link
+                key={s.name}
+                to={`/projects/${project}/stacks/${encodeURIComponent(s.name)}`}
+                className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-5 transition-shadow hover:shadow-sm"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-gray-900">{s.displayName || s.name}</span>
+                  <span className="rounded-full bg-white px-2 py-0.5 text-xs text-gray-500">
+                    {(s.apps ?? []).length} {(s.apps ?? []).length === 1 ? "app" : "apps"}
+                  </span>
+                </div>
+                {(s.apps ?? []).length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {(s.apps ?? []).map((a) => (
+                      <span key={a} className="rounded bg-white px-1.5 py-0.5 font-mono text-xs text-gray-600">{a}</span>
+                    ))}
+                  </div>
+                )}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Apps not in a stack */}
+      {(() => {
+        const grouped = new Set(stacks.flatMap((s) => s.apps ?? []));
+        const loose = apps.filter((a) => !grouped.has(a.name));
+        if (apps.length === 0) return <EmptyApps project={project!} />;
+        return (
+          <div>
+            {stacks.length > 0 && (
+              <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-gray-400">Apps</h2>
+            )}
+            {loose.length === 0 ? (
+              <p className="text-sm text-gray-400">All apps are grouped into stacks.</p>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2">
+                {loose.map((app) => (
+                  <AppCard key={app.name} project={project!} app={app} />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

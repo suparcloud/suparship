@@ -443,3 +443,19 @@ valkey instance with its connection details — no curl required.
 | 5 | Envoy Gateway Routing | Traffic splitting across trains |
 | 6 | Full Kargo Pipeline | Auto + manual promotion gates |
 | 7 | Managed Addons UI | Self-service addon claims (backend already shipped) |
+
+---
+
+## Stacks (grouping tightly-coupled apps in a project)
+
+A stack groups apps that ship/scale/route together (e.g. voiceai = web +
+agents), with a shared override layer, optional shared namespace, batch
+lifecycle, and clone. Full design + phase plan: **[docs/stacks.md](docs/stacks.md)**.
+
+- **Phase 1 — Grouping + override cascade (env/values/secrets) + membership + UI** — ✅ shipped
+- **Phase 2 — Shared stack namespace + intra-stack DNS** — ✅ shipped
+- **Phase 3 — Batch lifecycle (deploy/promote/preview/delete the whole stack)** — ✅ shipped
+- **Phase 4 — Clone stack with overrides (e.g. livekit-cloud vs self-hosted)** — ✅ shipped
+
+Decoupled / future: reusable stack blueprints; project/stack-scope gateway
+routing and cross-app canary (depend on Phase 5 Gateway API above).

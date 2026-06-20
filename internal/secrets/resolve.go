@@ -6,6 +6,7 @@ const (
 	SourceEnv     = "env"
 	SourceCluster = "cluster"
 	SourceProject = "project"
+	SourceStack   = "stack"
 )
 
 // ResolvedSecret describes a single secret key in the fully merged
@@ -35,7 +36,7 @@ type ScopeKeys struct {
 // app's env, project, and global values.
 //
 // The output maps each unique key to its winning source scope and tier.
-func ResolveScopes(global, projectGlobal, env, projectEnv, cluster ScopeKeys) map[string]ResolvedSecret {
+func ResolveScopes(global, projectGlobal, stackGlobal, env, projectEnv, stackEnv, cluster ScopeKeys) map[string]ResolvedSecret {
 	resolved := make(map[string]ResolvedSecret)
 
 	type layer struct {
@@ -43,13 +44,17 @@ func ResolveScopes(global, projectGlobal, env, projectEnv, cluster ScopeKeys) ma
 		tier   Tier
 		keys   []string
 	}
-	// Order matters: later layers overwrite earlier ones.
+	// Order matters: later layers overwrite earlier ones. Within each band
+	// (global → env → cluster) ownership runs org-shared → project-shared →
+	// stack-shared → app.
 	ordered := []layer{
 		{SourceGlobal, TierShared, global.Shared},
 		{SourceProject, TierShared, projectGlobal.Shared},
+		{SourceStack, TierShared, stackGlobal.Shared},
 		{SourceGlobal, TierApp, global.App},
 		{SourceEnv, TierShared, env.Shared},
 		{SourceProject, TierShared, projectEnv.Shared},
+		{SourceStack, TierShared, stackEnv.Shared},
 		{SourceEnv, TierApp, env.App},
 		{SourceCluster, TierShared, cluster.Shared},
 		{SourceCluster, TierApp, cluster.App},

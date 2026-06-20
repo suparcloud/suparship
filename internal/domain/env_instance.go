@@ -197,6 +197,15 @@ type NamespaceResolveInput struct {
 	// Derive this with IsDedicatedClusterTopology.
 	Dedicated bool
 
+	// StackName + StackShared co-locate an app's workloads in a shared stack
+	// namespace when the app belongs to a stack with SharedNamespace=true. This
+	// takes precedence over the app/project scope so stack members reach each
+	// other by in-cluster DNS. StackPattern (StackSpec.NamespacePattern) overrides
+	// the default {project}-{stack}[-{env}]. Tokens: {org},{project},{stack},{env}.
+	StackName    string
+	StackShared  bool
+	StackPattern string
+
 	// Pattern overrides — highest priority first.
 	// Empty string = not set at this level; fall through to the next level.
 	AppPattern        string // AppSpec.NamespacePattern
@@ -233,6 +242,23 @@ type NamespaceResolveInput struct {
 //	  4. Topology default
 func ResolveNamespace(in NamespaceResolveInput) (string, error) {
 	var pattern string
+	switch {
+	case in.StackShared && in.StackName != "":
+		// Shared stack namespace: co-locate the stack's apps so they reach each
+		// other by in-cluster DNS. Wins over app/project scope.
+		pattern = in.StackPattern
+		if pattern == "" {
+			if in.Dedicated {
+				pattern = "{project}-{stack}"
+			} else {
+				pattern = "{project}-{stack}-{env}"
+			}
+		}
+		ns := secrets.RenderPattern(pattern, secrets.NamingParams{
+			Org: in.OrgName, Env: in.EnvName, Project: in.ProjectName, Stack: in.StackName,
+		})
+		return ns, secrets.ValidateRenderedNamespace(ns, "namespace")
+	}
 	switch in.Scope {
 	case NamespaceScopeProject:
 		pattern = firstNonEmpty(in.ProjectPattern, in.OrgEnvProjPattern, in.OrgProjectDefault)

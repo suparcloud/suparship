@@ -40,6 +40,7 @@ type NamingParams struct {
 	Project string
 	App     string
 	Cluster string
+	Stack   string
 }
 
 // dns1123 validates K8s resource names (lowercase, alphanumeric, '-').
@@ -53,6 +54,7 @@ func RenderPattern(pattern string, params NamingParams) string {
 		"{project}", params.Project,
 		"{app}", params.App,
 		"{cluster}", params.Cluster,
+		"{stack}", params.Stack,
 	)
 	return r.Replace(pattern)
 }

@@ -5,6 +5,7 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
@@ -33,6 +34,7 @@ type rbacHandler struct {
 	promoteHandler   *promoteHandler   // optional: enables promote endpoint
 	logsHandler      *logsHandler      // optional: enables logs endpoint
 	appHandler       *appHandler       // optional: enables app read endpoints
+	stackStore       domain.StackStore // optional: enables stack grouping endpoints
 	envConfigHandler *envConfigHandler // optional: enables env config endpoints
 	secretsHandler   *secretsHandler   // optional: enables simple secret management
 	// storeReconciler republishes ESO ClusterSecretStores when an environment
@@ -283,12 +285,44 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/sync", devProject(sh.handleSecretSync))
 	}
 
+	// ── Stacks (logical grouping of apps within a project) ──
+	if rh.stackStore != nil {
+		mux.HandleFunc("GET /api/v1/projects/{project}/stacks", viewProject(rh.handleListStacks))
+		mux.HandleFunc("POST /api/v1/projects/{project}/stacks", manageProject(rh.handleCreateStack))
+		mux.HandleFunc("GET /api/v1/projects/{project}/stacks/{stack}", viewProject(rh.handleGetStack))
+		mux.HandleFunc("PATCH /api/v1/projects/{project}/stacks/{stack}", manageProject(rh.handlePatchStack))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}", manageProject(rh.handleDeleteStack))
+
+		// Batch lifecycle (Phase 3): fan out over the stack's member apps.
+		if rh.appHandler != nil {
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/sync", manageProject(rh.handleSyncStack))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/promote", manageProject(rh.handlePromoteStack))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/clone", manageProject(rh.handleCloneStack))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/previews", manageProject(rh.handleCreateStackPreview))
+			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/previews/{name}", manageProject(rh.handleDeleteStackPreview))
+		}
+
+		// Stack-scope shared secrets (shared by every app in the stack).
+		if rh.secretsHandler != nil {
+			sh := rh.secretsHandler
+			mux.HandleFunc("GET /api/v1/projects/{project}/stacks/{stack}/secrets/global", viewProject(sh.handleListSecrets))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/secrets/global", manageProject(sh.handleUpsertSecrets))
+			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/secrets/global/{key}", manageProject(sh.handleDeleteSecret))
+			mux.HandleFunc("GET /api/v1/projects/{project}/stacks/{stack}/secrets/env/{env}", viewProject(sh.handleListSecrets))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/secrets/env/{env}", manageProject(sh.handleUpsertSecrets))
+			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/secrets/env/{env}/{key}", manageProject(sh.handleDeleteSecret))
+		}
+	}
+
 	if rh.appHandler != nil {
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps", viewProject(rh.appHandler.handleListApps))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}", viewProject(rh.appHandler.handleGetApp))
 		mux.HandleFunc("PATCH /api/v1/projects/{project}/apps/{app}", manageProject(rh.appHandler.handleUpdateApp))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}", manageProject(rh.appHandler.handleDeleteApp))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/rename", manageProject(rh.appHandler.handleRenameApp))
+		if rh.stackStore != nil {
+			mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/stack", manageProject(rh.handleSetAppStack))
+		}
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments", viewProject(rh.appHandler.handleListAppEnvironments))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}", viewProject(rh.appHandler.handleGetAppEnvironment))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/previews", viewProject(rh.appHandler.handleListAppPreviews))

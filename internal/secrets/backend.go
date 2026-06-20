@@ -206,9 +206,9 @@ func (c BackendConfig) FindVault(scope Scope) *VaultRef {
 	}
 	op := c.OnePassword
 	switch scope.Kind {
-	case ScopeEnv, ScopeCluster, ScopeProjectEnv:
-		// Env-bound scopes — including project-env — live in the env vault.
-		// (ScopeProject is env-agnostic and falls through to the global vault.)
+	case ScopeEnv, ScopeCluster, ScopeProjectEnv, ScopeStackEnv:
+		// Env-bound scopes — including project-env and stack-env — live in the
+		// env vault. (ScopeProject/ScopeStack are env-agnostic → global vault.)
 		for i := range op.EnvVaults {
 			if op.EnvVaults[i].Key == scope.Env {
 				return &op.EnvVaults[i]

@@ -336,3 +336,28 @@ func TestBuildAppExternalSecret_PassesRefreshInterval(t *testing.T) {
 		t.Fatalf("expected RefreshInterval threaded to config, got %+v", cfg)
 	}
 }
+
+func TestBuildAppExternalSecret_StackItemsAfterProject(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App: "web", Namespace: "ns", Env: "prod", Project: "proj", Stack: "voiceai",
+		Presence: ScopePresence{
+			GlobalShared: true, ProjectShared: true, StackShared: true, GlobalApp: true,
+			EnvShared: true, ProjectEnvShared: true, StackEnvShared: true, EnvApp: true,
+		},
+	})
+	if cfg == nil {
+		t.Fatal("expected a config")
+	}
+	want := []string{
+		"shared-global", "shared-project-proj", "shared-stack-proj-voiceai", "web-global",
+		"shared-env-prod", "shared-project-proj-env-prod", "shared-stack-proj-voiceai-env-prod", "web-env-prod",
+	}
+	if len(cfg.Items) != len(want) {
+		t.Fatalf("expected %d items, got %d: %+v", len(want), len(cfg.Items), cfg.Items)
+	}
+	for i, k := range want {
+		if cfg.Items[i].Key != k {
+			t.Errorf("item %d = %q, want %q", i, cfg.Items[i].Key, k)
+		}
+	}
+}
