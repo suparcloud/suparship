@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -54,10 +55,18 @@ func (s *Store) EnsureKargoCred(ctx context.Context, projectNamespace string) er
 		return fmt.Errorf("ensure kargo namespace %q: %w", projectNamespace, err)
 	}
 
+	// Kargo matches a credential to a subscription by repoURL — EXACTLY unless
+	// repoURLIsRegex is set. Subscriptions use the full repo path
+	// (host/repo), so a host-only repoURL would never match. Emit a regex that
+	// matches the registry host and every repository under it, so one
+	// project-level credential covers all of a chart's images.
+	repoURLPattern := "^" + regexp.QuoteMeta(cfg.URL) + "(/.*)?$"
+
 	return s.upsertKargoCredSecret(ctx, projectNamespace, map[string][]byte{
-		"repoURL":  []byte(cfg.URL),
-		"username": []byte(username),
-		"password": []byte(password),
+		"repoURL":        []byte(repoURLPattern),
+		"repoURLIsRegex": []byte("true"),
+		"username":       []byte(username),
+		"password":       []byte(password),
 	})
 }
 

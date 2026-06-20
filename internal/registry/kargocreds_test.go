@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"regexp"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -43,10 +44,24 @@ func TestEnsureKargoCred_PasswordKey(t *testing.T) {
 	if sec.Labels[kargoCredTypeLabel] != kargoCredTypeImage {
 		t.Errorf("cred-type label = %q, want %q", sec.Labels[kargoCredTypeLabel], kargoCredTypeImage)
 	}
-	if string(sec.Data["repoURL"]) != "acr.example.com" ||
-		string(sec.Data["username"]) != "acruser" ||
-		string(sec.Data["password"]) != "s3cret" {
-		t.Errorf("secret data = %v, want repoURL/acruser/s3cret", sec.Data)
+	if string(sec.Data["username"]) != "acruser" || string(sec.Data["password"]) != "s3cret" {
+		t.Errorf("secret creds = %s/%s, want acruser/s3cret", sec.Data["username"], sec.Data["password"])
+	}
+	// repoURL is a regex (repoURLIsRegex=true) matching the host and every repo
+	// under it, so it matches a full subscription path.
+	if string(sec.Data["repoURLIsRegex"]) != "true" {
+		t.Errorf("repoURLIsRegex = %q, want true", sec.Data["repoURLIsRegex"])
+	}
+	pattern := string(sec.Data["repoURL"])
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("repoURL %q is not a valid regex: %v", pattern, err)
+	}
+	if !re.MatchString("acr.example.com/biglysales-voiceai-livekit") {
+		t.Errorf("repoURL regex %q does not match a full repo path", pattern)
+	}
+	if re.MatchString("evil-acr.example.com.attacker.io/x") {
+		t.Errorf("repoURL regex %q must not match a different registry host", pattern)
 	}
 }
 
