@@ -259,7 +259,10 @@ func (rh *rbacHandler) handleSetAppStack(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to update app"})
 		return
 	}
-	if err := rh.appHandler.republishApp(r.Context(), app); err != nil {
+	// Membership may relocate the app (joining/leaving a shared-namespace stack)
+	// and changes its override layer — relocateApp handles namespace recompute,
+	// republish, and old-namespace reclaim.
+	if err := rh.appHandler.relocateApp(r.Context(), app); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "stack membership saved but publish failed: " + err.Error()})
 		return
 	}
@@ -273,7 +276,9 @@ func (rh *rbacHandler) republishStackMembers(ctx context.Context, project, stack
 	apps, _ := rh.appHandler.appStore.ListApps(ctx, project)
 	for _, a := range apps {
 		if a.Spec.Stack == stackName {
-			_ = rh.appHandler.republishApp(ctx, a)
+			// relocateApp (not republishApp) so toggling SharedNamespace
+			// actually moves members to/from the shared namespace.
+			_ = rh.appHandler.relocateApp(ctx, a)
 		}
 	}
 }

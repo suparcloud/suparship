@@ -683,3 +683,49 @@ func TestResolveNamespaceIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveNamespace_SharedStack(t *testing.T) {
+	// A shared-namespace stack co-locates its apps under {project}-{stack}-{env},
+	// overriding the app/project scope so members share a namespace (DNS).
+	ns, err := ResolveNamespace(NamespaceResolveInput{
+		AppName:     "agent-server",
+		EnvName:     "staging",
+		ProjectName: "voiceproj",
+		Scope:       NamespaceScopeApp, // app scope is overridden by the shared stack
+		StackName:   "voiceai",
+		StackShared: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ns != "voiceproj-voiceai-staging" {
+		t.Errorf("ns = %q, want voiceproj-voiceai-staging", ns)
+	}
+
+	// A different app in the same stack resolves to the SAME namespace.
+	ns2, _ := ResolveNamespace(NamespaceResolveInput{
+		AppName: "web", EnvName: "staging", ProjectName: "voiceproj",
+		StackName: "voiceai", StackShared: true,
+	})
+	if ns2 != ns {
+		t.Errorf("stack members must share a namespace: %q vs %q", ns2, ns)
+	}
+
+	// SharedNamespace off → falls back to the app-scope namespace.
+	nsApp, _ := ResolveNamespace(NamespaceResolveInput{
+		AppName: "web", EnvName: "staging", ProjectName: "voiceproj",
+		StackName: "voiceai", StackShared: false,
+	})
+	if nsApp != "voiceproj-web-staging" {
+		t.Errorf("non-shared stack ns = %q, want voiceproj-web-staging", nsApp)
+	}
+
+	// Custom stack pattern is honored.
+	nsPat, _ := ResolveNamespace(NamespaceResolveInput{
+		AppName: "web", EnvName: "prod", ProjectName: "voiceproj",
+		StackName: "voiceai", StackShared: true, StackPattern: "{stack}-{env}",
+	})
+	if nsPat != "voiceai-prod" {
+		t.Errorf("custom stack pattern ns = %q, want voiceai-prod", nsPat)
+	}
+}

@@ -111,6 +111,41 @@ export function StackDetail() {
         </div>
       </div>
 
+      {/* Shared namespace toggle */}
+      <div className="rounded-xl border border-gray-200 bg-white px-6 py-4">
+        <label className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={stack.sharedNamespace ?? false}
+            onChange={async (e) => {
+              if (!project) return;
+              try {
+                await updateStack(project, stackName!, { sharedNamespace: e.target.checked });
+                toast.success(
+                  e.target.checked
+                    ? "Members will co-locate in one namespace"
+                    : "Members will use their own namespaces",
+                );
+                await reload();
+              } catch (err) {
+                toast.error(err instanceof ApiError ? err.message : "Failed to update stack");
+              }
+            }}
+            className="mt-0.5"
+          />
+          <span className="text-sm">
+            <span className="font-medium text-gray-900">Shared namespace</span>
+            <span className="block text-xs text-gray-500">
+              Co-locate member apps in one{" "}
+              <code className="font-mono">{project}-{stack.name}-&lt;env&gt;</code> namespace
+              so they reach each other by in-cluster DNS (e.g.{" "}
+              <code className="font-mono">web → http://agent-server-web:8080</code>). Toggling
+              relocates the apps on the next sync.
+            </span>
+          </span>
+        </label>
+      </div>
+
       {/* Members */}
       <div className="rounded-xl border border-gray-200 bg-white">
         <div className="border-b border-gray-100 px-6 py-4">
