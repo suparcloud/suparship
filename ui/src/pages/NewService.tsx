@@ -551,19 +551,22 @@ function ConfigureStep({
           <div className="mt-3">
             <label className="mb-1 block text-xs font-medium text-gray-700">
               Image tag path{" "}
-              <span className="font-normal text-gray-400">(optional)</span>
+              <span className="font-normal text-gray-400">
+                (optional — auto-detected)
+              </span>
             </label>
             <input
               type="text"
               className="w-full max-w-sm rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              placeholder="components.web.image.tag"
+              placeholder="auto-detect from chart shape"
               value={cdImageTagPath}
               onChange={(e) => setCdImageTagPath(e.target.value)}
             />
             <p className="mt-1 text-xs text-gray-400">
-              Dotted Helm-values key holding the tag. Empty defaults to{" "}
-              <code className="font-mono">components.web.image.tag</code>; use{" "}
-              <code className="font-mono">image.tag</code> for root-image charts.
+              Leave blank to infer the key from the chart and your overrides
+              (e.g. <code className="font-mono">image.tag</code> or{" "}
+              <code className="font-mono">components.web.image.tag</code>).
+              Set it only to override what detection picks.
             </p>
           </div>
         )}

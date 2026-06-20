@@ -2038,13 +2038,14 @@ function AppValuesEditor({
                 type="text"
                 value={cdImageTagPath}
                 onChange={(e) => setCdImageTagPath(e.target.value)}
-                placeholder="components.web.image.tag"
+                placeholder="auto-detect from chart shape"
                 className="mt-1 block w-full max-w-sm rounded-md border border-gray-300 px-2 py-1 font-mono text-xs"
               />
               <span className="mt-1 block text-gray-400">
-                Dotted Helm-values key that holds the tag. Empty defaults to{" "}
-                <code className="font-mono">components.web.image.tag</code>; use{" "}
-                <code className="font-mono">image.tag</code> for root-image charts.
+                Leave blank to infer the key from the chart and your overrides
+                (e.g. <code className="font-mono">image.tag</code> or{" "}
+                <code className="font-mono">components.web.image.tag</code>). Set
+                it only to override what detection picks.
               </span>
             </label>
           )}

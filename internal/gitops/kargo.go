@@ -2,6 +2,7 @@ package gitops
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/domain"
@@ -481,6 +482,45 @@ func ImageTagValuesKey(app *domain.App) string {
 		return app.Spec.CD.ImageTagPath
 	}
 	return defaultImageTagKey
+}
+
+// DetectImageTagKey infers the dotted Helm-values key that holds the image tag
+// by inspecting a values document (chart defaults or an app's overrides). It
+// returns "" when no image block is found, so callers can fall back to the
+// canonical default. Preference order: a "web" component, then the lexically
+// first component carrying an image block (canonical suparship layout), then a
+// root-level image block (common in BYO/external charts like voiceai-livekit).
+func DetectImageTagKey(values map[string]any) string {
+	if comps, ok := values["components"].(map[string]any); ok {
+		if componentHasImage(comps["web"]) {
+			return "components.web.image.tag"
+		}
+		names := make([]string, 0, len(comps))
+		for n := range comps {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			if componentHasImage(comps[n]) {
+				return "components." + n + ".image.tag"
+			}
+		}
+	}
+	if _, ok := values["image"].(map[string]any); ok {
+		return "image.tag"
+	}
+	return ""
+}
+
+// componentHasImage reports whether a component values block contains an image
+// map (i.e. the place a tag would live).
+func componentHasImage(v any) bool {
+	cm, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = cm["image"].(map[string]any)
+	return ok
 }
 
 // KargoNamespaceForProject returns the Kargo namespace for a suparship project.
