@@ -45,6 +45,7 @@ func TestPublishKargoCRs_WritesExpectedFiles(t *testing.T) {
 
 	wantFiles := []string{
 		"demo-project.yaml",
+		"demo-projectconfig.yaml",
 		"demo-hello-warehouse.yaml",
 		"demo-hello-staging-stage.yaml",
 		"demo-hello-prod-stage.yaml",
@@ -107,12 +108,32 @@ func TestPublishKargoCRs_TemplateImageMappingRoundTrip(t *testing.T) {
 		t.Errorf("subscription imageSelectionStrategy = %q, want NewestBuild", img.ImageSelectionStrategy)
 	}
 
-	// Stage: the helm image update must target the mapped repo + tag key.
+	// Stage: the yaml-update promotion step must target the mapped tag key.
 	var stage gitops.KargoStage
 	readYAMLInto(t, filepath.Join(kargoDir, "voiceai-livekit-express-caller-staging-stage.yaml"), &stage)
-	imgs := stage.Spec.PromotionMechanisms.GitRepoUpdates[0].Helm.Images
-	if len(imgs) != 1 || imgs[0].Image != "acr.example.com/voiceai-livekit" || imgs[0].Key != "image.tag" {
-		t.Errorf("stage helm image update = %+v, want repo acr.example.com/voiceai-livekit key image.tag", imgs)
+	if stage.Spec.PromotionTemplate == nil {
+		t.Fatal("stage PromotionTemplate is nil")
+	}
+	var yu *gitops.PromotionStep
+	for i := range stage.Spec.PromotionTemplate.Spec.Steps {
+		if stage.Spec.PromotionTemplate.Spec.Steps[i].Uses == "yaml-update" {
+			yu = &stage.Spec.PromotionTemplate.Spec.Steps[i]
+		}
+	}
+	if yu == nil {
+		t.Fatal("stage has no yaml-update step")
+	}
+	if path, _ := yu.Config["path"].(string); path != "./src/envs/staging/voiceai/livekit-express-caller/values.yaml" {
+		t.Errorf("yaml-update path = %q", path)
+	}
+	// updates unmarshal from YAML as []any of map[string]any.
+	updates, _ := yu.Config["updates"].([]any)
+	if len(updates) != 1 {
+		t.Fatalf("yaml-update updates = %+v, want 1", yu.Config["updates"])
+	}
+	u, _ := updates[0].(map[string]any)
+	if u["key"] != "image.tag" {
+		t.Errorf("yaml-update key = %v, want image.tag", u["key"])
 	}
 }
 
@@ -153,8 +174,29 @@ func TestPublishKargoCRs_ProjectCRIsGenerated(t *testing.T) {
 	if !strings.Contains(body, "name: demo") {
 		t.Errorf("project YAML missing name:demo:\n%s", body)
 	}
-	if !strings.Contains(body, "promotionPolicies") {
-		t.Errorf("project YAML missing promotionPolicies:\n%s", body)
+	// Kargo v1.x: the Project CR carries NO promotionPolicies (they live on the
+	// separate ProjectConfig). Emitting them on the Project gets stripped.
+	if strings.Contains(body, "promotionPolicies") {
+		t.Errorf("v1.x Project must NOT carry promotionPolicies (moved to ProjectConfig):\n%s", body)
+	}
+
+	// ProjectConfig holds the promotion policies (staging auto, prod manual).
+	cfgContent, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-projectconfig.yaml"))
+	if err != nil {
+		t.Fatalf("read projectconfig file: %v", err)
+	}
+	cfgBody := string(cfgContent)
+	if !strings.Contains(cfgBody, "kind: ProjectConfig") {
+		t.Errorf("projectconfig YAML missing kind:ProjectConfig:\n%s", cfgBody)
+	}
+	if !strings.Contains(cfgBody, "promotionPolicies") {
+		t.Errorf("projectconfig YAML missing promotionPolicies:\n%s", cfgBody)
+	}
+	if !strings.Contains(cfgBody, "stage: hello-staging") {
+		t.Errorf("projectconfig YAML missing staging policy:\n%s", cfgBody)
+	}
+	if !strings.Contains(cfgBody, "autoPromotionEnabled: true") {
+		t.Errorf("projectconfig YAML missing autoPromotionEnabled for first stage:\n%s", cfgBody)
 	}
 }
 
@@ -183,8 +225,8 @@ func TestPublishKargoCRs_ProdStageHasStagingUpstream(t *testing.T) {
 	if !strings.Contains(body, "staging") {
 		t.Errorf("prod Stage YAML should reference 'staging' upstream:\n%s", body)
 	}
-	if !strings.Contains(body, "promotionMechanisms") {
-		t.Errorf("prod Stage YAML should use promotionMechanisms (Kargo v0.9 webhook compat):\n%s", body)
+	if !strings.Contains(body, "promotionTemplate") {
+		t.Errorf("prod Stage YAML should use promotionTemplate.spec.steps (Kargo v1.x):\n%s", body)
 	}
 }
 

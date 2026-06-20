@@ -352,7 +352,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// Provision the Kargo image-credential Secret in every project's Kargo
 		// namespace from the org registry config, so Warehouses can authenticate
 		// without waiting for a registry-save or app-publish. Best-effort, async.
-		go reconcileKargoRegistryCreds(context.Background(), registryStore, projectStore, logger)
+		go reconcileKargoRegistryCreds(context.Background(), registryStore, gitopsConfigStore, projectStore, logger)
 
 		// Templates stored as ConfigMaps in the cluster (label
 		// suparship.io/type=template, namespace suparship-system) are served
@@ -1530,13 +1530,14 @@ func publishInitialEnvInfra(
 // lands across the whole fleet without per-app manual action — old app.yaml
 // files lack the new keys until rewritten. Idempotent: a no-op commit when
 // content is unchanged. Best-effort; per-app failures are logged.
-// reconcileKargoRegistryCreds provisions (or refreshes) the Kargo
-// image-credential Secret in every project's Kargo namespace from the org
-// registry config. Run at startup so Warehouses can authenticate without
-// waiting for a registry-config save or an app publish. Best-effort: per-project
-// failures are logged, not fatal. No-op when the registry is unconfigured.
-func reconcileKargoRegistryCreds(ctx context.Context, store *registry.Store, projectStore project.Store, logger *slog.Logger) {
-	if store == nil || projectStore == nil {
+// reconcileKargoRegistryCreds provisions (or refreshes) the Kargo credential
+// Secrets in every project's Kargo namespace: the image cred (Warehouse tag
+// discovery) from the registry config, and the git cred (promotion git steps)
+// from the gitops config. Run at startup so Kargo can authenticate without
+// waiting for a config save or an app publish. Best-effort: per-project failures
+// are logged, not fatal. No-op for a store that is nil/unconfigured.
+func reconcileKargoRegistryCreds(ctx context.Context, store *registry.Store, gitStore *gitops.ConfigStore, projectStore project.Store, logger *slog.Logger) {
+	if projectStore == nil || (store == nil && gitStore == nil) {
 		return
 	}
 	projects, err := projectStore.List(ctx)
@@ -1547,8 +1548,20 @@ func reconcileKargoRegistryCreds(ctx context.Context, store *registry.Store, pro
 	var ok, failed int
 	for _, p := range projects {
 		ns := gitops.KargoNamespaceForProject(p.Metadata.Name)
-		if err := store.EnsureKargoCred(ctx, ns); err != nil {
-			logger.Warn("kargo cred reconcile", "project", p.Metadata.Name, "namespace", ns, "error", err)
+		ferr := false
+		if store != nil {
+			if err := store.EnsureKargoCred(ctx, ns); err != nil {
+				logger.Warn("kargo image cred reconcile", "project", p.Metadata.Name, "namespace", ns, "error", err)
+				ferr = true
+			}
+		}
+		if gitStore != nil {
+			if err := gitStore.EnsureKargoGitCred(ctx, ns); err != nil {
+				logger.Warn("kargo git cred reconcile", "project", p.Metadata.Name, "namespace", ns, "error", err)
+				ferr = true
+			}
+		}
+		if ferr {
 			failed++
 			continue
 		}
