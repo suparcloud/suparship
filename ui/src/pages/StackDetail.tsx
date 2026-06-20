@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -16,7 +17,7 @@ import {
   syncStack,
   updateStack,
 } from "../lib/stacks";
-import type { Stack, StackBatchResponse } from "../lib/stacks";
+import type { Stack, StackBatchResponse, StackOpResult } from "../lib/stacks";
 import type { EnvConfig } from "../lib/envconfig";
 import {
   listStackGlobalSecretKeys,
@@ -29,6 +30,75 @@ import {
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
 
+const TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "variables", label: "Variables" },
+  { id: "secrets", label: "Secrets" },
+  { id: "settings", label: "Settings" },
+] as const;
+type TabId = (typeof TABS)[number]["id"];
+
+type ModalKind = "promote" | "preview" | "clone" | "delete";
+
+const btnPrimary =
+  "rounded-md bg-gray-900 px-3.5 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50";
+const btnSecondary =
+  "rounded-md border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50";
+
+// Modal is the shared backdrop + panel used for the input-driven batch actions,
+// mirroring the hand-rolled modals on AppDetail.
+function Modal({
+  title,
+  description,
+  onClose,
+  closable,
+  children,
+}: {
+  title: string;
+  description?: string;
+  onClose: () => void;
+  closable: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+        <div className="flex items-start justify-between gap-4">
+          <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
+          <button
+            onClick={onClose}
+            disabled={!closable}
+            className="text-gray-400 hover:text-gray-600 disabled:opacity-40"
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        {description && <p className="mt-1 text-sm text-gray-500">{description}</p>}
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ResultRows renders the per-app outcome of a batch op inside a modal.
+function ResultRows({ results }: { results: StackOpResult[] }) {
+  if (results.length === 0) {
+    return <p className="mt-4 text-sm text-gray-400">No member apps were affected.</p>;
+  }
+  return (
+    <ul className="mt-4 max-h-52 space-y-1 overflow-auto rounded-md border border-gray-100 bg-gray-50 p-3 text-xs">
+      {results.map((r) => (
+        <li key={r.app} className={r.ok ? "text-gray-600" : "text-red-600"}>
+          <span className="font-mono font-medium">{r.app}</span>
+          {" — "}
+          {r.ok ? r.message || "ok" : r.error}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function StackDetail() {
   const { project, stack: stackName } = useParams<{ project: string; stack: string }>();
   const navigate = useNavigate();
@@ -37,7 +107,10 @@ export function StackDetail() {
   const [envs, setEnvs] = useState<ProjectEnvironment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [addApp, setAddApp] = useState("");
+  const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [busy, setBusy] = useState<string | null>(null);
+  const [modal, setModal] = useState<ModalKind | null>(null);
+  const [results, setResults] = useState<StackOpResult[] | null>(null);
   const [promoteEnv, setPromoteEnv] = useState("");
   const [previewName, setPreviewName] = useState("");
   const [cloneName, setCloneName] = useState("");
@@ -69,11 +142,24 @@ export function StackDetail() {
   const memberApps = stack.apps ?? [];
   const members = new Set(memberApps);
   const addable = allApps.filter((a) => !members.has(a.name)).map((a) => a.name);
+  const noMembers = memberApps.length === 0;
+
+  function openModal(kind: ModalKind) {
+    setResults(null);
+    setModal(kind);
+  }
+  function closeModal() {
+    if (busy) return; // don't close mid-flight
+    setModal(null);
+    setResults(null);
+    setPromoteEnv("");
+    setPreviewName("");
+    setCloneName("");
+  }
 
   async function move(app: string, toStack: string) {
-    if (!project) return;
     try {
-      await setAppStack(project, app, toStack);
+      await setAppStack(project!, app, toStack);
       toast.success(toStack ? `Added ${app} to ${stackName}` : `Removed ${app} from ${stackName}`);
       setAddApp("");
       await reload();
@@ -82,22 +168,8 @@ export function StackDetail() {
     }
   }
 
-  async function onDelete(deleteApps: boolean) {
-    if (!project) return;
-    const msg = deleteApps
-      ? `Delete stack "${stackName}" AND all its member apps? This tears down every app in the collection — this cannot be undone.`
-      : `Delete stack "${stackName}"? Member apps stay in the project (detached from the stack).`;
-    if (!confirm(msg)) return;
-    try {
-      await deleteStack(project, stackName!, deleteApps);
-      toast.success(deleteApps ? `Stack ${stackName} and its apps deleted` : `Stack ${stackName} deleted`);
-      navigate(`/projects/${encodeURIComponent(project)}`);
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Failed to delete stack");
-    }
-  }
-
-  // summarize toasts the per-app outcome of a batch op.
+  // summarize toasts the per-app outcome of a batch op (used by Sync, which has
+  // no modal of its own).
   function summarize(action: string, res: StackBatchResponse) {
     const failed = res.results.filter((r) => !r.ok);
     if (failed.length === 0) {
@@ -111,23 +183,38 @@ export function StackDetail() {
     }
   }
 
-  async function runBatch(action: string, fn: () => Promise<StackBatchResponse>) {
-    setBusy(action);
+  async function doSync() {
+    setBusy("sync");
     try {
-      summarize(action, await fn());
+      summarize("Sync", await syncStack(project!, stackName!));
       await reload();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : `Failed to ${action}`);
+      toast.error(err instanceof ApiError ? err.message : "Failed to sync stack");
     } finally {
       setBusy(null);
     }
   }
 
-  async function onClone() {
-    if (!project || !cloneName) return;
+  // runModalBatch runs an action that shows its per-app results inside the open
+  // modal (Promote, Preview) rather than only a toast.
+  async function runModalBatch(kind: string, fn: () => Promise<StackBatchResponse>) {
+    setBusy(kind);
+    try {
+      const res = await fn();
+      setResults(res.results);
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : `Failed to ${kind}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function doClone() {
+    if (!cloneName) return;
     setBusy("clone");
     try {
-      const res = await cloneStack(project, stackName!, { newName: cloneName });
+      const res = await cloneStack(project!, stackName!, { newName: cloneName });
       const failed = res.results.filter((r) => !r.ok);
       if (failed.length) {
         toast.error(
@@ -138,16 +225,41 @@ export function StackDetail() {
           `Cloned to ${cloneName} (${res.results.length} app(s)). Re-enter app-level secrets under the new apps.`,
         );
       }
-      navigate(`/projects/${encodeURIComponent(project)}/stacks/${encodeURIComponent(cloneName)}`);
+      navigate(`/projects/${encodeURIComponent(project!)}/stacks/${encodeURIComponent(cloneName)}`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Failed to clone stack");
-    } finally {
       setBusy(null);
+    }
+  }
+
+  async function doDelete(deleteApps: boolean) {
+    if (deleteApps && !confirm(`Delete stack "${stackName}" AND all ${memberApps.length} member app(s)? This cannot be undone.`)) {
+      return;
+    }
+    setBusy("delete");
+    try {
+      await deleteStack(project!, stackName!, deleteApps);
+      toast.success(deleteApps ? `Stack ${stackName} and its apps deleted` : `Stack ${stackName} deleted`);
+      navigate(`/projects/${encodeURIComponent(project!)}`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to delete stack");
+      setBusy(null);
+    }
+  }
+
+  async function toggleSharedNamespace(checked: boolean) {
+    try {
+      await updateStack(project!, stackName!, { sharedNamespace: checked });
+      toast.success(checked ? "Members will co-locate in one namespace" : "Members will use their own namespaces");
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to update stack");
     }
   }
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div>
         <div className="text-sm text-gray-500">
           <Link to={`/projects/${encodeURIComponent(project)}`} className="hover:text-gray-700">
@@ -155,267 +267,344 @@ export function StackDetail() {
           </Link>{" "}
           / Stacks
         </div>
-        <div className="flex items-center justify-between">
+        <div className="mt-1 flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-gray-900">
-              {stack.displayName || stack.name}
-            </h1>
+            <h1 className="text-2xl font-semibold text-gray-900">{stack.displayName || stack.name}</h1>
             {stack.description && <p className="mt-1 text-sm text-gray-500">{stack.description}</p>}
-          </div>
-          <button
-            onClick={() => onDelete(false)}
-            className="rounded-md border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50"
-          >
-            Delete stack
-          </button>
-        </div>
-      </div>
-
-      {/* Shared namespace toggle */}
-      <div className="rounded-xl border border-gray-200 bg-white px-6 py-4">
-        <label className="flex items-start gap-3">
-          <input
-            type="checkbox"
-            checked={stack.sharedNamespace ?? false}
-            onChange={async (e) => {
-              if (!project) return;
-              try {
-                await updateStack(project, stackName!, { sharedNamespace: e.target.checked });
-                toast.success(
-                  e.target.checked
-                    ? "Members will co-locate in one namespace"
-                    : "Members will use their own namespaces",
-                );
-                await reload();
-              } catch (err) {
-                toast.error(err instanceof ApiError ? err.message : "Failed to update stack");
-              }
-            }}
-            className="mt-0.5"
-          />
-          <span className="text-sm">
-            <span className="font-medium text-gray-900">Shared namespace</span>
-            <span className="block text-xs text-gray-500">
-              Co-locate member apps in one{" "}
-              <code className="font-mono">{project}-{stack.name}-&lt;env&gt;</code> namespace
-              so they reach each other by in-cluster DNS (e.g.{" "}
-              <code className="font-mono">web → http://agent-server-web:8080</code>). Toggling
-              relocates the apps on the next sync.
-            </span>
-          </span>
-        </label>
-      </div>
-
-      {/* Batch lifecycle */}
-      <div className="rounded-xl border border-gray-200 bg-white">
-        <div className="border-b border-gray-100 px-6 py-4">
-          <h2 className="text-base font-medium text-gray-900">Batch actions</h2>
-          <p className="mt-0.5 text-sm text-gray-500">
-            Act on every app in this stack at once. Each app keeps its own ArgoCD/Kargo pipeline — these
-            just fan out over the members.
-          </p>
-        </div>
-        <div className="space-y-4 p-6">
-          {/* Sync all */}
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm">
-              <span className="font-medium text-gray-900">Sync all</span>
-              <span className="block text-xs text-gray-500">Republish every member app's GitOps manifests.</span>
+            <div className="mt-2 flex items-center gap-2 text-xs">
+              <span className="rounded-full bg-gray-100 px-2.5 py-0.5 font-medium text-gray-600">
+                {memberApps.length} app{memberApps.length === 1 ? "" : "s"}
+              </span>
+              {stack.sharedNamespace && (
+                <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 font-medium text-indigo-700">
+                  Shared namespace
+                </span>
+              )}
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Quick actions */}
+      <div className="flex flex-wrap gap-2">
+        <button onClick={doSync} disabled={busy !== null || noMembers} className={btnSecondary}>
+          {busy === "sync" ? "Syncing…" : "Sync"}
+        </button>
+        <button onClick={() => openModal("promote")} disabled={busy !== null || noMembers} className={btnPrimary}>
+          Promote
+        </button>
+        <button onClick={() => openModal("preview")} disabled={busy !== null || noMembers} className={btnSecondary}>
+          Preview
+        </button>
+        <button onClick={() => openModal("clone")} disabled={busy !== null} className={btnSecondary}>
+          Clone
+        </button>
+      </div>
+
+      {/* Tabs */}
+      <div className="border-b border-gray-200">
+        <nav className="-mb-px flex gap-6">
+          {TABS.map((tab) => (
             <button
-              onClick={() => runBatch("sync", () => syncStack(project, stackName))}
-              disabled={busy !== null || memberApps.length === 0}
-              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`pb-3 text-sm font-medium transition-colors ${
+                activeTab === tab.id
+                  ? "border-b-2 border-gray-900 text-gray-900"
+                  : "text-gray-500 hover:text-gray-700"
+              }`}
             >
-              {busy === "sync" ? "Syncing…" : "Sync all"}
+              {tab.label}
             </button>
-          </div>
+          ))}
+        </nav>
+      </div>
 
-          {/* Promote all */}
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm">
-              <span className="font-medium text-gray-900">Promote all</span>
-              <span className="block text-xs text-gray-500">Promote every member to the chosen environment.</span>
-            </div>
-            <div className="flex items-center gap-2">
+      {/* Overview — members */}
+      {activeTab === "overview" && (
+        <div className="rounded-xl border border-gray-200 bg-white">
+          <div className="border-b border-gray-100 px-6 py-4">
+            <h2 className="text-base font-medium text-gray-900">Apps in this stack</h2>
+            <p className="mt-0.5 text-sm text-gray-500">
+              Tightly-coupled apps grouped here share the stack's overrides
+              {stack.sharedNamespace ? " and namespace" : ""}. Each keeps its own ArgoCD/Kargo pipeline.
+            </p>
+          </div>
+          <div className="divide-y divide-gray-50">
+            {noMembers && <p className="px-6 py-4 text-sm text-gray-400">No apps yet. Add one below.</p>}
+            {memberApps.map((a) => (
+              <div key={a} className="flex items-center justify-between px-6 py-3">
+                <Link
+                  to={`/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(a)}`}
+                  className="font-mono text-sm text-gray-900 hover:text-indigo-600"
+                >
+                  {a}
+                </Link>
+                <button onClick={() => move(a, "")} className="text-xs font-medium text-gray-500 hover:text-red-600">
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+          {addable.length > 0 && (
+            <div className="flex items-center gap-2 border-t border-gray-100 px-6 py-3">
               <select
-                value={promoteEnv}
-                onChange={(e) => setPromoteEnv(e.target.value)}
+                value={addApp}
+                onChange={(e) => setAddApp(e.target.value)}
                 className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
               >
-                <option value="">Target env…</option>
-                {envs.map((env) => (
-                  <option key={env.name} value={env.name}>{env.displayName || env.name}</option>
+                <option value="">Add an app…</option>
+                {addable.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
                 ))}
               </select>
               <button
-                onClick={() => promoteEnv && runBatch("promote", () => promoteStack(project, stackName, promoteEnv))}
-                disabled={busy !== null || !promoteEnv || memberApps.length === 0}
+                onClick={() => addApp && move(addApp, stackName)}
+                disabled={!addApp}
                 className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
               >
-                {busy === "promote" ? "Promoting…" : "Promote all"}
+                Add
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Variables */}
+      {activeTab === "variables" && (
+        <EnvConfigEditor
+          title="Stack variables"
+          description="Applied to every app in this stack. Overrides project defaults; overridden by app-level values."
+          fetchFn={async (): Promise<EnvConfig> => (await getStack(project, stackName)).envConfig ?? {}}
+          saveFn={(cfg: EnvConfig) => updateStack(project, stackName, { envConfig: cfg })}
+        />
+      )}
+
+      {/* Secrets */}
+      {activeTab === "secrets" && (
+        <div className="rounded-xl border border-gray-200 bg-white">
+          <div className="border-b border-gray-100 px-6 py-4">
+            <h2 className="text-base font-medium text-gray-900">Stack secrets</h2>
+            <p className="mt-0.5 text-sm text-gray-500">
+              Shared by every app in this stack. Override project secrets; overridden by app-level secrets.
+            </p>
+          </div>
+          <div className="space-y-6 p-6">
+            <SecretEditor
+              title="Global (all environments)"
+              description="Stack secrets identical in every environment."
+              fetchFn={() => listStackGlobalSecretKeys(project, stackName)}
+              upsertFn={(e) => upsertStackGlobalSecrets(project, stackName, e)}
+              deleteFn={(k) => deleteStackGlobalSecretKey(project, stackName, k)}
+            />
+            {envs.map((env) => (
+              <SecretEditor
+                key={env.name}
+                title={`${env.displayName || env.name} secrets`}
+                description={`Stack secrets for the ${env.name} environment.`}
+                fetchFn={() => listStackEnvSecretKeys(project, stackName, env.name)}
+                upsertFn={(e) => upsertStackEnvSecrets(project, stackName, env.name, e)}
+                deleteFn={(k) => deleteStackEnvSecretKey(project, stackName, env.name, k)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Settings */}
+      {activeTab === "settings" && (
+        <div className="space-y-6">
+          <div className="rounded-xl border border-gray-200 bg-white px-6 py-4">
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={stack.sharedNamespace ?? false}
+                onChange={(e) => toggleSharedNamespace(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span className="text-sm">
+                <span className="font-medium text-gray-900">Shared namespace</span>
+                <span className="block text-xs text-gray-500">
+                  Co-locate member apps in one{" "}
+                  <code className="font-mono">
+                    {stack.namespacePattern || `${project}-${stack.name}-<env>`}
+                  </code>{" "}
+                  namespace so they reach each other by in-cluster DNS (e.g.{" "}
+                  <code className="font-mono">web → http://agent-server-web:8080</code>). Toggling relocates
+                  the apps on the next sync.
+                </span>
+              </span>
+            </label>
+          </div>
+
+          {/* Danger zone */}
+          <div className="rounded-xl border border-red-200 bg-white">
+            <div className="border-b border-red-100 px-6 py-4">
+              <h2 className="text-base font-medium text-red-700">Danger zone</h2>
+            </div>
+            <div className="flex items-center justify-between gap-3 px-6 py-4">
+              <p className="text-sm text-gray-600">
+                Delete this stack — detach its apps and keep them, or tear the whole collection down.
+              </p>
+              <button
+                onClick={() => openModal("delete")}
+                disabled={busy !== null}
+                className="rounded-md border border-red-300 bg-white px-3.5 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+              >
+                Delete stack…
               </button>
             </div>
           </div>
+        </div>
+      )}
 
-          {/* Preview the whole stack */}
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm">
-              <span className="font-medium text-gray-900">Preview the stack</span>
-              <span className="block text-xs text-gray-500">
-                Bring up a preview of every member co-located in one{" "}
-                <code className="font-mono">{project}-{stack.name}-preview-&lt;name&gt;</code> namespace.
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
+      {/* Promote modal */}
+      {modal === "promote" && (
+        <Modal
+          title="Promote stack"
+          description="Promote every member app to the chosen environment. Each app keeps its own pipeline."
+          onClose={closeModal}
+          closable={busy === null}
+        >
+          {!results && (
+            <select
+              value={promoteEnv}
+              onChange={(e) => setPromoteEnv(e.target.value)}
+              className="mt-4 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+            >
+              <option value="">Target environment…</option>
+              {envs.map((env) => (
+                <option key={env.name} value={env.name}>
+                  {env.displayName || env.name}
+                </option>
+              ))}
+            </select>
+          )}
+          {results && <ResultRows results={results} />}
+          <div className="mt-5 flex justify-end gap-2">
+            <button onClick={closeModal} disabled={busy !== null} className={btnSecondary}>
+              {results ? "Done" : "Cancel"}
+            </button>
+            {!results && (
+              <button
+                onClick={() => runModalBatch("promote", () => promoteStack(project, stackName, promoteEnv))}
+                disabled={!promoteEnv || busy !== null}
+                className={btnPrimary}
+              >
+                {busy === "promote" ? "Promoting…" : "Promote all"}
+              </button>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {/* Preview modal */}
+      {modal === "preview" && (
+        <Modal
+          title="Preview the stack"
+          description="Bring up a preview of every member co-located in one shared namespace."
+          onClose={closeModal}
+          closable={busy === null}
+        >
+          {!results && (
+            <>
               <input
                 value={previewName}
                 onChange={(e) => setPreviewName(e.target.value)}
                 placeholder="preview name"
-                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+                className="mt-4 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
               />
-              <button
-                onClick={() =>
-                  previewName &&
-                  runBatch("preview", () => createStackPreview(project, stackName, previewName)).then(() => setPreviewName(""))
-                }
-                disabled={busy !== null || !previewName || memberApps.length === 0}
-                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-              >
-                {busy === "preview" ? "Creating…" : "Preview"}
-              </button>
-            </div>
-          </div>
-
-          {/* Clone the stack */}
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm">
-              <span className="font-medium text-gray-900">Clone this stack</span>
-              <span className="block text-xs text-gray-500">
-                Duplicate the collection with variations (e.g. livekit-cloud vs self-hosted). Members are
-                copied as <code className="font-mono">&lt;new-stack&gt;-&lt;app&gt;</code>; the source stays
-                intact. App-level secret values aren't migrated — re-enter them under the new apps.
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                value={cloneName}
-                onChange={(e) => setCloneName(e.target.value)}
-                placeholder="new stack name"
-                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
-              />
-              <button
-                onClick={onClone}
-                disabled={busy !== null || !cloneName}
-                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-              >
-                {busy === "clone" ? "Cloning…" : "Clone"}
-              </button>
-            </div>
-          </div>
-
-          {/* Destroy everything */}
-          <div className="flex items-center justify-between gap-3 border-t border-gray-100 pt-4">
-            <div className="text-sm">
-              <span className="font-medium text-red-700">Delete stack + all apps</span>
-              <span className="block text-xs text-gray-500">Tear down every member app and reclaim the stack namespaces.</span>
-            </div>
-            <button
-              onClick={() => onDelete(true)}
-              disabled={busy !== null}
-              className="rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-            >
-              Delete everything
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Members */}
-      <div className="rounded-xl border border-gray-200 bg-white">
-        <div className="border-b border-gray-100 px-6 py-4">
-          <h2 className="text-base font-medium text-gray-900">Apps in this stack</h2>
-          <p className="mt-0.5 text-sm text-gray-500">
-            Tightly-coupled apps grouped here share the stack's overrides{stack.sharedNamespace ? " and namespace" : ""}.
-          </p>
-        </div>
-        <div className="divide-y divide-gray-50">
-          {memberApps.length === 0 && (
-            <p className="px-6 py-4 text-sm text-gray-400">No apps yet. Add one below.</p>
+              <p className="mt-2 text-xs text-gray-500">
+                Namespace:{" "}
+                <code className="font-mono">
+                  {project}-{stack.name}-preview-{previewName || "<name>"}
+                </code>
+              </p>
+            </>
           )}
-          {memberApps.map((a) => (
-            <div key={a} className="flex items-center justify-between px-6 py-3">
-              <Link
-                to={`/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(a)}`}
-                className="font-mono text-sm text-gray-900 hover:text-indigo-600"
+          {results && <ResultRows results={results} />}
+          <div className="mt-5 flex justify-end gap-2">
+            <button onClick={closeModal} disabled={busy !== null} className={btnSecondary}>
+              {results ? "Done" : "Cancel"}
+            </button>
+            {!results && (
+              <button
+                onClick={() => runModalBatch("preview", () => createStackPreview(project, stackName, previewName))}
+                disabled={!previewName || busy !== null}
+                className={btnPrimary}
               >
-                {a}
-              </Link>
-              <button onClick={() => move(a, "")} className="text-xs font-medium text-gray-500 hover:text-red-600">
-                Remove
+                {busy === "preview" ? "Creating…" : "Create preview"}
               </button>
-            </div>
-          ))}
-        </div>
-        {addable.length > 0 && (
-          <div className="flex items-center gap-2 border-t border-gray-100 px-6 py-3">
-            <select
-              value={addApp}
-              onChange={(e) => setAddApp(e.target.value)}
-              className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
-            >
-              <option value="">Add an app…</option>
-              {addable.map((a) => (
-                <option key={a} value={a}>{a}</option>
-              ))}
-            </select>
-            <button
-              onClick={() => addApp && move(addApp, stackName!)}
-              disabled={!addApp}
-              className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-            >
-              Add
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {/* Clone modal */}
+      {modal === "clone" && (
+        <Modal
+          title="Clone this stack"
+          description="Duplicate the collection with variations (e.g. livekit-cloud vs self-hosted). The source stays intact."
+          onClose={closeModal}
+          closable={busy === null}
+        >
+          <input
+            value={cloneName}
+            onChange={(e) => setCloneName(e.target.value)}
+            placeholder="new stack name"
+            className="mt-4 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+          />
+          <p className="mt-2 text-xs text-gray-500">
+            Members are copied as <code className="font-mono">{cloneName || "<new-stack>"}-&lt;app&gt;</code>.
+            App-level secret values are not migrated — re-enter them under the new apps.
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <button onClick={closeModal} disabled={busy !== null} className={btnSecondary}>
+              Cancel
+            </button>
+            <button onClick={doClone} disabled={!cloneName || busy !== null} className={btnPrimary}>
+              {busy === "clone" ? "Cloning…" : "Clone"}
             </button>
           </div>
-        )}
-      </div>
+        </Modal>
+      )}
 
-      {/* Shared env vars */}
-      <EnvConfigEditor
-        title="Stack variables"
-        description="Applied to every app in this stack. Overrides project defaults; overridden by app-level values."
-        fetchFn={async (): Promise<EnvConfig> => (await getStack(project, stackName!)).envConfig ?? {}}
-        saveFn={(cfg: EnvConfig) => updateStack(project, stackName!, { envConfig: cfg })}
-      />
-
-      {/* Shared secrets */}
-      <div className="rounded-xl border border-gray-200 bg-white">
-        <div className="border-b border-gray-100 px-6 py-4">
-          <h2 className="text-base font-medium text-gray-900">Stack secrets</h2>
-          <p className="mt-0.5 text-sm text-gray-500">
-            Shared by every app in this stack. Override project secrets; overridden by app-level secrets.
-          </p>
-        </div>
-        <div className="space-y-6 p-6">
-          <SecretEditor
-            title="Global (all environments)"
-            description="Stack secrets identical in every environment."
-            fetchFn={() => listStackGlobalSecretKeys(project, stackName!)}
-            upsertFn={(e) => upsertStackGlobalSecrets(project, stackName!, e)}
-            deleteFn={(k) => deleteStackGlobalSecretKey(project, stackName!, k)}
-          />
-          {envs.map((env) => (
-            <SecretEditor
-              key={env.name}
-              title={`${env.displayName || env.name} secrets`}
-              description={`Stack secrets for the ${env.name} environment.`}
-              fetchFn={() => listStackEnvSecretKeys(project, stackName!, env.name)}
-              upsertFn={(e) => upsertStackEnvSecrets(project, stackName!, env.name, e)}
-              deleteFn={(k) => deleteStackEnvSecretKey(project, stackName!, env.name, k)}
-            />
-          ))}
-        </div>
-      </div>
+      {/* Delete modal */}
+      {modal === "delete" && (
+        <Modal title={`Delete stack "${stackName}"`} onClose={closeModal} closable={busy === null}>
+          <div className="mt-4 space-y-2">
+            <button
+              onClick={() => doDelete(false)}
+              disabled={busy !== null}
+              className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-left text-sm hover:bg-gray-50 disabled:opacity-50"
+            >
+              <span className="font-medium text-gray-900">Detach apps & delete stack</span>
+              <span className="block text-xs text-gray-500">
+                Member apps stay in the project, detached from the stack.
+              </span>
+            </button>
+            <button
+              onClick={() => doDelete(true)}
+              disabled={busy !== null}
+              className="w-full rounded-md border border-red-300 bg-white px-4 py-3 text-left text-sm hover:bg-red-50 disabled:opacity-50"
+            >
+              <span className="font-medium text-red-700">
+                Delete stack AND all {memberApps.length} app{memberApps.length === 1 ? "" : "s"}
+              </span>
+              <span className="block text-xs text-gray-500">
+                Tears down every member app and reclaims the stack namespaces. Cannot be undone.
+              </span>
+            </button>
+          </div>
+          <div className="mt-5 flex justify-end">
+            <button onClick={closeModal} disabled={busy !== null} className={btnSecondary}>
+              Cancel
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
