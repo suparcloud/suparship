@@ -1209,19 +1209,11 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		return stableEnvs[i].EnvName < stableEnvs[j].EnvName
 	})
 
-	// ── Project CR (Kargo v0.9+) ───────────────────────────────────────────────
-	// The Project CR replaces the Namespace-label approach and also holds
-	// PromotionPolicies so that the Kargo v0.9 admission webhook permits
-	// Promotion CR creation for each stable environment.
-	var projectEnvs []KargoProjectEnv
-	for i, env := range stableEnvs {
-		projectEnvs = append(projectEnvs, KargoProjectEnv{
-			AppName:      app.Name,
-			EnvName:      env.EnvName,
-			IsFirstStage: i == 0,
-		})
-	}
-	proj := BuildKargoProject(projectNS, projectEnvs, p.cfg.Branding)
+	// ── Project + ProjectConfig CRs (Kargo v1.x) ───────────────────────────────
+	// The Project CR marks the namespace as a Kargo tenancy (no spec in v1.x).
+	// The separate ProjectConfig CR holds the PromotionPolicies that enable
+	// auto-promotion (staging) and gate manual promotion (prod).
+	proj := BuildKargoProject(projectNS, p.cfg.Branding)
 	projBytes, err := yaml.Marshal(proj)
 	if err != nil {
 		return fmt.Errorf("marshal kargo project: %w", err)
@@ -1230,6 +1222,24 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		return err
 	}
 	slog.Debug("gitops: wrote kargo project", "project", projectNS)
+
+	var projectEnvs []KargoProjectEnv
+	for i, env := range stableEnvs {
+		projectEnvs = append(projectEnvs, KargoProjectEnv{
+			AppName:      app.Name,
+			EnvName:      env.EnvName,
+			IsFirstStage: i == 0,
+		})
+	}
+	projCfg := BuildKargoProjectConfig(projectNS, projectEnvs, p.cfg.Branding)
+	projCfgBytes, err := yaml.Marshal(projCfg)
+	if err != nil {
+		return fmt.Errorf("marshal kargo projectconfig: %w", err)
+	}
+	if err := p.writeFile(filepath.Join(kargoDir, projectNS+"-projectconfig.yaml"), projCfgBytes); err != nil {
+		return err
+	}
+	slog.Debug("gitops: wrote kargo projectconfig", "project", projectNS)
 
 	// ── Resolve the app's image sources ────────────────────────────────────────
 	// Prefer the template's per-service Images mapping (threaded via

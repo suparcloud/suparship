@@ -503,6 +503,7 @@ func New(cfg Config) *Server {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ClusterTemplateLoader, cfg.ProjectStore)
 			rh.appHandler.kubeClient = cfg.KubeClient
 			rh.appHandler.registryStore = cfg.RegistryStore
+			rh.appHandler.gitopsConfigStore = cfg.GitOpsConfigStore
 			if cfg.OrgProvider != nil {
 				rh.appHandler.orgProvider = cfg.OrgProvider
 			}

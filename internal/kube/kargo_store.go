@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -294,6 +295,13 @@ func (s *KargoStore) getCurrentFreight(ctx context.Context, projectNS, stageName
 
 	statusRaw, ok := obj.Object["status"].(map[string]any)
 	if ok {
+		// Kargo v1.x: status.freightHistory is newest-first; the current Freight
+		// is the most recent collection's item.
+		if name := freightNameFromHistory(statusRaw); name != "" {
+			slog.Debug("kargo current freight resolved (v1.x freightHistory)",
+				"namespace", projectNS, "stage", stageName, "freight", name)
+			return name, nil
+		}
 		// Kargo ≥ v0.8: status.currentFreight is a map with a "name" key.
 		if cf, ok := statusRaw["currentFreight"].(map[string]any); ok {
 			name, found, _ := unstructuredString(cf, "name")
@@ -380,6 +388,38 @@ func (s *KargoStore) latestSuccessfulPromotionFreight(ctx context.Context, proje
 	return latestFreight, nil
 }
 
+// freightNameFromHistory extracts the most recent Freight name from a Kargo v1.x
+// Stage status. status.freightHistory is newest-first; each collection's "items"
+// map is keyed by warehouse, with a "name" per Freight. For a single-warehouse
+// stage there's one item; keys are sorted for deterministic selection.
+func freightNameFromHistory(statusRaw map[string]any) string {
+	history, ok := statusRaw["freightHistory"].([]any)
+	if !ok || len(history) == 0 {
+		return ""
+	}
+	coll, ok := history[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+	items, ok := coll["items"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	keys := make([]string, 0, len(items))
+	for k := range items {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if item, ok := items[k].(map[string]any); ok {
+			if name, _, _ := unstructuredString(item, "name"); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 	s := &KargoStageStatus{}
 	statusRaw, ok := obj.Object["status"].(map[string]any)
@@ -388,14 +428,19 @@ func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 	}
 	s.Phase, _, _ = unstructuredString(statusRaw, "phase")
 	s.Health, _, _ = unstructuredString(statusRaw, "health", "status")
-	if cf, ok := statusRaw["currentFreight"].(map[string]any); ok {
+	// Kargo v1.x: current Freight comes from freightHistory; older versions
+	// exposed status.currentFreight (map or string).
+	if name := freightNameFromHistory(statusRaw); name != "" {
+		s.CurrentFreight = name
+	} else if cf, ok := statusRaw["currentFreight"].(map[string]any); ok {
 		s.CurrentFreight, _, _ = unstructuredString(cf, "name")
 	} else if cf, ok := statusRaw["currentFreight"].(string); ok {
 		s.CurrentFreight = cf
 	}
 
 	// Count available freights (freights detected by Kargo but not yet promoted).
-	// Kargo stores these in status.availableFreights as a list.
+	// Kargo < v1 stored these in status.availableFreights; v1.x does not surface a
+	// count here, so this degrades to 0 (display-only).
 	if available, ok := statusRaw["availableFreights"].([]any); ok {
 		s.AvailableFreightCount = len(available)
 	}

@@ -70,19 +70,27 @@ type appHandler struct {
 	// registryStore, when set, provisions the Kargo image-credential Secret in
 	// the app's Kargo Project namespace after publish so Warehouses can pull tags.
 	registryStore *registry.Store
+	// gitopsConfigStore, when set, provisions the Kargo git-credential Secret in
+	// the app's Kargo Project namespace so promotion git-clone/push steps auth.
+	gitopsConfigStore *gitops.ConfigStore
 }
 
-// ensureKargoRegistryCred provisions/refreshes the Kargo image-credential Secret
-// in the project's Kargo namespace from the org registry config. Best-effort: a
-// failure is logged, never surfaced (publish already succeeded). No-op when no
-// registry store is wired or the registry is disabled.
-func (ah *appHandler) ensureKargoRegistryCred(ctx context.Context, projectName string) {
-	if ah.registryStore == nil {
-		return
-	}
+// ensureKargoProjectCreds provisions/refreshes both Kargo credential Secrets in
+// the project's Kargo namespace: the image cred (Warehouse tag discovery) and
+// the git cred (promotion git-clone/push). Best-effort: failures are logged,
+// never surfaced (publish already succeeded). No-op when the respective store is
+// not wired or the source config is disabled/unconfigured.
+func (ah *appHandler) ensureKargoProjectCreds(ctx context.Context, projectName string) {
 	ns := gitops.KargoNamespaceForProject(projectName)
-	if err := ah.registryStore.EnsureKargoCred(ctx, ns); err != nil {
-		slog.Warn("ensure kargo registry cred", "project", projectName, "namespace", ns, "err", err)
+	if ah.registryStore != nil {
+		if err := ah.registryStore.EnsureKargoCred(ctx, ns); err != nil {
+			slog.Warn("ensure kargo image cred", "project", projectName, "namespace", ns, "err", err)
+		}
+	}
+	if ah.gitopsConfigStore != nil {
+		if err := ah.gitopsConfigStore.EnsureKargoGitCred(ctx, ns); err != nil {
+			slog.Warn("ensure kargo git cred", "project", projectName, "namespace", ns, "err", err)
+		}
 	}
 }
 
@@ -348,7 +356,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 				"project", projectName,
 				"app", req.Name,
 			)
-			ah.ensureKargoRegistryCred(r.Context(), projectName)
+			ah.ensureKargoProjectCreds(r.Context(), projectName)
 		}
 	} else {
 		slog.Debug("gitops publisher not configured — skipping git commit for app",
@@ -551,7 +559,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		ah.ensureKargoRegistryCred(r.Context(), projectName)
+		ah.ensureKargoProjectCreds(r.Context(), projectName)
 	}
 
 	saved, _ := ah.appStore.GetApp(r.Context(), projectName, appName)

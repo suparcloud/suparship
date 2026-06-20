@@ -27,8 +27,11 @@ set -euo pipefail
 # Update these together when upgrading Kargo.
 # Releases: https://github.com/akuity/kargo/releases
 # OCI chart: oci://ghcr.io/akuity/kargo-charts/kargo
-KARGO_CHART_VERSION="0.9.0"     # kargo OCI chart version → Kargo v0.9.0
-KARGO_APP_VERSION="v0.9.0"
+# NOTE: suparship generates Kargo v1.x CR shapes (ProjectConfig + Stage
+# promotionTemplate.spec.steps). Keep this on the v1.x line — installing v0.9
+# here would mismatch the generated manifests.
+KARGO_CHART_VERSION="1.9.5"     # kargo OCI chart version → Kargo v1.9.5
+KARGO_APP_VERSION="v1.9.5"
 KARGO_OCI_CHART="oci://ghcr.io/akuity/kargo-charts/kargo"
 
 # ── Config ────────────────────────────────────────────────────────────────
