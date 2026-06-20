@@ -349,6 +349,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// a warning is logged and the server continues.
 		bootstrap.ReconcileArgoCD(cmd.Context(), dynClient, logger)
 
+		// Provision the Kargo image-credential Secret in every project's Kargo
+		// namespace from the org registry config, so Warehouses can authenticate
+		// without waiting for a registry-save or app-publish. Best-effort, async.
+		go reconcileKargoRegistryCreds(context.Background(), registryStore, projectStore, logger)
+
 		// Templates stored as ConfigMaps in the cluster (label
 		// suparship.io/type=template, namespace suparship-system) are served
 		// LIVE via cfg.ClusterTemplateLoader / the publisher's clusterLoader —
@@ -1525,6 +1530,35 @@ func publishInitialEnvInfra(
 // lands across the whole fleet without per-app manual action — old app.yaml
 // files lack the new keys until rewritten. Idempotent: a no-op commit when
 // content is unchanged. Best-effort; per-app failures are logged.
+// reconcileKargoRegistryCreds provisions (or refreshes) the Kargo
+// image-credential Secret in every project's Kargo namespace from the org
+// registry config. Run at startup so Warehouses can authenticate without
+// waiting for a registry-config save or an app publish. Best-effort: per-project
+// failures are logged, not fatal. No-op when the registry is unconfigured.
+func reconcileKargoRegistryCreds(ctx context.Context, store *registry.Store, projectStore project.Store, logger *slog.Logger) {
+	if store == nil || projectStore == nil {
+		return
+	}
+	projects, err := projectStore.List(ctx)
+	if err != nil {
+		logger.Warn("kargo cred reconcile: list projects failed", "error", err)
+		return
+	}
+	var ok, failed int
+	for _, p := range projects {
+		ns := gitops.KargoNamespaceForProject(p.Metadata.Name)
+		if err := store.EnsureKargoCred(ctx, ns); err != nil {
+			logger.Warn("kargo cred reconcile", "project", p.Metadata.Name, "namespace", ns, "error", err)
+			failed++
+			continue
+		}
+		ok++
+	}
+	if ok > 0 || failed > 0 {
+		logger.Info("kargo cred reconcile complete", "provisioned", ok, "failed", failed)
+	}
+}
+
 // republishAllApps re-publishes every app's stable-env gitops files and returns
 // the number of apps that failed. A zero return means the whole fleet is on the
 // current layout (callers use it to gate the generator marker).
