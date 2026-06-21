@@ -1,8 +1,9 @@
 import { type FormEvent, Suspense, lazy, useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../lib/api";
 import { createApp } from "../lib/apps";
+import { setAppStack } from "../lib/stacks";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
 import { listOrgEnvironments } from "../lib/settings";
@@ -33,6 +34,10 @@ type Step = "template" | "configure";
 export function NewService() {
   const { project } = useParams<{ project: string }>();
   const navigate = useNavigate();
+  // When launched from a stack ("/apps/new?stack=voiceai"), the new app joins
+  // that stack and its name defaults to the "{stack}-" prefix.
+  const [searchParams] = useSearchParams();
+  const stack = searchParams.get("stack") ?? undefined;
 
   const [step, setStep] = useState<Step>("template");
   const [templates, setTemplates] = useState<TemplateSummary[]>([]);
@@ -124,6 +129,7 @@ export function NewService() {
         <ConfigureStep
           project={project}
           template={selectedTemplate}
+          stack={stack}
           onBack={() => setStep("template")}
           navigate={navigate}
         />
@@ -273,15 +279,19 @@ function TemplateStep({
 function ConfigureStep({
   project,
   template,
+  stack,
   onBack,
   navigate,
 }: {
   project: string;
   template: TemplateDetail;
+  stack?: string;
   onBack: () => void;
   navigate: ReturnType<typeof useNavigate>;
 }) {
-  const [appName, setAppName] = useState("");
+  // In a stack, default to the "{stack}-" prefix so member app names stay
+  // distinct across stacks (app names are project-unique, not stack-scoped).
+  const [appName, setAppName] = useState(stack ? `${stack}-` : "");
   const [secretRefs, setSecretRefs] = useState<Record<string, string>>(() =>
     buildDefaultSecretRefs(template),
   );
@@ -377,16 +387,27 @@ function ConfigureStep({
         rawValues: Object.keys(overlay).length > 0 ? overlay : undefined,
         cd: cdManaged ? { managed: true } : undefined,
       });
-      navigate(`/projects/${project}/apps/${appName}`);
     } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message);
-      } else {
-        setError("Could not reach the server.");
-      }
-    } finally {
+      setError(err instanceof ApiError ? err.message : "Could not reach the server.");
       setSubmitting(false);
+      return;
     }
+
+    // App created. If launched from a stack, attach it (best-effort so a
+    // membership hiccup doesn't strand the user on a form for an app that now
+    // exists), then return to the stack so the new member is visible.
+    if (stack) {
+      try {
+        await setAppStack(project, appName, stack);
+      } catch {
+        // Leave unattached; the user can add it from the stack page.
+      }
+    }
+    navigate(
+      stack
+        ? `/projects/${project}/stacks/${encodeURIComponent(stack)}`
+        : `/projects/${project}/apps/${appName}`,
+    );
   }
 
   return (
@@ -426,6 +447,16 @@ function ConfigureStep({
         </label>
         <p className="mt-0.5 text-xs text-gray-400">
           A unique name for this app within the project. Used in Kubernetes resource names.
+          {stack && (
+            <>
+              {" "}
+              Joining the{" "}
+              <span className="font-medium text-gray-600">{stack}</span> stack — keep
+              the{" "}
+              <code className="font-mono">{stack}-</code> prefix so member names stay
+              distinct across stacks.
+            </>
+          )}
         </p>
         <input
           id="app-name"
