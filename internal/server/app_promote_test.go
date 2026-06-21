@@ -437,6 +437,11 @@ func TestAppPromoteReleaseCopiedToTarget(t *testing.T) {
 	if resp.Release.Tag != "v0.9.0" {
 		t.Errorf("Release.Tag = %q, want %q (staging tag)", resp.Release.Tag, "v0.9.0")
 	}
+	// No Kargo promoter wired → the response must label the mechanism so a
+	// non-pipeline promotion is never mistaken for a Kargo-driven rollout.
+	if resp.Mechanism != "in-store" {
+		t.Errorf("Mechanism = %q, want %q", resp.Mechanism, "in-store")
+	}
 
 	// Verify the store was updated.
 	prodEnv, err := store.GetAppEnvironment(context.Background(), testProject, "my-app", "prod")

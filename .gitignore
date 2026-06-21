@@ -36,6 +36,8 @@ go.work.sum
 
 # Build output
 bin/
+# Stray root build artifact (canonical output is bin/suparship)
+/suparship
 
 # Local development artifacts
 tmp/

@@ -27,7 +27,17 @@ type AuditEvent struct {
 	LatencyMs int64       `json:"latencyMs"`
 }
 
-// Auditor emits structured log lines for secret mutations.
+// SecretAuditor records secret-mutation audit events. The open-source core
+// ships *Auditor (structured slog). Enterprise builds can supply an
+// implementation that additionally streams events to a SIEM or an immutable
+// store, wired in via server.Config.SecretsAuditor. A nil SecretAuditor
+// disables auditing.
+type SecretAuditor interface {
+	Log(event AuditEvent)
+}
+
+// Auditor emits structured log lines for secret mutations. It is the core's
+// default SecretAuditor.
 // K8s Event emission can be added once a recorder is plumbed in.
 type Auditor struct {
 	logger *slog.Logger

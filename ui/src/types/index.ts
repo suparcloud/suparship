@@ -658,6 +658,8 @@ export interface KargoPromotion {
  * Returned by GET /api/v1/projects/:project/apps/:app/promotions/:name.
  */
 export interface KargoPromotionStatus {
+  /** False when no Kargo status reader is wired; other fields are then empty. */
+  available?: boolean;
   name: string;
   stage: string;
   freight: string;
@@ -677,6 +679,8 @@ export interface KargoStageStatus {
 
 /** Response from GET .../kargo/stages */
 export interface KargoAppPipeline {
+  /** False when no Kargo pipeline reader is wired; stages is then empty. */
+  available?: boolean;
   stages: KargoStageStatus[];
 }
 
@@ -690,6 +694,8 @@ export interface PromoteResponse {
   destination: string;
   namespace: string;
   message: string;
+  /** How the promotion ran: "kargo" (pipeline) or "in-store" (direct copy, no Kargo). */
+  mechanism?: "kargo" | "in-store";
   /** Populated when Kargo is configured — describes the created Promotion CR. */
   kargoPromotion?: KargoPromotion;
   /** Populated when Kargo is NOT configured — in-store release copy result. */
@@ -777,6 +783,8 @@ export interface DeploymentHistoryEntry {
 
 /** Response from GET .../environments/:env/history */
 export interface AppDeploymentHistoryResponse {
+  /** False when no ArgoCD history reader is wired; history is then empty. */
+  available?: boolean;
   project: string;
   app: string;
   environment: string;

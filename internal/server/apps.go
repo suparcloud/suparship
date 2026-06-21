@@ -404,6 +404,12 @@ type AppPromoteResponse struct {
 	Destination string             `json:"destination"`
 	Namespace   string             `json:"namespace"`
 	Message     string             `json:"message"`
+	// Mechanism describes how the promotion was carried out: "kargo" when a
+	// Kargo Promotion CR drove it through the GitOps pipeline, or "in-store" for
+	// the direct store release-copy fallback used when no Kargo promoter is
+	// wired (local/dev installs). Lets the UI label a non-pipeline promotion so
+	// it's never mistaken for a real Kargo-driven rollout.
+	Mechanism string `json:"mechanism"`
 	// Release is the release bundle copied in the store (no-Kargo fallback).
 	Release        *AppReleaseRefDTO  `json:"release,omitempty"`
 	// KargoPromotion is populated when a Kargo Promotion CR was created.
@@ -415,6 +421,11 @@ type AppPromoteResponse struct {
 // It returns the current observed phase of a Kargo Promotion CR, enabling the
 // UI to poll for live status updates without subscribing to server-sent events.
 type KargoPromotionStatusResponse struct {
+	// Available reports whether live Kargo status is being served. False when no
+	// kargoStatusReader is wired (e.g. local/dev without Kargo) — the rest of the
+	// fields are then zero and the UI should treat CD status as unavailable
+	// rather than surfacing an error.
+	Available bool `json:"available"`
 	// Name is the Kargo Promotion CR name.
 	Name string `json:"name"`
 	// Stage is the target Kargo Stage (= target environment).
@@ -446,6 +457,10 @@ type KargoStageStatusDTO struct {
 // KargoAppPipelineResponse is the JSON body for
 // GET /api/v1/projects/{project}/apps/{app}/kargo/stages.
 type KargoAppPipelineResponse struct {
+	// Available reports whether live Kargo pipeline status is being served. False
+	// when no kargoPipelineReader is wired — Stages is then empty and the UI
+	// degrades to a plain env switcher rather than rendering an empty pipeline.
+	Available bool `json:"available"`
 	// Stages is ordered staging → prod (matches the promotion chain).
 	Stages []KargoStageStatusDTO `json:"stages"`
 }
@@ -474,6 +489,10 @@ type AppDeploymentHistoryEntryDTO struct {
 // AppDeploymentHistoryResponse is the JSON body for
 // GET /api/v1/projects/{project}/apps/{app}/environments/{env}/history.
 type AppDeploymentHistoryResponse struct {
+	// Available reports whether deployment history is being served. False when no
+	// deploymentHistoryReader is wired (e.g. fake/local dev without ArgoCD) — the
+	// UI renders "history unavailable" rather than an error.
+	Available   bool                           `json:"available"`
 	Project     string                         `json:"project"`
 	App         string                         `json:"app"`
 	Environment string                         `json:"environment"`
