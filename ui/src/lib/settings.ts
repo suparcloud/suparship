@@ -127,6 +127,9 @@ export function fetchProjects(): Promise<ProjectsResponse> {
 export interface OrgNaming {
   projectNamespace?: string;
   appNamespace?: string;
+  /** ArgoCD Application name pattern. Tokens {project}/{app}/{env}/{cluster}.
+   *  Empty → default "{project}-{app}-{cluster}". Must contain {app} and {cluster}. */
+  argoAppName?: string;
 }
 
 export function getOrgNaming(): Promise<OrgNaming> {

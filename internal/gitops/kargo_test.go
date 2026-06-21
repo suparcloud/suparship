@@ -182,6 +182,8 @@ func TestBuildKargoStage_PromotionTemplateSyncsArgoApp(t *testing.T) {
 	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{
 		Images:        []gitops.KargoImage{{Repository: "r", TagKey: "image.tag"}},
 		GitOpsRepoURL: "http://gitops.example.com/gitops.git",
+		// Default pattern {project}-{app}-{cluster}; refresh one app per cluster.
+		Clusters: []gitops.ClusterTarget{{Name: "staging-eastus"}, {Name: "staging-westus"}},
 	})
 
 	if stage.Spec.PromotionTemplate == nil {
@@ -190,8 +192,29 @@ func TestBuildKargoStage_PromotionTemplateSyncsArgoApp(t *testing.T) {
 	steps := stage.Spec.PromotionTemplate.Spec.Steps
 	argo := findStep(t, steps, "argocd-update")
 	apps, _ := argo.Config["apps"].([]map[string]any)
-	if len(apps) != 1 || apps[0]["name"] != "demo-hello-staging" || apps[0]["namespace"] != "argocd" {
-		t.Errorf("argocd-update apps: got %+v want demo-hello-staging in argocd", apps)
+	if len(apps) != 2 {
+		t.Fatalf("argocd-update apps: got %+v, want one per cluster", apps)
+	}
+	if apps[0]["name"] != "demo-hello-staging-eastus" || apps[0]["namespace"] != "argocd" {
+		t.Errorf("apps[0] = %+v, want demo-hello-staging-eastus in argocd", apps[0])
+	}
+	if apps[1]["name"] != "demo-hello-staging-westus" {
+		t.Errorf("apps[1] = %+v, want demo-hello-staging-westus", apps[1])
+	}
+}
+
+// TestBuildKargoStage_ArgoUpdateFallback covers the no-cluster fallback: the
+// argocd-update target uses the in-cluster cluster token.
+func TestBuildKargoStage_ArgoUpdateFallback(t *testing.T) {
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}
+	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{
+		Images:        []gitops.KargoImage{{Repository: "r", TagKey: "image.tag"}},
+		GitOpsRepoURL: "http://gitops.example.com/gitops.git",
+	})
+	apps, _ := findStep(t, stage.Spec.PromotionTemplate.Spec.Steps, "argocd-update").Config["apps"].([]map[string]any)
+	if len(apps) != 1 || apps[0]["name"] != "demo-hello-in-cluster" {
+		t.Errorf("fallback argocd-update apps = %+v, want demo-hello-in-cluster", apps)
 	}
 }
 

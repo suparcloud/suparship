@@ -162,6 +162,48 @@ clusters and backward-compatible with older suparShip installations.
 
 ---
 
+## Application Naming
+
+Each app deploys as one ArgoCD `Application` **per cluster** in an env. The
+Application name follows the org-wide `argoAppName` pattern (Settings →
+Namespace Naming, or `resourceNaming.argoAppName` in org config):
+
+| Token | Resolves to |
+|-------|-------------|
+| `{project}` | owning project |
+| `{app}` | app name |
+| `{env}` | environment name |
+| `{cluster}` | destination cluster's registered name |
+
+Default: `{project}-{app}-{cluster}`. Cluster names usually carry an env prefix
+(e.g. `staging-eastus`), so the default omits `{env}` to avoid redundancy:
+
+```
+# Default — env carried by the cluster name
+{project}-{app}-{cluster}   → billing-api-staging-eastus
+
+# Explicit env segment (shared clusters across envs)
+{project}-{app}-{env}-{cluster}   → billing-api-staging-staging-eastus
+```
+
+The pattern **must contain `{app}` and `{cluster}`** — `{app}` for uniqueness
+across projects, `{cluster}` so the per-cluster Applications of a fan-out env
+don't collide. The platform companion Application (the per-app ConfigMap +
+ExternalSecret) is the workload name + `-platform`.
+
+Naming is always per-cluster, even for a single-cluster env, so adding a second
+cluster never renames the first cluster's Application (no ArgoCD recreate / no
+lost sync history for the existing cluster). Promotion stays **env-level** (one
+Kargo Stage per env); a promotion's `argocd-update` step refreshes every
+per-cluster Application of that env. Status, deployment history, and diagnostics
+resolve Applications by suparship identity labels (`suparship.io/project`,
+`/app`, `/env`, `/cluster`), so they are independent of the configured pattern.
+
+> Changing `argoAppName` renames existing Applications; ArgoCD deletes the old
+> ones and recreates them on the next publish. See [upgrading.md](upgrading.md).
+
+---
+
 ## GitOps Repository Layout
 
 suparShip writes to an env/cluster-centric layout. The top-level directory

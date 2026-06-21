@@ -27,6 +27,22 @@ This document tracks the plan to complete the suparship MVP and add the platform
 
 ---
 
+## 0.1 Release scope
+
+The model decision for 0.1 is recorded in
+[ADR-0002](docs/adr/0002-app-vs-stack-boundary.md):
+
+- **Apps + components** are the headline unit — one app = one atomic-release unit
+  with at most one HTTP surface + its workers/crons (no component-count cap).
+- **Stacks** ship **beta** — complete and optional, group multi-app services; test
+  hardening before promoting to stable.
+- **Variants** in 0.1: previews + per-env config + clone.
+- **Release Trains (Phase 4, below) are explicitly post-0.1** — in-app
+  canary/stable release channels depend on the Phase 5 Gateway API traffic
+  routing and are not in the 0.1 cut.
+
+---
+
 ## Phase 1: MVP Hardening
 
 > Foundation that must exist before company workloads can run reliably.
@@ -139,9 +155,9 @@ Inputs:
 
 ---
 
-## Phase 4: Release Trains
+## Phase 4: Release Trains (post-0.1)
 
-> Deploy multiple variants of an app into the same environment simultaneously (e.g., stable + canary).
+> Deploy multiple variants of an app into the same environment simultaneously (e.g., stable + canary). **Out of scope for 0.1** — in-app release channels depend on the Phase 5 Gateway API traffic routing.
 
 ### Concept
 

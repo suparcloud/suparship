@@ -2,13 +2,22 @@
 
 A **stack** is a logical grouping of tightly-coupled apps inside a project (e.g. a
 "voiceai" service = `web` + `agent-server` + `capacity-manager`). Apps are meant
-to be small (1–2 components); a real service is a *collection* of apps that ship,
-scale, and route together. A stack lets you group them, share config/secrets
-across the group, co-locate them, act on them as a unit, and clone the whole
-collection with variations.
+to be small; a real service is a *collection* of apps that ship, scale, and route
+together. A stack lets you group them, share config/secrets across the group,
+co-locate them, act on them as a unit, and clone the whole collection with
+variations.
 
-**Status:** all four phases shipped (grouping + cascade, shared namespace, batch
-lifecycle, clone). The remaining items are under "Out of scope (future)".
+**When a stack vs one multi-component app?** An app can already hold one HTTP
+surface + many workers/crons (no component cap). Use a **stack of apps** when you
+need **multiple HTTP surfaces**, **independent release cadences**, or to **clone a
+collection**. See the boundary rule in [ADR-0002](adr/0002-app-vs-stack-boundary.md)
+and [app-model.md](app-model.md#app-sizing--the-stack-boundary).
+
+**Status:** all four phases are implemented (grouping + cascade, shared namespace,
+batch lifecycle, clone), shipping **beta for 0.1** — the feature is **optional**
+(apps deploy fully without it) and its automated test coverage is still thin, so
+0.1 hardens it before promoting it to stable. The remaining items are under "Out
+of scope (future)".
 
 ## Design principle: config-cascade + orchestration, not a deployment engine
 

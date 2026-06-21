@@ -596,10 +596,14 @@ func TestBuildArgoExternalAppSet_GeneratorPathSeparate(t *testing.T) {
 	env := gitops.AppSetEnv{EnvName: "staging", ClusterServer: "https://kubernetes.default.svc"}
 	appSet := gitops.BuildArgoExternalAppSet(env, "https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
 
-	if len(appSet.Spec.Generators) != 1 || appSet.Spec.Generators[0].Git == nil {
-		t.Fatalf("expected one git generator, got %+v", appSet.Spec.Generators)
+	// Generator is now a matrix (git × cluster list) even for a single cluster.
+	if len(appSet.Spec.Generators) != 1 || appSet.Spec.Generators[0].Matrix == nil {
+		t.Fatalf("expected one matrix generator, got %+v", appSet.Spec.Generators)
 	}
-	gitGen := appSet.Spec.Generators[0].Git
+	gitGen := appSet.Spec.Generators[0].Matrix.Generators[0].Git
+	if gitGen == nil {
+		t.Fatalf("expected git generator inside matrix, got %+v", appSet.Spec.Generators[0].Matrix.Generators)
+	}
 	if len(gitGen.Files) != 1 {
 		t.Fatalf("expected one Files entry, got %d", len(gitGen.Files))
 	}

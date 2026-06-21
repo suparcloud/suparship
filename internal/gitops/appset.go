@@ -52,6 +52,46 @@ type AppSetOptions struct {
 	// same directories the publisher writes to. Empty (default) = repo
 	// root.
 	SubPath string
+	// ArgoAppNamePattern is the org ResourceNaming pattern for generated
+	// Application names (tokens {project}/{app}/{env}/{cluster}). Empty →
+	// secrets.DefaultArgoAppName ("{project}-{app}-{cluster}").
+	ArgoAppNamePattern string
+}
+
+// fallbackClusterName is the synthetic cluster name used when an env has no
+// resolvable cluster (unbound), so {cluster}-based Application names still
+// render uniformly. The destination is then the in-cluster API server.
+const fallbackClusterName = "in-cluster"
+
+// appSetClusterTargets returns the env's destination clusters, guaranteeing at
+// least one entry: an unbound env (no resolvable cluster) yields a single
+// in-cluster fallback so per-cluster naming stays uniform.
+func appSetClusterTargets(env AppSetEnv) []ClusterTarget {
+	if len(env.Clusters) > 0 {
+		return env.Clusters
+	}
+	server := env.ClusterServer
+	if server == "" {
+		server = defaultDestination
+	}
+	return []ClusterTarget{{Name: fallbackClusterName, Server: server}}
+}
+
+// matrixOverClusters wraps a git-file generator in a matrix × the env's cluster
+// list, producing one Application per (app, cluster). Used for every stable-env
+// AppSet now (even single-cluster) so the {{clusterName}} param is always
+// available for the Application name and cluster label.
+func matrixOverClusters(gitGen ApplicationSetGenerator, clusters []ClusterTarget) []ApplicationSetGenerator {
+	elements := make([]map[string]string, 0, len(clusters))
+	for _, c := range clusters {
+		elements = append(elements, map[string]string{"clusterName": c.Name, "clusterServer": c.Server})
+	}
+	return []ApplicationSetGenerator{{
+		Matrix: &MatrixGenerator{Generators: []ApplicationSetGenerator{
+			gitGen,
+			{List: &ListGenerator{Elements: elements}},
+		}},
+	}}
 }
 
 // ApplicationSet is a minimal, serializable representation of an ArgoCD
@@ -201,12 +241,12 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 		}
 	}
 
-	// Generators + destination depend on deploy mode. Single-cluster (active)
-	// keeps the legacy git-files generator with a hardcoded destination and the
-	// {project}-{app}-{env} Application name (preserving the Kargo/history/status
-	// contract). Multi-cluster (all) wraps the git generator in a matrix × the
-	// env's cluster list, so one Application is produced per (app, cluster), with
-	// the destination + name suffix coming from the list element.
+	// Always fan the git-file generator over the env's cluster list (≥1 entry)
+	// so the Application name and cluster label render per-cluster — adding a 2nd
+	// cluster to an env never renames the 1st cluster's Application. The name
+	// itself comes from the org ResourceNaming pattern. (The values-file path
+	// above still switches shared vs per-cluster on actual fan-out, matching what
+	// the publisher writes.)
 	gitGen := ApplicationSetGenerator{
 		Git: &GitFileGenerator{
 			RepoURL:  repoURL,
@@ -217,24 +257,10 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 		},
 	}
 
-	generators := []ApplicationSetGenerator{gitGen}
-	appName := "{{project}}-{{name}}-" + env.EnvName
-	destServer := env.ClusterServer
-
-	if fanOut {
-		elements := make([]map[string]string, 0, len(env.Clusters))
-		for _, c := range env.Clusters {
-			elements = append(elements, map[string]string{"clusterName": c.Name, "clusterServer": c.Server})
-		}
-		generators = []ApplicationSetGenerator{{
-			Matrix: &MatrixGenerator{Generators: []ApplicationSetGenerator{
-				gitGen,
-				{List: &ListGenerator{Elements: elements}},
-			}},
-		}}
-		appName += "-{{clusterName}}"
-		destServer = "{{clusterServer}}"
-	}
+	clusters := appSetClusterTargets(env)
+	generators := matrixOverClusters(gitGen, clusters)
+	appName := RenderArgoAppNameTemplate(opts.ArgoAppNamePattern, env.EnvName)
+	destServer := "{{clusterServer}}"
 
 	return &ApplicationSet{
 		APIVersion: argoAppSetAPIVersion,
@@ -261,6 +287,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 						labelApp:     "{{name}}",
 						labelProject: "{{project}}",
 						labelEnv:     env.EnvName,
+						labelCluster: "{{clusterName}}",
 					},
 					// Authorize the corresponding Kargo Stage to trigger ArgoCD syncs
 					// for this Application. Promotion stays env-level (one stage per
@@ -355,8 +382,9 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 		}
 	}
 
-	// Fan-out matches inline-mode: single cluster keeps the legacy name +
-	// hardcoded destination; multi-cluster uses a matrix × cluster list.
+	// Matches inline-mode: always fan over the env's cluster list (≥1) so the
+	// Application name + cluster label render per-cluster; the name comes from the
+	// org ResourceNaming pattern.
 	gitGen := ApplicationSetGenerator{
 		Git: &GitFileGenerator{
 			RepoURL:  repoURL,
@@ -366,23 +394,10 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 			},
 		},
 	}
-	generators := []ApplicationSetGenerator{gitGen}
-	appName := "{{project}}-{{name}}-" + env.EnvName
-	destServer := env.ClusterServer
-	if fanOut {
-		elements := make([]map[string]string, 0, len(env.Clusters))
-		for _, c := range env.Clusters {
-			elements = append(elements, map[string]string{"clusterName": c.Name, "clusterServer": c.Server})
-		}
-		generators = []ApplicationSetGenerator{{
-			Matrix: &MatrixGenerator{Generators: []ApplicationSetGenerator{
-				gitGen,
-				{List: &ListGenerator{Elements: elements}},
-			}},
-		}}
-		appName += "-{{clusterName}}"
-		destServer = "{{clusterServer}}"
-	}
+	clusters := appSetClusterTargets(env)
+	generators := matrixOverClusters(gitGen, clusters)
+	appName := RenderArgoAppNameTemplate(opts.ArgoAppNamePattern, env.EnvName)
+	destServer := "{{clusterServer}}"
 
 	return &ApplicationSet{
 		APIVersion: argoAppSetAPIVersion,
@@ -406,6 +421,7 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 						labelApp:     "{{name}}",
 						labelProject: "{{project}}",
 						labelEnv:     env.EnvName,
+						labelCluster: "{{clusterName}}",
 					},
 					Annotations: map[string]string{
 						"kargo.akuity.io/authorized-stage": "{{project}}:{{name}}-" + env.EnvName,
@@ -647,23 +663,13 @@ func BuildPlatformAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *App
 			{Path: joinSubPath(opts.SubPath, "_app-resources", env.EnvName, "*", "*", "meta.yaml")},
 		},
 	}}
-	generators := []ApplicationSetGenerator{gitGen}
-	appName := "{{project}}-{{name}}-" + env.EnvName + "-platform"
-	destServer := env.ClusterServer
-	if len(env.Clusters) > 1 {
-		elements := make([]map[string]string, 0, len(env.Clusters))
-		for _, c := range env.Clusters {
-			elements = append(elements, map[string]string{"clusterName": c.Name, "clusterServer": c.Server})
-		}
-		generators = []ApplicationSetGenerator{{
-			Matrix: &MatrixGenerator{Generators: []ApplicationSetGenerator{
-				gitGen,
-				{List: &ListGenerator{Elements: elements}},
-			}},
-		}}
-		appName = "{{project}}-{{name}}-" + env.EnvName + "-{{clusterName}}-platform"
-		destServer = "{{clusterServer}}"
-	}
+	// Platform app name = the workload Application name + "-platform", so the
+	// diagnostics reader can derive it from the rendered workload name. Always
+	// per-cluster (matrix over the env's cluster list, ≥1).
+	clusters := appSetClusterTargets(env)
+	generators := matrixOverClusters(gitGen, clusters)
+	appName := RenderArgoAppNameTemplate(opts.ArgoAppNamePattern, env.EnvName) + "-platform"
+	destServer := "{{clusterServer}}"
 
 	return &ApplicationSet{
 		APIVersion: argoAppSetAPIVersion,
@@ -683,6 +689,7 @@ func BuildPlatformAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *App
 						labelApp:     "{{name}}",
 						labelProject: "{{project}}",
 						labelEnv:     env.EnvName,
+						labelCluster: "{{clusterName}}",
 					},
 				},
 				Spec: ApplicationSetAppSpec{

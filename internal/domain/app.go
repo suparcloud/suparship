@@ -450,6 +450,10 @@ type Diagnostic struct {
 	Detail string `json:"detail,omitempty"`
 	// Hint is suparship's suggested fix, when a known pattern matched.
 	Hint string `json:"hint,omitempty"`
+	// Cluster names the destination cluster this diagnostic came from, set when
+	// an env fans out to more than one cluster so the operator can tell which
+	// cluster is unhealthy. Empty for single-cluster envs.
+	Cluster string `json:"cluster,omitempty"`
 }
 
 // AppEnvironment is a running instance of an App in a specific environment.

@@ -240,8 +240,9 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 		for _, env := range envs {
 			// Write {envName}-appset.yaml for this env.
 			appSet := BuildArgoAppSet(env, p.cfg.ArgoCDRepoURL, AppSetOptions{
-				SyncAutomated: p.cfg.SyncAutomated,
-				SubPath:       p.cfg.SubPath,
+				SyncAutomated:      p.cfg.SyncAutomated,
+				SubPath:            p.cfg.SubPath,
+				ArgoAppNamePattern: p.cfg.ResourceNaming.EffectiveArgoAppName(),
 			})
 			appSetBytes, err := yaml.Marshal(appSet)
 			if err != nil {
@@ -257,8 +258,9 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 			// ExternalSecret from _app-resources/ to this env's workload cluster,
 			// decoupled from the app's chart Application.
 			platformAppSet := BuildPlatformAppSet(env, p.cfg.ArgoCDRepoURL, AppSetOptions{
-				SyncAutomated: p.cfg.SyncAutomated,
-				SubPath:       p.cfg.SubPath,
+				SyncAutomated:      p.cfg.SyncAutomated,
+				SubPath:            p.cfg.SubPath,
+				ArgoAppNamePattern: p.cfg.ResourceNaming.EffectiveArgoAppName(),
 			})
 			platformBytes, err := yaml.Marshal(platformAppSet)
 			if err != nil {
@@ -1299,6 +1301,8 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			GitOpsRepoInsecure:    p.cfg.InsecureRegistry,
 			Branding:              p.cfg.Branding,
 			SubPath:               p.cfg.SubPath,
+			ArgoAppNamePattern:    p.cfg.ResourceNaming.EffectiveArgoAppName(),
+			Clusters:              env.Clusters,
 		}
 		stage := BuildKargoStage(app, appEnv, upstreams, stageOpts)
 		stageBytes, err := yaml.Marshal(stage)

@@ -691,7 +691,8 @@ function NamespaceNamingSection() {
       .replace("{org}", "myorg")
       .replace("{project}", "billing")
       .replace("{app}", "api")
-      .replace("{env}", "staging");
+      .replace("{env}", "staging")
+      .replace("{cluster}", "staging-eastus");
   }
 
   return (
@@ -809,6 +810,60 @@ function NamespaceNamingSection() {
               {!naming.appNamespace && (
                 <p className="text-xs text-gray-400 italic">
                   Empty → topology-aware default: <code className="font-mono">billing-api-staging</code> (shared) or <code className="font-mono">billing-api</code> (dedicated)
+                </p>
+              )}
+            </div>
+
+            {/* ArgoCD Application name pattern */}
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-gray-700">
+                ArgoCD Application name pattern
+              </label>
+              <p className="text-xs text-gray-400">
+                Tokens: <code className="font-mono">{"{project}"}</code>,{" "}
+                <code className="font-mono">{"{app}"}</code>,{" "}
+                <code className="font-mono">{"{env}"}</code>,{" "}
+                <code className="font-mono">{"{cluster}"}</code>. Must include{" "}
+                <code className="font-mono">{"{app}"}</code> and{" "}
+                <code className="font-mono">{"{cluster}"}</code> so each app's
+                per-cluster Application stays uniquely named.
+              </p>
+              <div className="flex flex-wrap gap-1.5 mb-1">
+                {[
+                  { label: "{project}-{app}-{cluster}", value: "{project}-{app}-{cluster}" },
+                  { label: "{project}-{app}-{env}-{cluster}", value: "{project}-{app}-{env}-{cluster}" },
+                ].map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    onClick={() => setNaming((n) => ({ ...n, argoAppName: p.value }))}
+                    className={`rounded px-2 py-0.5 text-xs font-mono transition-colors ${
+                      naming.argoAppName === p.value
+                        ? "bg-indigo-100 text-indigo-800"
+                        : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="e.g. {project}-{app}-{cluster}"
+                value={naming.argoAppName ?? ""}
+                onChange={(e) => setNaming((n) => ({ ...n, argoAppName: e.target.value || undefined }))}
+              />
+              {naming.argoAppName ? (
+                <p className="text-xs text-gray-400">
+                  Preview:{" "}
+                  <code className="font-mono text-gray-700">
+                    {renderPreview(naming.argoAppName)}
+                  </code>
+                </p>
+              ) : (
+                <p className="text-xs text-gray-400 italic">
+                  Empty → default <code className="font-mono">{"{project}-{app}-{cluster}"}</code>:{" "}
+                  <code className="font-mono">billing-api-staging-eastus</code>. Changing this renames existing Applications (ArgoCD recreates them).
                 </p>
               )}
             </div>

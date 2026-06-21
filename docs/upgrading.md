@@ -50,6 +50,23 @@ one-time operator action** on the 1Password secret backend. The k8s secret
 backend is unaffected. (config-schema unchanged at `v1` — the changes are
 operational, and the config decoder tolerates the removed fields.)
 
+**Per-cluster ArgoCD Application names (`{project}-{app}-{cluster}` by default).**
+ArgoCD Application names are now per-cluster and configurable via the org
+ResourceNaming `argoAppName` pattern (Settings → Namespace Naming → ArgoCD
+Application name pattern; tokens `{project}/{app}/{env}/{cluster}`, must contain
+`{app}` and `{cluster}`). Previously single-cluster envs used `{project}-{app}-{env}`
+and only multi-cluster fan-out appended the cluster; now every env names its
+Application(s) per cluster, so adding a second cluster to an env never renames
+the first cluster's Application.
+- *Action:* none required — on startup the server **re-publishes every app**,
+  writing the new per-cluster ApplicationSet names. ArgoCD will **delete the old
+  `{project}-{app}-{env}` Application and create the new per-cluster one** (a
+  one-time recreate; the workload is re-synced from git, not deleted). Status,
+  deployment history, and diagnostics now resolve Applications by suparship
+  identity labels, so they keep working across the rename. There is no
+  cluster-less option (multi-cluster requires `{cluster}`); the closest to the
+  old layout that keeps the env segment is `{project}-{app}-{env}-{cluster}`.
+
 **0. Version-scoped chart layout (generator `v0.1.0` → `v0.2.0`).** Bundled
 charts moved from `charts/{template}/` to `charts/{template}/{version}/`, and
 each app's `app.yaml` gained a `chartPath` key the inline ApplicationSet now

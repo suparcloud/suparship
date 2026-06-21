@@ -1692,6 +1692,11 @@ function DiagnosticsPanel({ diagnostics }: { diagnostics: Diagnostic[] }) {
               >
                 {sourceLabel(d.source)}
               </span>
+              {d.cluster && (
+                <span className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-gray-600">
+                  {d.cluster}
+                </span>
+              )}
               <span
                 className={`text-sm font-medium ${
                   isError ? "text-red-900" : "text-amber-900"

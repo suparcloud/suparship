@@ -96,7 +96,11 @@ func TestBuildPlatformAppSet_DirectorySource(t *testing.T) {
 	if appset.Metadata.Name != "staging-platform" {
 		t.Errorf("appset name = %q, want staging-platform", appset.Metadata.Name)
 	}
-	gen := appset.Spec.Generators[0].Git
+	// Generator is now a matrix (git × cluster list) even for a single cluster.
+	if appset.Spec.Generators[0].Matrix == nil {
+		t.Fatalf("expected a matrix generator, got %+v", appset.Spec.Generators)
+	}
+	gen := appset.Spec.Generators[0].Matrix.Generators[0].Git
 	if gen == nil || len(gen.Files) != 1 || gen.Files[0].Path != "_app-resources/staging/*/*/meta.yaml" {
 		t.Errorf("generator path wrong: %+v", gen)
 	}
@@ -114,8 +118,8 @@ func TestBuildPlatformAppSet_DirectorySource(t *testing.T) {
 	if strings.Contains(inc, "kustomization.yaml") {
 		t.Errorf("include must not reference kustomization.yaml: %q", inc)
 	}
-	if got := appset.Spec.Template.Spec.Destination; got.Server != "https://k8s:6443" || got.Namespace != "{{namespace}}" {
-		t.Errorf("destination = %+v, want workload cluster + {{namespace}}", got)
+	if got := appset.Spec.Template.Spec.Destination; got.Server != "{{clusterServer}}" || got.Namespace != "{{namespace}}" {
+		t.Errorf("destination = %+v, want {{clusterServer}} + {{namespace}}", got)
 	}
 }
 
