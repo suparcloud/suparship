@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -186,6 +187,20 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 		)
 	}
 
+	// Kargo v1.x requires every Promotion to carry its own spec.steps. The Kargo
+	// API server copies them from the target Stage's promotionTemplate when
+	// promoting via its UI/CLI, but a Promotion created directly through the
+	// Kubernetes API (as we do here) receives no such defaulting — the admission
+	// webhook then rejects it with "Stage ... defines no promotion steps". So we
+	// read the live Stage's promotionTemplate steps and embed them ourselves.
+	steps, err := s.stagePromotionSteps(ctx, projectNS, qualifiedToStage)
+	if err != nil {
+		return nil, fmt.Errorf("resolve promotion steps for stage %q: %w", qualifiedToStage, err)
+	}
+	if len(steps) == 0 {
+		return nil, fmt.Errorf("target stage %q defines no promotion steps (spec.promotionTemplate.spec.steps is empty) — re-publish the app's Kargo CRs", qualifiedToStage)
+	}
+
 	promotionName := fmt.Sprintf("%s-%s-%d", appName, toStage, time.Now().Unix())
 
 	slog.Debug("kargo create promotion: submitting Promotion CR",
@@ -193,6 +208,7 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 		"promotion", promotionName,
 		"stage", qualifiedToStage,
 		"freight", freight,
+		"steps", len(steps),
 	)
 
 	obj := &unstructured.Unstructured{
@@ -212,6 +228,7 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectNS, appName, fr
 			"spec": map[string]any{
 				"stage":   qualifiedToStage,
 				"freight": freight,
+				"steps":   steps,
 			},
 		},
 	}
@@ -294,6 +311,13 @@ func (s *KargoStore) getCurrentFreight(ctx context.Context, projectNS, stageName
 
 	statusRaw, ok := obj.Object["status"].(map[string]any)
 	if ok {
+		// Kargo v1.x: status.freightHistory is newest-first; the current Freight
+		// is the most recent collection's item.
+		if name := freightNameFromHistory(statusRaw); name != "" {
+			slog.Debug("kargo current freight resolved (v1.x freightHistory)",
+				"namespace", projectNS, "stage", stageName, "freight", name)
+			return name, nil
+		}
 		// Kargo ≥ v0.8: status.currentFreight is a map with a "name" key.
 		if cf, ok := statusRaw["currentFreight"].(map[string]any); ok {
 			name, found, _ := unstructuredString(cf, "name")
@@ -318,6 +342,31 @@ func (s *KargoStore) getCurrentFreight(ctx context.Context, projectNS, stageName
 	// is used without image substitution — Kargo marks the Promotion Succeeded
 	// but never sets status.currentFreight because it cannot verify delivery.
 	return s.latestSuccessfulPromotionFreight(ctx, projectNS, stageName)
+}
+
+// stagePromotionSteps returns the promotion steps defined on the target Stage's
+// spec.promotionTemplate.spec.steps (Kargo v1.x). These must be embedded in the
+// Promotion CR we create directly via the Kubernetes API, because — unlike the
+// Kargo API server — a raw dynamic-client create gets no step defaulting from
+// the webhook. Returns a nil slice (no error) when the Stage defines no steps,
+// which CreatePromotion treats as a fail-fast condition.
+//
+// The returned slice is a deep copy (via unstructured.NestedSlice) of
+// dynamic-client-safe values, so it can be assigned straight into a new
+// Promotion's spec.
+func (s *KargoStore) stagePromotionSteps(ctx context.Context, projectNS, stageName string) ([]any, error) {
+	obj, err := s.dynamic.Resource(kargoStageGVR).Namespace(projectNS).Get(ctx, stageName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get kargo stage %s/%s: %w", projectNS, stageName, err)
+	}
+	steps, found, err := unstructured.NestedSlice(obj.Object, "spec", "promotionTemplate", "spec", "steps")
+	if err != nil {
+		return nil, fmt.Errorf("read promotion steps from stage %s/%s: %w", projectNS, stageName, err)
+	}
+	if !found {
+		return nil, nil
+	}
+	return steps, nil
 }
 
 // latestSuccessfulPromotionFreight scans Promotion CRs in projectNS for the
@@ -380,6 +429,38 @@ func (s *KargoStore) latestSuccessfulPromotionFreight(ctx context.Context, proje
 	return latestFreight, nil
 }
 
+// freightNameFromHistory extracts the most recent Freight name from a Kargo v1.x
+// Stage status. status.freightHistory is newest-first; each collection's "items"
+// map is keyed by warehouse, with a "name" per Freight. For a single-warehouse
+// stage there's one item; keys are sorted for deterministic selection.
+func freightNameFromHistory(statusRaw map[string]any) string {
+	history, ok := statusRaw["freightHistory"].([]any)
+	if !ok || len(history) == 0 {
+		return ""
+	}
+	coll, ok := history[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+	items, ok := coll["items"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	keys := make([]string, 0, len(items))
+	for k := range items {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if item, ok := items[k].(map[string]any); ok {
+			if name, _, _ := unstructuredString(item, "name"); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 	s := &KargoStageStatus{}
 	statusRaw, ok := obj.Object["status"].(map[string]any)
@@ -388,14 +469,19 @@ func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 	}
 	s.Phase, _, _ = unstructuredString(statusRaw, "phase")
 	s.Health, _, _ = unstructuredString(statusRaw, "health", "status")
-	if cf, ok := statusRaw["currentFreight"].(map[string]any); ok {
+	// Kargo v1.x: current Freight comes from freightHistory; older versions
+	// exposed status.currentFreight (map or string).
+	if name := freightNameFromHistory(statusRaw); name != "" {
+		s.CurrentFreight = name
+	} else if cf, ok := statusRaw["currentFreight"].(map[string]any); ok {
 		s.CurrentFreight, _, _ = unstructuredString(cf, "name")
 	} else if cf, ok := statusRaw["currentFreight"].(string); ok {
 		s.CurrentFreight = cf
 	}
 
 	// Count available freights (freights detected by Kargo but not yet promoted).
-	// Kargo stores these in status.availableFreights as a list.
+	// Kargo < v1 stored these in status.availableFreights; v1.x does not surface a
+	// count here, so this degrades to 0 (display-only).
 	if available, ok := statusRaw["availableFreights"].([]any); ok {
 		s.AvailableFreightCount = len(available)
 	}

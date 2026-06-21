@@ -320,12 +320,76 @@ func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 			},
 			Inputs:   inputs,
 			Mappings: mappings,
+			Images:   DetectImageMappings(arc.Values),
 		},
 	}
 	if err := t.Validate(); err != nil {
 		return nil, fmt.Errorf("generated template failed validation: %w", err)
 	}
 	return t, nil
+}
+
+// DetectImageMappings infers per-service image mappings from a chart's
+// values.yaml so the import preview can pre-fill them (the operator reviews and
+// fills tagPattern/strategy before saving). It emits a mapping only when an
+// image block carries a "repository" string, so the generated template stays
+// valid; tag-only image blocks are left for the operator to complete manually.
+//
+// Recognised shapes: a root `image` block, `components.<name>.image` (canonical
+// suparship layout), and any top-level service map containing an `image` block
+// (e.g. `agent.image`, `caller.image` in multi-service BYO charts).
+func DetectImageMappings(values map[string]any) []tpl.TemplateImage {
+	if values == nil {
+		return nil
+	}
+	var out []tpl.TemplateImage
+	seen := map[string]bool{}
+	add := func(name, prefix string, image map[string]any) {
+		repo, _ := image["repository"].(string)
+		if repo == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		tagKey := "image.tag"
+		if prefix != "" {
+			tagKey = prefix + ".image.tag"
+		}
+		out = append(out, tpl.TemplateImage{Name: name, Repository: repo, TagKey: tagKey})
+	}
+
+	if img, ok := values["image"].(map[string]any); ok {
+		add("image", "", img)
+	}
+	if comps, ok := values["components"].(map[string]any); ok {
+		for _, name := range sortedMapKeys(comps) {
+			if cm, ok := comps[name].(map[string]any); ok {
+				if img, ok := cm["image"].(map[string]any); ok {
+					add(name, "components."+name, img)
+				}
+			}
+		}
+	}
+	for _, name := range sortedMapKeys(values) {
+		if name == "image" || name == "components" {
+			continue
+		}
+		if sm, ok := values[name].(map[string]any); ok {
+			if img, ok := sm["image"].(map[string]any); ok {
+				add(name, name, img)
+			}
+		}
+	}
+	return out
+}
+
+// sortedMapKeys returns a map's keys in lexical order for deterministic output.
+func sortedMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // buildInputs picks the schema path when available and falls back to walking

@@ -34,6 +34,18 @@ rules:
   - apiGroups: ["kargo.akuity.io"]
     resources: ["stages", "freights", "warehouses", "promotions", "projects"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Kargo v1.x authorizes Promotion creation via a SubjectAccessReview for the
+  # virtual "promote" verb on the target Stage. This is NOT covered by the
+  # standard verbs above, so without it the promotion admission webhook denies
+  # the request: "subject ... is not permitted to create Promotions for Stage".
+  - apiGroups: ["kargo.akuity.io"]
+    resources: ["stages"]
+    verbs: ["promote"]
+  # CreatePromotion approves the resolved Freight for the target Stage by
+  # patching the Freight's status; status is a distinct RBAC subresource.
+  - apiGroups: ["kargo.akuity.io"]
+    resources: ["freights/status"]
+    verbs: ["patch"]
   - apiGroups: ["external-secrets.io"]
     resources: ["externalsecrets", "clustersecretstores", "secretstores"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

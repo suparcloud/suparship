@@ -349,6 +349,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// a warning is logged and the server continues.
 		bootstrap.ReconcileArgoCD(cmd.Context(), dynClient, logger)
 
+		// Provision the Kargo image-credential Secret in every project's Kargo
+		// namespace from the org registry config, so Warehouses can authenticate
+		// without waiting for a registry-save or app-publish. Best-effort, async.
+		go reconcileKargoRegistryCreds(context.Background(), registryStore, gitopsConfigStore, projectStore, logger)
+
 		// Templates stored as ConfigMaps in the cluster (label
 		// suparship.io/type=template, namespace suparship-system) are served
 		// LIVE via cfg.ClusterTemplateLoader / the publisher's clusterLoader —
@@ -735,6 +740,44 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 	}
 	pub.PlatformDefaultValues = def
 	pub.PlatformEnvValues = env
+
+	// Translate the per-service image mapping into the publisher's resolved form
+	// so the Kargo Warehouse/Stage and the CD tag-preservation target the chart's
+	// real repos + tag keys (works for 1..N services). A sync-safe override
+	// mapping (set from the UI on a read-only/BYO template) wins over the
+	// template's own.
+	pub.TemplateImages = resolveTemplateImages(tmpl, ov)
+}
+
+// resolveTemplateImages returns the effective per-service image mapping for an
+// app's template, as Kargo images. An override mapping (set from the UI on a
+// read-only/BYO template) replaces the template's own when present.
+func resolveTemplateImages(tmpl *tpl.Template, ov *domain.TemplateOverride) []gitops.KargoImage {
+	if ov != nil && len(ov.Images) > 0 {
+		imgs := make([]gitops.KargoImage, 0, len(ov.Images))
+		for _, im := range ov.Images {
+			imgs = append(imgs, gitops.KargoImage{
+				Repository:        im.Repository,
+				TagKey:            im.TagKey,
+				TagPattern:        im.TagPattern,
+				SelectionStrategy: im.SelectionStrategy,
+			})
+		}
+		return imgs
+	}
+	if tmpl == nil || len(tmpl.Spec.Images) == 0 {
+		return nil
+	}
+	imgs := make([]gitops.KargoImage, 0, len(tmpl.Spec.Images))
+	for _, im := range tmpl.Spec.Images {
+		imgs = append(imgs, gitops.KargoImage{
+			Repository:        im.Repository,
+			TagKey:            im.TagKey,
+			TagPattern:        im.TagPattern,
+			SelectionStrategy: im.SelectionStrategy,
+		})
+	}
+	return imgs
 }
 
 // setStackOverlays populates the app's stack shared Helm-values overlay onto the
@@ -1487,6 +1530,48 @@ func publishInitialEnvInfra(
 // lands across the whole fleet without per-app manual action — old app.yaml
 // files lack the new keys until rewritten. Idempotent: a no-op commit when
 // content is unchanged. Best-effort; per-app failures are logged.
+// reconcileKargoRegistryCreds provisions (or refreshes) the Kargo credential
+// Secrets in every project's Kargo namespace: the image cred (Warehouse tag
+// discovery) from the registry config, and the git cred (promotion git steps)
+// from the gitops config. Run at startup so Kargo can authenticate without
+// waiting for a config save or an app publish. Best-effort: per-project failures
+// are logged, not fatal. No-op for a store that is nil/unconfigured.
+func reconcileKargoRegistryCreds(ctx context.Context, store *registry.Store, gitStore *gitops.ConfigStore, projectStore project.Store, logger *slog.Logger) {
+	if projectStore == nil || (store == nil && gitStore == nil) {
+		return
+	}
+	projects, err := projectStore.List(ctx)
+	if err != nil {
+		logger.Warn("kargo cred reconcile: list projects failed", "error", err)
+		return
+	}
+	var ok, failed int
+	for _, p := range projects {
+		ns := gitops.KargoNamespaceForProject(p.Metadata.Name)
+		ferr := false
+		if store != nil {
+			if err := store.EnsureKargoCred(ctx, ns); err != nil {
+				logger.Warn("kargo image cred reconcile", "project", p.Metadata.Name, "namespace", ns, "error", err)
+				ferr = true
+			}
+		}
+		if gitStore != nil {
+			if err := gitStore.EnsureKargoGitCred(ctx, ns); err != nil {
+				logger.Warn("kargo git cred reconcile", "project", p.Metadata.Name, "namespace", ns, "error", err)
+				ferr = true
+			}
+		}
+		if ferr {
+			failed++
+			continue
+		}
+		ok++
+	}
+	if ok > 0 || failed > 0 {
+		logger.Info("kargo cred reconcile complete", "provisioned", ok, "failed", failed)
+	}
+}
+
 // republishAllApps re-publishes every app's stable-env gitops files and returns
 // the number of apps that failed. A zero return means the whole fleet is on the
 // current layout (callers use it to gate the generator marker).

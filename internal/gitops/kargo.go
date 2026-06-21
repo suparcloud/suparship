@@ -9,10 +9,11 @@ import (
 
 // Kargo API constants.
 const (
-	kargoAPIVersion    = "kargo.akuity.io/v1alpha1"
-	kargoKindWarehouse = "Warehouse"
-	kargoKindStage     = "Stage"
-	kargoKindPromotion = "Promotion"
+	kargoAPIVersion        = "kargo.akuity.io/v1alpha1"
+	kargoKindWarehouse     = "Warehouse"
+	kargoKindStage         = "Stage"
+	kargoKindPromotion     = "Promotion"
+	kargoKindProjectConfig = "ProjectConfig"
 
 	// labelKargoProject marks resources as belonging to a Kargo project
 	// (namespace). Kargo uses namespace-per-project isolation.
@@ -58,6 +59,10 @@ type ImageSubscription struct {
 	// SemverConstraint is an optional semver range (e.g. ">=1.0.0").
 	// Use instead of AllowTags when the image follows semantic versioning.
 	SemverConstraint string `yaml:"semverConstraint,omitempty"`
+	// ImageSelectionStrategy is how Kargo discovers/selects the tag to promote:
+	// "NewestBuild" (most-recently-pushed, used for "latest from main"),
+	// "SemVer" (default), "Digest", or "Lexical". Empty = Kargo's default (SemVer).
+	ImageSelectionStrategy string `yaml:"imageSelectionStrategy,omitempty"`
 	// InsecureSkipTLSVerify skips TLS certificate verification when
 	// connecting to the registry. Required for HTTP-only registries
 	// like the local kind-registry in dev mode.
@@ -78,57 +83,33 @@ type KargoStage struct {
 	Spec       StageSpec  `yaml:"spec"`
 }
 
-// StageSpec describes the freight sources and promotion mechanisms for a Stage.
-//
-// Note: Kargo v0.9.0's admission webhook validates against the deprecated
-// spec.promotionMechanisms field. The newer spec.promotionTemplate.spec.steps
-// API is accepted by the CRD but the webhook blocks Promotion creation when
-// only steps are present. We use promotionMechanisms for compatibility.
+// StageSpec describes the freight sources and the promotion template for a
+// Stage. Kargo v1.x runs promotionTemplate.spec.steps to promote Freight into
+// the Stage (the v0.9 spec.promotionMechanisms field was removed and is silently
+// stripped by the v1.x admission webhook).
 type StageSpec struct {
-	RequestedFreight    []FreightRequest     `yaml:"requestedFreight"`
-	PromotionMechanisms *PromotionMechanisms `yaml:"promotionMechanisms,omitempty"`
+	RequestedFreight  []FreightRequest   `yaml:"requestedFreight"`
+	PromotionTemplate *PromotionTemplate `yaml:"promotionTemplate,omitempty"`
 }
 
-// PromotionMechanisms defines the actions Kargo takes when promoting Freight
-// into a Stage. Deprecated in Kargo v0.8 in favour of promotionTemplate.spec.steps
-// but required by the v0.9.0 Promotion admission webhook.
-type PromotionMechanisms struct {
-	// GitRepoUpdates writes updated image tags or chart versions into a Git
-	// repo so the new state is committed before ArgoCD syncs.
-	GitRepoUpdates []GitRepoUpdate `yaml:"gitRepoUpdates,omitempty"`
-	// ArgoCDAppUpdates is the list of ArgoCD Applications Kargo should sync
-	// as part of the promotion.
-	ArgoCDAppUpdates []ArgoCDAppUpdate `yaml:"argoCDAppUpdates,omitempty"`
+// PromotionTemplate wraps the ordered steps Kargo runs when promoting Freight
+// into a Stage (Kargo v1.x).
+type PromotionTemplate struct {
+	Spec PromotionTemplateSpec `yaml:"spec"`
 }
 
-// GitRepoUpdate describes one Git repository to update during promotion.
-type GitRepoUpdate struct {
-	RepoURL               string          `yaml:"repoURL"`
-	ReadBranch            string          `yaml:"readBranch,omitempty"`
-	WriteBranch           string          `yaml:"writeBranch,omitempty"`
-	InsecureSkipTLSVerify bool            `yaml:"insecureSkipTLSVerify,omitempty"`
-	Helm                  *HelmPromUpdate `yaml:"helm,omitempty"`
+// PromotionTemplateSpec holds the ordered promotion steps.
+type PromotionTemplateSpec struct {
+	Steps []PromotionStep `yaml:"steps"`
 }
 
-// HelmPromUpdate describes how Helm values files should be updated.
-type HelmPromUpdate struct {
-	Images []HelmImageUpdate `yaml:"images,omitempty"`
-}
-
-// HelmImageUpdate maps a Freight image to a key in a Helm values file.
-type HelmImageUpdate struct {
-	Image          string `yaml:"image"`
-	ValuesFilePath string `yaml:"valuesFilePath"`
-	Key            string `yaml:"key"`
-	Value          string `yaml:"value"`
-}
-
-// ArgoCDAppUpdate describes one ArgoCD Application to update during promotion.
-type ArgoCDAppUpdate struct {
-	// AppName is the name of the ArgoCD Application CR.
-	AppName string `yaml:"appName"`
-	// AppNamespace is the namespace where the Application lives (default: argocd).
-	AppNamespace string `yaml:"appNamespace,omitempty"`
+// PromotionStep is one step in a Kargo v1.x promotion: a built-in runner
+// (`uses`) with a free-form `config`. `as` optionally names the step so later
+// steps can reference its outputs (e.g. the commit produced by git-push).
+type PromotionStep struct {
+	Uses   string         `yaml:"uses"`
+	As     string         `yaml:"as,omitempty"`
+	Config map[string]any `yaml:"config,omitempty"`
 }
 
 // FreightRequest declares which Warehouse the Stage sources from, and whether
@@ -159,21 +140,32 @@ type FreightSources struct {
 
 // ── Build options ─────────────────────────────────────────────────────────────
 
+// KargoImage is one resolved image source for an app: the repository the
+// Warehouse watches and the values key the Stage rewrites on promotion. It is
+// the resolved, publish-time form of a tpl.TemplateImage (or a single legacy
+// image derived from the app's image_repository).
+type KargoImage struct {
+	// Repository is the container image repository to watch (no tag).
+	Repository string
+	// TagKey is the dotted Helm values key holding this image's tag.
+	TagKey string
+	// TagPattern limits which tags Kargo considers (allowTags). Empty = any.
+	TagPattern string
+	// SelectionStrategy maps to the subscription's imageSelectionStrategy.
+	SelectionStrategy string
+}
+
 // KargoBuildOptions carries the Kargo-specific options used by the builders.
 type KargoBuildOptions struct {
 	// KargoNamespace is the Kubernetes namespace for Kargo CRs (= Kargo project).
 	// Defaults to the suparship project name.
 	KargoNamespace string
 
-	// ImageRepoURL is the container image repository the Warehouse monitors.
-	// When empty a placeholder is used; operators should override this to their
-	// actual registry path.
-	ImageRepoURL string
-
-	// ImageTagPattern is a regex that filters which tags Kargo promotes.
-	// Maps to the Kargo v1alpha1 "allowTags" field.
-	// Defaults to semver tags (^\d+\.\d+\.\d+$) when empty.
-	ImageTagPattern string
+	// Images are the resolved image sources for the app — one per service. The
+	// Warehouse gets one subscription per entry and the Stage one helm image
+	// update per entry. When empty, applyKargoDefaults seeds a single
+	// placeholder image so the CRs are still well-formed.
+	Images []KargoImage
 
 	// InsecureSkipTLSVerify disables TLS verification for image registry
 	// access. Required for HTTP-only registries (e.g. local dev registries).
@@ -211,8 +203,17 @@ type KargoBuildOptions struct {
 func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehouse {
 	opts = applyKargoDefaults(opts, app)
 
-	repoURL := opts.ImageRepoURL
-	tagPattern := opts.ImageTagPattern
+	subs := make([]WarehouseSubscription, 0, len(opts.Images))
+	for _, img := range opts.Images {
+		subs = append(subs, WarehouseSubscription{
+			Image: &ImageSubscription{
+				RepoURL:                img.Repository,
+				AllowTags:              img.TagPattern,
+				ImageSelectionStrategy: img.SelectionStrategy,
+				InsecureSkipTLSVerify:  opts.InsecureSkipTLSVerify,
+			},
+		})
+	}
 
 	return &KargoWarehouse{
 		APIVersion: kargoAPIVersion,
@@ -231,15 +232,7 @@ func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehous
 		},
 		Spec: WarehouseSpec{
 			FreightCreationPolicy: "Automatic",
-			Subscriptions: []WarehouseSubscription{
-				{
-					Image: &ImageSubscription{
-						RepoURL:               repoURL,
-						AllowTags:              tagPattern,
-						InsecureSkipTLSVerify:  opts.InsecureSkipTLSVerify,
-					},
-				},
-			},
+			Subscriptions:         subs,
 		},
 	}
 }
@@ -269,51 +262,19 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 		sources.Stages = qualifiedUpstreams
 	}
 
-	// PromotionMechanisms triggers an ArgoCD sync for the app+env Application.
-	// The Application name follows the suparship convention: "{app}-{env}".
-	//
-	// Note: We use the deprecated promotionMechanisms API because the Kargo v0.9.0
-	// Promotion admission webhook validates against this field. The newer
-	// promotionTemplate.spec.steps API is accepted by the CRD but the webhook
-	// rejects Promotions for Stages that only declare steps.
+	// The promotionTemplate (Kargo v1.x) commits the promoted image tag(s) into
+	// the env's values.yaml in the gitops repo, then triggers an ArgoCD sync of
+	// the app+env Application ("{project}-{app}-{env}"). The Application carries
+	// the kargo.akuity.io/authorized-stage annotation so argocd-update may act.
 	argoAppName := ApplicationName(app.ProjectName, app.Name, env.EnvName)
 
-	// The values.yaml path within the gitops repo for this app+env.
-	// Built via joinSubPath so it matches whatever PublisherConfig.SubPath
-	// the publisher used when writing the file.
+	// The values.yaml path within the gitops repo for this app+env, relative to
+	// the repo root. Built via joinSubPath so it matches whatever
+	// PublisherConfig.SubPath the publisher used when writing the file. The
+	// git-clone step checks the repo out at ./src, so steps reference ./src/<path>.
 	valuesFilePath := joinSubPath(opts.SubPath, "envs", env.EnvName, app.ProjectName, app.Name, "values.yaml")
 
-	pm := &PromotionMechanisms{
-		ArgoCDAppUpdates: []ArgoCDAppUpdate{
-			{
-				AppName:      argoAppName,
-				AppNamespace: defaultArgoCDNS,
-			},
-		},
-	}
-
-	// When the gitops repo URL is configured, add gitRepoUpdates so Kargo
-	// commits new image tags to values.yaml before triggering the ArgoCD sync.
-	if opts.GitOpsRepoURL != "" {
-		pm.GitRepoUpdates = []GitRepoUpdate{
-			{
-				RepoURL:               opts.GitOpsRepoURL,
-				ReadBranch:            "main",
-				WriteBranch:           "main",
-				InsecureSkipTLSVerify: opts.GitOpsRepoInsecure,
-				Helm: &HelmPromUpdate{
-					Images: []HelmImageUpdate{
-						{
-							Image:          opts.ImageRepoURL,
-							ValuesFilePath: valuesFilePath,
-							Key:            "components.web.image.tag",
-							Value:          "Tag",
-						},
-					},
-				},
-			},
-		}
-	}
+	promoTemplate := buildPromotionTemplate(app, env, opts, argoAppName, valuesFilePath)
 
 	return &KargoStage{
 		APIVersion: kargoAPIVersion,
@@ -339,66 +300,125 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 					Sources: sources,
 				},
 			},
-			PromotionMechanisms: pm,
+			PromotionTemplate: promoTemplate,
 		},
 	}
+}
+
+// buildPromotionTemplate returns the Kargo v1.x promotion steps for a Stage:
+// clone the gitops repo, set each image's tag in the env values.yaml via the
+// imageFrom() expression, commit, push, then sync the app's ArgoCD Application.
+// Returns nil when no gitops repo URL is configured (the Stage then has no
+// promotion logic — same as the old "no gitRepoUpdates" path).
+func buildPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts KargoBuildOptions, argoAppName, valuesFilePath string) *PromotionTemplate {
+	if opts.GitOpsRepoURL == "" {
+		return nil
+	}
+
+	// One yaml-update "updates" entry per image; all images for an app write the
+	// same env values.yaml. imageFrom("<repo>").Tag resolves the promoted tag
+	// from the Freight at promotion time.
+	updates := make([]map[string]any, 0, len(opts.Images))
+	for _, img := range opts.Images {
+		updates = append(updates, map[string]any{
+			"key":   img.TagKey,
+			"value": fmt.Sprintf("${{ imageFrom(%q).Tag }}", img.Repository),
+		})
+	}
+
+	steps := []PromotionStep{
+		{
+			Uses: "git-clone",
+			Config: map[string]any{
+				"repoURL": opts.GitOpsRepoURL,
+				"checkout": []map[string]any{
+					{"branch": "main", "path": "./src"},
+				},
+			},
+		},
+		{
+			Uses: "yaml-update",
+			Config: map[string]any{
+				"path":    "./src/" + valuesFilePath,
+				"updates": updates,
+			},
+		},
+		{
+			Uses: "git-commit",
+			Config: map[string]any{
+				"path":    "./src",
+				"message": fmt.Sprintf("promote %s/%s to %s", app.ProjectName, app.Name, env.EnvName),
+			},
+		},
+		{
+			Uses:   "git-push",
+			Config: map[string]any{"path": "./src"},
+		},
+		{
+			Uses: "argocd-update",
+			Config: map[string]any{
+				"apps": []map[string]any{
+					{"name": argoAppName, "namespace": defaultArgoCDNS},
+				},
+			},
+		},
+	}
+
+	return &PromotionTemplate{Spec: PromotionTemplateSpec{Steps: steps}}
 }
 
 // ── Kargo Project CR ───────────────────────────────────────────────────────────
 
 // KargoProject is a minimal, serialisable representation of a Kargo Project CR.
 //
-// In Kargo v0.9+, the Project CR replaces the Namespace-label approach used in
-// older versions. Creating a Project CR causes Kargo to create (or adopt) the
-// namespace with the correct labels and RBAC, and allows Kargo to manage
-// Warehouse / Stage / Promotion CRs within it.
-//
-// The Project also holds PromotionPolicies that control which Stages allow
-// manual and auto-promotion. In Kargo v0.9, without an explicit policy the
-// admission webhook blocks all Promotion CR creation.
-//
-// One Project is created per suparship project. By suparship convention the
-// Project name equals the project name (which also becomes the namespace name).
+// A Kargo Project marks a namespace as a Kargo tenancy: creating it causes Kargo
+// to create (or adopt) the namespace with the correct labels and RBAC, within
+// which Warehouse / Stage / Promotion / Freight CRs live. In Kargo v1.x the
+// Project CR carries NO spec — promotion policies moved to a separate
+// ProjectConfig CR (see KargoProjectConfig). One Project per suparship project;
+// the Project name equals the project name (= the namespace name).
 //
 // Kargo docs: https://docs.kargo.io/concepts#projects
 type KargoProject struct {
-	APIVersion string           `yaml:"apiVersion"`
-	Kind       string           `yaml:"kind"`
-	Metadata   ObjectMeta       `yaml:"metadata"`
-	Spec       KargoProjectSpec `yaml:"spec,omitempty"`
+	APIVersion string     `yaml:"apiVersion"`
+	Kind       string     `yaml:"kind"`
+	Metadata   ObjectMeta `yaml:"metadata"`
 }
 
-// KargoProjectSpec holds the optional configuration for a Kargo Project.
-type KargoProjectSpec struct {
-	// PromotionPolicies governs which Stages allow promotion and whether
-	// auto-promotion is enabled.
+// KargoProjectConfig is a serialisable representation of a Kargo v1.x
+// ProjectConfig CR. It holds the project's PromotionPolicies (which Stages
+// auto-promote). It is namespaced in, and named after, the Kargo Project.
+//
+// Kargo docs: https://docs.kargo.io/user-guide/how-to-guides/working-with-stages
+type KargoProjectConfig struct {
+	APIVersion string                 `yaml:"apiVersion"`
+	Kind       string                 `yaml:"kind"`
+	Metadata   ObjectMeta             `yaml:"metadata"`
+	Spec       KargoProjectConfigSpec `yaml:"spec"`
+}
+
+// KargoProjectConfigSpec holds the promotion policies for a Kargo project.
+type KargoProjectConfigSpec struct {
+	// PromotionPolicies governs which Stages auto-promote new Freight.
 	PromotionPolicies []KargoPromotionPolicy `yaml:"promotionPolicies,omitempty"`
 }
 
-// KargoPromotionPolicy defines the promotion rules for one Stage within a Project.
+// KargoPromotionPolicy defines the promotion rules for one Stage within a project.
 type KargoPromotionPolicy struct {
-	// Stage is the name of the Kargo Stage (= environment name).
+	// Stage is the name of the Kargo Stage. (Deprecated in favour of
+	// stageSelector in newer Kargo, but still accepted.)
 	Stage string `yaml:"stage"`
 	// AutoPromotionEnabled enables automatic promotion of new Freight into
 	// this Stage. Set to true for the first stage in the pipeline (staging).
 	AutoPromotionEnabled bool `yaml:"autoPromotionEnabled,omitempty"`
 }
 
-// BuildKargoProject returns a Kargo Project CR for the given project name and
-// environments. It generates PromotionPolicies for all non-preview environments,
-// enabling auto-promotion on the first (staging) environment.
+// BuildKargoProject returns a minimal Kargo v1.x Project CR (no spec). Promotion
+// policies live in the ProjectConfig (see BuildKargoProjectConfig).
 //
 // brand stamps the platform identity. Zero value applies "suparship" defaults.
-// Compatible with Kargo v0.9+. BuildKargoProject is a pure function.
-func BuildKargoProject(projectName string, envs []KargoProjectEnv, brand branding.Config) KargoProject {
-	var policies []KargoPromotionPolicy
-	for _, env := range envs {
-		policies = append(policies, KargoPromotionPolicy{
-			Stage:                KargoStageName(env.AppName, env.EnvName),
-			AutoPromotionEnabled: env.IsFirstStage,
-		})
-	}
-
+// BuildKargoProject is a pure function.
+func BuildKargoProject(projectName string, brand branding.Config) KargoProject {
 	return KargoProject{
 		APIVersion: kargoAPIVersion,
 		Kind:       "Project",
@@ -409,7 +429,34 @@ func BuildKargoProject(projectName string, envs []KargoProjectEnv, brand brandin
 				map[string]string{labelProject: projectName},
 			),
 		},
-		Spec: KargoProjectSpec{
+	}
+}
+
+// BuildKargoProjectConfig returns the Kargo v1.x ProjectConfig CR for a project:
+// one PromotionPolicy per environment, enabling auto-promotion on the first
+// (staging) stage and leaving later stages (prod) manual. It is named after, and
+// namespaced in, the Kargo project. BuildKargoProjectConfig is a pure function.
+func BuildKargoProjectConfig(projectName string, envs []KargoProjectEnv, brand branding.Config) KargoProjectConfig {
+	var policies []KargoPromotionPolicy
+	for _, env := range envs {
+		policies = append(policies, KargoPromotionPolicy{
+			Stage:                KargoStageName(env.AppName, env.EnvName),
+			AutoPromotionEnabled: env.IsFirstStage,
+		})
+	}
+
+	return KargoProjectConfig{
+		APIVersion: kargoAPIVersion,
+		Kind:       kargoKindProjectConfig,
+		Metadata: ObjectMeta{
+			Name:      projectName,
+			Namespace: projectName,
+			Labels: branding.MergeLabels(
+				brand.ManagedByLabels(),
+				map[string]string{labelProject: projectName},
+			),
+		},
+		Spec: KargoProjectConfigSpec{
 			PromotionPolicies: policies,
 		},
 	}
@@ -467,6 +514,11 @@ func KargoStageName(appName, envName string) string {
 	return appName + "-" + envName
 }
 
+// DefaultImageTagKey is the canonical Helm-values key for the deploy image tag,
+// used as the legacy single-image fallback when a template declares no Images
+// mapping (charts built on suparship-common).
+const DefaultImageTagKey = "components.web.image.tag"
+
 // KargoNamespaceForProject returns the Kargo namespace for a suparship project.
 // By convention Kargo namespaces match the suparship project name.
 func KargoNamespaceForProject(projectName string) string {
@@ -482,16 +534,20 @@ func DefaultImageRepoURL(projectName, appName string) string {
 }
 
 // applyKargoDefaults fills zero-valued KargoBuildOptions with sensible defaults.
+// When the caller supplies no Images it seeds a single placeholder image so the
+// generated CRs are still well-formed (the placeholder repo won't resolve —
+// operators are expected to supply real images via the template mapping).
 func applyKargoDefaults(opts KargoBuildOptions, app *domain.App) KargoBuildOptions {
 	if opts.KargoNamespace == "" {
 		opts.KargoNamespace = app.ProjectName
 	}
-	if opts.ImageRepoURL == "" {
-		opts.ImageRepoURL = DefaultImageRepoURL(app.ProjectName, app.Name)
-	}
-	if opts.ImageTagPattern == "" {
-		// Match SemVer tags: 1.0.0, 2.3.14, etc.
-		opts.ImageTagPattern = `^\d+\.\d+\.\d+$`
+	if len(opts.Images) == 0 {
+		opts.Images = []KargoImage{{
+			Repository: DefaultImageRepoURL(app.ProjectName, app.Name),
+			TagKey:     DefaultImageTagKey,
+			// Match SemVer tags: 1.0.0, 2.3.14, etc.
+			TagPattern: `^\d+\.\d+\.\d+$`,
+		}}
 	}
 	return opts
 }

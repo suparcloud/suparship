@@ -61,7 +61,23 @@ func (th *templateHandler) handlePutTemplateOverride(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
 		return
 	}
-	ov := &domain.TemplateOverride{DefaultValues: dto.DefaultValues, EnvValues: dto.EnvValues, ClusterValues: dto.ClusterValues}
+	// The override ConfigMap also co-stores the image mapping and display-metadata
+	// overrides (set from the Images / metadata editors). This endpoint only owns
+	// the Helm values layer, so load-modify-write: replace just the values fields
+	// and preserve Images/Metadata, otherwise saving platform overrides would
+	// clobber an image mapping a PE wired up for CD.
+	ov, err := kube.LoadTemplateOverride(r.Context(), th.kubeClient, name)
+	if err != nil {
+		if th.logger != nil {
+			th.logger.Error("load template override", "name", name, "err", err)
+		}
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load template override"})
+		return
+	}
+	if ov == nil {
+		ov = &domain.TemplateOverride{}
+	}
+	ov.DefaultValues, ov.EnvValues, ov.ClusterValues = dto.DefaultValues, dto.EnvValues, dto.ClusterValues
 	if err := kube.SaveTemplateOverride(r.Context(), th.kubeClient, name, ov); err != nil {
 		if th.logger != nil {
 			th.logger.Error("save template override", "name", name, "err", err)

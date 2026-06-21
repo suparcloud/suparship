@@ -50,8 +50,12 @@ func TestBuildKargoWarehouse_WithOverrides(t *testing.T) {
 
 	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{
 		KargoNamespace: "kargo-myproject",
-		ImageRepoURL:   "registry.example.com/myproject/api",
-		ImageTagPattern: `^v\d+\.\d+\.\d+$`,
+		Images: []gitops.KargoImage{{
+			Repository:        "registry.example.com/myproject/api",
+			TagKey:            "image.tag",
+			TagPattern:        `^v\d+\.\d+\.\d+$`,
+			SelectionStrategy: "NewestBuild",
+		}},
 	})
 
 	if wh.Metadata.Namespace != "kargo-myproject" {
@@ -62,6 +66,26 @@ func TestBuildKargoWarehouse_WithOverrides(t *testing.T) {
 	}
 	if wh.Spec.Subscriptions[0].Image.AllowTags != `^v\d+\.\d+\.\d+$` {
 		t.Errorf("AllowTags override not applied: got %q", wh.Spec.Subscriptions[0].Image.AllowTags)
+	}
+	if wh.Spec.Subscriptions[0].Image.ImageSelectionStrategy != "NewestBuild" {
+		t.Errorf("ImageSelectionStrategy: got %q want NewestBuild", wh.Spec.Subscriptions[0].Image.ImageSelectionStrategy)
+	}
+}
+
+func TestBuildKargoWarehouse_MultipleImages(t *testing.T) {
+	app := &domain.App{Name: "multi", ProjectName: "demo"}
+	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{
+		Images: []gitops.KargoImage{
+			{Repository: "acr.example.com/agent", TagKey: "agent.image.tag"},
+			{Repository: "acr.example.com/caller", TagKey: "caller.image.tag"},
+		},
+	})
+	if len(wh.Spec.Subscriptions) != 2 {
+		t.Fatalf("Subscriptions: got %d want 2", len(wh.Spec.Subscriptions))
+	}
+	if wh.Spec.Subscriptions[0].Image.RepoURL != "acr.example.com/agent" ||
+		wh.Spec.Subscriptions[1].Image.RepoURL != "acr.example.com/caller" {
+		t.Errorf("per-image subscriptions not built: %+v", wh.Spec.Subscriptions)
 	}
 }
 
@@ -139,96 +163,111 @@ func TestBuildKargoStage_UpstreamStages(t *testing.T) {
 	}
 }
 
-func TestBuildKargoStage_PromotionMechanismsIncludesArgoApp(t *testing.T) {
+// findStep returns the first promotion step with the given `uses`.
+func findStep(t *testing.T, steps []gitops.PromotionStep, uses string) gitops.PromotionStep {
+	t.Helper()
+	for _, s := range steps {
+		if s.Uses == uses {
+			return s
+		}
+	}
+	t.Fatalf("no promotion step with uses=%q in %+v", uses, steps)
+	return gitops.PromotionStep{}
+}
+
+func TestBuildKargoStage_PromotionTemplateSyncsArgoApp(t *testing.T) {
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}
 
-	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{})
+	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{
+		Images:        []gitops.KargoImage{{Repository: "r", TagKey: "image.tag"}},
+		GitOpsRepoURL: "http://gitops.example.com/gitops.git",
+	})
 
-	if stage.Spec.PromotionMechanisms == nil {
-		t.Fatal("PromotionMechanisms is nil")
+	if stage.Spec.PromotionTemplate == nil {
+		t.Fatal("PromotionTemplate is nil")
 	}
-	updates := stage.Spec.PromotionMechanisms.ArgoCDAppUpdates
-	if len(updates) == 0 {
-		t.Fatal("PromotionMechanisms has no ArgoCDAppUpdates")
-	}
-	if updates[0].AppName != "demo-hello-staging" {
-		t.Errorf("ArgoCDAppUpdates[0].AppName: got %q want %q", updates[0].AppName, "demo-hello-staging")
-	}
-	if updates[0].AppNamespace != "argocd" {
-		t.Errorf("ArgoCDAppUpdates[0].AppNamespace: got %q want %q", updates[0].AppNamespace, "argocd")
+	steps := stage.Spec.PromotionTemplate.Spec.Steps
+	argo := findStep(t, steps, "argocd-update")
+	apps, _ := argo.Config["apps"].([]map[string]any)
+	if len(apps) != 1 || apps[0]["name"] != "demo-hello-staging" || apps[0]["namespace"] != "argocd" {
+		t.Errorf("argocd-update apps: got %+v want demo-hello-staging in argocd", apps)
 	}
 }
 
-func TestBuildKargoStage_GitRepoUpdates(t *testing.T) {
-	app := &domain.App{
-		Name:        "color-app",
-		ProjectName: "demo",
-		Spec: domain.AppSpec{
-			Values: map[string]any{
-				"image_repository": "kind-registry:5000/demo/color-app",
-			},
-		},
-	}
+func TestBuildKargoStage_PromotionStepsUpdateValues(t *testing.T) {
+	app := &domain.App{Name: "color-app", ProjectName: "demo"}
 	env := domain.AppEnvironment{
-		AppName:     "color-app",
-		ProjectName: "demo",
-		EnvName:     "staging",
-		EnvType:     domain.AppEnvStaging,
+		AppName: "color-app", ProjectName: "demo",
+		EnvName: "staging", EnvType: domain.AppEnvStaging,
 	}
-
 	opts := gitops.KargoBuildOptions{
-		ImageRepoURL:   "kind-registry:5000/demo/color-app",
-		GitOpsRepoURL:  "http://gitea-http.gitea.svc:3000/gitops/gitops.git",
-		GitOpsRepoInsecure: true,
+		Images: []gitops.KargoImage{{
+			Repository: "kind-registry:5000/demo/color-app",
+			TagKey:     "components.web.image.tag",
+		}},
+		GitOpsRepoURL: "http://gitea-http.gitea.svc:3000/gitops/gitops.git",
 	}
 	stage := gitops.BuildKargoStage(app, env, nil, opts)
+	if stage.Spec.PromotionTemplate == nil {
+		t.Fatal("PromotionTemplate is nil")
+	}
+	steps := stage.Spec.PromotionTemplate.Spec.Steps
 
-	pm := stage.Spec.PromotionMechanisms
-	if pm == nil {
-		t.Fatal("PromotionMechanisms is nil")
+	// git-clone targets the gitops repo at ./src
+	clone := findStep(t, steps, "git-clone")
+	if clone.Config["repoURL"] != "http://gitea-http.gitea.svc:3000/gitops/gitops.git" {
+		t.Errorf("git-clone repoURL: got %v", clone.Config["repoURL"])
 	}
-	if len(pm.GitRepoUpdates) != 1 {
-		t.Fatalf("GitRepoUpdates: got %d want 1", len(pm.GitRepoUpdates))
+
+	// yaml-update writes the env values.yaml under ./src with the imageFrom expr
+	yu := findStep(t, steps, "yaml-update")
+	if yu.Config["path"] != "./src/envs/staging/demo/color-app/values.yaml" {
+		t.Errorf("yaml-update path: got %v", yu.Config["path"])
 	}
-	gru := pm.GitRepoUpdates[0]
-	if gru.RepoURL != "http://gitea-http.gitea.svc:3000/gitops/gitops.git" {
-		t.Errorf("RepoURL: got %q", gru.RepoURL)
+	updates, _ := yu.Config["updates"].([]map[string]any)
+	if len(updates) != 1 || updates[0]["key"] != "components.web.image.tag" {
+		t.Fatalf("yaml-update updates: got %+v", updates)
 	}
-	if gru.ReadBranch != "main" {
-		t.Errorf("ReadBranch: got %q want %q", gru.ReadBranch, "main")
+	if got := updates[0]["value"]; got != `${{ imageFrom("kind-registry:5000/demo/color-app").Tag }}` {
+		t.Errorf("yaml-update value: got %v", got)
 	}
-	if gru.WriteBranch != "main" {
-		t.Errorf("WriteBranch: got %q want %q", gru.WriteBranch, "main")
+
+	// commit + push present (push checks the chain completes)
+	findStep(t, steps, "git-commit")
+	findStep(t, steps, "git-push")
+}
+
+func TestBuildKargoStage_MultipleImageKeys(t *testing.T) {
+	// A multi-service chart writes one yaml-update entry per service, each with
+	// that service's tag key + imageFrom expression.
+	app := &domain.App{Name: "multi", ProjectName: "demo"}
+	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}
+	opts := gitops.KargoBuildOptions{
+		Images: []gitops.KargoImage{
+			{Repository: "acr.example.com/agent", TagKey: "agent.image.tag"},
+			{Repository: "acr.example.com/caller", TagKey: "caller.image.tag"},
+		},
+		GitOpsRepoURL: "http://gitops.example.com/gitops.git",
 	}
-	if !gru.InsecureSkipTLSVerify {
-		t.Error("expected InsecureSkipTLSVerify=true")
+	stage := gitops.BuildKargoStage(app, env, nil, opts)
+	yu := findStep(t, stage.Spec.PromotionTemplate.Spec.Steps, "yaml-update")
+	updates, _ := yu.Config["updates"].([]map[string]any)
+	if len(updates) != 2 {
+		t.Fatalf("yaml-update updates: got %d want 2", len(updates))
 	}
-	if gru.Helm == nil || len(gru.Helm.Images) != 1 {
-		t.Fatal("expected 1 Helm image update")
-	}
-	img := gru.Helm.Images[0]
-	if img.Image != "kind-registry:5000/demo/color-app" {
-		t.Errorf("Image: got %q", img.Image)
-	}
-	if img.ValuesFilePath != "envs/staging/demo/color-app/values.yaml" {
-		t.Errorf("ValuesFilePath: got %q", img.ValuesFilePath)
-	}
-	if img.Key != "components.web.image.tag" {
-		t.Errorf("Key: got %q", img.Key)
-	}
-	if img.Value != "Tag" {
-		t.Errorf("Value: got %q want %q", img.Value, "Tag")
+	if updates[0]["key"] != "agent.image.tag" || updates[1]["key"] != "caller.image.tag" {
+		t.Errorf("per-service keys not written: %+v", updates)
 	}
 }
 
-func TestBuildKargoStage_NoGitRepoUpdatesWithoutRepoURL(t *testing.T) {
+func TestBuildKargoStage_NoPromotionTemplateWithoutRepoURL(t *testing.T) {
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	env := domain.AppEnvironment{EnvName: "staging", EnvType: domain.AppEnvStaging}
 	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{})
 
-	if len(stage.Spec.PromotionMechanisms.GitRepoUpdates) != 0 {
-		t.Errorf("expected no GitRepoUpdates without GitOpsRepoURL, got %d", len(stage.Spec.PromotionMechanisms.GitRepoUpdates))
+	if stage.Spec.PromotionTemplate != nil {
+		t.Errorf("expected nil PromotionTemplate without GitOpsRepoURL, got %+v", stage.Spec.PromotionTemplate)
 	}
 }
 

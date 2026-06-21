@@ -2,11 +2,21 @@ package tpl
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
 var validEngineTypes = map[string]bool{
 	EngineHelm: true,
+}
+
+// validImageSelectionStrategies are the Kargo tag-selection strategies allowed
+// on a TemplateImage. Empty is permitted and defaults to "SemVer".
+var validImageSelectionStrategies = map[string]bool{
+	"NewestBuild": true,
+	"SemVer":      true,
+	"Digest":      true,
+	"Lexical":     true,
 }
 
 var validInputTypes = map[InputType]bool{
@@ -88,6 +98,43 @@ func (t *Template) Validate() error {
 		}
 	}
 
+	if err := validateImages(t.Spec.Images); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateImages checks the spec.images slice: each entry needs a name,
+// repository, and tagKey; names are unique; the selection strategy (when set)
+// is recognised; and the tag pattern (when set) is a valid regex.
+func validateImages(images []TemplateImage) error {
+	names := make(map[string]bool, len(images))
+	for i, img := range images {
+		path := fmt.Sprintf("spec.images[%d]", i)
+		if img.Name == "" {
+			return fmt.Errorf("%s: name is required", path)
+		}
+		if names[img.Name] {
+			return fmt.Errorf("%s: duplicate image name %q", path, img.Name)
+		}
+		names[img.Name] = true
+		if img.Repository == "" {
+			return fmt.Errorf("%s (%s): repository is required", path, img.Name)
+		}
+		if img.TagKey == "" {
+			return fmt.Errorf("%s (%s): tagKey is required", path, img.Name)
+		}
+		if img.SelectionStrategy != "" && !validImageSelectionStrategies[img.SelectionStrategy] {
+			return fmt.Errorf("%s (%s): unsupported selectionStrategy %q (must be one of NewestBuild, SemVer, Digest, Lexical)",
+				path, img.Name, img.SelectionStrategy)
+		}
+		if img.TagPattern != "" {
+			if _, err := regexp.Compile(img.TagPattern); err != nil {
+				return fmt.Errorf("%s (%s): invalid tagPattern %q: %w", path, img.Name, img.TagPattern, err)
+			}
+		}
+	}
 	return nil
 }
 

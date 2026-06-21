@@ -154,6 +154,17 @@ type AppDetailDTO struct {
 	ComponentConfigs map[string]domain.ComponentConfig `json:"componentConfigs,omitempty"`
 	// EnvComponents surfaces per-(env, component) overrides keyed env → component.
 	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
+	// CD surfaces the app's continuous-delivery settings (external-CD tag
+	// ownership) so the UI can render and edit the toggle. Always present.
+	CD CDConfigDTO `json:"cd"`
+}
+
+// CDConfigDTO mirrors domain.CDConfig on the wire. When Managed is true an
+// external CD controller (Kargo) owns the deployed image tag and the publisher
+// preserves it across republishes (see domain.CDConfig). The per-service image
+// repositories and tag-keys are declared at the template level, not here.
+type CDConfigDTO struct {
+	Managed bool `json:"managed"`
 }
 
 // AddonClaimDTO mirrors domain.AddonSpec for the wire. Per-app values
@@ -269,6 +280,9 @@ type createAppRequest struct {
 	// EnvComponents holds per-(env, component) overrides keyed env → component,
 	// for setting staging≠prod tuning at creation.
 	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
+	// CD configures external-CD (Kargo) ownership of the image tag. Optional;
+	// omit to leave it disabled.
+	CD *CDConfigDTO `json:"cd,omitempty"`
 }
 
 // createAppResponse is the JSON body returned on a successful app creation.
@@ -309,6 +323,9 @@ type updateAppRequest struct {
 	// env → component. Each entry overrides the app-level component config for
 	// that environment only.
 	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
+	// CD, when non-nil, replaces the app's continuous-delivery settings
+	// (external-CD tag ownership). Omit to leave unchanged.
+	CD *CDConfigDTO `json:"cd,omitempty"`
 }
 
 // updateAppResponse mirrors createAppResponse for the edit endpoint.

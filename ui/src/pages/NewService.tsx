@@ -287,6 +287,7 @@ function ConfigureStep({
   );
   const [namespaceScope, setNamespaceScope] = useState<"app" | "project">("app");
   const [namespacePattern, setNamespacePattern] = useState("");
+  const [cdManaged, setCdManaged] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
@@ -374,6 +375,7 @@ function ConfigureStep({
         namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
         namespacePattern: namespacePattern.trim() || undefined,
         rawValues: Object.keys(overlay).length > 0 ? overlay : undefined,
+        cd: cdManaged ? { managed: true } : undefined,
       });
       navigate(`/projects/${project}/apps/${appName}`);
     } catch (err) {
@@ -523,6 +525,26 @@ function ConfigureStep({
             </div>
           )}
         </div>
+      </FormSection>
+
+      {/* Continuous delivery */}
+      <FormSection title="Continuous delivery">
+        <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+          <input
+            type="checkbox"
+            checked={cdManaged}
+            onChange={(e) => setCdManaged(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-300"
+          />
+          Image tag managed by Kargo
+        </label>
+        <p className="mt-1 text-xs text-gray-400">
+          When enabled, Kargo owns the image tag: it commits the
+          discovered/promoted tag and re-publishing preserves it instead of
+          resetting to your overrides. The tag you set in values acts only as the
+          initial seed. Which images Kargo watches (and the values keys it writes)
+          comes from the template's image mapping.
+        </p>
       </FormSection>
 
       {/* Secret inputs */}
