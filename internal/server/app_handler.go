@@ -1598,6 +1598,7 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 			Source:      sourceEnv.EnvName,
 			Destination: targetEnvName,
 			Namespace:   targetEnv.Namespace,
+			Mechanism:   "kargo",
 			Message:     fmt.Sprintf("Kargo promotion %q created — freight %q is being promoted to %s", kargoResult.Name, kargoResult.Freight, targetEnvName),
 			KargoPromotion: &KargoPromotionDTO{
 				Name:    kargoResult.Name,
@@ -1608,7 +1609,15 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 		}, nil
 	}
 
-	// Fallback: copy the release bundle in the local store (MVP stub, no Kargo).
+	// Fallback: copy the release bundle directly in the store — no Kargo pipeline.
+	// This is the expected path for local/dev installs without Kargo. When a
+	// GitOps publisher IS configured, though, a missing Kargo promoter usually
+	// means a misconfigured install: the copy won't flow through the CD pipeline,
+	// so warn loudly rather than let a "successful" promotion mislead.
+	if ah.gitOpsPublisher != nil {
+		slog.Warn("promote: no Kargo promoter wired on a GitOps-enabled install — performing a direct in-store release copy that does NOT flow through the CD pipeline; wire Kargo for pipeline-driven promotion",
+			"project", projectName, "app", appName, "from", sourceEnv.EnvName, "to", targetEnvName)
+	}
 	result, err := domainapp.Promote(ctx, ah.appStore, domainapp.PromoteRequest{
 		ProjectName: projectName,
 		AppName:     appName,
@@ -1628,7 +1637,8 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 		Source:      sourceEnv.EnvName,
 		Destination: targetEnvName,
 		Namespace:   targetEnv.Namespace,
-		Message:     "Promotion of " + appName + " from " + sourceEnv.EnvName + " to " + targetEnvName + " succeeded",
+		Mechanism:   "in-store",
+		Message:     "Promoted " + appName + " from " + sourceEnv.EnvName + " to " + targetEnvName + " (direct in-store release copy — no Kargo pipeline configured)",
 		Release: &AppReleaseRefDTO{
 			Image:  result.Release.Image,
 			Tag:    result.Release.Tag,

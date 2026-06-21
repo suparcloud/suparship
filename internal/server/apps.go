@@ -404,6 +404,12 @@ type AppPromoteResponse struct {
 	Destination string             `json:"destination"`
 	Namespace   string             `json:"namespace"`
 	Message     string             `json:"message"`
+	// Mechanism describes how the promotion was carried out: "kargo" when a
+	// Kargo Promotion CR drove it through the GitOps pipeline, or "in-store" for
+	// the direct store release-copy fallback used when no Kargo promoter is
+	// wired (local/dev installs). Lets the UI label a non-pipeline promotion so
+	// it's never mistaken for a real Kargo-driven rollout.
+	Mechanism string `json:"mechanism"`
 	// Release is the release bundle copied in the store (no-Kargo fallback).
 	Release        *AppReleaseRefDTO  `json:"release,omitempty"`
 	// KargoPromotion is populated when a Kargo Promotion CR was created.

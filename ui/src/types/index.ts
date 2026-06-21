@@ -690,6 +690,8 @@ export interface PromoteResponse {
   destination: string;
   namespace: string;
   message: string;
+  /** How the promotion ran: "kargo" (pipeline) or "in-store" (direct copy, no Kargo). */
+  mechanism?: "kargo" | "in-store";
   /** Populated when Kargo is configured — describes the created Promotion CR. */
   kargoPromotion?: KargoPromotion;
   /** Populated when Kargo is NOT configured — in-store release copy result. */
