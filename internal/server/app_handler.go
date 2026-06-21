@@ -1884,6 +1884,30 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	ah.applyRuntimeInfo(env, agg)
 }
 
+// argoAppName resolves the ArgoCD Application name for an app in an env using the
+// org's configured ArgoAppName pattern and the env's effective (active) cluster.
+// For a multi-cluster env this targets the active/primary cluster's Application
+// (Phase 1). Falls back to the default pattern + an "in-cluster" cluster token
+// when the org or its env/cluster can't be resolved, mirroring the publisher.
+func (ah *appHandler) argoAppName(ctx context.Context, projectName, appName, envName string) string {
+	var pattern, cluster string
+	if ah.orgProvider != nil {
+		if org, err := ah.orgProvider.GetOrg(ctx); err == nil && org != nil {
+			pattern = org.ResourceNaming.EffectiveArgoAppName()
+			for _, e := range org.Environments {
+				if e.Name == envName {
+					cluster = e.EffectiveClusterRef()
+					break
+				}
+			}
+		}
+	}
+	if cluster == "" {
+		cluster = "in-cluster" // mirror gitops.appSetClusterTargets fallback
+	}
+	return gitops.RenderArgoAppName(pattern, projectName, appName, envName, cluster)
+}
+
 // applyRuntimeInfo folds a RuntimeInfo into the env's stored status/urls/release.
 func (ah *appHandler) applyRuntimeInfo(env *domain.AppEnvironment, info *runtime.RuntimeInfo) {
 	env.Status.Phase = info.Status
@@ -1908,7 +1932,7 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 	if ah.diagnosticsReader == nil || env.ProjectName == "" {
 		return
 	}
-	base := env.ProjectName + "-" + appName + "-" + env.EnvName
+	base := ah.argoAppName(ctx, env.ProjectName, appName, env.EnvName)
 	for _, t := range []struct{ app, source string }{
 		{base, "argocd"},
 		{base + "-platform", "external-secrets"},

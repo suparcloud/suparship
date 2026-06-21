@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -180,21 +181,34 @@ type DeploymentHistoryEntry struct {
 	TargetRevision string
 }
 
-// GetAppDeploymentHistory reads the sync history of the ArgoCD Application
-// for a given project/app/env combination. The Application CR name follows the
-// "{project}-{app}-{env}" convention (matching gitops.ApplicationName) — the
-// project prefix is required, since two projects may each own an app of the
-// same name. Returns an empty slice (not an error) when the Application CR does
-// not exist or has no history yet.
+// GetAppDeploymentHistory reads the sync history of the app's chart ArgoCD
+// Application for the given project/app/env. The Application is found by
+// suparship identity labels (project/app/env) rather than by reconstructing its
+// name, because the name is configurable (org ResourceNaming pattern) and
+// per-cluster — labels are the stable key. The platform companion shares these
+// labels, so Applications whose name ends in "-platform" are skipped; for a
+// multi-cluster env the first matching cluster's Application is used. Returns an
+// empty slice (not an error) when none exists or it has no history yet.
 func (r *ArgoCDStatusReader) GetAppDeploymentHistory(ctx context.Context, projectName, appName, envName string) ([]DeploymentHistoryEntry, error) {
-	appCRName := projectName + "-" + appName + "-" + envName
-	raw, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).Get(ctx, appCRName, metav1.GetOptions{})
-	if err != nil {
-		// Not found is expected before the first deploy — return empty, not error.
+	sel := "suparship.io/project=" + projectName + ",suparship.io/app=" + appName + ",suparship.io/env=" + envName
+	list, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
+	if err != nil || list == nil || len(list.Items) == 0 {
+		// Not found / no match is expected before the first deploy — empty, not error.
 		return []DeploymentHistoryEntry{}, nil //nolint:nilerr
 	}
+	var obj map[string]any
+	for i := range list.Items {
+		if strings.HasSuffix(list.Items[i].GetName(), "-platform") {
+			continue
+		}
+		obj = list.Items[i].Object
+		break
+	}
+	if obj == nil {
+		return []DeploymentHistoryEntry{}, nil
+	}
 
-	statusRaw, ok := raw.Object["status"].(map[string]any)
+	statusRaw, ok := obj["status"].(map[string]any)
 	if !ok {
 		return []DeploymentHistoryEntry{}, nil
 	}
