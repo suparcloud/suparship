@@ -188,6 +188,15 @@ type KargoBuildOptions struct {
 	// values.yaml the publisher actually wrote. Empty (default) = repo
 	// root; otherwise prefixes the path with the configured sub-dir.
 	SubPath string
+
+	// ArgoAppNamePattern is the org ResourceNaming pattern for ArgoCD Application
+	// names, used to render the argocd-update targets in the promotion template.
+	// Empty → secrets.DefaultArgoAppName.
+	ArgoAppNamePattern string
+	// Clusters are the env's destination clusters; the argocd-update step refreshes
+	// one Application per cluster (per-cluster naming). Empty → a single in-cluster
+	// fallback, matching the AppSet builder.
+	Clusters []ClusterTarget
 }
 
 // ── Builders ─────────────────────────────────────────────────────────────────
@@ -264,17 +273,18 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 
 	// The promotionTemplate (Kargo v1.x) commits the promoted image tag(s) into
 	// the env's values.yaml in the gitops repo, then triggers an ArgoCD sync of
-	// the app+env Application ("{project}-{app}-{env}"). The Application carries
-	// the kargo.akuity.io/authorized-stage annotation so argocd-update may act.
-	argoAppName := ApplicationName(app.ProjectName, app.Name, env.EnvName)
-
+	// the app's Application(s) for this env. With per-cluster naming an env may
+	// have one Application per cluster, so argocd-update refreshes them all (the
+	// promotion stays env-level). Each Application carries the
+	// kargo.akuity.io/authorized-stage annotation so argocd-update may act.
+	//
 	// The values.yaml path within the gitops repo for this app+env, relative to
 	// the repo root. Built via joinSubPath so it matches whatever
 	// PublisherConfig.SubPath the publisher used when writing the file. The
 	// git-clone step checks the repo out at ./src, so steps reference ./src/<path>.
 	valuesFilePath := joinSubPath(opts.SubPath, "envs", env.EnvName, app.ProjectName, app.Name, "values.yaml")
 
-	promoTemplate := buildPromotionTemplate(app, env, opts, argoAppName, valuesFilePath)
+	promoTemplate := buildPromotionTemplate(app, env, opts, valuesFilePath)
 
 	return &KargoStage{
 		APIVersion: kargoAPIVersion,
@@ -310,7 +320,7 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 // imageFrom() expression, commit, push, then sync the app's ArgoCD Application.
 // Returns nil when no gitops repo URL is configured (the Stage then has no
 // promotion logic — same as the old "no gitRepoUpdates" path).
-func buildPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts KargoBuildOptions, argoAppName, valuesFilePath string) *PromotionTemplate {
+func buildPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts KargoBuildOptions, valuesFilePath string) *PromotionTemplate {
 	if opts.GitOpsRepoURL == "" {
 		return nil
 	}
@@ -357,14 +367,31 @@ func buildPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts Kar
 		{
 			Uses: "argocd-update",
 			Config: map[string]any{
-				"apps": []map[string]any{
-					{"name": argoAppName, "namespace": defaultArgoCDNS},
-				},
+				"apps": argoUpdateApps(opts.ArgoAppNamePattern, app.ProjectName, app.Name, env.EnvName, opts.Clusters),
 			},
 		},
 	}
 
 	return &PromotionTemplate{Spec: PromotionTemplateSpec{Steps: steps}}
+}
+
+// argoUpdateApps renders the argocd-update step's app list: one ArgoCD
+// Application per destination cluster, named via the org ResourceNaming pattern.
+// An env with no resolvable clusters falls back to a single in-cluster entry,
+// mirroring the AppSet builder's naming.
+func argoUpdateApps(pattern, projectName, appName, envName string, clusters []ClusterTarget) []map[string]any {
+	cs := clusters
+	if len(cs) == 0 {
+		cs = []ClusterTarget{{Name: fallbackClusterName}}
+	}
+	apps := make([]map[string]any, 0, len(cs))
+	for _, c := range cs {
+		apps = append(apps, map[string]any{
+			"name":      RenderArgoAppName(pattern, projectName, appName, envName, c.Name),
+			"namespace": defaultArgoCDNS,
+		})
+	}
+	return apps
 }
 
 // ── Kargo Project CR ───────────────────────────────────────────────────────────
