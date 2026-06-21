@@ -68,12 +68,14 @@ func newTestStackMux(projectName string) (*http.ServeMux, *authHandler, *memAppS
 	store.mu.Unlock()
 
 	stackStore := newMemStackStore()
+	orgProv := &staticOrgProvider{org: testRBACOrg()}
 	appH := newAppHandler(store, nil, nil, nil)
 	appH.stackStore = stackStore
+	appH.orgProvider = orgProv // needed so relocate can resolve env namespaces
 
 	rh := &rbacHandler{
 		auth:       ah,
-		orgStore:   &staticOrgProvider{org: testRBACOrg()},
+		orgStore:   orgProv,
 		appHandler: appH,
 		stackStore: stackStore,
 	}
@@ -118,6 +120,67 @@ func postStackJSON(mux *http.ServeMux, cookie *http.Cookie, url string, body any
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	return rec
+}
+
+func putStackJSON(mux *http.ServeMux, cookie *http.Cookie, url string, body any) *httptest.ResponseRecorder {
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPut, url, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestSetAppStack_JoinAndDetach covers stack membership: joining a stack sets
+// AppSpec.Stack, an unknown stack is rejected, and detaching clears it.
+func TestSetAppStack_JoinAndDetach(t *testing.T) {
+	mux, ah, store, stackStore := newTestStackMux(testProject)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	seedStackMember(store, testProject, "web", "") // starts unattached
+	cookie := sessionCookieFor(ah, "alice", "org_admin")
+	url := "/api/v1/projects/" + testProject + "/apps/web/stack"
+
+	if rec := putStackJSON(mux, cookie, url, setAppStackRequest{Stack: "voiceai"}); rec.Code != http.StatusOK {
+		t.Fatalf("join: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := store.GetApp(context.Background(), testProject, "web"); got.Spec.Stack != "voiceai" {
+		t.Errorf("stack = %q, want voiceai", got.Spec.Stack)
+	}
+
+	if rec := putStackJSON(mux, cookie, url, setAppStackRequest{Stack: "nope"}); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown stack: expected 404, got %d", rec.Code)
+	}
+
+	if rec := putStackJSON(mux, cookie, url, setAppStackRequest{Stack: ""}); rec.Code != http.StatusOK {
+		t.Fatalf("detach: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := store.GetApp(context.Background(), testProject, "web"); got.Spec.Stack != "" {
+		t.Errorf("stack = %q, want empty after detach", got.Spec.Stack)
+	}
+}
+
+// TestStack_SharedNamespaceCoLocation verifies that joining a shared-namespace
+// stack relocates the app into the co-located {project}-{stack}-{env} namespace.
+func TestStack_SharedNamespaceCoLocation(t *testing.T) {
+	mux, ah, store, stackStore := newTestStackMux(testProject)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{
+		Name: "voiceai", ProjectName: testProject,
+		Spec: domain.StackSpec{SharedNamespace: true},
+	})
+	seedStackMember(store, testProject, "web", "")
+
+	rec := putStackJSON(mux, sessionCookieFor(ah, "alice", "org_admin"),
+		"/api/v1/projects/"+testProject+"/apps/web/stack", setAppStackRequest{Stack: "voiceai"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	staging, _ := store.GetAppEnvironment(context.Background(), testProject, "web", "staging")
+	if want := testProject + "-voiceai-staging"; staging.Namespace != want {
+		t.Errorf("staging namespace = %q, want %q (shared-stack co-location)", staging.Namespace, want)
+	}
 }
 
 // TestStackPromote_FansOutToMembers verifies a stack promote promotes every
