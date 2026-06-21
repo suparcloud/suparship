@@ -716,10 +716,9 @@ func New(cfg Config) *Server {
 
 	if cfg.RegistryStore != nil && ah != nil {
 		rgh := &registryHandler{
-			store:        cfg.RegistryStore,
-			auth:         ah,
-			logger:       cfg.Logger,
-			projectStore: cfg.ProjectStore,
+			store:  cfg.RegistryStore,
+			auth:   ah,
+			logger: cfg.Logger,
 		}
 		rgh.registerRoutes(mux)
 		cfg.Logger.Info("container registry config endpoints enabled")

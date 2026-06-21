@@ -222,8 +222,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				Name:  "argocd",
 				Check: kube.NewArgoCDReadinessProbe(dynClient, ""),
 			})
-			// Wire Kargo promoter.
-			kargoStore := kube.NewKargoStore(dynClient)
+			// Wire Kargo promoter. All projects' Kargo CRs live in the single
+			// shared namespace on this (tooling) cluster.
+			kargoStore := kube.NewKargoStore(dynClient, gitops.KargoNamespace)
 			kargoAdapter := &kargoPromoterAdapter{store: kargoStore}
 			kargoPromoter = kargoAdapter
 			kargoStatusReader = kargoAdapter
@@ -354,7 +355,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// Provision the Kargo image-credential Secret in every project's Kargo
 		// namespace from the org registry config, so Warehouses can authenticate
 		// without waiting for a registry-save or app-publish. Best-effort, async.
-		go reconcileKargoRegistryCreds(context.Background(), registryStore, gitopsConfigStore, projectStore, logger)
+		go reconcileKargoRegistryCreds(context.Background(), registryStore, gitopsConfigStore, logger)
 
 		// Templates stored as ConfigMaps in the cluster (label
 		// suparship.io/type=template, namespace suparship-system) are served
@@ -922,9 +923,11 @@ func (a *kargoPromoterAdapter) CreatePromotion(ctx context.Context, projectNS, a
 	}, nil
 }
 
-// GetPromotionStatus implements server.KargoStatusReader.
+// GetPromotionStatus implements server.KargoStatusReader. Promotion names are
+// globally unique, so the (legacy) projectNS argument is unused — all CRs live in
+// the shared Kargo namespace.
 func (a *kargoPromoterAdapter) GetPromotionStatus(ctx context.Context, projectNS, promotionName string) (server.KargoPromotionResult, error) {
-	info, err := a.store.GetPromotionStatus(ctx, projectNS, promotionName)
+	info, err := a.store.GetPromotionStatus(ctx, promotionName)
 	if err != nil {
 		return server.KargoPromotionResult{}, err
 	}
@@ -937,21 +940,19 @@ func (a *kargoPromoterAdapter) GetPromotionStatus(ctx context.Context, projectNS
 }
 
 // ListAppStageStatuses implements server.KargoPipelineReader.
-// It lists all Kargo Stage CRs in projectNS and filters to those belonging to
-// appName (stage name starts with "{appName}-").
+// All projects share one Kargo namespace, so the store scopes the query by the
+// stamped project+app labels; here we strip the "{project}-{app}-" qualified-name
+// prefix to recover the env name for display.
 func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, projectNS, appName string) ([]server.KargoStageStatusResult, error) {
-	all, err := a.store.ListStageStatuses(ctx, projectNS)
+	all, err := a.store.ListAppStageStatuses(ctx, projectNS, appName)
 	if err != nil {
 		return nil, err
 	}
 
-	prefix := appName + "-"
+	prefix := projectNS + "-" + appName + "-"
 	var results []server.KargoStageStatusResult
 	for stageName, s := range all {
-		if len(stageName) <= len(prefix) || stageName[:len(prefix)] != prefix {
-			continue
-		}
-		envName := stageName[len(prefix):]
+		envName := strings.TrimPrefix(stageName, prefix)
 		results = append(results, server.KargoStageStatusResult{
 			StageName:             stageName,
 			EnvName:               envName,
@@ -962,10 +963,10 @@ func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, project
 		})
 	}
 
-	slog.Debug("kargo pipeline adapter: filtered stages for app",
-		"namespace", projectNS,
+	slog.Debug("kargo pipeline adapter: stages for app",
+		"namespace", gitops.KargoNamespace,
+		"project", projectNS,
 		"app", appName,
-		"totalStages", len(all),
 		"appStages", len(results),
 	)
 
@@ -1536,44 +1537,36 @@ func publishInitialEnvInfra(
 // files lack the new keys until rewritten. Idempotent: a no-op commit when
 // content is unchanged. Best-effort; per-app failures are logged.
 // reconcileKargoRegistryCreds provisions (or refreshes) the Kargo credential
-// Secrets in every project's Kargo namespace: the image cred (Warehouse tag
+// Secrets in the single shared Kargo namespace: the image cred (Warehouse tag
 // discovery) from the registry config, and the git cred (promotion git steps)
 // from the gitops config. Run at startup so Kargo can authenticate without
-// waiting for a config save or an app publish. Best-effort: per-project failures
-// are logged, not fatal. No-op for a store that is nil/unconfigured.
-func reconcileKargoRegistryCreds(ctx context.Context, store *registry.Store, gitStore *gitops.ConfigStore, projectStore project.Store, logger *slog.Logger) {
-	if projectStore == nil || (store == nil && gitStore == nil) {
+// waiting for a config save or an app publish. Best-effort: failures are logged,
+// not fatal. No-op for a store that is nil/unconfigured.
+func reconcileKargoRegistryCreds(ctx context.Context, store *registry.Store, gitStore *gitops.ConfigStore, logger *slog.Logger) {
+	if store == nil && gitStore == nil {
 		return
 	}
-	projects, err := projectStore.List(ctx)
-	if err != nil {
-		logger.Warn("kargo cred reconcile: list projects failed", "error", err)
-		return
+	// Both Kargo creds are org-global fixed-name Secrets matched by repoURL, and
+	// all projects share one Kargo namespace — so provision once into the shared
+	// namespace rather than replicating per project.
+	ns := gitops.KargoNamespace
+	var provisioned int
+	if store != nil {
+		if err := store.EnsureKargoCred(ctx, ns); err != nil {
+			logger.Warn("kargo image cred reconcile", "namespace", ns, "error", err)
+		} else {
+			provisioned++
+		}
 	}
-	var ok, failed int
-	for _, p := range projects {
-		ns := gitops.KargoNamespaceForProject(p.Metadata.Name)
-		ferr := false
-		if store != nil {
-			if err := store.EnsureKargoCred(ctx, ns); err != nil {
-				logger.Warn("kargo image cred reconcile", "project", p.Metadata.Name, "namespace", ns, "error", err)
-				ferr = true
-			}
+	if gitStore != nil {
+		if err := gitStore.EnsureKargoGitCred(ctx, ns); err != nil {
+			logger.Warn("kargo git cred reconcile", "namespace", ns, "error", err)
+		} else {
+			provisioned++
 		}
-		if gitStore != nil {
-			if err := gitStore.EnsureKargoGitCred(ctx, ns); err != nil {
-				logger.Warn("kargo git cred reconcile", "project", p.Metadata.Name, "namespace", ns, "error", err)
-				ferr = true
-			}
-		}
-		if ferr {
-			failed++
-			continue
-		}
-		ok++
 	}
-	if ok > 0 || failed > 0 {
-		logger.Info("kargo cred reconcile complete", "provisioned", ok, "failed", failed)
+	if provisioned > 0 {
+		logger.Info("kargo cred reconcile complete", "namespace", ns, "provisioned", provisioned)
 	}
 }
 
