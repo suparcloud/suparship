@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/suparcloud/suparship/internal/audit"
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/bootstrap"
 	"github.com/suparcloud/suparship/internal/branding"
@@ -25,6 +26,7 @@ import (
 	"github.com/suparcloud/suparship/internal/helmvalues"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
+	"github.com/suparcloud/suparship/internal/license"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -611,6 +613,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		StuckAppManager:         stuckAppManager,
 		ReadinessProbers:        readinessProbers,
 		CookieSecure:            cookieSecure,
+		License:                 license.Community{},                // open-source core; enterprise builds override
+		Auditor:                 audit.NewSlogAuditor(logger),       // enterprise builds can supply a SIEM sink
+		Authorizer:              rbac.NewOrgAuthorizer(orgProvider), // enterprise builds can supply custom-role/ABAC policy
 		Logger:                  logger,
 		KubeClient:              kubeClient,
 		DynClient:               dynClient,

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/suparcloud/suparship/internal/license"
 	"github.com/suparcloud/suparship/internal/version"
 )
 
@@ -15,6 +16,11 @@ type MetaResponse struct {
 	Version   string `json:"version"`
 	Commit    string `json:"commit"`
 	BuildDate string `json:"buildDate"`
+	// Edition is the active product edition ("community" or "enterprise").
+	Edition string `json:"edition"`
+	// Features lists entitled enterprise features so the UI can conditionally
+	// render enterprise panels. Empty for the community edition.
+	Features []string `json:"features"`
 }
 
 // readyzCheckResult is one entry in the GET /readyz response body.
@@ -30,10 +36,10 @@ type readyzResponse struct {
 	Checks []readyzCheckResult `json:"checks"`
 }
 
-func registerRoutes(mux *http.ServeMux, probers []ReadinessProber) {
+func registerRoutes(mux *http.ServeMux, probers []ReadinessProber, lic license.Validator) {
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.Handle("GET /readyz", buildReadyzHandler(probers))
-	mux.HandleFunc("GET /api/v1/meta", handleMeta)
+	mux.Handle("GET /api/v1/meta", buildMetaHandler(lic))
 }
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -82,18 +88,32 @@ func buildReadyzHandler(probers []ReadinessProber) http.Handler {
 	})
 }
 
-func handleMeta(w http.ResponseWriter, _ *http.Request) {
-	resp := MetaResponse{
-		App:       "suparship",
-		Version:   version.Version,
-		Commit:    version.Commit,
-		BuildDate: version.Date,
-	}
+// buildMetaHandler returns the GET /api/v1/meta handler. The active edition and
+// entitled enterprise features are read from lic (a nil validator is treated as
+// the community edition).
+func buildMetaHandler(lic license.Validator) http.HandlerFunc {
+	v := license.Resolve(lic)
+	return func(w http.ResponseWriter, _ *http.Request) {
+		feats := v.Features()
+		names := make([]string, 0, len(feats))
+		for _, f := range feats {
+			names = append(names, string(f))
+		}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+		resp := MetaResponse{
+			App:       "suparship",
+			Version:   version.Version,
+			Commit:    version.Commit,
+			BuildDate: version.Date,
+			Edition:   v.Edition(),
+			Features:  names,
+		}
 
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
 	}
 }

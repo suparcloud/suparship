@@ -90,7 +90,7 @@ type secretsHandler struct {
 	orgStore        rbac.OrgStore
 	appStore        domain.AppStore
 	vault           secrets.VaultStore
-	auditor         *secrets.Auditor
+	auditor         secrets.SecretAuditor
 	logger          *slog.Logger
 	saTokenStore    SATokenStore
 	saClientFactory SAClientFactory

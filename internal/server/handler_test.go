@@ -8,12 +8,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/suparcloud/suparship/internal/license"
 	"github.com/suparcloud/suparship/internal/version"
 )
 
 func newTestMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	registerRoutes(mux, nil)
+	registerRoutes(mux, nil, nil)
 	return mux
 }
 
@@ -63,7 +64,7 @@ func TestHandleReadyz_WithFailingProber(t *testing.T) {
 		{Name: "always-fail", Check: func(_ context.Context) error {
 			return fmt.Errorf("dependency unreachable")
 		}},
-	})
+	}, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
@@ -114,6 +115,33 @@ func TestHandleMeta(t *testing.T) {
 	}
 	if resp.BuildDate != version.Date {
 		t.Errorf("expected buildDate %q, got %q", version.Date, resp.BuildDate)
+	}
+	if resp.Edition != "community" {
+		t.Errorf("expected edition %q, got %q", "community", resp.Edition)
+	}
+	if len(resp.Features) != 0 {
+		t.Errorf("expected no features for community edition, got %v", resp.Features)
+	}
+}
+
+func TestHandleMeta_EnterpriseEdition(t *testing.T) {
+	mux := http.NewServeMux()
+	registerRoutes(mux, nil, license.NewStatic(license.EditionEnterprise, "saml", "audit-siem"))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/meta", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	var resp MetaResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Edition != "enterprise" {
+		t.Errorf("expected edition %q, got %q", "enterprise", resp.Edition)
+	}
+	// Features are returned sorted.
+	if len(resp.Features) != 2 || resp.Features[0] != "audit-siem" || resp.Features[1] != "saml" {
+		t.Errorf("expected [audit-siem saml], got %v", resp.Features)
 	}
 }
 
