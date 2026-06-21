@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -132,6 +133,51 @@ func EnsureNamespace(ctx context.Context, client kubernetes.Interface, ns string
 		return fmt.Errorf("creating namespace %q: %w", ns, err)
 	}
 
+	return nil
+}
+
+// KargoProjectNamespaceLabel marks a namespace as a Kargo Project namespace.
+// Kargo's Project admission webhook refuses to initialize a Project over a
+// pre-existing namespace that lacks this label (so it never hijacks an arbitrary
+// namespace), so suparship stamps it whenever it ensures the shared Kargo
+// namespace exists.
+const KargoProjectNamespaceLabel = "kargo.akuity.io/project"
+
+// EnsureKargoProjectNamespace ensures ns exists AND carries the
+// kargo.akuity.io/project label. This is required for the shared Kargo namespace:
+// credential provisioning may create the namespace before ArgoCD syncs the Kargo
+// Project CR, and Kargo will reject the Project ("namespace already exists and is
+// not labeled as a Project namespace") unless the namespace already carries the
+// label. The label is applied both on create and, idempotently, by patching a
+// pre-existing namespace that lacks it.
+func EnsureKargoProjectNamespace(ctx context.Context, client kubernetes.Interface, ns string) error {
+	existing, err := client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, cErr := client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   ns,
+				Labels: map[string]string{KargoProjectNamespaceLabel: "true"},
+			},
+		}, metav1.CreateOptions{})
+		if cErr == nil {
+			return nil
+		}
+		if !apierrors.IsAlreadyExists(cErr) {
+			return fmt.Errorf("creating kargo project namespace %q: %w", ns, cErr)
+		}
+		// Raced with another creator — re-fetch and ensure the label below.
+		existing, err = client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+	}
+	if err != nil {
+		return fmt.Errorf("checking kargo project namespace %q: %w", ns, err)
+	}
+	if existing.Labels[KargoProjectNamespaceLabel] == "true" {
+		return nil
+	}
+	patch := []byte(`{"metadata":{"labels":{"` + KargoProjectNamespaceLabel + `":"true"}}}`)
+	if _, err := client.CoreV1().Namespaces().Patch(ctx, ns, apitypes.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("labeling kargo project namespace %q: %w", ns, err)
+	}
 	return nil
 }
 

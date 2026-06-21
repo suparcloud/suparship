@@ -62,7 +62,7 @@ func (s *ConfigStore) EnsureKargoGitCred(ctx context.Context, projectNamespace s
 		return nil
 	}
 
-	if err := k8s.EnsureNamespace(ctx, s.client, projectNamespace); err != nil {
+	if err := k8s.EnsureKargoProjectNamespace(ctx, s.client, projectNamespace); err != nil {
 		return fmt.Errorf("ensure kargo namespace %q: %w", projectNamespace, err)
 	}
 

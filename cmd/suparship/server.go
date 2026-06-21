@@ -352,9 +352,22 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// a warning is logged and the server continues.
 		bootstrap.ReconcileArgoCD(cmd.Context(), dynClient, logger)
 
-		// Provision the Kargo image-credential Secret in every project's Kargo
-		// namespace from the org registry config, so Warehouses can authenticate
-		// without waiting for a registry-save or app-publish. Best-effort, async.
+		// Ensure the single shared Kargo namespace exists and is labeled as a Kargo
+		// Project namespace. Kargo's Project admission webhook rejects the Project
+		// CR (synced by ArgoCD) if the namespace already exists without the
+		// kargo.akuity.io/project label — which happens when an earlier deploy or a
+		// credential step created it unlabeled. Done unconditionally (not gated on
+		// registry/gitops creds being configured) and idempotently. Best-effort.
+		if kubeClient != nil {
+			if err := k8s.EnsureKargoProjectNamespace(context.Background(), kubeClient, gitops.KargoNamespace); err != nil {
+				logger.Warn("ensure kargo project namespace", "namespace", gitops.KargoNamespace, "error", err)
+			}
+		}
+
+		// Provision the org-global Kargo credential Secrets in the shared Kargo
+		// namespace from the org registry/gitops config, so Warehouses and
+		// promotion git steps can authenticate without waiting for a config-save or
+		// app-publish. Best-effort, async.
 		go reconcileKargoRegistryCreds(context.Background(), registryStore, gitopsConfigStore, logger)
 
 		// Templates stored as ConfigMaps in the cluster (label
