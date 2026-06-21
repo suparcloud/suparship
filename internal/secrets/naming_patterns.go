@@ -23,7 +23,21 @@ type ResourceNaming struct {
 	//   Shared cluster:    "{project}-{app}-{env}" → "myproject-api-staging"
 	//   Dedicated cluster: "{project}-{app}"       → "myproject-api"
 	AppNamespace string `json:"appNamespace,omitempty" yaml:"appNamespace,omitempty"`
+
+	// ArgoAppName is the org-wide pattern for ArgoCD Application names.
+	// Tokens: {project}, {app}, {env}, {cluster}. Empty → DefaultArgoAppName
+	// ("{project}-{app}-{cluster}"). Per-cluster by default so an app deployed to
+	// N clusters in an env yields N stably-named Applications and adding a cluster
+	// never renames the existing one. Must contain {app} and {cluster} so names
+	// stay unique across projects and across the clusters an env fans out to;
+	// cluster names are expected to carry an env prefix (e.g. "staging-eastus"),
+	// so {env} is omitted from the default to avoid redundancy.
+	ArgoAppName string `json:"argoAppName,omitempty" yaml:"argoAppName,omitempty"`
 }
+
+// DefaultArgoAppName is the ArgoCD Application name pattern used when
+// ResourceNaming.ArgoAppName is unset. See the ArgoAppName field docs.
+const DefaultArgoAppName = "{project}-{app}-{cluster}"
 
 // ── Hardcoded conventions ─────────────────────────────────────────────────
 
@@ -101,6 +115,15 @@ func (n ResourceNaming) EffectiveProjectNamespace() string { return n.ProjectNam
 // Empty string means no org default is set; topology decides at resolution time.
 func (n ResourceNaming) EffectiveAppNamespace() string { return n.AppNamespace }
 
+// EffectiveArgoAppName returns the configured ArgoCD Application name pattern,
+// or DefaultArgoAppName when unset.
+func (n ResourceNaming) EffectiveArgoAppName() string {
+	if n.ArgoAppName == "" {
+		return DefaultArgoAppName
+	}
+	return n.ArgoAppName
+}
+
 // Validate checks that the configured namespace patterns produce valid names.
 func (n ResourceNaming) Validate() error {
 	sample := NamingParams{Org: "default", Env: "prod", Project: "acme", App: "web", Cluster: "prod-us-east"}
@@ -111,6 +134,16 @@ func (n ResourceNaming) Validate() error {
 	}
 	if n.AppNamespace != "" {
 		if err := ValidateRenderedNamespace(RenderPattern(n.AppNamespace, sample), "appNamespace"); err != nil {
+			return err
+		}
+	}
+	if n.ArgoAppName != "" {
+		// {app} + {cluster} are required: {app} for cross-project uniqueness,
+		// {cluster} so the N Applications of a multi-cluster env don't collide.
+		if !strings.Contains(n.ArgoAppName, "{app}") || !strings.Contains(n.ArgoAppName, "{cluster}") {
+			return fmt.Errorf("naming: argoAppName must contain {app} and {cluster} tokens, got %q", n.ArgoAppName)
+		}
+		if err := ValidateRenderedDNS1123(RenderPattern(n.ArgoAppName, sample), "argoAppName"); err != nil {
 			return err
 		}
 	}

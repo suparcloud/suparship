@@ -26,7 +26,10 @@
 package gitops
 
 import (
+	"strings"
+
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 const (
@@ -49,6 +52,10 @@ const (
 	labelProject = "suparship.io/project"
 	labelEnv     = "suparship.io/env"
 	labelEnvType = "suparship.io/env-type"
+	// labelCluster identifies the destination cluster of a generated Application,
+	// so the per-cluster Applications of a fan-out env are distinguishable by
+	// label (not only by the cluster suffix in the name).
+	labelCluster = "suparship.io/cluster"
 )
 
 // Application is a minimal, serializable representation of an ArgoCD
@@ -73,6 +80,42 @@ type Application struct {
 // don't have this problem and KargoStageName stays "{app}-{env}".
 func ApplicationName(projectName, appName, envName string) string {
 	return projectName + "-" + appName + "-" + envName
+}
+
+// RenderArgoAppName renders a concrete ArgoCD Application name from an org
+// ResourceNaming pattern (tokens {project}/{app}/{env}/{cluster}). Pass the
+// effective pattern (ResourceNaming.EffectiveArgoAppName); cluster is the
+// resolved cluster Name the app deploys to in this env. Used by the Go-side
+// status/history/diagnostics readers and the Kargo argocd-update step so the
+// name they look up matches what the ApplicationSet renders.
+func RenderArgoAppName(pattern, projectName, appName, envName, clusterName string) string {
+	if pattern == "" {
+		pattern = secrets.DefaultArgoAppName
+	}
+	return secrets.RenderPattern(pattern, secrets.NamingParams{
+		Project: projectName,
+		App:     appName,
+		Env:     envName,
+		Cluster: clusterName,
+	})
+}
+
+// RenderArgoAppNameTemplate renders an org ResourceNaming pattern into an
+// ApplicationSet *template* string. An ApplicationSet is built per-env, so
+// {env} is substituted with the literal env name, while {project}/{app}/{cluster}
+// map to the ArgoCD generator params {{project}}/{{name}}/{{clusterName}} that
+// ArgoCD expands per generated Application at render time.
+func RenderArgoAppNameTemplate(pattern, envName string) string {
+	if pattern == "" {
+		pattern = secrets.DefaultArgoAppName
+	}
+	r := strings.NewReplacer(
+		"{project}", "{{project}}",
+		"{app}", "{{name}}",
+		"{cluster}", "{{clusterName}}",
+		"{env}", envName,
+	)
+	return r.Replace(pattern)
 }
 
 // ObjectMeta mirrors the Kubernetes ObjectMeta subset used by ArgoCD.
