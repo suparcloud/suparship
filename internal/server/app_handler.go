@@ -1837,11 +1837,12 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 
 	for _, name := range unreachable {
 		env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
-			Source: "runtime",
-			Level:  domain.DiagnosticWarning,
-			Title:  "Workload cluster unreachable",
-			Detail: fmt.Sprintf("cluster %q could not be reached", name),
-			Hint:   "Live replica count for this cluster is unavailable (ArgoCD may still show it Healthy). Check the cluster's kubeconfig/credentials under Clusters and that its API server is reachable from suparShip.",
+			Source:  "runtime",
+			Level:   domain.DiagnosticWarning,
+			Title:   "Workload cluster unreachable",
+			Detail:  fmt.Sprintf("cluster %q could not be reached", name),
+			Hint:    "Live replica count for this cluster is unavailable (ArgoCD may still show it Healthy). Check the cluster's kubeconfig/credentials under Clusters and that its API server is reachable from suparShip.",
+			Cluster: name,
 		})
 	}
 	if len(clients) == 0 {
@@ -1871,10 +1872,11 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 		agg.IngressURLs = append(agg.IngressURLs, info.IngressURLs...)
 		if len(clients) > 1 {
 			env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
-				Source: "runtime",
-				Level:  domain.DiagnosticInfo,
-				Title:  fmt.Sprintf("Cluster %s: %s", nc.name, info.Status),
-				Detail: fmt.Sprintf("%d/%d replicas available", info.Available, info.Replicas),
+				Source:  "runtime",
+				Level:   domain.DiagnosticInfo,
+				Title:   fmt.Sprintf("Cluster %s: %s", nc.name, info.Status),
+				Detail:  fmt.Sprintf("%d/%d replicas available", info.Available, info.Replicas),
+				Cluster: nc.name,
 			})
 		}
 	}
@@ -1884,28 +1886,45 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	ah.applyRuntimeInfo(env, agg)
 }
 
-// argoAppName resolves the ArgoCD Application name for an app in an env using the
-// org's configured ArgoAppName pattern and the env's effective (active) cluster.
-// For a multi-cluster env this targets the active/primary cluster's Application
-// (Phase 1). Falls back to the default pattern + an "in-cluster" cluster token
-// when the org or its env/cluster can't be resolved, mirroring the publisher.
-func (ah *appHandler) argoAppName(ctx context.Context, projectName, appName, envName string) string {
-	var pattern, cluster string
+// argoClusterApp pairs a destination cluster with the app's ArgoCD Application
+// name on that cluster (the chart Application; its platform companion is
+// name+"-platform").
+type argoClusterApp struct {
+	cluster string
+	name    string
+}
+
+// argoAppNamesForEnv resolves the per-cluster ArgoCD Application names for an app
+// in an env: the org ArgoAppName pattern rendered once per deploy-target cluster.
+// A single-cluster env yields one entry; a fan-out ("all") env yields one per
+// cluster, so status/diagnostics can read every cluster's Application. Falls back
+// to a single "in-cluster" entry when the org or its clusters can't be resolved,
+// mirroring the publisher's gitops.appSetClusterTargets fallback.
+func (ah *appHandler) argoAppNamesForEnv(ctx context.Context, projectName, appName, envName string) []argoClusterApp {
+	var pattern string
+	var clusters []string
 	if ah.orgProvider != nil {
 		if org, err := ah.orgProvider.GetOrg(ctx); err == nil && org != nil {
 			pattern = org.ResourceNaming.EffectiveArgoAppName()
 			for _, e := range org.Environments {
 				if e.Name == envName {
-					cluster = e.EffectiveClusterRef()
+					clusters = e.ResolveDeployTargets()
 					break
 				}
 			}
 		}
 	}
-	if cluster == "" {
-		cluster = "in-cluster" // mirror gitops.appSetClusterTargets fallback
+	if len(clusters) == 0 {
+		clusters = []string{"in-cluster"}
 	}
-	return gitops.RenderArgoAppName(pattern, projectName, appName, envName, cluster)
+	out := make([]argoClusterApp, 0, len(clusters))
+	for _, c := range clusters {
+		out = append(out, argoClusterApp{
+			cluster: c,
+			name:    gitops.RenderArgoAppName(pattern, projectName, appName, envName, c),
+		})
+	}
+	return out
 }
 
 // applyRuntimeInfo folds a RuntimeInfo into the env's stored status/urls/release.
@@ -1923,35 +1942,50 @@ func (ah *appHandler) applyRuntimeInfo(env *domain.AppEnvironment, info *runtime
 }
 
 // enrichEnvWithDiagnostics appends ArgoCD/ESO failure signals to env.Status so
-// a stuck or "not deployed" env explains itself. It reads both the chart
-// Application ({project}-{app}-{env}) and its platform companion
-// ({project}-{app}-{env}-platform) — the latter owns the ConfigMap +
-// ExternalSecret, so ESO "not ready" errors surface through its health. No-op
-// when no diagnostics reader is wired (fake/local mode) or project is unknown.
+// a stuck or "not deployed" env explains itself. For a fan-out ("all") env it
+// reads EVERY cluster's Application — so a failed sync on a secondary cluster is
+// surfaced, not just the active one — tagging each diagnostic with its cluster.
+// For each cluster it reads both the chart Application and its platform companion
+// (name+"-platform"), the latter owning the ConfigMap + ExternalSecret so ESO
+// "not ready" errors surface through its health. No-op when no diagnostics reader
+// is wired (fake/local mode) or project is unknown.
 func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName string, env *domain.AppEnvironment) {
 	if ah.diagnosticsReader == nil || env.ProjectName == "" {
 		return
 	}
-	base := ah.argoAppName(ctx, env.ProjectName, appName, env.EnvName)
-	for _, t := range []struct{ app, source string }{
-		{base, "argocd"},
-		{base + "-platform", "external-secrets"},
-	} {
-		diags, err := ah.diagnosticsReader.GetAppDiagnostics(ctx, t.app, t.source)
-		if err != nil {
-			// Don't silently drop a read failure (RBAC, throttling, API down) —
-			// that would falsely present a broken env as having no problems.
-			// Surface it as a warning so the operator knows status is unknown.
-			env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
-				Source: t.source,
-				Level:  domain.DiagnosticWarning,
-				Title:  "Delivery status unavailable",
-				Detail: err.Error(),
-				Hint:   "Could not read the ArgoCD Application status; the env's real health is unknown. Check suparShip's access to the ArgoCD namespace and that ArgoCD is reachable.",
-			})
-			continue
+	apps := ah.argoAppNamesForEnv(ctx, env.ProjectName, appName, env.EnvName)
+	// Only tag diagnostics with a cluster when the env actually fans out, to keep
+	// single-cluster output unchanged.
+	multi := len(apps) > 1
+	for _, ca := range apps {
+		cluster := ""
+		if multi {
+			cluster = ca.cluster
 		}
-		env.Status.Diagnostics = append(env.Status.Diagnostics, diags...)
+		for _, t := range []struct{ app, source string }{
+			{ca.name, "argocd"},
+			{ca.name + "-platform", "external-secrets"},
+		} {
+			diags, err := ah.diagnosticsReader.GetAppDiagnostics(ctx, t.app, t.source)
+			if err != nil {
+				// Don't silently drop a read failure (RBAC, throttling, API down) —
+				// that would falsely present a broken env as having no problems.
+				// Surface it as a warning so the operator knows status is unknown.
+				env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
+					Source:  t.source,
+					Level:   domain.DiagnosticWarning,
+					Title:   "Delivery status unavailable",
+					Detail:  err.Error(),
+					Hint:    "Could not read the ArgoCD Application status; the env's real health is unknown. Check suparShip's access to the ArgoCD namespace and that ArgoCD is reachable.",
+					Cluster: cluster,
+				})
+				continue
+			}
+			for i := range diags {
+				diags[i].Cluster = cluster
+			}
+			env.Status.Diagnostics = append(env.Status.Diagnostics, diags...)
+		}
 	}
 }
 
@@ -2204,11 +2238,12 @@ func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
 	}
 	for _, d := range s.Diagnostics {
 		dto.Diagnostics = append(dto.Diagnostics, DiagnosticDTO{
-			Source: d.Source,
-			Level:  string(d.Level),
-			Title:  d.Title,
-			Detail: d.Detail,
-			Hint:   d.Hint,
+			Source:  d.Source,
+			Level:   string(d.Level),
+			Title:   d.Title,
+			Detail:  d.Detail,
+			Hint:    d.Hint,
+			Cluster: d.Cluster,
 		})
 	}
 	return dto

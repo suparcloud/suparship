@@ -58,11 +58,12 @@ type AppStatusSummaryDTO struct {
 // DiagnosticDTO is one human-readable problem report surfaced from the
 // delivery pipeline (ArgoCD / External Secrets).
 type DiagnosticDTO struct {
-	Source string `json:"source"`
-	Level  string `json:"level"`
-	Title  string `json:"title"`
-	Detail string `json:"detail,omitempty"`
-	Hint   string `json:"hint,omitempty"`
+	Source  string `json:"source"`
+	Level   string `json:"level"`
+	Title   string `json:"title"`
+	Detail  string `json:"detail,omitempty"`
+	Hint    string `json:"hint,omitempty"`
+	Cluster string `json:"cluster,omitempty"`
 }
 
 // PreviewMetaDTO carries preview-specific metadata embedded in an environment
