@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/suparcloud/suparship/internal/audit"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
@@ -81,6 +82,8 @@ func (rh *rbacHandler) handleCreateProject(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	recordAudit(r.Context(), rh.auditor, "project.create", req.Name, req.Name, audit.ResultSuccess, nil)
+
 	writeJSON(w, http.StatusCreated, ProjectDTO{
 		Name:        p.Metadata.Name,
 		DisplayName: p.Spec.DisplayName,
@@ -137,6 +140,8 @@ func (rh *rbacHandler) handleDeleteProject(w http.ResponseWriter, r *http.Reques
 		afterPrune := func() { ah.deleteOwnedProjectNamespaces(context.Background(), projectName) }
 		go unpublishProjectTwoPhase(context.Background(), pub, counter, projectName, afterPrune)
 	}
+
+	recordAudit(r.Context(), rh.auditor, "project.delete", projectName, projectName, audit.ResultSuccess, nil)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -208,12 +213,13 @@ func unpublishProjectTwoPhase(ctx context.Context, pub GitOpsPublisher, counter 
 func (rh *rbacHandler) orgAdminOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := sessionFromContext(r.Context())
-		org, err := rh.orgStore.GetOrg(r.Context())
+		id := rbac.Identity{Username: sess.Username, Groups: sess.Groups}
+		allowed, err := rh.authorizer().Authorize(r.Context(), id, "*", rbac.RoleOrgAdmin)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
 			return
 		}
-		if !org.HasPermissionForIdentity(sess.Username, sess.Groups, "*", rbac.RoleOrgAdmin) {
+		if !allowed {
 			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
 			return
 		}

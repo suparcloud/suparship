@@ -5,6 +5,7 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/suparcloud/suparship/internal/audit"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -51,6 +52,24 @@ type rbacHandler struct {
 	// suparship-system namespace (the org ConfigMap stays credential-free).
 	// Optional; when nil the OIDC PUT rejects requests that carry a secret.
 	kubeClient kubernetes.Interface
+	// auditor records project lifecycle events (create/delete). Defaults to a
+	// Nop when unset.
+	auditor audit.Auditor
+	// authz decides role-based access. Optional: when nil the middleware falls
+	// back to a default OrgAuthorizer over orgStore (see authorizer()), so the
+	// core behaves identically. Enterprise builds inject a custom Authorizer.
+	authz rbac.Authorizer
+}
+
+// authorizer returns the configured Authorizer, or a default OrgAuthorizer
+// backed by orgStore when none was injected. This keeps the enforcement
+// middleware behaviour-identical to the previous inline org permission check
+// while allowing enterprise builds to override the policy.
+func (rh *rbacHandler) authorizer() rbac.Authorizer {
+	if rh.authz != nil {
+		return rh.authz
+	}
+	return rbac.NewOrgAuthorizer(rh.orgStore)
 }
 
 // requireRole returns middleware that enforces authentication and checks that
@@ -62,14 +81,14 @@ func (rh *rbacHandler) requireRole(role rbac.Role, extractProject ProjectExtract
 		return rh.auth.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 			sess := sessionFromContext(r.Context())
 
-			org, err := rh.orgStore.GetOrg(r.Context())
+			project := extractProject(r)
+			id := rbac.Identity{Username: sess.Username, Groups: sess.Groups}
+			allowed, err := rh.authorizer().Authorize(r.Context(), id, project, role)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
 				return
 			}
-
-			project := extractProject(r)
-			if !org.HasPermissionForIdentity(sess.Username, sess.Groups, project, role) {
+			if !allowed {
 				writeJSON(w, http.StatusForbidden, errorResponse{Error: "insufficient permissions"})
 				return
 			}
@@ -357,12 +376,13 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 func (rh *rbacHandler) requireOrgAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := sessionFromContext(r.Context())
-		org, err := rh.orgStore.GetOrg(r.Context())
+		id := rbac.Identity{Username: sess.Username, Groups: sess.Groups}
+		allowed, err := rh.authorizer().Authorize(r.Context(), id, "*", rbac.RoleOrgAdmin)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
 			return
 		}
-		if !org.HasPermissionForIdentity(sess.Username, sess.Groups, "*", rbac.RoleOrgAdmin) {
+		if !allowed {
 			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
 			return
 		}

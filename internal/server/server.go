@@ -14,11 +14,13 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/suparcloud/suparship/internal/audit"
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/license"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -376,10 +378,24 @@ type Config struct {
 	AppDiagnosticsReader    AppDiagnosticsReader    // optional: surfaces ArgoCD/ESO failure signals in app env status
 	StuckAppManager         StuckAppManager         // optional: enables platform stuck-app detection + unstick endpoints
 	VaultStore              secrets.VaultStore      // optional: enables secret CRUD across global/env/cluster scopes
-	SecretsAuditor          *secrets.Auditor        // optional: enables audit logging for secret ops
+	SecretsAuditor          secrets.SecretAuditor   // optional: enables audit logging for secret ops (enterprise builds can supply a SIEM sink)
 	ReadinessProbers        []ReadinessProber       // optional: checked by GET /readyz
 	CookieSecure            bool                    // true for production (HTTPS)
-	Logger                  *slog.Logger
+	// License reports the active edition and entitled enterprise features. Nil
+	// is treated as the community edition. The core only uses it to advertise
+	// the edition via GET /api/v1/meta; enterprise builds supply a Validator
+	// backed by a signed license key.
+	License license.Validator
+	// Auditor records audit events for app/project/promotion operations. Nil
+	// disables auditing (treated as a no-op). The core defaults to a structured
+	// slog auditor in cmd; enterprise builds can supply a SIEM/immutable-store
+	// sink. (Secret-mutation auditing is separate — see SecretsAuditor.)
+	Auditor audit.Auditor
+	// Authorizer decides role-based access for the RBAC middleware. Nil uses the
+	// built-in OrgAuthorizer (role hierarchy over the org config). Enterprise
+	// builds can supply a custom-role / ABAC / policy-engine implementation.
+	Authorizer rbac.Authorizer
+	Logger     *slog.Logger
 	// UpperLevelEnvWriter, when set, writes Org/Environment/Project runtime
 	// ConfigMaps in suparship-system alongside domain-store saves. Requires a
 	// live Kubernetes client; omit in unit tests.
@@ -430,7 +446,11 @@ type Server struct {
 // New creates a Server from the given Config.
 func New(cfg Config) *Server {
 	mux := http.NewServeMux()
-	registerRoutes(mux, cfg.ReadinessProbers)
+	registerRoutes(mux, cfg.ReadinessProbers, cfg.License)
+
+	// Resolve the audit sink once (Nop when none configured) so handlers can
+	// record unconditionally.
+	auditor := audit.Resolve(cfg.Auditor)
 
 	var ah *authHandler
 	if cfg.Authenticator != nil {
@@ -456,7 +476,7 @@ func New(cfg Config) *Server {
 		// provider is wired we require org_admin on DELETE; without it we
 		// fall back to plain auth so harnesses without an OrgStore work.
 		if cfg.OrgProvider != nil {
-			rh := &rbacHandler{auth: ah, orgStore: cfg.OrgProvider, projectStore: cfg.ProjectStore}
+			rh := &rbacHandler{auth: ah, orgStore: cfg.OrgProvider, projectStore: cfg.ProjectStore, authz: cfg.Authorizer}
 			th.authMiddleware = func(next http.HandlerFunc) http.HandlerFunc {
 				return ah.requireAuth(rh.requireOrgAdmin(next))
 			}
@@ -470,6 +490,8 @@ func New(cfg Config) *Server {
 			auth:         ah,
 			orgStore:     cfg.OrgProvider,
 			projectStore: cfg.ProjectStore,
+			auditor:      auditor,
+			authz:        cfg.Authorizer, // nil → built-in OrgAuthorizer (see authorizer())
 		}
 		if r, ok := cfg.GitOpsPublisher.(SecretStoreReconciler); ok {
 			rh.storeReconciler = r
@@ -501,6 +523,7 @@ func New(cfg Config) *Server {
 		}
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ClusterTemplateLoader, cfg.ProjectStore)
+			rh.appHandler.auditor = auditor
 			rh.appHandler.kubeClient = cfg.KubeClient
 			rh.appHandler.registryStore = cfg.RegistryStore
 			rh.appHandler.gitopsConfigStore = cfg.GitOpsConfigStore
@@ -680,7 +703,7 @@ func New(cfg Config) *Server {
 		// write/sync routes; without it we fall back to plain auth so test
 		// harnesses without an OrgStore keep working.
 		if cfg.OrgProvider != nil {
-			rh := &rbacHandler{auth: ah, orgStore: cfg.OrgProvider, projectStore: cfg.ProjectStore}
+			rh := &rbacHandler{auth: ah, orgStore: cfg.OrgProvider, projectStore: cfg.ProjectStore, authz: cfg.Authorizer}
 			trh.authMiddleware = func(next http.HandlerFunc) http.HandlerFunc {
 				return ah.requireAuth(rh.requireOrgAdmin(next))
 			}
