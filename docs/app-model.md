@@ -56,6 +56,33 @@ internal/domain/types.go — Service (deprecated), kept for compatibility only
 New code MUST use `domain.App` and `domain.AppStore`. Do not add features to
 the deprecated `domain.Service` or `domain.ServiceStore` types.
 
+### App sizing & the stack boundary
+
+There is **no cap** on how many components an app has. An app with one `web` +
+several `worker` + `cron` components is normal and fully supported. The boundary
+is **shape, not size**:
+
+> **One app = one atomic-release unit** (one Kargo pipeline / one image-tag
+> promotion) with **at most one HTTP surface**, plus the workers/crons that ship
+> and roll out with it.
+
+The forcing function is the **single-exposed-component invariant**: an app may
+have at most one component with a non-disabled `exposeMode` (and at most one `web`
+component). Reach for **separate apps grouped in a [stack](stacks.md)** when you
+need **multiple HTTP surfaces**, **independent release cadences**, or to **clone a
+collection** with config diffs. See [ADR-0002](adr/0002-app-vs-stack-boundary.md).
+
+### Deployment variants
+
+Pick the primitive by the need:
+
+| Need | Primitive |
+|---|---|
+| Test a branch/PR in isolation | **Preview** — ephemeral env instance (below) |
+| Differ config staging ↔ prod | **Per-env config** (`EnvironmentDefaults`) + promotion |
+| A second long-lived copy (tenant/region, cloud-vs-self-hosted) | **Clone** (stack-clone) |
+| Canary/stable split within one env | **Release channels** — *post-0.1* (Gateway API) |
+
 ---
 
 ## Environment — runtime context, not a navigation object

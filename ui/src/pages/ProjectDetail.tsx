@@ -226,7 +226,12 @@ export function ProjectDetail() {
       {/* Stacks */}
       {stacks.length > 0 && (
         <div>
-          <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-gray-400">Stacks</h2>
+          <h2 className="mb-3 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-gray-400">
+            Stacks
+            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+              Beta
+            </span>
+          </h2>
           <div className="grid gap-4 sm:grid-cols-2">
             {stacks.map((s) => (
               <Link

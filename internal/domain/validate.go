@@ -99,7 +99,8 @@ func ValidateSingleExposedComponent(components []ComponentSpec, allowMultiple bo
 	}
 	if count > 1 {
 		return fmt.Errorf(
-			"app has %d web components; at most one is allowed unless explicitly permitted",
+			"app has %d web components; an app may expose at most one HTTP surface — "+
+				"split additional web components into their own apps and group them in a stack",
 			count,
 		)
 	}
@@ -146,7 +147,8 @@ func ValidateExposeModes(components []ComponentSpec, orgProfiles, envProfiles Ro
 	}
 	if exposed > 1 {
 		return fmt.Errorf(
-			"app has %d components with non-disabled exposeMode; at most one is allowed",
+			"app has %d components with a non-disabled exposeMode; an app may expose at most one HTTP surface — "+
+				"split additional exposed components into their own apps and group them in a stack",
 			exposed,
 		)
 	}

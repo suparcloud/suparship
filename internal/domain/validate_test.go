@@ -680,7 +680,7 @@ func TestValidateExposeModes(t *testing.T) {
 				{Name: "api", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
 			},
 			org:     orgWithBoth,
-			wantErr: "at most one is allowed",
+			wantErr: "at most one HTTP surface",
 		},
 		{
 			name: "external mode without profile errors",
@@ -712,7 +712,7 @@ func TestValidateExposeModes(t *testing.T) {
 				{Name: "api", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
 			},
 			org:     orgWithBoth,
-			wantErr: "at most one is allowed",
+			wantErr: "at most one HTTP surface",
 		},
 	}
 	for _, tt := range tests {
