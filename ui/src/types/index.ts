@@ -507,6 +507,8 @@ export interface Diagnostic {
   title: string;
   detail?: string;
   hint?: string;
+  /** Destination cluster this came from, set when the env fans out to >1 cluster. */
+  cluster?: string;
 }
 
 export interface AppStatusSummary {
