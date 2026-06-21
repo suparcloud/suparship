@@ -364,6 +364,8 @@ function KargoPromotionDetail({
     async function fetchPhase() {
       try {
         const status = await getKargoPromotionStatus(project!, app!, kargo.name);
+        // available=false → no Kargo status reader; keep the last known phase.
+        if (status.available === false) return;
         setPhase(status.phase);
         if (terminal.has(status.phase)) {
           stopPolling();
@@ -599,9 +601,10 @@ function EnvPipelineBar({
     async function fetchPipeline() {
       try {
         const data = await getKargoAppPipeline(project, appName);
-        if (!cancelled) setPipeline(data);
+        // available=false → no Kargo pipeline reader; degrade to plain switcher.
+        if (!cancelled) setPipeline(data.available === false ? null : data);
       } catch {
-        // Kargo not configured — degrade to plain env switcher.
+        // Kargo not configured / request failed — degrade to plain env switcher.
       }
     }
 
@@ -2486,12 +2489,16 @@ function DeploymentsTab({
     getAppDeploymentHistory(project, appName, envName)
       .then((res) => {
         if (!cancelled) {
-          setHistoryData(res);
+          // available=false → no ArgoCD history reader wired; show "unavailable".
+          // (Tolerate older servers that omit the field by treating undefined as available.)
+          setUnavailable(res.available === false);
+          setHistoryData(res.available === false ? null : res);
           setLoading(false);
         }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
+          // A 501 from an older server still maps to "unavailable".
           const status = (err as { status?: number })?.status;
           setUnavailable(status === 501);
           setHistoryData(null);

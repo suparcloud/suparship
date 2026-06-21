@@ -2235,7 +2235,10 @@ func appPreviewToDTO(env *domain.AppEnvironment) AppPreviewSummaryDTO {
 // it returns 501 Not Implemented.
 func (ah *appHandler) handleGetKargoPromotion(w http.ResponseWriter, r *http.Request) {
 	if ah.kargoStatusReader == nil {
-		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "kargo status reader not configured"})
+		// No Kargo wired (e.g. local/dev). Degrade gracefully: 200 with
+		// available=false so the polling UI shows "unavailable" instead of
+		// erroring on a repeated 501.
+		writeJSON(w, http.StatusOK, KargoPromotionStatusResponse{Available: false})
 		return
 	}
 
@@ -2265,10 +2268,11 @@ func (ah *appHandler) handleGetKargoPromotion(w http.ResponseWriter, r *http.Req
 	)
 
 	writeJSON(w, http.StatusOK, KargoPromotionStatusResponse{
-		Name:    result.Name,
-		Stage:   result.Stage,
-		Freight: result.Freight,
-		Phase:   result.Phase,
+		Available: true,
+		Name:      result.Name,
+		Stage:     result.Stage,
+		Freight:   result.Freight,
+		Phase:     result.Phase,
 	})
 }
 
@@ -2281,7 +2285,9 @@ func (ah *appHandler) handleGetKargoPromotion(w http.ResponseWriter, r *http.Req
 // Returns 501 when kargoPipelineReader is not configured.
 func (ah *appHandler) handleGetKargoStages(w http.ResponseWriter, r *http.Request) {
 	if ah.kargoPipelineReader == nil {
-		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "kargo pipeline reader not configured"})
+		// No Kargo wired: 200 with available=false so the pipeline bar degrades
+		// to a plain env switcher instead of erroring on its 3s poll.
+		writeJSON(w, http.StatusOK, KargoAppPipelineResponse{Available: false, Stages: []KargoStageStatusDTO{}})
 		return
 	}
 
@@ -2332,7 +2338,7 @@ func (ah *appHandler) handleGetKargoStages(w http.ResponseWriter, r *http.Reques
 		})
 	}
 
-	writeJSON(w, http.StatusOK, KargoAppPipelineResponse{Stages: dtos})
+	writeJSON(w, http.StatusOK, KargoAppPipelineResponse{Available: true, Stages: dtos})
 }
 
 // handleGetAppDeploymentHistory handles
@@ -2346,7 +2352,9 @@ func (ah *appHandler) handleGetKargoStages(w http.ResponseWriter, r *http.Reques
 // but has no sync events yet.
 func (ah *appHandler) handleGetAppDeploymentHistory(w http.ResponseWriter, r *http.Request) {
 	if ah.deploymentHistoryReader == nil {
-		writeJSON(w, http.StatusNotImplemented, errorResponse{Error: "deployment history reader not configured"})
+		// No ArgoCD history reader wired (e.g. fake/local dev): 200 with
+		// available=false so the UI shows "history unavailable" rather than an error.
+		writeJSON(w, http.StatusOK, AppDeploymentHistoryResponse{Available: false, History: []AppDeploymentHistoryEntryDTO{}})
 		return
 	}
 
@@ -2396,6 +2404,7 @@ func (ah *appHandler) handleGetAppDeploymentHistory(w http.ResponseWriter, r *ht
 	}
 
 	writeJSON(w, http.StatusOK, AppDeploymentHistoryResponse{
+		Available:   true,
 		Project:     projectName,
 		App:         appName,
 		Environment: envName,
