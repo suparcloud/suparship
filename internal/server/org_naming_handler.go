@@ -31,6 +31,11 @@ type OrgNamingDTO struct {
 	//   Shared cluster:    "{project}-{app}-{env}" → "myproject-api-staging"
 	//   Dedicated cluster: "{project}-{app}"       → "myproject-api"
 	AppNamespace string `json:"appNamespace,omitempty"`
+
+	// ArgoAppName is the org-wide pattern for ArgoCD Application names.
+	// Tokens: {project}, {app}, {env}, {cluster}. Empty = the default
+	// "{project}-{app}-{cluster}" (per-cluster). Must contain {app} and {cluster}.
+	ArgoAppName string `json:"argoAppName,omitempty"`
 }
 
 // GET /api/v1/org/naming
@@ -43,6 +48,7 @@ func (rh *rbacHandler) handleGetOrgNaming(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, OrgNamingDTO{
 		ProjectNamespace: org.ResourceNaming.ProjectNamespace,
 		AppNamespace:     org.ResourceNaming.AppNamespace,
+		ArgoAppName:      org.ResourceNaming.ArgoAppName,
 	})
 }
 
@@ -76,6 +82,11 @@ func (rh *rbacHandler) handlePutOrgNaming(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	// ArgoAppName uses the model's own invariant ({app}+{cluster}, valid name).
+	if err := (secrets.ResourceNaming{ArgoAppName: req.ArgoAppName}).Validate(); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
 
 	org, err := rh.orgStore.GetOrg(r.Context())
 	if err != nil {
@@ -85,6 +96,7 @@ func (rh *rbacHandler) handlePutOrgNaming(w http.ResponseWriter, r *http.Request
 
 	org.ResourceNaming.ProjectNamespace = req.ProjectNamespace
 	org.ResourceNaming.AppNamespace = req.AppNamespace
+	org.ResourceNaming.ArgoAppName = req.ArgoAppName
 
 	// Clear per-environment NamespacePattern overrides so the new global
 	// default applies uniformly. Operators may restore individual overrides
@@ -101,5 +113,6 @@ func (rh *rbacHandler) handlePutOrgNaming(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, OrgNamingDTO{
 		ProjectNamespace: org.ResourceNaming.ProjectNamespace,
 		AppNamespace:     org.ResourceNaming.AppNamespace,
+		ArgoAppName:      org.ResourceNaming.ArgoAppName,
 	})
 }
