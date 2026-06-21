@@ -338,6 +338,8 @@ func appCreateTestTemplate() *tpl.Template {
 			Engine:   tpl.Engine{Type: tpl.EngineHelm},
 			Inputs: []tpl.Input{
 				{Name: "image", Title: "Image", Type: tpl.InputTypeString, Required: true},
+				// Optional: lets CD tests supply a watchable image source.
+				{Name: "image_repository", Title: "Image Repository", Type: tpl.InputTypeString},
 			},
 			SecretInputs: []tpl.SecretInput{
 				{Name: "db_url", Title: "Database URL", SecretRef: "db.url"},

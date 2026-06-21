@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	domainapp "github.com/suparcloud/suparship/internal/app"
+	"github.com/suparcloud/suparship/internal/audit"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/k8s"
@@ -73,6 +74,9 @@ type appHandler struct {
 	// gitopsConfigStore, when set, provisions the Kargo git-credential Secret in
 	// the app's Kargo Project namespace so promotion git-clone/push steps auth.
 	gitopsConfigStore *gitops.ConfigStore
+	// auditor records app lifecycle events (create/delete/rename/promote).
+	// Defaults to a Nop when unset.
+	auditor audit.Auditor
 }
 
 // ensureKargoProjectCreds provisions/refreshes both Kargo credential Secrets in
@@ -237,6 +241,15 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A CD-managed app must have an image for Kargo to watch; reject early
+	// rather than publishing a placeholder Warehouse that never pulls.
+	if req.CD != nil && req.CD.Managed {
+		if err := ah.validateCDImageSource(r.Context(), tmpl.Metadata.Name, tmpl, values); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+	}
+
 	result, err := domainapp.Create(domainapp.CreateRequest{
 		ProjectName:        projectName,
 		AppName:            req.Name,
@@ -369,6 +382,9 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	saved, _ := ah.appStore.GetApp(r.Context(), projectName, req.Name)
 	savedEnvs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, req.Name)
 
+	recordAudit(r.Context(), ah.auditor, "app.create", projectName, req.Name, audit.ResultSuccess,
+		map[string]string{"template": req.Template})
+
 	writeJSON(w, http.StatusCreated, createAppResponse{
 		App: appToDetailDTO(saved, savedEnvs),
 	})
@@ -476,7 +492,21 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		app.Spec.RawValues = *req.RawValues
 	}
 	if req.CD != nil {
-		app.Spec.CD = cdConfigFromDTO(req.CD)
+		cd := cdConfigFromDTO(req.CD)
+		// Enabling CD-managed tag ownership requires a watchable image source
+		// (template/override Images or app image_repository); reject otherwise so
+		// we never publish a placeholder Warehouse that silently never promotes.
+		// Validate before mutating the spec so a rejection leaves the app untouched.
+		if cd.Managed {
+			// Best-effort template resolve: a nil tmpl still validates against the
+			// app's own image_repository and the template-name-keyed override.
+			tmpl, _ := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
+			if err := ah.validateCDImageSource(r.Context(), app.Spec.Template.Name, tmpl, app.Spec.Values); err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+				return
+			}
+		}
+		app.Spec.CD = cd
 	}
 	if req.ComponentConfigs != nil {
 		// Apply app-level per-component config onto the matching ComponentSpec.
@@ -596,6 +626,8 @@ func (ah *appHandler) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	recordAudit(r.Context(), ah.auditor, "app.delete", projectName, appName, audit.ResultSuccess, nil)
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -655,7 +687,7 @@ func (ah *appHandler) handleRenameApp(w http.ResponseWriter, r *http.Request) {
 	for _, oldEnv := range oldEnvs {
 		ne := *oldEnv
 		ne.AppName = newName
-		ne.Namespace = ""                                                  // recomputed below
+		ne.Namespace = ""                                                    // recomputed below
 		ne.Status = domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed} // fresh; live status refreshes
 		ne.URLs = []string{}
 		ne.Release = nil
@@ -700,6 +732,8 @@ func (ah *appHandler) handleRenameApp(w http.ResponseWriter, r *http.Request) {
 	ah.emptyAppVaultItems(r.Context(), projectName, oldName, oldEnvs)
 
 	slog.Info("renamed app", "project", projectName, "old", oldName, "new", newName)
+	recordAudit(r.Context(), ah.auditor, "app.rename", projectName, newName, audit.ResultSuccess,
+		map[string]string{"from": oldName})
 	writeJSON(w, http.StatusOK, AppDetailResponse{App: appToDetailDTO(&newApp, newEnvs)})
 }
 
@@ -1480,6 +1514,8 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, statusForPromoteErr(err), errorResponse{Error: err.Error()})
 		return
 	}
+	recordAudit(r.Context(), ah.auditor, "app.promote", projectName, appName, audit.ResultSuccess,
+		map[string]string{"to": req.TargetEnvironment})
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1928,6 +1964,35 @@ func cdConfigFromDTO(dto *CDConfigDTO) domain.CDConfig {
 	return domain.CDConfig{Managed: dto.Managed}
 }
 
+// validateCDImageSource rejects enabling CD-managed tag ownership (cd.managed) on
+// an app that has no image for Kargo to watch. Without an Images mapping on the
+// template (or a sync-safe override set from the template UI for a BYO chart),
+// and without an app-level image_repository, publish would seed a placeholder
+// ghcr.io/{project}/{app} Warehouse that never pulls — so the CD pipeline would
+// silently never promote. This mirrors the publisher's resolveKargoImages
+// precedence (override images → template images → image_repository) and catches
+// the gap at the API so the operator gets immediate, actionable feedback rather
+// than a quietly broken Warehouse.
+func (ah *appHandler) validateCDImageSource(ctx context.Context, templateName string, tmpl *tpl.Template, values map[string]any) error {
+	// An app-level image_repository is a concrete source on its own — checkable
+	// without resolving the template, so this still guards correctly when the
+	// template loader is unavailable.
+	if repo, ok := values["image_repository"].(string); ok && strings.TrimSpace(repo) != "" {
+		return nil
+	}
+	if tmpl != nil && len(tmpl.Spec.Images) > 0 {
+		return nil
+	}
+	// A sync-safe override mapping replaces / substitutes for the template's own
+	// Images at publish (keyed by template name), so honour it here too.
+	if ah.kubeClient != nil && templateName != "" {
+		if ov, err := kube.LoadTemplateOverride(ctx, ah.kubeClient, templateName); err == nil && ov != nil && len(ov.Images) > 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("continuous delivery (cd.managed) needs an image for Kargo to watch: declare an Images mapping on template %q (Template detail → Images) or set image_repository on the app", templateName)
+}
+
 func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO {
 	secretRefs := make([]AppSecretRefDTO, 0, len(app.Spec.SecretRefs))
 	for _, ref := range app.Spec.SecretRefs {
@@ -1966,7 +2031,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		EnvRawValues:     envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
 		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
-		CD: CDConfigDTO{Managed: app.Spec.CD.Managed},
+		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed},
 	}
 }
 
