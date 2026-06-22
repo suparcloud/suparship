@@ -559,6 +559,25 @@ func TestBuildArgoAppSet_NamespaceDoesNotIncludeEnvName(t *testing.T) {
 	}
 }
 
+// TestBuildArgoAppSet_KargoAuthorizedStageNamespace verifies the Application's
+// kargo.akuity.io/authorized-stage annotation names the Kargo Stage by its
+// kargo-{project} namespace and {app}-{env} stage name. The Kargo "project" in
+// this annotation is the Stage's namespace; with per-project Kargo namespaces it
+// must carry the "kargo-" prefix, or ArgoCD rejects the promotion's argocd-update
+// step with "Application ... is not authorized".
+func TestBuildArgoAppSet_KargoAuthorizedStageNamespace(t *testing.T) {
+	env := gitops.AppSetEnv{
+		EnvName:       "staging",
+		ClusterServer: "https://kubernetes.default.svc",
+	}
+	appSet := gitops.BuildArgoAppSet(env, "https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
+	got := appSet.Spec.Template.Metadata.Annotations["kargo.akuity.io/authorized-stage"]
+	want := "kargo-{{project}}:{{name}}-staging"
+	if got != want {
+		t.Errorf("authorized-stage annotation = %q, want %q", got, want)
+	}
+}
+
 // TestBuildArgoPreviewAppSet_NamespaceIsTemplateVar ensures the preview AppSet
 // still uses {{namespace}} (regression guard).
 func TestBuildArgoPreviewAppSet_NamespaceIsTemplateVar(t *testing.T) {
