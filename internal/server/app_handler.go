@@ -80,10 +80,12 @@ type appHandler struct {
 }
 
 // ensureKargoProjectCreds provisions/refreshes both Kargo credential Secrets in
-// the project's Kargo namespace: the image cred (Warehouse tag discovery) and
-// the git cred (promotion git-clone/push). Best-effort: failures are logged,
-// never surfaced (publish already succeeded). No-op when the respective store is
-// not wired or the source config is disabled/unconfigured.
+// the project's kargo-{project} namespace: the image cred (Warehouse tag
+// discovery) and the git cred (promotion git-clone/push). The cred path also
+// ensures+labels the kargo-{project} namespace as a Kargo Project namespace.
+// Best-effort: failures are logged, never surfaced (publish already succeeded).
+// No-op when the respective store is not wired or the source config is
+// disabled/unconfigured.
 func (ah *appHandler) ensureKargoProjectCreds(ctx context.Context, projectName string) {
 	ns := gitops.KargoNamespaceForProject(projectName)
 	if ah.registryStore != nil {

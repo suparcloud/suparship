@@ -351,29 +351,38 @@ export function StackDetail() {
               </div>
             ))}
           </div>
-          {addable.length > 0 && (
-            <div className="flex items-center gap-2 border-t border-gray-100 px-6 py-3">
-              <select
-                value={addApp}
-                onChange={(e) => setAddApp(e.target.value)}
-                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
-              >
-                <option value="">Add an app…</option>
-                {addable.map((a) => (
-                  <option key={a} value={a}>
-                    {a}
-                  </option>
-                ))}
-              </select>
-              <button
-                onClick={() => addApp && move(addApp, stackName)}
-                disabled={!addApp}
-                className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-              >
-                Add
-              </button>
-            </div>
-          )}
+          <div className="flex flex-wrap items-center gap-2 border-t border-gray-100 px-6 py-3">
+            <Link
+              to={`/projects/${encodeURIComponent(project)}/apps/new?stack=${encodeURIComponent(stackName)}`}
+              className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700"
+            >
+              + New app
+            </Link>
+            {addable.length > 0 && (
+              <>
+                <span className="text-xs text-gray-400">or attach existing:</span>
+                <select
+                  value={addApp}
+                  onChange={(e) => setAddApp(e.target.value)}
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+                >
+                  <option value="">Add an app…</option>
+                  {addable.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => addApp && move(addApp, stackName)}
+                  disabled={!addApp}
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Attach
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
 

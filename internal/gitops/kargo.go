@@ -2,6 +2,8 @@ package gitops
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/domain"
@@ -14,10 +16,18 @@ const (
 	kargoKindStage         = "Stage"
 	kargoKindPromotion     = "Promotion"
 	kargoKindProjectConfig = "ProjectConfig"
+	kargoKindProject       = "Project"
 
 	// labelKargoProject marks resources as belonging to a Kargo project
 	// (namespace). Kargo uses namespace-per-project isolation.
 	labelKargoProject = "kargo.akuity.io/project"
+
+	// kargoNamespacePrefix prefixes each suparship project's Kargo Project
+	// namespace. Kargo's tenancy model is one Project = one namespace, so every
+	// suparship project gets its own namespace on the tooling cluster. The
+	// "kargo-" prefix keeps that namespace distinct from — and uncollidable with,
+	// in single-cluster setups — the project's workload/environment namespaces.
+	kargoNamespacePrefix = "kargo-"
 )
 
 // ── Warehouse ─────────────────────────────────────────────────────────────────
@@ -263,7 +273,7 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 	if len(upstreamStages) == 0 {
 		sources.Direct = true
 	} else {
-		// Upstream references also use {app}-{env} naming.
+		// Upstream references also use {app}-{env} naming (per-project namespace).
 		qualifiedUpstreams := make([]string, len(upstreamStages))
 		for i, us := range upstreamStages {
 			qualifiedUpstreams[i] = KargoStageName(app.Name, us)
@@ -440,17 +450,17 @@ type KargoPromotionPolicy struct {
 	AutoPromotionEnabled bool `yaml:"autoPromotionEnabled,omitempty"`
 }
 
-// BuildKargoProject returns a minimal Kargo v1.x Project CR (no spec). Promotion
-// policies live in the ProjectConfig (see BuildKargoProjectConfig).
-//
-// brand stamps the platform identity. Zero value applies "suparship" defaults.
-// BuildKargoProject is a pure function.
+// BuildKargoProject returns a project's Kargo v1.x Project CR (no spec) that owns
+// its kargo-{project} namespace. The app's Warehouse / Stage / Promotion /
+// Freight CRs live inside it; promotion policies live in the ProjectConfig (see
+// BuildKargoProjectConfig). It carries labelProject so project teardown can prune
+// it by label. BuildKargoProject is a pure function.
 func BuildKargoProject(projectName string, brand branding.Config) KargoProject {
 	return KargoProject{
 		APIVersion: kargoAPIVersion,
-		Kind:       "Project",
+		Kind:       kargoKindProject,
 		Metadata: ObjectMeta{
-			Name: projectName,
+			Name: KargoNamespaceForProject(projectName),
 			Labels: branding.MergeLabels(
 				brand.ManagedByLabels(),
 				map[string]string{labelProject: projectName},
@@ -459,25 +469,33 @@ func BuildKargoProject(projectName string, brand branding.Config) KargoProject {
 	}
 }
 
-// BuildKargoProjectConfig returns the Kargo v1.x ProjectConfig CR for a project:
-// one PromotionPolicy per environment, enabling auto-promotion on the first
-// (staging) stage and leaving later stages (prod) manual. It is named after, and
-// namespaced in, the Kargo project. BuildKargoProjectConfig is a pure function.
-func BuildKargoProjectConfig(projectName string, envs []KargoProjectEnv, brand branding.Config) KargoProjectConfig {
-	var policies []KargoPromotionPolicy
+// BuildKargoPromotionPolicies builds the promotion policies for one app's
+// environments: auto-promotion on the first (staging) stage, manual on later
+// stages (prod). Stage names are {app}-{env} (the project is the namespace).
+// Pure function.
+func BuildKargoPromotionPolicies(envs []KargoProjectEnv) []KargoPromotionPolicy {
+	policies := make([]KargoPromotionPolicy, 0, len(envs))
 	for _, env := range envs {
 		policies = append(policies, KargoPromotionPolicy{
 			Stage:                KargoStageName(env.AppName, env.EnvName),
 			AutoPromotionEnabled: env.IsFirstStage,
 		})
 	}
+	return policies
+}
 
+// BuildKargoProjectConfig returns a project's Kargo v1.x ProjectConfig CR for its
+// kargo-{project} namespace, holding the (already-aggregated across the project's
+// apps) promotion policies. It is named after, and namespaced in, the
+// kargo-{project} namespace and carries labelProject. Pure function.
+func BuildKargoProjectConfig(projectName string, policies []KargoPromotionPolicy, brand branding.Config) KargoProjectConfig {
+	ns := KargoNamespaceForProject(projectName)
 	return KargoProjectConfig{
 		APIVersion: kargoAPIVersion,
 		Kind:       kargoKindProjectConfig,
 		Metadata: ObjectMeta{
-			Name:      projectName,
-			Namespace: projectName,
+			Name:      ns,
+			Namespace: ns,
 			Labels: branding.MergeLabels(
 				brand.ManagedByLabels(),
 				map[string]string{labelProject: projectName},
@@ -489,10 +507,35 @@ func BuildKargoProjectConfig(projectName string, envs []KargoProjectEnv, brand b
 	}
 }
 
+// MergeKargoPromotionPolicies returns existing with one app's policies replaced
+// by appPolicies. It drops every existing policy whose Stage belongs to appName
+// — identified by the "{app}-" name prefix — then appends appPolicies and sorts
+// by Stage for deterministic output. Multiple apps in a project share one
+// ProjectConfig, so a per-app publish merges (rather than clobbers). Pass an
+// empty appPolicies to remove an app's policies entirely (teardown).
+//
+// Caveat: app DNS labels may contain hyphens, so the prefix match is the same
+// best-effort convention used for Kargo Stage names; an exotic ("a","b-c") vs
+// ("a-b","c") pair can alias. Acceptable because names derive from validated
+// app/env names.
+func MergeKargoPromotionPolicies(existing []KargoPromotionPolicy, appName string, appPolicies []KargoPromotionPolicy) []KargoPromotionPolicy {
+	prefix := appName + "-"
+	merged := make([]KargoPromotionPolicy, 0, len(existing)+len(appPolicies))
+	for _, p := range existing {
+		if strings.HasPrefix(p.Stage, prefix) {
+			continue
+		}
+		merged = append(merged, p)
+	}
+	merged = append(merged, appPolicies...)
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Stage < merged[j].Stage })
+	return merged
+}
+
 // KargoProjectEnv describes one environment for Kargo Project generation.
 type KargoProjectEnv struct {
-	// AppName is the application name. Used together with EnvName to form
-	// the Stage name ("{app}-{env}") in PromotionPolicies.
+	// AppName is the application name. Used together with EnvName to form the
+	// Stage name ("{app}-{env}") in PromotionPolicies.
 	AppName string
 	// EnvName is the environment name (e.g. "staging", "prod").
 	EnvName string
@@ -535,8 +578,17 @@ func BuildKargoProjectNamespace(projectName string) KubernetesNamespace {
 	}
 }
 
-// KargoStageName returns the Kargo Stage name for an app environment.
-// Uses "{app}-{env}" to avoid collisions when multiple apps share a project.
+// KargoNamespaceForProject returns the Kargo Project namespace for a suparship
+// project. Each project gets its own Kargo Project (Kargo binds a Project 1:1 to
+// a namespace), named "kargo-{project}" so the control-plane namespace can never
+// be confused with — or collide with — the project's workload/env namespaces.
+func KargoNamespaceForProject(projectName string) string {
+	return kargoNamespacePrefix + projectName
+}
+
+// KargoStageName returns the Kargo Stage name for an app environment. Stages live
+// in the per-project kargo-{project} namespace, so the name is just "{app}-{env}"
+// — collision-safe within the project.
 func KargoStageName(appName, envName string) string {
 	return appName + "-" + envName
 }
@@ -545,12 +597,6 @@ func KargoStageName(appName, envName string) string {
 // used as the legacy single-image fallback when a template declares no Images
 // mapping (charts built on suparship-common).
 const DefaultImageTagKey = "components.web.image.tag"
-
-// KargoNamespaceForProject returns the Kargo namespace for a suparship project.
-// By convention Kargo namespaces match the suparship project name.
-func KargoNamespaceForProject(projectName string) string {
-	return projectName
-}
 
 // DefaultImageRepoURL derives a placeholder container image repository URL
 // for an app when no explicit override is provided in KargoBuildOptions.
@@ -566,7 +612,7 @@ func DefaultImageRepoURL(projectName, appName string) string {
 // operators are expected to supply real images via the template mapping).
 func applyKargoDefaults(opts KargoBuildOptions, app *domain.App) KargoBuildOptions {
 	if opts.KargoNamespace == "" {
-		opts.KargoNamespace = app.ProjectName
+		opts.KargoNamespace = KargoNamespaceForProject(app.ProjectName)
 	}
 	if len(opts.Images) == 0 {
 		opts.Images = []KargoImage{{

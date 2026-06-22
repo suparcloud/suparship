@@ -19,7 +19,11 @@ var kargoFreightGVR = schema.GroupVersionResource{
 	Resource: "freights",
 }
 
-func newKargoStore(t *testing.T, objs ...*unstructured.Unstructured) (*KargoStore, dynamicfake.FakeDynamicClient) {
+// testKargoNS is the per-project Kargo namespace (kargo-{project}) for the test
+// project "voiceai", where the store reads/writes its CRs.
+const testKargoNS = "kargo-voiceai"
+
+func newKargoStore(t *testing.T, objs ...*unstructured.Unstructured) (*KargoStore, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
 	scheme := k8sruntime.NewScheme()
 	gvrMap := map[schema.GroupVersionResource]string{
@@ -33,7 +37,7 @@ func newKargoStore(t *testing.T, objs ...*unstructured.Unstructured) (*KargoStor
 		ro[i] = o
 	}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrMap, ro...)
-	return NewKargoStore(dyn), *dyn
+	return NewKargoStore(dyn), dyn
 }
 
 // stageCR builds a Kargo Stage with the given current freight and promotion steps.
@@ -84,15 +88,16 @@ func sampleSteps() []any {
 // Promotion CR — Kargo v1.x rejects a stepless Promotion created via the raw K8s
 // API with "Stage ... defines no promotion steps".
 func TestCreatePromotion_EmbedsTargetStagePromotionSteps(t *testing.T) {
-	const ns = "voiceai"
+	const project, app = "voiceai", "livekit-express-caller"
 	steps := sampleSteps()
+	// Stages live in the project's kargo-voiceai namespace under {app}-{env} names.
 	store, dyn := newKargoStore(t,
-		stageCR("livekit-express-caller-staging", ns, "freight-abc", nil),
-		stageCR("livekit-express-caller-production", ns, "", steps),
-		freightCR("freight-abc", ns),
+		stageCR("livekit-express-caller-staging", testKargoNS, "freight-abc", nil),
+		stageCR("livekit-express-caller-production", testKargoNS, "", steps),
+		freightCR("freight-abc", testKargoNS),
 	)
 
-	info, err := store.CreatePromotion(context.Background(), ns, "livekit-express-caller", "staging", "production")
+	info, err := store.CreatePromotion(context.Background(), project, app, "staging", "production")
 	if err != nil {
 		t.Fatalf("CreatePromotion: unexpected error: %v", err)
 	}
@@ -103,7 +108,7 @@ func TestCreatePromotion_EmbedsTargetStagePromotionSteps(t *testing.T) {
 		t.Errorf("Freight = %q, want freight-abc", info.Freight)
 	}
 
-	created, err := dyn.Resource(kargoPromotionGVR).Namespace(ns).Get(context.Background(), info.Name, metav1.GetOptions{})
+	created, err := dyn.Resource(kargoPromotionGVR).Namespace(testKargoNS).Get(context.Background(), info.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get created promotion: %v", err)
 	}
@@ -128,14 +133,14 @@ func TestCreatePromotion_EmbedsTargetStagePromotionSteps(t *testing.T) {
 // fail fast with a clear error rather than create a Promotion the webhook will
 // reject.
 func TestCreatePromotion_FailsWhenTargetStageHasNoSteps(t *testing.T) {
-	const ns = "voiceai"
+	const project, app = "voiceai", "livekit-express-caller"
 	store, _ := newKargoStore(t,
-		stageCR("livekit-express-caller-staging", ns, "freight-abc", nil),
-		stageCR("livekit-express-caller-production", ns, "", nil),
-		freightCR("freight-abc", ns),
+		stageCR("livekit-express-caller-staging", testKargoNS, "freight-abc", nil),
+		stageCR("livekit-express-caller-production", testKargoNS, "", nil),
+		freightCR("freight-abc", testKargoNS),
 	)
 
-	_, err := store.CreatePromotion(context.Background(), ns, "livekit-express-caller", "staging", "production")
+	_, err := store.CreatePromotion(context.Background(), project, app, "staging", "production")
 	if err == nil {
 		t.Fatal("CreatePromotion: expected error for stage with no promotion steps, got nil")
 	}

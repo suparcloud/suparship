@@ -49,6 +49,36 @@ func TestEnsureNamespaceOwned_AdoptsWithoutMutating(t *testing.T) {
 	}
 }
 
+func TestEnsureKargoProjectNamespace_CreatesLabeled(t *testing.T) {
+	client := fake.NewSimpleClientset()
+
+	if err := EnsureKargoProjectNamespace(context.Background(), client, "suparship-kargo"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ns, err := client.CoreV1().Namespaces().Get(context.Background(), "suparship-kargo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("namespace not created: %v", err)
+	}
+	if ns.Labels[KargoProjectNamespaceLabel] != "true" {
+		t.Errorf("missing kargo project label, got %+v", ns.Labels)
+	}
+}
+
+func TestEnsureKargoProjectNamespace_LabelsPreexistingUnlabeled(t *testing.T) {
+	// Reproduces the bug: the shared namespace was created earlier WITHOUT the
+	// Kargo project label, so Kargo refused to adopt it as a Project.
+	existing := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "suparship-kargo"}}
+	client := fake.NewSimpleClientset(existing)
+
+	if err := EnsureKargoProjectNamespace(context.Background(), client, "suparship-kargo"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ns, _ := client.CoreV1().Namespaces().Get(context.Background(), "suparship-kargo", metav1.GetOptions{})
+	if ns.Labels[KargoProjectNamespaceLabel] != "true" {
+		t.Errorf("pre-existing namespace was not labeled, got %+v", ns.Labels)
+	}
+}
+
 func TestDeleteOwnedNamespaces_OnlyMatchingLabels(t *testing.T) {
 	owned1 := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name:   "demo-app-staging",

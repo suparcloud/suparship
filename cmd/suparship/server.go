@@ -222,7 +222,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				Name:  "argocd",
 				Check: kube.NewArgoCDReadinessProbe(dynClient, ""),
 			})
-			// Wire Kargo promoter.
+			// Wire Kargo promoter. Each project's Kargo CRs live in its own
+			// kargo-{project} namespace on this (tooling) cluster; the store
+			// resolves the namespace from the project name per call.
 			kargoStore := kube.NewKargoStore(dynClient)
 			kargoAdapter := &kargoPromoterAdapter{store: kargoStore}
 			kargoPromoter = kargoAdapter
@@ -351,9 +353,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// a warning is logged and the server continues.
 		bootstrap.ReconcileArgoCD(cmd.Context(), dynClient, logger)
 
-		// Provision the Kargo image-credential Secret in every project's Kargo
-		// namespace from the org registry config, so Warehouses can authenticate
-		// without waiting for a registry-save or app-publish. Best-effort, async.
+		// Provision each project's Kargo credential Secrets in its kargo-{project}
+		// namespace from the org registry/gitops config, so Warehouses and promotion
+		// git steps can authenticate without waiting for a config-save or app-publish.
+		// The cred path also ensures+labels each kargo-{project} namespace as a Kargo
+		// Project namespace. Best-effort, async.
 		go reconcileKargoRegistryCreds(context.Background(), registryStore, gitopsConfigStore, projectStore, logger)
 
 		// Templates stored as ConfigMaps in the cluster (label
@@ -909,8 +913,8 @@ type kargoPromoterAdapter struct {
 	store *kube.KargoStore
 }
 
-func (a *kargoPromoterAdapter) CreatePromotion(ctx context.Context, projectNS, appName, fromStage, toStage string) (server.KargoPromotionResult, error) {
-	info, err := a.store.CreatePromotion(ctx, projectNS, appName, fromStage, toStage)
+func (a *kargoPromoterAdapter) CreatePromotion(ctx context.Context, projectName, appName, fromStage, toStage string) (server.KargoPromotionResult, error) {
+	info, err := a.store.CreatePromotion(ctx, projectName, appName, fromStage, toStage)
 	if err != nil {
 		return server.KargoPromotionResult{}, err
 	}
@@ -922,9 +926,11 @@ func (a *kargoPromoterAdapter) CreatePromotion(ctx context.Context, projectNS, a
 	}, nil
 }
 
-// GetPromotionStatus implements server.KargoStatusReader.
-func (a *kargoPromoterAdapter) GetPromotionStatus(ctx context.Context, projectNS, promotionName string) (server.KargoPromotionResult, error) {
-	info, err := a.store.GetPromotionStatus(ctx, projectNS, promotionName)
+// GetPromotionStatus implements server.KargoStatusReader. The promotion lives in
+// the project's kargo-{project} namespace, so the project name is required to
+// resolve it.
+func (a *kargoPromoterAdapter) GetPromotionStatus(ctx context.Context, projectName, promotionName string) (server.KargoPromotionResult, error) {
+	info, err := a.store.GetPromotionStatus(ctx, projectName, promotionName)
 	if err != nil {
 		return server.KargoPromotionResult{}, err
 	}
@@ -937,10 +943,10 @@ func (a *kargoPromoterAdapter) GetPromotionStatus(ctx context.Context, projectNS
 }
 
 // ListAppStageStatuses implements server.KargoPipelineReader.
-// It lists all Kargo Stage CRs in projectNS and filters to those belonging to
-// appName (stage name starts with "{appName}-").
-func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, projectNS, appName string) ([]server.KargoStageStatusResult, error) {
-	all, err := a.store.ListStageStatuses(ctx, projectNS)
+// The store scopes the query to the project's kargo-{project} namespace and the
+// app label; here we strip the "{app}-" name prefix to recover the env name.
+func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, projectName, appName string) ([]server.KargoStageStatusResult, error) {
+	all, err := a.store.ListAppStageStatuses(ctx, projectName, appName)
 	if err != nil {
 		return nil, err
 	}
@@ -948,10 +954,7 @@ func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, project
 	prefix := appName + "-"
 	var results []server.KargoStageStatusResult
 	for stageName, s := range all {
-		if len(stageName) <= len(prefix) || stageName[:len(prefix)] != prefix {
-			continue
-		}
-		envName := stageName[len(prefix):]
+		envName := strings.TrimPrefix(stageName, prefix)
 		results = append(results, server.KargoStageStatusResult{
 			StageName:             stageName,
 			EnvName:               envName,
@@ -962,10 +965,10 @@ func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, project
 		})
 	}
 
-	slog.Debug("kargo pipeline adapter: filtered stages for app",
-		"namespace", projectNS,
+	slog.Debug("kargo pipeline adapter: stages for app",
+		"namespace", gitops.KargoNamespaceForProject(projectName),
+		"project", projectName,
 		"app", appName,
-		"totalStages", len(all),
 		"appStages", len(results),
 	)
 
@@ -1536,11 +1539,12 @@ func publishInitialEnvInfra(
 // files lack the new keys until rewritten. Idempotent: a no-op commit when
 // content is unchanged. Best-effort; per-app failures are logged.
 // reconcileKargoRegistryCreds provisions (or refreshes) the Kargo credential
-// Secrets in every project's Kargo namespace: the image cred (Warehouse tag
-// discovery) from the registry config, and the git cred (promotion git steps)
-// from the gitops config. Run at startup so Kargo can authenticate without
-// waiting for a config save or an app publish. Best-effort: per-project failures
-// are logged, not fatal. No-op for a store that is nil/unconfigured.
+// Secrets in every project's kargo-{project} namespace: the image cred (Warehouse
+// tag discovery) from the registry config, and the git cred (promotion git steps)
+// from the gitops config. The cred path also ensures+labels each kargo-{project}
+// namespace as a Kargo Project namespace. Run at startup so Kargo can authenticate
+// without waiting for a config save or an app publish. Best-effort: per-project
+// failures are logged, not fatal. No-op for a store that is nil/unconfigured.
 func reconcileKargoRegistryCreds(ctx context.Context, store *registry.Store, gitStore *gitops.ConfigStore, projectStore project.Store, logger *slog.Logger) {
 	if projectStore == nil || (store == nil && gitStore == nil) {
 		return

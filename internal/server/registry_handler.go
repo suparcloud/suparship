@@ -18,7 +18,7 @@ type registryHandler struct {
 	auth   *authHandler
 	logger *slog.Logger
 	// projectStore, when set, lets a registry-config save refresh the Kargo
-	// image-credential Secret in every existing Kargo Project namespace.
+	// image-credential Secret in every project's kargo-{project} namespace.
 	projectStore project.Store
 }
 
@@ -71,7 +71,7 @@ func (h *registryHandler) handleUpdateConfig(w http.ResponseWriter, r *http.Requ
 }
 
 // reconcileKargoCreds (re)provisions the Kargo image-credential Secret in the
-// Kargo Project namespace of every project, from the current registry config.
+// kargo-{project} namespace of every project, from the current registry config.
 // Best-effort: per-project failures are logged, not surfaced to the caller.
 func (h *registryHandler) reconcileKargoCreds(ctx context.Context) {
 	if h.projectStore == nil {

@@ -51,7 +51,7 @@ func (s *Store) EnsureKargoCred(ctx context.Context, projectNamespace string) er
 		return fmt.Errorf("registry auth secret %q has no usable password", cfg.AuthSecretRef)
 	}
 
-	if err := k8s.EnsureNamespace(ctx, s.client, projectNamespace); err != nil {
+	if err := k8s.EnsureKargoProjectNamespace(ctx, s.client, projectNamespace); err != nil {
 		return fmt.Errorf("ensure kargo namespace %q: %w", projectNamespace, err)
 	}
 

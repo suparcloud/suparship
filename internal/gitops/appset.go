@@ -293,7 +293,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 					// for this Application. Promotion stays env-level (one stage per
 					// env), so the value is the same across a fan-out env's clusters.
 					Annotations: map[string]string{
-						"kargo.akuity.io/authorized-stage": "{{project}}:{{name}}-" + env.EnvName,
+						"kargo.akuity.io/authorized-stage": "kargo-{{project}}:{{name}}-" + env.EnvName,
 					},
 				},
 				Spec: ApplicationSetAppSpec{
@@ -424,7 +424,7 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 						labelCluster: "{{clusterName}}",
 					},
 					Annotations: map[string]string{
-						"kargo.akuity.io/authorized-stage": "{{project}}:{{name}}-" + env.EnvName,
+						"kargo.akuity.io/authorized-stage": "kargo-{{project}}:{{name}}-" + env.EnvName,
 					},
 				},
 				Spec: ApplicationSetAppSpec{

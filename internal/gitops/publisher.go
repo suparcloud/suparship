@@ -1211,11 +1211,15 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		return stableEnvs[i].EnvName < stableEnvs[j].EnvName
 	})
 
-	// ── Project + ProjectConfig CRs (Kargo v1.x) ───────────────────────────────
-	// The Project CR marks the namespace as a Kargo tenancy (no spec in v1.x).
-	// The separate ProjectConfig CR holds the PromotionPolicies that enable
-	// auto-promotion (staging) and gate manual promotion (prod).
-	proj := BuildKargoProject(projectNS, p.cfg.Branding)
+	// ── Per-project Project + ProjectConfig CRs (Kargo v1.x) ───────────────────
+	// Each suparship project owns one Kargo Project in its own kargo-{project}
+	// namespace (Kargo binds a Project 1:1 to a namespace). The Project CR (no spec
+	// in v1.x) marks that namespace as a Kargo tenancy — it is static per project,
+	// so every app in the project writes identical bytes (idempotent). The
+	// ProjectConfig CR is a per-namespace singleton holding the PromotionPolicies
+	// (auto-promote staging, gate prod) for ALL the project's apps, so this app
+	// MERGES its policies into the existing file instead of overwriting it.
+	proj := BuildKargoProject(app.ProjectName, p.cfg.Branding)
 	projBytes, err := yaml.Marshal(proj)
 	if err != nil {
 		return fmt.Errorf("marshal kargo project: %w", err)
@@ -1223,7 +1227,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	if err := p.writeFile(filepath.Join(kargoDir, projectNS+"-project.yaml"), projBytes); err != nil {
 		return err
 	}
-	slog.Debug("gitops: wrote kargo project", "project", projectNS)
+	slog.Debug("gitops: wrote kargo project", "namespace", projectNS)
 
 	var projectEnvs []KargoProjectEnv
 	for i, env := range stableEnvs {
@@ -1233,15 +1237,16 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			IsFirstStage: i == 0,
 		})
 	}
-	projCfg := BuildKargoProjectConfig(projectNS, projectEnvs, p.cfg.Branding)
-	projCfgBytes, err := yaml.Marshal(projCfg)
+	appPolicies := BuildKargoPromotionPolicies(projectEnvs)
+	existingPolicies, err := p.readKargoPromotionPolicies(kargoDir, projectNS)
 	if err != nil {
-		return fmt.Errorf("marshal kargo projectconfig: %w", err)
-	}
-	if err := p.writeFile(filepath.Join(kargoDir, projectNS+"-projectconfig.yaml"), projCfgBytes); err != nil {
 		return err
 	}
-	slog.Debug("gitops: wrote kargo projectconfig", "project", projectNS)
+	merged := MergeKargoPromotionPolicies(existingPolicies, app.Name, appPolicies)
+	if err := p.writeKargoProjectConfig(kargoDir, app.ProjectName, merged); err != nil {
+		return err
+	}
+	slog.Debug("gitops: wrote kargo projectconfig", "namespace", projectNS, "policies", len(merged))
 
 	// ── Resolve the app's image sources ────────────────────────────────────────
 	// Prefer the template's per-service Images mapping (threaded via
@@ -1317,6 +1322,42 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	}
 
 	return nil
+}
+
+// kargoProjectConfigPath is the gitops-repo path of a project's Kargo
+// ProjectConfig manifest (one per kargo-{project} namespace).
+func (p *Publisher) kargoProjectConfigPath(kargoDir, projectNS string) string {
+	return filepath.Join(kargoDir, projectNS+"-projectconfig.yaml")
+}
+
+// readKargoPromotionPolicies returns the promotion policies currently recorded
+// in the project's ProjectConfig manifest, or nil when it does not yet exist.
+// Callers merge their app's policies into the result before re-writing (multiple
+// apps in a project share one ProjectConfig).
+func (p *Publisher) readKargoPromotionPolicies(kargoDir, projectNS string) ([]KargoPromotionPolicy, error) {
+	data, err := os.ReadFile(p.kargoProjectConfigPath(kargoDir, projectNS))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read kargo projectconfig: %w", err)
+	}
+	var cfg KargoProjectConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse kargo projectconfig: %w", err)
+	}
+	return cfg.Spec.PromotionPolicies, nil
+}
+
+// writeKargoProjectConfig (re)writes the project's ProjectConfig manifest with
+// the given (already-merged) promotion policies.
+func (p *Publisher) writeKargoProjectConfig(kargoDir, projectName string, policies []KargoPromotionPolicy) error {
+	cfg := BuildKargoProjectConfig(projectName, policies, p.cfg.Branding)
+	b, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal kargo projectconfig: %w", err)
+	}
+	return p.writeFile(p.kargoProjectConfigPath(kargoDir, KargoNamespaceForProject(projectName)), b)
 }
 
 // AppPublishEnv carries per-environment publish context for PublishApp.
@@ -1597,10 +1638,13 @@ func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName strin
 			}
 		}
 
-		// Kargo Warehouse + Stage CRs for this app. Match on the stamped
-		// suparship.io/app label rather than the filename prefix: a sibling app
-		// whose name extends this one (e.g. "web-admin" vs "web") shares the
-		// filename prefix and would otherwise be wrongly pruned.
+		// Kargo Warehouse + Stage CRs for this app. Match on BOTH the stamped
+		// suparship.io/project and suparship.io/app labels rather than the filename
+		// prefix: the flat _infra/kargo/ dir holds every project's CRs, so two
+		// projects can own an app with the same name, and a sibling app whose name
+		// extends this one (e.g. "web-admin" vs "web") shares the filename prefix —
+		// either would be wrongly pruned by a name match alone. The project's
+		// Project/ProjectConfig CRs carry no app label, so they are never matched here.
 		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
 		if entries, err := os.ReadDir(kargoDir); err == nil {
 			for _, e := range entries {
@@ -1608,13 +1652,25 @@ func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName strin
 					continue
 				}
 				path := filepath.Join(kargoDir, e.Name())
-				if kargoManifestLabel(path, labelApp) != appName {
+				if kargoManifestLabel(path, labelApp) != appName || kargoManifestLabel(path, labelProject) != projectName {
 					continue
 				}
 				if err := u.rm(path); err != nil {
 					return err
 				}
 			}
+		}
+
+		// Drop this app's promotion policies from the project's ProjectConfig
+		// (other apps in the project keep theirs).
+		projectNS := KargoNamespaceForProject(projectName)
+		if existing, perr := p.readKargoPromotionPolicies(kargoDir, projectNS); perr != nil {
+			return perr
+		} else if merged := MergeKargoPromotionPolicies(existing, appName, nil); len(merged) != len(existing) {
+			if werr := p.writeKargoProjectConfig(kargoDir, projectName, merged); werr != nil {
+				return werr
+			}
+			u.removed = true
 		}
 
 		// Legacy pre-envs/ layout: top-level {env}/{project}/{app}.
@@ -1712,10 +1768,12 @@ func (p *Publisher) UnpublishProjectApps(ctx context.Context, projectName string
 			return err
 		}
 
-		// Kargo Project CR + every app's Warehouse/Stage CRs, matched on the
-		// stamped suparship.io/project label (the Project, Warehouse, and Stage
-		// CRs all carry it) — avoids the filename-prefix collision between a
-		// project and a hyphen-extended sibling (e.g. "web" vs "web-admin").
+		// The project's Kargo CRs — Project, ProjectConfig, and every app's
+		// Warehouse/Stage — all live in the kargo-{project} namespace and carry the
+		// stamped suparship.io/project label, so a single label match prunes the
+		// whole project's Kargo tenancy (including the Project + ProjectConfig).
+		// Matching the label rather than the filename prefix avoids collisions with
+		// a hyphen-extended sibling project (e.g. "web" vs "web-admin").
 		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
 		if entries, err := os.ReadDir(kargoDir); err == nil {
 			for _, e := range entries {
