@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/registry"
 )
 
@@ -16,6 +17,9 @@ type registryHandler struct {
 	store  *registry.Store
 	auth   *authHandler
 	logger *slog.Logger
+	// projectStore, when set, lets a registry-config save refresh the Kargo
+	// image-credential Secret in every project's kargo-{project} namespace.
+	projectStore project.Store
 }
 
 func (h *registryHandler) registerRoutes(mux *http.ServeMux) {
@@ -67,12 +71,22 @@ func (h *registryHandler) handleUpdateConfig(w http.ResponseWriter, r *http.Requ
 }
 
 // reconcileKargoCreds (re)provisions the Kargo image-credential Secret in the
-// single shared Kargo namespace from the current registry config. The cred is
-// org-global (one fixed-name Secret matched by repoURL), so it is provisioned
-// once rather than per project. Best-effort: failures are logged, not surfaced.
+// kargo-{project} namespace of every project, from the current registry config.
+// Best-effort: per-project failures are logged, not surfaced to the caller.
 func (h *registryHandler) reconcileKargoCreds(ctx context.Context) {
-	if err := h.store.EnsureKargoCred(ctx, gitops.KargoNamespace); err != nil {
-		h.logger.Warn("reconcile kargo cred", "namespace", gitops.KargoNamespace, "error", err)
+	if h.projectStore == nil {
+		return
+	}
+	projects, err := h.projectStore.List(ctx)
+	if err != nil {
+		h.logger.Warn("reconcile kargo creds: list projects failed", "error", err)
+		return
+	}
+	for _, p := range projects {
+		ns := gitops.KargoNamespaceForProject(p.Metadata.Name)
+		if err := h.store.EnsureKargoCred(ctx, ns); err != nil {
+			h.logger.Warn("reconcile kargo cred", "project", p.Metadata.Name, "namespace", ns, "error", err)
+		}
 	}
 }
 

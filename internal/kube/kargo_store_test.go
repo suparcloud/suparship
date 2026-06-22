@@ -19,8 +19,9 @@ var kargoFreightGVR = schema.GroupVersionResource{
 	Resource: "freights",
 }
 
-// testKargoNS is the single shared Kargo namespace used by the store under test.
-const testKargoNS = "suparship-kargo"
+// testKargoNS is the per-project Kargo namespace (kargo-{project}) for the test
+// project "voiceai", where the store reads/writes its CRs.
+const testKargoNS = "kargo-voiceai"
 
 func newKargoStore(t *testing.T, objs ...*unstructured.Unstructured) (*KargoStore, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
@@ -36,7 +37,7 @@ func newKargoStore(t *testing.T, objs ...*unstructured.Unstructured) (*KargoStor
 		ro[i] = o
 	}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrMap, ro...)
-	return NewKargoStore(dyn, testKargoNS), dyn
+	return NewKargoStore(dyn), dyn
 }
 
 // stageCR builds a Kargo Stage with the given current freight and promotion steps.
@@ -89,10 +90,10 @@ func sampleSteps() []any {
 func TestCreatePromotion_EmbedsTargetStagePromotionSteps(t *testing.T) {
 	const project, app = "voiceai", "livekit-express-caller"
 	steps := sampleSteps()
-	// Stages live in the shared namespace under fully-qualified {project}-{app}-{env} names.
+	// Stages live in the project's kargo-voiceai namespace under {app}-{env} names.
 	store, dyn := newKargoStore(t,
-		stageCR("voiceai-livekit-express-caller-staging", testKargoNS, "freight-abc", nil),
-		stageCR("voiceai-livekit-express-caller-production", testKargoNS, "", steps),
+		stageCR("livekit-express-caller-staging", testKargoNS, "freight-abc", nil),
+		stageCR("livekit-express-caller-production", testKargoNS, "", steps),
 		freightCR("freight-abc", testKargoNS),
 	)
 
@@ -100,8 +101,8 @@ func TestCreatePromotion_EmbedsTargetStagePromotionSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePromotion: unexpected error: %v", err)
 	}
-	if info.Stage != "voiceai-livekit-express-caller-production" {
-		t.Errorf("Stage = %q, want voiceai-livekit-express-caller-production", info.Stage)
+	if info.Stage != "livekit-express-caller-production" {
+		t.Errorf("Stage = %q, want livekit-express-caller-production", info.Stage)
 	}
 	if info.Freight != "freight-abc" {
 		t.Errorf("Freight = %q, want freight-abc", info.Freight)
@@ -123,8 +124,8 @@ func TestCreatePromotion_EmbedsTargetStagePromotionSteps(t *testing.T) {
 		t.Errorf("first step uses = %v, want git-clone", first["uses"])
 	}
 	stage, _, _ := unstructuredString(created.Object, "spec", "stage")
-	if stage != "voiceai-livekit-express-caller-production" {
-		t.Errorf("spec.stage = %q, want voiceai-livekit-express-caller-production", stage)
+	if stage != "livekit-express-caller-production" {
+		t.Errorf("spec.stage = %q, want livekit-express-caller-production", stage)
 	}
 }
 
@@ -134,8 +135,8 @@ func TestCreatePromotion_EmbedsTargetStagePromotionSteps(t *testing.T) {
 func TestCreatePromotion_FailsWhenTargetStageHasNoSteps(t *testing.T) {
 	const project, app = "voiceai", "livekit-express-caller"
 	store, _ := newKargoStore(t,
-		stageCR("voiceai-livekit-express-caller-staging", testKargoNS, "freight-abc", nil),
-		stageCR("voiceai-livekit-express-caller-production", testKargoNS, "", nil),
+		stageCR("livekit-express-caller-staging", testKargoNS, "freight-abc", nil),
+		stageCR("livekit-express-caller-production", testKargoNS, "", nil),
 		freightCR("freight-abc", testKargoNS),
 	)
 

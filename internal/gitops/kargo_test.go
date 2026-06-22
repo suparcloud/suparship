@@ -21,11 +21,11 @@ func TestBuildKargoWarehouse(t *testing.T) {
 	if wh.Kind != "Warehouse" {
 		t.Errorf("Kind: got %q want %q", wh.Kind, "Warehouse")
 	}
-	if wh.Metadata.Name != "demo-hello" {
-		t.Errorf("Name: got %q want %q", wh.Metadata.Name, "demo-hello")
+	if wh.Metadata.Name != "hello" {
+		t.Errorf("Name: got %q want %q", wh.Metadata.Name, "hello")
 	}
-	if wh.Metadata.Namespace != "suparship-kargo" {
-		t.Errorf("Namespace: got %q want %q", wh.Metadata.Namespace, "suparship-kargo")
+	if wh.Metadata.Namespace != "kargo-demo" {
+		t.Errorf("Namespace: got %q want %q", wh.Metadata.Namespace, "kargo-demo")
 	}
 	if len(wh.Spec.Subscriptions) != 1 {
 		t.Fatalf("Subscriptions: got %d want 1", len(wh.Spec.Subscriptions))
@@ -117,20 +117,20 @@ func TestBuildKargoStage_DirectSource(t *testing.T) {
 	if stage.Kind != "Stage" {
 		t.Errorf("Kind: got %q want %q", stage.Kind, "Stage")
 	}
-	// All projects share one Kargo namespace, so the Stage name is fully
-	// project-qualified: {project}-{app}-{env}.
-	if stage.Metadata.Name != "demo-hello-staging" {
-		t.Errorf("Name: got %q want %q", stage.Metadata.Name, "demo-hello-staging")
+	// Stages live in the per-project kargo-{project} namespace, so the Stage name
+	// is just {app}-{env}.
+	if stage.Metadata.Name != "hello-staging" {
+		t.Errorf("Name: got %q want %q", stage.Metadata.Name, "hello-staging")
 	}
-	if stage.Metadata.Namespace != "suparship-kargo" {
-		t.Errorf("Namespace: got %q want %q", stage.Metadata.Namespace, "suparship-kargo")
+	if stage.Metadata.Namespace != "kargo-demo" {
+		t.Errorf("Namespace: got %q want %q", stage.Metadata.Namespace, "kargo-demo")
 	}
 	if len(stage.Spec.RequestedFreight) != 1 {
 		t.Fatalf("RequestedFreight: got %d want 1", len(stage.Spec.RequestedFreight))
 	}
 	req := stage.Spec.RequestedFreight[0]
-	if req.Origin.Name != "demo-hello" {
-		t.Errorf("Origin.Name: got %q want %q", req.Origin.Name, "demo-hello")
+	if req.Origin.Name != "hello" {
+		t.Errorf("Origin.Name: got %q want %q", req.Origin.Name, "hello")
 	}
 	if !req.Sources.Direct {
 		t.Error("expected Direct=true for first stage (no upstream stages)")
@@ -156,8 +156,8 @@ func TestBuildKargoStage_UpstreamStages(t *testing.T) {
 	if req.Sources.Direct {
 		t.Error("expected Direct=false for stage with upstream")
 	}
-	if len(req.Sources.Stages) != 1 || req.Sources.Stages[0] != "demo-hello-staging" {
-		t.Errorf("Sources.Stages: got %v want [demo-hello-staging]", req.Sources.Stages)
+	if len(req.Sources.Stages) != 1 || req.Sources.Stages[0] != "hello-staging" {
+		t.Errorf("Sources.Stages: got %v want [hello-staging]", req.Sources.Stages)
 	}
 }
 
@@ -292,38 +292,32 @@ func TestBuildKargoStage_NoPromotionTemplateWithoutRepoURL(t *testing.T) {
 	}
 }
 
-func TestKargoNamespace(t *testing.T) {
-	// All projects share one Kargo Project namespace.
-	if gitops.KargoNamespace != "suparship-kargo" {
-		t.Errorf("KargoNamespace = %q, want suparship-kargo", gitops.KargoNamespace)
+func TestKargoNamespaceForProject(t *testing.T) {
+	if got := gitops.KargoNamespaceForProject("demo"); got != "kargo-demo" {
+		t.Errorf("KargoNamespaceForProject = %q, want kargo-demo", got)
 	}
 }
 
 func TestKargoStageName(t *testing.T) {
-	if got := gitops.KargoStageName("demo", "hello", "staging"); got != "demo-hello-staging" {
-		t.Errorf("KargoStageName = %q, want demo-hello-staging", got)
-	}
-}
-
-func TestKargoWarehouseName(t *testing.T) {
-	if got := gitops.KargoWarehouseName("demo", "hello"); got != "demo-hello" {
-		t.Errorf("KargoWarehouseName = %q, want demo-hello", got)
+	if got := gitops.KargoStageName("hello", "staging"); got != "hello-staging" {
+		t.Errorf("KargoStageName = %q, want hello-staging", got)
 	}
 }
 
 func TestMergeKargoPromotionPolicies(t *testing.T) {
-	// Two projects share an app name "web" and must not collide.
+	// Within a project namespace, multiple apps share one ProjectConfig; a per-app
+	// publish must merge (not clobber) other apps' policies.
 	existing := []gitops.KargoPromotionPolicy{
-		{Stage: "alpha-web-staging", AutoPromotionEnabled: true},
-		{Stage: "alpha-web-prod"},
-		{Stage: "beta-web-staging", AutoPromotionEnabled: true},
+		{Stage: "web-staging", AutoPromotionEnabled: true},
+		{Stage: "web-prod"},
+		{Stage: "api-staging", AutoPromotionEnabled: true},
 	}
-	// Re-publish alpha/web with only one env: its old prod policy must drop, beta
+	// Re-publish web with only one env: its old prod policy must drop, api
 	// must be untouched.
-	merged := gitops.MergeKargoPromotionPolicies(existing, "alpha", "web", []gitops.KargoPromotionPolicy{
-		{Stage: "alpha-web-staging", AutoPromotionEnabled: true},
+	merged := gitops.MergeKargoPromotionPolicies(existing, "web", []gitops.KargoPromotionPolicy{
+		{Stage: "web-staging", AutoPromotionEnabled: true},
 	})
-	want := []string{"alpha-web-staging", "beta-web-staging"}
+	want := []string{"api-staging", "web-staging"} // sorted by Stage
 	if len(merged) != len(want) {
 		t.Fatalf("merged = %+v, want stages %v", merged, want)
 	}
@@ -333,24 +327,12 @@ func TestMergeKargoPromotionPolicies(t *testing.T) {
 		}
 	}
 
-	// Teardown: empty appPolicies removes alpha/web entirely.
-	removed := gitops.MergeKargoPromotionPolicies(existing, "alpha", "web", nil)
+	// Teardown: empty appPolicies removes web entirely.
+	removed := gitops.MergeKargoPromotionPolicies(existing, "web", nil)
 	for _, p := range removed {
-		if p.Stage == "alpha-web-staging" || p.Stage == "alpha-web-prod" {
-			t.Errorf("alpha/web policy %q should have been removed", p.Stage)
+		if p.Stage == "web-staging" || p.Stage == "web-prod" {
+			t.Errorf("web policy %q should have been removed", p.Stage)
 		}
-	}
-}
-
-func TestRemoveKargoProjectPolicies(t *testing.T) {
-	existing := []gitops.KargoPromotionPolicy{
-		{Stage: "alpha-web-staging"},
-		{Stage: "alpha-api-prod"},
-		{Stage: "beta-web-staging"},
-	}
-	out := gitops.RemoveKargoProjectPolicies(existing, "alpha")
-	if len(out) != 1 || out[0].Stage != "beta-web-staging" {
-		t.Errorf("RemoveKargoProjectPolicies = %+v, want only beta-web-staging", out)
 	}
 }
 

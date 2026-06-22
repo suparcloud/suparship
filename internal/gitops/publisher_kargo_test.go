@@ -44,11 +44,11 @@ func TestPublishKargoCRs_WritesExpectedFiles(t *testing.T) {
 	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
 	wantFiles := []string{
-		"suparship-kargo-project.yaml",
-		"suparship-kargo-projectconfig.yaml",
-		"demo-hello-warehouse.yaml",
-		"demo-hello-staging-stage.yaml",
-		"demo-hello-prod-stage.yaml",
+		"kargo-demo-project.yaml",
+		"kargo-demo-projectconfig.yaml",
+		"kargo-demo-hello-warehouse.yaml",
+		"kargo-demo-hello-staging-stage.yaml",
+		"kargo-demo-hello-prod-stage.yaml",
 	}
 	for _, name := range wantFiles {
 		path := filepath.Join(kargoDir, name)
@@ -58,9 +58,9 @@ func TestPublishKargoCRs_WritesExpectedFiles(t *testing.T) {
 	}
 
 	// preview envs must NOT produce a Stage file
-	previewStage := filepath.Join(kargoDir, "demo-hello-pr-42-stage.yaml")
+	previewStage := filepath.Join(kargoDir, "kargo-demo-hello-pr-42-stage.yaml")
 	if _, err := os.Stat(previewStage); !os.IsNotExist(err) {
-		t.Error("preview environment should not produce a Stage file, but demo-hello-pr-42-stage.yaml exists")
+		t.Error("preview environment should not produce a Stage file, but kargo-demo-hello-pr-42-stage.yaml exists")
 	}
 }
 
@@ -93,7 +93,7 @@ func TestPublishKargoCRs_TemplateImageMappingRoundTrip(t *testing.T) {
 
 	// Warehouse: subscription must carry the mapping's repo + pattern + strategy.
 	var wh gitops.KargoWarehouse
-	readYAMLInto(t, filepath.Join(kargoDir, "voiceai-livekit-express-caller-warehouse.yaml"), &wh)
+	readYAMLInto(t, filepath.Join(kargoDir, "kargo-voiceai-livekit-express-caller-warehouse.yaml"), &wh)
 	if len(wh.Spec.Subscriptions) != 1 || wh.Spec.Subscriptions[0].Image == nil {
 		t.Fatalf("expected 1 image subscription, got %+v", wh.Spec.Subscriptions)
 	}
@@ -110,7 +110,7 @@ func TestPublishKargoCRs_TemplateImageMappingRoundTrip(t *testing.T) {
 
 	// Stage: the yaml-update promotion step must target the mapped tag key.
 	var stage gitops.KargoStage
-	readYAMLInto(t, filepath.Join(kargoDir, "voiceai-livekit-express-caller-staging-stage.yaml"), &stage)
+	readYAMLInto(t, filepath.Join(kargoDir, "kargo-voiceai-livekit-express-caller-staging-stage.yaml"), &stage)
 	if stage.Spec.PromotionTemplate == nil {
 		t.Fatal("stage PromotionTemplate is nil")
 	}
@@ -137,60 +137,71 @@ func TestPublishKargoCRs_TemplateImageMappingRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPublishKargoCRs_SharedNamespaceAggregatesAcrossProjects verifies that two
-// projects each owning an app named "web" share ONE Kargo Project/ProjectConfig
-// in the shared namespace, with collision-free, project-qualified Warehouse and
-// Stage CRs, and that the singleton ProjectConfig accumulates both projects'
-// promotion policies (a per-app publish must merge, not overwrite).
-func TestPublishKargoCRs_SharedNamespaceAggregatesAcrossProjects(t *testing.T) {
+// TestPublishKargoCRs_PerProjectNamespaceAndAggregation verifies that (1) two
+// projects sharing an app name "web" get isolated kargo-{project} files with no
+// collision, and (2) within a project, publishing multiple apps MERGES (not
+// clobbers) their policies into the project's single ProjectConfig.
+func TestPublishKargoCRs_PerProjectNamespaceAndAggregation(t *testing.T) {
 	dir := t.TempDir()
 	p := newTestPublisher(t)
 
-	for _, project := range []string{"alpha", "beta"} {
-		app := &domain.App{Name: "web", ProjectName: project}
-		envs := []gitops.AppPublishEnv{
+	twoEnvs := func() []gitops.AppPublishEnv {
+		return []gitops.AppPublishEnv{
 			{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
 			{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
 		}
-		if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
-			t.Fatalf("publish %s/web: %v", project, err)
+	}
+
+	// Project "alpha": two apps "web" and "api" (must aggregate in one ProjectConfig).
+	for _, appName := range []string{"web", "api"} {
+		if err := p.PublishKargoCRsForTest(dir, &domain.App{Name: appName, ProjectName: "alpha"}, twoEnvs()); err != nil {
+			t.Fatalf("publish alpha/%s: %v", appName, err)
 		}
+	}
+	// Project "beta": also has an app "web" — must not collide with alpha's.
+	if err := p.PublishKargoCRsForTest(dir, &domain.App{Name: "web", ProjectName: "beta"}, twoEnvs()); err != nil {
+		t.Fatalf("publish beta/web: %v", err)
 	}
 
 	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
-	// Project-qualified, collision-free per-app files exist for BOTH projects.
+	// Each project's CRs live under its kargo-{project} file prefix; alpha/web and
+	// beta/web never collide.
 	for _, name := range []string{
-		"alpha-web-warehouse.yaml", "alpha-web-staging-stage.yaml", "alpha-web-prod-stage.yaml",
-		"beta-web-warehouse.yaml", "beta-web-staging-stage.yaml", "beta-web-prod-stage.yaml",
+		"kargo-alpha-project.yaml", "kargo-alpha-projectconfig.yaml",
+		"kargo-alpha-web-warehouse.yaml", "kargo-alpha-api-warehouse.yaml",
+		"kargo-beta-project.yaml", "kargo-beta-projectconfig.yaml",
+		"kargo-beta-web-warehouse.yaml",
 	} {
 		if _, err := os.Stat(filepath.Join(kargoDir, name)); os.IsNotExist(err) {
 			t.Errorf("expected %q to exist", name)
 		}
 	}
 
-	// Exactly one shared Project + ProjectConfig.
-	if _, err := os.Stat(filepath.Join(kargoDir, "suparship-kargo-project.yaml")); err != nil {
-		t.Errorf("shared project CR missing: %v", err)
+	// alpha's ProjectConfig aggregates BOTH apps (4 stages), proving per-app
+	// publish merges rather than clobbers.
+	var alpha gitops.KargoProjectConfig
+	readYAMLInto(t, filepath.Join(kargoDir, "kargo-alpha-projectconfig.yaml"), &alpha)
+	got := map[string]bool{}
+	for _, pol := range alpha.Spec.PromotionPolicies {
+		got[pol.Stage] = true
 	}
-
-	// The singleton ProjectConfig holds BOTH projects' policies (4 stages).
-	var cfg gitops.KargoProjectConfig
-	readYAMLInto(t, filepath.Join(kargoDir, "suparship-kargo-projectconfig.yaml"), &cfg)
-	gotStages := map[string]bool{}
-	for _, pol := range cfg.Spec.PromotionPolicies {
-		gotStages[pol.Stage] = true
-	}
-	for _, want := range []string{
-		"alpha-web-staging", "alpha-web-prod", "beta-web-staging", "beta-web-prod",
-	} {
-		if !gotStages[want] {
-			t.Errorf("ProjectConfig missing policy for %q; got %+v", want, cfg.Spec.PromotionPolicies)
+	for _, want := range []string{"web-staging", "web-prod", "api-staging", "api-prod"} {
+		if !got[want] {
+			t.Errorf("alpha ProjectConfig missing policy %q; got %+v", want, alpha.Spec.PromotionPolicies)
 		}
 	}
-	if len(cfg.Spec.PromotionPolicies) != 4 {
-		t.Errorf("ProjectConfig has %d policies, want 4 (no overwrite/dup): %+v",
-			len(cfg.Spec.PromotionPolicies), cfg.Spec.PromotionPolicies)
+	if len(alpha.Spec.PromotionPolicies) != 4 {
+		t.Errorf("alpha ProjectConfig has %d policies, want 4 (no clobber): %+v",
+			len(alpha.Spec.PromotionPolicies), alpha.Spec.PromotionPolicies)
+	}
+
+	// beta's ProjectConfig holds only beta's app (2 stages) — isolated from alpha.
+	var beta gitops.KargoProjectConfig
+	readYAMLInto(t, filepath.Join(kargoDir, "kargo-beta-projectconfig.yaml"), &beta)
+	if len(beta.Spec.PromotionPolicies) != 2 {
+		t.Errorf("beta ProjectConfig has %d policies, want 2: %+v",
+			len(beta.Spec.PromotionPolicies), beta.Spec.PromotionPolicies)
 	}
 }
 
@@ -217,7 +228,7 @@ func TestPublishKargoCRs_ProjectCRIsGenerated(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	content, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "suparship-kargo-project.yaml"))
+	content, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "kargo-demo-project.yaml"))
 	if err != nil {
 		t.Fatalf("read project file: %v", err)
 	}
@@ -228,9 +239,9 @@ func TestPublishKargoCRs_ProjectCRIsGenerated(t *testing.T) {
 	if !strings.Contains(body, "kargo.akuity.io/v1alpha1") {
 		t.Errorf("project YAML missing apiVersion:\n%s", body)
 	}
-	// The single org-wide Project CR is named after the shared namespace.
-	if !strings.Contains(body, "name: suparship-kargo") {
-		t.Errorf("project YAML missing name:suparship-kargo:\n%s", body)
+	// The per-project Project CR is named after its kargo-{project} namespace.
+	if !strings.Contains(body, "name: kargo-demo") {
+		t.Errorf("project YAML missing name:kargo-demo:\n%s", body)
 	}
 	// Kargo v1.x: the Project CR carries NO promotionPolicies (they live on the
 	// separate ProjectConfig). Emitting them on the Project gets stripped.
@@ -239,7 +250,7 @@ func TestPublishKargoCRs_ProjectCRIsGenerated(t *testing.T) {
 	}
 
 	// ProjectConfig holds the promotion policies (staging auto, prod manual).
-	cfgContent, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "suparship-kargo-projectconfig.yaml"))
+	cfgContent, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "kargo-demo-projectconfig.yaml"))
 	if err != nil {
 		t.Fatalf("read projectconfig file: %v", err)
 	}
@@ -250,7 +261,7 @@ func TestPublishKargoCRs_ProjectCRIsGenerated(t *testing.T) {
 	if !strings.Contains(cfgBody, "promotionPolicies") {
 		t.Errorf("projectconfig YAML missing promotionPolicies:\n%s", cfgBody)
 	}
-	if !strings.Contains(cfgBody, "stage: demo-hello-staging") {
+	if !strings.Contains(cfgBody, "stage: hello-staging") {
 		t.Errorf("projectconfig YAML missing staging policy:\n%s", cfgBody)
 	}
 	if !strings.Contains(cfgBody, "autoPromotionEnabled: true") {
@@ -271,7 +282,7 @@ func TestPublishKargoCRs_ProdStageHasStagingUpstream(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	prodStage, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-hello-prod-stage.yaml"))
+	prodStage, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "kargo-demo-hello-prod-stage.yaml"))
 	if err != nil {
 		t.Fatalf("read prod stage: %v", err)
 	}
@@ -301,7 +312,7 @@ func TestPublishKargoCRs_StagingStageIsDirect(t *testing.T) {
 		t.Fatalf("PublishKargoCRsForTest: %v", err)
 	}
 
-	stagingStage, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-hello-staging-stage.yaml"))
+	stagingStage, err := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "kargo-demo-hello-staging-stage.yaml"))
 	if err != nil {
 		t.Fatalf("read staging stage: %v", err)
 	}
@@ -325,9 +336,9 @@ func TestPublishKargoCRs_Idempotent(t *testing.T) {
 	}
 
 	// file should exist and have stable content
-	content1, _ := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-hello-warehouse.yaml"))
+	content1, _ := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "kargo-demo-hello-warehouse.yaml"))
 	p.PublishKargoCRsForTest(dir, app, envs) //nolint:errcheck
-	content2, _ := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "demo-hello-warehouse.yaml"))
+	content2, _ := os.ReadFile(filepath.Join(dir, "_infra", "kargo", "kargo-demo-hello-warehouse.yaml"))
 	if string(content1) != string(content2) {
 		t.Error("publishKargoCRs is not idempotent: warehouse YAML changed between runs")
 	}
@@ -350,7 +361,7 @@ func TestPublishKargoCRs_SingleEnvNoUpstream(t *testing.T) {
 	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
 	// Only one stage file and no prod stage.
-	devStage, err := os.ReadFile(filepath.Join(kargoDir, "demo-hello-dev-stage.yaml"))
+	devStage, err := os.ReadFile(filepath.Join(kargoDir, "kargo-demo-hello-dev-stage.yaml"))
 	if err != nil {
 		t.Fatalf("dev stage missing: %v", err)
 	}
@@ -358,7 +369,7 @@ func TestPublishKargoCRs_SingleEnvNoUpstream(t *testing.T) {
 		t.Errorf("single-env Stage should have direct:true:\n%s", string(devStage))
 	}
 	// Must NOT produce a prod stage.
-	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-prod-stage.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(kargoDir, "kargo-demo-hello-prod-stage.yaml")); !os.IsNotExist(err) {
 		t.Error("single-env publish should not produce a prod stage file")
 	}
 }
@@ -382,18 +393,18 @@ func TestPublishKargoCRs_ThreeEnvChain(t *testing.T) {
 
 	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
-	devStage, _ := os.ReadFile(filepath.Join(kargoDir, "demo-hello-dev-stage.yaml"))
-	stagingStage, _ := os.ReadFile(filepath.Join(kargoDir, "demo-hello-staging-stage.yaml"))
-	prodStage, _ := os.ReadFile(filepath.Join(kargoDir, "demo-hello-prod-stage.yaml"))
+	devStage, _ := os.ReadFile(filepath.Join(kargoDir, "kargo-demo-hello-dev-stage.yaml"))
+	stagingStage, _ := os.ReadFile(filepath.Join(kargoDir, "kargo-demo-hello-staging-stage.yaml"))
+	prodStage, _ := os.ReadFile(filepath.Join(kargoDir, "kargo-demo-hello-prod-stage.yaml"))
 
 	if !strings.Contains(string(devStage), "direct: true") {
 		t.Errorf("dev Stage (Order=1, first) should have direct:true:\n%s", string(devStage))
 	}
-	if !strings.Contains(string(stagingStage), "demo-hello-dev") {
-		t.Errorf("staging Stage should reference 'demo-hello-dev' as upstream:\n%s", string(stagingStage))
+	if !strings.Contains(string(stagingStage), "hello-dev") {
+		t.Errorf("staging Stage should reference 'hello-dev' as upstream:\n%s", string(stagingStage))
 	}
-	if !strings.Contains(string(prodStage), "demo-hello-staging") {
-		t.Errorf("prod Stage should reference 'demo-hello-staging' as upstream:\n%s", string(prodStage))
+	if !strings.Contains(string(prodStage), "hello-staging") {
+		t.Errorf("prod Stage should reference 'hello-staging' as upstream:\n%s", string(prodStage))
 	}
 }
 
@@ -413,17 +424,17 @@ func TestPublishKargoCRs_UnboundEnvSkipped(t *testing.T) {
 	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
 	// staging is bound → should have a Stage file
-	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-staging-stage.yaml")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(kargoDir, "kargo-demo-hello-staging-stage.yaml")); os.IsNotExist(err) {
 		t.Error("expected staging Stage file to exist for bound env")
 	}
 
 	// prod is unbound → must NOT have a Stage file
-	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-prod-stage.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(kargoDir, "kargo-demo-hello-prod-stage.yaml")); !os.IsNotExist(err) {
 		t.Error("unbound prod env should NOT produce a Stage file")
 	}
 
 	// staging should be the first stage (direct) since prod is not in the chain
-	stagingStage, err := os.ReadFile(filepath.Join(kargoDir, "demo-hello-staging-stage.yaml"))
+	stagingStage, err := os.ReadFile(filepath.Join(kargoDir, "kargo-demo-hello-staging-stage.yaml"))
 	if err != nil {
 		t.Fatalf("read staging stage: %v", err)
 	}
@@ -449,13 +460,13 @@ func TestPublishKargoCRs_AllUnboundProducesWarehouseOnly(t *testing.T) {
 	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
 	// Warehouse should still be written (it's env-independent)
-	if _, err := os.Stat(filepath.Join(kargoDir, "demo-hello-warehouse.yaml")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(kargoDir, "kargo-demo-hello-warehouse.yaml")); os.IsNotExist(err) {
 		t.Error("warehouse file should exist even when all envs are unbound")
 	}
 
 	// No Stage files
 	for _, envName := range []string{"staging", "prod"} {
-		stageFile := filepath.Join(kargoDir, "demo-hello-"+envName+"-stage.yaml")
+		stageFile := filepath.Join(kargoDir, "kargo-demo-hello-"+envName+"-stage.yaml")
 		if _, err := os.Stat(stageFile); !os.IsNotExist(err) {
 			t.Errorf("unbound env %q should not produce a Stage file", envName)
 		}
