@@ -760,6 +760,18 @@ func rawValuesOverlay(app *domain.App, envName string) map[string]any {
 	return base
 }
 
+// previewRawValuesOverlay returns the freeform Helm values overlay for a
+// preview: the base env's overlay (app + base-env RawValues) with the reserved
+// "preview" band's RawValues merged on top (preview wins). The per-preview name
+// is never an EnvironmentDefaults key — previews share one band.
+func previewRawValuesOverlay(app *domain.App, baseEnv string) map[string]any {
+	base := rawValuesOverlay(app, baseEnv)
+	if ov, ok := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]; ok && len(ov.RawValues) > 0 {
+		base = deepMerge(base, deepCopyMap(ov.RawValues))
+	}
+	return base
+}
+
 // activeTarget returns the ClusterTarget matching the env's active ClusterRef,
 // falling back to the sole cluster or a bare-name target.
 func activeTarget(env AppPublishEnv) ClusterTarget {
@@ -1489,9 +1501,9 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
 		var hvBytes []byte
 		if preview.SkipCanonicalBase {
-			hvBytes, err = marshalPassthroughValues(hv.Platform, rawValuesOverlay(app, preview.PreviewName), preview.EnvVars)
+			hvBytes, err = marshalPassthroughValues(hv.Platform, previewRawValuesOverlay(app, preview.BaseEnv), preview.EnvVars)
 		} else {
-			hvBytes, err = marshalValuesWithOverlay(hv, rawValuesOverlay(app, preview.PreviewName), preview.EnvVars)
+			hvBytes, err = marshalValuesWithOverlay(hv, previewRawValuesOverlay(app, preview.BaseEnv), preview.EnvVars)
 		}
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
@@ -1514,10 +1526,12 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 			App:             app.Name,
 			Namespace:       preview.Namespace,
-			Env:             preview.PreviewName,
+			Env:             preview.BaseEnv,
 			Project:         app.ProjectName,
 			Stack:           app.Spec.Stack,
 			Presence:        preview.ScopeKeys,
+			IsPreview:       true,
+			PreviewName:     preview.PreviewName,
 			UnifiedStore:    p.usesUnifiedStore(),
 			Branding:        p.cfg.Branding,
 			RefreshInterval: p.externalSecretRefreshInterval(),
@@ -1544,6 +1558,11 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 type PreviewPublishSpec struct {
 	// PreviewName is the sanitized preview identifier (e.g. "pr-42").
 	PreviewName string
+	// BaseEnv is the stable env the preview clones (default the first stable env
+	// by promotion order, conventionally "staging"). The preview reuses this
+	// env's vault, ClusterSecretStore, cluster and per-env config — preview band
+	// items live inside the base env vault, so no per-preview vault is created.
+	BaseEnv string
 	// ClusterServer is the API server URL for the cluster where this preview runs.
 	ClusterServer string
 	// Namespace is the Kubernetes namespace for this preview.

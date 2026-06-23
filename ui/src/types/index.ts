@@ -53,6 +53,26 @@ export interface CreatePreviewRequest {
   branch?: string;
 }
 
+/** Body for the app-scoped preview create endpoint. */
+export interface CreateAppPreviewRequest {
+  name: string;
+  /**
+   * Stable env the preview clones (cluster + per-env config/secrets). Omit to
+   * default to the app's first stable env by order (conventionally "staging").
+   */
+  baseEnv?: string;
+}
+
+/** Response from the app-scoped preview create/list endpoints. */
+export interface AppPreviewSummary {
+  name: string;
+  appName: string;
+  project: string;
+  namespace: string;
+  urls: string[];
+  status: AppStatusSummary;
+}
+
 export interface OrgInfo {
   name: string;
   displayName: string;
@@ -567,6 +587,8 @@ export interface AppDetail {
   envComponents?: Record<string, Record<string, ComponentConfig>>;
   // Continuous-delivery settings (external-CD tag ownership). Always present.
   cd: CDConfig;
+  // Whether this app supports preview (ephemeral PR) environments. Default true.
+  previewsEnabled: boolean;
 }
 
 // CDConfig configures who owns the deployed image tag. When managed is true an

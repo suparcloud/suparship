@@ -48,6 +48,35 @@ func TestProjectScopeNames(t *testing.T) {
 	}
 }
 
+func TestPreviewScopeNames(t *testing.T) {
+	// Preview band: items live in the BASE env vault (no per-preview vault),
+	// named with a preview suffix.
+	pv := PreviewScope("staging")
+	if got := VaultName(pv); got != "suparship-secrets-env-staging" {
+		t.Errorf("VaultName(preview) = %q, want base env vault", got)
+	}
+	if got := AppItemName(pv, "api"); got != "api-env-preview" {
+		t.Errorf("AppItemName(preview) = %q, want api-env-preview", got)
+	}
+	if got := SharedItemName(pv); got != "shared-env-preview" {
+		t.Errorf("SharedItemName(preview) = %q", got)
+	}
+	if got := StoreName(pv); got != EnvStoreName("staging") {
+		t.Errorf("StoreName(preview) = %q, want env store %q", got, EnvStoreName("staging"))
+	}
+	// Per-PR override: also in the base env vault, keyed by preview name.
+	pr := PreviewPRScope("staging", "pr-42")
+	if got := VaultName(pr); got != "suparship-secrets-env-staging" {
+		t.Errorf("VaultName(preview-pr) = %q, want base env vault", got)
+	}
+	if got := AppItemName(pr, "api"); got != "api-env-preview-pr-42" {
+		t.Errorf("AppItemName(preview-pr) = %q", got)
+	}
+	if got := StoreName(pr); got != EnvStoreName("staging") {
+		t.Errorf("StoreName(preview-pr) = %q, want env store", got)
+	}
+}
+
 func TestStackScopeNames(t *testing.T) {
 	// Stack-global: lives in the org global vault + global store.
 	sg := StackScope("voiceproj", "voiceai")

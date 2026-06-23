@@ -16,6 +16,11 @@ const (
 	AppEnvPreview AppEnvironmentType = "preview"
 )
 
+// PreviewOverrideKey is the reserved AppSpec.EnvironmentDefaults key holding the
+// per-app "preview band": values/env/secrets applied to every preview on top of
+// its base env. It is not a real environment — no stable env may use this name.
+const PreviewOverrideKey = "preview"
+
 // NamespaceScope controls where an app's workloads are deployed.
 type NamespaceScope string
 
@@ -180,10 +185,6 @@ type ComponentSpec struct {
 	// TLS issuer come from the org's RoutingProfiles map keyed by this name;
 	// ExposeDisabled (the zero value) means no ingress is created.
 	ExposeMode ExposeMode `json:"exposeMode,omitempty" yaml:"exposeMode,omitempty"`
-	// PreviewEnabled controls whether this component is deployed in preview
-	// environments. Heavy or non-essential components can opt out by setting
-	// this to false.
-	PreviewEnabled bool `json:"previewEnabled" yaml:"previewEnabled"`
 	// Config holds non-secret key/value configuration for the component
 	// (e.g. environment variable defaults, feature flags). Secret values
 	// MUST NOT appear here; use AppSpec.SecretRefs instead.
@@ -238,7 +239,6 @@ type ComponentConfig struct {
 	// component's app-level Config (env override wins per key).
 	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 }
-
 
 // AppMetadata carries optional labelling and annotation data attached to an
 // app spec. Both maps are optional; nil and empty are treated equivalently.
@@ -326,7 +326,13 @@ type AppSpec struct {
 	Addons []AddonSpec `json:"addons,omitempty" yaml:"addons,omitempty"`
 	// EnvironmentDefaults holds per-environment overrides keyed by environment
 	// name (e.g. "staging", "prod"). Only set fields override app-level values.
+	// The reserved key PreviewOverrideKey ("preview") holds the per-app preview
+	// band applied to every preview on top of its base env.
 	EnvironmentDefaults map[string]EnvironmentOverride `json:"environmentDefaults,omitempty" yaml:"environmentDefaults,omitempty"`
+	// PreviewsEnabled controls whether this app supports preview (ephemeral PR)
+	// environments. Defaults to true on create. When false, CreatePreview is
+	// rejected. A preview deploys all the app's enabled components.
+	PreviewsEnabled bool `json:"previewsEnabled" yaml:"previewsEnabled"`
 	// Metadata carries optional labels and annotations for the app spec.
 	Metadata *AppMetadata `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	// EnvConfig holds cross-cutting env vars and secret refs that apply to all

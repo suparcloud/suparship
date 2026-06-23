@@ -56,17 +56,18 @@ type PreviewResult struct {
 //
 // Steps:
 //  1. Validate that app is non-nil and previewName is non-empty.
-//  2. Verify that the app has at least one preview-enabled component.
+//  2. Verify that the app has previews enabled and at least one enabled
+//     component.
 //  3. Build the EnvironmentInstance with a deterministic namespace and URL
 //     (via domain.GenerateNamespace / domain.GenerateURL).
-//  4. Generate Helm values using helmvalues.MapToHelmValues. Components with
-//     PreviewEnabled == false are rendered as disabled in the output.
+//  4. Generate Helm values using helmvalues.MapToHelmValues. A preview deploys
+//     all of the app's enabled components — the same set its base env runs.
 //  5. Generate the ArgoCD Application manifest using
 //     gitops.BuildArgoApplicationFromInstance.
 //
-// Returns an error when the app has no preview-enabled components or the
-// request is structurally invalid (nil app, empty preview name). All other
-// errors are programming mistakes.
+// Returns an error when the app has previews disabled, has no enabled
+// components, or the request is structurally invalid (nil app, empty preview
+// name). All other errors are programming mistakes.
 func CreatePreview(req PreviewRequest) (*PreviewResult, error) {
 	if req.App == nil {
 		return nil, fmt.Errorf("app must not be nil")
@@ -75,8 +76,11 @@ func CreatePreview(req PreviewRequest) (*PreviewResult, error) {
 		return nil, fmt.Errorf("preview name must not be empty")
 	}
 
-	if len(PreviewEnabledComponents(req.App.Spec.Components)) == 0 {
-		return nil, fmt.Errorf("app %q has no preview-enabled components", req.App.Name)
+	if !req.App.Spec.PreviewsEnabled {
+		return nil, fmt.Errorf("app %q has previews disabled", req.App.Name)
+	}
+	if len(EnabledComponents(req.App.Spec.Components)) == 0 {
+		return nil, fmt.Errorf("app %q has no enabled components", req.App.Name)
 	}
 
 	ns := domain.GenerateNamespace(req.App.Name, req.PreviewName, domain.AppEnvPreview)

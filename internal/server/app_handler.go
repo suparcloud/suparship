@@ -205,11 +205,10 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		explicitComponents = append(explicitComponents, domain.ComponentSpec{
-			Name:           c.Name,
-			Type:           ct,
-			Enabled:        c.Enabled,
-			ExposeMode:     mode,
-			PreviewEnabled: c.PreviewEnabled,
+			Name:       c.Name,
+			Type:       ct,
+			Enabled:    c.Enabled,
+			ExposeMode: mode,
 		})
 	}
 	if len(explicitComponents) > 0 {
@@ -432,6 +431,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	prevRawValues := app.Spec.RawValues
 	prevComponents := append([]domain.ComponentSpec(nil), app.Spec.Components...)
 	prevCD := app.Spec.CD
+	prevPreviewsEnabled := app.Spec.PreviewsEnabled
 
 	if req.Values != nil {
 		newValues := *req.Values
@@ -510,6 +510,9 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		}
 		app.Spec.CD = cd
 	}
+	if req.PreviewsEnabled != nil {
+		app.Spec.PreviewsEnabled = *req.PreviewsEnabled
+	}
 	if req.ComponentConfigs != nil {
 		// Apply app-level per-component config onto the matching ComponentSpec.
 		for i := range app.Spec.Components {
@@ -583,6 +586,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			app.Spec.RawValues = prevRawValues
 			app.Spec.Components = prevComponents
 			app.Spec.CD = prevCD
+			app.Spec.PreviewsEnabled = prevPreviewsEnabled
 			_ = ah.appStore.SaveApp(r.Context(), projectName, app)
 			slog.Error("update-app: publish failed; rolled back config change",
 				"project", projectName, "app", appName, "err", err)
@@ -1011,8 +1015,40 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Resolve the base env the preview clones: the requested baseEnv when given
+	// (must be a real stable env), else the first stable env by promotion order
+	// (conventionally staging). The preview reuses this env's cluster + vault.
+	stableEnvs := ah.stableEnvsFromOrg(r.Context(), a)
+	baseEnv := req.BaseEnv
+	if baseEnv == "" {
+		if len(stableEnvs) > 0 {
+			baseEnv = stableEnvs[0].EnvName
+		}
+	} else {
+		valid := false
+		for _, e := range stableEnvs {
+			if e.EnvName == baseEnv {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+				Error: "invalid baseEnv \"" + baseEnv + "\": not a stable environment of this app",
+			})
+			return
+		}
+	}
+	if baseEnv == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "no stable environment available to base the preview on",
+		})
+		return
+	}
+
 	// Run the full preview creation pipeline: EnvironmentInstance + Helm values
-	// + ArgoCD Application, respecting preview_enabled components.
+	// + ArgoCD Application. Errors when the app has previews disabled or no
+	// enabled components.
 	previewResult, err := domainapp.CreatePreview(domainapp.PreviewRequest{
 		App:         a,
 		PreviewName: sanitized,
@@ -1045,6 +1081,16 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 	if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save preview"})
 		return
+	}
+
+	// Publish the preview to GitOps (values + ConfigMap + ExternalSecret reusing
+	// the base env vault). Roll back the saved env on failure so a retry is clean.
+	if ah.gitOpsPublisher != nil {
+		if err := ah.gitOpsPublisher.PublishAppPreview(r.Context(), a, previewResult.Instance, baseEnv); err != nil {
+			_ = ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, sanitized)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish preview: " + err.Error()})
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, appPreviewToDTO(env))
@@ -2102,6 +2148,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
 		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
 		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed},
+		PreviewsEnabled:  app.Spec.PreviewsEnabled,
 	}
 }
 
@@ -2255,11 +2302,10 @@ func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 	dtos := make([]ComponentSummaryDTO, 0, len(components))
 	for _, c := range components {
 		dtos = append(dtos, ComponentSummaryDTO{
-			Name:           c.Name,
-			Type:           string(c.Type),
-			Enabled:        c.Enabled,
-			ExposeMode:     string(c.ExposeMode),
-			PreviewEnabled: c.PreviewEnabled,
+			Name:       c.Name,
+			Type:       string(c.Type),
+			Enabled:    c.Enabled,
+			ExposeMode: string(c.ExposeMode),
 		})
 	}
 	return dtos

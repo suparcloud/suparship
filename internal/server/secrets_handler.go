@@ -714,6 +714,11 @@ func orgEnvCluster(org *rbac.Org, envName string) string {
 // Cluster routes are nested under env ({env} is always present alongside
 // {cluster}) — cluster overrides are per-(env, cluster).
 func scopeFromPath(r *http.Request) secrets.Scope {
+	// Preview band: app-scoped secrets applied to every preview of the app, on
+	// top of its base env. Stored as an item inside the base env ({env}) vault.
+	if strings.Contains(r.Pattern, "/preview") {
+		return secrets.PreviewScope(r.PathValue("env"))
+	}
 	if c := r.PathValue("cluster"); c != "" {
 		return secrets.ClusterScope(r.PathValue("env"), c)
 	}

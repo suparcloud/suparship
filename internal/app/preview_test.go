@@ -20,9 +20,10 @@ func previewApp() *domain.App {
 				"image_tag":        "latest",
 			},
 			Components: []domain.ComponentSpec{
-				{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal, PreviewEnabled: true},
-				{Name: "worker", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true},
 			},
+			PreviewsEnabled: true,
 		},
 	}
 }
@@ -32,10 +33,11 @@ func workerOnlyApp() *domain.App {
 		Name:        "jobs",
 		ProjectName: "demo",
 		Spec: domain.AppSpec{
-			Template:   domain.AppTemplateRef{Name: "worker"},
+			Template: domain.AppTemplateRef{Name: "worker"},
 			Components: []domain.ComponentSpec{
-				{Name: "worker", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true},
 			},
+			PreviewsEnabled: true,
 		},
 	}
 }
@@ -60,10 +62,35 @@ func TestCreatePreview_EmptyPreviewName(t *testing.T) {
 	}
 }
 
-func TestCreatePreview_NoPreviewEnabledComponents(t *testing.T) {
-	_, err := CreatePreview(PreviewRequest{App: workerOnlyApp(), PreviewName: "pr-1", BuildOpts: defaultBuildOpts()})
+func TestCreatePreview_PreviewsDisabled(t *testing.T) {
+	app := previewApp()
+	app.Spec.PreviewsEnabled = false
+	_, err := CreatePreview(PreviewRequest{App: app, PreviewName: "pr-1", BuildOpts: defaultBuildOpts()})
 	if err == nil {
-		t.Fatal("expected error when no preview-enabled components")
+		t.Fatal("expected error when previews are disabled for the app")
+	}
+}
+
+func TestCreatePreview_NoEnabledComponents(t *testing.T) {
+	app := previewApp()
+	for i := range app.Spec.Components {
+		app.Spec.Components[i].Enabled = false
+	}
+	_, err := CreatePreview(PreviewRequest{App: app, PreviewName: "pr-1", BuildOpts: defaultBuildOpts()})
+	if err == nil {
+		t.Fatal("expected error when the app has no enabled components")
+	}
+}
+
+func TestCreatePreview_WorkerOnlyApp(t *testing.T) {
+	// A worker-only app (PreviewsEnabled, one enabled worker) now produces a
+	// valid preview — the per-component preview gate is gone.
+	result, err := CreatePreview(PreviewRequest{App: workerOnlyApp(), PreviewName: "pr-1", BuildOpts: defaultBuildOpts()})
+	if err != nil {
+		t.Fatalf("unexpected error for worker-only app: %v", err)
+	}
+	if !result.HelmValues.Components["worker"].Enabled {
+		t.Error("worker should be enabled in a worker-only app preview")
 	}
 }
 
@@ -136,9 +163,9 @@ func TestCreatePreview_URL(t *testing.T) {
 	}
 }
 
-// --- CreatePreview Helm values: preview_enabled components only ---
+// --- CreatePreview Helm values: all enabled components render ---
 
-func TestCreatePreview_HelmValues_PreviewEnabledOnly(t *testing.T) {
+func TestCreatePreview_HelmValues_AllEnabledComponents(t *testing.T) {
 	result, err := CreatePreview(PreviewRequest{
 		App: previewApp(), PreviewName: "pr-42", BuildOpts: defaultBuildOpts(),
 	})
@@ -152,15 +179,15 @@ func TestCreatePreview_HelmValues_PreviewEnabledOnly(t *testing.T) {
 		t.Fatal("web component missing from HelmValues")
 	}
 	if !webComp.Enabled {
-		t.Error("web component should be enabled in preview (PreviewEnabled=true)")
+		t.Error("web component should be enabled in preview")
 	}
 
 	workerComp, ok := hv.Components["worker"]
 	if !ok {
 		t.Fatal("worker component missing from HelmValues")
 	}
-	if workerComp.Enabled {
-		t.Error("worker component should be disabled in preview (PreviewEnabled=false)")
+	if !workerComp.Enabled {
+		t.Error("worker component should be enabled in preview (no per-component gate)")
 	}
 }
 

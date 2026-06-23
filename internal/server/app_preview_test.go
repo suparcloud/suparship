@@ -15,31 +15,34 @@ import (
 
 // --- Shared test fixtures ---
 
-// previewTestAppForProject returns an App with one web (preview-enabled) and one
-// worker (not preview-enabled) component for use in preview endpoint tests.
+// previewTestAppForProject returns an App with one web and one worker component,
+// both enabled, with previews enabled — for use in preview endpoint tests.
 func previewTestAppForProject(projectName string) *domain.App {
 	return &domain.App{
 		Name:        "my-app",
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
-			Template: domain.AppTemplateRef{Name: "web-service"},
+			Template:        domain.AppTemplateRef{Name: "web-service"},
+			PreviewsEnabled: true,
 			Components: []domain.ComponentSpec{
-				{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
-				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true},
 			},
 		},
 	}
 }
 
-// workerOnlyAppForProject returns an App whose only component has EnabledInPreview=false.
-func workerOnlyAppForProject(projectName string) *domain.App {
+// previewsDisabledAppForProject returns an App that has enabled components but
+// has opted out of previews (PreviewsEnabled=false) — creating a preview must fail.
+func previewsDisabledAppForProject(projectName string) *domain.App {
 	return &domain.App{
-		Name:        "worker-app",
+		Name:        "noprev-app",
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
-			Template: domain.AppTemplateRef{Name: "worker"},
+			Template:        domain.AppTemplateRef{Name: "web-service"},
+			PreviewsEnabled: false,
 			Components: []domain.ComponentSpec{
-				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true},
 			},
 		},
 	}
@@ -211,15 +214,39 @@ func TestCreateAppPreviewAppNotFound(t *testing.T) {
 	}
 }
 
-func TestCreateAppPreviewNoPreviewEnabledComponents(t *testing.T) {
+func TestCreateAppPreviewPreviewsDisabled(t *testing.T) {
 	mux, ah, store := newTestAppPreviewMux(testProject)
-	store.addApp(workerOnlyAppForProject(testProject))
+	store.addApp(previewsDisabledAppForProject(testProject))
 
-	rec := postAppPreviewJSON(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "worker-app",
+	rec := postAppPreviewJSON(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "noprev-app",
 		CreateAppPreviewRequest{Name: "pr-42"})
 
 	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for app with no preview-enabled components, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 422 for app with previews disabled, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppPreviewInvalidBaseEnv(t *testing.T) {
+	mux, ah, store := newTestAppPreviewMux(testProject)
+	store.addApp(previewTestAppForProject(testProject))
+
+	rec := postAppPreviewJSON(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app",
+		CreateAppPreviewRequest{Name: "pr-42", BaseEnv: "bogus"})
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for unknown baseEnv, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppPreviewExplicitBaseEnv(t *testing.T) {
+	mux, ah, store := newTestAppPreviewMux(testProject)
+	store.addApp(previewTestAppForProject(testProject))
+
+	rec := postAppPreviewJSON(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app",
+		CreateAppPreviewRequest{Name: "pr-42", BaseEnv: "staging"})
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for valid baseEnv, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

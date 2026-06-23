@@ -278,6 +278,39 @@ export function deleteAppEnvSecretKey(project: string, app: string, env: string,
   return api.del(`${appBase(project, app)}/env/${encodeURIComponent(env)}/${encodeURIComponent(key)}`);
 }
 
+// Preview band: app secrets applied to every preview, on top of base env {env}.
+// Stored as the <app>-env-preview item inside the {env} vault — no preview vault.
+export function listAppPreviewSecretKeys(
+  project: string,
+  app: string,
+  env: string,
+): Promise<SecretKeysResponse> {
+  return api.get<SecretKeysResponse>(
+    `${appBase(project, app)}/env/${encodeURIComponent(env)}/preview`,
+  );
+}
+export function upsertAppPreviewSecrets(
+  project: string,
+  app: string,
+  env: string,
+  entries: Record<string, string>,
+): Promise<void> {
+  return api.post(
+    `${appBase(project, app)}/env/${encodeURIComponent(env)}/preview`,
+    { entries },
+  );
+}
+export function deleteAppPreviewSecretKey(
+  project: string,
+  app: string,
+  env: string,
+  key: string,
+): Promise<void> {
+  return api.del(
+    `${appBase(project, app)}/env/${encodeURIComponent(env)}/preview/${encodeURIComponent(key)}`,
+  );
+}
+
 // Cluster overrides are per-(env, cluster): items live in the env vault.
 export function listAppClusterSecretKeys(
   project: string,

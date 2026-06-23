@@ -60,6 +60,11 @@ type GitOpsPublisher interface {
 	// the GitOps repo. Called on every explicit promotion so the target env's
 	// files are present before Kargo / ArgoCD act on the promotion.
 	PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error
+	// PublishAppPreview writes a preview's app.yaml + values.yaml + ConfigMap +
+	// ExternalSecret to the GitOps repo. The preview reuses baseEnv's cluster,
+	// per-env config and vault (its secret/config items are read from baseEnv's
+	// vault — no per-preview vault is created). Called when a preview is created.
+	PublishAppPreview(ctx context.Context, app *domain.App, preview *domain.EnvironmentInstance, baseEnv string) error
 	// UnpublishApp removes all GitOps files for an app (app + platform
 	// resource directories, Kargo CRs) and commits + pushes the deletion.
 	// It is a no-op if no files exist for the app.
@@ -241,6 +246,18 @@ func (h *PublisherHolder) PublishAppEnv(ctx context.Context, app *domain.App, en
 		return nil
 	}
 	return p.PublishAppEnv(ctx, app, env)
+}
+
+// PublishAppPreview implements GitOpsPublisher. It delegates to the currently
+// held publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) PublishAppPreview(ctx context.Context, app *domain.App, preview *domain.EnvironmentInstance, baseEnv string) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.PublishAppPreview(ctx, app, preview, baseEnv)
 }
 
 // UnpublishApp implements GitOpsPublisher. It delegates to the currently held

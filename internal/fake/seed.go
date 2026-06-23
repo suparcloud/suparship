@@ -147,13 +147,13 @@ func seedApps(r *DevRuntime) {
 			},
 			Components: []domain.ComponentSpec{
 				{
-					Name:           "web",
-					Type:           domain.ComponentWeb,
-					Enabled:        true,
-					ExposeMode:     domain.ExposeExternal,
-					PreviewEnabled: true,
+					Name:       "web",
+					Type:       domain.ComponentWeb,
+					Enabled:    true,
+					ExposeMode: domain.ExposeExternal,
 				},
 			},
+			PreviewsEnabled: true,
 		},
 	}
 
@@ -175,25 +175,23 @@ func seedApps(r *DevRuntime) {
 			},
 			Components: []domain.ComponentSpec{
 				{
-					Name:           "web",
-					Type:           domain.ComponentWeb,
-					Enabled:        true,
-					ExposeMode:     domain.ExposeExternal,
-					PreviewEnabled: true,
+					Name:       "web",
+					Type:       domain.ComponentWeb,
+					Enabled:    true,
+					ExposeMode: domain.ExposeExternal,
 				},
 				{
-					Name:           "worker",
-					Type:           domain.ComponentWorker,
-					Enabled:        true,
-					PreviewEnabled: false,
+					Name:    "worker",
+					Type:    domain.ComponentWorker,
+					Enabled: true,
 				},
 				{
-					Name:           "scheduler",
-					Type:           domain.ComponentCron,
-					Enabled:        true,
-					PreviewEnabled: false,
+					Name:    "scheduler",
+					Type:    domain.ComponentCron,
+					Enabled: true,
 				},
 			},
+			PreviewsEnabled: true,
 		},
 	}
 
@@ -214,13 +212,13 @@ func seedApps(r *DevRuntime) {
 			},
 			Components: []domain.ComponentSpec{
 				{
-					Name:           "web",
-					Type:           domain.ComponentWeb,
-					Enabled:        true,
-					ExposeMode:     domain.ExposeExternal,
-					PreviewEnabled: true,
+					Name:       "web",
+					Type:       domain.ComponentWeb,
+					Enabled:    true,
+					ExposeMode: domain.ExposeExternal,
 				},
 			},
+			PreviewsEnabled: true,
 		},
 	}
 

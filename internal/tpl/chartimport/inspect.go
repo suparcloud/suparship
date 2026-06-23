@@ -311,11 +311,10 @@ func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 			},
 			Components: []tpl.TemplateComponent{
 				{
-					Name:           "web",
-					Type:           tpl.TemplateComponentWeb,
-					Required:       true,
-					PreviewEnabled: true,
-					Exposed:        true,
+					Name:     "web",
+					Type:     tpl.TemplateComponentWeb,
+					Required: true,
+					Exposed:  true,
 				},
 			},
 			Inputs:   inputs,

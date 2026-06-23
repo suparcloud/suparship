@@ -226,8 +226,8 @@ func TestAppLogsWithComponent(t *testing.T) {
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "web-service"},
 			Components: []domain.ComponentSpec{
-				{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
-				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true},
 			},
 		},
 	}

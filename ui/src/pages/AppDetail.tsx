@@ -12,7 +12,7 @@ import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 import { listTemplateVersions } from "../lib/templates";
 import type { TemplateVersionInfo } from "../types";
-import { createPreview, deletePreview } from "../lib/previews";
+import { createAppPreview, deletePreview } from "../lib/previews";
 import {
   getAppEnvConfig,
   getAppEnvEnvConfig,
@@ -33,6 +33,9 @@ import {
   listAppClusterSecretKeys,
   upsertAppClusterSecrets,
   deleteAppClusterSecretKey,
+  listAppPreviewSecretKeys,
+  upsertAppPreviewSecrets,
+  deleteAppPreviewSecretKey,
   getResolvedSecrets,
 } from "../lib/secrets";
 import { listOrgEnvironments } from "../lib/settings";
@@ -785,6 +788,7 @@ export function AppDetail() {
   // Preview form
   const [showPreviewForm, setShowPreviewForm] = useState(false);
   const [previewName, setPreviewName] = useState("");
+  const [previewBaseEnv, setPreviewBaseEnv] = useState("");
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewSubmitting, setPreviewSubmitting] = useState(false);
 
@@ -1031,8 +1035,13 @@ export function AppDetail() {
               setPreviewName("");
               setPreviewError(null);
             }}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
-            title="Create preview environment"
+            disabled={data?.previewsEnabled === false}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            title={
+              data?.previewsEnabled === false
+                ? "Previews are disabled for this app (enable them in the values/settings tab)"
+                : "Create preview environment"
+            }
           >
             {icons.branch}
             Preview
@@ -1180,10 +1189,10 @@ export function AppDetail() {
                   setPreviewSubmitting(true);
                   setPreviewError(null);
                   try {
-                    await createPreview({
+                    await createAppPreview(project, appName, {
                       name: previewName.trim(),
-                      project,
-                      service: appName,
+                      // Omit baseEnv to default to the first stable env (staging).
+                      baseEnv: previewBaseEnv || undefined,
                     });
                     setShowPreviewForm(false);
                     toast.success("Preview created", {
@@ -1217,6 +1226,34 @@ export function AppDetail() {
                     className="w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder-gray-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                   />
                 </div>
+                {(() => {
+                  const stableEnvNames = (data?.environments ?? [])
+                    .filter((e) => e.envType !== "preview")
+                    .map((e) => e.envName);
+                  if (stableEnvNames.length === 0) return null;
+                  return (
+                    <div>
+                      <label
+                        htmlFor="preview-base-env"
+                        className="mb-1 block text-xs font-medium text-gray-700"
+                      >
+                        Base env
+                      </label>
+                      <select
+                        id="preview-base-env"
+                        value={previewBaseEnv || stableEnvNames[0]}
+                        onChange={(e) => setPreviewBaseEnv(e.target.value)}
+                        className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      >
+                        {stableEnvNames.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })()}
                 <button
                   type="submit"
                   disabled={previewSubmitting || !previewName.trim()}
@@ -1830,6 +1867,8 @@ function AppValuesEditor({
   const [chartAvailable, setChartAvailable] = useState(true);
   const [cdManaged, setCdManaged] = useState(false);
   const [cdSaving, setCdSaving] = useState(false);
+  const [previewsEnabled, setPreviewsEnabled] = useState(true);
+  const [previewsSaving, setPreviewsSaving] = useState(false);
 
   // Seed editors from the persisted overlays whenever the app data changes.
   useEffect(() => {
@@ -1840,6 +1879,7 @@ function AppValuesEditor({
     }
     setEnvTexts(next);
     setCdManaged(data.cd?.managed ?? false);
+    setPreviewsEnabled(data.previewsEnabled ?? true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
@@ -1916,6 +1956,21 @@ function AppValuesEditor({
       toast.error(err instanceof Error ? err.message : "Failed to save CD settings");
     } finally {
       setCdSaving(false);
+    }
+  }
+
+  const previewsDirty = previewsEnabled !== (data.previewsEnabled ?? true);
+
+  async function savePreviews() {
+    setPreviewsSaving(true);
+    try {
+      await updateApp(project, data.name, { previewsEnabled });
+      toast.success("Preview settings saved.");
+      await onSaved();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save preview settings");
+    } finally {
+      setPreviewsSaving(false);
     }
   }
 
@@ -2032,6 +2087,34 @@ function AppValuesEditor({
               className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
             >
               {cdSaving ? "Saving…" : "Save CD"}
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-4 border-t border-gray-100 pt-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={previewsEnabled}
+                  onChange={(e) => setPreviewsEnabled(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                Previews enabled
+              </label>
+              <p className="mt-1 text-xs text-gray-400">
+                When enabled, this app can be deployed to ephemeral preview
+                (PR) environments. A preview clones a base env (default staging)
+                and deploys all the app's enabled components.
+              </p>
+            </div>
+            <button
+              onClick={savePreviews}
+              disabled={previewsSaving || !previewsDirty}
+              className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            >
+              {previewsSaving ? "Saving…" : "Save"}
             </button>
           </div>
         </div>
@@ -3527,6 +3610,8 @@ function EnvVarsTab({
   // Only non-preview environments are meaningful for per-env env-var overrides.
   const stableEnvs = environments.filter((e) => e.envType !== "preview");
   const activeEnv = selectedEnvName ?? stableEnvs[0]?.envName ?? null;
+  // Base env for the preview band — its items live in this env's vault.
+  const previewBandEnv = stableEnvs[0]?.envName ?? null;
 
   const fetchAppCfg = useCallback(
     () => getAppEnvConfig(project, appName),
@@ -3567,6 +3652,38 @@ function EnvVarsTab({
         upsertFn={(entries) => upsertAppGlobalSecrets(project, appName, entries)}
         deleteFn={(key) => deleteAppGlobalSecretKey(project, appName, key)}
       />
+
+      {/* Preview band — one config applied to every preview, layered on top of
+          the base env. Stored as preview-scoped items inside the base env vault
+          (no per-preview vault). */}
+      {previewBandEnv && (
+        <div className="space-y-4 rounded-lg border border-indigo-100 bg-indigo-50/30 p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-indigo-500">
+            Preview band — applies to every preview (base env: {previewBandEnv})
+          </p>
+          <EnvConfigEditor
+            key="appenv-preview"
+            title="Preview variables"
+            description="Variables applied to every preview of this app, on top of its base env. Overridden by per-preview values."
+            fetchFn={() => getAppEnvEnvConfig(project, appName, "preview")}
+            saveFn={(cfg) => updateAppEnvEnvConfig(project, appName, "preview", cfg)}
+          />
+          <SecretEditor
+            key="secrets-preview"
+            title="Preview secrets"
+            description={`Secrets applied to every preview, on top of the base env. Stored as the "${appName}-env-preview" item in the "${previewBandEnv}" env vault.`}
+            fetchFn={() =>
+              listAppPreviewSecretKeys(project, appName, previewBandEnv)
+            }
+            upsertFn={(entries) =>
+              upsertAppPreviewSecrets(project, appName, previewBandEnv, entries)
+            }
+            deleteFn={(key) =>
+              deleteAppPreviewSecretKey(project, appName, previewBandEnv, key)
+            }
+          />
+        </div>
+      )}
 
       {/* Per-environment section */}
       <div className="space-y-3">
