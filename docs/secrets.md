@@ -38,6 +38,11 @@ win, so a `cluster`/`app` value beats a `global`/`shared` one.
 > break-glass, regional tuning, per-cluster feature kill-switches. It overrides
 > every other scope and applies per `(env, cluster)` pair. Use sparingly.
 
+**Previews** reuse the same mechanism: a preview reads a per-app
+`<app>-env-preview` band (and an optional per-PR `<app>-env-preview-pr-<name>`)
+item **inside the base env's vault** — no per-preview vault is created. See
+[previews.md](previews.md).
+
 ### Vault, item, and store names
 
 For the **1Password** backend a "vault" is a real 1Password vault; for the

@@ -46,8 +46,8 @@ const (
 //
 //   - For each ComponentSpec in app.Spec.Components (processed in name order):
 //
-//   - enabled   ← ComponentSpec.Enabled; additionally false when
-//     envType==preview and ComponentSpec.PreviewEnabled==false
+//   - enabled   ← ComponentSpec.Enabled (a preview renders the same enabled
+//     components as its base env)
 //
 //   - image     ← AppSpec.Values["image_repository"] / ["image_tag"]
 //     (shared across all components in MVP; per-component overrides future)
@@ -69,6 +69,8 @@ const (
 //     to first web component, then to first component overall)
 //
 // Environment overrides are taken from app.Spec.EnvironmentDefaults[envName].
+// For preview environments the reserved EnvironmentDefaults[PreviewOverrideKey]
+// ("preview") band is used instead (the preview name is never an override key).
 // They apply uniformly to all components in that environment.
 func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironmentType) HelmValues {
 	return MapToHelmValuesWithDomain(app, envName, envType, "localhost")
@@ -120,7 +122,13 @@ func MapToHelmValuesForEnv(
 		orgName = "default"
 	}
 
-	envOverride := app.Spec.EnvironmentDefaults[envName] // zero value if absent
+	// Preview envs apply the reserved "preview" band; their per-preview name
+	// (e.g. "pr-42") is never an EnvironmentDefaults key.
+	overrideKey := envName
+	if envType == domain.AppEnvPreview {
+		overrideKey = domain.PreviewOverrideKey
+	}
+	envOverride := app.Spec.EnvironmentDefaults[overrideKey] // zero value if absent
 	// Per-cluster overrides (deployMode "all"): fold the cluster's override on
 	// top of the env override so its replicas/size/config/values win for this
 	// cluster only. cluster=="" (single-cluster / active mode) is a no-op.
@@ -378,9 +386,6 @@ func buildComponentValues(
 	orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles,
 ) *ComponentValues {
 	enabled := c.Enabled
-	if envType == domain.AppEnvPreview && !c.PreviewEnabled {
-		enabled = false
-	}
 
 	replicas := resolveReplicas(c.Replicas, envOverride.Replicas, envType)
 

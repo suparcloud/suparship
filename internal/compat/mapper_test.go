@@ -67,8 +67,8 @@ func TestMapServiceToApp_SingleWebComponent(t *testing.T) {
 	if c.Type != domain.ComponentWeb {
 		t.Errorf("Component.Type = %q, want %q", c.Type, domain.ComponentWeb)
 	}
-	if !c.PreviewEnabled {
-		t.Error("Component.PreviewEnabled must be true for the default web component")
+	if !app.Spec.PreviewsEnabled {
+		t.Error("mapped app must have PreviewsEnabled=true")
 	}
 }
 

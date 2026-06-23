@@ -231,6 +231,11 @@ type ScopePresence struct {
 	// StackShared / StackEnvShared mark stack-scope secrets (shared by every app
 	// in the stack) present in the global / env vaults.
 	StackShared, StackEnvShared bool
+	// PreviewShared / PreviewApp mark the per-app preview band (applied to every
+	// preview on top of the base env). PreviewPRShared / PreviewPRApp mark a
+	// single preview's (PR's) override. All live in the base env vault.
+	PreviewShared, PreviewApp     bool
+	PreviewPRShared, PreviewPRApp bool
 }
 
 // WorkloadExternalSecretParams captures the per-app-env info for the single
@@ -249,6 +254,13 @@ type WorkloadExternalSecretParams struct {
 	// scope regardless of presence.
 	Cluster  string
 	Presence ScopePresence
+	// IsPreview marks this as a preview ExternalSecret. Env then holds the base
+	// env (whose vault/store the preview reuses) and PreviewName the preview's
+	// name. The preview band + per-PR items are appended on top of the base env.
+	IsPreview bool
+	// PreviewName is the preview (PR) name, used to key the per-PR override item.
+	// Only consulted when IsPreview is true.
+	PreviewName string
 	// UnifiedStore selects the 1Password layout: every item extracts from the
 	// single per-cluster store (secrets.UnifiedStoreName), so no per-entry
 	// sourceRef is emitted. False = k8s layout with per-vault stores.
@@ -326,6 +338,30 @@ func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretCo
 		}
 		if p.Presence.ClusterApp {
 			appItem(cluster)
+		}
+	}
+
+	// Preview bands: applied on top of the base env for previews only. The
+	// shared/app preview band (one per app) wins over the base env; a single
+	// preview's per-PR override wins over the band. All items live in the base
+	// env's vault (Env), so previews reuse the base env vault — no per-preview
+	// vault is ever created.
+	if p.IsPreview {
+		band := secrets.PreviewScope(p.Env)
+		if p.Presence.PreviewShared {
+			sharedItem(band)
+		}
+		if p.Presence.PreviewApp {
+			appItem(band)
+		}
+		if p.PreviewName != "" {
+			pr := secrets.PreviewPRScope(p.Env, p.PreviewName)
+			if p.Presence.PreviewPRShared {
+				sharedItem(pr)
+			}
+			if p.Presence.PreviewPRApp {
+				appItem(pr)
+			}
 		}
 	}
 

@@ -20,18 +20,18 @@ func TestIsDNSLabel(t *testing.T) {
 		{"app123", true},
 		{"a1", true},
 		{"my-app-42", true},
-		{strings.Repeat("a", 63), true},       // max 63 chars
+		{strings.Repeat("a", 63), true}, // max 63 chars
 		{"a" + strings.Repeat("b", 61) + "c", true}, // 63 chars with inner
 		// invalid
 		{"", false},
-		{"a", false},                    // too short (only 1 char)
-		{"A", false},                    // uppercase
-		{"MyApp", false},                // uppercase
-		{"-app", false},                 // starts with hyphen
-		{"app-", false},                 // ends with hyphen
-		{"123app", false},               // starts with digit
-		{"my_app", false},               // underscore
-		{"my app", false},               // space
+		{"a", false},                     // too short (only 1 char)
+		{"A", false},                     // uppercase
+		{"MyApp", false},                 // uppercase
+		{"-app", false},                  // starts with hyphen
+		{"app-", false},                  // ends with hyphen
+		{"123app", false},                // starts with digit
+		{"my_app", false},                // underscore
+		{"my app", false},                // space
 		{strings.Repeat("a", 64), false}, // too long
 	}
 	for _, tt := range tests {
@@ -122,7 +122,7 @@ func TestValidateComponentName(t *testing.T) {
 // ── ValidateComponents ────────────────────────────────────────────────────────
 
 func TestValidateComponents(t *testing.T) {
-	web := ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, PreviewEnabled: true}
+	web := ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true}
 	worker := ComponentSpec{Name: "worker", Type: ComponentWorker, Enabled: true}
 	cron := ComponentSpec{Name: "cron", Type: ComponentCron, Enabled: true}
 
@@ -462,7 +462,7 @@ func TestValidateComponentSpec(t *testing.T) {
 	}{
 		{
 			name:  "valid web enabled exposed",
-			input: ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal, PreviewEnabled: true},
+			input: ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
 		},
 		{
 			name:  "valid worker with replicas",

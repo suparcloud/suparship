@@ -24,6 +24,14 @@ const (
 	// ScopeStackEnv holds secrets shared by every app in a stack, in one
 	// environment. Items live in that env's vault.
 	ScopeStackEnv ScopeKind = "stackenv"
+	// ScopePreview holds the per-app "preview band": values folded into every
+	// preview of an app on top of its base env. Items live in the base env's
+	// vault (named with a preview suffix), so previews need no vault of their
+	// own — the same pattern cluster overrides use.
+	ScopePreview ScopeKind = "preview"
+	// ScopePreviewPR holds a single preview's (PR's) override. Items live in the
+	// base env's vault alongside the preview band, keyed by the preview name.
+	ScopePreviewPR ScopeKind = "previewpr"
 )
 
 // Scope identifies which vault a secret lives in. Env is set for ScopeEnv,
@@ -36,6 +44,8 @@ type Scope struct {
 	Cluster string
 	Project string
 	Stack   string
+	// Preview is the preview (PR) name for ScopePreviewPR. Empty otherwise.
+	Preview string
 }
 
 // GlobalScope returns the global scope.
@@ -72,6 +82,18 @@ func StackScope(project, stack string) Scope {
 // The items live in that environment's vault.
 func StackEnvScope(project, stack, env string) Scope {
 	return Scope{Kind: ScopeStackEnv, Project: project, Stack: stack, Env: env}
+}
+
+// PreviewScope returns the scope for an app's preview band — values applied to
+// every preview on top of the base env. Items live in the base env's vault.
+func PreviewScope(baseEnv string) Scope {
+	return Scope{Kind: ScopePreview, Env: baseEnv}
+}
+
+// PreviewPRScope returns the scope for a single preview's (PR's) override.
+// Items live in the base env's vault, keyed by the preview name.
+func PreviewPRScope(baseEnv, preview string) Scope {
+	return Scope{Kind: ScopePreviewPR, Env: baseEnv, Preview: preview}
 }
 
 // Tier identifies ownership within a scope: TierShared holds org-admin,

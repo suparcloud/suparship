@@ -225,6 +225,76 @@ func TestBuildAppExternalSecret_ClusterItemsUseEnvStore(t *testing.T) {
 	}
 }
 
+// TestBuildAppExternalSecret_PreviewReusesBaseEnvVault is the core guarantee of
+// the preview design: a preview reads the BASE env store (not a per-preview
+// vault), layering base env → preview band → per-PR items in precedence order.
+func TestBuildAppExternalSecret_PreviewReusesBaseEnvVault(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App:         "web",
+		Namespace:   "web-pr-42",
+		Env:         "staging", // BASE env — the preview clones it
+		IsPreview:   true,
+		PreviewName: "pr-42",
+		Presence: ScopePresence{
+			EnvApp:          true,
+			PreviewShared:   true,
+			PreviewApp:      true,
+			PreviewPRShared: true,
+			PreviewPRApp:    true,
+		},
+	})
+	if cfg == nil {
+		t.Fatal("expected a config")
+	}
+	// Order: base env app → preview band (shared, app) → per-PR (shared, app).
+	wantKeys := []string{
+		"web-env-staging",
+		"shared-env-preview", "web-env-preview",
+		"shared-env-preview-pr-42", "web-env-preview-pr-42",
+	}
+	if len(cfg.Items) != len(wantKeys) {
+		t.Fatalf("expected %d items, got %d: %+v", len(wantKeys), len(cfg.Items), cfg.Items)
+	}
+	for i, k := range wantKeys {
+		if cfg.Items[i].Key != k {
+			t.Errorf("item %d: got %q, want %q", i, cfg.Items[i].Key, k)
+		}
+		// Every item — including the preview bands — must read from the BASE env
+		// store. No per-preview store/vault may appear.
+		if cfg.Items[i].StoreName != "suparship-store-env-staging" {
+			t.Errorf("item %q store = %q, want base env store", k, cfg.Items[i].StoreName)
+		}
+		if strings.Contains(cfg.Items[i].StoreName, "pr-42") {
+			t.Errorf("item %q must not reference a per-preview store, got %q", k, cfg.Items[i].StoreName)
+		}
+	}
+}
+
+// TestBuildAppExternalSecret_PreviewWithoutPRItems covers the common case: a
+// preview band exists but no per-PR override has been written out-of-band.
+func TestBuildAppExternalSecret_PreviewWithoutPRItems(t *testing.T) {
+	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App:         "web",
+		Namespace:   "web-pr-7",
+		Env:         "staging",
+		IsPreview:   true,
+		PreviewName: "pr-7",
+		Presence:    ScopePresence{EnvApp: true, PreviewApp: true},
+	})
+	if cfg == nil {
+		t.Fatal("expected a config")
+	}
+	wantKeys := []string{"web-env-staging", "web-env-preview"}
+	if len(cfg.Items) != len(wantKeys) {
+		t.Fatalf("expected %d items, got %d: %+v", len(wantKeys), len(cfg.Items), cfg.Items)
+	}
+	for i, k := range wantKeys {
+		if cfg.Items[i].Key != k {
+			t.Errorf("item %d: got %q, want %q", i, cfg.Items[i].Key, k)
+		}
+	}
+}
+
 func TestBuildAppExternalSecret_UnifiedStore(t *testing.T) {
 	cfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 		App:          "web",

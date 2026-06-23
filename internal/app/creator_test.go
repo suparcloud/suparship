@@ -63,9 +63,6 @@ func TestDefaultComponentsWebCategory(t *testing.T) {
 	if c.Type != domain.ComponentWeb {
 		t.Errorf("expected type %q, got %q", domain.ComponentWeb, c.Type)
 	}
-	if !c.PreviewEnabled {
-		t.Error("expected PreviewEnabled=true for web component")
-	}
 }
 
 func TestDefaultComponentsWorkerCategory(t *testing.T) {
@@ -80,9 +77,6 @@ func TestDefaultComponentsWorkerCategory(t *testing.T) {
 	if c.Type != domain.ComponentWorker {
 		t.Errorf("expected type %q, got %q", domain.ComponentWorker, c.Type)
 	}
-	if c.PreviewEnabled {
-		t.Error("expected PreviewEnabled=false for worker component")
-	}
 }
 
 func TestDefaultComponentsCronCategory(t *testing.T) {
@@ -96,9 +90,6 @@ func TestDefaultComponentsCronCategory(t *testing.T) {
 	}
 	if c.Type != domain.ComponentCron {
 		t.Errorf("expected type %q, got %q", domain.ComponentCron, c.Type)
-	}
-	if c.PreviewEnabled {
-		t.Error("expected PreviewEnabled=false for cron component")
 	}
 }
 
@@ -225,8 +216,8 @@ func TestBuildUsesDefaultComponentsWhenNoneProvided(t *testing.T) {
 
 func TestBuildRespectsExplicitComponents(t *testing.T) {
 	explicit := []domain.ComponentSpec{
-		{Name: "web", Type: domain.ComponentWeb, Enabled: true, PreviewEnabled: true},
-		{Name: "worker", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
+		{Name: "web", Type: domain.ComponentWeb, Enabled: true},
+		{Name: "worker", Type: domain.ComponentWorker, Enabled: true},
 	}
 	a, _ := Build("demo", "myapp", "", "", webTemplate(), nil, nil, explicit)
 	if len(a.Spec.Components) != 2 {
@@ -241,46 +232,46 @@ func TestBuildNilValuesNormalisedToEmptyMap(t *testing.T) {
 	}
 }
 
-// --- PreviewEnabledComponents ---
+// --- EnabledComponents ---
 
-func TestPreviewEnabledComponentsFiltersCorrectly(t *testing.T) {
+func TestEnabledComponentsFiltersCorrectly(t *testing.T) {
 	components := []domain.ComponentSpec{
-		{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
-		{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
-		{Name: "cron", Type: domain.ComponentCron, PreviewEnabled: false},
+		{Name: "web", Type: domain.ComponentWeb, Enabled: true},
+		{Name: "worker", Type: domain.ComponentWorker, Enabled: false},
+		{Name: "cron", Type: domain.ComponentCron, Enabled: false},
 	}
-	got := PreviewEnabledComponents(components)
+	got := EnabledComponents(components)
 	if len(got) != 1 {
-		t.Fatalf("expected 1 preview-enabled component, got %d", len(got))
+		t.Fatalf("expected 1 enabled component, got %d", len(got))
 	}
 	if got[0].Name != "web" {
 		t.Errorf("expected component %q, got %q", "web", got[0].Name)
 	}
 }
 
-func TestPreviewEnabledComponentsAllEnabled(t *testing.T) {
+func TestEnabledComponentsAllEnabled(t *testing.T) {
 	components := []domain.ComponentSpec{
-		{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
-		{Name: "api", Type: domain.ComponentWeb, PreviewEnabled: true},
+		{Name: "web", Type: domain.ComponentWeb, Enabled: true},
+		{Name: "api", Type: domain.ComponentWeb, Enabled: true},
 	}
-	got := PreviewEnabledComponents(components)
+	got := EnabledComponents(components)
 	if len(got) != 2 {
-		t.Fatalf("expected 2 preview-enabled components, got %d", len(got))
+		t.Fatalf("expected 2 enabled components, got %d", len(got))
 	}
 }
 
-func TestPreviewEnabledComponentsNoneEnabled(t *testing.T) {
+func TestEnabledComponentsNoneEnabled(t *testing.T) {
 	components := []domain.ComponentSpec{
-		{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
+		{Name: "worker", Type: domain.ComponentWorker, Enabled: false},
 	}
-	got := PreviewEnabledComponents(components)
+	got := EnabledComponents(components)
 	if len(got) != 0 {
-		t.Fatalf("expected 0 preview-enabled components, got %d", len(got))
+		t.Fatalf("expected 0 enabled components, got %d", len(got))
 	}
 }
 
-func TestPreviewEnabledComponentsEmptyList(t *testing.T) {
-	got := PreviewEnabledComponents(nil)
+func TestEnabledComponentsEmptyList(t *testing.T) {
+	got := EnabledComponents(nil)
 	if len(got) != 0 {
 		t.Fatalf("expected 0 components for nil input, got %d", len(got))
 	}
@@ -294,9 +285,10 @@ func TestNewPreviewEnvironmentSuccess(t *testing.T) {
 		ProjectName: "demo",
 		Spec: domain.AppSpec{
 			Components: []domain.ComponentSpec{
-				{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
-				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: false},
 			},
+			PreviewsEnabled: true,
 		},
 	}
 
@@ -328,20 +320,39 @@ func TestNewPreviewEnvironmentSuccess(t *testing.T) {
 	}
 }
 
-func TestNewPreviewEnvironmentNoPreviewComponents(t *testing.T) {
+func TestNewPreviewEnvironmentNoEnabledComponents(t *testing.T) {
 	a := &domain.App{
 		Name:        "worker-app",
 		ProjectName: "demo",
 		Spec: domain.AppSpec{
 			Components: []domain.ComponentSpec{
-				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: false},
 			},
+			PreviewsEnabled: true,
 		},
 	}
 
 	_, err := NewPreviewEnvironment(a, "pr-42")
 	if err == nil {
-		t.Fatal("expected error when no preview-enabled components")
+		t.Fatal("expected error when no enabled components")
+	}
+}
+
+func TestNewPreviewEnvironmentPreviewsDisabled(t *testing.T) {
+	a := &domain.App{
+		Name:        "web-app",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true},
+			},
+			PreviewsEnabled: false,
+		},
+	}
+
+	_, err := NewPreviewEnvironment(a, "pr-42")
+	if err == nil {
+		t.Fatal("expected error when previews are disabled")
 	}
 }
 
@@ -363,8 +374,9 @@ func TestNewPreviewEnvironmentNamespaceConvention(t *testing.T) {
 				ProjectName: "demo",
 				Spec: domain.AppSpec{
 					Components: []domain.ComponentSpec{
-						{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
+						{Name: "web", Type: domain.ComponentWeb, Enabled: true},
 					},
+					PreviewsEnabled: true,
 				},
 			}
 			env, err := NewPreviewEnvironment(a, tt.previewName)
@@ -436,18 +448,16 @@ func templateWithComponents() *tpl.Template {
 			Engine:   tpl.Engine{Type: tpl.EngineHelm},
 			Components: []tpl.TemplateComponent{
 				{
-					Name:           "web",
-					Type:           tpl.TemplateComponentWeb,
-					Required:       true,
-					PreviewEnabled: true,
-					Exposed:        true,
+					Name:     "web",
+					Type:     tpl.TemplateComponentWeb,
+					Required: true,
+					Exposed:  true,
 				},
 				{
 					Name:           "worker",
 					Type:           tpl.TemplateComponentWorker,
 					Required:       false,
 					DefaultEnabled: &defaultEnabledFalse,
-					PreviewEnabled: false,
 					Exposed:        false,
 				},
 			},
@@ -543,9 +553,6 @@ func TestComponentsFromTemplate_FieldsFromTemplateComponent(t *testing.T) {
 			if c.ExposeMode != domain.ExposeExternal {
 				t.Errorf("web component ExposeMode = %q, want %q", c.ExposeMode, domain.ExposeExternal)
 			}
-			if !c.PreviewEnabled {
-				t.Error("web component should have PreviewEnabled=true from template")
-			}
 			if c.Type != domain.ComponentWeb {
 				t.Errorf("web component type = %q, want ComponentWeb", c.Type)
 			}
@@ -553,9 +560,6 @@ func TestComponentsFromTemplate_FieldsFromTemplateComponent(t *testing.T) {
 		if c.Name == "worker" {
 			if c.ExposeMode != domain.ExposeDisabled {
 				t.Errorf("worker component ExposeMode = %q, want %q", c.ExposeMode, domain.ExposeDisabled)
-			}
-			if c.PreviewEnabled {
-				t.Error("worker component should have PreviewEnabled=false from template")
 			}
 			if c.Type != domain.ComponentWorker {
 				t.Errorf("worker component type = %q, want ComponentWorker", c.Type)
@@ -575,8 +579,7 @@ func TestComponentsFromTemplate_Deterministic(t *testing.T) {
 		if got1[i].Name != got2[i].Name ||
 			got1[i].Type != got2[i].Type ||
 			got1[i].Enabled != got2[i].Enabled ||
-			got1[i].ExposeMode != got2[i].ExposeMode ||
-			got1[i].PreviewEnabled != got2[i].PreviewEnabled {
+			got1[i].ExposeMode != got2[i].ExposeMode {
 			t.Errorf("non-deterministic output at index %d: %+v vs %+v", i, got1[i], got2[i])
 		}
 	}
@@ -628,7 +631,7 @@ func minimalTemplateWithComponents() *tpl.Template {
 			Category: "web",
 			Engine:   tpl.Engine{Type: tpl.EngineHelm},
 			Components: []tpl.TemplateComponent{
-				{Name: "web", Type: tpl.TemplateComponentWeb, Required: true, PreviewEnabled: true, Exposed: true},
+				{Name: "web", Type: tpl.TemplateComponentWeb, Required: true, Exposed: true},
 			},
 			Inputs: []tpl.Input{
 				{Name: "image", Title: "Image", Type: tpl.InputTypeString, Required: true},
@@ -717,7 +720,7 @@ func TestCreate_ComponentsInitialisedFromTemplate(t *testing.T) {
 		t.Fatalf("expected 1 component, got %d", len(result.App.Spec.Components))
 	}
 	c := result.App.Spec.Components[0]
-	if c.Name != "web" || !c.Enabled || !c.PreviewEnabled || c.ExposeMode != domain.ExposeExternal {
+	if c.Name != "web" || !c.Enabled || c.ExposeMode != domain.ExposeExternal {
 		t.Errorf("web component fields unexpected: %+v", c)
 	}
 }
@@ -826,7 +829,7 @@ func TestCreate_ComponentTogglesApplied(t *testing.T) {
 			Category: "web",
 			Engine:   tpl.Engine{Type: tpl.EngineHelm},
 			Components: []tpl.TemplateComponent{
-				{Name: "web", Type: tpl.TemplateComponentWeb, Required: true, PreviewEnabled: true, Exposed: true},
+				{Name: "web", Type: tpl.TemplateComponentWeb, Required: true, Exposed: true},
 				{Name: "worker", Type: tpl.TemplateComponentWorker, DefaultEnabled: &defaultEnabledFalse},
 			},
 		},
@@ -850,7 +853,7 @@ func TestCreate_ComponentTogglesApplied(t *testing.T) {
 
 func TestCreate_ExplicitComponentsBypassTemplate(t *testing.T) {
 	explicit := []domain.ComponentSpec{
-		{Name: "custom", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
+		{Name: "custom", Type: domain.ComponentWorker, Enabled: true},
 	}
 	result, err := Create(CreateRequest{
 		ProjectName:        "demo",

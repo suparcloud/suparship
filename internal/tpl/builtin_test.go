@@ -86,9 +86,6 @@ func assertWebServiceTemplate(t *testing.T, tmpl *Template) {
 	if !webComp.Exposed {
 		t.Error("web component should be exposed")
 	}
-	if !webComp.PreviewEnabled {
-		t.Error("web component should be previewEnabled")
-	}
 	if !webComp.IsDefaultEnabled() {
 		t.Error("web component should be default-enabled")
 	}

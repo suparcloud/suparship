@@ -396,9 +396,6 @@ func TestParseTemplateWithComponents(t *testing.T) {
 	if !web.Required {
 		t.Error("components[0].Required should be true")
 	}
-	if !web.PreviewEnabled {
-		t.Error("components[0].PreviewEnabled should be true")
-	}
 	if !web.Exposed {
 		t.Error("components[0].Exposed should be true")
 	}

@@ -760,6 +760,23 @@ func rawValuesOverlay(app *domain.App, envName string) map[string]any {
 	return base
 }
 
+// imageTagValuesKey is the AppSpec.Values key the canonical mapper reads the
+// image tag from (mirrors helmvalues' internal imageTagKey). Overriding it for a
+// preview re-tags every component image.
+const imageTagValuesKey = "image_tag"
+
+// previewRawValuesOverlay returns the freeform Helm values overlay for a
+// preview: the base env's overlay (app + base-env RawValues) with the reserved
+// "preview" band's RawValues merged on top (preview wins). The per-preview name
+// is never an EnvironmentDefaults key — previews share one band.
+func previewRawValuesOverlay(app *domain.App, baseEnv string) map[string]any {
+	base := rawValuesOverlay(app, baseEnv)
+	if ov, ok := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]; ok && len(ov.RawValues) > 0 {
+		base = deepMerge(base, deepCopyMap(ov.RawValues))
+	}
+	return base
+}
+
 // activeTarget returns the ClusterTarget matching the env's active ClusterRef,
 // falling back to the sole cluster or a bare-name target.
 func activeTarget(env AppPublishEnv) ClusterTarget {
@@ -1486,12 +1503,35 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		// Org-level routing profiles apply uniformly to previews; per-env
 		// overrides don't make sense for ephemeral preview envs (their
 		// names are PR-specific and have no static config).
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
+		// A per-preview image tag overrides the inherited base-env tag: for
+		// canonical templates it is folded into the app's image_tag so the mapper
+		// bakes it into each component's image.tag; for BYO/passthrough charts it
+		// is exposed as a top-level image_tag overlay value.
+		mapApp := app
+		overlay := previewRawValuesOverlay(app, preview.BaseEnv)
+		if preview.ImageTag != "" {
+			if preview.SkipCanonicalBase {
+				if overlay == nil {
+					overlay = map[string]any{}
+				}
+				overlay[imageTagValuesKey] = preview.ImageTag
+			} else {
+				clone := *app
+				vals := make(map[string]any, len(app.Spec.Values)+1)
+				for k, v := range app.Spec.Values {
+					vals[k] = v
+				}
+				vals[imageTagValuesKey] = preview.ImageTag
+				clone.Spec.Values = vals
+				mapApp = &clone
+			}
+		}
+		hv := helmvalues.MapToHelmValuesForEnv(mapApp, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
 		var hvBytes []byte
 		if preview.SkipCanonicalBase {
-			hvBytes, err = marshalPassthroughValues(hv.Platform, rawValuesOverlay(app, preview.PreviewName), preview.EnvVars)
+			hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, preview.EnvVars)
 		} else {
-			hvBytes, err = marshalValuesWithOverlay(hv, rawValuesOverlay(app, preview.PreviewName), preview.EnvVars)
+			hvBytes, err = marshalValuesWithOverlay(hv, overlay, preview.EnvVars)
 		}
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
@@ -1514,10 +1554,12 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 			App:             app.Name,
 			Namespace:       preview.Namespace,
-			Env:             preview.PreviewName,
+			Env:             preview.BaseEnv,
 			Project:         app.ProjectName,
 			Stack:           app.Spec.Stack,
 			Presence:        preview.ScopeKeys,
+			IsPreview:       true,
+			PreviewName:     preview.PreviewName,
 			UnifiedStore:    p.usesUnifiedStore(),
 			Branding:        p.cfg.Branding,
 			RefreshInterval: p.externalSecretRefreshInterval(),
@@ -1544,6 +1586,11 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 type PreviewPublishSpec struct {
 	// PreviewName is the sanitized preview identifier (e.g. "pr-42").
 	PreviewName string
+	// BaseEnv is the stable env the preview clones (default the first stable env
+	// by promotion order, conventionally "staging"). The preview reuses this
+	// env's vault, ClusterSecretStore, cluster and per-env config — preview band
+	// items live inside the base env vault, so no per-preview vault is created.
+	BaseEnv string
 	// ClusterServer is the API server URL for the cluster where this preview runs.
 	ClusterServer string
 	// Namespace is the Kubernetes namespace for this preview.
@@ -1554,6 +1601,9 @@ type PreviewPublishSpec struct {
 	// EnvVars holds per-preview variable overrides to merge into the platform-managed
 	// ConfigMap alongside app.Spec.EnvConfig.Vars.
 	EnvVars map[string]string
+	// ImageTag, when non-empty, overrides the image tag in the preview's values
+	// (every image the app maps). Empty inherits the base env's image tag.
+	ImageTag string
 	// ScopeKeys reports which (scope, tier) items have keys, so PublishPreview
 	// emits only the ExternalSecrets that resolve.
 	ScopeKeys ScopePresence

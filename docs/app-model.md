@@ -143,6 +143,11 @@ on that cluster.
 Only these three values are valid in MVP. `ParseAppEnvironmentType` returns an
 error for any other string.
 
+A `preview` env clones a stable base env (default: the first by promotion order)
+plus the app's preview overrides, and is excluded from the promotion chain. See
+[previews.md](previews.md) for the preview lifecycle, overlays, and how to launch
+one from the UI, the API, or CI.
+
 ### Desired config vs runtime state
 
 **Desired config** lives in `App`/`AppSpec` and is stored in Git-backed

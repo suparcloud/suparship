@@ -1322,6 +1322,86 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 	return a.inner.PublishAppEnv(ctx, app, pub)
 }
 
+// PublishAppPreview implements server.GitOpsPublisher for previews. A preview
+// reuses baseEnv's cluster, per-env config and vault: its env vars are the base
+// env's merged vars with the reserved "preview" band overlaid, and its
+// ExternalSecret reads the base env vault's preview-band (+ per-PR) items on top
+// of the base env's own items. No per-preview vault or store is created.
+func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *domain.App, preview *domain.EnvironmentInstance, baseEnv, imageTag string) error {
+	tmpl, err := a.resolveTemplate(ctx, app.Spec.Template.Name)
+	if err != nil {
+		return fmt.Errorf("publish preview %s/%s/%s: %w", app.ProjectName, app.Name, preview.EnvName, err)
+	}
+
+	// Resolve the BASE env's cluster + base domain — the preview deploys there.
+	resolved := a.resolveEnvs(ctx)
+	res, ok := resolved[baseEnv]
+	if !ok {
+		res = envResolved{
+			clusterServer: "https://kubernetes.default.svc",
+			baseDomain:    "localhost",
+			bound:         false,
+		}
+	}
+
+	var org *rbac.Org
+	if a.orgProvider != nil {
+		org, _ = a.orgProvider.GetOrg(ctx)
+	}
+
+	// Reuse the stable-env secret wiring for the base env (resolves ClusterRef +
+	// global/env/project/stack ScopeKeys and ensures their items exist), then add
+	// the preview bands on top.
+	var basePub gitops.AppPublishEnv
+	if org != nil {
+		a.enrichPubEnvWithSecrets(ctx, org, app, baseEnv, &basePub)
+	}
+	scopeKeys := basePub.ScopeKeys
+	clusterRef := basePub.ClusterRef
+	if a.vault != nil {
+		// Always provision + reference the per-app preview band so a "preview"-scope
+		// secret set later resolves without re-publishing.
+		if err := a.vault.EnsureItem(ctx, secrets.PreviewScope(baseEnv), secrets.TierApp, app.Name); err == nil {
+			scopeKeys.PreviewApp = true
+		}
+		has := func(scope secrets.Scope, tier secrets.Tier, appName string) bool {
+			entries, err := a.vault.ListKeys(ctx, scope, tier, appName)
+			return err == nil && len(entries) > 0
+		}
+		band := secrets.PreviewScope(baseEnv)
+		scopeKeys.PreviewShared = has(band, secrets.TierShared, "")
+		// Per-PR override items are written out-of-band (CI/API); reference them
+		// only when present so ESO never extracts a missing item.
+		pr := secrets.PreviewPRScope(baseEnv, preview.EnvName)
+		scopeKeys.PreviewPRShared = has(pr, secrets.TierShared, "")
+		scopeKeys.PreviewPRApp = has(pr, secrets.TierApp, app.Name)
+	}
+
+	// Env vars: base env's merged vars + the reserved "preview" band on top.
+	envVars := a.mergeAllEnvVars(ctx, app, baseEnv, clusterRef, org)
+	if ov, ok := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]; ok && len(ov.EnvConfig.Vars) > 0 {
+		if envVars == nil {
+			envVars = map[string]string{}
+		}
+		for k, v := range ov.EnvConfig.Vars {
+			envVars[k] = v
+		}
+	}
+
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:       preview.EnvName,
+		BaseEnv:           baseEnv,
+		ClusterServer:     res.clusterServer,
+		Namespace:         preview.Namespace,
+		BaseDomain:        res.baseDomain,
+		EnvVars:           envVars,
+		ScopeKeys:         scopeKeys,
+		ImageTag:          imageTag,
+		SkipCanonicalBase: !tmpl.Spec.CanonicalValues(),
+	}
+	return a.inner.PublishPreview(ctx, app, spec)
+}
+
 // UnpublishApp implements server.GitOpsPublisher by removing all gitops-output
 // directories for the given app and committing the deletion.
 func (a *gitOpsPublisherAdapter) UnpublishApp(ctx context.Context, projectName, appName string) error {

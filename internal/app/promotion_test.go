@@ -15,8 +15,8 @@ import (
 
 type memStore struct {
 	mu   sync.RWMutex
-	apps map[string]map[string]*domain.App                            // project → app
-	envs map[string]map[string]map[string]*domain.AppEnvironment      // project → app → envName
+	apps map[string]map[string]*domain.App                       // project → app
+	envs map[string]map[string]map[string]*domain.AppEnvironment // project → app → envName
 }
 
 func newMemStore() *memStore {
@@ -193,8 +193,8 @@ func baseApp() *domain.App {
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "web-service"},
 			Components: []domain.ComponentSpec{
-				{Name: "web", Type: domain.ComponentWeb, Enabled: true, PreviewEnabled: true},
-				{Name: "worker", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true},
 			},
 		},
 	}
@@ -403,7 +403,7 @@ func TestPromote_DeepCopy(t *testing.T) {
 func TestPromote_NoRelease(t *testing.T) {
 	store := newMemStore()
 	seedStore(store,
-		stagingEnv(""),  // no release
+		stagingEnv(""), // no release
 		prodEnv(),
 	)
 

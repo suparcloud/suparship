@@ -298,6 +298,12 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/cluster/{cluster}", devProject(sh.handleUpsertSecrets))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/cluster/{cluster}/{key}", devProject(sh.handleDeleteSecret))
 
+		// Preview band: app secrets applied to every preview on top of base env
+		// {env}. Stored as the <app>-env-preview item inside the {env} vault.
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/preview", viewProject(sh.handleListSecrets))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/preview", devProject(sh.handleUpsertSecrets))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/secrets/env/{env}/preview/{key}", devProject(sh.handleDeleteSecret))
+
 		// Resolved secrets — merged view (global<env<cluster, shared<app).
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/secrets/resolved", viewProject(sh.handleGetResolvedSecrets))
 		// Force-sync: triggers ESO re-pull.

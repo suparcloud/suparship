@@ -28,11 +28,10 @@ type AppSecretRefDTO struct {
 // (e.g. "web", "worker", "cron"). It is a read-only view; mutations go through
 // the app spec update endpoint.
 type ComponentSummaryDTO struct {
-	Name           string `json:"name"`
-	Type           string `json:"type"`
-	Enabled        bool   `json:"enabled"`
-	ExposeMode     string `json:"exposeMode,omitempty"`
-	PreviewEnabled bool   `json:"previewEnabled"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Enabled    bool   `json:"enabled"`
+	ExposeMode string `json:"exposeMode,omitempty"`
 }
 
 // AppReleaseRefDTO identifies the deployed release version for one environment
@@ -84,8 +83,11 @@ type PreviewMetaDTO struct {
 // EnvType is one of "staging", "prod", "preview". When EnvType is "preview",
 // the Preview field is populated with additional metadata.
 type AppEnvironmentSummaryDTO struct {
-	EnvName   string               `json:"envName"`
-	EnvType   string               `json:"envType"`
+	EnvName string `json:"envName"`
+	EnvType string `json:"envType"`
+	// Order is the position in the promotion pipeline (lower = earlier; the first
+	// stable env is the default preview base env). Preview envs have Order 0.
+	Order     int                  `json:"order"`
 	Namespace string               `json:"namespace"`
 	// URLs are the ingress hostnames assigned to this environment instance.
 	// Always a non-nil slice; empty when no ingress has been provisioned.
@@ -158,6 +160,9 @@ type AppDetailDTO struct {
 	// CD surfaces the app's continuous-delivery settings (external-CD tag
 	// ownership) so the UI can render and edit the toggle. Always present.
 	CD CDConfigDTO `json:"cd"`
+	// PreviewsEnabled reports whether this app supports preview (ephemeral PR)
+	// environments. Defaults to true on create; editable via the update endpoint.
+	PreviewsEnabled bool `json:"previewsEnabled"`
 }
 
 // CDConfigDTO mirrors domain.CDConfig on the wire. When Managed is true an
@@ -225,9 +230,6 @@ type ComponentCreateDTO struct {
 	// the chart should use for this component. Empty is treated as
 	// "disabled" — the component runs without any ingress.
 	ExposeMode string `json:"exposeMode,omitempty"`
-	// PreviewEnabled controls whether this component is deployed in preview
-	// environments. Defaults to true for web components, false for others.
-	PreviewEnabled bool `json:"previewEnabled"`
 }
 
 // createAppRequest is the JSON body for POST /api/v1/projects/{project}/apps.
@@ -327,6 +329,9 @@ type updateAppRequest struct {
 	// CD, when non-nil, replaces the app's continuous-delivery settings
 	// (external-CD tag ownership). Omit to leave unchanged.
 	CD *CDConfigDTO `json:"cd,omitempty"`
+	// PreviewsEnabled, when non-nil, toggles whether this app supports preview
+	// (ephemeral PR) environments. Omit to leave unchanged.
+	PreviewsEnabled *bool `json:"previewsEnabled,omitempty"`
 }
 
 // updateAppResponse mirrors createAppResponse for the edit endpoint.
@@ -369,6 +374,16 @@ type AppPreviewsResponse struct {
 // domain.SanitizePreviewName before validation and storage.
 type CreateAppPreviewRequest struct {
 	Name string `json:"name"`
+	// BaseEnv is the stable environment the preview clones (cluster + per-env
+	// config/secrets). Optional — defaults to the project's first stable env by
+	// promotion order (conventionally "staging"). Pass "prod" to base a preview
+	// on prod. Must name an existing stable env of the app.
+	BaseEnv string `json:"baseEnv,omitempty"`
+	// ImageTag overrides the image tag for this preview (every image the app's
+	// template maps). Optional — when empty the preview inherits the base env's
+	// image. CI typically passes the tag it just built for the PR (e.g. the
+	// commit SHA). Re-POSTing with a new tag re-publishes the preview (upsert).
+	ImageTag string `json:"imageTag,omitempty"`
 }
 
 // --- App-scoped promotion DTOs ---

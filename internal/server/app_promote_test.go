@@ -61,7 +61,7 @@ func promoteTestApp(projectName string) *domain.App {
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
 			Template:   domain.AppTemplateRef{Name: "web-service"},
-			Components: []domain.ComponentSpec{{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true}},
+			Components: []domain.ComponentSpec{{Name: "web", Type: domain.ComponentWeb, Enabled: true}},
 		},
 	}
 }
@@ -586,6 +586,9 @@ func (r *recordingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, env
 	r.publishedEnvs = append(r.publishedEnvs, env.EnvName)
 	return nil
 }
+func (r *recordingPublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _, _ string) error {
+	return nil
+}
 func (r *recordingPublisher) UnpublishApp(_ context.Context, _, _ string) error       { return nil }
 func (r *recordingPublisher) UnpublishProjectApps(_ context.Context, _ string) error  { return nil }
 func (r *recordingPublisher) UnpublishProjectInfra(_ context.Context, _ string) error { return nil }
@@ -651,6 +654,9 @@ func (f *failingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*dom
 	return nil
 }
 func (f *failingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, _ *domain.AppEnvironment) error {
+	return fmt.Errorf("simulated publish failure")
+}
+func (f *failingPublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _, _ string) error {
 	return fmt.Errorf("simulated publish failure")
 }
 func (f *failingPublisher) UnpublishApp(_ context.Context, _, _ string) error       { return nil }

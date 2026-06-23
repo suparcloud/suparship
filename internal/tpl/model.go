@@ -14,8 +14,7 @@
 //
 // Component visibility: components are internal runtime units and are hidden
 // from the default UI. Only the app-level health is surfaced by default;
-// individual components appear in advanced views only. Templates control which
-// components participate in preview environments via PreviewEnabled.
+// individual components appear in advanced views only.
 //
 // See docs/templates-components.md for how templates define component topology.
 // See docs/templates.md for the full template authoring guide.
@@ -222,9 +221,6 @@ type TemplateComponent struct {
 	// DefaultEnabled controls whether the component is enabled by default.
 	// nil (omitted in YAML) is treated as true by IsDefaultEnabled.
 	DefaultEnabled *bool `yaml:"defaultEnabled,omitempty"`
-	// PreviewEnabled declares whether this component is deployed in preview
-	// environments by default. Typically true for web, false for worker/cron.
-	PreviewEnabled bool `yaml:"previewEnabled,omitempty"`
 	// Exposed declares whether this component should receive an ingress
 	// endpoint by default. Typically true only for web components. This
 	// controls the *initial state* of the expose toggle; whether the toggle

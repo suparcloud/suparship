@@ -94,7 +94,6 @@ type TemplateComponentDTO struct {
 	Type               string                   `json:"type"`
 	Required           bool                     `json:"required"`
 	DefaultEnabled     bool                     `json:"defaultEnabled"`
-	PreviewEnabled     bool                     `json:"previewEnabled"`
 	Exposed            bool                     `json:"exposed"`
 	Produces           []string                 `json:"produces,omitempty"`
 	OptionallyProduces []string                 `json:"optionallyProduces,omitempty"`
@@ -605,7 +604,6 @@ func componentsToTemplateDTO(components []tpl.TemplateComponent) []TemplateCompo
 			Type:               string(c.Type),
 			Required:           c.Required,
 			DefaultEnabled:     c.IsDefaultEnabled(),
-			PreviewEnabled:     c.PreviewEnabled,
 			Exposed:            c.Exposed,
 			Produces:           c.Produces,
 			OptionallyProduces: c.OptionallyProduces,

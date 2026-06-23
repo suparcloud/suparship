@@ -15,31 +15,34 @@ import (
 
 // --- Shared test fixtures ---
 
-// previewTestAppForProject returns an App with one web (preview-enabled) and one
-// worker (not preview-enabled) component for use in preview endpoint tests.
+// previewTestAppForProject returns an App with one web and one worker component,
+// both enabled, with previews enabled — for use in preview endpoint tests.
 func previewTestAppForProject(projectName string) *domain.App {
 	return &domain.App{
 		Name:        "my-app",
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
-			Template: domain.AppTemplateRef{Name: "web-service"},
+			Template:        domain.AppTemplateRef{Name: "web-service"},
+			PreviewsEnabled: true,
 			Components: []domain.ComponentSpec{
-				{Name: "web", Type: domain.ComponentWeb, PreviewEnabled: true},
-				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true},
 			},
 		},
 	}
 }
 
-// workerOnlyAppForProject returns an App whose only component has EnabledInPreview=false.
-func workerOnlyAppForProject(projectName string) *domain.App {
+// previewsDisabledAppForProject returns an App that has enabled components but
+// has opted out of previews (PreviewsEnabled=false) — creating a preview must fail.
+func previewsDisabledAppForProject(projectName string) *domain.App {
 	return &domain.App{
-		Name:        "worker-app",
+		Name:        "noprev-app",
 		ProjectName: projectName,
 		Spec: domain.AppSpec{
-			Template: domain.AppTemplateRef{Name: "worker"},
+			Template:        domain.AppTemplateRef{Name: "web-service"},
+			PreviewsEnabled: false,
 			Components: []domain.ComponentSpec{
-				{Name: "worker", Type: domain.ComponentWorker, PreviewEnabled: false},
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true},
 			},
 		},
 	}
@@ -211,34 +214,68 @@ func TestCreateAppPreviewAppNotFound(t *testing.T) {
 	}
 }
 
-func TestCreateAppPreviewNoPreviewEnabledComponents(t *testing.T) {
+func TestCreateAppPreviewPreviewsDisabled(t *testing.T) {
 	mux, ah, store := newTestAppPreviewMux(testProject)
-	store.addApp(workerOnlyAppForProject(testProject))
+	store.addApp(previewsDisabledAppForProject(testProject))
 
-	rec := postAppPreviewJSON(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "worker-app",
+	rec := postAppPreviewJSON(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "noprev-app",
 		CreateAppPreviewRequest{Name: "pr-42"})
 
 	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for app with no preview-enabled components, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 422 for app with previews disabled, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestCreateAppPreviewDuplicate(t *testing.T) {
+func TestCreateAppPreviewInvalidBaseEnv(t *testing.T) {
+	mux, ah, store := newTestAppPreviewMux(testProject)
+	store.addApp(previewTestAppForProject(testProject))
+
+	rec := postAppPreviewJSON(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app",
+		CreateAppPreviewRequest{Name: "pr-42", BaseEnv: "bogus"})
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for unknown baseEnv, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppPreviewExplicitBaseEnv(t *testing.T) {
+	mux, ah, store := newTestAppPreviewMux(testProject)
+	store.addApp(previewTestAppForProject(testProject))
+
+	rec := postAppPreviewJSON(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app",
+		CreateAppPreviewRequest{Name: "pr-42", BaseEnv: "staging"})
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for valid baseEnv, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAppPreviewUpsert(t *testing.T) {
 	mux, ah, store := newTestAppPreviewMux(testProject)
 	store.addApp(previewTestAppForProject(testProject))
 
 	cookie := sessionCookieFor(ah, "bob", "developer")
 
-	// Create the first preview.
-	rec := postAppPreviewJSON(mux, cookie, testProject, "my-app", CreateAppPreviewRequest{Name: "pr-42"})
+	// First create → 201.
+	rec := postAppPreviewJSON(mux, cookie, testProject, "my-app",
+		CreateAppPreviewRequest{Name: "pr-42", ImageTag: "sha-aaa"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("first create: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Attempt to create the same preview again.
-	rec = postAppPreviewJSON(mux, cookie, testProject, "my-app", CreateAppPreviewRequest{Name: "pr-42"})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("duplicate: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	// Re-POST (e.g. CI on a new push) → 200 upsert, tag updated.
+	rec = postAppPreviewJSON(mux, cookie, testProject, "my-app",
+		CreateAppPreviewRequest{Name: "pr-42", ImageTag: "sha-bbb"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-create: expected 200 (upsert), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	env, err := store.GetAppEnvironment(context.Background(), testProject, "my-app", "pr-42")
+	if err != nil {
+		t.Fatalf("preview env not found after upsert: %v", err)
+	}
+	if env.Release == nil || env.Release.Tag != "sha-bbb" {
+		t.Fatalf("expected preview release tag sha-bbb, got %+v", env.Release)
 	}
 }
 

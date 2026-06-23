@@ -89,6 +89,9 @@ export interface UpdateAppRequest {
   // cd replaces the app's continuous-delivery settings (external-CD tag
   // ownership). Omit to leave unchanged.
   cd?: CDConfig;
+  // previewsEnabled toggles whether this app supports preview environments.
+  // Omit to leave unchanged.
+  previewsEnabled?: boolean;
 }
 
 export function updateApp(

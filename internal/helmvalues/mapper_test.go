@@ -32,29 +32,26 @@ func webApp(name string, components ...domain.ComponentSpec) *domain.App {
 
 func webComponent(name string) domain.ComponentSpec {
 	return domain.ComponentSpec{
-		Name:           name,
-		Type:           domain.ComponentWeb,
-		Enabled:        true,
-		ExposeMode:     domain.ExposeExternal,
-		PreviewEnabled: true,
+		Name:       name,
+		Type:       domain.ComponentWeb,
+		Enabled:    true,
+		ExposeMode: domain.ExposeExternal,
 	}
 }
 
 func workerComponent(name string) domain.ComponentSpec {
 	return domain.ComponentSpec{
-		Name:           name,
-		Type:           domain.ComponentWorker,
-		Enabled:        true,
-		PreviewEnabled: false,
+		Name:    name,
+		Type:    domain.ComponentWorker,
+		Enabled: true,
 	}
 }
 
 func cronComponent(name string) domain.ComponentSpec {
 	return domain.ComponentSpec{
-		Name:           name,
-		Type:           domain.ComponentCron,
-		Enabled:        true,
-		PreviewEnabled: false,
+		Name:    name,
+		Type:    domain.ComponentCron,
+		Enabled: true,
 	}
 }
 
@@ -267,25 +264,46 @@ func TestMapToHelmValues_DisabledComponent(t *testing.T) {
 	}
 }
 
-func TestMapToHelmValues_PreviewDisablesNonPreviewComponents(t *testing.T) {
+func TestMapToHelmValues_PreviewRendersAllEnabledComponents(t *testing.T) {
+	// A preview now deploys the same enabled components its base env does — the
+	// per-component preview gate is gone.
 	app := webApp("hello", webComponent("web"), workerComponent("worker"))
 	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
 
 	if !hv.Components["web"].Enabled {
-		t.Error("web (PreviewEnabled=true) should be enabled in preview")
+		t.Error("web should be enabled in preview")
 	}
-	if hv.Components["worker"].Enabled {
-		t.Error("worker (PreviewEnabled=false) should be disabled in preview")
+	if !hv.Components["worker"].Enabled {
+		t.Error("worker should be enabled in preview (no per-component gate)")
 	}
 }
 
-func TestMapToHelmValues_PreviewKeepsPreviewEnabledComponents(t *testing.T) {
-	c := workerComponent("worker")
-	c.PreviewEnabled = true
-	app := webApp("hello", webComponent("web"), c)
-	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
+func TestMapToHelmValues_PreviewWorkerOnlyApp(t *testing.T) {
+	// A worker-only app (no web component) still produces a valid preview.
+	app := webApp("agent", workerComponent("worker"))
+	hv := MapToHelmValues(app, "pr-7", domain.AppEnvPreview)
 	if !hv.Components["worker"].Enabled {
-		t.Error("worker with PreviewEnabled=true should stay enabled in preview")
+		t.Error("worker-only app: worker should be enabled in preview")
+	}
+}
+
+func TestMapToHelmValues_PreviewBandOverrideApplies(t *testing.T) {
+	// The reserved EnvironmentDefaults["preview"] band overrides preview values
+	// (here: replicas) on top of the preview default of 1.
+	app := webApp("hello", webComponent("web"))
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		domain.PreviewOverrideKey: {Replicas: 3},
+	}
+	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
+	if got := hv.Components["web"].Replicas; got != 3 {
+		t.Errorf("preview-band Replicas = %d, want 3 (band overrides preview default)", got)
+	}
+	// A preview whose name collides with a stable env key must still read the
+	// reserved "preview" band, not EnvironmentDefaults["staging"].
+	app.Spec.EnvironmentDefaults["staging"] = domain.EnvironmentOverride{Replicas: 9}
+	hv = MapToHelmValues(app, "staging", domain.AppEnvPreview)
+	if got := hv.Components["web"].Replicas; got != 3 {
+		t.Errorf("preview override key = %d, want 3 (must ignore staging override)", got)
 	}
 }
 
@@ -686,8 +704,8 @@ func TestResolveIngress_UnknownModeYieldsNoIngress(t *testing.T) {
 func TestResolveRoutingComponent_PrefersExternalOverInternal(t *testing.T) {
 	// admin (alphabetically first, internal) should NOT win against api
 	// (alphabetically later, external). Documents the new tier preference.
-	admin := domain.ComponentSpec{Name: "admin", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeInternal, PreviewEnabled: true}
-	api := domain.ComponentSpec{Name: "api", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal, PreviewEnabled: true}
+	admin := domain.ComponentSpec{Name: "admin", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeInternal}
+	api := domain.ComponentSpec{Name: "api", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal}
 	got := resolveRoutingComponent([]domain.ComponentSpec{admin, api})
 	if got != "api" {
 		t.Errorf("routing component = %q, want api (external should beat internal)", got)

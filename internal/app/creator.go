@@ -23,22 +23,22 @@ import (
 // template does not declare an explicit components section.
 //
 // Mapping:
-//   - "worker" → {Name: "worker", Type: ComponentWorker, Enabled: true, PreviewEnabled: false}
-//   - "cron"   → {Name: "cron",   Type: ComponentCron,   Enabled: true, PreviewEnabled: false}
-//   - any other → {Name: "web",  Type: ComponentWeb,    Enabled: true, ExposeMode: ExposeExternal, PreviewEnabled: true}
+//   - "worker" → {Name: "worker", Type: ComponentWorker, Enabled: true}
+//   - "cron"   → {Name: "cron",   Type: ComponentCron,   Enabled: true}
+//   - any other → {Name: "web",  Type: ComponentWeb,    Enabled: true, ExposeMode: ExposeExternal}
 func DefaultComponentsFromTemplate(tmpl *tpl.Template) []domain.ComponentSpec {
 	switch tmpl.Spec.Category {
 	case "worker":
 		return []domain.ComponentSpec{
-			{Name: "worker", Type: domain.ComponentWorker, Enabled: true, PreviewEnabled: false},
+			{Name: "worker", Type: domain.ComponentWorker, Enabled: true},
 		}
 	case "cron":
 		return []domain.ComponentSpec{
-			{Name: "cron", Type: domain.ComponentCron, Enabled: true, PreviewEnabled: false},
+			{Name: "cron", Type: domain.ComponentCron, Enabled: true},
 		}
 	default:
 		return []domain.ComponentSpec{
-			{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal, PreviewEnabled: true},
+			{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal},
 		}
 	}
 }
@@ -72,11 +72,10 @@ func ComponentsFromTemplate(tmpl *tpl.Template, toggles map[string]bool) []domai
 	specs := make([]domain.ComponentSpec, 0, len(sorted))
 	for _, tc := range sorted {
 		spec := domain.ComponentSpec{
-			Name:           tc.Name,
-			Type:           templateComponentTypeToDomain(tc.Type),
-			Enabled:        resolveEnabled(tc, toggles),
-			ExposeMode:     templateExposedToMode(tc.Exposed),
-			PreviewEnabled: tc.PreviewEnabled,
+			Name:       tc.Name,
+			Type:       templateComponentTypeToDomain(tc.Type),
+			Enabled:    resolveEnabled(tc, toggles),
+			ExposeMode: templateExposedToMode(tc.Exposed),
 		}
 		applyComponentDefaults(&spec, tc.Defaults)
 		specs = append(specs, spec)
@@ -365,12 +364,13 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 	}
 }
 
-// PreviewEnabledComponents returns the subset of components from the given
-// list that should be deployed in preview environments (PreviewEnabled == true).
-func PreviewEnabledComponents(components []domain.ComponentSpec) []domain.ComponentSpec {
+// EnabledComponents returns the subset of components from the given list that
+// are enabled (Enabled == true). A preview deploys all of an app's enabled
+// components — the same set its base env runs.
+func EnabledComponents(components []domain.ComponentSpec) []domain.ComponentSpec {
 	out := make([]domain.ComponentSpec, 0, len(components))
 	for _, c := range components {
-		if c.PreviewEnabled {
+		if c.Enabled {
 			out = append(out, c)
 		}
 	}
@@ -379,11 +379,15 @@ func PreviewEnabledComponents(components []domain.ComponentSpec) []domain.Compon
 
 // NewPreviewEnvironment builds a preview AppEnvironment for the given app and
 // sanitized preview name. It uses domain.AppPreviewNamespace for the namespace
-// convention. Returns an error when the app has no preview-enabled components,
-// since deploying a preview with zero active components is meaningless.
+// convention. Returns an error when the app has previews disabled or has no
+// enabled components, since deploying a preview with zero active components is
+// meaningless.
 func NewPreviewEnvironment(a *domain.App, previewName string) (*domain.AppEnvironment, error) {
-	if len(PreviewEnabledComponents(a.Spec.Components)) == 0 {
-		return nil, fmt.Errorf("app %q has no preview-enabled components", a.Name)
+	if !a.Spec.PreviewsEnabled {
+		return nil, fmt.Errorf("app %q has previews disabled", a.Name)
+	}
+	if len(EnabledComponents(a.Spec.Components)) == 0 {
+		return nil, fmt.Errorf("app %q has no enabled components", a.Name)
 	}
 	return &domain.AppEnvironment{
 		AppName:     a.Name,
@@ -432,9 +436,10 @@ func Build(
 				Name:    tmpl.Metadata.Name,
 				Version: tmpl.Metadata.Version,
 			},
-			Values:     values,
-			SecretRefs: secretRefs,
-			Components: comps,
+			Values:          values,
+			SecretRefs:      secretRefs,
+			Components:      comps,
+			PreviewsEnabled: true,
 		},
 	}
 
