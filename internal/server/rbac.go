@@ -38,6 +38,7 @@ type rbacHandler struct {
 	stackStore       domain.StackStore // optional: enables stack grouping endpoints
 	envConfigHandler *envConfigHandler // optional: enables env config endpoints
 	secretsHandler   *secretsHandler   // optional: enables simple secret management
+	tokenHandler     *tokenHandler     // optional: enables project API token endpoints
 	// storeReconciler republishes ESO ClusterSecretStores when an environment
 	// is created/changed. Optional; nil disables the hook.
 	storeReconciler SecretStoreReconciler
@@ -79,9 +80,21 @@ func (rh *rbacHandler) authorizer() rbac.Authorizer {
 func (rh *rbacHandler) requireRole(role rbac.Role, extractProject ProjectExtractor) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return rh.auth.requireAuth(func(w http.ResponseWriter, r *http.Request) {
-			sess := sessionFromContext(r.Context())
-
 			project := extractProject(r)
+
+			// API-token requests are authorized solely by the token's grant —
+			// its fixed project and role — never by the minter's live org
+			// membership. This keeps a token's authority stable and bounded.
+			if tok := tokenFromContext(r.Context()); tok != nil {
+				if tok.Project != project || rbac.RoleLevel(rbac.Role(tok.Role)) < rbac.RoleLevel(role) {
+					writeJSON(w, http.StatusForbidden, errorResponse{Error: "insufficient permissions"})
+					return
+				}
+				next(w, r)
+				return
+			}
+
+			sess := sessionFromContext(r.Context())
 			id := rbac.Identity{Username: sess.Username, Groups: sess.Groups}
 			allowed, err := rh.authorizer().Authorize(r.Context(), id, project, role)
 			if err != nil {
@@ -375,12 +388,27 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 			mux.HandleFunc("POST /api/v1/projects/{project}/apps", devProject(rh.appHandler.handleCreateApp))
 		}
 	}
+
+	// Project API tokens — minting/revoking a long-lived credential is
+	// project_admin only. The tokens themselves authenticate as their granted
+	// role (see requireRole's token branch).
+	if rh.tokenHandler != nil {
+		mux.HandleFunc("GET /api/v1/projects/{project}/tokens", manageProject(rh.tokenHandler.handleListTokens))
+		mux.HandleFunc("POST /api/v1/projects/{project}/tokens", manageProject(rh.tokenHandler.handleCreateToken))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/tokens/{id}", manageProject(rh.tokenHandler.handleDeleteToken))
+	}
 }
 
 // requireOrgAdmin wraps a handler and enforces that the session user holds the
 // org_admin role on the wildcard project ("*"). Used for org-level write operations.
 func (rh *rbacHandler) requireOrgAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Project-scoped API tokens are never org admins, regardless of who
+		// minted them.
+		if tokenFromContext(r.Context()) != nil {
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
+			return
+		}
 		sess := sessionFromContext(r.Context())
 		id := rbac.Identity{Username: sess.Username, Groups: sess.Groups}
 		allowed, err := rh.authorizer().Authorize(r.Context(), id, "*", rbac.RoleOrgAdmin)

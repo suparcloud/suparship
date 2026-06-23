@@ -30,6 +30,7 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
+	"github.com/suparcloud/suparship/internal/token"
 	"github.com/suparcloud/suparship/internal/tpl"
 	"github.com/suparcloud/suparship/internal/tpl/credstore"
 	"github.com/suparcloud/suparship/internal/tpl/registrysync"
@@ -386,6 +387,7 @@ type Config struct {
 	RuntimeProvider         runtime.Provider        // optional: enables runtime inventory when set
 	LogsProvider            runtime.LogsProvider    // optional: enables logs endpoint when set
 	PreviewStore            preview.Store           // optional: enables preview endpoints when set
+	TokenStore              token.Store             // optional: enables project API tokens + bearer auth when set
 	AppStore                domain.AppStore         // optional: enables app read endpoints when set
 	StackStore              domain.StackStore       // optional: enables stack grouping endpoints when set
 	ClusterStore            domain.ClusterStore     // optional: enables /api/v1/clusters endpoints when set
@@ -477,9 +479,13 @@ func New(cfg Config) *Server {
 		ah = &authHandler{
 			authenticator: cfg.Authenticator,
 			sessions:      session.NewStore(sessionTTL),
+			tokenStore:    cfg.TokenStore,
 			cookieSecure:  cfg.CookieSecure,
 			orgProvider:   cfg.OrgProvider,
 			kubeClient:    cfg.KubeClient,
+		}
+		if cfg.TokenStore != nil {
+			cfg.Logger.Info("API token bearer auth enabled")
 		}
 		ah.registerRoutes(mux)
 		cfg.Logger.Info("auth endpoints enabled")
@@ -535,6 +541,11 @@ func New(cfg Config) *Server {
 
 			rh.promoteHandler = newPromoteHandler(cfg.ProjectStore)
 			cfg.Logger.Info("promote endpoint enabled")
+
+			if cfg.TokenStore != nil {
+				rh.tokenHandler = newTokenHandler(cfg.TokenStore, cfg.ProjectStore)
+				cfg.Logger.Info("project API token endpoints enabled")
+			}
 
 			if cfg.LogsProvider != nil {
 				rh.logsHandler = newLogsHandler(cfg.ProjectStore, cfg.LogsProvider)

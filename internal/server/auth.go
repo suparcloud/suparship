@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/suparcloud/suparship/internal/auth"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/session"
+	"github.com/suparcloud/suparship/internal/token"
 )
 
 const (
@@ -23,13 +25,22 @@ const (
 
 type contextKey string
 
-const sessionCtxKey contextKey = "session"
+const (
+	sessionCtxKey contextKey = "session"
+	// tokenCtxKey holds the *token.Metadata when a request authenticated via an
+	// API token rather than a session cookie. Authorization middleware consults
+	// it to scope the request to the token's single project+role grant.
+	tokenCtxKey contextKey = "apitoken"
+)
 
 // authHandler groups the auth-related HTTP handlers and their dependencies.
 type authHandler struct {
 	authenticator auth.Authenticator
 	sessions      *session.Store
-	cookieSecure  bool
+	// tokenStore validates Authorization: Bearer API tokens. Optional; nil
+	// disables bearer auth (cookie sessions only).
+	tokenStore   token.Store
+	cookieSecure bool
 	// orgProvider supplies the OIDC config (org.Auth.OIDC). Optional; nil
 	// disables the SSO endpoints.
 	orgProvider rbac.OrgProvider
@@ -121,9 +132,16 @@ func (ah *authHandler) handleMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// requireAuth wraps a handler, rejecting requests without a valid session.
+// requireAuth wraps a handler, rejecting requests that present neither a valid
+// session cookie nor a valid API token. An Authorization: Bearer token takes
+// precedence; absent that, the session cookie is checked.
 func (ah *authHandler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if raw, ok := bearerToken(r); ok {
+			ah.authenticateToken(w, r, next, raw)
+			return
+		}
+
 		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "not authenticated"})
@@ -141,9 +159,47 @@ func (ah *authHandler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// authenticateToken resolves an API token and, on success, runs next with both
+// the token grant and a synthetic session in context. The synthetic session
+// (username only) keeps session-reading handlers working for audit/createdBy;
+// authorization is driven by the token grant, never by the username's live org
+// membership (see requireRole and the org-admin gates).
+func (ah *authHandler) authenticateToken(w http.ResponseWriter, r *http.Request, next http.HandlerFunc, raw string) {
+	if ah.tokenStore == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "not authenticated"})
+		return
+	}
+	meta, err := ah.tokenStore.Resolve(r.Context(), raw)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid api token"})
+		return
+	}
+	sess := &session.Session{Username: meta.CreatedBy, Role: meta.Role}
+	ctx := context.WithValue(r.Context(), sessionCtxKey, sess)
+	ctx = context.WithValue(ctx, tokenCtxKey, &meta)
+	next(w, r.WithContext(ctx))
+}
+
+// bearerToken extracts a Bearer credential from the Authorization header.
+func bearerToken(r *http.Request) (string, bool) {
+	const scheme = "Bearer "
+	h := r.Header.Get("Authorization")
+	if len(h) <= len(scheme) || !strings.EqualFold(h[:len(scheme)], scheme) {
+		return "", false
+	}
+	return strings.TrimSpace(h[len(scheme):]), true
+}
+
 func sessionFromContext(ctx context.Context) *session.Session {
 	sess, _ := ctx.Value(sessionCtxKey).(*session.Session)
 	return sess
+}
+
+// tokenFromContext returns the API token grant for a token-authenticated
+// request, or nil when the request used a session cookie.
+func tokenFromContext(ctx context.Context) *token.Metadata {
+	t, _ := ctx.Value(tokenCtxKey).(*token.Metadata)
+	return t
 }
 
 func (ah *authHandler) sessionCookie(value string, expires time.Time) *http.Cookie {

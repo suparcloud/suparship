@@ -5,7 +5,8 @@
 # (staging) — pass "baseEnv" in the create body to base it on another env.
 #
 # See docs/previews.md for the full model. Set these repo secrets/vars:
-#   secrets.SUPARSHIP_TOKEN  — an API token with developer access to the project
+#   secrets.SUPARSHIP_TOKEN  — a project API token with developer (or higher)
+#                              role; mint one per docs/api-tokens.md
 #   vars.SUPARSHIP_API       — e.g. https://suparship.acme.com/api/v1
 #   vars.SUPARSHIP_PROJECT   — the project name (e.g. "voiceai")
 #   vars.SUPARSHIP_APP       — the app name (e.g. "livekit-express-caller-v2")

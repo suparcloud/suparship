@@ -212,6 +212,12 @@ func unpublishProjectTwoPhase(ctx context.Context, pub GitOpsPublisher, counter 
 
 func (rh *rbacHandler) orgAdminOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Project-scoped API tokens are never org admins, regardless of who
+		// minted them.
+		if tokenFromContext(r.Context()) != nil {
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
+			return
+		}
 		sess := sessionFromContext(r.Context())
 		id := rbac.Identity{Username: sess.Username, Groups: sess.Groups}
 		allowed, err := rh.authorizer().Authorize(r.Context(), id, "*", rbac.RoleOrgAdmin)
