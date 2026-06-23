@@ -1327,7 +1327,7 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 // env's merged vars with the reserved "preview" band overlaid, and its
 // ExternalSecret reads the base env vault's preview-band (+ per-PR) items on top
 // of the base env's own items. No per-preview vault or store is created.
-func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *domain.App, preview *domain.EnvironmentInstance, baseEnv string) error {
+func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *domain.App, preview *domain.EnvironmentInstance, baseEnv, imageTag string) error {
 	tmpl, err := a.resolveTemplate(ctx, app.Spec.Template.Name)
 	if err != nil {
 		return fmt.Errorf("publish preview %s/%s/%s: %w", app.ProjectName, app.Name, preview.EnvName, err)
@@ -1396,6 +1396,7 @@ func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *dom
 		BaseDomain:        res.baseDomain,
 		EnvVars:           envVars,
 		ScopeKeys:         scopeKeys,
+		ImageTag:          imageTag,
 		SkipCanonicalBase: !tmpl.Spec.CanonicalValues(),
 	}
 	return a.inner.PublishPreview(ctx, app, spec)

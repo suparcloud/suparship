@@ -30,7 +30,7 @@ func (p *renamePublisher) PublishApp(_ context.Context, app *domain.App, _ []*do
 func (p *renamePublisher) PublishAppEnv(_ context.Context, _ *domain.App, _ *domain.AppEnvironment) error {
 	return nil
 }
-func (p *renamePublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _ string) error {
+func (p *renamePublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _, _ string) error {
 	return nil
 }
 func (p *renamePublisher) UnpublishApp(_ context.Context, _, app string) error {

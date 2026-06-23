@@ -61,6 +61,12 @@ export interface CreateAppPreviewRequest {
    * default to the app's first stable env by order (conventionally "staging").
    */
   baseEnv?: string;
+  /**
+   * Image tag to deploy for this preview (every image the app maps). Omit to
+   * inherit the base env's image. Re-creating with a new tag re-publishes the
+   * preview (upsert) — CI typically passes the tag it built for the PR.
+   */
+  imageTag?: string;
 }
 
 /** Response from the app-scoped preview create/list endpoints. */

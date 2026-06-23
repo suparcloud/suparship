@@ -789,6 +789,7 @@ export function AppDetail() {
   const [showPreviewForm, setShowPreviewForm] = useState(false);
   const [previewName, setPreviewName] = useState("");
   const [previewBaseEnv, setPreviewBaseEnv] = useState("");
+  const [previewImageTag, setPreviewImageTag] = useState("");
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewSubmitting, setPreviewSubmitting] = useState(false);
 
@@ -1190,6 +1191,8 @@ export function AppDetail() {
                       name: previewName.trim(),
                       // Omit baseEnv to default to the first stable env (staging).
                       baseEnv: previewBaseEnv || undefined,
+                      // Omit imageTag to inherit the base env's image.
+                      imageTag: previewImageTag.trim() || undefined,
                     });
                     setShowPreviewForm(false);
                     toast.success("Preview created", {
@@ -1251,6 +1254,22 @@ export function AppDetail() {
                     </div>
                   );
                 })()}
+                <div>
+                  <label
+                    htmlFor="preview-image-tag"
+                    className="mb-1 block text-xs font-medium text-gray-700"
+                  >
+                    Image tag <span className="text-gray-400">(optional)</span>
+                  </label>
+                  <input
+                    id="preview-image-tag"
+                    type="text"
+                    value={previewImageTag}
+                    onChange={(e) => setPreviewImageTag(e.target.value)}
+                    placeholder="inherit base env"
+                    className="w-40 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder-gray-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
                 <button
                   type="submit"
                   disabled={previewSubmitting || !previewName.trim()}

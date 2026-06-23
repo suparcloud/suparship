@@ -379,6 +379,11 @@ type CreateAppPreviewRequest struct {
 	// promotion order (conventionally "staging"). Pass "prod" to base a preview
 	// on prod. Must name an existing stable env of the app.
 	BaseEnv string `json:"baseEnv,omitempty"`
+	// ImageTag overrides the image tag for this preview (every image the app's
+	// template maps). Optional — when empty the preview inherits the base env's
+	// image. CI typically passes the tag it just built for the PR (e.g. the
+	// commit SHA). Re-POSTing with a new tag re-publishes the preview (upsert).
+	ImageTag string `json:"imageTag,omitempty"`
 }
 
 // --- App-scoped promotion DTOs ---

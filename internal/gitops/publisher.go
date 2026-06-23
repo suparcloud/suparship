@@ -760,6 +760,11 @@ func rawValuesOverlay(app *domain.App, envName string) map[string]any {
 	return base
 }
 
+// imageTagValuesKey is the AppSpec.Values key the canonical mapper reads the
+// image tag from (mirrors helmvalues' internal imageTagKey). Overriding it for a
+// preview re-tags every component image.
+const imageTagValuesKey = "image_tag"
+
 // previewRawValuesOverlay returns the freeform Helm values overlay for a
 // preview: the base env's overlay (app + base-env RawValues) with the reserved
 // "preview" band's RawValues merged on top (preview wins). The per-preview name
@@ -1498,12 +1503,35 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		// Org-level routing profiles apply uniformly to previews; per-env
 		// overrides don't make sense for ephemeral preview envs (their
 		// names are PR-specific and have no static config).
-		hv := helmvalues.MapToHelmValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
+		// A per-preview image tag overrides the inherited base-env tag: for
+		// canonical templates it is folded into the app's image_tag so the mapper
+		// bakes it into each component's image.tag; for BYO/passthrough charts it
+		// is exposed as a top-level image_tag overlay value.
+		mapApp := app
+		overlay := previewRawValuesOverlay(app, preview.BaseEnv)
+		if preview.ImageTag != "" {
+			if preview.SkipCanonicalBase {
+				if overlay == nil {
+					overlay = map[string]any{}
+				}
+				overlay[imageTagValuesKey] = preview.ImageTag
+			} else {
+				clone := *app
+				vals := make(map[string]any, len(app.Spec.Values)+1)
+				for k, v := range app.Spec.Values {
+					vals[k] = v
+				}
+				vals[imageTagValuesKey] = preview.ImageTag
+				clone.Spec.Values = vals
+				mapApp = &clone
+			}
+		}
+		hv := helmvalues.MapToHelmValuesForEnv(mapApp, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
 		var hvBytes []byte
 		if preview.SkipCanonicalBase {
-			hvBytes, err = marshalPassthroughValues(hv.Platform, previewRawValuesOverlay(app, preview.BaseEnv), preview.EnvVars)
+			hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, preview.EnvVars)
 		} else {
-			hvBytes, err = marshalValuesWithOverlay(hv, previewRawValuesOverlay(app, preview.BaseEnv), preview.EnvVars)
+			hvBytes, err = marshalValuesWithOverlay(hv, overlay, preview.EnvVars)
 		}
 		if err != nil {
 			return fmt.Errorf("marshal preview values.yaml: %w", err)
@@ -1573,6 +1601,9 @@ type PreviewPublishSpec struct {
 	// EnvVars holds per-preview variable overrides to merge into the platform-managed
 	// ConfigMap alongside app.Spec.EnvConfig.Vars.
 	EnvVars map[string]string
+	// ImageTag, when non-empty, overrides the image tag in the preview's values
+	// (every image the app maps). Empty inherits the base env's image tag.
+	ImageTag string
 	// ScopeKeys reports which (scope, tier) items have keys, so PublishPreview
 	// emits only the ExternalSecrets that resolve.
 	ScopeKeys ScopePresence

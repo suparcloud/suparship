@@ -81,9 +81,9 @@ Charts can also branch on the platform token **`{platform.envType}`** (which is
 ### From the UI
 
 Open the app → click **Preview** (top-right) → enter a preview name (e.g.
-`pr-42`), pick a **Base env** if you don't want the default → **Create**. The
-preview appears under the app's **Previews** tab and on the global
-[Previews](/previews) page.
+`pr-42`), optionally pick a **Base env** and an **Image tag** (leave the tag
+blank to inherit the base env's image) → **Create**. The preview appears under
+the app's **Previews** tab and on the global [Previews](/previews) page.
 
 ### From the API
 
@@ -91,9 +91,15 @@ preview appears under the app's **Previews** tab and on the global
 POST /api/v1/projects/{project}/apps/{app}/previews
 Content-Type: application/json
 
-{ "name": "pr-42" }                 # clones the default base env (staging)
-{ "name": "pr-42", "baseEnv": "prod" }  # opt-in: base on prod
+{ "name": "pr-42" }                              # clone staging, inherit its image
+{ "name": "pr-42", "baseEnv": "prod" }           # opt-in: base on prod
+{ "name": "pr-42", "imageTag": "sha-abc1234" }   # deploy a specific image tag
 ```
+
+**`imageTag`** overrides the tag for every image the app's template maps (omit it
+to inherit the base env's image). Create is an **upsert**: re-POSTing an existing
+preview re-publishes it with the new tag — `201` on first create, `200` on
+update — so CI can push a fresh image and re-point the preview on every commit.
 
 Tear down with:
 
@@ -111,11 +117,12 @@ Create a preview on PR open/update and delete it on close. See
 Actions workflow. The shape is:
 
 ```bash
-# on PR opened/synchronize
+# on PR opened/synchronize — build & push the image first, then point the
+# preview at that tag. The upsert re-publishes on every push (201 then 200).
 curl -fsS -X POST "$SUPARSHIP_API/projects/$PROJECT/apps/$APP/previews" \
   -H "Authorization: Bearer $SUPARSHIP_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d "{\"name\":\"pr-${PR_NUMBER}\"}"
+  -d "{\"name\":\"pr-${PR_NUMBER}\",\"imageTag\":\"${COMMIT_SHA}\"}"
 
 # on PR closed
 curl -fsS -X DELETE "$SUPARSHIP_API/projects/$PROJECT/apps/$APP/previews/pr-${PR_NUMBER}" \

@@ -1058,13 +1058,12 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Reject duplicate preview names within the same app.
-	if _, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, sanitized); err == nil {
-		writeJSON(w, http.StatusConflict, errorResponse{
-			Error: "preview \"" + sanitized + "\" already exists for app \"" + appName + "\"",
-		})
-		return
-	}
+	// Create is an upsert: re-POSTing an existing preview re-publishes it (e.g.
+	// CI updating the image tag on each PR push). 201 on first create, 200 on
+	// update. Capture the prior env so a failed publish can roll back cleanly.
+	imageTag := strings.TrimSpace(req.ImageTag)
+	prior, getErr := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, sanitized)
+	existed := getErr == nil
 
 	// Project the EnvironmentInstance onto AppEnvironment for the compat store.
 	inst := previewResult.Instance
@@ -1077,6 +1076,12 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 		URLs:        []string{inst.URL},
 		Status:      inst.Status,
 	}
+	// Record the resolved image tag so the Previews UI shows what's deployed.
+	if imageTag != "" {
+		env.Release = &domain.AppReleaseRef{Tag: imageTag}
+	} else if existed {
+		env.Release = prior.Release // preserve a previously-set tag on re-publish
+	}
 
 	if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save preview"})
@@ -1084,16 +1089,25 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Publish the preview to GitOps (values + ConfigMap + ExternalSecret reusing
-	// the base env vault). Roll back the saved env on failure so a retry is clean.
+	// the base env vault). On failure, restore the prior env (or delete it when
+	// this was a fresh create) so a retry is clean.
 	if ah.gitOpsPublisher != nil {
-		if err := ah.gitOpsPublisher.PublishAppPreview(r.Context(), a, previewResult.Instance, baseEnv); err != nil {
-			_ = ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, sanitized)
+		if err := ah.gitOpsPublisher.PublishAppPreview(r.Context(), a, previewResult.Instance, baseEnv, imageTag); err != nil {
+			if existed {
+				_ = ah.appStore.SaveAppEnvironment(r.Context(), projectName, prior)
+			} else {
+				_ = ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, sanitized)
+			}
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish preview: " + err.Error()})
 			return
 		}
 	}
 
-	writeJSON(w, http.StatusCreated, appPreviewToDTO(env))
+	status := http.StatusCreated
+	if existed {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, appPreviewToDTO(env))
 }
 
 // handleDeleteAppPreview handles DELETE /api/v1/projects/{project}/apps/{app}/previews/{name}.

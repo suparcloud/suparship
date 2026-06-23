@@ -250,22 +250,32 @@ func TestCreateAppPreviewExplicitBaseEnv(t *testing.T) {
 	}
 }
 
-func TestCreateAppPreviewDuplicate(t *testing.T) {
+func TestCreateAppPreviewUpsert(t *testing.T) {
 	mux, ah, store := newTestAppPreviewMux(testProject)
 	store.addApp(previewTestAppForProject(testProject))
 
 	cookie := sessionCookieFor(ah, "bob", "developer")
 
-	// Create the first preview.
-	rec := postAppPreviewJSON(mux, cookie, testProject, "my-app", CreateAppPreviewRequest{Name: "pr-42"})
+	// First create → 201.
+	rec := postAppPreviewJSON(mux, cookie, testProject, "my-app",
+		CreateAppPreviewRequest{Name: "pr-42", ImageTag: "sha-aaa"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("first create: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Attempt to create the same preview again.
-	rec = postAppPreviewJSON(mux, cookie, testProject, "my-app", CreateAppPreviewRequest{Name: "pr-42"})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("duplicate: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	// Re-POST (e.g. CI on a new push) → 200 upsert, tag updated.
+	rec = postAppPreviewJSON(mux, cookie, testProject, "my-app",
+		CreateAppPreviewRequest{Name: "pr-42", ImageTag: "sha-bbb"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-create: expected 200 (upsert), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	env, err := store.GetAppEnvironment(context.Background(), testProject, "my-app", "pr-42")
+	if err != nil {
+		t.Fatalf("preview env not found after upsert: %v", err)
+	}
+	if env.Release == nil || env.Release.Tag != "sha-bbb" {
+		t.Fatalf("expected preview release tag sha-bbb, got %+v", env.Release)
 	}
 }
 

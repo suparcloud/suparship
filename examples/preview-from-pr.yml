@@ -33,18 +33,27 @@ jobs:
       APP: ${{ vars.SUPARSHIP_APP }}
       TOKEN: ${{ secrets.SUPARSHIP_TOKEN }}
       NAME: pr-${{ github.event.pull_request.number }}
+      # Tag the image with the PR head commit so each push is a distinct,
+      # immutable tag the preview redeploys to. Build & push this tag in a step
+      # before the create call (omitted here — it's specific to your registry).
+      IMAGE_TAG: ${{ github.event.pull_request.head.sha }}
     steps:
+      # - name: Build & push image    # your registry/Dockerfile
+      #   run: docker build -t $REGISTRY/$APP:$IMAGE_TAG . && docker push $REGISTRY/$APP:$IMAGE_TAG
+
       - name: Create or update preview
         if: github.event.action != 'closed'
         run: |
-          # 201 = created, 409 = already exists for this PR (synchronize) — both OK.
+          # Upsert: 201 = created, 200 = re-published with the new image tag.
+          # Passing imageTag re-points the preview at this PR's freshly-built image
+          # (omit it to inherit the base env's image).
           code=$(curl -sS -o /tmp/resp -w '%{http_code}' \
             -X POST "$API/projects/$PROJECT/apps/$APP/previews" \
             -H "Authorization: Bearer $TOKEN" \
             -H 'Content-Type: application/json' \
-            -d "{\"name\":\"$NAME\"}")
+            -d "{\"name\":\"$NAME\",\"imageTag\":\"$IMAGE_TAG\"}")
           echo "HTTP $code"; cat /tmp/resp
-          if [ "$code" != "201" ] && [ "$code" != "409" ]; then exit 1; fi
+          if [ "$code" != "201" ] && [ "$code" != "200" ]; then exit 1; fi
 
       - name: Delete preview
         if: github.event.action == 'closed'
