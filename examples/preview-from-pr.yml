@@ -1,0 +1,57 @@
+# Example GitHub Actions workflow — launch a suparShip preview per pull request.
+#
+# Creates an ephemeral preview environment when a PR is opened/updated and tears
+# it down when the PR closes. The preview clones the app's default base env
+# (staging) — pass "baseEnv" in the create body to base it on another env.
+#
+# See docs/previews.md for the full model. Set these repo secrets/vars:
+#   secrets.SUPARSHIP_TOKEN  — an API token with developer access to the project
+#   vars.SUPARSHIP_API       — e.g. https://suparship.acme.com/api/v1
+#   vars.SUPARSHIP_PROJECT   — the project name (e.g. "voiceai")
+#   vars.SUPARSHIP_APP       — the app name (e.g. "livekit-express-caller-v2")
+#
+# Single-app shown here; for a monorepo, loop the create/delete over each app
+# (e.g. read an app list from a matrix) — the API call is per app.
+
+name: suparship-preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+# One in-flight run per PR; a newer push supersedes an older create.
+concurrency:
+  group: suparship-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    env:
+      API: ${{ vars.SUPARSHIP_API }}
+      PROJECT: ${{ vars.SUPARSHIP_PROJECT }}
+      APP: ${{ vars.SUPARSHIP_APP }}
+      TOKEN: ${{ secrets.SUPARSHIP_TOKEN }}
+      NAME: pr-${{ github.event.pull_request.number }}
+    steps:
+      - name: Create or update preview
+        if: github.event.action != 'closed'
+        run: |
+          # 201 = created, 409 = already exists for this PR (synchronize) — both OK.
+          code=$(curl -sS -o /tmp/resp -w '%{http_code}' \
+            -X POST "$API/projects/$PROJECT/apps/$APP/previews" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "{\"name\":\"$NAME\"}")
+          echo "HTTP $code"; cat /tmp/resp
+          if [ "$code" != "201" ] && [ "$code" != "409" ]; then exit 1; fi
+
+      - name: Delete preview
+        if: github.event.action == 'closed'
+        run: |
+          # 200/204 = deleted, 404 = already gone — both OK.
+          code=$(curl -sS -o /tmp/resp -w '%{http_code}' \
+            -X DELETE "$API/projects/$PROJECT/apps/$APP/previews/$NAME" \
+            -H "Authorization: Bearer $TOKEN")
+          echo "HTTP $code"; cat /tmp/resp
+          case "$code" in 200|204|404) ;; *) exit 1 ;; esac

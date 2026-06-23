@@ -1173,9 +1173,10 @@ export function AppDetail() {
                 Create preview environment
               </h3>
               <p className="mt-0.5 text-xs text-gray-500">
-                Deploy{" "}
-                <span className="font-medium">{appName}</span> to an isolated
-                preview namespace.
+                Deploy <span className="font-medium">{appName}</span> to an
+                isolated preview namespace. It clones the base env's cluster,
+                config and secrets, then applies this app's preview overrides
+                (Values dropdown + Env Vars → "Preview band").
               </p>
               <form
                 className="mt-3 flex items-end gap-2"
@@ -2756,8 +2757,12 @@ function PreviewsTab({
         <p className="text-sm font-medium text-gray-500">
           No active preview environments
         </p>
-        <p className="mt-1 text-xs text-gray-400">
-          Use the Preview button above to create one.
+        <p className="mx-auto mt-1 max-w-lg text-xs text-gray-400">
+          A preview is an ephemeral copy of this app — typically one per pull
+          request. It clones a base env (default: staging) plus the app's
+          preview overrides, runs in its own namespace, and is torn down when you
+          delete it. Use the <span className="font-medium">Preview</span> button
+          above to create one, or automate it from CI (see docs/previews.md).
         </p>
       </div>
     );

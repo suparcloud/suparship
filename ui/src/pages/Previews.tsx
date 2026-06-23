@@ -468,10 +468,12 @@ function EmptyState() {
       <h3 className="text-sm font-medium text-gray-900">
         No preview environments
       </h3>
-      <p className="mx-auto mt-1 max-w-sm text-sm text-gray-500">
+      <p className="mx-auto mt-1 max-w-md text-sm text-gray-500">
+        A preview is an ephemeral copy of an app — usually one per pull request —
+        that clones a base env (default: staging) and runs in its own namespace.
         Open an app from the dashboard and use the{" "}
-        <span className="font-medium">Preview</span> button to deploy an
-        isolated preview environment.
+        <span className="font-medium">Preview</span> button to create one, or
+        automate it from CI (see docs/previews.md).
       </p>
     </div>
   );
