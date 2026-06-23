@@ -1841,6 +1841,9 @@ function LegacyConfigNotice({ data }: { data: AppDetailType }) {
 // shows a read-only effective preview (chart ⊕ platform/env ⊕ overrides) computed
 // by the backend, reflecting unsaved edits.
 const BASE_SCOPE = "__base__";
+// Reserved EnvironmentDefaults key for the preview band (values applied to every
+// preview on top of its base env). Mirrors the backend's domain.PreviewOverrideKey.
+const PREVIEW_SCOPE = "preview";
 
 function AppValuesEditor({
   data,
@@ -1877,6 +1880,8 @@ function AppValuesEditor({
     for (const env of envs) {
       next[env] = stringifyOverlay(data.envRawValues?.[env]);
     }
+    // The preview band is keyed under the reserved "preview" env name.
+    next[PREVIEW_SCOPE] = stringifyOverlay(data.envRawValues?.[PREVIEW_SCOPE]);
     setEnvTexts(next);
     setCdManaged(data.cd?.managed ?? false);
     setPreviewsEnabled(data.previewsEnabled ?? true);
@@ -1995,6 +2000,9 @@ function AppValuesEditor({
                 {env} overrides
               </option>
             ))}
+            {previewsEnabled && (
+              <option value={PREVIEW_SCOPE}>preview overrides (all previews)</option>
+            )}
           </select>
           <button
             onClick={save}
@@ -2009,7 +2017,9 @@ function AppValuesEditor({
         <p className="mb-3 text-xs text-gray-400">
           {scope === BASE_SCOPE
             ? "App-level overrides applied to every environment."
-            : `Overrides for ${scope}, layered on top of the base.`}{" "}
+            : scope === PREVIEW_SCOPE
+              ? "Overrides applied to every preview, layered on top of its base env."
+              : `Overrides for ${scope}, layered on top of the base.`}{" "}
           Edit only what you override — empty inherits the chart and platform
           defaults. Reference{" "}
           <code className="font-mono">{"{platform.*}"}</code> /{" "}
@@ -2036,9 +2046,11 @@ function AppValuesEditor({
             <div>
               <ValuesEditor
                 label={
-                  previewEnv
-                    ? `Effective — ${previewEnv} (as deployed)`
-                    : "Effective (as deployed)"
+                  scope === PREVIEW_SCOPE
+                    ? "Effective — preview (computed)"
+                    : previewEnv
+                      ? `Effective — ${previewEnv} (as deployed)`
+                      : "Effective (as deployed)"
                 }
                 value={preview}
                 readOnly
