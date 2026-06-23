@@ -547,6 +547,9 @@ export interface PreviewMeta {
 export interface AppEnvironmentSummary {
   envName: string;
   envType: "staging" | "prod" | "preview";
+  /** Position in the promotion pipeline (lower = earlier). The first stable env
+   *  is the default preview base env. Preview envs have order 0. */
+  order: number;
   namespace: string;
   urls: string[];
   release?: AppReleaseRef;

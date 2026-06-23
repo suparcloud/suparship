@@ -2127,6 +2127,19 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 	for _, env := range envs {
 		envDTOs = append(envDTOs, appEnvToDTO(env))
 	}
+	// Return environments in promotion order (stable envs by Order, previews
+	// last) so the UI's "first stable env" — the default preview base env —
+	// agrees with the server's resolution instead of relying on store order.
+	sort.SliceStable(envDTOs, func(i, j int) bool {
+		ip, jp := envDTOs[i].EnvType == string(domain.AppEnvPreview), envDTOs[j].EnvType == string(domain.AppEnvPreview)
+		if ip != jp {
+			return !ip // non-preview envs first
+		}
+		if envDTOs[i].Order != envDTOs[j].Order {
+			return envDTOs[i].Order < envDTOs[j].Order
+		}
+		return envDTOs[i].EnvName < envDTOs[j].EnvName
+	})
 
 	return AppDetailDTO{
 		Name:        app.Name,
@@ -2256,6 +2269,7 @@ func appEnvToDTO(env *domain.AppEnvironment) AppEnvironmentSummaryDTO {
 	dto := AppEnvironmentSummaryDTO{
 		EnvName:   env.EnvName,
 		EnvType:   string(env.EnvType),
+		Order:     env.Order,
 		Namespace: env.Namespace,
 		URLs:      urls,
 		Status:    appRuntimeStatusDTO(env.Status),

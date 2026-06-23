@@ -83,8 +83,11 @@ type PreviewMetaDTO struct {
 // EnvType is one of "staging", "prod", "preview". When EnvType is "preview",
 // the Preview field is populated with additional metadata.
 type AppEnvironmentSummaryDTO struct {
-	EnvName   string               `json:"envName"`
-	EnvType   string               `json:"envType"`
+	EnvName string `json:"envName"`
+	EnvType string `json:"envType"`
+	// Order is the position in the promotion pipeline (lower = earlier; the first
+	// stable env is the default preview base env). Preview envs have Order 0.
+	Order     int                  `json:"order"`
 	Namespace string               `json:"namespace"`
 	// URLs are the ingress hostnames assigned to this environment instance.
 	// Always a non-nil slice; empty when no ingress has been provisioned.

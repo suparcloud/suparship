@@ -929,13 +929,9 @@ export function AppDetail() {
 
   if (!data) return null;
 
-  const ENV_ORDER: Record<string, number> = { staging: 0, prod: 1 };
   const nonPreviewEnvs = data.environments
     .filter((e) => e.envType !== "preview")
-    .sort(
-      (a, b) =>
-        (ENV_ORDER[a.envName] ?? 99) - (ENV_ORDER[b.envName] ?? 99),
-    );
+    .sort((a, b) => a.order - b.order || a.envName.localeCompare(b.envName));
   const previewEnvs = data.environments.filter((e) => e.envType === "preview");
   // The embedded summary from the app response; used as a fallback.
   const currentEnvSummary =
@@ -3620,7 +3616,11 @@ function EnvVarsTab({
   onSelectEnv: (name: string) => void;
 }) {
   // Only non-preview environments are meaningful for per-env env-var overrides.
-  const stableEnvs = environments.filter((e) => e.envType !== "preview");
+  // Sort by promotion order so stableEnvs[0] is the first stable env (the
+  // default preview base env), matching the server's base-env resolution.
+  const stableEnvs = environments
+    .filter((e) => e.envType !== "preview")
+    .sort((a, b) => a.order - b.order || a.envName.localeCompare(b.envName));
   const activeEnv = selectedEnvName ?? stableEnvs[0]?.envName ?? null;
   // Base env for the preview band — its items live in this env's vault.
   const previewBandEnv = stableEnvs[0]?.envName ?? null;
