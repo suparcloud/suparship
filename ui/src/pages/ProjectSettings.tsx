@@ -24,6 +24,7 @@ import {
   deleteProjectEnvSecretKey,
 } from "../lib/secrets";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
+import { ProjectTokensSection } from "../components/ProjectTokensSection";
 import { SecretEditor } from "../components/SecretEditor";
 
 // ── Origin badge ──────────────────────────────────────────────────────────────
@@ -817,6 +818,9 @@ export function ProjectSettings() {
 
       {/* Project-level secrets — shared by every app in the project. */}
       <ProjectSecretsSection projectName={project} envs={envs} />
+
+      {/* Project API tokens — bearer credentials for CI/scripts. */}
+      <ProjectTokensSection projectName={project} />
       {/* Modals */}
       {showAdd && (
         <EnvForm

@@ -36,6 +36,7 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
+	"github.com/suparcloud/suparship/internal/token"
 	"github.com/suparcloud/suparship/internal/tpl"
 	"github.com/suparcloud/suparship/internal/tpl/credstore"
 	"github.com/suparcloud/suparship/internal/tpl/registrysync"
@@ -131,6 +132,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		orgProvider             rbac.OrgStore
 		projectStore            project.Store
 		previewStore            preview.Store
+		tokenStore              token.Store
 		runtimeProvider         runtime.Provider
 		logsProvider            runtime.LogsProvider
 		appStore                domain.AppStore
@@ -174,6 +176,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		orgProvider = deps.OrgProvider
 		projectStore = deps.ProjectStore
 		previewStore = deps.PreviewStore
+		tokenStore = token.NewMemStore()
 		runtimeProvider = deps.RuntimeProvider
 		logsProvider = deps.LogsProvider
 		appStore = deps.AppStore
@@ -275,6 +278,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		kubeDeps := kube.NewServerDeps(client, rbac.NewOrgEnvNamesAdapter(orgProvider))
 		projectStore = kubeDeps.ProjectStore
 		previewStore = kubeDeps.PreviewStore
+		tokenStore = token.NewKubeStore(client)
 		runtimeProvider = kubeDeps.RuntimeProvider
 		logsProvider = kubeDeps.LogsProvider
 		appStore = kubeDeps.AppStore
@@ -600,6 +604,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		ClusterTemplateLoader:   clusterTemplateLoaderFromClient(kubeClient),
 		RegistrySyncEngine:      registrySyncEngine(kubeClient, logger),
 		ProjectStore:            projectStore,
+		TokenStore:              tokenStore,
 		RuntimeProvider:         runtimeProvider,
 		LogsProvider:            logsProvider,
 		PreviewStore:            previewStore,

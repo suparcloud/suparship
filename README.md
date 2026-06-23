@@ -172,6 +172,9 @@ suparship server --addr :9090 # custom address
 | DELETE | `/api/v1/projects/{project}/apps/{app}/previews/{name}` | developer | Delete a preview environment |
 | POST | `/api/v1/projects/{project}/apps/{app}/promote` | project_admin | Promote app to target environment |
 | GET | `/api/v1/projects/{project}/apps/{app}/logs` | viewer | Fetch pod logs for an app |
+| GET | `/api/v1/projects/{project}/tokens` | project_admin | List a project's API tokens (metadata only) |
+| POST | `/api/v1/projects/{project}/tokens` | project_admin | Mint a project API token (plaintext returned once) |
+| DELETE | `/api/v1/projects/{project}/tokens/{id}` | project_admin | Revoke a project API token |
 | GET | `/api/v1/clusters` | session | List registered clusters |
 | POST | `/api/v1/clusters` | org_admin | Register a new cluster |
 | GET | `/api/v1/clusters/{name}` | session | Get cluster detail |

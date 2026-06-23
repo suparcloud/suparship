@@ -824,3 +824,39 @@ export interface AppDeploymentHistoryResponse {
   /** Reverse-chronological order (most recent first). Empty when not deployed. */
   history: DeploymentHistoryEntry[];
 }
+
+// --- Project API tokens ---
+
+/** Roles a project API token may carry (org_admin is never a token role). */
+export type ProjectTokenRole = "viewer" | "developer" | "project_admin";
+
+/** Metadata for a project API token. Never carries the secret. */
+export interface ApiToken {
+  id: string;
+  name: string;
+  project: string;
+  role: string;
+  createdBy: string;
+  createdAt: string;
+  /** RFC 3339 expiry; absent means the token never expires. */
+  expiresAt?: string;
+}
+
+/** Body for POST .../projects/:project/tokens. */
+export interface CreateTokenRequest {
+  name: string;
+  /** Defaults to "developer" server-side when omitted. */
+  role?: ProjectTokenRole;
+  /** Omit or 0 to never expire. */
+  expiresInDays?: number;
+}
+
+/** Create response: token metadata plus the one-time plaintext secret. */
+export interface CreatedToken extends ApiToken {
+  /** Shown exactly once — unrecoverable afterwards. */
+  token: string;
+}
+
+export interface TokensResponse {
+  tokens: ApiToken[];
+}
