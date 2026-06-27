@@ -335,6 +335,38 @@ func ValidateNamespacePattern(pattern string) error {
 	return nil
 }
 
+// ValidatePreviewNamespacePattern returns an error if pattern is not a valid
+// preview namespace pattern. Rules:
+//   - Must only contain allowed tokens: {project}, {app}, {name}.
+//   - When resolved with realistic inputs the result must be a valid DNS label
+//     (≤ 63 chars, lowercase alnum + hyphens).
+//
+// Omitting {name} is allowed: it yields a SHARED namespace for all of a
+// project's previews (e.g. "{project}-previews"). The publisher then suffixes
+// each preview's platform resources with the preview name to avoid collisions,
+// and workloads should include {platform.previewName} in their resource names.
+//
+// An empty pattern is valid and resolves to DefaultPreviewNamespacePattern.
+func ValidatePreviewNamespacePattern(pattern string) error {
+	if pattern == "" {
+		return nil // empty → DefaultPreviewNamespacePattern
+	}
+	// Check for unknown tokens: strip known ones and look for leftover braces.
+	cleaned := pattern
+	for _, tok := range []string{"{project}", "{app}", "{name}"} {
+		cleaned = strings.ReplaceAll(cleaned, tok, "")
+	}
+	if strings.ContainsAny(cleaned, "{}") {
+		return fmt.Errorf("preview namespace pattern %q contains unsupported tokens; allowed: {project}, {app}, {name}", pattern)
+	}
+	// Validate that a realistic resolution produces a valid DNS label.
+	resolved := GeneratePreviewNamespaceFromPattern("app", "pr-1", "project", pattern)
+	if !dnsLabelRE.MatchString(resolved) {
+		return fmt.Errorf("preview namespace pattern %q resolves to %q which is not a valid DNS label", pattern, resolved)
+	}
+	return nil
+}
+
 // ValidateClusterName returns an error if name is not a valid cluster identifier.
 // Cluster names follow the same DNS-label rules as app names.
 func ValidateClusterName(name string) error {

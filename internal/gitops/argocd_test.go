@@ -588,6 +588,26 @@ func TestBuildArgoPreviewAppSet_NamespaceIsTemplateVar(t *testing.T) {
 	}
 }
 
+// TestBuildArgoPreviewAppSet_ValuesPathUsesPreviewName guards against the
+// values file path interpolating {{name}}, which the previews Git File
+// generator does not expose (its app.yaml key is "previewName"). A literal
+// {{name}} makes helm template open previews/{project}/{{name}}/values.yaml and
+// fail with "no such file or directory".
+func TestBuildArgoPreviewAppSet_ValuesPathUsesPreviewName(t *testing.T) {
+	appSet := gitops.BuildArgoPreviewAppSet("https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
+	sources := appSet.Spec.Template.Spec.Sources
+	if len(sources) < 2 || sources[1].Helm == nil || len(sources[1].Helm.ValueFiles) == 0 {
+		t.Fatalf("preview AppSet missing chart source value files: %+v", sources)
+	}
+	got := sources[1].Helm.ValueFiles[0]
+	if strings.Contains(got, "{{name}}") {
+		t.Errorf("preview values path %q uses {{name}}; the generator exposes {{previewName}}", got)
+	}
+	if !strings.Contains(got, "{{previewName}}") {
+		t.Errorf("preview values path %q must interpolate {{previewName}}", got)
+	}
+}
+
 // ── BuildArgoExternalAppSet — multi-source, registry-chart shape ─────────────
 
 // TestBuildArgoExternalAppSet_NameDistinctFromInline ensures the external

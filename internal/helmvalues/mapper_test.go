@@ -228,6 +228,28 @@ func TestMapToHelmValues_ImageFromValues(t *testing.T) {
 	}
 }
 
+func TestMapToHelmValues_PlatformImageTag(t *testing.T) {
+	app := webApp("myapp", webComponent("web"))
+	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
+	if hv.Platform.ImageTag != "v1.0.0" {
+		t.Errorf("Platform.ImageTag = %q, want v1.0.0 (mirrors image_tag)", hv.Platform.ImageTag)
+	}
+}
+
+func TestMapToHelmValues_PlatformImageTagEmpty(t *testing.T) {
+	app := &domain.App{
+		Name:        "bare",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Components: []domain.ComponentSpec{webComponent("web")},
+		},
+	}
+	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
+	if hv.Platform.ImageTag != "" {
+		t.Errorf("Platform.ImageTag = %q, want empty when no image_tag", hv.Platform.ImageTag)
+	}
+}
+
 func TestMapToHelmValues_ImageMissingFromValues(t *testing.T) {
 	app := &domain.App{
 		Name:        "bare",

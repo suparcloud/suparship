@@ -39,6 +39,21 @@ export function createAppPreview(
   );
 }
 
+// deleteAppPreview removes an app-scoped preview. Use this for previews created
+// via createAppPreview — they live in the app store, not the legacy preview
+// store that deletePreview targets.
+export function deleteAppPreview(
+  project: string,
+  app: string,
+  name: string,
+): Promise<void> {
+  return api.del(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/previews/${encodeURIComponent(name)}`,
+  );
+}
+
+// deletePreview removes a preview via the legacy service-oriented endpoint.
+// Deprecated: prefer deleteAppPreview for app-scoped previews.
 export function deletePreview(name: string): Promise<void> {
   return api.del(`/previews/${encodeURIComponent(name)}`);
 }

@@ -486,6 +486,10 @@ type AppEnvironment struct {
 	// This is a soft hint for UI rendering only. Pipeline ordering is
 	// controlled by Order, not by this field.
 	EnvType AppEnvironmentType `json:"envType"`
+	// BaseEnv is the stable environment a preview was cloned from (e.g.
+	// "staging"). Set only for preview instances; empty for stable envs. Lets the
+	// UI group a preview under the environment it derives from.
+	BaseEnv string `json:"baseEnv,omitempty"`
 	// Order defines the position of this environment in the promotion pipeline.
 	// Lower values are deployed earlier (e.g. staging=1, prod=2). Preview
 	// environments always have Order=0 and are excluded from the pipeline chain.

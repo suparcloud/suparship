@@ -38,6 +38,18 @@ func (p *Publisher) PublishAppEnvForTest(repoDir string, app *domain.App, env Ap
 	return p.publishAppFiles(repoDir, app, []AppPublishEnv{env})
 }
 
+// PublishPreviewForTest exposes PublishPreview's inner file generation for
+// white-box unit testing without git operations.
+func (p *Publisher) PublishPreviewForTest(repoDir string, app *domain.App, preview PreviewPublishSpec) error {
+	return p.publishPreviewFiles(repoDir, app, preview)
+}
+
+// DeletePreviewForTest exposes DeletePreview's inner file removal for white-box
+// unit testing without git operations. Returns whether anything was removed.
+func (p *Publisher) DeletePreviewForTest(repoDir, projectName, previewName string) (bool, error) {
+	return p.deletePreviewFiles(repoDir, projectName, previewName)
+}
+
 // FirstDeployEnvsForTest exposes firstDeployEnvs for unit testing.
 func FirstDeployEnvsForTest(envs []AppPublishEnv) []AppPublishEnv {
 	return firstDeployEnvs(envs)
@@ -45,5 +57,5 @@ func FirstDeployEnvsForTest(envs []AppPublishEnv) []AppPublishEnv {
 
 // ChartVersionDirForTest / ChartPathForTest expose the version-scoped chart
 // path helpers to white-box tests.
-func ChartVersionDirForTest(version string) string    { return chartVersionDir(version) }
+func ChartVersionDirForTest(version string) string     { return chartVersionDir(version) }
 func ChartPathForTest(template, version string) string { return chartPathFor(template, version) }

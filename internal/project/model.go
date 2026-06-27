@@ -88,6 +88,12 @@ type ProjectSpec struct {
 	// Tokens: {org}, {project}, {env}.
 	// Empty = inherit from OrgEnvironment.NamespacePattern or org ResourceNaming.
 	NamespacePattern string `yaml:"namespacePattern,omitempty"`
+	// PreviewNamespacePattern controls the Kubernetes namespace for this
+	// project's preview environments. Tokens: {project}, {app}, {name} (the
+	// preview name, e.g. "pr-42"). Must contain {name} so previews never
+	// collide. Empty = domain.DefaultPreviewNamespacePattern
+	// ("{project}-{app}-preview-{name}").
+	PreviewNamespacePattern string `yaml:"previewNamespacePattern,omitempty"`
 }
 
 // Environment represents a deployment target in the promotion chain.

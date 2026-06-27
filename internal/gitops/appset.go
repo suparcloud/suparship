@@ -467,7 +467,12 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 		TargetRevision: opts.TargetRevision,
 		Helm: &HelmSource{
 			ReleaseName: "{{appName}}",
-			ValueFiles:  []string{"$previewvalues/" + joinSubPath(opts.SubPath, "previews", "{{project}}", "{{name}}", "values.yaml")},
+			// The previews Git File generator reads each preview's app.yaml
+			// (PreviewAppMetadata), whose key is "previewName" — not "name". The
+			// values file lives at previews/{project}/{previewName}/values.yaml
+			// (see Publisher.PublishAppPreview), so the path must interpolate
+			// {{previewName}}; {{name}} would stay literal and 404 at render.
+			ValueFiles: []string{"$previewvalues/" + joinSubPath(opts.SubPath, "previews", "{{project}}", "{{previewName}}", "values.yaml")},
 		},
 	}
 

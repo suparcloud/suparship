@@ -72,13 +72,19 @@ func TestCreatePreview_PreviewsDisabled(t *testing.T) {
 }
 
 func TestCreatePreview_NoEnabledComponents(t *testing.T) {
+	// Previews are an app-level concept: with PreviewsEnabled set, the app
+	// previews as a whole regardless of per-component enablement (the component
+	// gate is gone). The preview renders exactly what the base env renders.
 	app := previewApp()
 	for i := range app.Spec.Components {
 		app.Spec.Components[i].Enabled = false
 	}
-	_, err := CreatePreview(PreviewRequest{App: app, PreviewName: "pr-1", BuildOpts: defaultBuildOpts()})
-	if err == nil {
-		t.Fatal("expected error when the app has no enabled components")
+	result, err := CreatePreview(PreviewRequest{App: app, PreviewName: "pr-1", BuildOpts: defaultBuildOpts()})
+	if err != nil {
+		t.Fatalf("preview should succeed for an app with previews enabled: %v", err)
+	}
+	if result == nil || result.Instance == nil {
+		t.Fatal("expected a preview result")
 	}
 }
 
@@ -91,6 +97,36 @@ func TestCreatePreview_WorkerOnlyApp(t *testing.T) {
 	}
 	if !result.HelmValues.Components["worker"].Enabled {
 		t.Error("worker should be enabled in a worker-only app preview")
+	}
+}
+
+func TestCreatePreview_NoURLForUnexposedApp(t *testing.T) {
+	// A worker/agent app exposes no HTTP route, so the preview has no URL and the
+	// UI shows no "Open" link.
+	result, err := CreatePreview(PreviewRequest{App: workerOnlyApp(), PreviewName: "pr-1", BuildOpts: defaultBuildOpts()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Instance.URL != "" {
+		t.Errorf("URL = %q, want empty for an app with no exposed component", result.Instance.URL)
+	}
+}
+
+func TestCreatePreview_URLUsesBaseDomain(t *testing.T) {
+	// An exposed app's preview URL uses the base env's real domain, not the
+	// fabricated localhost default.
+	result, err := CreatePreview(PreviewRequest{
+		App:         previewApp(),
+		PreviewName: "pr-42",
+		BaseDomain:  "staging.acme.com",
+		BuildOpts:   defaultBuildOpts(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "http://pr-42.hello.preview.staging.acme.com"
+	if result.Instance.URL != want {
+		t.Errorf("URL = %q, want %q", result.Instance.URL, want)
 	}
 }
 
@@ -135,11 +171,25 @@ func TestCreatePreview_Namespace(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	wantNS := domain.GenerateNamespace("hello", "pr-42", domain.AppEnvPreview)
+	wantNS := domain.GeneratePreviewNamespaceFromPattern("hello", "pr-42", "demo", "")
 	if result.Instance.Namespace != wantNS {
 		t.Errorf("Namespace = %q, want %q", result.Instance.Namespace, wantNS)
 	}
-	// Concrete expected value from the convention: "<app>-<envName>"
+	// Concrete value from the default pattern "{project}-{app}-preview-{name}".
+	if result.Instance.Namespace != "demo-hello-preview-pr-42" {
+		t.Errorf("Namespace = %q, want demo-hello-preview-pr-42", result.Instance.Namespace)
+	}
+}
+
+func TestCreatePreview_NamespaceCustomPattern(t *testing.T) {
+	// A project-supplied pattern overrides the default.
+	result, err := CreatePreview(PreviewRequest{
+		App: previewApp(), PreviewName: "pr-42", NamespacePattern: "{app}-{name}",
+		BuildOpts: defaultBuildOpts(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if result.Instance.Namespace != "hello-pr-42" {
 		t.Errorf("Namespace = %q, want hello-pr-42", result.Instance.Namespace)
 	}
@@ -256,8 +306,8 @@ func TestCreatePreview_ArgoApp(t *testing.T) {
 	if argoApp.Metadata.Name != "demo-hello-pr-42" {
 		t.Errorf("ArgoApp.Name = %q, want hello-pr-42", argoApp.Metadata.Name)
 	}
-	if argoApp.Spec.Destination.Namespace != "hello-pr-42" {
-		t.Errorf("ArgoApp.Destination.Namespace = %q, want hello-pr-42", argoApp.Spec.Destination.Namespace)
+	if argoApp.Spec.Destination.Namespace != "demo-hello-preview-pr-42" {
+		t.Errorf("ArgoApp.Destination.Namespace = %q, want demo-hello-preview-pr-42", argoApp.Spec.Destination.Namespace)
 	}
 	if argoApp.Metadata.Labels["suparship.io/env-type"] != "preview" {
 		t.Errorf("ArgoApp env-type label = %q, want preview", argoApp.Metadata.Labels["suparship.io/env-type"])
@@ -336,9 +386,9 @@ func TestCreatePreview_PreviewNameVariants(t *testing.T) {
 		wantNS        string
 		wantURLPrefix string
 	}{
-		{"pr-1", "hello-pr-1", "http://pr-1.hello.preview.localhost"},
-		{"feature-login", "hello-feature-login", "http://feature-login.hello.preview.localhost"},
-		{"hotfix-123", "hello-hotfix-123", "http://hotfix-123.hello.preview.localhost"},
+		{"pr-1", "demo-hello-preview-pr-1", "http://pr-1.hello.preview.localhost"},
+		{"feature-login", "demo-hello-preview-feature-login", "http://feature-login.hello.preview.localhost"},
+		{"hotfix-123", "demo-hello-preview-hotfix-123", "http://hotfix-123.hello.preview.localhost"},
 	}
 
 	for _, tc := range tests {

@@ -396,3 +396,148 @@ func TestGetAppRuntime_AllScaledToZeroIsIdle(t *testing.T) {
 		t.Errorf("status = %s, want idle", info.Status)
 	}
 }
+
+// stsWithInstance builds a StatefulSet labelled for app-native discovery.
+func stsWithInstance(name, ns, instance, image string, replicas, available int32) *appsv1.StatefulSet {
+	return &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			CreationTimestamp: metav1.Now(),
+			Labels:            map[string]string{"app.kubernetes.io/instance": instance},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: int32p(replicas),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: image}}},
+			},
+		},
+		Status: appsv1.StatefulSetStatus{Replicas: replicas, ReadyReplicas: available, AvailableReplicas: available},
+	}
+}
+
+// dsWithInstance builds a DaemonSet labelled for app-native discovery. A
+// DaemonSet's desired count is per-node (DesiredNumberScheduled), not spec.replicas.
+func dsWithInstance(name, ns, instance, image string, desired, ready int32) *appsv1.DaemonSet {
+	return &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			CreationTimestamp: metav1.Now(),
+			Labels:            map[string]string{"app.kubernetes.io/instance": instance},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: image}}},
+			},
+		},
+		Status: appsv1.DaemonSetStatus{DesiredNumberScheduled: desired, NumberReady: ready, NumberAvailable: ready},
+	}
+}
+
+// The real-world valkey case: an app that ships as a StatefulSet (no Deployment
+// at all) must report its true health, not a perpetual 0/0 "not deployed".
+func TestGetAppRuntime_DiscoversStatefulSet(t *testing.T) {
+	const ns, instance = "voiceai", "valkey-internal"
+	sts := stsWithInstance("valkey-internal", ns, instance, "valkey:9.0.2", 1, 1)
+	client := fake.NewSimpleClientset(sts)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), ns, instance, "valkey-internal")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusHealthy {
+		t.Errorf("status = %s, want healthy", info.Status)
+	}
+	if info.Replicas != 1 || info.Available != 1 {
+		t.Errorf("replicas = %d/%d, want 1/1", info.Available, info.Replicas)
+	}
+	if info.Image != "valkey:9.0.2" {
+		t.Errorf("image = %s, want valkey:9.0.2", info.Image)
+	}
+}
+
+// A degraded StatefulSet (some pods not ready) must surface as degraded.
+func TestGetAppRuntime_StatefulSetDegraded(t *testing.T) {
+	const ns, instance = "voiceai", "valkey-internal"
+	sts := stsWithInstance("valkey-internal", ns, instance, "valkey:9.0.2", 3, 1)
+	client := fake.NewSimpleClientset(sts)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), ns, instance, "valkey-internal")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusDegraded {
+		t.Errorf("status = %s, want degraded", info.Status)
+	}
+}
+
+// An app that ships as a DaemonSet reports its per-node health.
+func TestGetAppRuntime_DiscoversDaemonSet(t *testing.T) {
+	const ns, instance = "obs", "node-agent"
+	ds := dsWithInstance("node-agent", ns, instance, "agent:1", 3, 3)
+	client := fake.NewSimpleClientset(ds)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), ns, instance, "node-agent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusHealthy {
+		t.Errorf("status = %s, want healthy", info.Status)
+	}
+	if info.Replicas != 3 || info.Available != 3 {
+		t.Errorf("replicas = %d/%d, want 3/3", info.Available, info.Replicas)
+	}
+}
+
+// An app composed of mixed workload kinds aggregates worst-of across all of them:
+// a healthy Deployment plus a degraded StatefulSet is degraded, with summed replicas.
+func TestGetAppRuntime_AggregatesMixedKinds(t *testing.T) {
+	const ns, instance = "proj-staging", "proj-staging"
+	api := deployWithInstance("api", ns, instance, "img/api:1", 2, 2)   // healthy
+	db := stsWithInstance("db", ns, instance, "postgres:16", 3, 1)      // degraded
+	client := fake.NewSimpleClientset(api, db)
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), ns, instance, "proj")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusDegraded {
+		t.Errorf("status = %s, want degraded (worst-of)", info.Status)
+	}
+	if info.Replicas != 5 || info.Available != 3 {
+		t.Errorf("replicas = %d/%d, want 5/3", info.Available, info.Replicas)
+	}
+}
+
+// The name-based fallback (no instance labels) must also find a StatefulSet, so
+// label-less / canonical apps that ship as StatefulSets aren't reported 0/0.
+func TestGetServiceRuntime_FindsStatefulSetByName(t *testing.T) {
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey", Namespace: "myapi-dev", CreationTimestamp: metav1.Now()},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: int32p(1),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: "valkey:9.0.2"}}},
+			},
+		},
+		Status: appsv1.StatefulSetStatus{Replicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
+	}
+	client := fake.NewSimpleClientset(sts) // no instance label
+	p := NewK8sProvider(client)
+
+	info, err := p.GetAppRuntime(context.Background(), "myapi-dev", "myapi-valkey-dev", "valkey")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Status != StatusHealthy || info.Replicas != 1 {
+		t.Errorf("fallback STS lookup failed: status=%s replicas=%d", info.Status, info.Replicas)
+	}
+	if info.Image != "valkey:9.0.2" {
+		t.Errorf("image = %s, want valkey:9.0.2", info.Image)
+	}
+}

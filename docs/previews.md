@@ -2,11 +2,35 @@
 
 A **preview** is an ephemeral, isolated deployment of an app — typically one per
 pull request or branch — that lets you exercise a change end-to-end before it
-reaches a stable environment. A preview gets its own namespace
-(`{app}-{previewName}`, e.g. `api-pr-42`) and a deterministic URL
-(`http://{previewName}.{app}.preview.{baseDomain}`), runs at a single replica by
-default, and is **not** part of the staging → prod promotion chain (it has
-`Order = 0`). Delete it when the PR closes and it's gone — no lingering state.
+reaches a stable environment. A preview gets its own namespace (default
+`{project}-{app}-preview-{name}`, e.g. `voiceai-api-preview-pr-42`; configurable
+per project — see below) and a deterministic URL
+(`http://{previewName}.{app}.preview.{baseDomain}`, only when the app exposes an
+HTTP route), runs at a single replica by default, and is **not** part of the
+staging → prod promotion chain (it has `Order = 0`). Delete it when the PR closes
+and it's gone — no lingering state.
+
+**Namespace pattern.** The preview namespace is configurable per project in
+**Project → Settings → Namespace patterns → Preview namespace**, or via
+`PUT /api/v1/projects/{project}/naming` (`previewNamespacePattern`). Tokens:
+`{project}`, `{app}`, `{name}` (the preview name). Blank uses the default
+`{project}-{app}-preview-{name}`.
+
+**Shared preview namespace.** Omit `{name}` from the pattern (e.g.
+`{project}-previews`) to put **every preview of the project in one namespace**.
+suparship then suffixes its own platform resources per preview — the env
+ConfigMap becomes `{app}-{name}-config` and the ExternalSecret/Secret
+`{app}-{name}-secrets`, and the `{platform.configMapName}` / `{platform.secretName}`
+tokens resolve to those suffixed names automatically. **Workload** resources are
+the chart's responsibility: include `{platform.previewName}` (the PR id, e.g.
+`pr-42`) in the chart's name, typically in `fullnameOverride`:
+
+```yaml
+# preview overrides for a shared-namespace project
+fullnameOverride: "{platform.project}-{platform.app}-{platform.previewName}"
+```
+
+Without this, two previews of the same app would collide in the shared namespace.
 
 **Design principle: clone a base env, don't reconfigure.** A preview is meant to
 be cheap and opinionated. Rather than carrying its own full configuration, it
@@ -18,11 +42,12 @@ per-preview knob.
 ## Opting in
 
 An app supports previews when **`AppSpec.PreviewsEnabled`** is true (the default
-for new apps). A preview deploys **all of the app's enabled components** — there
-is no per-component preview gate, so worker-only apps (e.g. a LiveKit agent)
-preview fine. Toggle it on **Overview → Previews enabled**, or via the app
-update API (`previewsEnabled: true|false`). When disabled, the **Preview** button
-is greyed out and the create API returns `422`.
+for new apps). Previews are an **app-level** concept: the preview mirrors exactly
+what the base env deploys — there is no per-component preview gate — so worker-only
+apps (e.g. a LiveKit agent) and apps that deploy via a chart / raw values without
+enumerated components preview fine. Toggle it on **Overview → Previews enabled**,
+or via the app update API (`previewsEnabled: true|false`). When disabled, the
+**Preview** button is greyed out and the create API returns `422`.
 
 ## Base environment
 
@@ -100,6 +125,20 @@ Content-Type: application/json
 to inherit the base env's image). Create is an **upsert**: re-POSTing an existing
 preview re-publishes it with the new tag — `201` on first create, `200` on
 update — so CI can push a fresh image and re-point the preview on every commit.
+
+**Secondary images (sidecars, init containers).** `imageTag` only reaches images
+the template *maps* (the canonical `image.repository`/`image.tag`). A chart with a
+second image the mapping doesn't cover — e.g. a sidecar — would otherwise fall
+back to its chart default (often `:latest`) and fail to pull in a preview. Pin it
+to the resolved tag with the **`{platform.imageTag}`** token in the app's values
+(or preview overrides), which resolves to the per-PR tag at deploy:
+
+```yaml
+sidecar:
+  image:
+    repository: acr.io/org/app   # already correct in your values
+    tag: "{platform.imageTag}"   # tracks the same build as the main container
+```
 
 Tear down with:
 

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
@@ -21,6 +22,10 @@ type ProjectNamingDTO struct {
 	// project. Tokens: {org}, {project}, {env}.
 	// Empty = inherit from OrgEnvironment.NamespacePattern or org ResourceNaming.
 	NamespacePattern string `json:"namespacePattern,omitempty"`
+	// PreviewNamespacePattern controls the namespace of this project's preview
+	// environments. Tokens: {project}, {app}, {name}. Must contain {name}.
+	// Empty = "{project}-{app}-preview-{name}".
+	PreviewNamespacePattern string `json:"previewNamespacePattern,omitempty"`
 }
 
 // GET /api/v1/projects/{project}/naming
@@ -36,7 +41,8 @@ func (rh *rbacHandler) handleGetProjectNaming(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, ProjectNamingDTO{
-		NamespacePattern: proj.Spec.NamespacePattern,
+		NamespacePattern:        proj.Spec.NamespacePattern,
+		PreviewNamespacePattern: proj.Spec.PreviewNamespacePattern,
 	})
 }
 
@@ -62,6 +68,12 @@ func (rh *rbacHandler) handlePutProjectNaming(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	// Preview pattern: requires the {name} token (per-PR uniqueness) and a
+	// DNS-valid resolution. Empty inherits the default.
+	if err := domain.ValidatePreviewNamespacePattern(req.PreviewNamespacePattern); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
 
 	proj, err := rh.projectStore.Get(r.Context(), projectName)
 	if err != nil {
@@ -70,6 +82,7 @@ func (rh *rbacHandler) handlePutProjectNaming(w http.ResponseWriter, r *http.Req
 	}
 
 	proj.Spec.NamespacePattern = req.NamespacePattern
+	proj.Spec.PreviewNamespacePattern = req.PreviewNamespacePattern
 
 	if err := rh.projectStore.Save(r.Context(), proj); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save project"})
@@ -77,6 +90,7 @@ func (rh *rbacHandler) handlePutProjectNaming(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, ProjectNamingDTO{
-		NamespacePattern: proj.Spec.NamespacePattern,
+		NamespacePattern:        proj.Spec.NamespacePattern,
+		PreviewNamespacePattern: proj.Spec.PreviewNamespacePattern,
 	})
 }

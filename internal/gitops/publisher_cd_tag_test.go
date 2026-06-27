@@ -165,3 +165,220 @@ func TestPublish_CDManaged_PreviewNotPreserved(t *testing.T) {
 		t.Errorf("preview image.tag = %q, want rendered seed %q (preview must not be preserved)", got, seedTag)
 	}
 }
+
+// tokenImageApp is a BYO/passthrough app whose RawValues pin the chart's image
+// tag to the {platform.imageTag} token (the chart-agnostic, recommended way).
+func tokenImageApp() *domain.App {
+	return &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"},
+			RawValues: map[string]any{
+				"image": map[string]any{
+					"repository": "registry.example.com/demo/hello",
+					"tag":        "{platform.imageTag}",
+				},
+			},
+		},
+	}
+}
+
+// TestPublishPreview_TokenImageTagResolvesToPR is the core fix: a per-PR image
+// tag must be exposed as {platform.imageTag} so a passthrough chart's
+// `image.tag: "{platform.imageTag}"` override renders the PR build — regardless
+// of the template's image-mapping shape.
+func TestPublishPreview_TokenImageTagResolvesToPR(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+	const prTag = "pr-42-abc1234"
+
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:       "pr-42",
+		BaseEnv:           "staging",
+		ClusterServer:     "https://kubernetes.default.svc",
+		Namespace:         "demo-hello-preview-pr-42",
+		BaseDomain:        "localhost",
+		ImageTag:          prTag,
+		SkipCanonicalBase: true, // BYO/passthrough
+	}
+	if err := p.PublishPreviewForTest(dir, tokenImageApp(), spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	path := filepath.Join(dir, "previews", "demo", "pr-42", "values.yaml")
+	if got := readRootImageTag(t, path); got != prTag {
+		t.Errorf("preview image.tag = %q, want %q ({platform.imageTag} must resolve to the per-PR tag)", got, prTag)
+	}
+}
+
+// TestDeletePreview_RemovesPlatformResources guards the dangling
+// previews-platform Application: delete must remove BOTH the preview chart tree
+// and its _app-resources platform tree, else the previews-platform AppSet keeps
+// generating the {project}-{name}-preview-platform Application.
+func TestDeletePreview_RemovesPlatformResources(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:       "pr-42",
+		BaseEnv:           "staging",
+		ClusterServer:     "https://kubernetes.default.svc",
+		Namespace:         "demo-hello-preview-pr-42",
+		BaseDomain:        "localhost",
+		SkipCanonicalBase: true,
+	}
+	if err := p.PublishPreviewForTest(dir, tokenImageApp(), spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	chartTree := filepath.Join(dir, "previews", "demo", "pr-42")
+	platformTree := filepath.Join(dir, "_app-resources", "previews", "demo", "pr-42")
+	for _, d := range []string{chartTree, platformTree} {
+		if _, err := os.Stat(d); err != nil {
+			t.Fatalf("expected %s to exist after publish: %v", d, err)
+		}
+	}
+
+	removed, err := p.DeletePreviewForTest(dir, "demo", "pr-42")
+	if err != nil {
+		t.Fatalf("delete preview: %v", err)
+	}
+	if !removed {
+		t.Error("DeletePreview reported nothing removed")
+	}
+	for _, d := range []string{chartTree, platformTree} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed after delete (err=%v)", d, err)
+		}
+	}
+}
+
+// readPreviewValues parses a preview's published values.yaml into a map.
+func readPreviewValues(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal %s: %v", path, err)
+	}
+	return m
+}
+
+// platformNameApp wires its env CM/Secret and fullname to platform tokens — the
+// pattern used for a shared preview namespace.
+func platformNameApp() *domain.App {
+	return &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"},
+			RawValues: map[string]any{
+				"envConfigMapName": "{platform.configMapName}",
+				"envSecretName":    "{platform.secretName}",
+				"fullnameOverride": "{platform.app}-{platform.previewName}",
+			},
+		},
+	}
+}
+
+func TestPublishPreview_SharedNamespaceSuffixesPlatformNames(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:       "pr-42",
+		BaseEnv:           "staging",
+		ClusterServer:     "https://kubernetes.default.svc",
+		Namespace:         "demo-previews", // shared: no preview name in it
+		BaseDomain:        "localhost",
+		SkipCanonicalBase: true,
+	}
+	if err := p.PublishPreviewForTest(dir, platformNameApp(), spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	m := readPreviewValues(t, filepath.Join(dir, "previews", "demo", "pr-42", "values.yaml"))
+	for key, want := range map[string]string{
+		"envConfigMapName": "hello-pr-42-config",
+		"envSecretName":    "hello-pr-42-secrets",
+		"fullnameOverride": "hello-pr-42",
+	} {
+		if got, _ := m[key].(string); got != want {
+			t.Errorf("%s = %q, want %q (suffixed per preview in a shared namespace)", key, got, want)
+		}
+	}
+}
+
+func TestPublishPreview_PerPreviewNamespaceNoSuffix(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:       "pr-42",
+		BaseEnv:           "staging",
+		ClusterServer:     "https://kubernetes.default.svc",
+		Namespace:         "demo-hello-preview-pr-42", // carries the preview name
+		BaseDomain:        "localhost",
+		SkipCanonicalBase: true,
+	}
+	if err := p.PublishPreviewForTest(dir, platformNameApp(), spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	m := readPreviewValues(t, filepath.Join(dir, "previews", "demo", "pr-42", "values.yaml"))
+	if got, _ := m["envConfigMapName"].(string); got != "hello-config" {
+		t.Errorf("envConfigMapName = %q, want hello-config (no suffix when namespace is per-preview)", got)
+	}
+}
+
+// TestPublishPreview_InheritsBaseEnvOverlay is the core fix: a preview must
+// inherit the base env's template/org platform value overrides and app values —
+// not just the preview band — so e.g. envConfigMapName resolves to the platform
+// ConfigMap instead of the chart default. The preview band layers on top.
+func TestPublishPreview_InheritsBaseEnvOverlay(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+	app := &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template:  domain.AppTemplateRef{Name: "voiceai-livekit-agent"},
+			RawValues: map[string]any{"appKey": "appVal"},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				domain.PreviewOverrideKey: {RawValues: map[string]any{
+					"previewKey":   "previewVal",
+					"fromTemplate": "overridden-by-band", // band wins over template default
+				}},
+			},
+		},
+	}
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:       "pr-42",
+		BaseEnv:           "staging",
+		ClusterServer:     "https://kubernetes.default.svc",
+		Namespace:         "demo-hello-preview-pr-42",
+		BaseDomain:        "localhost",
+		SkipCanonicalBase: true,
+		// The base env's resolved template/org platform overrides — the layer the
+		// preview was dropping.
+		PlatformDefaultValues: map[string]any{
+			"envConfigMapName": "{platform.configMapName}",
+			"fromTemplate":     "yes",
+		},
+		PlatformEnvValues: map[string]any{"fromStagingTemplate": "yes"},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	m := readPreviewValues(t, filepath.Join(dir, "previews", "demo", "pr-42", "values.yaml"))
+	checks := map[string]string{
+		"envConfigMapName":    "hello-config",       // inherited template override, token resolved
+		"fromTemplate":        "overridden-by-band", // preview band wins over the template default
+		"fromStagingTemplate": "yes",                // PlatformEnvValues inherited
+		"appKey":              "appVal",             // app RawValues inherited
+		"previewKey":          "previewVal",         // preview band applied
+	}
+	for k, want := range checks {
+		if got, _ := m[k].(string); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+}

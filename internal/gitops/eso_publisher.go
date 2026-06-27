@@ -269,6 +269,11 @@ type WorkloadExternalSecretParams struct {
 	// RefreshInterval is the org-configured ExternalSecret refresh interval.
 	// Empty falls back to secrets.DefaultRefreshInterval at render time.
 	RefreshInterval string
+	// SecretName overrides the ExternalSecret + target Secret name. Empty falls
+	// back to AppSecretName(App). The vault item keys (remote refs) always use
+	// App, so a shared-namespace preview can give its Secret a preview-suffixed
+	// name while still reading the app's items.
+	SecretName string
 }
 
 // BuildAppExternalSecret returns the single merged ExternalSecret config for an
@@ -368,8 +373,12 @@ func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretCo
 	if len(items) == 0 {
 		return nil
 	}
+	esName := p.SecretName
+	if esName == "" {
+		esName = secrets.AppSecretName(p.App)
+	}
 	return &ESOExternalSecretConfig{
-		Name:            secrets.AppSecretName(p.App),
+		Name:            esName,
 		Namespace:       p.Namespace,
 		StoreName:       defaultStore,
 		Items:           items,

@@ -134,6 +134,23 @@ type PlatformValues struct {
 	// ClusterIssuer is the resolved cert-manager ClusterIssuer. Empty for plain
 	// HTTP or no profile.
 	ClusterIssuer string `json:"clusterIssuer,omitempty" yaml:"clusterIssuer,omitempty"`
+	// ImageTag is the app's resolved image tag for this instance — the same tag
+	// the canonical image mapping bakes into each component's image.tag. For a
+	// preview it is the per-PR tag. Exposed as {platform.imageTag} so charts can
+	// pin secondary images (sidecars, init containers) the canonical mapping
+	// doesn't cover to the same build. Empty when the app sets no image_tag.
+	ImageTag string `json:"imageTag,omitempty" yaml:"imageTag,omitempty"`
+	// PreviewName is the preview (PR) identifier (e.g. "pr-42"), empty for stable
+	// envs. Exposed as {platform.previewName} so a shared-namespace preview can
+	// suffix its workload resource names (e.g. fullnameOverride) per preview.
+	PreviewName string `json:"previewName,omitempty" yaml:"previewName,omitempty"`
+	// ConfigMapName / SecretName are the resolved names of the platform-managed
+	// env ConfigMap and ExternalSecret/target Secret for this instance. Empty
+	// falls back to {app}-config / {app}-secrets. The publisher sets them to a
+	// preview-name-suffixed value for shared-namespace previews so the chart's
+	// envConfigMapName/envSecretName references resolve to the right objects.
+	ConfigMapName string `json:"configMapName,omitempty" yaml:"configMapName,omitempty"`
+	SecretName    string `json:"secretName,omitempty" yaml:"secretName,omitempty"`
 }
 
 // AppContext carries top-level app identity injected into every chart.

@@ -77,6 +77,12 @@ export function deleteProjectEnvironment(
 
 export interface ProjectNaming {
   namespacePattern?: string;
+  /**
+   * Namespace pattern for preview environments. Tokens: {project}, {app},
+   * {name} (the preview name). Must contain {name}. Empty inherits the default
+   * "{project}-{app}-preview-{name}".
+   */
+  previewNamespacePattern?: string;
 }
 
 export function getProjectNaming(project: string): Promise<ProjectNaming> {

@@ -31,6 +31,18 @@ type PreviewRequest struct {
 	// Application should be committed to a GitOps repository; all other
 	// fields have sensible defaults.
 	BuildOpts gitops.BuildOptions
+
+	// BaseDomain is the ingress DNS zone of the base env the preview clones
+	// (e.g. "staging.acme.com"). It drives the preview's routing host so the
+	// Instance URL matches what the chart actually renders. Empty falls back to
+	// "localhost" (local/dev). Only consulted when the app exposes an HTTP route.
+	BaseDomain string
+
+	// NamespacePattern is the project's preview namespace pattern. Tokens:
+	// {project}, {app}, {name}. Empty falls back to
+	// domain.DefaultPreviewNamespacePattern. Validate with
+	// domain.ValidatePreviewNamespacePattern before passing it here.
+	NamespacePattern string
 }
 
 // PreviewResult holds the pure-function outputs of CreatePreview.
@@ -54,20 +66,25 @@ type PreviewResult struct {
 // CreatePreview is the end-to-end preview creation pipeline. It is a pure
 // function with no I/O; the caller is responsible for persistence.
 //
+// Previews are an app-level concept: a preview clones the app's base env and is
+// gated solely by the app's PreviewsEnabled opt-in — there is no per-component
+// preview gate. A preview renders exactly what the base env renders (the same
+// components, with the same enabled flags), so apps that deploy via a chart /
+// raw values without enumerated components preview correctly too.
+//
 // Steps:
 //  1. Validate that app is non-nil and previewName is non-empty.
-//  2. Verify that the app has previews enabled and at least one enabled
-//     component.
+//  2. Verify that the app has previews enabled.
 //  3. Build the EnvironmentInstance with a deterministic namespace and URL
 //     (via domain.GenerateNamespace / domain.GenerateURL).
-//  4. Generate Helm values using helmvalues.MapToHelmValues. A preview deploys
-//     all of the app's enabled components — the same set its base env runs.
+//  4. Generate Helm values using helmvalues.MapToHelmValues — the same mapping
+//     the base env uses.
 //  5. Generate the ArgoCD Application manifest using
 //     gitops.BuildArgoApplicationFromInstance.
 //
-// Returns an error when the app has previews disabled, has no enabled
-// components, or the request is structurally invalid (nil app, empty preview
-// name). All other errors are programming mistakes.
+// Returns an error when the app has previews disabled or the request is
+// structurally invalid (nil app, empty preview name). All other errors are
+// programming mistakes.
 func CreatePreview(req PreviewRequest) (*PreviewResult, error) {
 	if req.App == nil {
 		return nil, fmt.Errorf("app must not be nil")
@@ -79,12 +96,21 @@ func CreatePreview(req PreviewRequest) (*PreviewResult, error) {
 	if !req.App.Spec.PreviewsEnabled {
 		return nil, fmt.Errorf("app %q has previews disabled", req.App.Name)
 	}
-	if len(EnabledComponents(req.App.Spec.Components)) == 0 {
-		return nil, fmt.Errorf("app %q has no enabled components", req.App.Name)
-	}
 
-	ns := domain.GenerateNamespace(req.App.Name, req.PreviewName, domain.AppEnvPreview)
-	url := domain.GenerateURL(req.App.Name, req.PreviewName, domain.AppEnvPreview)
+	ns := domain.GeneratePreviewNamespaceFromPattern(req.App.Name, req.PreviewName, req.App.ProjectName, req.NamespacePattern)
+
+	// A preview gets a routing URL only when the app actually exposes an HTTP
+	// route — a worker/agent with no ingress (e.g. a LiveKit agent) gets none,
+	// so the UI shows no "Open" link. The host uses the base env's real domain
+	// (matching what the chart renders), not a fabricated localhost default.
+	url := ""
+	if AppHasIngressRoute(req.App) {
+		base := req.BaseDomain
+		if base == "" {
+			base = "localhost"
+		}
+		url = domain.GenerateURLWithDomain(req.App.Name, req.PreviewName, domain.AppEnvPreview, base)
+	}
 
 	inst := &domain.EnvironmentInstance{
 		AppName:     req.App.Name,

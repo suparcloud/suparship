@@ -103,10 +103,32 @@ func (c Context) replacer() *strings.Replacer {
 	// BYO/passthrough charts can wire envFrom to the platform-managed env without
 	// hardcoding. Guarded on App so an empty context doesn't emit "-config".
 	if p.App != "" {
+		// Prefer the explicitly resolved names (set for shared-namespace previews,
+		// where they carry the preview-name suffix); fall back to the {app}-config
+		// / {app}-secrets convention.
+		cmName := p.ConfigMapName
+		if cmName == "" {
+			cmName = secrets.AppConfigMapName(p.App)
+		}
+		secName := p.SecretName
+		if secName == "" {
+			secName = secrets.AppSecretName(p.App)
+		}
 		pairs = append(pairs,
-			"{platform.configMapName}", secrets.AppConfigMapName(p.App),
-			"{platform.secretName}", secrets.AppSecretName(p.App),
+			"{platform.configMapName}", cmName,
+			"{platform.secretName}", secName,
 		)
+	}
+	// The resolved image tag is exposed only when set, so a chart that
+	// references {platform.imageTag} without a resolved tag keeps the literal
+	// token (visibly unresolved) rather than rendering a bare "repo:".
+	if p.ImageTag != "" {
+		pairs = append(pairs, "{platform.imageTag}", p.ImageTag)
+	}
+	// Preview name — exposed only for previews so a shared-namespace preview can
+	// suffix workload resource names per PR. Left literal for stable envs.
+	if p.PreviewName != "" {
+		pairs = append(pairs, "{platform.previewName}", p.PreviewName)
 	}
 	for k, v := range c.Vars {
 		pairs = append(pairs, "{vars."+k+"}", v)
@@ -140,5 +162,7 @@ func PlatformTokens() []TokenInfo {
 		{Token: "{platform.clusterIssuer}", Label: "Cluster issuer", Group: "Routing"},
 		{Token: "{platform.configMapName}", Label: "Config map name", Group: "Identity", Description: "platform-managed app ConfigMap ({app}-config)"},
 		{Token: "{platform.secretName}", Label: "Secret name", Group: "Identity", Description: "platform-managed app Secret ({app}-secrets)"},
+		{Token: "{platform.imageTag}", Label: "Image tag", Group: "Identity", Description: "resolved image tag (per-PR tag for previews); pin sidecar/init images to it"},
+		{Token: "{platform.previewName}", Label: "Preview name", Group: "Identity", Description: "PR/preview identifier (e.g. pr-42); suffix workload names in a shared preview namespace"},
 	}
 }

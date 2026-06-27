@@ -1393,18 +1393,38 @@ func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *dom
 		}
 	}
 
+	// Resolve the base env's value overlays (template/org platform overrides +
+	// stack shared values) exactly as a stable publish would, so the preview
+	// inherits them. The preview band layers on top of these in PublishPreview.
+	tmplOv := a.loadOverride(ctx, app.Spec.Template.Name)
+	setPlatformOverlays(&basePub, tmpl, tmplOv, baseEnv)
+	a.setStackOverlays(ctx, &basePub, app, baseEnv)
+
 	spec := gitops.PreviewPublishSpec{
-		PreviewName:       preview.EnvName,
-		BaseEnv:           baseEnv,
-		ClusterServer:     res.clusterServer,
-		Namespace:         preview.Namespace,
-		BaseDomain:        res.baseDomain,
-		EnvVars:           envVars,
-		ScopeKeys:         scopeKeys,
-		ImageTag:          imageTag,
-		SkipCanonicalBase: !tmpl.Spec.CanonicalValues(),
+		PreviewName:           preview.EnvName,
+		BaseEnv:               baseEnv,
+		ClusterServer:         res.clusterServer,
+		Cluster:               clusterRef,
+		Namespace:             preview.Namespace,
+		BaseDomain:            res.baseDomain,
+		EnvVars:               envVars,
+		ScopeKeys:             scopeKeys,
+		ImageTag:              imageTag,
+		SkipCanonicalBase:     !tmpl.Spec.CanonicalValues(),
+		PlatformDefaultValues: basePub.PlatformDefaultValues,
+		PlatformEnvValues:     basePub.PlatformEnvValues,
+		PlatformClusterValues: basePub.PlatformClusterValues,
+		StackRawValues:        basePub.StackRawValues,
+		StackEnvRawValues:     basePub.StackEnvRawValues,
 	}
 	return a.inner.PublishPreview(ctx, app, spec)
+}
+
+// DeleteAppPreview implements server.AppPreviewDeleter by removing the preview's
+// gitops-output tree (previews/{project}/{name}) and committing, so ArgoCD
+// prunes the generated Application and its namespace.
+func (a *gitOpsPublisherAdapter) DeleteAppPreview(ctx context.Context, projectName, previewName string) error {
+	return a.inner.DeletePreview(ctx, projectName, previewName)
 }
 
 // UnpublishApp implements server.GitOpsPublisher by removing all gitops-output

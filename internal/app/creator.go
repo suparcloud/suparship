@@ -364,6 +364,22 @@ func DefaultEnvironments(a *domain.App) []*domain.AppEnvironment {
 	}
 }
 
+// AppHasIngressRoute reports whether the app exposes an HTTP route — i.e. some
+// component requests external or internal ingress (ExposeMode). Apps with no
+// exposed component (e.g. a worker or agent) have no reachable URL, so callers
+// should not synthesise one for them.
+func AppHasIngressRoute(a *domain.App) bool {
+	if a == nil {
+		return false
+	}
+	for _, c := range a.Spec.Components {
+		if c.ExposeMode == domain.ExposeExternal || c.ExposeMode == domain.ExposeInternal {
+			return true
+		}
+	}
+	return false
+}
+
 // EnabledComponents returns the subset of components from the given list that
 // are enabled (Enabled == true). A preview deploys all of an app's enabled
 // components — the same set its base env runs.
@@ -379,15 +395,12 @@ func EnabledComponents(components []domain.ComponentSpec) []domain.ComponentSpec
 
 // NewPreviewEnvironment builds a preview AppEnvironment for the given app and
 // sanitized preview name. It uses domain.AppPreviewNamespace for the namespace
-// convention. Returns an error when the app has previews disabled or has no
-// enabled components, since deploying a preview with zero active components is
-// meaningless.
+// convention. Previews are gated only by the app's PreviewsEnabled opt-in (an
+// app-level concept) — not by component enablement — so an app previews as a
+// whole, mirroring its base env.
 func NewPreviewEnvironment(a *domain.App, previewName string) (*domain.AppEnvironment, error) {
 	if !a.Spec.PreviewsEnabled {
 		return nil, fmt.Errorf("app %q has previews disabled", a.Name)
-	}
-	if len(EnabledComponents(a.Spec.Components)) == 0 {
-		return nil, fmt.Errorf("app %q has no enabled components", a.Name)
 	}
 	return &domain.AppEnvironment{
 		AppName:     a.Name,

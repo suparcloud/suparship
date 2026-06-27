@@ -35,7 +35,7 @@ type stackBatchResponse struct {
 	Results []stackOpResult `json:"results"`
 }
 
-func okResult(app, msg string) stackOpResult    { return stackOpResult{App: app, OK: true, Message: msg} }
+func okResult(app, msg string) stackOpResult { return stackOpResult{App: app, OK: true, Message: msg} }
 func errResult(app string, err error) stackOpResult {
 	return stackOpResult{App: app, OK: false, Error: err.Error()}
 }
@@ -201,13 +201,17 @@ func (ah *appHandler) createStackPreview(ctx context.Context, a *domain.App, pre
 		return err
 	}
 	inst := res.Instance
+	urls := []string{}
+	if inst.URL != "" {
+		urls = []string{inst.URL}
+	}
 	env := &domain.AppEnvironment{
 		AppName:     inst.AppName,
 		ProjectName: inst.ProjectName,
 		EnvName:     inst.EnvName,
 		EnvType:     inst.EnvType,
 		Namespace:   namespace, // override: co-locate the whole stack preview
-		URLs:        []string{inst.URL},
+		URLs:        urls,
 		Status:      inst.Status,
 	}
 	if err := ah.appStore.SaveAppEnvironment(ctx, a.ProjectName, env); err != nil {

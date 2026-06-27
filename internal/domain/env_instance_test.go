@@ -552,7 +552,7 @@ func TestResolveNamespace(t *testing.T) {
 			in: NamespaceResolveInput{
 				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
 				Scope: NamespaceScopeApp, Dedicated: false,
-				OrgAppDefault: "{project}-{app}",
+				OrgAppDefault:    "{project}-{app}",
 				OrgEnvAppPattern: "{project}-{app}-stg",
 			},
 			want: "billing-api-stg",
@@ -563,7 +563,7 @@ func TestResolveNamespace(t *testing.T) {
 				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
 				Scope: NamespaceScopeApp, Dedicated: false,
 				OrgEnvAppPattern: "{project}-{app}-stg",
-				ProjectPattern: "{project}-{app}-{env}",
+				ProjectPattern:   "{project}-{app}-{env}",
 			},
 			want: "billing-api-staging",
 		},
@@ -573,8 +573,8 @@ func TestResolveNamespace(t *testing.T) {
 				AppName: "api", EnvName: "staging", ProjectName: "billing", OrgName: "myorg",
 				Scope: NamespaceScopeApp, Dedicated: false,
 				OrgEnvAppPattern: "{project}-{app}-stg",
-				ProjectPattern: "{project}-{app}-{env}",
-				AppPattern:     "{app}",
+				ProjectPattern:   "{project}-{app}-{env}",
+				AppPattern:       "{app}",
 			},
 			want: "api",
 		},
@@ -727,5 +727,58 @@ func TestResolveNamespace_SharedStack(t *testing.T) {
 	})
 	if nsPat != "voiceai-prod" {
 		t.Errorf("custom stack pattern ns = %q, want voiceai-prod", nsPat)
+	}
+}
+
+// --- Preview namespace patterns ---
+
+func TestGeneratePreviewNamespaceFromPattern(t *testing.T) {
+	tests := []struct {
+		name        string
+		appName     string
+		previewName string
+		projectName string
+		pattern     string
+		want        string
+	}{
+		{"default empty pattern", "hello", "pr-42", "demo", "", "demo-hello-preview-pr-42"},
+		{"app and name only", "hello", "pr-42", "demo", "{app}-{name}", "hello-pr-42"},
+		{"project app name", "api", "pr-7", "acme", "{project}-{app}-{name}", "acme-api-pr-7"},
+		{"branch name", "web", "feature-login", "shop", "{app}-{name}", "web-feature-login"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GeneratePreviewNamespaceFromPattern(tt.appName, tt.previewName, tt.projectName, tt.pattern)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidatePreviewNamespacePattern(t *testing.T) {
+	valid := []string{
+		"",                               // empty → default
+		"{project}-{app}-preview-{name}", // the default
+		"{app}-{name}",
+		"{project}-{name}",
+		"preview-{name}",
+		"{project}-previews",      // shared namespace (no {name}) is allowed
+		"{project}-{app}-preview", // shared per-app namespace
+	}
+	for _, p := range valid {
+		if err := ValidatePreviewNamespacePattern(p); err != nil {
+			t.Errorf("pattern %q should be valid: %v", p, err)
+		}
+	}
+
+	invalid := []string{
+		"{project}-{app}-{env}-{name}", // unsupported {env} token
+		"{name}_{app}",                 // underscore is not DNS-valid
+	}
+	for _, p := range invalid {
+		if err := ValidatePreviewNamespacePattern(p); err == nil {
+			t.Errorf("pattern %q should be rejected", p)
+		}
 	}
 }

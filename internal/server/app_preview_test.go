@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -66,9 +67,9 @@ func newTestAppPreviewMux(projectName string) (*http.ServeMux, *authHandler, *me
 	store.mu.Unlock()
 
 	rh := &rbacHandler{
-		auth:        ah,
-		orgStore: &staticOrgProvider{org: testRBACOrg()},
-		appHandler:  newAppHandler(store, nil, nil, nil),
+		auth:       ah,
+		orgStore:   &staticOrgProvider{org: testRBACOrg()},
+		appHandler: newAppHandler(store, nil, nil, nil),
 	}
 	rh.registerRoutes(mux)
 
@@ -127,8 +128,13 @@ func TestCreateAppPreviewValid(t *testing.T) {
 	if dto.Project != testProject {
 		t.Errorf("Project = %q, want %q", dto.Project, testProject)
 	}
-	if dto.Namespace != "my-app-pr-42" {
-		t.Errorf("Namespace = %q, want %q", dto.Namespace, "my-app-pr-42")
+	if dto.Namespace != testProject+"-my-app-preview-pr-42" {
+		t.Errorf("Namespace = %q, want %q", dto.Namespace, testProject+"-my-app-preview-pr-42")
+	}
+	// BaseEnv records the stable env the preview clones (first stable env by
+	// order = staging) so the UI can group it under that env.
+	if dto.BaseEnv != "staging" {
+		t.Errorf("BaseEnv = %q, want staging", dto.BaseEnv)
 	}
 	if dto.Status.Phase != domain.StatusNotDeployed {
 		t.Errorf("Status.Phase = %q, want %q", dto.Status.Phase, domain.StatusNotDeployed)
@@ -549,3 +555,62 @@ func TestListAppPreviewsDTOFields(t *testing.T) {
 		t.Errorf("Status.Phase = %q, want %q", p.Status.Phase, domain.StatusHealthy)
 	}
 }
+
+// previewDeleterPublisher embeds recordingPublisher (for the GitOpsPublisher
+// method set) and implements AppPreviewDeleter, recording delete calls and
+// optionally failing.
+type previewDeleterPublisher struct {
+	recordingPublisher
+	deleted   []string
+	deleteErr error
+}
+
+func (p *previewDeleterPublisher) DeleteAppPreview(_ context.Context, project, previewName string) error {
+	if p.deleteErr != nil {
+		return p.deleteErr
+	}
+	p.deleted = append(p.deleted, project+"/"+previewName)
+	return nil
+}
+
+func TestDeleteAppPreviewPrunesGitops(t *testing.T) {
+	pub := &previewDeleterPublisher{}
+	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)
+	store.addApp(previewTestAppForProject(testProject))
+	store.addEnv(&domain.AppEnvironment{
+		AppName: "my-app", ProjectName: testProject, EnvName: "pr-42",
+		EnvType: domain.AppEnvPreview, Namespace: testProject + "-my-app-preview-pr-42",
+	})
+
+	rec := deleteAppPreview(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app", "pr-42")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(pub.deleted) != 1 || pub.deleted[0] != testProject+"/pr-42" {
+		t.Errorf("gitops delete calls = %v, want [%s/pr-42]", pub.deleted, testProject)
+	}
+	if _, err := store.GetAppEnvironment(context.Background(), testProject, "my-app", "pr-42"); err == nil {
+		t.Error("preview env should be removed from the store")
+	}
+}
+
+func TestDeleteAppPreviewGitopsFailureKeepsRecord(t *testing.T) {
+	pub := &previewDeleterPublisher{deleteErr: errTestGitops}
+	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)
+	store.addApp(previewTestAppForProject(testProject))
+	store.addEnv(&domain.AppEnvironment{
+		AppName: "my-app", ProjectName: testProject, EnvName: "pr-42",
+		EnvType: domain.AppEnvPreview, Namespace: testProject + "-my-app-preview-pr-42",
+	})
+
+	rec := deleteAppPreview(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app", "pr-42")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	// Record must survive so the preview stays listed and the delete is retryable.
+	if _, err := store.GetAppEnvironment(context.Background(), testProject, "my-app", "pr-42"); err != nil {
+		t.Error("preview env should remain after a gitops failure")
+	}
+}
+
+var errTestGitops = errors.New("gitops boom")

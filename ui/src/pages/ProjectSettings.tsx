@@ -337,6 +337,16 @@ const PROJECT_NS_PRESETS = [
   { label: "{org}-{project}-{env}", value: "{org}-{project}-{env}" },
 ];
 
+const PREVIEW_NS_PRESETS = [
+  { label: "{project}-{app}-preview-{name}", value: "{project}-{app}-preview-{name}" },
+  { label: "{app}-{name}", value: "{app}-{name}" },
+  { label: "{project}-previews (shared)", value: "{project}-previews" },
+];
+
+// DEFAULT_PREVIEW_NS_PATTERN mirrors domain.DefaultPreviewNamespacePattern; shown
+// as the effective value when the project sets no preview pattern.
+const DEFAULT_PREVIEW_NS_PATTERN = "{project}-{app}-preview-{name}";
+
 // ProjectSecretsSection edits the project-scope secrets shared by every app in
 // the project: a global (all-environments) editor plus one per environment.
 // Reuses the callback-driven SecretEditor — values are write-only and stored
@@ -359,7 +369,7 @@ function ProjectSecretsSection({
           by app-level secrets. An app's own key wins over the project's.
         </p>
       </div>
-      <div className="space-y-6 p-6">
+      <div className="space-y-4 p-6">
         <SecretEditor
           title="Global (all environments)"
           description="Project secrets that are the same in every environment."
@@ -367,18 +377,46 @@ function ProjectSecretsSection({
           upsertFn={(entries) => upsertProjectGlobalSecrets(projectName, entries)}
           deleteFn={(key) => deleteProjectGlobalSecretKey(projectName, key)}
         />
-        {envs.map((env) => (
-          <SecretEditor
-            key={env.name}
-            title={`${env.displayName || env.name} secrets`}
-            description={`Project secrets for the ${env.name} environment. Override the global project secrets above.`}
-            fetchFn={() => listProjectEnvSecretKeys(projectName, env.name)}
-            upsertFn={(entries) =>
-              upsertProjectEnvSecrets(projectName, env.name, entries)
-            }
-            deleteFn={(key) => deleteProjectEnvSecretKey(projectName, env.name, key)}
-          />
-        ))}
+        {envs.length > 0 && (
+          <details className="group rounded-lg border border-gray-100 bg-gray-50/40">
+            <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-2.5 text-sm">
+              <span className="font-medium text-gray-700">
+                Per-environment overrides
+                <span className="ml-2 rounded-full bg-gray-200 px-2 py-0.5 text-xs font-medium text-gray-600">
+                  {envs.length}
+                </span>
+              </span>
+              <span className="text-xs text-gray-400 group-open:hidden">
+                Override the global secrets per environment — click to manage
+              </span>
+              <svg
+                className="h-4 w-4 flex-shrink-0 text-gray-400 transition-transform group-open:rotate-180"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+              </svg>
+            </summary>
+            <div className="space-y-6 border-t border-gray-100 bg-white p-4">
+              {envs.map((env) => (
+                <SecretEditor
+                  key={env.name}
+                  title={`${env.displayName || env.name} secrets`}
+                  description={`Project secrets for the ${env.name} environment. Override the global project secrets above.`}
+                  fetchFn={() => listProjectEnvSecretKeys(projectName, env.name)}
+                  upsertFn={(entries) =>
+                    upsertProjectEnvSecrets(projectName, env.name, entries)
+                  }
+                  deleteFn={(key) =>
+                    deleteProjectEnvSecretKey(projectName, env.name, key)
+                  }
+                />
+              ))}
+            </div>
+          </details>
+        )}
       </div>
     </div>
   );
@@ -415,75 +453,178 @@ function ProjectNamespaceSection({ projectName }: { projectName: string }) {
     }
   }
 
-  function renderPreview(pattern: string): string {
+  function renderProjectPreview(pattern: string): string {
     return pattern
       .replace("{org}", "myorg")
       .replace("{project}", projectName || "myproject")
       .replace("{env}", "staging");
   }
 
+  function renderPreviewNs(pattern: string): string {
+    return pattern
+      .replace("{project}", projectName || "myproject")
+      .replace("{app}", "web")
+      .replace("{name}", "pr-42");
+  }
+
+  const previewPattern = naming.previewNamespacePattern ?? "";
+
   return (
     <div className="rounded-lg border border-gray-200 bg-white">
       <div className="border-b border-gray-100 px-6 py-4">
-        <h2 className="text-sm font-medium text-gray-900">
-          Project Namespace Pattern
-        </h2>
+        <h2 className="text-sm font-medium text-gray-900">Namespace patterns</h2>
         <p className="mt-0.5 text-xs text-gray-500">
-          Override the org-level default for this project's Kubernetes
-          namespace. Apps with{" "}
-          <code className="font-mono text-xs">namespaceScope: project</code>{" "}
-          will use this namespace. Leave blank to inherit from org settings.
+          Control how Kubernetes namespaces are named for this project's apps and
+          preview environments.
         </p>
       </div>
       <div className="px-6 py-4">
         {loading ? (
           <div className="h-16 animate-pulse rounded bg-gray-100" />
         ) : (
-          <div className="space-y-3">
-            <div className="flex flex-wrap gap-1.5">
-              {PROJECT_NS_PRESETS.map((p) => (
+          <div className="space-y-6">
+            {/* Project namespace pattern */}
+            <div className="space-y-3">
+              <div>
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Project namespace
+                </h3>
+                <p className="mt-0.5 text-xs text-gray-500">
+                  Used by apps with{" "}
+                  <code className="font-mono text-xs">namespaceScope: project</code>.
+                  Blank inherits from org settings.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {PROJECT_NS_PRESETS.map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    onClick={() =>
+                      setNaming((n) => ({ ...n, namespacePattern: p.value }))
+                    }
+                    className={`rounded px-2 py-0.5 text-xs font-mono transition-colors ${
+                      naming.namespacePattern === p.value
+                        ? "bg-indigo-100 text-indigo-800"
+                        : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
                 <button
-                  key={p.value}
                   type="button"
-                  onClick={() => setNaming({ namespacePattern: p.value })}
-                  className={`rounded px-2 py-0.5 text-xs font-mono transition-colors ${
-                    naming.namespacePattern === p.value
-                      ? "bg-indigo-100 text-indigo-800"
-                      : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-                  }`}
+                  onClick={() =>
+                    setNaming((n) => ({ ...n, namespacePattern: "" }))
+                  }
+                  className="rounded border border-dashed border-gray-200 px-2 py-0.5 text-xs text-gray-400 hover:text-gray-600"
                 >
-                  {p.label}
+                  Clear (inherit from org)
                 </button>
-              ))}
-              <button
-                type="button"
-                onClick={() => setNaming({ namespacePattern: "" })}
-                className="rounded px-2 py-0.5 text-xs text-gray-400 hover:text-gray-600 border border-dashed border-gray-200"
-              >
-                Clear (inherit from org)
-              </button>
-            </div>
-            <input
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              placeholder="e.g. {project}-{env}  (blank = inherit from org)"
-              value={naming.namespacePattern ?? ""}
-              onChange={(e) =>
-                setNaming({ namespacePattern: e.target.value || undefined })
-              }
-            />
-            <p className="text-xs text-gray-400">
-              Tokens: <code className="font-mono">{"{org}"}</code>,{" "}
-              <code className="font-mono">{"{project}"}</code>,{" "}
-              <code className="font-mono">{"{env}"}</code>
-            </p>
-            {naming.namespacePattern && (
+              </div>
+              <input
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="e.g. {project}-{env}  (blank = inherit from org)"
+                value={naming.namespacePattern ?? ""}
+                onChange={(e) =>
+                  setNaming((n) => ({
+                    ...n,
+                    namespacePattern: e.target.value || undefined,
+                  }))
+                }
+              />
               <p className="text-xs text-gray-400">
-                Preview:{" "}
+                Tokens: <code className="font-mono">{"{org}"}</code>,{" "}
+                <code className="font-mono">{"{project}"}</code>,{" "}
+                <code className="font-mono">{"{env}"}</code>
+                {naming.namespacePattern && (
+                  <>
+                    {" · e.g. "}
+                    <code className="font-mono text-gray-700">
+                      {renderProjectPreview(naming.namespacePattern)}
+                    </code>
+                  </>
+                )}
+              </p>
+            </div>
+
+            {/* Preview namespace pattern */}
+            <div className="space-y-3 border-t border-gray-100 pt-5">
+              <div>
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Preview namespace
+                </h3>
+                <p className="mt-0.5 text-xs text-gray-500">
+                  Namespace for previews. Include{" "}
+                  <code className="font-mono text-xs">{"{name}"}</code> for a
+                  namespace per preview, or omit it for one{" "}
+                  <strong>shared</strong> namespace across the project (e.g.{" "}
+                  <code className="font-mono text-xs">{"{project}-previews"}</code>)
+                  — suparship then suffixes its ConfigMap/Secret per preview, and
+                  you suffix workloads via{" "}
+                  <code className="font-mono text-xs">{"{platform.previewName}"}</code>{" "}
+                  in fullnameOverride. Blank uses the default{" "}
+                  <code className="font-mono text-xs">
+                    {DEFAULT_PREVIEW_NS_PATTERN}
+                  </code>
+                  .
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {PREVIEW_NS_PRESETS.map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    onClick={() =>
+                      setNaming((n) => ({
+                        ...n,
+                        previewNamespacePattern: p.value,
+                      }))
+                    }
+                    className={`rounded px-2 py-0.5 text-xs font-mono transition-colors ${
+                      previewPattern === p.value
+                        ? "bg-indigo-100 text-indigo-800"
+                        : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setNaming((n) => ({
+                      ...n,
+                      previewNamespacePattern: "",
+                    }))
+                  }
+                  className="rounded border border-dashed border-gray-200 px-2 py-0.5 text-xs text-gray-400 hover:text-gray-600"
+                >
+                  Clear (use default)
+                </button>
+              </div>
+              <input
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder={`e.g. ${DEFAULT_PREVIEW_NS_PATTERN}  (blank = default)`}
+                value={previewPattern}
+                onChange={(e) =>
+                  setNaming((n) => ({
+                    ...n,
+                    previewNamespacePattern: e.target.value || undefined,
+                  }))
+                }
+              />
+              <p className="text-xs text-gray-400">
+                Tokens: <code className="font-mono">{"{project}"}</code>,{" "}
+                <code className="font-mono">{"{app}"}</code>,{" "}
+                <code className="font-mono">{"{name}"}</code>
+                {" · e.g. "}
                 <code className="font-mono text-gray-700">
-                  {renderPreview(naming.namespacePattern)}
+                  {renderPreviewNs(previewPattern || DEFAULT_PREVIEW_NS_PATTERN)}
                 </code>
               </p>
-            )}
+            </div>
+
             {saveError && (
               <p className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">
                 {saveError}
@@ -491,7 +632,7 @@ function ProjectNamespaceSection({ projectName }: { projectName: string }) {
             )}
             {saved && (
               <p className="rounded bg-green-50 px-3 py-2 text-xs text-green-700">
-                Project namespace pattern saved.
+                Namespace patterns saved.
               </p>
             )}
             <div className="flex justify-end">
@@ -500,7 +641,7 @@ function ProjectNamespaceSection({ projectName }: { projectName: string }) {
                 disabled={saving}
                 className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
               >
-                {saving ? "Saving…" : "Save namespace pattern"}
+                {saving ? "Saving…" : "Save namespace patterns"}
               </button>
             </div>
           </div>
@@ -512,9 +653,27 @@ function ProjectNamespaceSection({ projectName }: { projectName: string }) {
 
 // ── ProjectSettings page ──────────────────────────────────────────────────────
 
+type SettingsTab =
+  | "environments"
+  | "namespaces"
+  | "variables"
+  | "secrets"
+  | "tokens"
+  | "danger";
+
+const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
+  { id: "environments", label: "Environments" },
+  { id: "namespaces", label: "Namespaces" },
+  { id: "variables", label: "Variables" },
+  { id: "secrets", label: "Secrets" },
+  { id: "tokens", label: "API Tokens" },
+  { id: "danger", label: "Danger zone" },
+];
+
 export function ProjectSettings() {
   const { project = "" } = useParams();
   const navigate = useNavigate();
+  const [tab, setTab] = useState<SettingsTab>("environments");
   const [envs, setEnvs] = useState<ProjectEnvironment[]>([]);
   const [clusters, setClusters] = useState<Cluster[]>([]);
   const [loading, setLoading] = useState(true);
@@ -593,7 +752,7 @@ export function ProjectSettings() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-3xl space-y-4 p-6">
+      <div className="mx-auto max-w-5xl space-y-4">
         <div className="h-8 w-48 animate-pulse rounded bg-gray-100" />
         <div className="h-64 animate-pulse rounded-lg bg-gray-50" />
       </div>
@@ -602,7 +761,7 @@ export function ProjectSettings() {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-3xl p-6">
+      <div className="mx-auto max-w-5xl">
         <div className="rounded-lg border border-red-200 bg-red-50 p-4">
           <p className="text-sm text-red-700">{error}</p>
         </div>
@@ -611,9 +770,9 @@ export function ProjectSettings() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8 p-6">
+    <div className="mx-auto max-w-5xl space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between">
         <div>
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <Link to={`/projects/${project}`} className="hover:text-gray-700">
@@ -625,6 +784,10 @@ export function ProjectSettings() {
           <h1 className="mt-1 text-2xl font-semibold text-gray-900">
             Project settings
           </h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Defaults for every app in <span className="font-medium">{project}</span> —
+            environments, namespaces, shared variables and secrets.
+          </p>
         </div>
         <Link
           to={`/projects/${project}`}
@@ -634,18 +797,44 @@ export function ProjectSettings() {
         </Link>
       </div>
 
+      {/* Tab bar */}
+      <div className="flex flex-wrap gap-1 border-b border-gray-200">
+        {SETTINGS_TABS.map((t) => {
+          const active = tab === t.id;
+          const danger = t.id === "danger";
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
+                active
+                  ? danger
+                    ? "border-red-500 text-red-600"
+                    : "border-gray-900 text-gray-900"
+                  : "border-transparent text-gray-500 hover:text-gray-800"
+              }`}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
       {/* Environments */}
-      <div className="rounded-lg border border-gray-200 bg-white">
+      {tab === "environments" && (
+      <div className="space-y-4">
+      <div className="rounded-xl border border-gray-200 bg-white">
         <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
           <div>
-            <h2 className="text-sm font-medium text-gray-900">Environments</h2>
-            <p className="mt-0.5 text-xs text-gray-500">
-              Inherited from org defaults · Project-level overrides and additions shown below.
+            <h2 className="text-base font-medium text-gray-900">Environments</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Inherited from your org defaults; project-level overrides and
+              additions are shown here.
             </p>
           </div>
           <button
             onClick={() => setShowAdd(true)}
-            className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700"
+            className="shrink-0 rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700"
           >
             Add environment
           </button>
@@ -781,47 +970,33 @@ export function ProjectSettings() {
             </tbody>
           </table>
         )}
+
+        {/* Legend — grouped with the table it explains */}
+        {envs.length > 0 && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-gray-100 px-6 py-3 text-xs text-gray-500">
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block rounded-full bg-blue-50 px-2 py-0.5 font-medium text-blue-700">
+                inherited
+              </span>
+              from org defaults
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700">
+                override
+              </span>
+              project-level fields on top
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block rounded-full bg-gray-100 px-2 py-0.5 font-medium text-gray-600">
+                project-only
+              </span>
+              not in org defaults
+            </span>
+          </div>
+        )}
       </div>
 
-      {/* Legend */}
-      <div className="flex items-center gap-4 text-xs text-gray-500">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block rounded-full bg-blue-50 px-2 py-0.5 font-medium text-blue-700">
-            inherited
-          </span>
-          from org defaults
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700">
-            override
-          </span>
-          project-level fields applied on top
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block rounded-full bg-gray-100 px-2 py-0.5 font-medium text-gray-600">
-            project-only
-          </span>
-          not in org defaults
-        </span>
-      </div>
-
-      {/* Project namespace naming pattern */}
-      <ProjectNamespaceSection projectName={project} />
-
-      {/* Project-level environment variables */}
-      <EnvConfigEditor
-        title="Project-level variables"
-        description="Applied to every app in this project. Overrides org defaults; overridden by app-level values."
-        fetchFn={fetchProjectEnvConfig}
-        saveFn={saveProjectEnvConfig}
-      />
-
-      {/* Project-level secrets — shared by every app in the project. */}
-      <ProjectSecretsSection projectName={project} envs={envs} />
-
-      {/* Project API tokens — bearer credentials for CI/scripts. */}
-      <ProjectTokensSection projectName={project} />
-      {/* Modals */}
+      {/* Env add/edit modals (triggered from this tab) */}
       {showAdd && (
         <EnvForm
           projectName={project}
@@ -843,25 +1018,46 @@ export function ProjectSettings() {
           onSaved={reload}
         />
       )}
+      </div>
+      )}
+
+      {tab === "namespaces" && <ProjectNamespaceSection projectName={project} />}
+
+      {tab === "variables" && (
+        <EnvConfigEditor
+          title="Project-level variables"
+          description="Applied to every app in this project. Overrides org defaults; overridden by app-level values."
+          fetchFn={fetchProjectEnvConfig}
+          saveFn={saveProjectEnvConfig}
+        />
+      )}
+
+      {tab === "secrets" && (
+        <ProjectSecretsSection projectName={project} envs={envs} />
+      )}
+
+      {tab === "tokens" && <ProjectTokensSection projectName={project} />}
 
       {/* Danger zone */}
-      <div className="rounded-xl border border-red-200 bg-red-50/40 p-6">
-        <h2 className="text-base font-semibold text-red-700">Danger zone</h2>
-        <p className="mt-1 text-sm text-gray-500">
-          Permanently delete this project and all its apps, environments, and configuration.
-          This action cannot be undone.
-        </p>
-        <button
-          onClick={() => {
-            setDeleteConfirmInput("");
-            setDeleteError(null);
-            setShowDeleteConfirm(true);
-          }}
-          className="mt-4 rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50"
-        >
-          Delete project
-        </button>
-      </div>
+      {tab === "danger" && (
+        <div className="rounded-xl border border-red-200 bg-red-50/40 p-6">
+          <h2 className="text-base font-semibold text-red-700">Danger zone</h2>
+          <p className="mt-1 text-sm text-gray-500">
+            Permanently delete this project and all its apps, environments, and
+            configuration. This action cannot be undone.
+          </p>
+          <button
+            onClick={() => {
+              setDeleteConfirmInput("");
+              setDeleteError(null);
+              setShowDeleteConfirm(true);
+            }}
+            className="mt-4 rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50"
+          >
+            Delete project
+          </button>
+        </div>
+      )}
 
       {/* Delete project confirmation modal */}
       {showDeleteConfirm && (

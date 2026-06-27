@@ -70,6 +70,10 @@ type DiagnosticDTO struct {
 type PreviewMetaDTO struct {
 	// PreviewName is the logical name of the preview (e.g. "pr-42").
 	PreviewName string `json:"previewName"`
+	// BaseEnv is the stable environment this preview was cloned from (e.g.
+	// "staging"). Empty for previews created before this was tracked; the UI then
+	// falls back to the default base env (first stable env).
+	BaseEnv string `json:"baseEnv,omitempty"`
 	// CreatedAt is the RFC 3339 creation timestamp of the preview.
 	CreatedAt string `json:"createdAt,omitempty"`
 }
@@ -87,14 +91,14 @@ type AppEnvironmentSummaryDTO struct {
 	EnvType string `json:"envType"`
 	// Order is the position in the promotion pipeline (lower = earlier; the first
 	// stable env is the default preview base env). Preview envs have Order 0.
-	Order     int                  `json:"order"`
-	Namespace string               `json:"namespace"`
+	Order     int    `json:"order"`
+	Namespace string `json:"namespace"`
 	// URLs are the ingress hostnames assigned to this environment instance.
 	// Always a non-nil slice; empty when no ingress has been provisioned.
-	URLs      []string             `json:"urls"`
-	Release   *AppReleaseRefDTO    `json:"release,omitempty"`
-	Status    AppStatusSummaryDTO  `json:"status"`
-	Preview   *PreviewMetaDTO      `json:"preview,omitempty"`
+	URLs    []string            `json:"urls"`
+	Release *AppReleaseRefDTO   `json:"release,omitempty"`
+	Status  AppStatusSummaryDTO `json:"status"`
+	Preview *PreviewMetaDTO     `json:"preview,omitempty"`
 }
 
 // --- App summary (list view) ---
@@ -108,16 +112,16 @@ type AppEnvironmentSummaryDTO struct {
 // callers can distinguish single-component apps from multi-component apps
 // without a detail fetch.
 type AppSummaryDTO struct {
-	Name        string               `json:"name"`
-	Project     string               `json:"project"`
-	DisplayName string               `json:"displayName,omitempty"`
-	Description string               `json:"description,omitempty"`
-	Template    AppTemplateRefDTO    `json:"template"`
+	Name        string            `json:"name"`
+	Project     string            `json:"project"`
+	DisplayName string            `json:"displayName,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Template    AppTemplateRefDTO `json:"template"`
 	// Status is the runtime summary for the primary stable environment.
-	Status      AppStatusSummaryDTO  `json:"status"`
+	Status AppStatusSummaryDTO `json:"status"`
 	// URLs are the primary ingress hostnames (stable environments only).
-	URLs        []string             `json:"urls"`
-	Components  []ComponentSummaryDTO `json:"components"`
+	URLs       []string              `json:"urls"`
+	Components []ComponentSummaryDTO `json:"components"`
 }
 
 // --- App detail (single-app view) ---
@@ -126,20 +130,20 @@ type AppSummaryDTO struct {
 // component topology, template reference, curated values, and secret refs.
 // Secret values are never included; only reference strings are returned.
 type AppDetailDTO struct {
-	Name        string                     `json:"name"`
-	Project     string                     `json:"project"`
-	DisplayName string                     `json:"displayName,omitempty"`
-	Description string                     `json:"description,omitempty"`
-	Template    AppTemplateRefDTO          `json:"template"`
+	Name        string            `json:"name"`
+	Project     string            `json:"project"`
+	DisplayName string            `json:"displayName,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Template    AppTemplateRefDTO `json:"template"`
 	// Values holds the curated (non-secret) template input values.
-	Values      map[string]any             `json:"values"`
-	SecretRefs  []AppSecretRefDTO          `json:"secretRefs"`
-	Components  []ComponentSummaryDTO      `json:"components"`
+	Values     map[string]any        `json:"values"`
+	SecretRefs []AppSecretRefDTO     `json:"secretRefs"`
+	Components []ComponentSummaryDTO `json:"components"`
 	// Addons lists managed-dependency claims (databases, caches, queues).
 	// Each claim binds at publish time to an org-level AddonProfile (per-env
 	// override permitted) and produces a connection Secret consumed by every
 	// component via the standard envFrom hierarchy.
-	Addons      []AddonClaimDTO            `json:"addons"`
+	Addons []AddonClaimDTO `json:"addons"`
 	// Environments includes stable (staging, prod) and preview instances.
 	Environments []AppEnvironmentSummaryDTO `json:"environments"`
 	// ClusterOverrides surfaces stored per-(env, cluster) value overrides keyed
@@ -345,14 +349,17 @@ type updateAppResponse struct {
 // Unlike the service-scoped PreviewDTO, this type references the owning app by
 // name rather than the internal service name, and embeds a full status summary.
 type AppPreviewSummaryDTO struct {
-	Name      string              `json:"name"`
-	AppName   string              `json:"appName"`
-	Project   string              `json:"project"`
-	Namespace string              `json:"namespace"`
-	Status    AppStatusSummaryDTO `json:"status"`
+	Name      string `json:"name"`
+	AppName   string `json:"appName"`
+	Project   string `json:"project"`
+	Namespace string `json:"namespace"`
+	// BaseEnv is the stable env this preview clones (e.g. "staging"). Empty for
+	// previews created before this was tracked.
+	BaseEnv string              `json:"baseEnv,omitempty"`
+	Status  AppStatusSummaryDTO `json:"status"`
 	// URLs are the ingress hostnames assigned to this preview instance.
 	// Always a non-nil slice; empty when no ingress has been provisioned.
-	URLs      []string          `json:"urls"`
+	URLs []string `json:"urls"`
 	// Release is the deployed release for this preview, when available.
 	Release   *AppReleaseRefDTO `json:"release,omitempty"`
 	CreatedAt string            `json:"createdAt,omitempty"`
@@ -414,12 +421,12 @@ type KargoPromotionDTO struct {
 // When Kargo is configured, KargoPromotion is populated and Release is nil.
 // Without Kargo, Release is populated with the in-store release copy result.
 type AppPromoteResponse struct {
-	Project     string             `json:"project"`
-	App         string             `json:"app"`
-	Source      string             `json:"source"`
-	Destination string             `json:"destination"`
-	Namespace   string             `json:"namespace"`
-	Message     string             `json:"message"`
+	Project     string `json:"project"`
+	App         string `json:"app"`
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	Namespace   string `json:"namespace"`
+	Message     string `json:"message"`
 	// Mechanism describes how the promotion was carried out: "kargo" when a
 	// Kargo Promotion CR drove it through the GitOps pipeline, or "in-store" for
 	// the direct store release-copy fallback used when no Kargo promoter is
@@ -427,7 +434,7 @@ type AppPromoteResponse struct {
 	// it's never mistaken for a real Kargo-driven rollout.
 	Mechanism string `json:"mechanism"`
 	// Release is the release bundle copied in the store (no-Kargo fallback).
-	Release        *AppReleaseRefDTO  `json:"release,omitempty"`
+	Release *AppReleaseRefDTO `json:"release,omitempty"`
 	// KargoPromotion is populated when a Kargo Promotion CR was created.
 	KargoPromotion *KargoPromotionDTO `json:"kargoPromotion,omitempty"`
 }
@@ -508,11 +515,11 @@ type AppDeploymentHistoryResponse struct {
 	// Available reports whether deployment history is being served. False when no
 	// deploymentHistoryReader is wired (e.g. fake/local dev without ArgoCD) — the
 	// UI renders "history unavailable" rather than an error.
-	Available   bool                           `json:"available"`
-	Project     string                         `json:"project"`
-	App         string                         `json:"app"`
-	Environment string                         `json:"environment"`
+	Available   bool   `json:"available"`
+	Project     string `json:"project"`
+	App         string `json:"app"`
+	Environment string `json:"environment"`
 	// History is in reverse-chronological order (most recent first).
 	// Empty slice when no syncs have occurred yet.
-	History     []AppDeploymentHistoryEntryDTO `json:"history"`
+	History []AppDeploymentHistoryEntryDTO `json:"history"`
 }

@@ -979,14 +979,14 @@ func (ah *appHandler) handleListAppPreviews(w http.ResponseWriter, r *http.Reque
 //
 // The raw preview name from the request body is sanitized via
 // domain.SanitizePreviewName (deterministic, branch-name-friendly) before
-// validation and storage. Only apps with at least one preview-enabled component
-// may create previews; the handler returns 422 otherwise.
+// validation and storage. Previews are gated only by the app's PreviewsEnabled
+// opt-in (an app-level concept); an app that has opted out returns 422.
 //
 // Internally, the handler delegates to domainapp.CreatePreview which builds
-// the EnvironmentInstance, generates Helm values (respecting preview_enabled
-// components), and generates the ArgoCD Application manifest as a pure
-// function. Persistence to the AppStore is handled by projecting the
-// EnvironmentInstance back onto an AppEnvironment (compat layer).
+// the EnvironmentInstance, generates Helm values (the same mapping the base env
+// uses), and generates the ArgoCD Application manifest as a pure function.
+// Persistence to the AppStore is handled by projecting the EnvironmentInstance
+// back onto an AppEnvironment (compat layer).
 func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
@@ -1047,11 +1047,14 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Run the full preview creation pipeline: EnvironmentInstance + Helm values
-	// + ArgoCD Application. Errors when the app has previews disabled or no
-	// enabled components.
+	// + ArgoCD Application. Errors only when the app has previews disabled. The
+	// base env's domain drives the preview routing host so the stored URL matches
+	// what the chart renders (rather than a fabricated localhost host).
 	previewResult, err := domainapp.CreatePreview(domainapp.PreviewRequest{
-		App:         a,
-		PreviewName: sanitized,
+		App:              a,
+		PreviewName:      sanitized,
+		BaseDomain:       ah.baseDomainForEnv(r.Context(), baseEnv),
+		NamespacePattern: ah.previewNamespacePattern(r.Context(), projectName),
 	})
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -1066,14 +1069,21 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 	existed := getErr == nil
 
 	// Project the EnvironmentInstance onto AppEnvironment for the compat store.
+	// URLs is empty for apps with no exposed HTTP route (inst.URL == ""), so the
+	// UI shows no "Open" link for worker/agent previews.
 	inst := previewResult.Instance
+	urls := []string{}
+	if inst.URL != "" {
+		urls = []string{inst.URL}
+	}
 	env := &domain.AppEnvironment{
 		AppName:     inst.AppName,
 		ProjectName: inst.ProjectName,
 		EnvName:     inst.EnvName,
 		EnvType:     inst.EnvType,
+		BaseEnv:     baseEnv, // the stable env this preview clones (UI grouping)
 		Namespace:   inst.Namespace,
-		URLs:        []string{inst.URL},
+		URLs:        urls,
 		Status:      inst.Status,
 	}
 	// Record the resolved image tag so the Previews UI shows what's deployed.
@@ -1130,6 +1140,17 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 			Error: "environment \"" + previewName + "\" is not a preview environment",
 		})
 		return
+	}
+
+	// Prune the preview's GitOps files first so ArgoCD removes the generated
+	// Application + namespace. Done before the store delete so a gitops failure
+	// keeps the record (the preview stays listed and retryable) rather than
+	// orphaning a running Application with no store entry.
+	if d, ok := ah.gitOpsPublisher.(AppPreviewDeleter); ok {
+		if err := d.DeleteAppPreview(r.Context(), projectName, previewName); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to remove preview from gitops"})
+			return
+		}
 	}
 
 	if err := ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, previewName); err != nil {
@@ -1463,6 +1484,40 @@ func (ah *appHandler) resolveEnvNamespaces(ctx context.Context, app *domain.App,
 // the org definition into each AppEnvironment.
 func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []*domain.AppEnvironment {
 	return StableEnvsFromOrg(ctx, ah.orgProvider, app)
+}
+
+// baseDomainForEnv returns the ingress DNS zone configured for the named org
+// environment, or "localhost" when none is set (or no org provider). This
+// mirrors the publisher's preview base-domain resolution (orgEnv.BaseDomain →
+// localhost), so a preview's stored routing host matches what the chart renders.
+func (ah *appHandler) baseDomainForEnv(ctx context.Context, envName string) string {
+	if ah.orgProvider == nil {
+		return "localhost"
+	}
+	org, err := ah.orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		return "localhost"
+	}
+	for _, e := range org.Environments {
+		if e.Name == envName && e.BaseDomain != "" {
+			return e.BaseDomain
+		}
+	}
+	return "localhost"
+}
+
+// previewNamespacePattern returns the project's configured preview namespace
+// pattern, or "" (→ domain.DefaultPreviewNamespacePattern) when the project has
+// none or the store is unavailable.
+func (ah *appHandler) previewNamespacePattern(ctx context.Context, projectName string) string {
+	if ah.projectStore == nil {
+		return ""
+	}
+	proj, err := ah.projectStore.Get(ctx, projectName)
+	if err != nil || proj == nil {
+		return ""
+	}
+	return proj.Spec.PreviewNamespacePattern
 }
 
 // StableEnvsFromOrg derives an app's stable environments from the org's
@@ -2300,6 +2355,7 @@ func appEnvToDTO(env *domain.AppEnvironment) AppEnvironmentSummaryDTO {
 	if env.EnvType == domain.AppEnvPreview {
 		dto.Preview = &PreviewMetaDTO{
 			PreviewName: env.EnvName,
+			BaseEnv:     env.BaseEnv,
 		}
 	}
 
@@ -2349,6 +2405,7 @@ func appPreviewToDTO(env *domain.AppEnvironment) AppPreviewSummaryDTO {
 		AppName:   env.AppName,
 		Project:   env.ProjectName,
 		Namespace: env.Namespace,
+		BaseEnv:   env.BaseEnv,
 		Status:    appRuntimeStatusDTO(env.Status),
 		URLs:      urls,
 	}

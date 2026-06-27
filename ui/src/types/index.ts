@@ -75,6 +75,8 @@ export interface AppPreviewSummary {
   appName: string;
   project: string;
   namespace: string;
+  /** Stable env this preview clones (e.g. "staging"). Empty for older previews. */
+  baseEnv?: string;
   urls: string[];
   status: AppStatusSummary;
 }
@@ -547,6 +549,8 @@ export interface AppStatusSummary {
 
 export interface PreviewMeta {
   previewName: string;
+  /** Stable env this preview clones (e.g. "staging"). Empty for older previews. */
+  baseEnv?: string;
   createdAt?: string;
 }
 

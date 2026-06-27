@@ -187,6 +187,7 @@ func MapToHelmValuesForEnv(
 		Namespace:   namespace,
 		BaseDomain:  effectiveBase,
 		RoutingHost: routingHost,
+		ImageTag:    imageTag,
 	}
 	if rc := components[routingComponent]; rc != nil && rc.Ingress != nil {
 		platform.IngressClassName = rc.Ingress.ClassName

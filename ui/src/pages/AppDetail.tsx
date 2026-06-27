@@ -12,7 +12,7 @@ import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 import { listTemplateVersions } from "../lib/templates";
 import type { TemplateVersionInfo } from "../types";
-import { createAppPreview, deletePreview } from "../lib/previews";
+import { createAppPreview, deleteAppPreview } from "../lib/previews";
 import {
   getAppEnvConfig,
   getAppEnvEnvConfig,
@@ -623,10 +623,24 @@ function EnvPipelineBar({
     ? Object.fromEntries(pipeline.stages.map((s) => [s.envName, s]))
     : {};
 
+  // Group previews under the stable env each was cloned from. Previews with an
+  // unknown/empty baseEnv (older previews) fall back to the first stable env —
+  // the default preview base.
+  const defaultBaseEnv = nonPreviewEnvs[0]?.envName;
+  const knownEnvs = new Set(nonPreviewEnvs.map((e) => e.envName));
+  const previewsByBase: Record<string, AppEnvironmentSummary[]> = {};
+  for (const p of previewEnvs) {
+    const declared = p.preview?.baseEnv;
+    const base = declared && knownEnvs.has(declared) ? declared : defaultBaseEnv;
+    if (!base) continue;
+    (previewsByBase[base] ??= []).push(p);
+  }
+
   return (
     <div className="space-y-2">
-      {/* Pipeline row: stable envs connected by promotion arrows */}
-      <div className="flex flex-wrap items-stretch gap-0">
+      {/* Pipeline row: stable envs connected by promotion arrows; each env
+          carries its previews stacked beneath it. */}
+      <div className="flex flex-wrap items-start gap-0">
         {nonPreviewEnvs.map((env, i) => {
           const stage = stageMap[env.envName];
           const isSelected = selectedEnvName === env.envName;
@@ -635,8 +649,10 @@ function EnvPipelineBar({
             : fallbackStageCfg;
           const runtimeCfg = statusStyles[env.status.phase] ?? fallbackStatus;
 
+          const envPreviews = previewsByBase[env.envName] ?? [];
           return (
-            <div key={env.envName} className="flex items-center">
+            <div key={env.envName} className="flex flex-col gap-1.5">
+              <div className="flex items-center">
               <button
                 onClick={() => onSelect(env.envName)}
                 className={`flex min-w-[108px] flex-col gap-1.5 rounded-xl border px-3 py-2 text-left transition-all ${
@@ -735,30 +751,40 @@ function EnvPipelineBar({
                   />
                 </svg>
               )}
+              </div>
+
+              {/* Previews cloned from this env, stacked beneath its card. */}
+              {envPreviews.length > 0 && (
+                <div className="flex flex-col items-start gap-1">
+                  {envPreviews.map((p) => (
+                    <button
+                      key={p.envName}
+                      onClick={() => onSelect(p.envName)}
+                      title={`Preview cloned from ${env.envName}`}
+                      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                        selectedEnvName === p.envName
+                          ? "bg-purple-700 text-white"
+                          : "bg-purple-50 text-purple-700 hover:bg-purple-100"
+                      }`}
+                    >
+                      <span
+                        className={
+                          selectedEnvName === p.envName
+                            ? "text-purple-200"
+                            : "text-purple-300"
+                        }
+                      >
+                        ↳
+                      </span>
+                      {p.preview?.previewName ?? p.envName}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}
       </div>
-
-      {/* Preview env pills — not part of the promotion pipeline */}
-      {previewEnvs.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-gray-400">Previews:</span>
-          {previewEnvs.map((env) => (
-            <button
-              key={env.envName}
-              onClick={() => onSelect(env.envName)}
-              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
-                selectedEnvName === env.envName
-                  ? "bg-purple-700 text-white"
-                  : "bg-purple-50 text-purple-700 hover:bg-purple-100"
-              }`}
-            >
-              {env.preview?.previewName ?? env.envName}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -896,7 +922,8 @@ export function AppDetail() {
   }, [project, appName, selectedEnvName]);
 
   function handleDeletePreview(previewName: string) {
-    deletePreview(previewName)
+    if (!project || !appName) return;
+    deleteAppPreview(project, appName, previewName)
       .then(() => {
         setData((prev) => {
           if (!prev) return prev;
@@ -934,6 +961,30 @@ export function AppDetail() {
     .filter((e) => e.envType !== "preview")
     .sort((a, b) => a.order - b.order || a.envName.localeCompare(b.envName));
   const previewEnvs = data.environments.filter((e) => e.envType === "preview");
+
+  // Each preview belongs to the stable env it clones (its base env); previews
+  // with an unknown/empty base env (older ones) fall back to the first stable
+  // env. The env-scoped tabs (incl. Previews) show only the previews of the env
+  // in context — never previews belonging to another env.
+  const defaultBaseEnv = nonPreviewEnvs[0]?.envName;
+  const knownEnvNames = new Set(nonPreviewEnvs.map((e) => e.envName));
+  const baseEnvOf = (p: AppEnvironmentSummary): string | undefined => {
+    const declared = p.preview?.baseEnv;
+    return declared && knownEnvNames.has(declared) ? declared : defaultBaseEnv;
+  };
+  // The base env in context: the selected stable env, or the base env of the
+  // selected preview.
+  const selectedEnvObj = data.environments.find(
+    (e) => e.envName === selectedEnvName,
+  );
+  const currentBaseEnv =
+    selectedEnvObj?.envType === "preview"
+      ? baseEnvOf(selectedEnvObj)
+      : (selectedEnvName ?? defaultBaseEnv);
+  const visiblePreviewEnvs = previewEnvs.filter(
+    (p) => baseEnvOf(p) === currentBaseEnv,
+  );
+
   // The embedded summary from the app response; used as a fallback.
   const currentEnvSummary =
     data.environments.find((e) => e.envName === selectedEnvName) ?? null;
@@ -1675,7 +1726,8 @@ export function AppDetail() {
       )}
       {activeTab === "previews" && (
         <PreviewsTab
-          previewEnvs={previewEnvs}
+          previewEnvs={visiblePreviewEnvs}
+          baseEnv={currentBaseEnv}
           onDeletePreview={handleDeletePreview}
         />
       )}
@@ -2763,9 +2815,11 @@ function DeploymentHistoryRow({ entry }: { entry: DeploymentHistoryEntry }) {
 
 function PreviewsTab({
   previewEnvs,
+  baseEnv,
   onDeletePreview,
 }: {
   previewEnvs: AppEnvironmentSummary[];
+  baseEnv?: string;
   onDeletePreview: (previewName: string) => void;
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
@@ -2774,7 +2828,7 @@ function PreviewsTab({
     return (
       <div className="rounded-xl border border-dashed border-gray-200 bg-white px-6 py-12 text-center">
         <p className="text-sm font-medium text-gray-500">
-          No active preview environments
+          No preview environments{baseEnv ? ` for ${baseEnv}` : ""}
         </p>
         <p className="mx-auto mt-1 max-w-lg text-xs text-gray-400">
           A preview is an ephemeral copy of this app — typically one per pull
@@ -2801,6 +2855,11 @@ function PreviewsTab({
               <span className="text-sm font-medium text-gray-900">
                 {previewName}
               </span>
+              {env.preview?.baseEnv && (
+                <span className="ml-2 text-xs text-gray-400">
+                  ↳ from {env.preview.baseEnv}
+                </span>
+              )}
               <span className="ml-2 font-mono text-xs text-gray-400">
                 {env.namespace}
               </span>

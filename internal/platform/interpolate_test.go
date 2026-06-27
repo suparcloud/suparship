@@ -55,12 +55,65 @@ func TestInterpolate_PlatformManagedNames_EmptyAppLeftLiteral(t *testing.T) {
 	}
 }
 
+func TestInterpolate_ImageTag(t *testing.T) {
+	c := Context{Platform: helmvalues.PlatformValues{App: "hello", ImageTag: "pr-712-3ac32cb7"}}
+	if got := c.Interpolate("{platform.imageTag}"); got != "pr-712-3ac32cb7" {
+		t.Errorf("Interpolate({platform.imageTag}) = %q, want pr-712-3ac32cb7", got)
+	}
+	// Works as a tag in a repo:tag string (the sidecar wiring use case).
+	if got := c.Interpolate("acr.io/app:{platform.imageTag}"); got != "acr.io/app:pr-712-3ac32cb7" {
+		t.Errorf("got %q, want acr.io/app:pr-712-3ac32cb7", got)
+	}
+}
+
+func TestInterpolate_ImageTagEmptyLeftLiteral(t *testing.T) {
+	// No resolved tag → token left literal (visibly unresolved) rather than
+	// rendering a bare "repo:".
+	c := Context{Platform: helmvalues.PlatformValues{App: "hello"}}
+	if got := c.Interpolate("{platform.imageTag}"); got != "{platform.imageTag}" {
+		t.Errorf("empty ImageTag should leave token literal, got %q", got)
+	}
+}
+
+func TestInterpolate_PreviewName(t *testing.T) {
+	c := Context{Platform: helmvalues.PlatformValues{App: "hello", PreviewName: "pr-42"}}
+	if got := c.Interpolate("{platform.app}-{platform.previewName}"); got != "hello-pr-42" {
+		t.Errorf("got %q, want hello-pr-42", got)
+	}
+	// Stable env: no preview name → token left literal.
+	stable := Context{Platform: helmvalues.PlatformValues{App: "hello"}}
+	if got := stable.Interpolate("{platform.previewName}"); got != "{platform.previewName}" {
+		t.Errorf("stable previewName should be literal, got %q", got)
+	}
+}
+
+func TestInterpolate_ResolvedPlatformNamesOverrideDefault(t *testing.T) {
+	// Shared-namespace preview: the publisher sets suffixed ConfigMap/Secret
+	// names, which must win over the {app}-config / {app}-secrets default.
+	c := Context{Platform: helmvalues.PlatformValues{
+		App:           "hello",
+		ConfigMapName: "hello-pr-42-config",
+		SecretName:    "hello-pr-42-secrets",
+	}}
+	if got := c.Interpolate("{platform.configMapName}"); got != "hello-pr-42-config" {
+		t.Errorf("configMapName = %q, want hello-pr-42-config", got)
+	}
+	if got := c.Interpolate("{platform.secretName}"); got != "hello-pr-42-secrets" {
+		t.Errorf("secretName = %q, want hello-pr-42-secrets", got)
+	}
+	// Unset → fall back to the {app}-* convention.
+	d := Context{Platform: helmvalues.PlatformValues{App: "hello"}}
+	if got := d.Interpolate("{platform.configMapName}"); got != "hello-config" {
+		t.Errorf("default configMapName = %q, want hello-config", got)
+	}
+}
+
 func TestPlatformTokens_IncludesManagedNames(t *testing.T) {
 	found := map[string]bool{}
 	for _, tok := range PlatformTokens() {
 		found[tok.Token] = true
 	}
-	for _, want := range []string{"{platform.configMapName}", "{platform.secretName}"} {
+	for _, want := range []string{"{platform.configMapName}", "{platform.secretName}", "{platform.imageTag}", "{platform.previewName}"} {
 		if !found[want] {
 			t.Errorf("PlatformTokens() missing %q", want)
 		}

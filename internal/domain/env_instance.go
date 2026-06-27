@@ -19,10 +19,11 @@ import (
 //     layer translates it into a real Kubernetes namespace object.
 //
 // Relationship to AppEnvironment:
-//   AppEnvironment is a transitional bridge type used by the compat layer.
-//   EnvironmentInstance is the intended long-term model. New code should use
-//   EnvironmentInstance; AppEnvironment will be deprecated once the migration
-//   from service-centric paths is complete.
+//
+//	AppEnvironment is a transitional bridge type used by the compat layer.
+//	EnvironmentInstance is the intended long-term model. New code should use
+//	EnvironmentInstance; AppEnvironment will be deprecated once the migration
+//	from service-centric paths is complete.
 type EnvironmentInstance struct {
 	// AppName is the app this instance belongs to.
 	AppName string `json:"appName"`
@@ -115,6 +116,37 @@ func GenerateNamespace(appName, envName string, _ AppEnvironmentType) string {
 //	"acme", "api", "prod"    → "acme-api-prod"
 func GenerateProjectNamespace(projectName, appName, envName string) string {
 	return GenerateNamespaceFromPattern(appName, envName, projectName, "{project}-{app}-{env}")
+}
+
+// DefaultPreviewNamespacePattern is the namespace pattern used for preview
+// environments when a project configures none. It is project-scoped (so
+// previews of same-named apps in different projects never collide on a shared
+// cluster) and carries the preview name so each PR gets a distinct namespace.
+const DefaultPreviewNamespacePattern = "{project}-{app}-preview-{name}"
+
+// GeneratePreviewNamespaceFromPattern resolves the Kubernetes namespace for a
+// preview environment from a pattern. Supported tokens:
+//
+//	{project}  → projectName
+//	{app}      → appName
+//	{name}     → previewName (e.g. "pr-42")
+//
+// When pattern is empty, DefaultPreviewNamespacePattern is used. The pattern is
+// expected to be validated with ValidatePreviewNamespacePattern (which requires
+// the {name} token, so previews never collide) before reaching here.
+//
+// Examples:
+//
+//	GeneratePreviewNamespaceFromPattern("hello", "pr-42", "demo", "")               → "demo-hello-preview-pr-42"
+//	GeneratePreviewNamespaceFromPattern("hello", "pr-42", "demo", "{app}-{name}")   → "hello-pr-42"
+func GeneratePreviewNamespaceFromPattern(appName, previewName, projectName, pattern string) string {
+	if pattern == "" {
+		pattern = DefaultPreviewNamespacePattern
+	}
+	ns := strings.ReplaceAll(pattern, "{app}", appName)
+	ns = strings.ReplaceAll(ns, "{name}", previewName)
+	ns = strings.ReplaceAll(ns, "{project}", projectName)
+	return ns
 }
 
 // GenerateURL derives the primary ingress URL for an environment instance.

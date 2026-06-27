@@ -769,12 +769,23 @@ const imageTagValuesKey = "image_tag"
 // preview: the base env's overlay (app + base-env RawValues) with the reserved
 // "preview" band's RawValues merged on top (preview wins). The per-preview name
 // is never an EnvironmentDefaults key — previews share one band.
-func previewRawValuesOverlay(app *domain.App, baseEnv string) map[string]any {
-	base := rawValuesOverlay(app, baseEnv)
-	if ov, ok := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]; ok && len(ov.RawValues) > 0 {
-		base = deepMerge(base, deepCopyMap(ov.RawValues))
+func previewRawValuesOverlay(app *domain.App, preview PreviewPublishSpec) map[string]any {
+	// Mirror envOverlay (the stable-env composition) for the BASE env so the
+	// preview inherits the base env's template/org → cluster → stack → app value
+	// overrides, then layer the reserved preview band on top. Without this the
+	// preview would render only the preview band over the chart defaults, losing
+	// the base env's overrides (e.g. envConfigMapName → {platform.configMapName}).
+	overlay := deepMerge(deepCopyMap(preview.PlatformDefaultValues), deepCopyMap(preview.PlatformEnvValues))
+	if preview.Cluster != "" && preview.PlatformClusterValues != nil {
+		overlay = deepMerge(overlay, deepCopyMap(preview.PlatformClusterValues[preview.Cluster]))
 	}
-	return base
+	overlay = deepMerge(overlay, deepCopyMap(preview.StackRawValues))
+	overlay = deepMerge(overlay, deepCopyMap(preview.StackEnvRawValues))
+	overlay = deepMerge(overlay, rawValuesOverlay(app, preview.BaseEnv))
+	if ov, ok := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]; ok && len(ov.RawValues) > 0 {
+		overlay = deepMerge(overlay, deepCopyMap(ov.RawValues))
+	}
+	return overlay
 }
 
 // activeTarget returns the ClusterTarget matching the env's active ClusterRef,
@@ -971,7 +982,7 @@ func (p *Publisher) writeAppPlatformResources(
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	})
 	meta := PlatformAppMeta{Name: app.Name, Project: app.ProjectName, Namespace: namespace}
-	if err := p.writePlatformDir(resDir, app.Name, namespace, envVars, esCfg, meta); err != nil {
+	if err := p.writePlatformDir(resDir, secrets.AppConfigMapName(app.Name), namespace, envVars, esCfg, meta); err != nil {
 		return err
 	}
 	// Migration: remove platform manifests that older publishers wrote into the
@@ -981,7 +992,7 @@ func (p *Publisher) writeAppPlatformResources(
 
 // writePlatformDir writes meta.yaml + the <app>-config ConfigMap + the
 // <app>-secrets ExternalSecret (esCfg may be nil → pruned) into resDir.
-func (p *Publisher) writePlatformDir(resDir, appName, namespace string, envVars map[string]string, esCfg *ESOExternalSecretConfig, meta PlatformAppMeta) error {
+func (p *Publisher) writePlatformDir(resDir, configMapName, namespace string, envVars map[string]string, esCfg *ESOExternalSecretConfig, meta PlatformAppMeta) error {
 	metaBytes, err := yaml.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("marshal platform meta: %w", err)
@@ -989,7 +1000,7 @@ func (p *Publisher) writePlatformDir(resDir, appName, namespace string, envVars 
 	if err := p.writeFile(filepath.Join(resDir, "meta.yaml"), metaBytes); err != nil {
 		return err
 	}
-	if err := p.WriteAppConfigMap(resDir, secrets.AppConfigMapName(appName), namespace, envVars); err != nil {
+	if err := p.WriteAppConfigMap(resDir, configMapName, namespace, envVars); err != nil {
 		return fmt.Errorf("writing app ConfigMap: %w", err)
 	}
 	return p.WriteAppExternalSecret(resDir, esCfg)
@@ -1478,108 +1489,137 @@ type AppPublishEnv struct {
 // PublishPreview is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview PreviewPublishSpec) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		previewMeta := PreviewAppMetadata{
-			AppName:       app.Name,
-			PreviewName:   preview.PreviewName,
-			Project:       app.ProjectName,
-			Template:      app.Spec.Template.Name,
-			ChartPath:     chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
-			ClusterServer: preview.ClusterServer,
-			Namespace:     preview.Namespace,
-		}
-		metaBytes, err := yaml.Marshal(previewMeta)
-		if err != nil {
-			return fmt.Errorf("marshal preview app.yaml: %w", err)
-		}
-		metaPath := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName, "app.yaml")
-		if err := p.writeFile(metaPath, metaBytes); err != nil {
+		if err := p.publishPreviewFiles(repoDir, app, preview); err != nil {
 			return err
 		}
-
-		previewOrgName := p.cfg.OrgName
-		if previewOrgName == "" {
-			previewOrgName = "default"
-		}
-		// Org-level routing profiles apply uniformly to previews; per-env
-		// overrides don't make sense for ephemeral preview envs (their
-		// names are PR-specific and have no static config).
-		// A per-preview image tag overrides the inherited base-env tag: for
-		// canonical templates it is folded into the app's image_tag so the mapper
-		// bakes it into each component's image.tag; for BYO/passthrough charts it
-		// is exposed as a top-level image_tag overlay value.
-		mapApp := app
-		overlay := previewRawValuesOverlay(app, preview.BaseEnv)
-		if preview.ImageTag != "" {
-			if preview.SkipCanonicalBase {
-				if overlay == nil {
-					overlay = map[string]any{}
-				}
-				overlay[imageTagValuesKey] = preview.ImageTag
-			} else {
-				clone := *app
-				vals := make(map[string]any, len(app.Spec.Values)+1)
-				for k, v := range app.Spec.Values {
-					vals[k] = v
-				}
-				vals[imageTagValuesKey] = preview.ImageTag
-				clone.Spec.Values = vals
-				mapApp = &clone
-			}
-		}
-		hv := helmvalues.MapToHelmValuesForEnv(mapApp, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
-		var hvBytes []byte
-		if preview.SkipCanonicalBase {
-			hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, preview.EnvVars)
-		} else {
-			hvBytes, err = marshalValuesWithOverlay(hv, overlay, preview.EnvVars)
-		}
-		if err != nil {
-			return fmt.Errorf("marshal preview values.yaml: %w", err)
-		}
-		valuesPath := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName, "values.yaml")
-		if err := p.writeFile(valuesPath, hvBytes); err != nil {
-			return err
-		}
-		// Interpolate preview env-var values against the preview's platform context.
-		previewEnvVars := preview.EnvVars
-		if hasInterpToken(previewEnvVars) {
-			previewEnvVars = platform.Context{Platform: hv.Platform, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
-		}
-
-		// Platform-managed ConfigMap + ExternalSecret go to the platform-owned
-		// _app-resources/previews/ tree (shipped by the preview platform
-		// ApplicationSet), not the preview's chart directory.
-		previewDir := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName)
-		resDir := p.outputDir(repoDir, "_app-resources", "previews", app.ProjectName, preview.PreviewName)
-		esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
-			App:             app.Name,
-			Namespace:       preview.Namespace,
-			Env:             preview.BaseEnv,
-			Project:         app.ProjectName,
-			Stack:           app.Spec.Stack,
-			Presence:        preview.ScopeKeys,
-			IsPreview:       true,
-			PreviewName:     preview.PreviewName,
-			UnifiedStore:    p.usesUnifiedStore(),
-			Branding:        p.cfg.Branding,
-			RefreshInterval: p.externalSecretRefreshInterval(),
-		})
-		meta := PlatformAppMeta{
-			Name:          preview.PreviewName,
-			Project:       app.ProjectName,
-			Namespace:     preview.Namespace,
-			ClusterServer: preview.ClusterServer,
-		}
-		if err := p.writePlatformDir(resDir, app.Name, preview.Namespace, previewEnvVars, esCfg, meta); err != nil {
-			return fmt.Errorf("writing preview platform resources: %w", err)
-		}
-		if err := p.pruneLegacyPlatformFiles(previewDir); err != nil {
-			return err
-		}
-
 		commitMsg := fmt.Sprintf("feat(previews): create preview %s/%s\n\nCreated by suparShip.", app.ProjectName, preview.PreviewName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// publishPreviewFiles writes a preview's app.yaml, values.yaml and platform
+// resources into repoDir (no git commit). Extracted from PublishPreview so the
+// file-generation logic — notably image-tag resolution — is testable without a
+// repo clone.
+func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview PreviewPublishSpec) error {
+	previewMeta := PreviewAppMetadata{
+		AppName:       app.Name,
+		PreviewName:   preview.PreviewName,
+		Project:       app.ProjectName,
+		Template:      app.Spec.Template.Name,
+		ChartPath:     chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
+		ClusterServer: preview.ClusterServer,
+		Namespace:     preview.Namespace,
+	}
+	metaBytes, err := yaml.Marshal(previewMeta)
+	if err != nil {
+		return fmt.Errorf("marshal preview app.yaml: %w", err)
+	}
+	metaPath := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName, "app.yaml")
+	if err := p.writeFile(metaPath, metaBytes); err != nil {
+		return err
+	}
+
+	previewOrgName := p.cfg.OrgName
+	if previewOrgName == "" {
+		previewOrgName = "default"
+	}
+	// Org-level routing profiles apply uniformly to previews; per-env
+	// overrides don't make sense for ephemeral preview envs (their
+	// names are PR-specific and have no static config).
+	//
+	// A per-preview image tag is surfaced two ways, so any chart shape works:
+	//   - {platform.imageTag}: set on hv.Platform below, so an override like
+	//     `image.tag: "{platform.imageTag}"` resolves to the PR build at publish
+	//     (overlay tokens interpolate against hv.Platform). Chart-agnostic — the
+	//     recommended way for BYO/passthrough charts whose image key varies.
+	//   - canonical fold: for canonical templates the tag is also folded into the
+	//     app's image_tag so the mapper bakes it into each component's image.tag.
+	mapApp := app
+	overlay := previewRawValuesOverlay(app, preview)
+	if preview.ImageTag != "" && !preview.SkipCanonicalBase {
+		clone := *app
+		vals := make(map[string]any, len(app.Spec.Values)+1)
+		for k, v := range app.Spec.Values {
+			vals[k] = v
+		}
+		vals[imageTagValuesKey] = preview.ImageTag
+		clone.Spec.Values = vals
+		mapApp = &clone
+	}
+	hv := helmvalues.MapToHelmValuesForEnv(mapApp, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
+	// Expose the per-PR tag as {platform.imageTag} for overlay/raw-values token
+	// interpolation, independent of the chart's image-mapping shape.
+	if preview.ImageTag != "" {
+		hv.Platform.ImageTag = preview.ImageTag
+	}
+	// Shared-namespace previews put every preview of the project into one
+	// namespace (the namespace pattern omits {name}), so the resolved namespace
+	// doesn't carry the preview name. Suffix the platform-managed resource names
+	// (env ConfigMap + ExternalSecret/target Secret) with the preview name so
+	// previews of the same app don't collide; the {platform.configMapName} /
+	// {platform.secretName} tokens follow suit so the chart's
+	// envConfigMapName/envSecretName references resolve to the suffixed objects.
+	// Workload resource names are the chart's responsibility (via the
+	// {platform.previewName} token in fullnameOverride).
+	resBase := app.Name
+	if !strings.Contains(preview.Namespace, preview.PreviewName) {
+		resBase = app.Name + "-" + preview.PreviewName
+	}
+	hv.Platform.PreviewName = preview.PreviewName
+	hv.Platform.ConfigMapName = secrets.AppConfigMapName(resBase)
+	hv.Platform.SecretName = secrets.AppSecretName(resBase)
+	var hvBytes []byte
+	if preview.SkipCanonicalBase {
+		hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, preview.EnvVars)
+	} else {
+		hvBytes, err = marshalValuesWithOverlay(hv, overlay, preview.EnvVars)
+	}
+	if err != nil {
+		return fmt.Errorf("marshal preview values.yaml: %w", err)
+	}
+	valuesPath := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName, "values.yaml")
+	if err := p.writeFile(valuesPath, hvBytes); err != nil {
+		return err
+	}
+	// Interpolate preview env-var values against the preview's platform context.
+	previewEnvVars := preview.EnvVars
+	if hasInterpToken(previewEnvVars) {
+		previewEnvVars = platform.Context{Platform: hv.Platform, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
+	}
+
+	// Platform-managed ConfigMap + ExternalSecret go to the platform-owned
+	// _app-resources/previews/ tree (shipped by the preview platform
+	// ApplicationSet), not the preview's chart directory.
+	previewDir := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName)
+	resDir := p.outputDir(repoDir, "_app-resources", "previews", app.ProjectName, preview.PreviewName)
+	esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App:             app.Name,
+		SecretName:      secrets.AppSecretName(resBase),
+		Namespace:       preview.Namespace,
+		Env:             preview.BaseEnv,
+		Project:         app.ProjectName,
+		Stack:           app.Spec.Stack,
+		Presence:        preview.ScopeKeys,
+		IsPreview:       true,
+		PreviewName:     preview.PreviewName,
+		UnifiedStore:    p.usesUnifiedStore(),
+		Branding:        p.cfg.Branding,
+		RefreshInterval: p.externalSecretRefreshInterval(),
+	})
+	meta := PlatformAppMeta{
+		Name:          preview.PreviewName,
+		Project:       app.ProjectName,
+		Namespace:     preview.Namespace,
+		ClusterServer: preview.ClusterServer,
+	}
+	if err := p.writePlatformDir(resDir, secrets.AppConfigMapName(resBase), preview.Namespace, previewEnvVars, esCfg, meta); err != nil {
+		return fmt.Errorf("writing preview platform resources: %w", err)
+	}
+	if err := p.pruneLegacyPlatformFiles(previewDir); err != nil {
+		return err
+	}
+	return nil
 }
 
 // PreviewPublishSpec carries the parameters for publishing a preview environment.
@@ -1601,8 +1641,10 @@ type PreviewPublishSpec struct {
 	// EnvVars holds per-preview variable overrides to merge into the platform-managed
 	// ConfigMap alongside app.Spec.EnvConfig.Vars.
 	EnvVars map[string]string
-	// ImageTag, when non-empty, overrides the image tag in the preview's values
-	// (every image the app maps). Empty inherits the base env's image tag.
+	// ImageTag, when non-empty, overrides the image tag in the preview's values:
+	// it is exposed as {platform.imageTag} (for `image.tag: "{platform.imageTag}"`
+	// style overrides) and, for canonical templates, folded into each component's
+	// image.tag. Empty inherits the base env's image tag.
 	ImageTag string
 	// ScopeKeys reports which (scope, tier) items have keys, so PublishPreview
 	// emits only the ExternalSecrets that resolve.
@@ -1610,23 +1652,59 @@ type PreviewPublishSpec struct {
 	// SkipCanonicalBase mirrors AppPublishEnv.SkipCanonicalBase for previews of
 	// BYO/passthrough templates.
 	SkipCanonicalBase bool
+
+	// The fields below are the BASE env's resolved value overlays, so the preview
+	// inherits exactly what the base env deploys (the preview band layers on top).
+	// They mirror the same-named AppPublishEnv fields; the publish adapter fills
+	// them via setPlatformOverlays/setStackOverlays for the base env.
+	//
+	// Cluster is the base env's active cluster ref, selecting which
+	// PlatformClusterValues block applies.
+	Cluster string
+	// PlatformDefaultValues / PlatformEnvValues are the PE-authored template/org
+	// value overrides (all envs, then the base env).
+	PlatformDefaultValues map[string]any
+	PlatformEnvValues     map[string]any
+	// PlatformClusterValues are the org-level per-cluster overlays keyed by
+	// cluster ref; only the Cluster block is applied.
+	PlatformClusterValues map[string]map[string]any
+	// StackRawValues / StackEnvRawValues are the app's stack shared overlays.
+	StackRawValues    map[string]any
+	StackEnvRawValues map[string]any
 }
 
-// DeletePreview removes the preview directory from the GitOps repo and commits.
-// It is a no-op (without error) if the preview directory does not exist.
+// DeletePreview removes a preview's GitOps files and commits. It deletes BOTH
+// the preview's chart tree (previews/{project}/{name}) — pruned by the previews
+// ApplicationSet — AND its platform-resources tree
+// (_app-resources/previews/{project}/{name}) — pruned by the previews-platform
+// ApplicationSet. Removing only the former leaves the {project}-{name}-preview-
+// platform Application dangling. No-op (without error) when neither exists.
 func (p *Publisher) DeletePreview(ctx context.Context, projectName, previewName string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		previewDir := p.outputDir(repoDir, "previews", projectName, previewName)
-		if _, err := os.Stat(previewDir); os.IsNotExist(err) {
-			slog.Debug("gitops: preview directory not found, nothing to delete", "preview", previewName)
-			return nil
+		removed, err := p.deletePreviewFiles(repoDir, projectName, previewName)
+		if err != nil {
+			return err
 		}
-		if err := os.RemoveAll(previewDir); err != nil {
-			return fmt.Errorf("removing preview dir: %w", err)
+		if !removed {
+			slog.Debug("gitops: preview directories not found, nothing to delete", "preview", previewName)
+			return nil
 		}
 		commitMsg := fmt.Sprintf("feat(previews): delete preview %s/%s\n\nDeleted by suparShip.", projectName, previewName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// deletePreviewFiles removes a preview's chart tree and its platform-resources
+// tree from repoDir (no git commit), reporting whether anything was removed.
+func (p *Publisher) deletePreviewFiles(repoDir, projectName, previewName string) (bool, error) {
+	u := &unpublishHelper{}
+	if err := u.rm(p.outputDir(repoDir, "previews", projectName, previewName)); err != nil {
+		return false, err
+	}
+	if err := u.rm(p.outputDir(repoDir, "_app-resources", "previews", projectName, previewName)); err != nil {
+		return false, err
+	}
+	return u.removed, nil
 }
 
 // unpublishHelper removes path if present, tracking whether anything was

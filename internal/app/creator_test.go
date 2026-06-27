@@ -321,6 +321,8 @@ func TestNewPreviewEnvironmentSuccess(t *testing.T) {
 }
 
 func TestNewPreviewEnvironmentNoEnabledComponents(t *testing.T) {
+	// Previews are gated only by PreviewsEnabled (app level), not by component
+	// enablement — so an app with no enabled components still previews.
 	a := &domain.App{
 		Name:        "worker-app",
 		ProjectName: "demo",
@@ -332,9 +334,12 @@ func TestNewPreviewEnvironmentNoEnabledComponents(t *testing.T) {
 		},
 	}
 
-	_, err := NewPreviewEnvironment(a, "pr-42")
-	if err == nil {
-		t.Fatal("expected error when no enabled components")
+	env, err := NewPreviewEnvironment(a, "pr-42")
+	if err != nil {
+		t.Fatalf("preview should succeed when previews are enabled: %v", err)
+	}
+	if env == nil || env.EnvType != domain.AppEnvPreview {
+		t.Fatal("expected a preview AppEnvironment")
 	}
 }
 
