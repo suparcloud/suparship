@@ -1,5 +1,6 @@
 import { api } from "./api";
 import type {
+  AppImageBinding,
   CDConfig,
   ComponentConfig,
   AppDeploymentHistoryResponse,
@@ -89,6 +90,9 @@ export interface UpdateAppRequest {
   // cd replaces the app's continuous-delivery settings (external-CD tag
   // ownership). Omit to leave unchanged.
   cd?: CDConfig;
+  // images replaces the app's per-slot image repository bindings (keyed by
+  // template slot name). Send [] to clear; omit to leave unchanged.
+  images?: AppImageBinding[];
   // previewsEnabled toggles whether this app supports preview environments.
   // Omit to leave unchanged.
   previewsEnabled?: boolean;

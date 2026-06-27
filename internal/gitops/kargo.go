@@ -155,6 +155,10 @@ type FreightSources struct {
 // the resolved, publish-time form of a tpl.TemplateImage (or a single legacy
 // image derived from the app's image_repository).
 type KargoImage struct {
+	// Name is the logical image slot (matches tpl.TemplateImage.Name), used to
+	// overlay per-app repository bindings onto the template's slots. Empty for the
+	// single legacy image. Not emitted into any CR — internal resolution only.
+	Name string
 	// Repository is the container image repository to watch (no tag).
 	Repository string
 	// TagKey is the dotted Helm values key holding this image's tag.
@@ -597,6 +601,17 @@ func KargoStageName(appName, envName string) string {
 // used as the legacy single-image fallback when a template declares no Images
 // mapping (charts built on suparship-common).
 const DefaultImageTagKey = "components.web.image.tag"
+
+// Default Kargo tag-selection settings for a CD-managed image when the app's
+// selection doesn't override them. The platform convention is to tag images with
+// the 7-char git commit SHA and promote the newest build, so a CD-managed app
+// rolls forward on every merge. Operators can override both per image.
+const (
+	// DefaultImageTagPattern matches a 7-character git commit SHA (Kargo allowTags).
+	DefaultImageTagPattern = "^[0-9a-f]{7}$"
+	// DefaultImageSelectionStrategy promotes the most recently pushed image.
+	DefaultImageSelectionStrategy = "NewestBuild"
+)
 
 // DefaultImageRepoURL derives a placeholder container image repository URL
 // for an app when no explicit override is provided in KargoBuildOptions.

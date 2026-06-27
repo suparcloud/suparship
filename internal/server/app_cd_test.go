@@ -83,24 +83,29 @@ func TestUpdateApp_CDConfigPersists(t *testing.T) {
 	}
 }
 
-// TestCreateApp_CDWithoutImageSourceRejected guards the CD precondition: enabling
-// cd.managed on an app whose template declares no Images mapping and that sets no
-// image_repository would publish a placeholder Warehouse that never pulls, so the
-// create is rejected with 422 rather than silently producing a broken pipeline.
-func TestCreateApp_CDWithoutImageSourceRejected(t *testing.T) {
+// TestCreateApp_CDWithoutImageSourceAllowed documents that cd.managed does NOT
+// require an image source at creation: image discovery needs the app's effective
+// values (the canonical base only exists for a created app+env), so the operator
+// selects which images Kargo manages from the app's Overview after create. The
+// create therefore succeeds and persists cd.managed; the edit path still guards
+// the selection (see TestUpdateApp_CDWithoutImageSourceRejected).
+func TestCreateApp_CDWithoutImageSourceAllowed(t *testing.T) {
 	mux, ah, appStore, _ := newTestAppCreateMux()
 
 	rec := postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
 		Name:     "cd-noimg",
 		Template: "web-service",
-		Values:   map[string]any{"image": "img:v1"}, // required input set, but no image_repository
 		CD:       &CDConfigDTO{Managed: true},
 	})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for CD app with no image source, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (CD image selection deferred to Overview), got %d: %s", rec.Code, rec.Body.String())
 	}
-	if _, err := appStore.GetApp(context.Background(), "demo", "cd-noimg"); err == nil {
-		t.Errorf("app should not have been created when CD validation fails")
+	app, err := appStore.GetApp(context.Background(), "demo", "cd-noimg")
+	if err != nil {
+		t.Fatalf("app should have been created: %v", err)
+	}
+	if !app.Spec.CD.Managed {
+		t.Errorf("persisted cd.managed = false, want true")
 	}
 }
 

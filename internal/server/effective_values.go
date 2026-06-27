@@ -33,6 +33,12 @@ type EffectiveValuesDTO struct {
 	Interpolated bool `json:"interpolated"`
 	// Layers names the overlays that contributed, low→high, for UI hints.
 	Layers []string `json:"layers"`
+	// DiscoveredImages are the container images found in the effective values
+	// (every image block with a repository), each with its dotted tag key. The CD
+	// UI lists these so the user can select which images Kargo manages — excluding
+	// sidecars/init/proxy images they don't want promoted. Repository is shown for
+	// context; at publish it is re-read from the values, not from here.
+	DiscoveredImages []TemplateImageDTO `json:"discoveredImages,omitempty"`
 }
 
 // chartDefaults reads the template's chart bundle (.tgz stored as a cluster
@@ -125,11 +131,13 @@ func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool,
 	if len(envRaw) > 0 {
 		layers = append(layers, envName+" overrides")
 	}
+	values := computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, cluster, appRaw, envRaw)
 	return EffectiveValuesDTO{
-		Values:                 computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, cluster, appRaw, envRaw),
+		Values:                 values,
 		ChartDefaultsAvailable: available,
 		Interpolated:           false,
 		Layers:                 layers,
+		DiscoveredImages:       imagesToDTO(chartimport.DetectImageMappings(values)),
 	}
 }
 
@@ -245,6 +253,17 @@ func (ah *appHandler) canonicalBaseMap(ctx context.Context, app *domain.App, env
 			orgName = org.Name
 		}
 	}
+	return CanonicalBaseMap(app, envName, envType, namespace, orgName)
+}
+
+// CanonicalBaseMap renders the canonical HelmValues base suparShip publishes for
+// an app+env (app/components/suparship/routing) into a map, so callers can layer
+// it under the chart defaults + overrides to match what Helm renders. Routing
+// host / cluster resolution is approximate (nil profiles, empty baseDomain); the
+// structural keys (including each component's image block) are what matter for
+// image discovery. Exported so the publish path discovers the same images the
+// preview shows.
+func CanonicalBaseMap(app *domain.App, envName string, envType domain.AppEnvironmentType, namespace, orgName string) map[string]any {
 	hv := helmvalues.MapToHelmValuesForEnv(app, envName, envType, "", namespace, "", orgName, nil, nil, nil, nil, nil)
 	raw, err := yaml.Marshal(hv)
 	if err != nil {
@@ -255,4 +274,20 @@ func (ah *appHandler) canonicalBaseMap(ctx context.Context, app *domain.App, env
 		return nil
 	}
 	return out
+}
+
+// DiscoverAppImages returns the container images present in an app+env's effective
+// Helm values (chart defaults ⊕ canonical base ⊕ template/org overlays ⊕ developer
+// rawValues), each with its repository and dotted tag key. It is the publish-time
+// counterpart of the values-preview discovery, so the images CD can manage match
+// exactly what the UI lists. canonicalBase is included only for canonical
+// templates (BYO/passthrough charts deploy their own values verbatim).
+func DiscoverAppImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Template, ov *domain.TemplateOverride, app *domain.App, envName string, envType domain.AppEnvironmentType, namespace, orgName string, appRaw, envRaw map[string]any) []tpl.TemplateImage {
+	chartVals, _ := chartDefaults(ctx, kc, t)
+	var canonicalBase map[string]any
+	if t == nil || t.Spec.CanonicalValues() {
+		canonicalBase = CanonicalBaseMap(app, envName, envType, namespace, orgName)
+	}
+	values := computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, "", appRaw, envRaw)
+	return chartimport.DetectImageMappings(values)
 }

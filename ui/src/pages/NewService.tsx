@@ -298,6 +298,7 @@ function ConfigureStep({
   const [namespaceScope, setNamespaceScope] = useState<"app" | "project">("app");
   const [namespacePattern, setNamespacePattern] = useState("");
   const [cdManaged, setCdManaged] = useState(false);
+  // Per-slot image repository the app binds, keyed by template slot name.
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
@@ -573,8 +574,8 @@ function ConfigureStep({
           When enabled, Kargo owns the image tag: it commits the
           discovered/promoted tag and re-publishing preserves it instead of
           resetting to your overrides. The tag you set in values acts only as the
-          initial seed. Which images Kargo watches (and the values keys it writes)
-          comes from the template's image mapping.
+          initial seed. After creating the app, choose which images Kargo watches
+          from its Overview → Images (discovered from the app's live values).
         </p>
       </FormSection>
 

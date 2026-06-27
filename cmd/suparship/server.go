@@ -435,6 +435,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					inner:           pub,
 					orgProvider:     orgProvider,
 					clusterStore:    clusterStore,
+					kubeClient:      kubeClient,
 					vault:           vaultStore,
 					projectStore:    projectStore,
 					stackStore:      stackStore,
@@ -573,6 +574,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				inner:           pub,
 				orgProvider:     orgProvider,
 				clusterStore:    clusterStore,
+				kubeClient:      kubeClient,
 				vault:           vaultStore,
 				projectStore:    projectStore,
 				stackStore:      stackStore,
@@ -674,6 +676,10 @@ type gitOpsPublisherAdapter struct {
 	inner        *gitops.Publisher
 	orgProvider  rbac.OrgProvider
 	clusterStore domain.ClusterStore
+	// kubeClient loads chart bundles for publish-time image discovery (reading the
+	// chart's effective values to resolve each CD-selected image's repository).
+	// Optional: when nil, discovery degrades to overlay-only values.
+	kubeClient kubernetes.Interface
 	// vault populates AppPublishEnv.ScopeKeys — which (scope, tier) items have
 	// keys — so the publisher only emits ExternalSecrets that resolve. Optional:
 	// when nil, no scope presence is reported (no ExternalSecrets emitted).
@@ -754,44 +760,32 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 	}
 	pub.PlatformDefaultValues = def
 	pub.PlatformEnvValues = env
-
-	// Translate the per-service image mapping into the publisher's resolved form
-	// so the Kargo Warehouse/Stage and the CD tag-preservation target the chart's
-	// real repos + tag keys (works for 1..N services). A sync-safe override
-	// mapping (set from the UI on a read-only/BYO template) wins over the
-	// template's own.
-	pub.TemplateImages = resolveTemplateImages(tmpl, ov)
 }
 
-// resolveTemplateImages returns the effective per-service image mapping for an
-// app's template, as Kargo images. An override mapping (set from the UI on a
-// read-only/BYO template) replaces the template's own when present.
-func resolveTemplateImages(tmpl *tpl.Template, ov *domain.TemplateOverride) []gitops.KargoImage {
-	if ov != nil && len(ov.Images) > 0 {
-		imgs := make([]gitops.KargoImage, 0, len(ov.Images))
-		for _, im := range ov.Images {
-			imgs = append(imgs, gitops.KargoImage{
-				Repository:        im.Repository,
-				TagKey:            im.TagKey,
-				TagPattern:        im.TagPattern,
-				SelectionStrategy: im.SelectionStrategy,
-			})
-		}
-		return imgs
+// orgNameOf returns the org's name, or "" when the org is unavailable.
+func orgNameOf(org *rbac.Org) string {
+	if org == nil {
+		return ""
 	}
-	if tmpl == nil || len(tmpl.Spec.Images) == 0 {
+	return org.Name
+}
+
+// resolveCDImages resolves the app's CD-selected images for one environment to the
+// publisher's KargoImage form. Images are DISCOVERED from the app+env's effective
+// Helm values (so each repository reflects the values, never a stale snapshot),
+// then filtered to the user's selection (app.Spec.Images) by tag key. A selection
+// whose image no longer appears in the values is skipped with a warning. Empty
+// selection → nil, letting the publisher fall back to the legacy single image.
+func (a *gitOpsPublisherAdapter) resolveCDImages(ctx context.Context, tmpl *tpl.Template, ov *domain.TemplateOverride, app *domain.App, env *domain.AppEnvironment, orgName string) []gitops.KargoImage {
+	if len(app.Spec.Images) == 0 {
 		return nil
 	}
-	imgs := make([]gitops.KargoImage, 0, len(tmpl.Spec.Images))
-	for _, im := range tmpl.Spec.Images {
-		imgs = append(imgs, gitops.KargoImage{
-			Repository:        im.Repository,
-			TagKey:            im.TagKey,
-			TagPattern:        im.TagPattern,
-			SelectionStrategy: im.SelectionStrategy,
-		})
+	var envRaw map[string]any
+	if ovr, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok {
+		envRaw = ovr.RawValues
 	}
-	return imgs
+	discovered := server.DiscoverAppImages(ctx, a.kubeClient, tmpl, ov, app, env.EnvName, env.EnvType, env.Namespace, orgName, app.Spec.RawValues, envRaw)
+	return gitops.SelectKargoImages(discovered, app.Spec.Images)
 }
 
 // setStackOverlays populates the app's stack shared Helm-values overlay onto the
@@ -1051,6 +1045,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 		// pod will see — no chart-side multi-source merging.
 		pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
 		setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
+		pub.TemplateImages = a.resolveCDImages(ctx, tmpl, ov, app, env, orgNameOf(org))
 		a.setStackOverlays(ctx, &pub, app, env.EnvName)
 
 		pubEnvs = append(pubEnvs, pub)
@@ -1322,6 +1317,7 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 	}
 	pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
 	setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
+	pub.TemplateImages = a.resolveCDImages(ctx, tmpl, ov, app, env, orgNameOf(org))
 	a.setStackOverlays(ctx, &pub, app, env.EnvName)
 
 	return a.inner.PublishAppEnv(ctx, app, pub)

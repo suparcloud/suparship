@@ -66,12 +66,17 @@ func TestInterpolate_ImageTag(t *testing.T) {
 	}
 }
 
-func TestInterpolate_ImageTagEmptyLeftLiteral(t *testing.T) {
-	// No resolved tag → token left literal (visibly unresolved) rather than
-	// rendering a bare "repo:".
+func TestInterpolate_ImageTagEmptyResolvesToEmpty(t *testing.T) {
+	// No resolved tag → token resolves to "" (never left literal): a literal
+	// "{platform.imageTag}" in metadata.labels / image refs is an invalid value
+	// k8s rejects. The chart defaults an empty tag to .Chart.AppVersion.
 	c := Context{Platform: helmvalues.PlatformValues{App: "hello"}}
-	if got := c.Interpolate("{platform.imageTag}"); got != "{platform.imageTag}" {
-		t.Errorf("empty ImageTag should leave token literal, got %q", got)
+	if got := c.Interpolate("{platform.imageTag}"); got != "" {
+		t.Errorf("empty ImageTag should resolve to empty, got %q", got)
+	}
+	// And it must not survive embedded in a larger string either.
+	if got := c.Interpolate("acr.io/app:{platform.imageTag}"); got != "acr.io/app:" {
+		t.Errorf("embedded empty ImageTag = %q, want acr.io/app:", got)
 	}
 }
 

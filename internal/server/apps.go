@@ -164,6 +164,9 @@ type AppDetailDTO struct {
 	// CD surfaces the app's continuous-delivery settings (external-CD tag
 	// ownership) so the UI can render and edit the toggle. Always present.
 	CD CDConfigDTO `json:"cd"`
+	// Images surfaces the app's per-slot image repository bindings so the UI can
+	// render and edit them. Omitted when the app has none.
+	Images []AppImageBindingDTO `json:"images,omitempty"`
 	// PreviewsEnabled reports whether this app supports preview (ephemeral PR)
 	// environments. Defaults to true on create; editable via the update endpoint.
 	PreviewsEnabled bool `json:"previewsEnabled"`
@@ -171,10 +174,21 @@ type AppDetailDTO struct {
 
 // CDConfigDTO mirrors domain.CDConfig on the wire. When Managed is true an
 // external CD controller (Kargo) owns the deployed image tag and the publisher
-// preserves it across republishes (see domain.CDConfig). The per-service image
-// repositories and tag-keys are declared at the template level, not here.
+// preserves it across republishes (see domain.CDConfig). The tag-keys are
+// declared by the template's image slots; the repository each slot watches is
+// bound per-app via the Images field, not here.
 type CDConfigDTO struct {
 	Managed bool `json:"managed"`
+}
+
+// AppImageBindingDTO mirrors domain.AppImageBinding on the wire: a chart image
+// (discovered in the app's Helm values, identified by TagKey) the app has
+// selected for external CD. No repository — it's read from the values at publish.
+type AppImageBindingDTO struct {
+	Name              string `json:"name"`
+	TagKey            string `json:"tagKey"`
+	TagPattern        string `json:"tagPattern,omitempty"`
+	SelectionStrategy string `json:"selectionStrategy,omitempty"`
 }
 
 // AddonClaimDTO mirrors domain.AddonSpec for the wire. Per-app values
@@ -290,6 +304,9 @@ type createAppRequest struct {
 	// CD configures external-CD (Kargo) ownership of the image tag. Optional;
 	// omit to leave it disabled.
 	CD *CDConfigDTO `json:"cd,omitempty"`
+	// Images binds the template's image slots to concrete repositories for this
+	// app, keyed by slot Name. Optional; omit for the legacy single-image flow.
+	Images []AppImageBindingDTO `json:"images,omitempty"`
 }
 
 // createAppResponse is the JSON body returned on a successful app creation.
@@ -333,6 +350,10 @@ type updateAppRequest struct {
 	// CD, when non-nil, replaces the app's continuous-delivery settings
 	// (external-CD tag ownership). Omit to leave unchanged.
 	CD *CDConfigDTO `json:"cd,omitempty"`
+	// Images, when non-nil, replaces the app's per-slot image repository
+	// bindings (keyed by slot Name). Send an empty array to clear them; omit to
+	// leave unchanged.
+	Images *[]AppImageBindingDTO `json:"images,omitempty"`
 	// PreviewsEnabled, when non-nil, toggles whether this app supports preview
 	// (ephemeral PR) environments. Omit to leave unchanged.
 	PreviewsEnabled *bool `json:"previewsEnabled,omitempty"`

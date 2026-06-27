@@ -225,6 +225,10 @@ type CreateRequest struct {
 	// CD configures external-CD (Kargo) ownership of the deployed image tag.
 	// Zero value disables it (the platform owns the tag). Optional.
 	CD domain.CDConfig
+	// Images binds the template's image slots to concrete repositories for this
+	// app, keyed by slot Name. Optional; empty preserves the legacy single-image
+	// (image_repository) behaviour.
+	Images []domain.AppImageBinding
 }
 
 // CreateResult holds the pure-function outputs of Create.
@@ -300,6 +304,7 @@ func Create(req CreateRequest) (*CreateResult, error) {
 	app.Spec.Addons = req.Addons
 	app.Spec.RawValues = req.RawValues
 	app.Spec.CD = req.CD
+	app.Spec.Images = req.Images
 
 	// Apply per-component config (app level) over the template defaults.
 	for i := range app.Spec.Components {

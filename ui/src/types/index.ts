@@ -184,6 +184,16 @@ export interface TemplateImage {
   selectionStrategy?: string;
 }
 
+// AppImageBinding marks one discovered chart image (identified by its tagKey) as
+// managed by external CD (Kargo). No repository — it's read from the Helm values
+// at publish, so it never goes stale.
+export interface AppImageBinding {
+  name: string;
+  tagKey: string;
+  tagPattern?: string;
+  selectionStrategy?: string;
+}
+
 export interface TemplateImportChartFile {
   path: string;
   size: number;
@@ -412,6 +422,10 @@ export interface EffectiveValuesResponse {
   interpolated: boolean;
   // overlays that contributed, low→high.
   layers: string[];
+  // images discovered in the effective values (every image block with a
+  // repository), each with its dotted tag key. The CD UI lists these so the user
+  // can select which Kargo manages. Omitted/empty when none are found.
+  discoveredImages?: TemplateImage[];
 }
 
 // --- Onboarding types ---
@@ -600,15 +614,18 @@ export interface AppDetail {
   envComponents?: Record<string, Record<string, ComponentConfig>>;
   // Continuous-delivery settings (external-CD tag ownership). Always present.
   cd: CDConfig;
+  // Per-slot image repository bindings (keyed by template slot name). Omitted
+  // when the app has none (legacy single-image flow).
+  images?: AppImageBinding[];
   // Whether this app supports preview (ephemeral PR) environments. Default true.
   previewsEnabled: boolean;
 }
 
 // CDConfig configures who owns the deployed image tag. When managed is true an
 // external CD controller (Kargo) writes the tag and the platform preserves it
-// across republishes instead of overwriting it with the create-time seed. Which
-// repositories/tag-keys Kargo manages is declared at the template level
-// (TemplateImage), not per app.
+// across republishes instead of overwriting it with the create-time seed. The
+// tag-keys Kargo manages are declared by the template's image slots; the
+// repository each slot watches is bound per-app via AppImageBinding.
 export interface CDConfig {
   managed?: boolean;
 }
@@ -792,6 +809,8 @@ export interface CreateAppRequest {
   envComponents?: Record<string, Record<string, ComponentConfig>>;
   /** Continuous-delivery settings (external-CD tag ownership). */
   cd?: CDConfig;
+  /** Per-slot image repository bindings (keyed by template slot name). */
+  images?: AppImageBinding[];
 }
 
 export interface CreateAppResponse {

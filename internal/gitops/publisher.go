@@ -1196,22 +1196,76 @@ const maxChartEntrySize = 4 * 1024 * 1024
 // declares the previous stage as its upstream gate. The first stage (lowest
 // Order) pulls directly from the Warehouse with auto-promotion enabled.
 // resolveKargoImages returns the image sources the Kargo CRs should target.
-// When the template declares an Images mapping (tmplImages), those are used
-// verbatim — supporting charts with one or many services, each with its own
-// repo + values tag-key. Otherwise it falls back to a single legacy image
+//
+// images is the app's CD-selected image set, already discovered from the app's
+// effective Helm values and resolved to concrete Repository + TagKey by the
+// publish adapter (one per image the user chose to manage; sidecars and other
+// unselected images are absent). When non-empty it is used verbatim.
+//
+// When the app has selected no images, it falls back to a single legacy image
 // derived from the app's image_repository value (canonical tag key), preserving
-// behaviour for suparship-common charts.
-func resolveKargoImages(app *domain.App, tmplImages []KargoImage) []KargoImage {
-	if len(tmplImages) > 0 {
-		return tmplImages
+// behaviour for suparship-common charts that predate explicit selection.
+func resolveKargoImages(app *domain.App, images []KargoImage) []KargoImage {
+	if len(images) > 0 {
+		return images
 	}
-	if repo, ok := app.Spec.Values["image_repository"].(string); ok && repo != "" {
-		// Concrete image, no template mapping: accept any tag (operators can
-		// tighten the pattern via the template Images mapping).
-		return []KargoImage{{Repository: repo, TagKey: DefaultImageTagKey, TagPattern: ".*"}}
+	if repo, ok := app.Spec.Values["image_repository"].(string); ok {
+		if repo = strings.TrimSpace(repo); repo != "" {
+			return []KargoImage{{Repository: repo, TagKey: DefaultImageTagKey, TagPattern: ".*"}}
+		}
 	}
-	// No mapping and no image set — caller decides whether to warn.
+	// No selection and no image set — caller decides whether to warn.
 	return nil
+}
+
+// SelectKargoImages resolves an app's CD image selection against the images
+// discovered in its effective Helm values. For each selected image (matched by
+// TagKey) it emits a KargoImage carrying the discovered Repository + TagKey, with
+// the selection's TagPattern/SelectionStrategy overriding the discovered defaults
+// when set. A selection whose image is no longer present in the values is skipped
+// with a warning (it would otherwise produce a Warehouse subscription that never
+// resolves). An empty selection yields nil — the caller falls back to legacy.
+func SelectKargoImages(discovered []tpl.TemplateImage, selection []domain.AppImageBinding) []KargoImage {
+	if len(selection) == 0 {
+		return nil
+	}
+	byKey := make(map[string]tpl.TemplateImage, len(discovered))
+	for _, d := range discovered {
+		byKey[d.TagKey] = d
+	}
+	out := make([]KargoImage, 0, len(selection))
+	for _, sel := range selection {
+		d, ok := byKey[sel.TagKey]
+		if !ok {
+			slog.Warn("gitops: CD-selected image not found in values; skipping",
+				"name", sel.Name, "tagKey", sel.TagKey)
+			continue
+		}
+		img := KargoImage{
+			Name:              d.Name,
+			Repository:        d.Repository,
+			TagKey:            d.TagKey,
+			TagPattern:        d.TagPattern,
+			SelectionStrategy: d.SelectionStrategy,
+		}
+		if sel.TagPattern != "" {
+			img.TagPattern = sel.TagPattern
+		}
+		if sel.SelectionStrategy != "" {
+			img.SelectionStrategy = sel.SelectionStrategy
+		}
+		// Fall back to the platform defaults (7-char commit SHA / newest build) when
+		// the selection and the discovered image leave them unset, so a CD-managed
+		// image rolls forward on every merge without per-image configuration.
+		if img.TagPattern == "" {
+			img.TagPattern = DefaultImageTagPattern
+		}
+		if img.SelectionStrategy == "" {
+			img.SelectionStrategy = DefaultImageSelectionStrategy
+		}
+		out = append(out, img)
+	}
+	return out
 }
 
 func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppPublishEnv) error {

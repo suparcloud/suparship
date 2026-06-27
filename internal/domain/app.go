@@ -364,6 +364,33 @@ type AppSpec struct {
 	Stack string `json:"stack,omitempty" yaml:"stack,omitempty"`
 	// CD holds continuous-delivery settings for this app.
 	CD CDConfig `json:"cd,omitempty" yaml:"cd,omitempty"`
+	// Images is the set of chart images this app has selected for external CD
+	// (Kargo) management. Images are DISCOVERED from the app's effective Helm
+	// values (every image block with a repository); the user picks which ones CD
+	// should watch/promote, so unrelated images (sidecars, init, proxy) are simply
+	// left out. Each entry identifies a discovered image by its tag key; the
+	// repository is read from the Helm values at publish (not stored here, so it
+	// never drifts). Empty = no image is CD-managed (legacy single-image fallback).
+	Images []AppImageBinding `json:"images,omitempty" yaml:"images,omitempty"`
+}
+
+// AppImageBinding marks one discovered chart image as managed by external CD
+// (Kargo). It carries no repository: the repository is read from the effective
+// Helm values at publish, keyed by TagKey, so changing the image in values is
+// followed automatically with no stale snapshot.
+type AppImageBinding struct {
+	// Name is the discovered image's logical name (component name, "image", or a
+	// service key) — for display and as a secondary match alongside TagKey.
+	Name string `json:"name" yaml:"name"`
+	// TagKey is the dotted Helm values path of this image's tag (e.g.
+	// "components.web.image.tag"). It is the stable identity of the selected
+	// image and where Kargo writes the promoted tag.
+	TagKey string `json:"tagKey" yaml:"tagKey"`
+	// TagPattern optionally overrides Kargo's tag allow-list (allowTags).
+	TagPattern string `json:"tagPattern,omitempty" yaml:"tagPattern,omitempty"`
+	// SelectionStrategy optionally overrides how Kargo picks the tag to promote
+	// ("NewestBuild", "SemVer", "Digest", "Lexical").
+	SelectionStrategy string `json:"selectionStrategy,omitempty" yaml:"selectionStrategy,omitempty"`
 }
 
 // CDConfig configures who owns the deployed image tag in the published
@@ -376,9 +403,10 @@ type AppSpec struct {
 // back to the seed. Preservation applies only to stable (non-preview)
 // environments — preview envs always deploy the tag from their own pipeline.
 //
-// Which image repositories and values tag-keys Kargo manages is declared at the
-// template level (tpl.TemplateSpec.Images), not here, so a chart with one or
-// many services is handled uniformly.
+// Which values tag-keys Kargo manages is declared by the template's image slots
+// (tpl.TemplateSpec.Images); which repository each slot watches is bound per-app
+// via AppSpec.Images (falling back to the legacy image_repository value). Not
+// configured here, so a chart with one or many services is handled uniformly.
 type CDConfig struct {
 	// Managed enables external-CD tag ownership (see CDConfig docs). Default
 	// false preserves the legacy behaviour where the platform writes the tag.

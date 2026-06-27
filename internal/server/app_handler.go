@@ -242,14 +242,19 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A CD-managed app must have an image for Kargo to watch; reject early
-	// rather than publishing a placeholder Warehouse that never pulls.
-	if req.CD != nil && req.CD.Managed {
-		if err := ah.validateCDImageSource(r.Context(), tmpl.Metadata.Name, tmpl, values); err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
-			return
-		}
+	imageBindings := appImageBindingsFromDTO(req.Images)
+	if err := validateImageBindings(imageBindings); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
 	}
+
+	// NB: CD-managed apps are NOT required to have an image source at creation.
+	// Image discovery needs the app's effective values (the canonical base is only
+	// computed for an existing app+env), so a canonical template's component images
+	// can't be discovered or selected until the app exists. The operator selects
+	// which images Kargo manages from the app's Overview after create, where
+	// discovery is live; validateCDImageSource still guards that selection on the
+	// edit path.
 
 	result, err := domainapp.Create(domainapp.CreateRequest{
 		ProjectName:        projectName,
@@ -268,6 +273,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		ComponentConfigs:   req.ComponentConfigs,
 		EnvComponents:      req.EnvComponents,
 		CD:                 cdConfigFromDTO(req.CD),
+		Images:             imageBindings,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -493,17 +499,24 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if req.RawValues != nil {
 		app.Spec.RawValues = *req.RawValues
 	}
+	// Apply the image selection before the CD check so cd.managed validates against
+	// the selection in this same request.
+	if req.Images != nil {
+		bindings := appImageBindingsFromDTO(*req.Images)
+		if err := validateImageBindings(bindings); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		app.Spec.Images = bindings
+	}
 	if req.CD != nil {
 		cd := cdConfigFromDTO(req.CD)
-		// Enabling CD-managed tag ownership requires a watchable image source
-		// (template/override Images or app image_repository); reject otherwise so
-		// we never publish a placeholder Warehouse that silently never promotes.
-		// Validate before mutating the spec so a rejection leaves the app untouched.
+		// Enabling CD-managed tag ownership requires a watchable image source (a
+		// selected image or an app image_repository); reject otherwise so we never
+		// publish a Warehouse that silently never promotes. Validate before mutating
+		// CD so a rejection leaves it as-is.
 		if cd.Managed {
-			// Best-effort template resolve: a nil tmpl still validates against the
-			// app's own image_repository and the template-name-keyed override.
-			tmpl, _ := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
-			if err := ah.validateCDImageSource(r.Context(), app.Spec.Template.Name, tmpl, app.Spec.Values); err != nil {
+			if err := validateCDImageSource(app.Spec.Values, app.Spec.Images); err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 				return
 			}
@@ -2149,33 +2162,67 @@ func cdConfigFromDTO(dto *CDConfigDTO) domain.CDConfig {
 	return domain.CDConfig{Managed: dto.Managed}
 }
 
+// appImageBindingsFromDTO converts wire image selections into domain selections.
+// A nil/empty slice yields nil (no CD-managed images).
+func appImageBindingsFromDTO(dtos []AppImageBindingDTO) []domain.AppImageBinding {
+	if len(dtos) == 0 {
+		return nil
+	}
+	out := make([]domain.AppImageBinding, 0, len(dtos))
+	for _, d := range dtos {
+		out = append(out, domain.AppImageBinding{
+			Name:              d.Name,
+			TagKey:            d.TagKey,
+			TagPattern:        d.TagPattern,
+			SelectionStrategy: d.SelectionStrategy,
+		})
+	}
+	return out
+}
+
+// appImageBindingsToDTO is the inverse of appImageBindingsFromDTO.
+func appImageBindingsToDTO(bindings []domain.AppImageBinding) []AppImageBindingDTO {
+	if len(bindings) == 0 {
+		return nil
+	}
+	out := make([]AppImageBindingDTO, 0, len(bindings))
+	for _, b := range bindings {
+		out = append(out, AppImageBindingDTO{
+			Name:              b.Name,
+			TagKey:            b.TagKey,
+			TagPattern:        b.TagPattern,
+			SelectionStrategy: b.SelectionStrategy,
+		})
+	}
+	return out
+}
+
+// validateImageBindings rejects a CD image selection that lacks the identity
+// fields (Name + TagKey) needed to discover its repository and write its tag at
+// publish.
+func validateImageBindings(bindings []domain.AppImageBinding) error {
+	for _, b := range bindings {
+		if strings.TrimSpace(b.Name) == "" || strings.TrimSpace(b.TagKey) == "" {
+			return fmt.Errorf("image selection requires a name and tagKey")
+		}
+	}
+	return nil
+}
+
 // validateCDImageSource rejects enabling CD-managed tag ownership (cd.managed) on
-// an app that has no image for Kargo to watch. Without an Images mapping on the
-// template (or a sync-safe override set from the template UI for a BYO chart),
-// and without an app-level image_repository, publish would seed a placeholder
-// ghcr.io/{project}/{app} Warehouse that never pulls — so the CD pipeline would
-// silently never promote. This mirrors the publisher's resolveKargoImages
-// precedence (override images → template images → image_repository) and catches
-// the gap at the API so the operator gets immediate, actionable feedback rather
-// than a quietly broken Warehouse.
-func (ah *appHandler) validateCDImageSource(ctx context.Context, templateName string, tmpl *tpl.Template, values map[string]any) error {
-	// An app-level image_repository is a concrete source on its own — checkable
-	// without resolving the template, so this still guards correctly when the
-	// template loader is unavailable.
+// an app that has no image for Kargo to watch. Without at least one selected image
+// (discovered from the app's Helm values) and without an app-level
+// image_repository, publish would produce no Warehouse subscription — so the CD
+// pipeline would silently never promote. Catching it at the API gives the operator
+// immediate, actionable feedback rather than a quietly broken Warehouse.
+func validateCDImageSource(values map[string]any, images []domain.AppImageBinding) error {
+	if len(images) > 0 {
+		return nil
+	}
 	if repo, ok := values["image_repository"].(string); ok && strings.TrimSpace(repo) != "" {
 		return nil
 	}
-	if tmpl != nil && len(tmpl.Spec.Images) > 0 {
-		return nil
-	}
-	// A sync-safe override mapping replaces / substitutes for the template's own
-	// Images at publish (keyed by template name), so honour it here too.
-	if ah.kubeClient != nil && templateName != "" {
-		if ov, err := kube.LoadTemplateOverride(ctx, ah.kubeClient, templateName); err == nil && ov != nil && len(ov.Images) > 0 {
-			return nil
-		}
-	}
-	return fmt.Errorf("continuous delivery (cd.managed) needs an image for Kargo to watch: declare an Images mapping on template %q (Template detail → Images) or set image_repository on the app", templateName)
+	return fmt.Errorf("continuous delivery (cd.managed) needs an image for Kargo to watch: select at least one image under the app's Images section, or set image_repository on the app")
 }
 
 func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO {
@@ -2230,6 +2277,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
 		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
 		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed},
+		Images:           appImageBindingsToDTO(app.Spec.Images),
 		PreviewsEnabled:  app.Spec.PreviewsEnabled,
 	}
 }

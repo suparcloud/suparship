@@ -119,12 +119,14 @@ func (c Context) replacer() *strings.Replacer {
 			"{platform.secretName}", secName,
 		)
 	}
-	// The resolved image tag is exposed only when set, so a chart that
-	// references {platform.imageTag} without a resolved tag keeps the literal
-	// token (visibly unresolved) rather than rendering a bare "repo:".
-	if p.ImageTag != "" {
-		pairs = append(pairs, "{platform.imageTag}", p.ImageTag)
-	}
+	// {platform.imageTag} is ALWAYS replaced — to the resolved tag, or to "" when
+	// none is known (a stable app whose tag is owned by external CD and not yet
+	// promoted). It must never survive as a literal: charts stamp the tag into
+	// metadata.labels (app.kubernetes.io/version) and image refs, and "{...}" is an
+	// invalid label value (k8s rejects the whole apply). An empty tag is safe —
+	// the canonical chart defaults it to .Chart.AppVersion (see suparship-common
+	// _labels.tpl), and CD overwrites the real tag on its first promotion.
+	pairs = append(pairs, "{platform.imageTag}", p.ImageTag)
 	// Preview name — exposed only for previews so a shared-namespace preview can
 	// suffix workload resource names per PR. Left literal for stable envs.
 	if p.PreviewName != "" {

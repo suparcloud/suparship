@@ -11,7 +11,7 @@ import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 // CodeMirror is heavy; only the values editor needs it.
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 import { listTemplateVersions } from "../lib/templates";
-import type { TemplateVersionInfo } from "../types";
+import type { TemplateVersionInfo, TemplateImage, AppImageBinding } from "../types";
 import { createAppPreview, deleteAppPreview } from "../lib/previews";
 import {
   getAppEnvConfig,
@@ -1913,6 +1913,15 @@ const BASE_SCOPE = "__base__";
 // preview on top of its base env). Mirrors the backend's domain.PreviewOverrideKey.
 const PREVIEW_SCOPE = "preview";
 
+// Defaults for a CD-managed image's Kargo tag selection (mirror the backend's
+// gitops.DefaultImageTagPattern / DefaultImageSelectionStrategy): match a 7-char
+// git commit SHA and promote the newest build. Editable per image.
+const DEFAULT_TAG_PATTERN = "^[0-9a-f]{7}$";
+const DEFAULT_SELECTION_STRATEGY = "NewestBuild";
+const SELECTION_STRATEGIES = ["NewestBuild", "SemVer", "Digest", "Lexical"];
+
+type ImageSel = { tagPattern: string; selectionStrategy: string };
+
 function AppValuesEditor({
   data,
   project,
@@ -1940,6 +1949,15 @@ function AppValuesEditor({
   const [cdSaving, setCdSaving] = useState(false);
   const [previewsEnabled, setPreviewsEnabled] = useState(true);
   const [previewsSaving, setPreviewsSaving] = useState(false);
+  // Images discovered in the effective values (from the values preview below);
+  // the user checks which ones Kargo manages.
+  const [discoveredImages, setDiscoveredImages] = useState<TemplateImage[]>([]);
+  // Images selected for CD, keyed by tag key → per-image Kargo settings. Presence
+  // means selected. Seeded from the app's saved selection.
+  const [selectedImages, setSelectedImages] = useState<Record<string, ImageSel>>(
+    {},
+  );
+  const [imagesSaving, setImagesSaving] = useState(false);
 
   // Seed editors from the persisted overlays whenever the app data changes.
   useEffect(() => {
@@ -1953,6 +1971,14 @@ function AppValuesEditor({
     setEnvTexts(next);
     setCdManaged(data.cd?.managed ?? false);
     setPreviewsEnabled(data.previewsEnabled ?? true);
+    const sel: Record<string, ImageSel> = {};
+    for (const b of data.images ?? []) {
+      sel[b.tagKey] = {
+        tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
+        selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
+      };
+    }
+    setSelectedImages(sel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
@@ -1987,6 +2013,7 @@ function AppValuesEditor({
         .then((res) => {
           setPreview(stringifyOverlay(res.values));
           setChartAvailable(res.chartDefaultsAvailable);
+          setDiscoveredImages(res.discoveredImages ?? []);
         })
         .catch(() => {
           /* leave last good preview */
@@ -2029,6 +2056,78 @@ function AppValuesEditor({
       toast.error(err instanceof Error ? err.message : "Failed to save CD settings");
     } finally {
       setCdSaving(false);
+    }
+  }
+
+  // Build the CD selection from the checked discovered images, carrying each
+  // image's (possibly customized) tag pattern + selection strategy.
+  function buildImageBindings(): AppImageBinding[] {
+    const out: AppImageBinding[] = [];
+    for (const img of discoveredImages) {
+      const s = selectedImages[img.tagKey];
+      if (!s) continue;
+      out.push({
+        name: img.name,
+        tagKey: img.tagKey,
+        tagPattern: s.tagPattern,
+        selectionStrategy: s.selectionStrategy,
+      });
+    }
+    return out;
+  }
+
+  const savedImages: Record<string, ImageSel> = {};
+  for (const b of data.images ?? []) {
+    savedImages[b.tagKey] = {
+      tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
+      selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
+    };
+  }
+  const selectedKeys = Object.keys(selectedImages);
+  const imagesDirty =
+    selectedKeys.length !== Object.keys(savedImages).length ||
+    selectedKeys.some((k) => {
+      const cur = selectedImages[k];
+      const prev = savedImages[k];
+      if (!cur) return false;
+      return (
+        !prev ||
+        prev.tagPattern !== cur.tagPattern ||
+        prev.selectionStrategy !== cur.selectionStrategy
+      );
+    });
+
+  function toggleImage(tagKey: string) {
+    setSelectedImages((cur) => {
+      const next = { ...cur };
+      if (next[tagKey]) delete next[tagKey];
+      else
+        next[tagKey] = {
+          tagPattern: DEFAULT_TAG_PATTERN,
+          selectionStrategy: DEFAULT_SELECTION_STRATEGY,
+        };
+      return next;
+    });
+  }
+
+  function updateImageSel(tagKey: string, patch: Partial<ImageSel>) {
+    setSelectedImages((cur) =>
+      cur[tagKey] ? { ...cur, [tagKey]: { ...cur[tagKey], ...patch } } : cur,
+    );
+  }
+
+  async function saveImages() {
+    setImagesSaving(true);
+    try {
+      await updateApp(project, data.name, { images: buildImageBindings() });
+      toast.success("CD images saved — re-publishing to GitOps.");
+      await onSaved();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to save CD images",
+      );
+    } finally {
+      setImagesSaving(false);
     }
   }
 
@@ -2157,8 +2256,8 @@ function AppValuesEditor({
                 When enabled, Kargo owns the image tag: it commits the
                 discovered/promoted tag and re-publishing preserves it instead of
                 resetting to the value in your overrides. Leave the tag out of the
-                overrides above once this is on. Which images Kargo watches comes
-                from the template's image mapping.
+                overrides above once this is on. Which images Kargo watches is set
+                under Images below.
               </p>
             </div>
             <button
@@ -2170,6 +2269,98 @@ function AppValuesEditor({
             </button>
           </div>
         </div>
+
+        {discoveredImages.length > 0 && (
+          <div className="mt-4 border-t border-gray-100 pt-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-gray-700">Images</p>
+                <p className="mt-1 text-xs text-gray-400">
+                  These images were found in this app's effective values. Check the
+                  ones Kargo should watch and promote — leave out images you don't
+                  want under CD (e.g. sidecars). The repository is read from the
+                  values at deploy.
+                </p>
+                <div className="mt-3 space-y-3">
+                  {discoveredImages.map((img) => {
+                    const sel = selectedImages[img.tagKey];
+                    return (
+                      <div key={img.tagKey} className="text-xs text-gray-600">
+                        <label className="flex items-start gap-2">
+                          <input
+                            type="checkbox"
+                            checked={!!sel}
+                            onChange={() => toggleImage(img.tagKey)}
+                            className="mt-0.5 h-4 w-4 rounded border-gray-300"
+                          />
+                          <span className="min-w-0">
+                            <span className="font-medium">{img.name}</span>{" "}
+                            <span className="font-mono text-gray-500">
+                              {img.repository}
+                            </span>
+                            <span className="ml-2 font-mono text-gray-400">
+                              {img.tagKey}
+                            </span>
+                          </span>
+                        </label>
+                        {sel && (
+                          <div className="mt-2 ml-6 flex flex-wrap items-center gap-x-4 gap-y-2">
+                            <label className="flex items-center gap-1">
+                              <span className="text-gray-500">Tag regex</span>
+                              <input
+                                type="text"
+                                value={sel.tagPattern}
+                                onChange={(e) =>
+                                  updateImageSel(img.tagKey, {
+                                    tagPattern: e.target.value,
+                                  })
+                                }
+                                placeholder={DEFAULT_TAG_PATTERN}
+                                className="w-48 rounded-md border border-gray-300 px-2 py-1 font-mono"
+                              />
+                            </label>
+                            <label className="flex items-center gap-1">
+                              <span className="text-gray-500">Strategy</span>
+                              <select
+                                value={sel.selectionStrategy}
+                                onChange={(e) =>
+                                  updateImageSel(img.tagKey, {
+                                    selectionStrategy: e.target.value,
+                                  })
+                                }
+                                className="rounded-md border border-gray-300 px-2 py-1"
+                              >
+                                {SELECTION_STRATEGIES.map((s) => (
+                                  <option key={s} value={s}>
+                                    {s}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="mt-2 text-xs text-gray-400">
+                  Defaults: tag regex{" "}
+                  <code className="font-mono">{DEFAULT_TAG_PATTERN}</code>{" "}
+                  (7-char commit SHA), strategy{" "}
+                  <code className="font-mono">{DEFAULT_SELECTION_STRATEGY}</code>.
+                  Override per image above.
+                </p>
+              </div>
+              <button
+                onClick={saveImages}
+                disabled={imagesSaving || !imagesDirty}
+                className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {imagesSaving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="mt-4 border-t border-gray-100 pt-4">
           <div className="flex items-start justify-between gap-4">
