@@ -33,6 +33,7 @@ func (p *updatePublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ 
 	return nil
 }
 func (p *updatePublisher) UnpublishApp(_ context.Context, _, _ string) error        { return nil }
+func (p *updatePublisher) RemoveAppEnv(_ context.Context, _, _, _ string) error     { return nil }
 func (p *updatePublisher) UnpublishProjectApps(_ context.Context, _ string) error   { return nil }
 func (p *updatePublisher) UnpublishProjectInfra(_ context.Context, _ string) error  { return nil }
 

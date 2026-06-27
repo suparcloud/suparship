@@ -248,6 +248,19 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the delivery mode: explicit request wins, else a sync-safe template
+	// override, else the template's declared default, else pipeline. Direct apps
+	// skip Kargo/promotion.
+	deliveryMode := domain.DeliveryMode(strings.TrimSpace(req.DeliveryMode))
+	if deliveryMode == "" && ah.kubeClient != nil {
+		if ov, err := kube.LoadTemplateOverride(r.Context(), ah.kubeClient, tmpl.Metadata.Name); err == nil && ov != nil {
+			deliveryMode = domain.DeliveryMode(strings.TrimSpace(ov.DeliveryMode))
+		}
+	}
+	if deliveryMode == "" {
+		deliveryMode = domain.DeliveryMode(strings.TrimSpace(tmpl.Spec.DeliveryMode))
+	}
+
 	// NB: CD-managed apps are NOT required to have an image source at creation.
 	// Image discovery needs the app's effective values (the canonical base is only
 	// computed for an existing app+env), so a canonical template's component images
@@ -274,6 +287,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		EnvComponents:      req.EnvComponents,
 		CD:                 cdConfigFromDTO(req.CD),
 		Images:             imageBindings,
+		DeliveryMode:       deliveryMode,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -522,6 +536,20 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		app.Spec.CD = cd
+	}
+	if dm := domain.DeliveryMode(strings.TrimSpace(req.DeliveryMode)); dm != "" {
+		app.Spec.DeliveryMode = dm
+	}
+	if len(req.DeployEnvs) > 0 {
+		if app.Spec.EnvironmentDefaults == nil {
+			app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+		}
+		for envName, deploy := range req.DeployEnvs {
+			ov := app.Spec.EnvironmentDefaults[envName]
+			d := deploy
+			ov.Deploy = &d
+			app.Spec.EnvironmentDefaults[envName] = ov
+		}
 	}
 	if req.PreviewsEnabled != nil {
 		app.Spec.PreviewsEnabled = *req.PreviewsEnabled
@@ -1625,6 +1653,52 @@ func StableEnvsFromOrg(ctx context.Context, orgProvider rbac.OrgProvider, app *d
 // All components in the app share a single AppReleaseRef, so there is no
 // possibility of partial component promotion: the entire release bundle moves
 // together or not at all.
+// handleUndeployAppEnv serves POST /api/v1/projects/{project}/apps/{app}/environments/{env}/undeploy.
+// It is the explicit "remove from cluster" action: it sets the env's Deploy flag
+// to false (so it won't be re-published) and removes the env's GitOps files so
+// ArgoCD prunes its workload. Deliberate and destructive — for stateful apps this
+// deletes the env's data. Other envs and apps are untouched.
+func (ah *appHandler) handleUndeployAppEnv(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+		})
+		return
+	}
+
+	// Mark the env opted-out so a later re-publish doesn't recreate it.
+	if app.Spec.EnvironmentDefaults == nil {
+		app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+	}
+	ov := app.Spec.EnvironmentDefaults[envName]
+	no := false
+	ov.Deploy = &no
+	app.Spec.EnvironmentDefaults[envName] = ov
+	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
+		return
+	}
+
+	// Remove the env's GitOps files so ArgoCD prunes the workload.
+	if ah.gitOpsPublisher != nil {
+		if err := ah.gitOpsPublisher.RemoveAppEnv(r.Context(), projectName, appName, envName); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to remove environment: " + err.Error()})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "environment " + envName + " removed from cluster",
+		"project": projectName,
+		"app":     appName,
+		"env":     envName,
+	})
+}
+
 func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
@@ -1678,6 +1752,9 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 	app, err := ah.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
 		return nil, fmt.Errorf("%w: app %q not found in project %q", errPromoteAppNotFound, appName, projectName)
+	}
+	if app.Spec.IsDirect() {
+		return nil, fmt.Errorf("%w: direct-delivery apps deploy each environment from its values; promotion is disabled", errPromoteBadRequest)
 	}
 
 	targetEnv, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, targetEnvName)
@@ -2257,6 +2334,25 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		return envDTOs[i].EnvName < envDTOs[j].EnvName
 	})
 
+	// Resolve per-env deploy state. The first stable env (now sorted first) is the
+	// base. For direct apps Deploy follows the opt-in rules; pipeline apps always
+	// "deploy" (advance via promotion), so report true.
+	baseSeen := false
+	for i := range envDTOs {
+		if envDTOs[i].EnvType == string(domain.AppEnvPreview) {
+			envDTOs[i].Deploy = true
+			continue
+		}
+		isBase := !baseSeen
+		baseSeen = true
+		envDTOs[i].IsBase = isBase
+		if app.Spec.IsDirect() {
+			envDTOs[i].Deploy = app.Spec.DeploysToEnv(envDTOs[i].EnvName, isBase)
+		} else {
+			envDTOs[i].Deploy = true
+		}
+	}
+
 	return AppDetailDTO{
 		Name:        app.Name,
 		Project:     app.ProjectName,
@@ -2278,6 +2374,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
 		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed},
 		Images:           appImageBindingsToDTO(app.Spec.Images),
+		DeliveryMode:     string(app.Spec.DeliveryMode),
 		PreviewsEnabled:  app.Spec.PreviewsEnabled,
 	}
 }

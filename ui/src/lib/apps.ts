@@ -93,6 +93,13 @@ export interface UpdateAppRequest {
   // images replaces the app's per-slot image repository bindings (keyed by
   // template slot name). Send [] to clear; omit to leave unchanged.
   images?: AppImageBinding[];
+  // deliveryMode switches the app's delivery mode ("pipeline" or "direct").
+  // Omit to leave unchanged.
+  deliveryMode?: string;
+  // deployEnvs (direct apps) opts environments in/out of deployment, keyed by env
+  // name → deploy. Opting out leaves a running env in place (use undeployAppEnv to
+  // remove it). Omit to leave unchanged.
+  deployEnvs?: Record<string, boolean>;
   // previewsEnabled toggles whether this app supports preview environments.
   // Omit to leave unchanged.
   previewsEnabled?: boolean;
@@ -124,6 +131,19 @@ export function previewAppValues(
   return api.post<EffectiveValuesResponse>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/values/preview`,
     body,
+  );
+}
+
+// undeployAppEnv removes a single environment's resources from the cluster (the
+// explicit "remove from cluster" action for a direct-delivery env). Destructive:
+// for stateful apps this deletes that env's data.
+export function undeployAppEnv(
+  project: string,
+  app: string,
+  env: string,
+): Promise<{ message: string }> {
+  return api.post<{ message: string }>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/undeploy`,
   );
 }
 

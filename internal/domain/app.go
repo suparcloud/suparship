@@ -21,6 +21,21 @@ const (
 // its base env. It is not a real environment — no stable env may use this name.
 const PreviewOverrideKey = "preview"
 
+// DeliveryMode controls how an app is delivered across its environments.
+type DeliveryMode string
+
+const (
+	// DeliveryPipeline (the default; "" is treated as this) wires the CI-image
+	// promotion pipeline: a Kargo Warehouse watches the image, Stages promote it
+	// staging→prod, and only the first env deploys on create.
+	DeliveryPipeline DeliveryMode = "pipeline"
+	// DeliveryDirect deploys each environment directly from its own Helm values —
+	// no Kargo, no promotion. The image is a pinned tag in values. Intended for
+	// off-the-shelf / external software (valkey, redis, postgres). Every stable
+	// env deploys from create; editing an env's values re-deploys just that env.
+	DeliveryDirect DeliveryMode = "direct"
+)
+
 // NamespaceScope controls where an app's workloads are deployed.
 type NamespaceScope string
 
@@ -280,6 +295,13 @@ type EnvironmentOverride struct {
 	// (deployMode "all"). Each cluster's published values.yaml is the env values
 	// deep-merged with its ClusterOverrides entry. Only meaningful in "all" mode.
 	ClusterOverrides map[string]ClusterValueOverride `json:"clusterOverrides,omitempty" yaml:"clusterOverrides,omitempty"`
+	// Deploy, for direct-delivery apps, opts this environment in or out of being
+	// deployed (published) by suparship. nil = default: the base env (lowest
+	// Order) deploys, higher envs don't (opt-in). Setting it false stops
+	// publishing updates to the env but does NOT remove its running workload —
+	// removal is an explicit, separate action. Ignored for pipeline apps (which
+	// use promotion). See AppSpec.DeploysToEnv.
+	Deploy *bool `json:"deploy,omitempty" yaml:"deploy,omitempty"`
 }
 
 // ClusterValueOverride holds per-(env, cluster) value overrides, applied on top
@@ -372,6 +394,26 @@ type AppSpec struct {
 	// repository is read from the Helm values at publish (not stored here, so it
 	// never drifts). Empty = no image is CD-managed (legacy single-image fallback).
 	Images []AppImageBinding `json:"images,omitempty" yaml:"images,omitempty"`
+	// DeliveryMode controls how the app is delivered across environments:
+	// "pipeline" (default) uses Kargo + staging→prod promotion; "direct" deploys
+	// each env straight from its values with no Kargo or promotion (off-the-shelf
+	// software with a pinned image tag). Empty is treated as pipeline.
+	DeliveryMode DeliveryMode `json:"deliveryMode,omitempty" yaml:"deliveryMode,omitempty"`
+}
+
+// IsDirect reports whether the app deploys each environment directly from its
+// values (no Kargo, no promotion). Empty DeliveryMode means pipeline.
+func (s AppSpec) IsDirect() bool { return s.DeliveryMode == DeliveryDirect }
+
+// DeploysToEnv reports whether a direct-delivery app should deploy (publish) to
+// the named environment. An explicit per-env Deploy override wins; otherwise the
+// default is "deploy the base env, not the higher ones" — isBase is true for the
+// base env (lowest Order). Callers determine which env is base.
+func (s AppSpec) DeploysToEnv(envName string, isBase bool) bool {
+	if ov, ok := s.EnvironmentDefaults[envName]; ok && ov.Deploy != nil {
+		return *ov.Deploy
+	}
+	return isBase
 }
 
 // AppImageBinding marks one discovered chart image as managed by external CD

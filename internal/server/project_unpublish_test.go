@@ -36,7 +36,8 @@ func (p *twoPhasePublisher) PublishAppEnv(_ context.Context, _ *domain.App, _ *d
 func (p *twoPhasePublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _, _ string) error {
 	return nil
 }
-func (p *twoPhasePublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }
+func (p *twoPhasePublisher) UnpublishApp(_ context.Context, _, _ string) error    { return nil }
+func (p *twoPhasePublisher) RemoveAppEnv(_ context.Context, _, _, _ string) error { return nil }
 func (p *twoPhasePublisher) UnpublishProjectApps(_ context.Context, _ string) error {
 	p.record("apps")
 	return nil

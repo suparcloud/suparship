@@ -34,6 +34,11 @@ type TemplateOverride struct {
 	// so operators can wire up CD for a BYO chart without editing its source.
 	// Mirrors tpl.TemplateImage; the server layer converts.
 	Images []TemplateImageOverride `json:"images,omitempty" yaml:"images,omitempty"`
+	// DeliveryMode overrides the template's default app delivery mode ("pipeline"
+	// or "direct") for read-only synced/built-in templates, so an operator can
+	// mark a synced off-the-shelf chart (valkey, redis, postgres) "direct" without
+	// editing its source. Empty = no override (use the template's own). Sync-safe.
+	DeliveryMode string `json:"deliveryMode,omitempty" yaml:"deliveryMode,omitempty"`
 }
 
 // TemplateMetadataOverride carries display-metadata overrides. Each field is
@@ -80,6 +85,9 @@ func (o *TemplateOverride) IsEmpty() bool {
 		}
 	}
 	if len(o.Images) > 0 {
+		return false
+	}
+	if o.DeliveryMode != "" {
 		return false
 	}
 	return o.Metadata.IsEmpty()

@@ -84,6 +84,101 @@ func TestUpdateTemplateMetadata_ImportedEditable(t *testing.T) {
 	}
 }
 
+func TestUpdateTemplateMetadata_ImportedSetsDeliveryMode(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	if err := kube.SaveTemplate(context.Background(), client, metadataTestTemplate(), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	th := &templateHandler{
+		kubeClient: client,
+		clusterLoader: func(ctx context.Context) ([]*tpl.Template, error) {
+			return kube.LoadTemplates(ctx, client)
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	th.handleUpdateTemplateMetadata(rec, patchReq("voiceai-livekit-agent", templateMetadataPatch{
+		DeliveryMode: strptr("direct"),
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var dto TemplateDetailDTO
+	_ = json.NewDecoder(rec.Body).Decode(&dto)
+	if dto.DeliveryMode != "direct" {
+		t.Errorf("deliveryMode = %q, want direct", dto.DeliveryMode)
+	}
+	got, _ := kube.LoadTemplates(context.Background(), client)
+	if len(got) != 1 || got[0].Spec.DeliveryMode != "direct" {
+		t.Errorf("persisted deliveryMode not set: %+v", got)
+	}
+}
+
+func TestUpdateTemplateMetadata_RejectsInvalidDeliveryMode(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	if err := kube.SaveTemplate(context.Background(), client, metadataTestTemplate(), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	th := &templateHandler{
+		kubeClient: client,
+		clusterLoader: func(ctx context.Context) ([]*tpl.Template, error) {
+			return kube.LoadTemplates(ctx, client)
+		},
+	}
+	rec := httptest.NewRecorder()
+	th.handleUpdateTemplateMetadata(rec, patchReq("voiceai-livekit-agent", templateMetadataPatch{
+		DeliveryMode: strptr("bogus"),
+	}))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for invalid deliveryMode, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpdateTemplateMetadata_SyncedSavesDeliveryModeOverride(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	if err := kube.SaveTemplate(context.Background(), client, metadataTestTemplate(), nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	regStore := tpl.NewRegistryStore(client)
+	reg := &tpl.TemplateRegistry{}
+	reg.UpsertSource(tpl.TemplateSource{
+		Name: "voiceai-livekit-agent", Origin: "external",
+		ExternalRepo: "https://github.com/example/templates.git",
+	})
+	if err := regStore.Save(context.Background(), reg); err != nil {
+		t.Fatal(err)
+	}
+	th := &templateHandler{
+		kubeClient:    client,
+		registryStore: regStore,
+		clusterLoader: func(ctx context.Context) ([]*tpl.Template, error) {
+			return kube.LoadTemplates(ctx, client)
+		},
+	}
+	rec := httptest.NewRecorder()
+	th.handleUpdateTemplateMetadata(rec, patchReq("voiceai-livekit-agent", templateMetadataPatch{
+		DeliveryMode: strptr("direct"),
+	}))
+	// Delivery mode is a sync-safe override (like images), allowed for synced.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (delivery-mode override saved), got %d: %s", rec.Code, rec.Body.String())
+	}
+	var dto TemplateDetailDTO
+	_ = json.NewDecoder(rec.Body).Decode(&dto)
+	if dto.DeliveryMode != "direct" {
+		t.Errorf("DTO deliveryMode = %q, want direct (override applied)", dto.DeliveryMode)
+	}
+	// Persisted as a sync-safe override; the template body is untouched.
+	ov, err := kube.LoadTemplateOverride(context.Background(), client, "voiceai-livekit-agent")
+	if err != nil || ov == nil || ov.DeliveryMode != "direct" {
+		t.Fatalf("expected override deliveryMode=direct, got %+v (err=%v)", ov, err)
+	}
+	got, _ := kube.LoadTemplates(context.Background(), client)
+	if len(got) != 1 || got[0].Spec.DeliveryMode != "" {
+		t.Errorf("synced template body must not change, got deliveryMode %q", got[0].Spec.DeliveryMode)
+	}
+}
+
 func TestUpdateTemplateMetadata_SyncedSavesOverride(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	if err := kube.SaveTemplate(context.Background(), client, metadataTestTemplate(), nil); err != nil {

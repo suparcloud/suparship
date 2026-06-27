@@ -1429,6 +1429,12 @@ func (a *gitOpsPublisherAdapter) UnpublishApp(ctx context.Context, projectName, 
 	return a.inner.UnpublishApp(ctx, projectName, appName)
 }
 
+// RemoveAppEnv implements server.GitOpsPublisher — removes one env's files for an
+// app so ArgoCD prunes that env's workload (the explicit "remove from cluster").
+func (a *gitOpsPublisherAdapter) RemoveAppEnv(ctx context.Context, projectName, appName, envName string) error {
+	return a.inner.RemoveAppEnv(ctx, projectName, appName, envName)
+}
+
 // UnpublishProjectApps implements server.GitOpsPublisher (phase 1 of project
 // deletion: app dirs, previews, Kargo CRs — the AppProject stays).
 func (a *gitOpsPublisherAdapter) UnpublishProjectApps(ctx context.Context, projectName string) error {

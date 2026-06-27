@@ -229,6 +229,10 @@ type CreateRequest struct {
 	// app, keyed by slot Name. Optional; empty preserves the legacy single-image
 	// (image_repository) behaviour.
 	Images []domain.AppImageBinding
+	// DeliveryMode controls how the app deploys across envs ("pipeline" default,
+	// or "direct" for off-the-shelf apps with no Kargo/promotion). Empty =
+	// pipeline. Resolved by the caller from the template default + request.
+	DeliveryMode domain.DeliveryMode
 }
 
 // CreateResult holds the pure-function outputs of Create.
@@ -305,6 +309,7 @@ func Create(req CreateRequest) (*CreateResult, error) {
 	app.Spec.RawValues = req.RawValues
 	app.Spec.CD = req.CD
 	app.Spec.Images = req.Images
+	app.Spec.DeliveryMode = req.DeliveryMode
 
 	// Apply per-component config (app level) over the template defaults.
 	for i := range app.Spec.Components {

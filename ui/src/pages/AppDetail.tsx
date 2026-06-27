@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, promoteApp, syncApp, deleteApp, renameApp, updateApp, upgradeAppTemplate } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, promoteApp, syncApp, deleteApp, renameApp, undeployAppEnv, updateApp, upgradeAppTemplate } from "../lib/apps";
 import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
@@ -1133,6 +1133,8 @@ export function AppDetail() {
                 : "Sync to Git"}
           </button>
           {(() => {
+            // Direct-delivery apps have no promotion — each env deploys from values.
+            if (data.deliveryMode === "direct") return null;
             const promotion = getPromoteTarget(currentEnv, data.environments);
             if (!promotion) return null;
             return (
@@ -1948,6 +1950,12 @@ function AppValuesEditor({
   const [cdManaged, setCdManaged] = useState(false);
   const [cdSaving, setCdSaving] = useState(false);
   const [previewsEnabled, setPreviewsEnabled] = useState(true);
+  const [deliveryMode, setDeliveryMode] = useState("pipeline");
+  const [deliverySaving, setDeliverySaving] = useState(false);
+  // Per-env deploy opt-in for direct apps, keyed by env name. Seeded from each
+  // env's effective `deploy`.
+  const [deployEnvs, setDeployEnvs] = useState<Record<string, boolean>>({});
+  const [deploySaving, setDeploySaving] = useState(false);
   const [previewsSaving, setPreviewsSaving] = useState(false);
   // Images discovered in the effective values (from the values preview below);
   // the user checks which ones Kargo manages.
@@ -1971,6 +1979,12 @@ function AppValuesEditor({
     setEnvTexts(next);
     setCdManaged(data.cd?.managed ?? false);
     setPreviewsEnabled(data.previewsEnabled ?? true);
+    setDeliveryMode(data.deliveryMode === "direct" ? "direct" : "pipeline");
+    const de: Record<string, boolean> = {};
+    for (const e of data.environments ?? []) {
+      if (e.envType !== "preview") de[e.envName] = e.deploy;
+    }
+    setDeployEnvs(de);
     const sel: Record<string, ImageSel> = {};
     for (const b of data.images ?? []) {
       sel[b.tagKey] = {
@@ -2045,6 +2059,74 @@ function AppValuesEditor({
   }
 
   const cdDirty = cdManaged !== (data.cd?.managed ?? false);
+  // Direct-delivery apps deploy each env from values — no Kargo, so the CD +
+  // image-selection sections don't apply. Derived from the live selector so the
+  // sections toggle as the user switches mode.
+  const isDirect = deliveryMode === "direct";
+  const deliveryDirty =
+    deliveryMode !== (data.deliveryMode === "direct" ? "direct" : "pipeline");
+
+  async function saveDelivery() {
+    setDeliverySaving(true);
+    try {
+      await updateApp(project, data.name, { deliveryMode });
+      toast.success(
+        deliveryMode === "direct"
+          ? "Switched to direct delivery — re-publishing (Kargo removed)."
+          : "Switched to pipeline delivery — re-publishing.",
+      );
+      await onSaved();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to save delivery mode",
+      );
+    } finally {
+      setDeliverySaving(false);
+    }
+  }
+
+  // Stable envs in promotion order, for the per-env deploy toggles (direct apps).
+  const stableEnvList = (data.environments ?? []).filter(
+    (e) => e.envType !== "preview",
+  );
+  const deployDirty = stableEnvList.some(
+    (e) => (deployEnvs[e.envName] ?? e.deploy) !== e.deploy,
+  );
+
+  async function saveDeployEnvs() {
+    setDeploySaving(true);
+    try {
+      await updateApp(project, data.name, { deployEnvs });
+      toast.success("Environment deployment updated — re-publishing.");
+      await onSaved();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to update environments",
+      );
+    } finally {
+      setDeploySaving(false);
+    }
+  }
+
+  async function removeFromCluster(envName: string) {
+    if (
+      !window.confirm(
+        `Remove ${data.name} from "${envName}"? This deletes its resources in that environment` +
+          ` — for stateful apps (databases/caches) this destroys that environment's data. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await undeployAppEnv(project, data.name, envName);
+      toast.success(`Removed from ${envName}.`);
+      await onSaved();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to remove from cluster",
+      );
+    }
+  }
 
   async function saveCD() {
     setCdSaving(true);
@@ -2242,35 +2324,125 @@ function AppValuesEditor({
 
         <div className="mt-4 border-t border-gray-100 pt-4">
           <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={cdManaged}
-                  onChange={(e) => setCdManaged(e.target.checked)}
-                  className="h-4 w-4 rounded border-gray-300"
-                />
-                Image tag managed by Kargo
-              </label>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-gray-700">Delivery mode</p>
+              <select
+                value={deliveryMode}
+                onChange={(e) => setDeliveryMode(e.target.value)}
+                className="mt-2 w-full max-w-md rounded-md border border-gray-300 px-2 py-1 text-sm"
+              >
+                <option value="pipeline">Pipeline (Kargo + promotion)</option>
+                <option value="direct">Direct (deploy each env from values)</option>
+              </select>
               <p className="mt-1 text-xs text-gray-400">
-                When enabled, Kargo owns the image tag: it commits the
-                discovered/promoted tag and re-publishing preserves it instead of
-                resetting to the value in your overrides. Leave the tag out of the
-                overrides above once this is on. Which images Kargo watches is set
-                under Images below.
+                {isDirect
+                  ? "Each environment deploys straight from its values — no Kargo, no promotion. Switching to direct removes this app's Kargo resources on the next publish."
+                  : "CI image promoted staging→prod via Kargo. Switch to direct for off-the-shelf software with a pinned image."}
               </p>
             </div>
             <button
-              onClick={saveCD}
-              disabled={cdSaving || !cdDirty}
+              onClick={saveDelivery}
+              disabled={deliverySaving || !deliveryDirty}
               className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
             >
-              {cdSaving ? "Saving…" : "Save CD"}
+              {deliverySaving ? "Saving…" : "Save"}
             </button>
           </div>
         </div>
 
-        {discoveredImages.length > 0 && (
+        {isDirect && (
+          <div className="mt-4 border-t border-gray-100 pt-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-gray-700">Environments</p>
+                <p className="mt-1 text-xs text-gray-400">
+                  The base env deploys by default; check higher envs to deploy
+                  them. Unchecking stops updates but leaves a running env in place
+                  — use "Remove from cluster" to delete it.
+                </p>
+                <div className="mt-3 space-y-2">
+                  {stableEnvList.map((e) => (
+                    <div
+                      key={e.envName}
+                      className="flex items-center justify-between gap-3 text-xs text-gray-600"
+                    >
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={deployEnvs[e.envName] ?? e.deploy}
+                          onChange={(ev) =>
+                            setDeployEnvs((cur) => ({
+                              ...cur,
+                              [e.envName]: ev.target.checked,
+                            }))
+                          }
+                          className="h-4 w-4 rounded border-gray-300"
+                        />
+                        <span className="font-medium capitalize">
+                          {e.envName}
+                        </span>
+                        {e.isBase && (
+                          <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
+                            base
+                          </span>
+                        )}
+                      </label>
+                      {e.deploy && (
+                        <button
+                          onClick={() => removeFromCluster(e.envName)}
+                          className="shrink-0 text-[11px] font-medium text-red-600 hover:text-red-800"
+                        >
+                          Remove from cluster
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <button
+                onClick={saveDeployEnvs}
+                disabled={deploySaving || !deployDirty}
+                className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {deploySaving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!isDirect && (
+          <div className="mt-4 border-t border-gray-100 pt-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={cdManaged}
+                    onChange={(e) => setCdManaged(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  Image tag managed by Kargo
+                </label>
+                <p className="mt-1 text-xs text-gray-400">
+                  When enabled, Kargo owns the image tag: it commits the
+                  discovered/promoted tag and re-publishing preserves it instead of
+                  resetting to the value in your overrides. Leave the tag out of the
+                  overrides above once this is on. Which images Kargo watches is set
+                  under Images below.
+                </p>
+              </div>
+              <button
+                onClick={saveCD}
+                disabled={cdSaving || !cdDirty}
+                className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {cdSaving ? "Saving…" : "Save CD"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!isDirect && discoveredImages.length > 0 && (
           <div className="mt-4 border-t border-gray-100 pt-4">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1">

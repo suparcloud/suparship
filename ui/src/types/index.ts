@@ -375,6 +375,9 @@ export interface TemplateDetail {
   injectCanonicalValues?: boolean;
   // Per-service image mapping for external-CD (Kargo) wiring.
   images?: TemplateImage[];
+  // Default app delivery mode: "pipeline" (Kargo + promotion) or "direct"
+  // (deploy each env from values, no Kargo). "" means pipeline.
+  deliveryMode?: string;
   // editable = metadata can be edited in place (imported/BYO + cluster-stored).
   editable?: boolean;
   source?: TemplateProvenance;
@@ -396,6 +399,9 @@ export interface TemplateMetadataPatch {
   // images, when present, replaces the per-service image mapping (editable
   // templates only). Send [] to clear.
   images?: TemplateImage[];
+  // deliveryMode sets the template's default app delivery mode ("pipeline" or
+  // "direct"). Editable (imported) templates only; "" reverts to pipeline.
+  deliveryMode?: string;
 }
 
 // TemplateOverride is the org-level platform values overlay a PE/SRE authors for
@@ -579,6 +585,11 @@ export interface AppEnvironmentSummary {
   release?: AppReleaseRef;
   status: AppStatusSummary;
   preview?: PreviewMeta;
+  /** For direct-delivery apps: whether suparship deploys to this env (effective
+   *  opt-in/out). Always true for pipeline apps. */
+  deploy: boolean;
+  /** Marks the base (lowest-order stable) env, which deploys by default. */
+  isBase: boolean;
 }
 
 export interface AppSummary {
@@ -617,6 +628,9 @@ export interface AppDetail {
   // Per-slot image repository bindings (keyed by template slot name). Omitted
   // when the app has none (legacy single-image flow).
   images?: AppImageBinding[];
+  // "pipeline" (Kargo + promotion) or "direct" (deploy each env from values, no
+  // Kargo). "" is treated as pipeline.
+  deliveryMode?: string;
   // Whether this app supports preview (ephemeral PR) environments. Default true.
   previewsEnabled: boolean;
 }
@@ -811,6 +825,8 @@ export interface CreateAppRequest {
   cd?: CDConfig;
   /** Per-slot image repository bindings (keyed by template slot name). */
   images?: AppImageBinding[];
+  /** "pipeline" (default) or "direct". Omit to inherit the template default. */
+  deliveryMode?: string;
 }
 
 export interface CreateAppResponse {

@@ -298,7 +298,12 @@ function ConfigureStep({
   const [namespaceScope, setNamespaceScope] = useState<"app" | "project">("app");
   const [namespacePattern, setNamespacePattern] = useState("");
   const [cdManaged, setCdManaged] = useState(false);
-  // Per-slot image repository the app binds, keyed by template slot name.
+  // Delivery mode, defaulted from the template (a valkey/redis/postgres template
+  // declares "direct"); the user can override. "direct" skips Kargo/promotion.
+  const [deliveryMode, setDeliveryMode] = useState<string>(
+    template.deliveryMode === "direct" ? "direct" : "pipeline",
+  );
+  const isDirect = deliveryMode === "direct";
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
@@ -386,7 +391,8 @@ function ConfigureStep({
         namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
         namespacePattern: namespacePattern.trim() || undefined,
         rawValues: Object.keys(overlay).length > 0 ? overlay : undefined,
-        cd: cdManaged ? { managed: true } : undefined,
+        cd: !isDirect && cdManaged ? { managed: true } : undefined,
+        deliveryMode,
       });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not reach the server.");
@@ -436,7 +442,7 @@ function ConfigureStep({
       </div>
 
       {/* Deployment targets (read-only) */}
-      <DeploymentTargets envs={orgEnvs} />
+      <DeploymentTargets envs={orgEnvs} direct={isDirect} />
 
       {/* App name */}
       <div>
@@ -559,24 +565,64 @@ function ConfigureStep({
         </div>
       </FormSection>
 
-      {/* Continuous delivery */}
-      <FormSection title="Continuous delivery">
-        <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
-          <input
-            type="checkbox"
-            checked={cdManaged}
-            onChange={(e) => setCdManaged(e.target.checked)}
-            className="h-4 w-4 rounded border-gray-300"
-          />
-          Image tag managed by Kargo
-        </label>
-        <p className="mt-1 text-xs text-gray-400">
-          When enabled, Kargo owns the image tag: it commits the
-          discovered/promoted tag and re-publishing preserves it instead of
-          resetting to your overrides. The tag you set in values acts only as the
-          initial seed. After creating the app, choose which images Kargo watches
-          from its Overview → Images (discovered from the app's live values).
-        </p>
+      {/* Delivery */}
+      <FormSection title="Delivery">
+        <div className="space-y-2">
+          <label className="flex items-start gap-2 text-sm text-gray-700">
+            <input
+              type="radio"
+              name="deliveryMode"
+              checked={!isDirect}
+              onChange={() => setDeliveryMode("pipeline")}
+              className="mt-1 h-4 w-4 border-gray-300"
+            />
+            <span>
+              <span className="font-medium">Pipeline</span>
+              <span className="block text-xs text-gray-400">
+                CI builds the image; Kargo watches it and you promote
+                staging→prod. For your own services.
+              </span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-sm text-gray-700">
+            <input
+              type="radio"
+              name="deliveryMode"
+              checked={isDirect}
+              onChange={() => setDeliveryMode("direct")}
+              className="mt-1 h-4 w-4 border-gray-300"
+            />
+            <span>
+              <span className="font-medium">Direct (from values)</span>
+              <span className="block text-xs text-gray-400">
+                Deploy each environment straight from its values — no Kargo, no
+                promotion. For off-the-shelf software (valkey, redis, postgres)
+                with a pinned image tag.
+              </span>
+            </span>
+          </label>
+        </div>
+
+        {!isDirect && (
+          <div className="mt-4 border-t border-gray-100 pt-4">
+            <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
+              <input
+                type="checkbox"
+                checked={cdManaged}
+                onChange={(e) => setCdManaged(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              Image tag managed by Kargo
+            </label>
+            <p className="mt-1 text-xs text-gray-400">
+              When enabled, Kargo owns the image tag: it commits the
+              discovered/promoted tag and re-publishing preserves it instead of
+              resetting to your overrides. The tag you set in values acts only as
+              the initial seed. After creating the app, choose which images Kargo
+              watches from its Overview → Images.
+            </p>
+          </div>
+        )}
       </FormSection>
 
       {/* Secret inputs */}
@@ -704,7 +750,13 @@ function effectiveClusters(env: OrgEnvironment): string[] {
 // environment (the app is created across all of them), which env gets the first
 // deploy (lowest order), and the cluster(s) each env maps to. The env→cluster
 // binding is owned by platform engineers in org settings, not chosen per app.
-function DeploymentTargets({ envs }: { envs: OrgEnvironment[] }) {
+function DeploymentTargets({
+  envs,
+  direct,
+}: {
+  envs: OrgEnvironment[];
+  direct?: boolean;
+}) {
   if (envs.length === 0) return null;
   const sorted = [...envs].sort((a, b) => a.order - b.order);
 
@@ -729,12 +781,12 @@ function DeploymentTargets({ envs }: { envs: OrgEnvironment[] }) {
                 </span>
                 <span
                   className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                    i === 0
+                    direct || i === 0
                       ? "bg-indigo-50 text-indigo-600"
                       : "bg-gray-100 text-gray-500"
                   }`}
                 >
-                  {i === 0 ? "first deploy" : "via promotion"}
+                  {direct ? "from values" : i === 0 ? "first deploy" : "via promotion"}
                 </span>
                 {(env.deployMode ?? "active") === "all" && (
                   <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
@@ -754,9 +806,9 @@ function DeploymentTargets({ envs }: { envs: OrgEnvironment[] }) {
         })}
       </ul>
       <p className="border-t border-gray-100 px-4 py-2 text-xs text-gray-400">
-        The app is created in every environment; the lowest one deploys first and
-        you promote to advance it. Clusters are bound per environment in org
-        settings — not chosen per app.
+        {direct
+          ? "The app is created in every environment and each deploys straight from its own values — no promotion. Clusters are bound per environment in org settings — not chosen per app."
+          : "The app is created in every environment; the lowest one deploys first and you promote to advance it. Clusters are bound per environment in org settings — not chosen per app."}
       </p>
     </div>
   );

@@ -62,6 +62,10 @@ type TemplateDetailDTO struct {
 	// wiring: which repo to watch and which values key holds each tag. Editable
 	// in template settings; auto-detected at import.
 	Images []TemplateImageDTO `json:"images,omitempty"`
+	// DeliveryMode is the template's default app delivery mode: "pipeline"
+	// (Kargo + promotion) or "direct" (deploy each env from values, no Kargo).
+	// "" means pipeline. The create wizard pre-selects this.
+	DeliveryMode string `json:"deliveryMode,omitempty"`
 	// Editable is true when metadata can be edited in place (cluster-stored and
 	// NOT managed by an external sync). Source describes provenance.
 	Editable bool               `json:"editable"`
@@ -447,6 +451,10 @@ func (th *templateHandler) handleDetail(w http.ResponseWriter, r *http.Request) 
 			if len(ov.Images) > 0 {
 				dto.Images = imagesOverrideToDTO(ov.Images)
 			}
+			// A delivery-mode override (sync-safe) wins over the template's own.
+			if ov.DeliveryMode != "" {
+				dto.DeliveryMode = ov.DeliveryMode
+			}
 		}
 	}
 	src, editable := th.templateProvenance(r.Context(), name)
@@ -517,6 +525,7 @@ func templateToDetail(t *tpl.Template) TemplateDetailDTO {
 		EnvValues:             t.Spec.EnvValues,
 		InjectCanonicalValues: t.Spec.InjectCanonicalValues,
 		Images:                imagesToDTO(t.Spec.Images),
+		DeliveryMode:          t.Spec.DeliveryMode,
 	}
 }
 

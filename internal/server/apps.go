@@ -99,6 +99,12 @@ type AppEnvironmentSummaryDTO struct {
 	Release *AppReleaseRefDTO   `json:"release,omitempty"`
 	Status  AppStatusSummaryDTO `json:"status"`
 	Preview *PreviewMetaDTO     `json:"preview,omitempty"`
+	// Deploy reports whether a direct-delivery app deploys to this env (effective:
+	// explicit opt-in/out, else base default-on / higher default-off). Always true
+	// for pipeline apps. IsBase marks the base (lowest-Order stable) env, which
+	// deploys by default. Both drive the per-env deploy toggles in the UI.
+	Deploy bool `json:"deploy"`
+	IsBase bool `json:"isBase"`
 }
 
 // --- App summary (list view) ---
@@ -167,6 +173,9 @@ type AppDetailDTO struct {
 	// Images surfaces the app's per-slot image repository bindings so the UI can
 	// render and edit them. Omitted when the app has none.
 	Images []AppImageBindingDTO `json:"images,omitempty"`
+	// DeliveryMode is "pipeline" (Kargo + promotion) or "direct" (deploy each env
+	// from values, no Kargo). Always present; "" is treated as pipeline.
+	DeliveryMode string `json:"deliveryMode"`
 	// PreviewsEnabled reports whether this app supports preview (ephemeral PR)
 	// environments. Defaults to true on create; editable via the update endpoint.
 	PreviewsEnabled bool `json:"previewsEnabled"`
@@ -307,6 +316,9 @@ type createAppRequest struct {
 	// Images binds the template's image slots to concrete repositories for this
 	// app, keyed by slot Name. Optional; omit for the legacy single-image flow.
 	Images []AppImageBindingDTO `json:"images,omitempty"`
+	// DeliveryMode is "pipeline" (default) or "direct". Omit to inherit the
+	// template's declared default (else pipeline).
+	DeliveryMode string `json:"deliveryMode,omitempty"`
 }
 
 // createAppResponse is the JSON body returned on a successful app creation.
@@ -354,6 +366,15 @@ type updateAppRequest struct {
 	// bindings (keyed by slot Name). Send an empty array to clear them; omit to
 	// leave unchanged.
 	Images *[]AppImageBindingDTO `json:"images,omitempty"`
+	// DeliveryMode, when non-empty, switches the app's delivery mode ("pipeline"
+	// or "direct"). Omit to leave unchanged.
+	DeliveryMode string `json:"deliveryMode,omitempty"`
+	// DeployEnvs, for direct-delivery apps, opts environments in/out of being
+	// deployed, keyed by env name → deploy. Applied to each env's per-env Deploy
+	// flag and re-published (opting in writes the env; opting out leaves a running
+	// env in place — use the undeploy endpoint to remove it). Omit to leave
+	// unchanged.
+	DeployEnvs map[string]bool `json:"deployEnvs,omitempty"`
 	// PreviewsEnabled, when non-nil, toggles whether this app supports preview
 	// (ephemeral PR) environments. Omit to leave unchanged.
 	PreviewsEnabled *bool `json:"previewsEnabled,omitempty"`

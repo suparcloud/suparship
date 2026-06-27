@@ -148,6 +148,12 @@ type TemplateSpec struct {
 	// templates that don't opt into image-driven CD (the publisher then falls
 	// back to the legacy single-image behaviour).
 	Images []TemplateImage `yaml:"images,omitempty"`
+	// DeliveryMode is the default delivery mode for apps created from this
+	// template: "pipeline" (default; "" == this) for CI-image apps promoted via
+	// Kargo, or "direct" for off-the-shelf software (valkey, redis, postgres)
+	// deployed to each env straight from values with no Kargo/promotion. The
+	// create wizard pre-selects this; the user can override per app.
+	DeliveryMode string `yaml:"deliveryMode,omitempty"`
 }
 
 // TemplateImage maps one of a chart's services to its image source and the Helm

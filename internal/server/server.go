@@ -73,6 +73,10 @@ type GitOpsPublisher interface {
 	// resource directories, Kargo CRs) and commits + pushes the deletion.
 	// It is a no-op if no files exist for the app.
 	UnpublishApp(ctx context.Context, projectName, appName string) error
+	// RemoveAppEnv removes a single environment's GitOps files for an app so
+	// ArgoCD prunes that env's workload, leaving other envs and apps intact.
+	// The explicit "remove from cluster" action for a direct-delivery env.
+	RemoveAppEnv(ctx context.Context, projectName, appName, envName string) error
 	// UnpublishProjectApps removes the project's app directories, preview
 	// trees, and Kargo CRs (phase 1 of project deletion). The AppProject is
 	// intentionally kept — ArgoCD needs it to cascade-delete the generated
@@ -274,6 +278,18 @@ func (h *PublisherHolder) UnpublishApp(ctx context.Context, projectName, appName
 		return nil
 	}
 	return p.UnpublishApp(ctx, projectName, appName)
+}
+
+// RemoveAppEnv implements GitOpsPublisher. It delegates to the currently held
+// publisher; if none is set it returns nil (no-op).
+func (h *PublisherHolder) RemoveAppEnv(ctx context.Context, projectName, appName, envName string) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.RemoveAppEnv(ctx, projectName, appName, envName)
 }
 
 // UnpublishProjectApps implements GitOpsPublisher. It delegates to the

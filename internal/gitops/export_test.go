@@ -18,6 +18,16 @@ func (p *Publisher) SyncAddonChartsForTest(ctx context.Context, repoDir string, 
 	return p.syncAddonCharts(ctx, repoDir, app, envs)
 }
 
+// RemoveAppEnvFilesForTest exposes removeAppEnvFiles for white-box unit testing.
+func (p *Publisher) RemoveAppEnvFilesForTest(repoDir, projectName, appName, envName string) (bool, error) {
+	return p.removeAppEnvFiles(repoDir, projectName, appName, envName)
+}
+
+// CleanupKargoCRsForTest exposes cleanupKargoCRs for white-box unit testing.
+func (p *Publisher) CleanupKargoCRsForTest(repoDir string, app *domain.App) error {
+	return p.cleanupKargoCRs(repoDir, app)
+}
+
 // PublishKargoCRsForTest exposes publishKargoCRs for white-box unit testing.
 // It writes Kargo Namespace, Warehouse, and Stage files into repoDir/gitops-output/_infra/kargo/
 // without any git operations so tests can assert on the generated YAML without
@@ -53,6 +63,11 @@ func (p *Publisher) DeletePreviewForTest(repoDir, projectName, previewName strin
 // FirstDeployEnvsForTest exposes firstDeployEnvs for unit testing.
 func FirstDeployEnvsForTest(envs []AppPublishEnv) []AppPublishEnv {
 	return firstDeployEnvs(envs)
+}
+
+// EnabledDeployEnvsForTest exposes enabledDeployEnvs for unit testing.
+func EnabledDeployEnvsForTest(app *domain.App, envs []AppPublishEnv) []AppPublishEnv {
+	return enabledDeployEnvs(app, envs)
 }
 
 // ChartVersionDirForTest / ChartPathForTest expose the version-scoped chart

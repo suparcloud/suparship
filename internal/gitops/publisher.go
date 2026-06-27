@@ -485,6 +485,44 @@ func firstDeployEnvs(envs []AppPublishEnv) []AppPublishEnv {
 	return result
 }
 
+// enabledDeployEnvs returns the deploy set for a direct-delivery app: previews
+// always, plus the bound stable envs the app opts into. The base env (lowest
+// Order) deploys by default; higher envs are opt-in; an explicit per-env Deploy
+// override (app.Spec.EnvironmentDefaults[env].Deploy) wins either way. A
+// disabled env is simply omitted — its existing files are left untouched, so the
+// workload keeps running until an explicit removal. Unbound envs are skipped.
+func enabledDeployEnvs(app *domain.App, envs []AppPublishEnv) []AppPublishEnv {
+	// Determine the base (lowest-Order) bound stable env.
+	stable := make([]AppPublishEnv, 0, len(envs))
+	for _, env := range envs {
+		if env.EnvType != domain.AppEnvPreview && env.Bound {
+			stable = append(stable, env)
+		}
+	}
+	sort.Slice(stable, func(i, j int) bool {
+		if stable[i].Order != stable[j].Order {
+			return stable[i].Order < stable[j].Order
+		}
+		return stable[i].EnvName < stable[j].EnvName
+	})
+	baseEnv := ""
+	if len(stable) > 0 {
+		baseEnv = stable[0].EnvName
+	}
+
+	result := make([]AppPublishEnv, 0, len(envs))
+	for _, env := range envs {
+		if env.EnvType == domain.AppEnvPreview {
+			result = append(result, env)
+			continue
+		}
+		if env.Bound && app.Spec.DeploysToEnv(env.EnvName, env.EnvName == baseEnv) {
+			result = append(result, env)
+		}
+	}
+	return result
+}
+
 // PublishApp writes the per-app app.yaml and values.yaml for each environment,
 // plus Kargo Warehouse and Stage CRs so promotions are wired automatically.
 //
@@ -505,8 +543,14 @@ func firstDeployEnvs(envs []AppPublishEnv) []AppPublishEnv {
 // PublishApp is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppPublishEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		// Only write app/values files for the first env (+ previews) on create.
-		if err := p.publishAppFiles(repoDir, app, firstDeployEnvs(envs)); err != nil {
+		// Pipeline apps deploy only the first stable env (+ previews) on create;
+		// prod waits for a promotion. Direct apps have no promotion, so every bound
+		// stable env deploys from its own values immediately.
+		deployEnvs := firstDeployEnvs(envs)
+		if app.Spec.IsDirect() {
+			deployEnvs = enabledDeployEnvs(app, envs)
+		}
+		if err := p.publishAppFiles(repoDir, app, deployEnvs); err != nil {
 			return err
 		}
 
@@ -535,8 +579,14 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 		}
 
 		// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
-		// full promotion pipeline is wired from day one.
-		if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
+		// full promotion pipeline is wired from day one. Direct-delivery apps have
+		// no pipeline — remove any Kargo CRs the app may have had (e.g. it was
+		// switched from pipeline→direct) so they don't linger and keep watching.
+		if app.Spec.IsDirect() {
+			if err := p.cleanupKargoCRs(repoDir, app); err != nil {
+				return fmt.Errorf("cleanup kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
+			}
+		} else if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
 			return fmt.Errorf("write kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
 		}
 
@@ -1412,6 +1462,47 @@ func (p *Publisher) kargoProjectConfigPath(kargoDir, projectNS string) string {
 	return filepath.Join(kargoDir, projectNS+"-projectconfig.yaml")
 }
 
+// cleanupKargoCRs removes an app's Kargo Warehouse + Stage files and drops its
+// promotion policies from the shared per-project ProjectConfig. It is called for
+// direct-delivery apps so an app switched from pipeline→direct doesn't leave
+// stale Kargo CRs behind in Git (they'd otherwise keep watching images and
+// gating a promotion that no longer exists). Idempotent: a no-op when the app
+// has no Kargo files.
+func (p *Publisher) cleanupKargoCRs(repoDir string, app *domain.App) error {
+	kargoDir := p.outputDir(repoDir, "_infra", "kargo")
+	projectNS := KargoNamespaceForProject(app.ProjectName)
+
+	for _, pattern := range []string{
+		filepath.Join(kargoDir, projectNS+"-"+app.Name+"-warehouse.yaml"),
+		filepath.Join(kargoDir, projectNS+"-"+app.Name+"-*-stage.yaml"),
+	} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return fmt.Errorf("glob kargo files %s: %w", pattern, err)
+		}
+		for _, m := range matches {
+			if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove kargo file %s: %w", m, err)
+			}
+		}
+	}
+
+	// Drop this app's promotion policies from the project's shared ProjectConfig,
+	// preserving any sibling pipeline apps' policies. Only rewrite when something
+	// changed, so a project with no Kargo at all doesn't get a spurious file.
+	existing, err := p.readKargoPromotionPolicies(kargoDir, projectNS)
+	if err != nil {
+		return err
+	}
+	merged := MergeKargoPromotionPolicies(existing, app.Name, nil)
+	if len(merged) != len(existing) {
+		if err := p.writeKargoProjectConfig(kargoDir, app.ProjectName, merged); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // readKargoPromotionPolicies returns the promotion policies currently recorded
 // in the project's ProjectConfig manifest, or nil when it does not yet exist.
 // Callers merge their app's policies into the result before re-writing (multiple
@@ -1877,6 +1968,54 @@ func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName strin
 		commitMsg := fmt.Sprintf("feat(apps): delete app %s/%s\n\nDeleted by suparShip.", projectName, appName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// RemoveAppEnv removes a SINGLE environment's GitOps manifests for an app —
+// envs/{env}/{project}/{app}/ (and its _clusters/* fan-out values) plus
+// _app-resources/{env}/{project}/{app}/ — then commits + pushes. ArgoCD's
+// automated prune then removes that env's workload. This is the explicit,
+// deliberate "remove from cluster" action for a direct-delivery app; it is NOT a
+// side effect of toggling an env off (that merely stops publishing). Other envs
+// and other apps are untouched. No-op when the env has no files.
+func (p *Publisher) RemoveAppEnv(ctx context.Context, projectName, appName, envName string) error {
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		removed, err := p.removeAppEnvFiles(repoDir, projectName, appName, envName)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			slog.Debug("gitops: no env files found — nothing to remove",
+				"project", projectName, "app", appName, "env", envName)
+			return nil
+		}
+		commitMsg := fmt.Sprintf("feat(apps): remove %s/%s from %s\n\nRemoved by suparShip.", projectName, appName, envName)
+		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
+// removeAppEnvFiles deletes one env's app + platform-resource trees (and any
+// per-cluster fan-out values) for an app, returning whether anything was removed.
+// No git ops — the caller commits. Other envs and other apps are untouched.
+func (p *Publisher) removeAppEnvFiles(repoDir, projectName, appName, envName string) (bool, error) {
+	var u unpublishHelper
+	for _, base := range []string{"envs", "_app-resources"} {
+		if err := u.rm(p.outputDir(repoDir, base, envName, projectName, appName)); err != nil {
+			return false, err
+		}
+		// Per-cluster fan-out values: {base}/{env}/_clusters/{cluster}/{project}/{app}.
+		clustersDir := p.outputDir(repoDir, base, envName, "_clusters")
+		if cents, cerr := os.ReadDir(clustersDir); cerr == nil {
+			for _, c := range cents {
+				if !c.IsDir() {
+					continue
+				}
+				if err := u.rm(filepath.Join(clustersDir, c.Name(), projectName, appName)); err != nil {
+					return false, err
+				}
+			}
+		}
+	}
+	return u.removed, nil
 }
 
 // kargoManifestLabel reads a Kargo manifest file and returns the value of the

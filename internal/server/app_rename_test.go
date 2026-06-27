@@ -37,6 +37,7 @@ func (p *renamePublisher) UnpublishApp(_ context.Context, _, app string) error {
 	p.unpublished = append(p.unpublished, app)
 	return nil
 }
+func (p *renamePublisher) RemoveAppEnv(_ context.Context, _, _, _ string) error    { return nil }
 func (p *renamePublisher) UnpublishProjectApps(_ context.Context, _ string) error  { return nil }
 func (p *renamePublisher) UnpublishProjectInfra(_ context.Context, _ string) error { return nil }
 

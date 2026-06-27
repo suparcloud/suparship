@@ -716,12 +716,16 @@ function MetadataSection({
   const [passthrough, setPassthrough] = useState(
     template.injectCanonicalValues === false,
   );
+  const [deliveryMode, setDeliveryMode] = useState(
+    template.deliveryMode === "direct" ? "direct" : "pipeline",
+  );
 
   function reset() {
     setTitle(template.title);
     setCategory(template.category);
     setDescription(template.description ?? "");
     setPassthrough(template.injectCanonicalValues === false);
+    setDeliveryMode(template.deliveryMode === "direct" ? "direct" : "pipeline");
     setEditing(false);
   }
 
@@ -732,9 +736,11 @@ function MetadataSection({
         title,
         category,
         description,
-        // The passthrough toggle only applies to in-place edits; the override
-        // path is display-metadata only and rejects injectCanonicalValues.
+        // The passthrough toggle only applies to in-place edits (it rewrites the
+        // chart body). Delivery mode is supported on both paths — in place for
+        // imported templates, as a sync-safe override for synced/built-in ones.
         ...(inPlace ? { injectCanonicalValues: !passthrough } : {}),
+        deliveryMode,
       });
       onUpdated(updated);
       toast.success(
@@ -825,6 +831,25 @@ function MetadataSection({
               </span>
             </label>
           )}
+          <label className="block">
+            <span className="text-xs font-medium text-gray-500">
+              Delivery mode
+            </span>
+            <select
+              value={deliveryMode}
+              onChange={(e) => setDeliveryMode(e.target.value)}
+              className="mt-1 w-full max-w-2xl rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+            >
+              <option value="pipeline">Pipeline (Kargo + promotion)</option>
+              <option value="direct">Direct (deploy each env from values)</option>
+            </select>
+            <span className="mt-1 block text-xs text-gray-400">
+              Apps created from this template default to this. "Direct" suits
+              off-the-shelf software (valkey, redis, postgres) with a pinned
+              image — no Kargo, no promotion.
+              {!inPlace && " Saved as a sync-safe override."}
+            </span>
+          </label>
         </div>
       </div>
     );
@@ -839,6 +864,9 @@ function MetadataSection({
       <div className="mt-2 flex items-center justify-between gap-3">
         <span className="text-xs text-gray-400">
           {valuesModeLabel(template)}
+          {template.deliveryMode === "direct"
+            ? " · direct delivery"
+            : " · pipeline delivery"}
           {template.source?.origin === "synced" && template.source.externalRepo
             ? ` · managed by ${template.source.externalRepo}`
             : template.source?.origin === "builtin"

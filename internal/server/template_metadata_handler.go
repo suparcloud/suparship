@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/kube"
@@ -20,6 +21,12 @@ type templateMetadataPatch struct {
 	// (external-CD wiring). Only honored for editable (imported) templates; send
 	// an empty array to clear it. Read-only/synced templates reject it.
 	Images *[]TemplateImageDTO `json:"images,omitempty"`
+	// DeliveryMode, when non-nil, sets the template's default app delivery mode:
+	// "pipeline" (Kargo + promotion) or "direct" (deploy each env from values, no
+	// Kargo); "" reverts to the default (pipeline). Only honored for editable
+	// (imported) templates — it changes app-creation semantics, not display
+	// metadata, so read-only/synced templates reject it (set it at the source).
+	DeliveryMode *string `json:"deliveryMode,omitempty"`
 }
 
 // handleUpdateTemplateMetadata serves PATCH /api/v1/templates/{name}.
@@ -94,6 +101,14 @@ func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r
 	if patch.Images != nil {
 		updated.Spec.Images = imagesFromDTO(*patch.Images)
 	}
+	if patch.DeliveryMode != nil {
+		mode := strings.TrimSpace(*patch.DeliveryMode)
+		if mode != "" && mode != string(domain.DeliveryPipeline) && mode != string(domain.DeliveryDirect) {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "deliveryMode must be \"pipeline\" or \"direct\""})
+			return
+		}
+		updated.Spec.DeliveryMode = mode
+	}
 
 	if err := updated.Validate(); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -142,6 +157,13 @@ func (th *templateHandler) updateMetadataViaOverride(
 		})
 		return
 	}
+	if patch.DeliveryMode != nil {
+		mode := strings.TrimSpace(*patch.DeliveryMode)
+		if mode != "" && mode != string(domain.DeliveryPipeline) && mode != string(domain.DeliveryDirect) {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "deliveryMode must be \"pipeline\" or \"direct\""})
+			return
+		}
+	}
 
 	ov, err := kube.LoadTemplateOverride(r.Context(), th.kubeClient, name)
 	if err != nil {
@@ -181,6 +203,11 @@ func (th *templateHandler) updateMetadataViaOverride(
 		}
 		ov.Images = imagesToOverride(*patch.Images)
 	}
+	// Delivery mode is a sync-safe override too: it sets how apps from this
+	// template deliver (pipeline vs direct), not source chart content.
+	if patch.DeliveryMode != nil {
+		ov.DeliveryMode = strings.TrimSpace(*patch.DeliveryMode)
+	}
 
 	if err := kube.SaveTemplateOverride(r.Context(), th.kubeClient, name, ov); err != nil {
 		if th.logger != nil {
@@ -194,6 +221,9 @@ func (th *templateHandler) updateMetadataViaOverride(
 	dto.Title, dto.Category, dto.Description = applyMetadataOverride(dto.Title, dto.Category, dto.Description, ov.Metadata)
 	if len(ov.Images) > 0 {
 		dto.Images = imagesOverrideToDTO(ov.Images)
+	}
+	if ov.DeliveryMode != "" {
+		dto.DeliveryMode = ov.DeliveryMode
 	}
 	dto.Source, dto.Editable = th.templateProvenance(r.Context(), name)
 	writeJSON(w, http.StatusOK, dto)

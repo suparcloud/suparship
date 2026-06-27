@@ -98,6 +98,22 @@ func seedFullPromotionChain(store *memAppStore, projectName string) {
 	})
 }
 
+// A direct-delivery app has no promotion pipeline — promoting it is rejected.
+func TestAppPromote_DirectAppRejected(t *testing.T) {
+	mux, ah, store := newTestAppPromoteMux(testProject)
+	app := promoteTestApp(testProject)
+	app.Spec.DeliveryMode = domain.DeliveryDirect
+	store.addApp(app)
+	seedFullPromotionChain(store, testProject)
+
+	rec := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for promoting a direct app, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // --- Happy-path tests ---
 
 // TestAppPromoteStagingFromPreview verifies that promoting to staging selects
@@ -577,6 +593,7 @@ func TestAppPromoteThreeEnvChain(t *testing.T) {
 // recordingPublisher is a GitOpsPublisher stub that records PublishAppEnv calls.
 type recordingPublisher struct {
 	publishedEnvs []string
+	removedEnvs   []string
 }
 
 func (r *recordingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*domain.AppEnvironment) error {
@@ -589,7 +606,11 @@ func (r *recordingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, env
 func (r *recordingPublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _, _ string) error {
 	return nil
 }
-func (r *recordingPublisher) UnpublishApp(_ context.Context, _, _ string) error       { return nil }
+func (r *recordingPublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }
+func (r *recordingPublisher) RemoveAppEnv(_ context.Context, _, _, env string) error {
+	r.removedEnvs = append(r.removedEnvs, env)
+	return nil
+}
 func (r *recordingPublisher) UnpublishProjectApps(_ context.Context, _ string) error  { return nil }
 func (r *recordingPublisher) UnpublishProjectInfra(_ context.Context, _ string) error { return nil }
 
@@ -660,6 +681,7 @@ func (f *failingPublisher) PublishAppPreview(_ context.Context, _ *domain.App, _
 	return fmt.Errorf("simulated publish failure")
 }
 func (f *failingPublisher) UnpublishApp(_ context.Context, _, _ string) error       { return nil }
+func (f *failingPublisher) RemoveAppEnv(_ context.Context, _, _, _ string) error    { return nil }
 func (f *failingPublisher) UnpublishProjectApps(_ context.Context, _ string) error  { return nil }
 func (f *failingPublisher) UnpublishProjectInfra(_ context.Context, _ string) error { return nil }
 
