@@ -94,6 +94,7 @@ type envConfigHandler struct {
 	orgStore         rbac.OrgStore
 	projectStore     project.Store
 	appStore         domain.AppStore
+	stackStore       domain.StackStore              // optional: enables stack-scope env layers
 	upperLevelWriter *envconfig.UpperLevelEnvWriter // optional: writes k8s ConfigMaps
 	publisher        GitOpsPublisher                // optional: async re-publish
 	logger           *slog.Logger
@@ -422,6 +423,58 @@ func (h *envConfigHandler) handlePutProjectEnvConfig(w http.ResponseWriter, r *h
 	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
 }
 
+// handleGetProjectEnvEnvConfig serves
+// GET /api/v1/projects/{project}/envconfig/env/{env} — a project's variables for
+// one specific environment (the project-env level), mirroring project-env secrets.
+func (h *envConfigHandler) handleGetProjectEnvEnvConfig(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	envName := r.PathValue("env")
+
+	proj, err := h.projectStore.Get(r.Context(), projectName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "project not found: " + projectName})
+		return
+	}
+	writeJSON(w, http.StatusOK, toEnvConfigDTO(proj.Spec.EnvConfigByEnv[envName]))
+}
+
+// handlePutProjectEnvEnvConfig serves
+// PUT /api/v1/projects/{project}/envconfig/env/{env}. The values are baked into
+// each app's per-env ConfigMap on the next publish (scheduled below).
+func (h *envConfigHandler) handlePutProjectEnvEnvConfig(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	envName := r.PathValue("env")
+
+	dto, ok := decodeEnvConfigDTO(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	cfg := fromEnvConfigDTO(dto)
+	if err := envconfig.ValidateEnvConfig(cfg); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
+	proj, err := h.projectStore.Get(r.Context(), projectName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "project not found: " + projectName})
+		return
+	}
+	if proj.Spec.EnvConfigByEnv == nil {
+		proj.Spec.EnvConfigByEnv = map[string]envconfig.EnvConfig{}
+	}
+	proj.Spec.EnvConfigByEnv[envName] = cfg
+	if err := h.projectStore.Save(r.Context(), proj); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save project"})
+		return
+	}
+
+	h.scheduleRepublishProjectApps(projectName, "project-env-envconfig")
+
+	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
+}
+
 // ── Level 4 — App ─────────────────────────────────────────────────────────────
 
 // handleGetAppEnvConfig serves GET /api/v1/projects/{project}/apps/{app}/envconfig.
@@ -561,6 +614,7 @@ func (h *envConfigHandler) handleGetResolvedEnvConfig(w http.ResponseWriter, r *
 		return
 	}
 	projectCfg := proj.Spec.EnvConfig
+	projectEnvCfg := proj.Spec.EnvConfigByEnv[envName]
 
 	app, err := h.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
@@ -570,16 +624,26 @@ func (h *envConfigHandler) handleGetResolvedEnvConfig(w http.ResponseWriter, r *
 	appCfg := app.Spec.EnvConfig
 	appEnvCfg := appEnvConfig(app, envName)
 
+	// Stack levels: a member app inherits its stack's global + per-env config
+	// (between project-env and app). Empty when the app is not in a stack.
+	var stackCfg, stackEnvCfg envconfig.EnvConfig
+	if app.Spec.Stack != "" && h.stackStore != nil {
+		if st, serr := h.stackStore.GetStack(ctx, projectName, app.Spec.Stack); serr == nil && st != nil {
+			stackCfg = st.Spec.EnvConfig
+			stackEnvCfg = st.Spec.EnvConfigByEnv[envName]
+		}
+	}
+
 	// Cluster level: read the runtime ConfigMap for the cluster bound to envName.
 	// Empty when the env is unbound or no writer is configured.
 	clusterCfg := h.readClusterEnvConfig(ctx, org.Environments, envName)
 
-	_, resolved := envconfig.ResolveEnvLayers(orgCfg, envCfg, projectCfg, appCfg, appEnvCfg, clusterCfg)
+	_, resolved := envconfig.ResolveEnvLayers(orgCfg, envCfg, projectCfg, projectEnvCfg, stackCfg, stackEnvCfg, appCfg, appEnvCfg, clusterCfg)
 
 	// Build a lookup of plain-text values by merging Vars in hierarchy order
 	// (lower levels first, higher wins). Secret values are not included.
 	plainValues := make(map[string]string)
-	for _, cfg := range []envconfig.EnvConfig{orgCfg, envCfg, projectCfg, appCfg, appEnvCfg, clusterCfg} {
+	for _, cfg := range []envconfig.EnvConfig{orgCfg, envCfg, projectCfg, projectEnvCfg, stackCfg, stackEnvCfg, appCfg, appEnvCfg, clusterCfg} {
 		for k, v := range cfg.Vars {
 			plainValues[k] = v
 		}
@@ -880,6 +944,21 @@ func (h *envConfigHandler) collectConfigVars(ctx context.Context, org *rbac.Org,
 	if projectName != "" {
 		if proj, err := h.projectStore.Get(ctx, projectName); err == nil && proj != nil {
 			add("project", proj.Spec.EnvConfig.Vars)
+			for _, e := range org.Environments {
+				add("project:"+e.Name, proj.Spec.EnvConfigByEnv[e.Name].Vars)
+			}
+		}
+		// Stack scope: each stack in the project contributes its global +
+		// per-env vars, scope-labelled so the picker shows where each comes from.
+		if h.stackStore != nil {
+			if stacks, err := h.stackStore.ListStacks(ctx, projectName); err == nil {
+				for _, st := range stacks {
+					add("stack:"+st.Name, st.Spec.EnvConfig.Vars)
+					for _, e := range org.Environments {
+						add("stack:"+st.Name+":"+e.Name, st.Spec.EnvConfigByEnv[e.Name].Vars)
+					}
+				}
+			}
 		}
 	}
 	// Cluster scope: read each distinct bound cluster's runtime env ConfigMap.

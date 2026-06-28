@@ -1209,6 +1209,7 @@ func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *doma
 //  1. org           (org.EnvConfig.Vars)
 //  2. env-type      (org.Environments[envName].EnvConfig.Vars)
 //  3. project       (project.Spec.EnvConfig.Vars)
+//  3b. project-env   (project.Spec.EnvConfigByEnv[env].Vars)
 //  4. app           (app.Spec.EnvConfig.Vars)
 //  5. app-env       (app.Spec.EnvironmentDefaults[envName].EnvConfig.Vars)
 //  6. cluster       (suparship-envvars-cluster-{name} ConfigMap data)
@@ -1239,6 +1240,10 @@ func (a *gitOpsPublisherAdapter) mergeAllEnvVars(ctx context.Context, app *domai
 			for k, v := range proj.Spec.EnvConfig.Vars {
 				merged[k] = v
 			}
+			// Project per-environment overrides win over project-global.
+			for k, v := range proj.Spec.EnvConfigByEnv[envName].Vars {
+				merged[k] = v
+			}
 		}
 	}
 
@@ -1247,6 +1252,10 @@ func (a *gitOpsPublisherAdapter) mergeAllEnvVars(ctx context.Context, app *domai
 	if app.Spec.Stack != "" && a.stackStore != nil {
 		if st, err := a.stackStore.GetStack(ctx, app.ProjectName, app.Spec.Stack); err == nil && st != nil {
 			for k, v := range st.Spec.EnvConfig.Vars {
+				merged[k] = v
+			}
+			// Stack per-environment overrides win over stack-global.
+			for k, v := range st.Spec.EnvConfigByEnv[envName].Vars {
 				merged[k] = v
 			}
 		}

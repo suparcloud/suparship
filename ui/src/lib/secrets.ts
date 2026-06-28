@@ -133,6 +133,12 @@ export function registerEnvVault(
   return api.post(`/org/secret-backend/vaults/env/${encodeURIComponent(env)}`, body);
 }
 
+// unregisterEnvVault removes an env's vault binding. Editing a binding is just
+// registerEnvVault again with a different vault.
+export function unregisterEnvVault(env: string): Promise<void> {
+  return api.del(`/org/secret-backend/vaults/env/${encodeURIComponent(env)}`);
+}
+
 // ── Per-cluster Connect token (1Password) ───────────────────────────────────
 // One token per cluster, with access to every vault the cluster reads (the
 // global vault + its bound env vaults). suparShip stashes it, seals it, and

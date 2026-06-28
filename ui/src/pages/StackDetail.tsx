@@ -5,6 +5,8 @@ import { toast } from "sonner";
 
 import { ApiError } from "../lib/api";
 import { listApps } from "../lib/apps";
+import { AppTable } from "../components/AppTable";
+import type { AppSummary } from "../types";
 import { listProjectEnvironments } from "../lib/projects";
 import type { ProjectEnvironment } from "../lib/projects";
 import {
@@ -103,7 +105,7 @@ export function StackDetail() {
   const { project, stack: stackName } = useParams<{ project: string; stack: string }>();
   const navigate = useNavigate();
   const [stack, setStack] = useState<Stack | null>(null);
-  const [allApps, setAllApps] = useState<{ name: string; stack?: string }[]>([]);
+  const [allApps, setAllApps] = useState<AppSummary[]>([]);
   const [envs, setEnvs] = useState<ProjectEnvironment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [addApp, setAddApp] = useState("");
@@ -124,7 +126,7 @@ export function StackDetail() {
         listProjectEnvironments(project),
       ]);
       setStack(s);
-      setAllApps(apps.apps.map((a) => ({ name: a.name })));
+      setAllApps(apps.apps);
       setEnvs(envList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load stack");
@@ -143,6 +145,11 @@ export function StackDetail() {
   const members = new Set(memberApps);
   const addable = allApps.filter((a) => !members.has(a.name)).map((a) => a.name);
   const noMembers = memberApps.length === 0;
+  // Member apps as full summaries (with per-env status), in stack order.
+  const byName = new Map(allApps.map((a) => [a.name, a]));
+  const memberSummaries: AppSummary[] = memberApps
+    .map((n) => byName.get(n))
+    .filter((a): a is AppSummary => a !== undefined);
 
   function openModal(kind: ModalKind) {
     setResults(null);
@@ -335,21 +342,23 @@ export function StackDetail() {
               {stack.sharedNamespace ? " and namespace" : ""}. Each keeps its own ArgoCD/Kargo pipeline.
             </p>
           </div>
-          <div className="divide-y divide-gray-50">
-            {noMembers && <p className="px-6 py-4 text-sm text-gray-400">No apps yet. Add one below.</p>}
-            {memberApps.map((a) => (
-              <div key={a} className="flex items-center justify-between px-6 py-3">
-                <Link
-                  to={`/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(a)}`}
-                  className="font-mono text-sm text-gray-900 hover:text-indigo-600"
-                >
-                  {a}
-                </Link>
-                <button onClick={() => move(a, "")} className="text-xs font-medium text-gray-500 hover:text-red-600">
-                  Remove
-                </button>
-              </div>
-            ))}
+          <div className="px-6 py-4">
+            {noMembers ? (
+              <p className="text-sm text-gray-400">No apps yet. Add one below.</p>
+            ) : (
+              <AppTable
+                project={project}
+                apps={memberSummaries}
+                rowAction={(app) => (
+                  <button
+                    onClick={() => move(app.name, "")}
+                    className="text-xs font-medium text-gray-500 hover:text-red-600"
+                  >
+                    Remove
+                  </button>
+                )}
+              />
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t border-gray-100 px-6 py-3">
             <Link
@@ -388,12 +397,38 @@ export function StackDetail() {
 
       {/* Variables */}
       {activeTab === "variables" && (
-        <EnvConfigEditor
-          title="Stack variables"
-          description="Applied to every app in this stack. Overrides project defaults; overridden by app-level values."
-          fetchFn={async (): Promise<EnvConfig> => (await getStack(project, stackName)).envConfig ?? {}}
-          saveFn={(cfg: EnvConfig) => updateStack(project, stackName, { envConfig: cfg })}
-        />
+        <div className="rounded-xl border border-gray-200 bg-white">
+          <div className="border-b border-gray-100 px-6 py-4">
+            <h2 className="text-base font-medium text-gray-900">Stack variables</h2>
+            <p className="mt-0.5 text-sm text-gray-500">
+              Applied to every app in this stack. Override project defaults; overridden by app-level values.
+            </p>
+          </div>
+          <div className="space-y-6 p-6">
+            <EnvConfigEditor
+              title="Global (all environments)"
+              description="Stack variables identical in every environment."
+              fetchFn={async (): Promise<EnvConfig> => (await getStack(project, stackName)).envConfig ?? {}}
+              saveFn={(cfg: EnvConfig) => updateStack(project, stackName, { envConfig: cfg })}
+            />
+            {envs.map((env) => (
+              <EnvConfigEditor
+                key={env.name}
+                title={`${env.displayName || env.name} variables`}
+                description={`Stack variables for the ${env.name} environment. Override the global stack variables above.`}
+                fetchFn={async (): Promise<EnvConfig> =>
+                  (await getStack(project, stackName)).envConfigByEnv?.[env.name] ?? {}
+                }
+                saveFn={async (cfg: EnvConfig) => {
+                  const fresh = await getStack(project, stackName);
+                  await updateStack(project, stackName, {
+                    envConfigByEnv: { ...(fresh.envConfigByEnv ?? {}), [env.name]: cfg },
+                  });
+                }}
+              />
+            ))}
+          </div>
+        </div>
       )}
 
       {/* Secrets */}

@@ -82,6 +82,11 @@ type ProjectSpec struct {
 	// EnvConfig holds env vars and secret refs that apply to all apps within
 	// this project (Project level of the hierarchy).
 	EnvConfig envconfig.EnvConfig `yaml:"envConfig,omitempty"`
+	// EnvConfigByEnv holds project-level per-environment overrides keyed by
+	// environment name (e.g. "staging", "prod") — a project's variables in one
+	// specific environment, layered above EnvConfig and below app config. Mirrors
+	// the project-env secrets scope so Variables and Secrets have matching levels.
+	EnvConfigByEnv map[string]envconfig.EnvConfig `yaml:"envConfigByEnv,omitempty"`
 	// NamespacePattern overrides the org-level default for namespace naming.
 	// Controls both the project's own Kubernetes namespace (when apps use
 	// NamespaceScopeProject) and the fallback for app namespaces.

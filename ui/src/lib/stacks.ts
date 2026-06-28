@@ -13,6 +13,7 @@ export interface Stack {
   rawValues?: Record<string, unknown>;
   envRawValues?: Record<string, Record<string, unknown>>;
   envConfig?: EnvConfig;
+  envConfigByEnv?: Record<string, EnvConfig>;
   apps: string[]; // member app names
 }
 
@@ -37,6 +38,7 @@ export interface UpdateStackRequest {
   rawValues?: Record<string, unknown>;
   envRawValues?: Record<string, Record<string, unknown>>;
   envConfig?: EnvConfig;
+  envConfigByEnv?: Record<string, EnvConfig>;
 }
 
 const base = (project: string) =>

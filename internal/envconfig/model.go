@@ -97,6 +97,16 @@ type EnvLayers struct {
 	Env EnvConfig
 	// Project is the project-level env config.
 	Project EnvConfig
+	// ProjectEnv is the project-level per-environment env config (a project's
+	// variables in one specific environment), overriding Project and overridden
+	// by the stack/app layers. Mirrors the secrets project-env scope.
+	ProjectEnv EnvConfig
+	// Stack is the stack-level env config shared by every app in the stack,
+	// overriding ProjectEnv and overridden by App. Empty for apps not in a stack.
+	Stack EnvConfig
+	// StackEnv is the stack-level per-environment env config, overriding Stack and
+	// overridden by App. Empty for apps not in a stack.
+	StackEnv EnvConfig
 	// App is the app-level env config.
 	App EnvConfig
 	// AppEnv is the app-environment-level env config (most specific app-team layer).
@@ -121,10 +131,13 @@ type ResolvedEnvVar struct {
 
 // LevelName constants are the canonical string identifiers for each level.
 const (
-	LevelOrg        = "org"
+	LevelOrg         = "org"
 	LevelEnvironment = "environment"
-	LevelProject    = "project"
-	LevelApp        = "app"
-	LevelAppEnv     = "app-environment"
-	LevelCluster    = "cluster"
+	LevelProject     = "project"
+	LevelProjectEnv  = "project-environment"
+	LevelStack       = "stack"
+	LevelStackEnv    = "stack-environment"
+	LevelApp         = "app"
+	LevelAppEnv      = "app-environment"
+	LevelCluster     = "cluster"
 )

@@ -650,6 +650,7 @@ func New(cfg Config) *Server {
 				orgStore:         cfg.OrgProvider,
 				projectStore:     cfg.ProjectStore,
 				appStore:         cfg.AppStore,
+				stackStore:       cfg.StackStore,
 				upperLevelWriter: cfg.UpperLevelEnvWriter,
 				publisher:        cfg.GitOpsPublisher,
 				logger:           cfg.Logger,

@@ -14,7 +14,12 @@ import {
 } from "../lib/projects";
 import type { ProjectEnvironment, ProjectNaming } from "../lib/projects";
 import { deleteProject } from "../lib/settings";
-import { getProjectEnvConfig, updateProjectEnvConfig } from "../lib/envconfig";
+import {
+  getProjectEnvConfig,
+  updateProjectEnvConfig,
+  getProjectEnvEnvConfig,
+  updateProjectEnvEnvConfig,
+} from "../lib/envconfig";
 import {
   listProjectGlobalSecretKeys,
   upsertProjectGlobalSecrets,
@@ -422,6 +427,77 @@ function ProjectSecretsSection({
   );
 }
 
+// ProjectVariablesSection mirrors ProjectSecretsSection: a Global (all-environments)
+// variables editor plus a collapsible "Per-environment overrides" group with one
+// editor per environment. Keeps Variables and Secrets visually and structurally
+// consistent.
+function ProjectVariablesSection({
+  projectName,
+  envs,
+}: {
+  projectName: string;
+  envs: ProjectEnvironment[];
+}) {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-6 py-4">
+        <h2 className="text-base font-medium text-gray-900">
+          Project-level variables
+        </h2>
+        <p className="mt-1 text-sm text-gray-500">
+          Applied to every app in this project. Override org defaults; overridden
+          by app-level values. An app's own value wins over the project's.
+        </p>
+      </div>
+      <div className="space-y-4 p-6">
+        <EnvConfigEditor
+          title="Global (all environments)"
+          description="Project variables that are the same in every environment."
+          fetchFn={() => getProjectEnvConfig(projectName)}
+          saveFn={(cfg) => updateProjectEnvConfig(projectName, cfg)}
+        />
+        {envs.length > 0 && (
+          <details className="group rounded-lg border border-gray-100 bg-gray-50/40">
+            <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-2.5 text-sm">
+              <span className="font-medium text-gray-700">
+                Per-environment overrides
+                <span className="ml-2 rounded-full bg-gray-200 px-2 py-0.5 text-xs font-medium text-gray-600">
+                  {envs.length}
+                </span>
+              </span>
+              <span className="text-xs text-gray-400 group-open:hidden">
+                Override the global variables per environment — click to manage
+              </span>
+              <svg
+                className="h-4 w-4 flex-shrink-0 text-gray-400 transition-transform group-open:rotate-180"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+              </svg>
+            </summary>
+            <div className="space-y-6 border-t border-gray-100 bg-white p-4">
+              {envs.map((env) => (
+                <EnvConfigEditor
+                  key={env.name}
+                  title={`${env.displayName || env.name} variables`}
+                  description={`Project variables for the ${env.name} environment. Override the global project variables above.`}
+                  fetchFn={() => getProjectEnvEnvConfig(projectName, env.name)}
+                  saveFn={(cfg) =>
+                    updateProjectEnvEnvConfig(projectName, env.name, cfg)
+                  }
+                />
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ProjectNamespaceSection({ projectName }: { projectName: string }) {
   const [naming, setNaming] = useState<ProjectNaming>({});
   const [loading, setLoading] = useState(true);
@@ -687,16 +763,6 @@ export function ProjectSettings() {
   const [deleteConfirmInput, setDeleteConfirmInput] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-
-  const fetchProjectEnvConfig = useCallback(
-    () => getProjectEnvConfig(project),
-    [project],
-  );
-  const saveProjectEnvConfig = useCallback(
-    (cfg: Parameters<typeof updateProjectEnvConfig>[1]) =>
-      updateProjectEnvConfig(project, cfg),
-    [project],
-  );
 
   const reload = useCallback(async () => {
     try {
@@ -1024,12 +1090,7 @@ export function ProjectSettings() {
       {tab === "namespaces" && <ProjectNamespaceSection projectName={project} />}
 
       {tab === "variables" && (
-        <EnvConfigEditor
-          title="Project-level variables"
-          description="Applied to every app in this project. Overrides org defaults; overridden by app-level values."
-          fetchFn={fetchProjectEnvConfig}
-          saveFn={saveProjectEnvConfig}
-        />
+        <ProjectVariablesSection projectName={project} envs={envs} />
       )}
 
       {tab === "secrets" && (

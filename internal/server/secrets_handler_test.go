@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/session"
 )
@@ -82,6 +84,82 @@ func TestGetSecretsBackend_Default(t *testing.T) {
 	mustDecode(t, rec.Body.Bytes(), &dto)
 	if dto.Type != "k8s" {
 		t.Errorf("expected default type 'k8s', got %q", dto.Type)
+	}
+}
+
+// Removing an env vault binding clears it from the org's backend config.
+func TestUnregisterEnvVault(t *testing.T) {
+	org := &rbac.Org{
+		SecretBackend: secrets.BackendConfig{
+			Type: secrets.Backend1Password,
+			OnePassword: &secrets.OnePasswordConfig{
+				EnvVaults: []secrets.VaultRef{{Key: "staging", VaultID: "v1", Provisioned: true}},
+			},
+		},
+	}
+	store := &staticOrgProvider{org: org}
+	h := &secretsHandler{orgStore: store, logger: slog.Default()}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/org/secret-backend/vaults/env/staging", nil)
+	req.SetPathValue("env", "staging")
+	rec := httptest.NewRecorder()
+	h.handleUnregisterEnvVault(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := store.GetOrg(context.Background())
+	if got.SecretBackend.FindVault(secrets.EnvScope("staging")) != nil {
+		t.Fatalf("staging env vault binding should be removed")
+	}
+}
+
+// Switching the active secrets backend must NOT lose the previously configured
+// backend's settings — re-selecting it reloads its config. Regression for the
+// bug where saving type=k8s wiped the stored 1Password config.
+func TestPutSecretsBackend_PreservesConfigAcrossTypeSwitch(t *testing.T) {
+	mux, ah := newSecretsMux()
+
+	// Configure 1Password.
+	rec := do(t, mux, ah, "PUT", "/api/v1/org/secret-backend", "alice", "org_admin", map[string]any{
+		"type": "onepassword",
+		"onePassword": map[string]any{
+			"groupName": "Suparship",
+			"connect":   map[string]any{"endpoint": "http://op:8080"},
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("configure 1Password: got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Switch the active backend to k8s — the UI sends only {type}.
+	rec = do(t, mux, ah, "PUT", "/api/v1/org/secret-backend", "alice", "org_admin", map[string]any{"type": "k8s"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("switch to k8s: got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The active type is k8s, but the 1Password config is preserved.
+	rec = do(t, mux, ah, "GET", "/api/v1/org/secret-backend", "alice", "org_admin", nil)
+	var cfg secrets.BackendConfig
+	mustDecode(t, rec.Body.Bytes(), &cfg)
+	if cfg.Type != "k8s" {
+		t.Errorf("type = %q, want k8s", cfg.Type)
+	}
+	if cfg.OnePassword == nil || cfg.OnePassword.GroupName != "Suparship" {
+		t.Fatalf("1Password config lost on switch to k8s: %+v", cfg.OnePassword)
+	}
+	if cfg.OnePassword.Connect.Endpoint != "http://op:8080" {
+		t.Errorf("connect endpoint lost: %q", cfg.OnePassword.Connect.Endpoint)
+	}
+
+	// Re-selecting 1Password reloads the saved config.
+	if rec = do(t, mux, ah, "PUT", "/api/v1/org/secret-backend", "alice", "org_admin", map[string]any{"type": "onepassword"}); rec.Code != http.StatusOK {
+		t.Fatalf("re-select 1Password: got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, mux, ah, "GET", "/api/v1/org/secret-backend", "alice", "org_admin", nil)
+	mustDecode(t, rec.Body.Bytes(), &cfg)
+	if cfg.Type != "onepassword" || cfg.OnePassword == nil || cfg.OnePassword.GroupName != "Suparship" {
+		t.Fatalf("re-selecting 1Password did not reload config: %+v", cfg)
 	}
 }
 

@@ -24,6 +24,12 @@ import type { EnvConfig, ResolvedEnvVar } from "../lib/envconfig";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
 import {
+  StatusBadge,
+  statusStyles,
+  fallbackStatus,
+  overallPhase,
+} from "../components/StatusBadge";
+import {
   listAppGlobalSecretKeys,
   upsertAppGlobalSecrets,
   deleteAppGlobalSecretKey,
@@ -66,96 +72,15 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "previews", label: "Previews" },
   { id: "logs", label: "Logs" },
   { id: "traffic", label: "Traffic" },
-  { id: "envvars", label: "Env Vars" },
+  { id: "envvars", label: "Variables" },
 ];
 
 // ---------------------------------------------------------------------------
 // Status helpers
 // ---------------------------------------------------------------------------
 
-interface StatusStyle {
-  dot: string;
-  bg: string;
-  label: string;
-}
-
-const fallbackStatus: StatusStyle = {
-  dot: "bg-gray-300",
-  bg: "bg-gray-100 text-gray-500",
-  label: "Unknown",
-};
-
-const statusStyles: Record<string, StatusStyle> = {
-  healthy: {
-    dot: "bg-emerald-500",
-    bg: "bg-emerald-50 text-emerald-700",
-    label: "Healthy",
-  },
-  degraded: {
-    dot: "bg-amber-500",
-    bg: "bg-amber-50 text-amber-700",
-    label: "Degraded",
-  },
-  progressing: {
-    dot: "bg-blue-500",
-    bg: "bg-blue-50 text-blue-700",
-    label: "Syncing",
-  },
-  not_deployed: {
-    dot: "bg-gray-300",
-    bg: "bg-gray-100 text-gray-500",
-    label: "Not deployed",
-  },
-  // Deployed but scaled to zero (e.g. KEDA idle off-hours) — distinct from
-  // "not deployed": the workload exists, nothing is running right now.
-  idle: {
-    dot: "bg-indigo-400",
-    bg: "bg-indigo-50 text-indigo-700",
-    label: "Idle",
-  },
-};
-
-function StatusBadge({
-  status,
-  size = "sm",
-}: {
-  status: string;
-  size?: "sm" | "lg";
-}) {
-  const cfg = statusStyles[status] ?? fallbackStatus;
-  const cls =
-    size === "lg"
-      ? "px-3 py-1 text-sm font-medium"
-      : "px-2.5 py-0.5 text-xs font-medium";
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full ${cls} ${cfg.bg}`}
-    >
-      <span
-        className={`rounded-full ${cfg.dot} ${size === "lg" ? "h-2 w-2" : "h-1.5 w-1.5"}`}
-      />
-      {cfg.label}
-    </span>
-  );
-}
-
-function overallPhase(envs: AppEnvironmentSummary[]): string {
-  const active = envs.filter((e) => e.envType !== "preview");
-  if (active.length === 0) return "not_deployed";
-  const phases = active.map((e) => e.status.phase);
-  // "up" = running or intentionally idle (scaled to zero); neither is a problem.
-  const up = (p: string) => p === "healthy" || p === "idle";
-  if (phases.every(up)) {
-    return phases.every((p) => p === "idle") ? "idle" : "healthy";
-  }
-  if (phases.some((p) => p === "degraded")) return "degraded";
-  if (phases.some((p) => p === "progressing")) return "progressing";
-  if (phases.every((p) => p === "not_deployed")) return "not_deployed";
-  // Mixed case: some envs up, rest not yet deployed (e.g. staging up, prod not
-  // promoted yet). This is expected — not a degraded state.
-  if (phases.some(up)) return "healthy";
-  return "degraded";
-}
+// StatusBadge, statusStyles, fallbackStatus, and overallPhase live in the shared
+// ../components/StatusBadge module (imported above) so all pages stay consistent.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1230,7 +1155,7 @@ export function AppDetail() {
                 Deploy <span className="font-medium">{appName}</span> to an
                 isolated preview namespace. It clones the base env's cluster,
                 config and secrets, then applies this app's preview overrides
-                (Values dropdown + Env Vars → "Preview band").
+                (Values dropdown + Variables → "Preview band").
               </p>
               <form
                 className="mt-3 flex items-end gap-2"
@@ -3792,6 +3717,9 @@ const sourceBadge: Record<string, { bg: string; label: string }> = {
   org: { bg: "bg-blue-50 text-blue-700", label: "Org" },
   environment: { bg: "bg-purple-50 text-purple-700", label: "Env-type" },
   project: { bg: "bg-amber-50 text-amber-700", label: "Project" },
+  "project-environment": { bg: "bg-amber-50 text-amber-800", label: "Project-Env" },
+  stack: { bg: "bg-teal-50 text-teal-700", label: "Stack" },
+  "stack-environment": { bg: "bg-teal-50 text-teal-800", label: "Stack-Env" },
   app: { bg: "bg-emerald-50 text-emerald-700", label: "App" },
   "app-environment": { bg: "bg-gray-100 text-gray-700", label: "App-Env" },
 };

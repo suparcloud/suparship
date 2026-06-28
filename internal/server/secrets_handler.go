@@ -126,7 +126,21 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "unsupported backend type: " + dto.Type})
 		return
 	}
-	newCfg := secrets.BackendConfig{Type: bt, OnePassword: dto.OnePassword}
+	org, err := h.orgStore.GetOrg(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	// Merge onto the existing config: change the active type and apply a supplied
+	// 1Password config, but PRESERVE the previously configured backend's settings
+	// when the request omits them (so switching backends doesn't lose config and
+	// re-selecting a backend reloads it). ExternalSecrets (backend-independent) is
+	// likewise preserved.
+	newCfg := org.SecretBackend
+	newCfg.Type = bt
+	if dto.OnePassword != nil {
+		newCfg.OnePassword = dto.OnePassword
+	}
 	if err := newCfg.Validate(); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
@@ -137,11 +151,6 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 			return
 		}
-	}
-	org, err := h.orgStore.GetOrg(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
-		return
 	}
 	org.SecretBackend = newCfg
 	if err := h.orgStore.SaveOrg(r.Context(), org); err != nil {
@@ -164,7 +173,16 @@ func (h *secretsHandler) handleGetSecretsBackendFull(w http.ResponseWriter, r *h
 }
 
 func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *http.Request) {
-	var cfg secrets.BackendConfig
+	org, err := h.orgStore.GetOrg(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	// Decode ONTO the existing backend config so fields the request omits are
+	// preserved — switching the active backend (e.g. to k8s) sends only {type},
+	// and the previously configured backend's settings (1Password) must survive so
+	// re-selecting it reloads its config. JSON null still explicitly clears a field.
+	cfg := org.SecretBackend
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
 		return
@@ -179,11 +197,6 @@ func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *h
 			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 			return
 		}
-	}
-	org, err := h.orgStore.GetOrg(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
-		return
 	}
 	org.SecretBackend = cfg
 	if err := h.orgStore.SaveOrg(r.Context(), org); err != nil {
@@ -435,6 +448,35 @@ func (h *secretsHandler) registerVault(w http.ResponseWriter, r *http.Request, s
 		"vaultId": req.VaultID,
 		"status":  "saved (no bound cluster yet; the store will be published when a cluster is assigned)",
 	})
+}
+
+// handleUnregisterEnvVault removes an environment's vault binding so the env no
+// longer maps to a 1Password vault. The bound cluster's unified store is
+// republished (best-effort) so it stops listing the removed vault. Editing a
+// binding is just re-registering with a different vault (UpsertVault replaces).
+func (h *secretsHandler) handleUnregisterEnvVault(w http.ResponseWriter, r *http.Request) {
+	env := r.PathValue("env")
+	ctx := r.Context()
+	org, err := h.orgStore.GetOrg(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	org.SecretBackend.RemoveVault(secrets.EnvScope(env))
+	if err := h.orgStore.SaveOrg(ctx, org); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist org"})
+		return
+	}
+	// The bound cluster's unified store no longer reads this vault — republish it.
+	if c := orgEnvCluster(org, env); c != "" {
+		if err := h.sealCluster(ctx, org, c); err != nil {
+			h.logger.Warn("unregister vault: store republish pending", "cluster", c, "error", err)
+			writeJSON(w, http.StatusOK, map[string]string{"env": env, "status": "removed (store republish pending: " + err.Error() + ")"})
+			return
+		}
+		_ = h.orgStore.SaveOrg(ctx, org)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"env": env, "status": "removed"})
 }
 
 // ── Per-cluster Connect token (1Password) ───────────────────────────────────

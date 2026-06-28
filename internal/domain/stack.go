@@ -35,6 +35,10 @@ type StackSpec struct {
 	// EnvConfig holds env vars + secret refs shared by every app in the stack
 	// (Stack level of the hierarchy — overrides project, overridden by app).
 	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
+	// EnvConfigByEnv holds stack-level per-environment env config keyed by env
+	// name — a stack's variables in one specific environment, layered above
+	// EnvConfig and below app config. Mirrors EnvRawValues / project EnvConfigByEnv.
+	EnvConfigByEnv map[string]envconfig.EnvConfig `json:"envConfigByEnv,omitempty" yaml:"envConfigByEnv,omitempty"`
 	// RawValues is a freeform Helm values overlay applied to every member app,
 	// layered above the template platform values and below the app's own
 	// RawValues. May reference {platform.*}/{vars.*} tokens. No secrets.

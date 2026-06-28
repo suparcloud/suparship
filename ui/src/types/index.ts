@@ -600,6 +600,9 @@ export interface AppSummary {
   template: AppTemplateRef;
   status: AppStatusSummary;
   urls: string[];
+  /** Per-environment status in promotion order (stable envs by order, previews
+   *  last). Lets list views show per-env status without a per-app request. */
+  environments?: AppEnvironmentSummary[];
   components: ComponentSummary[];
 }
 

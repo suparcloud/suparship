@@ -238,6 +238,8 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// Project level — project_admin writes, viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig", viewProject(ec.handleGetProjectEnvConfig))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/envconfig", manageProject(ec.handlePutProjectEnvConfig))
+		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig/env/{env}", viewProject(ec.handleGetProjectEnvEnvConfig))
+		mux.HandleFunc("PUT /api/v1/projects/{project}/envconfig/env/{env}", manageProject(ec.handlePutProjectEnvEnvConfig))
 		// Cluster level — org_admin writes, any-auth reads. Platform escape hatch.
 		mux.HandleFunc("GET /api/v1/clusters/{cluster}/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handleGetClusterEnvConfig)))
 		mux.HandleFunc("PUT /api/v1/clusters/{cluster}/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutClusterEnvConfig)))
@@ -272,6 +274,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// Env vault registration (vault ID only — cluster overrides live inside
 		// env vaults, so there is no cluster vault registration).
 		mux.HandleFunc("POST /api/v1/org/secret-backend/vaults/env/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleRegisterEnvVault)))
+		mux.HandleFunc("DELETE /api/v1/org/secret-backend/vaults/env/{env}", requireOrgAdmin(rh.requireOrgAdmin(sh.handleUnregisterEnvVault)))
 		// Per-cluster Connect token: one token per cluster, covering the global
 		// vault + the env vaults bound to that cluster; sealing publishes the
 		// cluster's single unified ClusterSecretStore.

@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { listApps } from "../lib/apps";
+import { listStacks } from "../lib/stacks";
+import type { Stack } from "../lib/stacks";
 import { StuckAppsBanner } from "../components/StuckAppsBanner";
+import { AppTable } from "../components/AppTable";
+import { usePagedSearch } from "../components/Pagination";
 import { fetchPreviews } from "../lib/previews";
 import { createProject, fetchOrg, fetchProjects } from "../lib/settings";
 import { fetchEnvironments } from "../lib/services";
@@ -12,55 +16,6 @@ import type {
   Project,
   EnvironmentInfo,
 } from "../types";
-
-// --- Status helpers ---
-
-interface StatusStyle {
-  dot: string;
-  bg: string;
-  label: string;
-}
-
-const fallbackStatus: StatusStyle = {
-  dot: "bg-gray-300",
-  bg: "bg-gray-100 text-gray-500",
-  label: "Unknown",
-};
-
-const statusConfig: Record<string, StatusStyle> = {
-  healthy: {
-    dot: "bg-emerald-500",
-    bg: "bg-emerald-50 text-emerald-700",
-    label: "Healthy",
-  },
-  degraded: {
-    dot: "bg-amber-500",
-    bg: "bg-amber-50 text-amber-700",
-    label: "Degraded",
-  },
-  progressing: {
-    dot: "bg-blue-500",
-    bg: "bg-blue-50 text-blue-700",
-    label: "Syncing",
-  },
-  not_deployed: {
-    dot: "bg-gray-300",
-    bg: "bg-gray-100 text-gray-500",
-    label: "Not deployed",
-  },
-};
-
-function StatusBadge({ status }: { status: string }) {
-  const cfg = statusConfig[status] ?? fallbackStatus;
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${cfg.bg}`}
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot}`} />
-      {cfg.label}
-    </span>
-  );
-}
 
 // --- New project modal ---
 
@@ -193,6 +148,7 @@ interface DashboardData {
   projects: Project[];
   environments: EnvironmentInfo[];
   appsByProject: Map<string, AppSummary[]>;
+  stacksByProject: Map<string, Stack[]>;
   previewCount: number;
 }
 
@@ -205,13 +161,23 @@ async function loadDashboard(): Promise<DashboardData> {
   ]);
 
   const appsByProject = new Map<string, AppSummary[]>();
+  const stacksByProject = new Map<string, Stack[]>();
 
   const results = await Promise.allSettled(
-    projectsData.projects.map((p) => listApps(p.name)),
+    projectsData.projects.map((p) =>
+      Promise.all([
+        listApps(p.name),
+        listStacks(p.name)
+          .then((r) => r.stacks)
+          .catch(() => [] as Stack[]),
+      ]),
+    ),
   );
   for (const result of results) {
     if (result.status === "fulfilled") {
-      appsByProject.set(result.value.project, result.value.apps);
+      const [appsRes, stacks] = result.value;
+      appsByProject.set(appsRes.project, appsRes.apps);
+      stacksByProject.set(appsRes.project, stacks);
     }
   }
 
@@ -220,6 +186,7 @@ async function loadDashboard(): Promise<DashboardData> {
     projects: projectsData.projects,
     environments: envsData.environments,
     appsByProject,
+    stacksByProject,
     previewCount: previewsData.previews.length,
   };
 }
@@ -376,24 +343,90 @@ export function Dashboard() {
       {data.projects.length === 0 ? (
         <EmptyState onNewProject={() => setShowNewProject(true)} />
       ) : (
-        <div className="space-y-6">
-          <h2 className="text-sm font-medium uppercase tracking-wider text-gray-400">
-            Projects
-          </h2>
-          {data.projects.map((p) => {
-            const apps = data.appsByProject.get(p.name) ?? [];
-            return (
-              <ProjectCard
-                key={p.name}
-                project={p}
-                apps={apps}
-              />
-            );
-          })}
-        </div>
+        <ProjectsSection
+          projects={data.projects}
+          appsByProject={data.appsByProject}
+          stacksByProject={data.stacksByProject}
+        />
       )}
     </div>
     </>
+  );
+}
+
+// --- Projects section (search + pagination over projects) ---
+
+function ProjectsSection({
+  projects,
+  appsByProject,
+  stacksByProject,
+}: {
+  projects: Project[];
+  appsByProject: Map<string, AppSummary[]>;
+  stacksByProject: Map<string, Stack[]>;
+}) {
+  const { query, setQuery, page, setPage, pageItems, pageCount, total } =
+    usePagedSearch(
+      projects,
+      (p, q) =>
+        p.name.toLowerCase().includes(q) ||
+        (p.displayName ?? "").toLowerCase().includes(q),
+      8,
+    );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-medium uppercase tracking-wider text-gray-400">
+          Projects
+        </h2>
+        {projects.length > 6 && (
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search projects…"
+            className="w-56 rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:border-gray-400 focus:outline-none"
+          />
+        )}
+      </div>
+
+      {pageItems.map((p) => (
+        <ProjectCard
+          key={p.name}
+          project={p}
+          apps={appsByProject.get(p.name) ?? []}
+          stacks={stacksByProject.get(p.name) ?? []}
+        />
+      ))}
+
+      {query && total === 0 && (
+        <p className="py-6 text-center text-sm text-gray-400">
+          No projects match “{query}”.
+        </p>
+      )}
+
+      {pageCount > 1 && (
+        <div className="flex items-center justify-end gap-2 text-xs text-gray-500">
+          <button
+            onClick={() => setPage(page - 1)}
+            disabled={page <= 1}
+            className="rounded border border-gray-200 px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
+          >
+            ‹ Prev
+          </button>
+          <span className="tabular-nums">
+            {page} / {pageCount}
+          </span>
+          <button
+            onClick={() => setPage(page + 1)}
+            disabled={page >= pageCount}
+            className="rounded border border-gray-200 px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
+          >
+            Next ›
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -402,9 +435,11 @@ export function Dashboard() {
 function ProjectCard({
   project,
   apps,
+  stacks,
 }: {
   project: Project;
   apps: AppSummary[];
+  stacks: Stack[];
 }) {
   const displayName = project.displayName ?? project.name;
 
@@ -425,9 +460,6 @@ function ProjectCard({
           )}
         </div>
         <div className="flex flex-shrink-0 items-center gap-3">
-          <span className="text-xs text-gray-400">
-            {apps.length} {apps.length === 1 ? "app" : "apps"}
-          </span>
           <Link
             to={`/projects/${project.name}/settings`}
             className="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
@@ -443,102 +475,15 @@ function ProjectCard({
         </div>
       </div>
 
-      {apps.length === 0 ? (
-        <div className="px-5 py-10 text-center">
-          <p className="text-sm text-gray-400">No apps yet.</p>
-          <Link
-            to={`/projects/${project.name}/apps/new`}
-            className="mt-2 inline-block text-sm font-medium text-gray-600 hover:text-gray-900"
-          >
-            Create your first app &rarr;
-          </Link>
-        </div>
-      ) : (
-        <table className="w-full">
-          <thead>
-            <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-400">
-              <th className="px-5 py-2.5">App</th>
-              <th className="px-5 py-2.5">Template</th>
-              <th className="px-5 py-2.5">Status</th>
-              <th className="px-5 py-2.5">Replicas</th>
-              <th className="px-5 py-2.5">URLs</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-50">
-            {apps.map((app) => (
-              <AppRow
-                key={app.name}
-                project={project.name}
-                app={app}
-              />
-            ))}
-          </tbody>
-        </table>
-      )}
+      <div className="px-5 py-4">
+        <AppTable
+          project={project.name}
+          apps={apps}
+          stacks={stacks}
+          emptyText="No apps yet."
+        />
+      </div>
     </div>
-  );
-}
-
-// --- App row ---
-
-function AppRow({
-  project,
-  app,
-}: {
-  project: string;
-  app: AppSummary;
-}) {
-  const phase = app.status.phase;
-  const urls = app.urls ?? [];
-
-  return (
-    <tr className="transition-colors hover:bg-gray-50">
-      <td className="px-5 py-3">
-        <Link
-          to={`/projects/${project}/apps/${app.name}`}
-          className="text-sm font-medium text-gray-900 hover:text-gray-600"
-        >
-          {app.displayName || app.name}
-        </Link>
-      </td>
-      <td className="px-5 py-3">
-        <span className="rounded bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-600">
-          {app.template.name}
-        </span>
-      </td>
-      <td className="px-5 py-3">
-        <StatusBadge status={phase} />
-      </td>
-      <td className="px-5 py-3 text-sm text-gray-600">
-        {phase === "not_deployed" ? (
-          "—"
-        ) : (
-          <span>
-            {app.status.available}
-            <span className="text-gray-400">/{app.status.replicas}</span>
-          </span>
-        )}
-      </td>
-      <td className="px-5 py-3">
-        {urls.length > 0 ? (
-          <div className="flex flex-col gap-0.5">
-            {urls.map((url) => (
-              <a
-                key={url}
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
-              >
-                {url.replace(/^https?:\/\//, "")}
-              </a>
-            ))}
-          </div>
-        ) : (
-          <span className="text-xs text-gray-400">—</span>
-        )}
-      </td>
-    </tr>
   );
 }
 

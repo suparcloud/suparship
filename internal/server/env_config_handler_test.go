@@ -157,6 +157,65 @@ func TestGetConfigVariables_ListsPlatformAndVars_NoSecrets(t *testing.T) {
 	}
 }
 
+// Project per-environment variables round-trip through the new endpoints and
+// surface in the variable catalog scoped to that env.
+func TestProjectEnvEnvConfig_RoundTrip(t *testing.T) {
+	mux, ah := newEnvConfigMux()
+	cookie := sessionCookieFor(ah, "alice", "org_admin")
+
+	body, _ := json.Marshal(EnvConfigDTO{Vars: map[string]string{"PE_VAR": "1"}})
+	put := httptest.NewRequest("PUT", "/api/v1/projects/api/envconfig/env/staging", bytes.NewReader(body))
+	put.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, put)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	get := httptest.NewRequest("GET", "/api/v1/projects/api/envconfig/env/staging", nil)
+	get.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, get)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", rec.Code)
+	}
+	var dto EnvConfigDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &dto); err != nil {
+		t.Fatal(err)
+	}
+	if dto.Vars["PE_VAR"] != "1" {
+		t.Fatalf("project-env var not persisted: %+v", dto.Vars)
+	}
+
+	// It must NOT bleed into the project-global (all-envs) variables.
+	getGlobal := httptest.NewRequest("GET", "/api/v1/projects/api/envconfig", nil)
+	getGlobal.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, getGlobal)
+	var gdto EnvConfigDTO
+	_ = json.Unmarshal(rec.Body.Bytes(), &gdto)
+	if _, leaked := gdto.Vars["PE_VAR"]; leaked {
+		t.Errorf("project-env var leaked into project-global variables")
+	}
+
+	// The catalog lists it scoped to project:staging.
+	cat := httptest.NewRequest("GET", "/api/v1/projects/api/config-variables", nil)
+	cat.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, cat)
+	var cresp ConfigVariablesResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &cresp)
+	found := false
+	for _, v := range cresp.Vars {
+		if v.Name == "PE_VAR" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("PE_VAR missing from variable catalog")
+	}
+}
+
 func TestGetPlatformConfigVariables_OmitsProjectScope(t *testing.T) {
 	mux := http.NewServeMux()
 	ah := &authHandler{

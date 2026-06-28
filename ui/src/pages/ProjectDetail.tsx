@@ -2,74 +2,19 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { getAppEnvironments, listApps } from "../lib/apps";
+import { listApps } from "../lib/apps";
 import { createStack, listStacks } from "../lib/stacks";
 import type { Stack } from "../lib/stacks";
 import { ApiError } from "../lib/api";
-import type { AppEnvironmentSummary, AppSummary } from "../types";
-
-// --- Status helpers ---
-
-interface StatusStyle {
-  dot: string;
-  bg: string;
-  label: string;
-}
-
-const fallbackStatus: StatusStyle = {
-  dot: "bg-gray-300",
-  bg: "bg-gray-100 text-gray-500",
-  label: "Unknown",
-};
-
-const statusConfig: Record<string, StatusStyle> = {
-  healthy: {
-    dot: "bg-emerald-500",
-    bg: "bg-emerald-50 text-emerald-700",
-    label: "Healthy",
-  },
-  degraded: {
-    dot: "bg-amber-500",
-    bg: "bg-amber-50 text-amber-700",
-    label: "Degraded",
-  },
-  progressing: {
-    dot: "bg-blue-500",
-    bg: "bg-blue-50 text-blue-700",
-    label: "Syncing",
-  },
-  not_deployed: {
-    dot: "bg-gray-300",
-    bg: "bg-gray-100 text-gray-500",
-    label: "Not deployed",
-  },
-};
-
-function StatusBadge({ status }: { status: string }) {
-  const cfg = statusConfig[status] ?? fallbackStatus;
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${cfg.bg}`}
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${cfg.dot}`} />
-      {cfg.label}
-    </span>
-  );
-}
-
-// --- App with enriched env data ---
-
-interface AppWithEnvs extends AppSummary {
-  environments: AppEnvironmentSummary[];
-  envsLoaded: boolean;
-}
+import { AppTable } from "../components/AppTable";
+import type { AppSummary } from "../types";
 
 // --- Component ---
 
 export function ProjectDetail() {
   const { project } = useParams<{ project: string }>();
   const navigate = useNavigate();
-  const [apps, setApps] = useState<AppWithEnvs[]>([]);
+  const [apps, setApps] = useState<AppSummary[]>([]);
   const [stacks, setStacks] = useState<Stack[]>([]);
   const [newStack, setNewStack] = useState<string | null>(null); // null = form hidden
   const [loading, setLoading] = useState(true);
@@ -86,39 +31,12 @@ export function ProjectDetail() {
     if (!project) return;
     let cancelled = false;
 
+    // listApps now returns per-env status inline, so no per-app enrichment.
     listApps(project)
-      .then(async (data) => {
+      .then((data) => {
         if (cancelled) return;
-
-        // Seed apps immediately for a responsive first paint
-        const initial: AppWithEnvs[] = data.apps.map((a) => ({
-          ...a,
-          environments: [],
-          envsLoaded: false,
-        }));
-        setApps(initial);
+        setApps(data.apps);
         setLoading(false);
-
-        // Enrich each app with per-environment status in parallel
-        const envResults = await Promise.allSettled(
-          data.apps.map((a) => getAppEnvironments(project, a.name)),
-        );
-
-        if (cancelled) return;
-
-        setApps((prev) =>
-          prev.map((app, i) => {
-            const result = envResults[i];
-            if (result && result.status === "fulfilled") {
-              return {
-                ...app,
-                environments: result.value.environments,
-                envsLoaded: true,
-              };
-            }
-            return { ...app, envsLoaded: true };
-          }),
-        );
       })
       .catch((err) => {
         if (!cancelled) {
@@ -223,164 +141,14 @@ export function ProjectDetail() {
         </div>
       )}
 
-      {/* Stacks */}
-      {stacks.length > 0 && (
-        <div>
-          <h2 className="mb-3 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-gray-400">
-            Stacks
-            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
-              Beta
-            </span>
-          </h2>
-          <div className="grid gap-4 sm:grid-cols-2">
-            {stacks.map((s) => (
-              <Link
-                key={s.name}
-                to={`/projects/${project}/stacks/${encodeURIComponent(s.name)}`}
-                className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-5 transition-shadow hover:shadow-sm"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-gray-900">{s.displayName || s.name}</span>
-                  <span className="rounded-full bg-white px-2 py-0.5 text-xs text-gray-500">
-                    {(s.apps ?? []).length} {(s.apps ?? []).length === 1 ? "app" : "apps"}
-                  </span>
-                </div>
-                {(s.apps ?? []).length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {(s.apps ?? []).map((a) => (
-                      <span key={a} className="rounded bg-white px-1.5 py-0.5 font-mono text-xs text-gray-600">{a}</span>
-                    ))}
-                  </div>
-                )}
-              </Link>
-            ))}
-          </div>
+      {/* Unified apps + stacks table */}
+      {apps.length === 0 ? (
+        <EmptyApps project={project!} />
+      ) : (
+        <div className="rounded-xl border border-gray-200 bg-white p-5">
+          <AppTable project={project!} apps={apps} stacks={stacks} />
         </div>
       )}
-
-      {/* Apps not in a stack */}
-      {(() => {
-        const grouped = new Set(stacks.flatMap((s) => s.apps ?? []));
-        const loose = apps.filter((a) => !grouped.has(a.name));
-        if (apps.length === 0) return <EmptyApps project={project!} />;
-        return (
-          <div>
-            {stacks.length > 0 && (
-              <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-gray-400">Apps</h2>
-            )}
-            {loose.length === 0 ? (
-              <p className="text-sm text-gray-400">All apps are grouped into stacks.</p>
-            ) : (
-              <div className="grid gap-4 sm:grid-cols-2">
-                {loose.map((app) => (
-                  <AppCard key={app.name} project={project!} app={app} />
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })()}
-    </div>
-  );
-}
-
-// --- App card ---
-
-function AppCard({ project, app }: { project: string; app: AppWithEnvs }) {
-  const stagingEnv = app.environments.find((e) => e.envType === "staging");
-  const prodEnv = app.environments.find((e) => e.envType === "prod");
-  const previewCount = app.environments.filter(
-    (e) => e.envType === "preview",
-  ).length;
-
-  // Prefer staging URL for the "Open" quick link, fall back to prod or summary URL
-  const firstUrl =
-    stagingEnv?.urls[0] ?? prodEnv?.urls[0] ?? app.urls[0] ?? null;
-
-  return (
-    <div className="flex flex-col rounded-xl border border-gray-200 bg-white p-5 transition-shadow hover:shadow-sm">
-      {/* Name + quick actions */}
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <Link
-            to={`/projects/${project}/apps/${app.name}`}
-            className="text-sm font-semibold text-gray-900 hover:text-gray-600"
-          >
-            {app.displayName ?? app.name}
-          </Link>
-          {app.description && (
-            <p className="mt-0.5 truncate text-xs text-gray-400">
-              {app.description}
-            </p>
-          )}
-        </div>
-        <div className="flex flex-shrink-0 items-center gap-2">
-          {firstUrl && (
-            <a
-              href={firstUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="rounded-md border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
-            >
-              Open ↗
-            </a>
-          )}
-          <Link
-            to={`/projects/${project}/apps/${app.name}`}
-            className="rounded-md bg-gray-900 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-gray-700"
-          >
-            Details
-          </Link>
-        </div>
-      </div>
-
-      {/* Template badge */}
-      <div className="mt-3">
-        <span className="rounded bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-600">
-          {app.template.name}
-        </span>
-        {app.template.version && (
-          <span className="ml-1 text-xs text-gray-400">
-            v{app.template.version}
-          </span>
-        )}
-      </div>
-
-      {/* Environment status row */}
-      <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-gray-50 pt-4">
-        {!app.envsLoaded ? (
-          <div className="h-5 w-40 animate-pulse rounded bg-gray-100" />
-        ) : (
-          <>
-            <EnvStatus label="staging" env={stagingEnv} />
-            <EnvStatus label="prod" env={prodEnv} />
-            {previewCount > 0 && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2.5 py-0.5 text-xs font-medium text-purple-700">
-                <span className="h-1.5 w-1.5 rounded-full bg-purple-500" />
-                {previewCount} {previewCount === 1 ? "preview" : "previews"}
-              </span>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// --- Environment status pill ---
-
-function EnvStatus({
-  label,
-  env,
-}: {
-  label: string;
-  env: AppEnvironmentSummary | undefined;
-}) {
-  const phase = env?.status.phase ?? "not_deployed";
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-xs text-gray-400">{label}</span>
-      <StatusBadge status={phase} />
     </div>
   );
 }

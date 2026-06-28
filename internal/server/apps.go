@@ -113,21 +113,25 @@ type AppEnvironmentSummaryDTO struct {
 // surfaces the primary stable-environment status and URLs so the dashboard can
 // render a useful row without a separate detail fetch.
 //
-// Status reflects the first stable environment (staging or prod); URLs are
-// the union of stable-environment ingress URLs. Components are included so
-// callers can distinguish single-component apps from multi-component apps
-// without a detail fetch.
+// Status is the aggregate across the app's deployed stable environments
+// (summaryPhase); URLs are the union of those environments' ingress URLs.
+// Environments carries per-env status so list views need no separate per-app
+// request. Components are included so callers can distinguish single- from
+// multi-component apps without a detail fetch.
 type AppSummaryDTO struct {
 	Name        string            `json:"name"`
 	Project     string            `json:"project"`
 	DisplayName string            `json:"displayName,omitempty"`
 	Description string            `json:"description,omitempty"`
 	Template    AppTemplateRefDTO `json:"template"`
-	// Status is the runtime summary for the primary stable environment.
+	// Status is the aggregate runtime status across deployed stable environments.
 	Status AppStatusSummaryDTO `json:"status"`
 	// URLs are the primary ingress hostnames (stable environments only).
-	URLs       []string              `json:"urls"`
-	Components []ComponentSummaryDTO `json:"components"`
+	URLs []string `json:"urls"`
+	// Environments is the per-environment status in promotion order (stable envs
+	// by Order, previews last). Mirrors AppDetailDTO.Environments.
+	Environments []AppEnvironmentSummaryDTO `json:"environments"`
+	Components    []ComponentSummaryDTO     `json:"components"`
 }
 
 // --- App detail (single-app view) ---

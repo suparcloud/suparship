@@ -31,6 +31,7 @@ import {
   listVaults,
   setGlobalVault,
   registerEnvVault,
+  unregisterEnvVault,
   setClusterConnectToken,
   listSharedGlobalSecretKeys,
   upsertSharedGlobalSecrets,
@@ -1178,6 +1179,9 @@ function SecretsBackendSection() {
   const [bindEnv, setBindEnv] = useState("");
   const [bindVaultId, setBindVaultId] = useState("");
   const [bindBusy, setBindBusy] = useState(false);
+  // When set, the binding form edits this already-bound env (vs adding a new one).
+  const [editingEnv, setEditingEnv] = useState("");
+  const [removingEnv, setRemovingEnv] = useState("");
 
   // Setup guide toggle
   const [showGuide, setShowGuide] = useState(false);
@@ -1226,11 +1230,10 @@ function SecretsBackendSection() {
     setSaving(true);
     setError(null);
     try {
-      const updated: Partial<SecretBackendConfig> = { type: value };
-      if (value === "k8s") {
-        updated.onePassword = undefined;
-      }
-      const result = await updateSecretsBackend(updated);
+      // Only change the active backend type. The server preserves the previously
+      // configured backend's settings (e.g. 1Password) so re-selecting it reloads
+      // its config — don't clear them here.
+      const result = await updateSecretsBackend({ type: value });
       setConfig(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save");
@@ -1276,10 +1279,41 @@ function SecretsBackendSection() {
       setShowAddBinding(false);
       setBindEnv("");
       setBindVaultId("");
+      setEditingEnv("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Vault registration failed");
     } finally {
       setBindBusy(false);
+    }
+  }
+
+  // startEditBinding opens the form pre-filled to change an env's vault.
+  function startEditBinding(env: string, vaultId: string) {
+    setEditingEnv(env);
+    setBindEnv(env);
+    setBindVaultId(vaultId);
+    setShowAddBinding(true);
+    if (vaults.length === 0) loadVaults();
+  }
+
+  async function removeBinding(env: string) {
+    if (
+      !window.confirm(
+        `Remove the vault binding for "${env}"? Secrets for this environment will no longer resolve until you bind a vault again.`,
+      )
+    ) {
+      return;
+    }
+    setRemovingEnv(env);
+    setError(null);
+    try {
+      await unregisterEnvVault(env);
+      const updated = await getSecretsBackend();
+      setConfig(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove binding");
+    } finally {
+      setRemovingEnv("");
     }
   }
 
@@ -1594,9 +1628,15 @@ function SecretsBackendSection() {
                     </label>
                     <button
                       onClick={() => {
-                        setShowAddBinding(!showAddBinding);
-                        if (!showAddBinding && vaults.length === 0) {
-                          loadVaults();
+                        const opening = !showAddBinding;
+                        setShowAddBinding(opening);
+                        if (opening) {
+                          if (vaults.length === 0) loadVaults();
+                        } else {
+                          // Cancel: clear any in-progress edit/add.
+                          setEditingEnv("");
+                          setBindEnv("");
+                          setBindVaultId("");
                         }
                       }}
                       className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
@@ -1614,6 +1654,13 @@ function SecretsBackendSection() {
                           Environment
                         </label>
                         {(() => {
+                          if (editingEnv) {
+                            return (
+                              <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-mono">
+                                {editingEnv}
+                              </div>
+                            );
+                          }
                           const boundEnvs = new Set(
                             (config?.onePassword?.envVaults || []).map((v) => v.key),
                           );
@@ -1681,7 +1728,11 @@ function SecretsBackendSection() {
                         disabled={bindBusy || !bindEnv || !bindVaultId}
                         className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
                       >
-                        {bindBusy ? "Saving…" : "Register Vault"}
+                        {bindBusy
+                          ? "Saving…"
+                          : editingEnv
+                            ? "Update Vault"
+                            : "Register Vault"}
                       </button>
                     </div>
                   )}
@@ -1720,6 +1771,7 @@ function SecretsBackendSection() {
                             <th className="py-2">Key</th>
                             <th className="py-2">Vault</th>
                             <th className="py-2">Status</th>
+                            <th className="py-2 text-right">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-50">
@@ -1744,6 +1796,27 @@ function SecretsBackendSection() {
                                   <span className="ml-2 text-xs text-red-600">
                                     {b.lastError}
                                   </span>
+                                )}
+                              </td>
+                              <td className="py-2 text-right text-xs">
+                                {b.scope === "env" ? (
+                                  <span className="inline-flex gap-3">
+                                    <button
+                                      onClick={() => startEditBinding(b.key, b.vaultId)}
+                                      className="font-medium text-indigo-600 hover:text-indigo-800"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      onClick={() => removeBinding(b.key)}
+                                      disabled={removingEnv === b.key}
+                                      className="font-medium text-red-600 hover:text-red-800 disabled:opacity-50"
+                                    >
+                                      {removingEnv === b.key ? "Removing…" : "Remove"}
+                                    </button>
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-300">—</span>
                                 )}
                               </td>
                             </tr>

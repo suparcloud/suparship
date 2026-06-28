@@ -51,7 +51,7 @@ export function VariablePicker({
     const vars: Entry[] = variables.vars.map((v) => ({
       token: v.token,
       label: v.name,
-      group: "Env vars",
+      group: "Variables",
       hint: v.scope,
     }));
     return [...platform, ...vars];
@@ -77,7 +77,7 @@ export function VariablePicker({
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
-        title="Insert a platform or env-var reference"
+        title="Insert a platform or variable reference"
       >
         {"{ } "}
         {label} ▾

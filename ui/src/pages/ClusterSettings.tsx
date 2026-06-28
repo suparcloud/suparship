@@ -576,7 +576,7 @@ function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
       <EnvConfigEditor
         key={`env-${cluster.name}`}
         title={`Variables for cluster "${cluster.name}"`}
-        description="Plain-text env vars applied to every app deployed onto this cluster."
+        description="Plain-text variables applied to every app deployed onto this cluster."
         fetchFn={fetchEnv}
         saveFn={saveEnv}
       />
@@ -952,7 +952,7 @@ export function ClusterSettings() {
                                 cur === c.name ? null : c.name,
                               )
                             }
-                            title="Edit cluster-scope env vars and secrets — these override every other layer for apps deployed on this cluster"
+                            title="Edit cluster-scope variables and secrets — these override every other layer for apps deployed on this cluster"
                             className="text-sm text-gray-600 hover:text-gray-900"
                           >
                             {expandedName === c.name

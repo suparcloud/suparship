@@ -87,6 +87,28 @@ export function updateProjectEnvConfig(
   );
 }
 
+// Project per-environment variables (overrides the project-global level for one
+// environment), mirroring project-env secrets.
+export function getProjectEnvEnvConfig(
+  project: string,
+  env: string,
+): Promise<EnvConfig> {
+  return api.get<EnvConfig>(
+    `/projects/${encodeURIComponent(project)}/envconfig/env/${encodeURIComponent(env)}`,
+  );
+}
+
+export function updateProjectEnvEnvConfig(
+  project: string,
+  env: string,
+  cfg: EnvConfig,
+): Promise<unknown> {
+  return api.put<unknown>(
+    `/projects/${encodeURIComponent(project)}/envconfig/env/${encodeURIComponent(env)}`,
+    cfg,
+  );
+}
+
 // ── App level ──────────────────────────────────────────────────────────────────
 
 export function getAppEnvConfig(

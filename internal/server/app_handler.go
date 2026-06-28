@@ -2198,7 +2198,95 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 
 // --- DTO mapping helpers ---
 
+// buildEnvSummaryDTOs converts an app's environments to per-env summary DTOs in
+// promotion order (stable envs by Order, previews last) and resolves each env's
+// Deploy/IsBase flags. Shared by the list (summary) and detail views so both
+// agree on ordering and which envs actually deploy. The first stable env (sorted
+// first) is the base; for direct apps Deploy follows the opt-in rules, pipeline
+// apps always report Deploy=true.
+func buildEnvSummaryDTOs(app *domain.App, envs []*domain.AppEnvironment) []AppEnvironmentSummaryDTO {
+	envDTOs := make([]AppEnvironmentSummaryDTO, 0, len(envs))
+	for _, env := range envs {
+		envDTOs = append(envDTOs, appEnvToDTO(env))
+	}
+	sort.SliceStable(envDTOs, func(i, j int) bool {
+		ip, jp := envDTOs[i].EnvType == string(domain.AppEnvPreview), envDTOs[j].EnvType == string(domain.AppEnvPreview)
+		if ip != jp {
+			return !ip // non-preview envs first
+		}
+		if envDTOs[i].Order != envDTOs[j].Order {
+			return envDTOs[i].Order < envDTOs[j].Order
+		}
+		return envDTOs[i].EnvName < envDTOs[j].EnvName
+	})
+
+	baseSeen := false
+	for i := range envDTOs {
+		if envDTOs[i].EnvType == string(domain.AppEnvPreview) {
+			envDTOs[i].Deploy = true
+			continue
+		}
+		isBase := !baseSeen
+		baseSeen = true
+		envDTOs[i].IsBase = isBase
+		if app.Spec.IsDirect() {
+			envDTOs[i].Deploy = app.Spec.DeploysToEnv(envDTOs[i].EnvName, isBase)
+		} else {
+			envDTOs[i].Deploy = true
+		}
+	}
+	return envDTOs
+}
+
+// summaryPhase aggregates per-env status into a single phase for list views,
+// considering only stable environments the app actually deploys to (Deploy=true).
+// Mirrors the UI's overallPhase: healthy when all deployed envs are healthy,
+// else degraded/progressing if any is, else not_deployed. Returns not_deployed
+// when the app deploys to no stable env.
+func summaryPhase(envs []AppEnvironmentSummaryDTO) string {
+	phases := make([]string, 0, len(envs))
+	for _, e := range envs {
+		if e.EnvType == string(domain.AppEnvPreview) || !e.Deploy {
+			continue
+		}
+		phases = append(phases, e.Status.Phase)
+	}
+	if len(phases) == 0 {
+		return domain.StatusNotDeployed
+	}
+	allHealthy := true
+	for _, p := range phases {
+		if p != domain.StatusHealthy {
+			allHealthy = false
+			break
+		}
+	}
+	if allHealthy {
+		return domain.StatusHealthy
+	}
+	for _, p := range phases {
+		if p == domain.StatusDegraded {
+			return domain.StatusDegraded
+		}
+	}
+	for _, p := range phases {
+		if p == domain.StatusProgressing {
+			return domain.StatusProgressing
+		}
+	}
+	// Some envs healthy, the rest not yet deployed — treat as healthy (partial
+	// rollout) rather than not_deployed so deployed envs are visible.
+	for _, p := range phases {
+		if p == domain.StatusHealthy {
+			return domain.StatusHealthy
+		}
+	}
+	return domain.StatusNotDeployed
+}
+
 func appToSummaryDTO(app *domain.App, envs []*domain.AppEnvironment) AppSummaryDTO {
+	envDTOs := buildEnvSummaryDTOs(app, envs)
+
 	dto := AppSummaryDTO{
 		Name:        app.Name,
 		Project:     app.ProjectName,
@@ -2208,22 +2296,19 @@ func appToSummaryDTO(app *domain.App, envs []*domain.AppEnvironment) AppSummaryD
 			Name:    app.Spec.Template.Name,
 			Version: app.Spec.Template.Version,
 		},
-		URLs:       []string{},
-		Components: componentDTOs(app.Spec.Components),
-		Status: AppStatusSummaryDTO{
-			Phase: domain.StatusNotDeployed,
-		},
+		URLs:         []string{},
+		Environments: envDTOs,
+		Components:   componentDTOs(app.Spec.Components),
+		Status:       AppStatusSummaryDTO{Phase: summaryPhase(envDTOs)},
 	}
 
-	// Use the first stable environment (staging or prod) for summary status and URLs.
-	for _, env := range envs {
-		if env.EnvType == domain.AppEnvStaging || env.EnvType == domain.AppEnvProd {
-			dto.Status = appRuntimeStatusDTO(env.Status)
-			dto.URLs = append(dto.URLs, env.URLs...)
-			break
+	// URLs: union across deployed stable environments (previews excluded).
+	for _, e := range envDTOs {
+		if e.EnvType == string(domain.AppEnvPreview) || !e.Deploy {
+			continue
 		}
+		dto.URLs = append(dto.URLs, e.URLs...)
 	}
-
 	if dto.URLs == nil {
 		dto.URLs = []string{}
 	}
@@ -2316,42 +2401,9 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		values = map[string]any{}
 	}
 
-	envDTOs := make([]AppEnvironmentSummaryDTO, 0, len(envs))
-	for _, env := range envs {
-		envDTOs = append(envDTOs, appEnvToDTO(env))
-	}
-	// Return environments in promotion order (stable envs by Order, previews
-	// last) so the UI's "first stable env" — the default preview base env —
-	// agrees with the server's resolution instead of relying on store order.
-	sort.SliceStable(envDTOs, func(i, j int) bool {
-		ip, jp := envDTOs[i].EnvType == string(domain.AppEnvPreview), envDTOs[j].EnvType == string(domain.AppEnvPreview)
-		if ip != jp {
-			return !ip // non-preview envs first
-		}
-		if envDTOs[i].Order != envDTOs[j].Order {
-			return envDTOs[i].Order < envDTOs[j].Order
-		}
-		return envDTOs[i].EnvName < envDTOs[j].EnvName
-	})
-
-	// Resolve per-env deploy state. The first stable env (now sorted first) is the
-	// base. For direct apps Deploy follows the opt-in rules; pipeline apps always
-	// "deploy" (advance via promotion), so report true.
-	baseSeen := false
-	for i := range envDTOs {
-		if envDTOs[i].EnvType == string(domain.AppEnvPreview) {
-			envDTOs[i].Deploy = true
-			continue
-		}
-		isBase := !baseSeen
-		baseSeen = true
-		envDTOs[i].IsBase = isBase
-		if app.Spec.IsDirect() {
-			envDTOs[i].Deploy = app.Spec.DeploysToEnv(envDTOs[i].EnvName, isBase)
-		} else {
-			envDTOs[i].Deploy = true
-		}
-	}
+	// Environments in promotion order with resolved Deploy/IsBase flags (shared
+	// with the list view so both agree on ordering and deploy state).
+	envDTOs := buildEnvSummaryDTOs(app, envs)
 
 	return AppDetailDTO{
 		Name:        app.Name,

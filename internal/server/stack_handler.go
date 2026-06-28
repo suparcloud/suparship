@@ -23,6 +23,7 @@ type StackDTO struct {
 	RawValues        map[string]any            `json:"rawValues,omitempty"`
 	EnvRawValues     map[string]map[string]any `json:"envRawValues,omitempty"`
 	EnvConfig        EnvConfigDTO              `json:"envConfig,omitempty"`
+	EnvConfigByEnv   map[string]EnvConfigDTO   `json:"envConfigByEnv,omitempty"`
 	// Apps are the member app names (apps whose Spec.Stack == this stack).
 	Apps []string `json:"apps"`
 }
@@ -38,6 +39,7 @@ type createStackRequest struct {
 	RawValues        map[string]any            `json:"rawValues,omitempty"`
 	EnvRawValues     map[string]map[string]any `json:"envRawValues,omitempty"`
 	EnvConfig        *EnvConfigDTO             `json:"envConfig,omitempty"`
+	EnvConfigByEnv   map[string]EnvConfigDTO   `json:"envConfigByEnv,omitempty"`
 }
 
 type patchStackRequest struct {
@@ -48,11 +50,36 @@ type patchStackRequest struct {
 	RawValues        map[string]any            `json:"rawValues,omitempty"`
 	EnvRawValues     map[string]map[string]any `json:"envRawValues,omitempty"`
 	EnvConfig        *EnvConfigDTO             `json:"envConfig,omitempty"`
+	EnvConfigByEnv   map[string]EnvConfigDTO   `json:"envConfigByEnv,omitempty"`
 }
 
 type setAppStackRequest struct {
 	// Stack is the target stack name; empty removes the app from any stack.
 	Stack string `json:"stack"`
+}
+
+// envConfigByEnvToDTO / envConfigByEnvFromDTO convert the per-env stack config
+// map to/from its wire form. Return nil for empty input so the field is omitted.
+func envConfigByEnvToDTO(m map[string]envconfig.EnvConfig) map[string]EnvConfigDTO {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]EnvConfigDTO, len(m))
+	for k, v := range m {
+		out[k] = toEnvConfigDTO(v)
+	}
+	return out
+}
+
+func envConfigByEnvFromDTO(m map[string]EnvConfigDTO) map[string]envconfig.EnvConfig {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]envconfig.EnvConfig, len(m))
+	for k, v := range m {
+		out[k] = fromEnvConfigDTO(v)
+	}
+	return out
 }
 
 func stackToDTO(s *domain.Stack, appNames []string) StackDTO {
@@ -70,6 +97,7 @@ func stackToDTO(s *domain.Stack, appNames []string) StackDTO {
 		RawValues:        s.Spec.RawValues,
 		EnvRawValues:     s.Spec.EnvRawValues,
 		EnvConfig:        toEnvConfigDTO(s.Spec.EnvConfig),
+		EnvConfigByEnv:   envConfigByEnvToDTO(s.Spec.EnvConfigByEnv),
 		Apps:             appNames,
 	}
 }
@@ -145,6 +173,7 @@ func (rh *rbacHandler) handleCreateStack(w http.ResponseWriter, r *http.Request)
 			RawValues:        req.RawValues,
 			EnvRawValues:     req.EnvRawValues,
 			EnvConfig:        ec,
+			EnvConfigByEnv:   envConfigByEnvFromDTO(req.EnvConfigByEnv),
 		},
 	}
 	if err := rh.stackStore.SaveStack(r.Context(), stack); err != nil {
@@ -187,6 +216,9 @@ func (rh *rbacHandler) handlePatchStack(w http.ResponseWriter, r *http.Request) 
 	}
 	if req.EnvConfig != nil {
 		s.Spec.EnvConfig = fromEnvConfigDTO(*req.EnvConfig)
+	}
+	if req.EnvConfigByEnv != nil {
+		s.Spec.EnvConfigByEnv = envConfigByEnvFromDTO(req.EnvConfigByEnv)
 	}
 	if err := rh.stackStore.SaveStack(r.Context(), s); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save stack"})
