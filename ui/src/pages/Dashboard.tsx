@@ -2,16 +2,14 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { listApps } from "../lib/apps";
-import { listStacks } from "../lib/stacks";
-import type { Stack } from "../lib/stacks";
 import { StuckAppsBanner } from "../components/StuckAppsBanner";
-import { AppTable } from "../components/AppTable";
+import { StatusBadge, overallPhase } from "../components/StatusBadge";
 import { usePagedSearch } from "../components/Pagination";
-import { fetchPreviews } from "../lib/previews";
 import { createProject, fetchOrg, fetchProjects } from "../lib/settings";
 import { fetchEnvironments } from "../lib/services";
 import type {
   AppSummary,
+  AppEnvironmentSummary,
   OrgInfo,
   Project,
   EnvironmentInfo,
@@ -148,37 +146,34 @@ interface DashboardData {
   projects: Project[];
   environments: EnvironmentInfo[];
   appsByProject: Map<string, AppSummary[]>;
-  stacksByProject: Map<string, Stack[]>;
   previewCount: number;
 }
 
 async function loadDashboard(): Promise<DashboardData> {
-  const [orgData, projectsData, envsData, previewsData] = await Promise.all([
+  const [orgData, projectsData, envsData] = await Promise.all([
     fetchOrg().catch(() => null),
     fetchProjects().catch(() => ({ projects: [] as Project[] })),
     fetchEnvironments().catch(() => ({ environments: [] as EnvironmentInfo[] })),
-    fetchPreviews().catch(() => ({ previews: [] })),
   ]);
 
+  // Per-project apps power the health summary rows. Stacks aren't needed on the
+  // dashboard anymore (apps are viewed on the project detail page).
   const appsByProject = new Map<string, AppSummary[]>();
-  const stacksByProject = new Map<string, Stack[]>();
-
   const results = await Promise.allSettled(
-    projectsData.projects.map((p) =>
-      Promise.all([
-        listApps(p.name),
-        listStacks(p.name)
-          .then((r) => r.stacks)
-          .catch(() => [] as Stack[]),
-      ]),
-    ),
+    projectsData.projects.map((p) => listApps(p.name)),
   );
   for (const result of results) {
     if (result.status === "fulfilled") {
-      const [appsRes, stacks] = result.value;
-      appsByProject.set(appsRes.project, appsRes.apps);
-      stacksByProject.set(appsRes.project, stacks);
+      appsByProject.set(result.value.project, result.value.apps);
     }
+  }
+
+  // Preview count = number of distinct PRs across all projects (consistent with
+  // the per-project preview column and the Previews page), derived from the apps
+  // we already loaded — no separate previews fetch.
+  let previewCount = 0;
+  for (const apps of appsByProject.values()) {
+    previewCount += distinctPreviewCount(apps);
   }
 
   return {
@@ -186,8 +181,7 @@ async function loadDashboard(): Promise<DashboardData> {
     projects: projectsData.projects,
     environments: envsData.environments,
     appsByProject,
-    stacksByProject,
-    previewCount: previewsData.previews.length,
+    previewCount,
   };
 }
 
@@ -346,7 +340,7 @@ export function Dashboard() {
         <ProjectsSection
           projects={data.projects}
           appsByProject={data.appsByProject}
-          stacksByProject={data.stacksByProject}
+          environments={data.environments}
         />
       )}
     </div>
@@ -354,16 +348,60 @@ export function Dashboard() {
   );
 }
 
-// --- Projects section (search + pagination over projects) ---
+// --- Projects section: paginated, searchable list of project summary rows ---
+
+// projectSummary derives a project's health rollup from its already-loaded apps,
+// with no extra requests. Per stable env it counts apps that deploy there
+// (deployed) and of those how many are healthy/idle.
+interface EnvCount {
+  healthy: number;
+  deployed: number;
+}
+function projectSummary(apps: AppSummary[], envNames: string[]) {
+  const allStableEnvs: AppEnvironmentSummary[] = apps.flatMap((a) =>
+    (a.environments ?? []).filter((e) => e.envType !== "preview"),
+  );
+  const perEnv: Record<string, EnvCount> = {};
+  for (const name of envNames) perEnv[name] = { healthy: 0, deployed: 0 };
+  for (const a of apps) {
+    for (const e of a.environments ?? []) {
+      const c = perEnv[e.envName];
+      if (!c || e.envType === "preview") continue;
+      if (e.deploy && e.status.phase !== "not_deployed") {
+        c.deployed++;
+        if (e.status.phase === "healthy" || e.status.phase === "idle") c.healthy++;
+      }
+    }
+  }
+  return {
+    total: apps.length,
+    overall: overallPhase(allStableEnvs),
+    perEnv,
+    previews: distinctPreviewCount(apps),
+  };
+}
+
+// distinctPreviewCount counts PRs, not app-previews: the number of distinct
+// preview names across the apps (a PR creates one app-preview per app, all named
+// the same — see the per-PR Previews page).
+function distinctPreviewCount(apps: AppSummary[]): number {
+  const names = new Set<string>();
+  for (const a of apps) {
+    for (const e of a.environments ?? []) {
+      if (e.envType === "preview") names.add(e.preview?.previewName ?? e.envName);
+    }
+  }
+  return names.size;
+}
 
 function ProjectsSection({
   projects,
   appsByProject,
-  stacksByProject,
+  environments,
 }: {
   projects: Project[];
   appsByProject: Map<string, AppSummary[]>;
-  stacksByProject: Map<string, Stack[]>;
+  environments: EnvironmentInfo[];
 }) {
   const { query, setQuery, page, setPage, pageItems, pageCount, total } =
     usePagedSearch(
@@ -371,11 +409,16 @@ function ProjectsSection({
       (p, q) =>
         p.name.toLowerCase().includes(q) ||
         (p.displayName ?? "").toLowerCase().includes(q),
-      8,
+      12,
     );
 
+  // Org-level stable environments become the per-env columns, in promotion order.
+  const envCols = [...environments]
+    .filter((e) => !e.project)
+    .sort((a, b) => a.order - b.order);
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium uppercase tracking-wider text-gray-400">
           Projects
@@ -390,20 +433,44 @@ function ProjectsSection({
         )}
       </div>
 
-      {pageItems.map((p) => (
-        <ProjectCard
-          key={p.name}
-          project={p}
-          apps={appsByProject.get(p.name) ?? []}
-          stacks={stacksByProject.get(p.name) ?? []}
-        />
-      ))}
-
-      {query && total === 0 && (
-        <p className="py-6 text-center text-sm text-gray-400">
-          No projects match “{query}”.
-        </p>
-      )}
+      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-400">
+              <th className="px-5 py-2.5">Project</th>
+              <th className="px-5 py-2.5">Health</th>
+              <th className="px-5 py-2.5">Apps</th>
+              {envCols.map((e) => (
+                <th key={e.name} className="px-5 py-2.5">
+                  {e.displayName || e.name}
+                </th>
+              ))}
+              <th className="px-5 py-2.5">Previews</th>
+              <th className="px-5 py-2.5 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-50">
+            {pageItems.map((p) => (
+              <ProjectSummaryRow
+                key={p.name}
+                project={p}
+                apps={appsByProject.get(p.name) ?? []}
+                envCols={envCols}
+              />
+            ))}
+            {query && total === 0 && (
+              <tr>
+                <td
+                  colSpan={5 + envCols.length}
+                  className="px-5 py-6 text-center text-sm text-gray-400"
+                >
+                  No projects match “{query}”.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {pageCount > 1 && (
         <div className="flex items-center justify-end gap-2 text-xs text-gray-500">
@@ -430,60 +497,87 @@ function ProjectsSection({
   );
 }
 
-// --- Project card ---
+// --- Project summary row ---
 
-function ProjectCard({
+function EnvHealthCell({ count }: { count: EnvCount | undefined }) {
+  if (!count || count.deployed === 0) {
+    return <span className="text-xs text-gray-300">not deployed</span>;
+  }
+  const allHealthy = count.healthy === count.deployed;
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 text-xs font-medium ${
+        allHealthy ? "text-emerald-700" : "text-amber-700"
+      }`}
+    >
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${
+          allHealthy ? "bg-emerald-500" : "bg-amber-500"
+        }`}
+      />
+      {count.healthy}/{count.deployed} healthy
+    </span>
+  );
+}
+
+function ProjectSummaryRow({
   project,
   apps,
-  stacks,
+  envCols,
 }: {
   project: Project;
   apps: AppSummary[];
-  stacks: Stack[];
+  envCols: EnvironmentInfo[];
 }) {
-  const displayName = project.displayName ?? project.name;
+  const summary = projectSummary(
+    apps,
+    envCols.map((e) => e.name),
+  );
 
   return (
-    <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
-      <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3.5">
-        <div className="min-w-0">
-          <Link
-            to={`/projects/${project.name}`}
-            className="text-sm font-semibold text-gray-900 hover:text-gray-600"
-          >
-            {displayName}
-          </Link>
-          {project.description && (
-            <p className="mt-0.5 truncate text-xs text-gray-400">
-              {project.description}
-            </p>
-          )}
-        </div>
-        <div className="flex flex-shrink-0 items-center gap-3">
+    <tr className="hover:bg-gray-50/50">
+      <td className="px-5 py-3">
+        <Link
+          to={`/projects/${project.name}`}
+          className="font-medium text-gray-900 hover:text-indigo-600"
+        >
+          {project.displayName ?? project.name}
+        </Link>
+        {project.description && (
+          <p className="mt-0.5 max-w-xs truncate text-xs text-gray-400">
+            {project.description}
+          </p>
+        )}
+      </td>
+      <td className="px-5 py-3">
+        <StatusBadge status={summary.overall} />
+      </td>
+      <td className="px-5 py-3 text-gray-600 tabular-nums">{summary.total}</td>
+      {envCols.map((e) => (
+        <td key={e.name} className="px-5 py-3">
+          <EnvHealthCell count={summary.perEnv[e.name]} />
+        </td>
+      ))}
+      <td className="px-5 py-3 text-gray-600 tabular-nums">
+        {summary.previews > 0 ? summary.previews : <span className="text-gray-300">—</span>}
+      </td>
+      <td className="px-5 py-3">
+        <div className="flex items-center justify-end gap-3 text-xs font-medium">
           <Link
             to={`/projects/${project.name}/settings`}
-            className="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50"
+            className="text-gray-500 hover:text-gray-800"
           >
             Settings
           </Link>
           <Link
             to={`/projects/${project.name}/apps/new`}
-            className="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-gray-700"
+            className="text-indigo-600 hover:text-indigo-800"
           >
             Add app
           </Link>
         </div>
-      </div>
-
-      <div className="px-5 py-4">
-        <AppTable
-          project={project.name}
-          apps={apps}
-          stacks={stacks}
-          emptyText="No apps yet."
-        />
-      </div>
-    </div>
+      </td>
+    </tr>
   );
 }
 

@@ -795,8 +795,33 @@ func tierAndApp(r *http.Request) (secrets.Tier, string) {
 	return secrets.TierShared, ""
 }
 
-func (h *secretsHandler) handleListSecrets(w http.ResponseWriter, r *http.Request) {
+// scopeForRequest resolves the secret scope for a request, remapping an app's
+// preview environment (e.g. "pr-712") to a preview-PR scope. A preview has no
+// vault of its own — its secrets live in the base env's vault as a preview-PR
+// item — so without this remap an app-env request for a preview resolves to a
+// non-existent "suparship-secrets-env-<preview>" vault.
+func (h *secretsHandler) scopeForRequest(r *http.Request) secrets.Scope {
 	scope := scopeFromPath(r)
+	if scope.Kind != secrets.ScopeEnv || h.appStore == nil {
+		return scope
+	}
+	project, app := r.PathValue("project"), r.PathValue("app")
+	if project == "" || app == "" {
+		return scope
+	}
+	env, err := h.appStore.GetAppEnvironment(r.Context(), project, app, scope.Env)
+	if err != nil || env == nil || env.EnvType != domain.AppEnvPreview {
+		return scope
+	}
+	base := env.BaseEnv
+	if base == "" {
+		base = scope.Env // defensive: a preview should always carry its base env
+	}
+	return secrets.PreviewPRScope(base, scope.Env)
+}
+
+func (h *secretsHandler) handleListSecrets(w http.ResponseWriter, r *http.Request) {
+	scope := h.scopeForRequest(r)
 	tier, app := tierAndApp(r)
 	entries, err := h.vault.ListKeys(r.Context(), scope, tier, app)
 	if err != nil {
@@ -808,7 +833,7 @@ func (h *secretsHandler) handleListSecrets(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *secretsHandler) handleUpsertSecrets(w http.ResponseWriter, r *http.Request) {
-	scope := scopeFromPath(r)
+	scope := h.scopeForRequest(r)
 	tier, app := tierAndApp(r)
 	req, ok := h.decodeUpsertRequest(w, r)
 	if !ok {
@@ -824,7 +849,7 @@ func (h *secretsHandler) handleUpsertSecrets(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *secretsHandler) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
-	scope := scopeFromPath(r)
+	scope := h.scopeForRequest(r)
 	tier, app := tierAndApp(r)
 	key := r.PathValue("key")
 	if err := h.vault.DeleteKey(r.Context(), scope, tier, app, key); err != nil {
@@ -856,24 +881,47 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 		return secrets.ScopeKeys{Shared: entriesToKeys(shared), App: entriesToKeys(app)}
 	}
 
+	// A preview env has no vault of its own — it inherits the base env's secrets.
+	// Read the env band from the base env and fold in the preview band + this
+	// preview's own overrides on top.
+	readEnvName := envName
+	var previewBase, previewName string
+	if h.appStore != nil {
+		if e, err := h.appStore.GetAppEnvironment(ctx, project, appName, envName); err == nil && e != nil && e.EnvType == domain.AppEnvPreview {
+			previewName = envName
+			previewBase = e.BaseEnv
+			if previewBase == "" {
+				previewBase = envName
+			}
+			readEnvName = previewBase
+		}
+	}
+
 	global := read(secrets.GlobalScope())
-	env := read(secrets.EnvScope(envName))
+	env := read(secrets.EnvScope(readEnvName))
+	if previewName != "" {
+		// Preview band (every preview) + this preview's overrides win over base env.
+		band := read(secrets.PreviewScope(previewBase))
+		pr := read(secrets.PreviewPRScope(previewBase, previewName))
+		env.Shared = append(append(env.Shared, band.Shared...), pr.Shared...)
+		env.App = append(append(env.App, band.App...), pr.App...)
+	}
 	var projectGlobal, projectEnv secrets.ScopeKeys
 	if project != "" {
 		projectGlobal = read(secrets.ProjectScope(project))
-		projectEnv = read(secrets.ProjectEnvScope(project, envName))
+		projectEnv = read(secrets.ProjectEnvScope(project, readEnvName))
 	}
 	// Stack layers — only when the app belongs to a stack.
 	var stackGlobal, stackEnv secrets.ScopeKeys
 	if h.appStore != nil {
 		if app, err := h.appStore.GetApp(ctx, project, appName); err == nil && app != nil && app.Spec.Stack != "" {
 			stackGlobal = read(secrets.StackScope(project, app.Spec.Stack))
-			stackEnv = read(secrets.StackEnvScope(project, app.Spec.Stack, envName))
+			stackEnv = read(secrets.StackEnvScope(project, app.Spec.Stack, readEnvName))
 		}
 	}
 	var cluster secrets.ScopeKeys
-	if clusterRef := h.resolveClusterRef(r, envName); clusterRef != "" {
-		cluster = read(secrets.ClusterScope(envName, clusterRef))
+	if clusterRef := h.resolveClusterRef(r, readEnvName); clusterRef != "" {
+		cluster = read(secrets.ClusterScope(readEnvName, clusterRef))
 	}
 
 	resolved := secrets.ResolveScopes(global, projectGlobal, stackGlobal, env, projectEnv, stackEnv, cluster)

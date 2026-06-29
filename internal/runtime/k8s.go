@@ -10,8 +10,16 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
+
+// httpRouteGVR is the Gateway-API HTTPRoute resource, listed via the dynamic
+// client (unstructured) so we don't depend on the gateway-api module. Discovery
+// no-ops gracefully when the CRD is absent or access is forbidden.
+var httpRouteGVR = schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}
 
 // instanceLabel is the standard label ArgoCD (and Helm) stamp on every resource
 // of a release, set to the ArgoCD Application name ({project}-{app}-{env}). It
@@ -32,14 +40,18 @@ var statusRank = map[string]int{
 }
 
 // K8sProvider reads runtime state from Kubernetes workloads (Deployments,
-// StatefulSets, DaemonSets) and Ingresses.
+// StatefulSets, DaemonSets), Ingresses, and Gateway-API HTTPRoutes.
 type K8sProvider struct {
 	client kubernetes.Interface
+	// dyn lists Gateway-API HTTPRoutes (a CRD, not in the typed clientset).
+	// Optional: nil disables HTTPRoute endpoint discovery (Ingress still works).
+	dyn dynamic.Interface
 }
 
-// NewK8sProvider creates a Kubernetes-backed runtime provider.
-func NewK8sProvider(client kubernetes.Interface) *K8sProvider {
-	return &K8sProvider{client: client}
+// NewK8sProvider creates a Kubernetes-backed runtime provider. dyn may be nil to
+// disable Gateway-API HTTPRoute endpoint discovery.
+func NewK8sProvider(client kubernetes.Interface, dyn dynamic.Interface) *K8sProvider {
+	return &K8sProvider{client: client, dyn: dyn}
 }
 
 func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceName string) (*RuntimeInfo, error) {
@@ -76,6 +88,15 @@ func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceN
 		}
 	}
 
+	// Gateway-API HTTPRoutes in this namespace whose backendRef targets the
+	// service contribute their host URLs too (e.g. a co-located "routes" app).
+	for _, rt := range p.listHTTPRoutes(ctx, namespace, "") {
+		if httpRouteReferencesService(rt, serviceName) {
+			info.IngressURLs = append(info.IngressURLs, httpRouteHostURLs(rt)...)
+		}
+	}
+	info.IngressURLs = dedupeStrings(info.IngressURLs)
+
 	return info, nil
 }
 
@@ -87,18 +108,33 @@ func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceN
 // workload naming, so BYO/passthrough charts (whose workloads are named by their
 // own fullname template, not the app name) report real replica counts.
 //
-// Aggregation is worst-of phase + summed replicas + union of ingress URLs.
-// When no labelled workloads are found — label tracking disabled, a non-ArgoCD
-// install, or a canonical app predating instance labels — it falls back to the
-// name-based GetServiceRuntime(namespace, fallbackName) so existing single-
-// workload apps keep working.
+// Aggregation is worst-of phase + summed replicas + union of ingress/HTTPRoute
+// URLs. A resource-only app that ships no workloads — e.g. an httproute/ingress
+// app — but owns labelled routing resources is reported Healthy (it's deployed;
+// there are simply no pods to count). When nothing is found by label at all it
+// falls back to the name-based GetServiceRuntime(namespace, fallbackName) so
+// canonical apps predating instance labels keep working.
 func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fallbackName string) (*RuntimeInfo, error) {
 	selector := instanceLabel + "=" + instance
 	workloads, err := p.listLabelledWorkloads(ctx, namespace, selector)
 	if err != nil {
 		return nil, err
 	}
+
+	// Routing resources this app owns (by label), independent of workloads — so a
+	// resource-only app (httproute/ingress) is recognized as deployed and its
+	// endpoints surface even though there are no replicas to count.
+	routeURLs, hasRouting, err := p.labelledRoutes(ctx, namespace, selector)
+	if err != nil {
+		return nil, err
+	}
+
 	if len(workloads) == 0 {
+		if hasRouting {
+			// Resource-only app: deployed, no pods. Healthy with no replicas.
+			return &RuntimeInfo{Status: StatusHealthy, IngressURLs: routeURLs, Namespace: namespace}, nil
+		}
+		// Nothing labelled — name-based fallback (pre-label / single-workload apps).
 		return p.GetServiceRuntime(ctx, namespace, fallbackName)
 	}
 
@@ -134,16 +170,32 @@ func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fa
 		info.Status = worst
 	}
 
-	ingList, err := p.client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsForbidden(err) {
-		return nil, fmt.Errorf("listing ingresses in %s: %w", namespace, err)
+	info.IngressURLs = dedupeStrings(append(info.IngressURLs, routeURLs...))
+	return info, nil
+}
+
+// labelledRoutes returns the endpoint URLs from Ingresses and Gateway-API
+// HTTPRoutes carrying the given label selector, plus whether any such routing
+// resource exists (used to recognize a workload-less app as deployed). HTTPRoute
+// discovery degrades gracefully (see listHTTPRoutes).
+func (p *K8sProvider) labelledRoutes(ctx context.Context, namespace, selector string) (urls []string, found bool, err error) {
+	ingList, ierr := p.client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if ierr != nil && !apierrors.IsNotFound(ierr) && !apierrors.IsForbidden(ierr) {
+		return nil, false, fmt.Errorf("listing ingresses in %s: %w", namespace, ierr)
 	}
 	if ingList != nil {
 		for i := range ingList.Items {
-			info.IngressURLs = append(info.IngressURLs, ingressHostURLs(&ingList.Items[i])...)
+			found = true
+			urls = append(urls, ingressHostURLs(&ingList.Items[i])...)
 		}
 	}
-	return info, nil
+	if routes := p.listHTTPRoutes(ctx, namespace, selector); len(routes) > 0 {
+		found = true
+		for _, rt := range routes {
+			urls = append(urls, httpRouteHostURLs(rt)...)
+		}
+	}
+	return dedupeStrings(urls), found, nil
 }
 
 // workload is the subset of a Deployment/StatefulSet/DaemonSet runtime state the
@@ -324,4 +376,133 @@ func ingressHostURLs(ing *networkingv1.Ingress) []string {
 func ingressReferencesService(ingressName, serviceName string) bool {
 	return ingressName == serviceName ||
 		strings.HasPrefix(ingressName, serviceName+"-")
+}
+
+// listHTTPRoutes lists Gateway-API HTTPRoutes in namespace (optionally filtered
+// by labelSelector). Returns nil — never an error — when the dynamic client is
+// absent, the CRD isn't installed (NotFound), or access is forbidden, so
+// endpoint discovery degrades gracefully like the Ingress lookups.
+func (p *K8sProvider) listHTTPRoutes(ctx context.Context, namespace, labelSelector string) []unstructured.Unstructured {
+	if p.dyn == nil {
+		return nil
+	}
+	list, err := p.dyn.Resource(httpRouteGVR).Namespace(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		return nil // no CRD / forbidden / transient — best-effort
+	}
+	return list.Items
+}
+
+// httpRouteHostURLs returns the endpoint URLs of an HTTPRoute: every spec.hostname
+// crossed with each rule's path match (default "/"), as https://host[path].
+// Scheme defaults to https — gateways typically terminate TLS, and the HTTPRoute
+// itself carries no scheme (it's a property of the parent Gateway's listeners).
+func httpRouteHostURLs(rt unstructured.Unstructured) []string {
+	hosts, _, _ := unstructured.NestedStringSlice(rt.Object, "spec", "hostnames")
+	if len(hosts) == 0 {
+		return nil
+	}
+	rules, _, _ := unstructured.NestedSlice(rt.Object, "spec", "rules")
+	paths := httpRoutePaths(rules)
+	var urls []string
+	for _, h := range hosts {
+		if h == "" {
+			continue
+		}
+		for _, path := range paths {
+			if path == "/" {
+				urls = append(urls, "https://"+h)
+			} else {
+				urls = append(urls, "https://"+h+path)
+			}
+		}
+	}
+	return urls
+}
+
+// httpRoutePaths extracts the distinct path-match values across an HTTPRoute's
+// rules. A rule with no path match (or no rules at all) implies "/".
+func httpRoutePaths(rules []any) []string {
+	seen := map[string]bool{}
+	var paths []string
+	add := func(p string) {
+		if p == "" {
+			p = "/"
+		}
+		if !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	if len(rules) == 0 {
+		add("/")
+		return paths
+	}
+	for _, r := range rules {
+		rm, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		matches, _, _ := unstructured.NestedSlice(rm, "matches")
+		if len(matches) == 0 {
+			add("/")
+			continue
+		}
+		for _, m := range matches {
+			mm, ok := m.(map[string]any)
+			if !ok {
+				continue
+			}
+			val, _, _ := unstructured.NestedString(mm, "path", "value")
+			add(val)
+		}
+	}
+	if len(paths) == 0 {
+		add("/")
+	}
+	return paths
+}
+
+// httpRouteReferencesService reports whether any rule's backendRef targets a
+// Service named serviceName (same-namespace attribution; Gateway-API defaults a
+// backendRef's kind to Service when unset).
+func httpRouteReferencesService(rt unstructured.Unstructured, serviceName string) bool {
+	rules, _, _ := unstructured.NestedSlice(rt.Object, "spec", "rules")
+	for _, r := range rules {
+		rm, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		refs, _, _ := unstructured.NestedSlice(rm, "backendRefs")
+		for _, ref := range refs {
+			refm, ok := ref.(map[string]any)
+			if !ok {
+				continue
+			}
+			kind, _, _ := unstructured.NestedString(refm, "kind")
+			if kind != "" && kind != "Service" {
+				continue
+			}
+			if name, _, _ := unstructured.NestedString(refm, "name"); name == serviceName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dedupeStrings returns s with duplicates removed, preserving first-seen order.
+func dedupeStrings(s []string) []string {
+	if len(s) == 0 {
+		return s
+	}
+	seen := make(map[string]bool, len(s))
+	out := make([]string, 0, len(s))
+	for _, v := range s {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }

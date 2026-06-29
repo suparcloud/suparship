@@ -205,7 +205,7 @@ func TestPublishPreview_TokenImageTagResolvesToPR(t *testing.T) {
 	if err := p.PublishPreviewForTest(dir, tokenImageApp(), spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
 	}
-	path := filepath.Join(dir, "previews", "demo", "pr-42", "values.yaml")
+	path := filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello", "values.yaml")
 	if got := readRootImageTag(t, path); got != prTag {
 		t.Errorf("preview image.tag = %q, want %q ({platform.imageTag} must resolve to the per-PR tag)", got, prTag)
 	}
@@ -230,15 +230,15 @@ func TestDeletePreview_RemovesPlatformResources(t *testing.T) {
 	if err := p.PublishPreviewForTest(dir, tokenImageApp(), spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
 	}
-	chartTree := filepath.Join(dir, "previews", "demo", "pr-42")
-	platformTree := filepath.Join(dir, "_app-resources", "previews", "demo", "pr-42")
+	chartTree := filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello")
+	platformTree := filepath.Join(dir, "_app-resources", "previews", "staging", "demo", "pr-42", "hello")
 	for _, d := range []string{chartTree, platformTree} {
 		if _, err := os.Stat(d); err != nil {
 			t.Fatalf("expected %s to exist after publish: %v", d, err)
 		}
 	}
 
-	removed, err := p.DeletePreviewForTest(dir, "demo", "pr-42")
+	removed, err := p.DeletePreviewForTest(dir, "demo", "pr-42", "hello", "staging")
 	if err != nil {
 		t.Fatalf("delete preview: %v", err)
 	}
@@ -249,6 +249,102 @@ func TestDeletePreview_RemovesPlatformResources(t *testing.T) {
 		if _, err := os.Stat(d); !os.IsNotExist(err) {
 			t.Errorf("%s should be removed after delete (err=%v)", d, err)
 		}
+	}
+}
+
+// TestPublishPreview_MultipleAppsSamePreviewNoCollision guards the bug where all
+// apps in one PR wrote to previews/{project}/{preview}/ and overwrote each other.
+// Each app's preview must live under its own app-scoped subdirectory.
+func TestPublishPreview_MultipleAppsSamePreviewNoCollision(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:       "pr-42",
+		BaseEnv:           "staging",
+		ClusterServer:     "https://kubernetes.default.svc",
+		Namespace:         "demo-preview-pr-42",
+		BaseDomain:        "localhost",
+		SkipCanonicalBase: true,
+	}
+	for _, name := range []string{"web", "worker"} {
+		app := &domain.App{
+			Name: name, ProjectName: "demo",
+			Spec: domain.AppSpec{Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"}},
+		}
+		if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+			t.Fatalf("publish preview for %s: %v", name, err)
+		}
+	}
+
+	// Both apps' files coexist under the base-env-scoped path — neither overwrote
+	// the other.
+	for _, name := range []string{"web", "worker"} {
+		for _, f := range []string{"app.yaml", "values.yaml"} {
+			path := filepath.Join(dir, "previews", "staging", "demo", "pr-42", name, f)
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("expected %s for app %s: %v", f, name, err)
+			}
+		}
+	}
+
+	// Deleting one app's preview leaves the other intact.
+	if _, err := p.DeletePreviewForTest(dir, "demo", "pr-42", "web", "staging"); err != nil {
+		t.Fatalf("delete web preview: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "previews", "staging", "demo", "pr-42", "web")); !os.IsNotExist(err) {
+		t.Error("web preview dir should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "previews", "staging", "demo", "pr-42", "worker", "values.yaml")); err != nil {
+		t.Errorf("worker preview must survive deletion of web: %v", err)
+	}
+}
+
+// TestPublishPreview_TemplateDefaultsBelowAppBand verifies template-level default
+// preview values apply to a preview but the app's own preview band wins, and the
+// template default overrides the app's base-env value for previews.
+func TestPublishPreview_TemplateDefaultsBelowAppBand(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+
+	app := &domain.App{
+		Name: "hello", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"},
+			// App's base-env (staging) value — the template preview default should
+			// override it for previews.
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"staging": {RawValues: map[string]any{"replicas": 5}},
+				// App preview band: wins over the template default.
+				domain.PreviewOverrideKey: {RawValues: map[string]any{"appWins": "yes"}},
+			},
+		},
+	}
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:       "pr-1",
+		BaseEnv:           "staging",
+		ClusterServer:     "https://kubernetes.default.svc",
+		Namespace:         "demo-preview-pr-1",
+		BaseDomain:        "localhost",
+		SkipCanonicalBase: true,
+		TemplatePreviewValues: map[string]any{
+			"replicas":     1,     // overrides app base-env (5) for previews
+			"templateOnly": "t",   // survives
+			"appWins":      "no",  // app band overrides this
+		},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	m := readPreviewValues(t, filepath.Join(dir, "previews", "staging", "demo", "pr-1", "hello", "values.yaml"))
+	if m["replicas"] != 1 {
+		t.Errorf("replicas = %v, want 1 (template preview default over app base-env)", m["replicas"])
+	}
+	if m["templateOnly"] != "t" {
+		t.Errorf("templateOnly = %v, want t (template default survives)", m["templateOnly"])
+	}
+	if m["appWins"] != "yes" {
+		t.Errorf("appWins = %v, want yes (app preview band wins over template default)", m["appWins"])
 	}
 }
 
@@ -297,7 +393,7 @@ func TestPublishPreview_SharedNamespaceSuffixesPlatformNames(t *testing.T) {
 	if err := p.PublishPreviewForTest(dir, platformNameApp(), spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
 	}
-	m := readPreviewValues(t, filepath.Join(dir, "previews", "demo", "pr-42", "values.yaml"))
+	m := readPreviewValues(t, filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello", "values.yaml"))
 	for key, want := range map[string]string{
 		"envConfigMapName": "hello-pr-42-config",
 		"envSecretName":    "hello-pr-42-secrets",
@@ -323,7 +419,7 @@ func TestPublishPreview_PerPreviewNamespaceNoSuffix(t *testing.T) {
 	if err := p.PublishPreviewForTest(dir, platformNameApp(), spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
 	}
-	m := readPreviewValues(t, filepath.Join(dir, "previews", "demo", "pr-42", "values.yaml"))
+	m := readPreviewValues(t, filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello", "values.yaml"))
 	if got, _ := m["envConfigMapName"].(string); got != "hello-config" {
 		t.Errorf("envConfigMapName = %q, want hello-config (no suffix when namespace is per-preview)", got)
 	}
@@ -368,7 +464,7 @@ func TestPublishPreview_InheritsBaseEnvOverlay(t *testing.T) {
 	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
 	}
-	m := readPreviewValues(t, filepath.Join(dir, "previews", "demo", "pr-42", "values.yaml"))
+	m := readPreviewValues(t, filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello", "values.yaml"))
 	checks := map[string]string{
 		"envConfigMapName":    "hello-config",       // inherited template override, token resolved
 		"fromTemplate":        "overridden-by-band", // preview band wins over the template default

@@ -275,7 +275,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 		// Wire all Kubernetes-backed store and runtime implementations
 		// through the consolidated kube.ServerDeps bundle.
-		kubeDeps := kube.NewServerDeps(client, rbac.NewOrgEnvNamesAdapter(orgProvider))
+		kubeDeps := kube.NewServerDeps(client, rbac.NewOrgEnvNamesAdapter(orgProvider), dynClient)
 		projectStore = kubeDeps.ProjectStore
 		previewStore = kubeDeps.PreviewStore
 		tokenStore = token.NewKubeStore(client)
@@ -804,6 +804,11 @@ func (a *gitOpsPublisherAdapter) setStackOverlays(ctx context.Context, pub *gito
 	if ev, ok := st.Spec.EnvRawValues[envName]; ok {
 		pub.StackEnvRawValues = ev
 	}
+	// A stack-level auto-promote opts in every member app (the effective value is
+	// the app's own setting ORed with the stack's).
+	if st.Spec.AutoPromote != nil && *st.Spec.AutoPromote {
+		pub.AutoPromote = true
+	}
 }
 
 // loadOverride best-effort reads a template's org-level platform override.
@@ -1032,6 +1037,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 			Namespace:       env.Namespace,
 			RoutingProfiles: lookupOrgEnvRoutingProfiles(org, env.EnvName),
 			Clusters:        res.clusters,
+			AutoPromote:     app.Spec.CD.AutoPromote,
 		}
 
 		// Populate secret-store info from org backend config.
@@ -1405,6 +1411,17 @@ func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *dom
 	setPlatformOverlays(&basePub, tmpl, tmplOv, baseEnv)
 	a.setStackOverlays(ctx, &basePub, app, baseEnv)
 
+	// Template-level default preview overlay: the template spec's default merged
+	// with the operator's sync-safe override (override wins), applied to every
+	// preview below the app's own preview band.
+	var templatePreviewValues map[string]any
+	if tmpl != nil {
+		templatePreviewValues = helmvalues.DeepCopyMap(tmpl.Spec.PreviewDefaultValues)
+	}
+	if tmplOv != nil && len(tmplOv.PreviewDefaultValues) > 0 {
+		templatePreviewValues = helmvalues.DeepMerge(templatePreviewValues, helmvalues.DeepCopyMap(tmplOv.PreviewDefaultValues))
+	}
+
 	spec := gitops.PreviewPublishSpec{
 		PreviewName:           preview.EnvName,
 		BaseEnv:               baseEnv,
@@ -1421,15 +1438,16 @@ func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *dom
 		PlatformClusterValues: basePub.PlatformClusterValues,
 		StackRawValues:        basePub.StackRawValues,
 		StackEnvRawValues:     basePub.StackEnvRawValues,
+		TemplatePreviewValues: templatePreviewValues,
 	}
 	return a.inner.PublishPreview(ctx, app, spec)
 }
 
-// DeleteAppPreview implements server.AppPreviewDeleter by removing the preview's
-// gitops-output tree (previews/{project}/{name}) and committing, so ArgoCD
-// prunes the generated Application and its namespace.
-func (a *gitOpsPublisherAdapter) DeleteAppPreview(ctx context.Context, projectName, previewName string) error {
-	return a.inner.DeletePreview(ctx, projectName, previewName)
+// DeleteAppPreview implements server.AppPreviewDeleter by removing one app's
+// preview gitops-output tree (previews/{baseEnv}/{project}/{name}/{app}) and
+// committing, so ArgoCD prunes the generated Application and its namespace.
+func (a *gitOpsPublisherAdapter) DeleteAppPreview(ctx context.Context, projectName, previewName, appName, baseEnv string) error {
+	return a.inner.DeletePreview(ctx, projectName, previewName, appName, baseEnv)
 }
 
 // UnpublishApp implements server.GitOpsPublisher by removing all gitops-output

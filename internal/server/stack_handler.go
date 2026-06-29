@@ -20,6 +20,7 @@ type StackDTO struct {
 	Description      string                    `json:"description,omitempty"`
 	SharedNamespace  bool                      `json:"sharedNamespace,omitempty"`
 	NamespacePattern string                    `json:"namespacePattern,omitempty"`
+	AutoPromote      *bool                     `json:"autoPromote,omitempty"`
 	RawValues        map[string]any            `json:"rawValues,omitempty"`
 	EnvRawValues     map[string]map[string]any `json:"envRawValues,omitempty"`
 	EnvConfig        EnvConfigDTO              `json:"envConfig,omitempty"`
@@ -47,6 +48,7 @@ type patchStackRequest struct {
 	Description      *string                   `json:"description,omitempty"`
 	SharedNamespace  *bool                     `json:"sharedNamespace,omitempty"`
 	NamespacePattern *string                   `json:"namespacePattern,omitempty"`
+	AutoPromote      *bool                     `json:"autoPromote,omitempty"`
 	RawValues        map[string]any            `json:"rawValues,omitempty"`
 	EnvRawValues     map[string]map[string]any `json:"envRawValues,omitempty"`
 	EnvConfig        *EnvConfigDTO             `json:"envConfig,omitempty"`
@@ -94,6 +96,7 @@ func stackToDTO(s *domain.Stack, appNames []string) StackDTO {
 		Description:      s.Spec.Description,
 		SharedNamespace:  s.Spec.SharedNamespace,
 		NamespacePattern: s.Spec.NamespacePattern,
+		AutoPromote:      s.Spec.AutoPromote,
 		RawValues:        s.Spec.RawValues,
 		EnvRawValues:     s.Spec.EnvRawValues,
 		EnvConfig:        toEnvConfigDTO(s.Spec.EnvConfig),
@@ -207,6 +210,9 @@ func (rh *rbacHandler) handlePatchStack(w http.ResponseWriter, r *http.Request) 
 	}
 	if req.NamespacePattern != nil {
 		s.Spec.NamespacePattern = *req.NamespacePattern
+	}
+	if req.AutoPromote != nil {
+		s.Spec.AutoPromote = req.AutoPromote
 	}
 	if req.RawValues != nil {
 		s.Spec.RawValues = req.RawValues

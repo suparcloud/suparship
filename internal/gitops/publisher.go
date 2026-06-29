@@ -832,6 +832,10 @@ func previewRawValuesOverlay(app *domain.App, preview PreviewPublishSpec) map[st
 	overlay = deepMerge(overlay, deepCopyMap(preview.StackRawValues))
 	overlay = deepMerge(overlay, deepCopyMap(preview.StackEnvRawValues))
 	overlay = deepMerge(overlay, rawValuesOverlay(app, preview.BaseEnv))
+	// Template-level preview defaults: the bottom of the "preview band" — applied
+	// to every preview of this template's apps, above the base-env composition and
+	// below the app's own preview override (so apps can modify/extend).
+	overlay = deepMerge(overlay, deepCopyMap(preview.TemplatePreviewValues))
 	if ov, ok := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]; ok && len(ov.RawValues) > 0 {
 		overlay = deepMerge(overlay, deepCopyMap(ov.RawValues))
 	}
@@ -1367,6 +1371,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			AppName:      app.Name,
 			EnvName:      env.EnvName,
 			IsFirstStage: i == 0,
+			AutoPromote:  env.AutoPromote,
 		})
 	}
 	appPolicies := BuildKargoPromotionPolicies(projectEnvs)
@@ -1535,6 +1540,11 @@ func (p *Publisher) writeKargoProjectConfig(kargoDir, projectName string, polici
 
 // AppPublishEnv carries per-environment publish context for PublishApp.
 type AppPublishEnv struct {
+	// AutoPromote opts this app's pipeline into auto-promotion to prod (the
+	// effective value of CDConfig.AutoPromote ORed with its stack's setting).
+	// App-wide, carried on every env; the Kargo policy builder enables auto
+	// promotion for the downstream (prod) stages when true.
+	AutoPromote bool
 	// EnvName is the logical environment name, e.g. "staging".
 	EnvName string
 	// EnvType classifies the environment for Helm values mapping and preview
@@ -1625,11 +1635,12 @@ type AppPublishEnv struct {
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD
 // deploys the preview via the previews ApplicationSet.
 //
-// Written files:
-//   - gitops-output/previews/{project}/{previewName}/app.yaml
-//   - gitops-output/previews/{project}/{previewName}/values.yaml
-//   - gitops-output/previews/{project}/{previewName}/env-configmap.yaml
-//   - gitops-output/previews/{project}/{previewName}/external-secret.yaml (when StoreName is set)
+// Written files (env-first + app-scoped, mirroring the stable envs/ tree, so the
+// base env is evident and apps sharing a preview name in one PR don't collide):
+//   - gitops-output/previews/{baseEnv}/{project}/{previewName}/{app}/app.yaml
+//   - gitops-output/previews/{baseEnv}/{project}/{previewName}/{app}/values.yaml
+//   - gitops-output/_app-resources/previews/{baseEnv}/{project}/{previewName}/{app}/env-configmap.yaml
+//   - gitops-output/_app-resources/previews/{baseEnv}/{project}/{previewName}/{app}/external-secret.yaml (when StoreName is set)
 //
 // PublishPreview is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview PreviewPublishSpec) error {
@@ -1651,6 +1662,7 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 		AppName:       app.Name,
 		PreviewName:   preview.PreviewName,
 		Project:       app.ProjectName,
+		BaseEnv:       preview.BaseEnv,
 		Template:      app.Spec.Template.Name,
 		ChartPath:     chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
 		ClusterServer: preview.ClusterServer,
@@ -1660,7 +1672,7 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	if err != nil {
 		return fmt.Errorf("marshal preview app.yaml: %w", err)
 	}
-	metaPath := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName, "app.yaml")
+	metaPath := p.outputDir(repoDir, "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name, "app.yaml")
 	if err := p.writeFile(metaPath, metaBytes); err != nil {
 		return err
 	}
@@ -1723,7 +1735,7 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	if err != nil {
 		return fmt.Errorf("marshal preview values.yaml: %w", err)
 	}
-	valuesPath := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName, "values.yaml")
+	valuesPath := p.outputDir(repoDir, "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name, "values.yaml")
 	if err := p.writeFile(valuesPath, hvBytes); err != nil {
 		return err
 	}
@@ -1736,8 +1748,8 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	// Platform-managed ConfigMap + ExternalSecret go to the platform-owned
 	// _app-resources/previews/ tree (shipped by the preview platform
 	// ApplicationSet), not the preview's chart directory.
-	previewDir := p.outputDir(repoDir, "previews", app.ProjectName, preview.PreviewName)
-	resDir := p.outputDir(repoDir, "_app-resources", "previews", app.ProjectName, preview.PreviewName)
+	previewDir := p.outputDir(repoDir, "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name)
+	resDir := p.outputDir(repoDir, "_app-resources", "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name)
 	esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 		App:             app.Name,
 		SecretName:      secrets.AppSecretName(resBase),
@@ -1754,6 +1766,8 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	})
 	meta := PlatformAppMeta{
 		Name:          preview.PreviewName,
+		AppName:       app.Name,
+		BaseEnv:       preview.BaseEnv,
 		Project:       app.ProjectName,
 		Namespace:     preview.Namespace,
 		ClusterServer: preview.ClusterServer,
@@ -1816,37 +1830,42 @@ type PreviewPublishSpec struct {
 	// StackRawValues / StackEnvRawValues are the app's stack shared overlays.
 	StackRawValues    map[string]any
 	StackEnvRawValues map[string]any
+	// TemplatePreviewValues is the template's default preview overlay (TemplateSpec
+	// + TemplateOverride PreviewDefaultValues, merged), applied to every preview of
+	// the template's apps below the app's own preview band.
+	TemplatePreviewValues map[string]any
 }
 
-// DeletePreview removes a preview's GitOps files and commits. It deletes BOTH
-// the preview's chart tree (previews/{project}/{name}) — pruned by the previews
-// ApplicationSet — AND its platform-resources tree
-// (_app-resources/previews/{project}/{name}) — pruned by the previews-platform
-// ApplicationSet. Removing only the former leaves the {project}-{name}-preview-
-// platform Application dangling. No-op (without error) when neither exists.
-func (p *Publisher) DeletePreview(ctx context.Context, projectName, previewName string) error {
+// DeletePreview removes one app's preview GitOps files and commits. It deletes
+// BOTH the preview's chart tree (previews/{baseEnv}/{project}/{name}/{app}) —
+// pruned by the previews ApplicationSet — AND its platform-resources tree
+// (_app-resources/previews/{baseEnv}/{project}/{name}/{app}) — pruned by the
+// previews-platform ApplicationSet. Removing only the former leaves the
+// preview-platform Application dangling. Other apps sharing the preview name are
+// untouched. No-op (without error) when neither exists.
+func (p *Publisher) DeletePreview(ctx context.Context, projectName, previewName, appName, baseEnv string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		removed, err := p.deletePreviewFiles(repoDir, projectName, previewName)
+		removed, err := p.deletePreviewFiles(repoDir, projectName, previewName, appName, baseEnv)
 		if err != nil {
 			return err
 		}
 		if !removed {
-			slog.Debug("gitops: preview directories not found, nothing to delete", "preview", previewName)
+			slog.Debug("gitops: preview directories not found, nothing to delete", "preview", previewName, "app", appName)
 			return nil
 		}
-		commitMsg := fmt.Sprintf("feat(previews): delete preview %s/%s\n\nDeleted by suparShip.", projectName, previewName)
+		commitMsg := fmt.Sprintf("feat(previews): delete preview %s/%s/%s/%s\n\nDeleted by suparShip.", baseEnv, projectName, previewName, appName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
 
-// deletePreviewFiles removes a preview's chart tree and its platform-resources
+// deletePreviewFiles removes one app's preview chart tree and its platform-resources
 // tree from repoDir (no git commit), reporting whether anything was removed.
-func (p *Publisher) deletePreviewFiles(repoDir, projectName, previewName string) (bool, error) {
+func (p *Publisher) deletePreviewFiles(repoDir, projectName, previewName, appName, baseEnv string) (bool, error) {
 	u := &unpublishHelper{}
-	if err := u.rm(p.outputDir(repoDir, "previews", projectName, previewName)); err != nil {
+	if err := u.rm(p.outputDir(repoDir, "previews", baseEnv, projectName, previewName, appName)); err != nil {
 		return false, err
 	}
-	if err := u.rm(p.outputDir(repoDir, "_app-resources", "previews", projectName, previewName)); err != nil {
+	if err := u.rm(p.outputDir(repoDir, "_app-resources", "previews", baseEnv, projectName, previewName, appName)); err != nil {
 		return false, err
 	}
 	return u.removed, nil
@@ -1876,8 +1895,8 @@ func (u *unpublishHelper) rm(path string) error {
 //   - _infra/kargo/{ns}-{app}-*.yaml         — Kargo Warehouse + Stage CRs
 //   - {env}/{project}/{app}/                 — legacy pre-envs/ layout
 //
-// Preview trees (previews/{project}/{preview}) are keyed by preview name, not
-// app name, and are removed by the preview-delete flow. No-op if nothing found.
+// Preview trees (previews/{baseEnv}/{project}/{preview}/{app}) are removed by the
+// per-app preview-delete flow, not here. No-op if nothing found.
 func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		var u unpublishHelper
@@ -2208,11 +2227,9 @@ func (p *Publisher) ensureRepoREADME(repoDir string) error {
 
 // appEnvDir builds the per-app directory for one publish env. Stable envs
 // land under "envs/{envName}/{project}/{app}/" so the top-level layout is
-// self-documenting (`envs/`, `previews/`, `_infra/`, `charts/`). Preview
-// envs keep their legacy "{previewName}/{project}/{app}/" placement —
-// publishAppFiles handles both kinds, but the dedicated PublishPreview
-// flow writes to "previews/{project}/{previewName}/" so the locations
-// differ on purpose.
+// self-documenting (`envs/`, `previews/`, `_infra/`, `charts/`). The dedicated
+// PublishPreview flow writes to "previews/{baseEnv}/{project}/{previewName}/{app}/"
+// (env-first, mirroring envs/) so the locations differ on purpose.
 func (p *Publisher) appEnvDir(repoDir string, env AppPublishEnv, parts ...string) string {
 	if env.EnvType == domain.AppEnvPreview {
 		all := append([]string{env.EnvName}, parts...)
@@ -2444,7 +2461,7 @@ walk away from the platform entirely. The repo keeps syncing.
 │               ├── values.yaml            # rendered Helm values
 │               ├── env-configmap.yaml     # merged env vars (org→cluster)
 │               └── external-secret.yaml   # platform-managed ExternalSecret
-├── previews/{project}/{previewName}/      # per-PR preview environments
+├── previews/{baseEnv}/{project}/{previewName}/{app}/  # per-PR preview environments (env-first)
 └── charts/{template}/{version}/           # bundled Helm chart sources (version-scoped)
 `+"```"+`
 

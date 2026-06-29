@@ -39,6 +39,7 @@ import (
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/runtime"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -108,10 +109,12 @@ type ServerDeps struct {
 // orgEnvs is optional (pass nil to skip org-level environment resolution).
 // When provided it is used by the compat layer to enumerate environments for
 // legacy apps whose project's Environments list is empty (org-inherited model).
-func NewServerDeps(client kubernetes.Interface, orgEnvs compat.OrgEnvsReader) *ServerDeps {
+// dyn is optional (may be nil) — it enables Gateway-API HTTPRoute endpoint
+// discovery in the runtime provider; nil leaves Ingress discovery working.
+func NewServerDeps(client kubernetes.Interface, orgEnvs compat.OrgEnvsReader, dyn dynamic.Interface) *ServerDeps {
 	projectStore := project.NewK8sStore(client)
 	previewStore := preview.NewK8sStore(client)
-	runtimeProvider := runtime.NewK8sProvider(client)
+	runtimeProvider := runtime.NewK8sProvider(client, dyn)
 
 	nativeAppStore := NewK8sAppStore(client)
 	appStore := compat.NewServiceBackedAppStore(

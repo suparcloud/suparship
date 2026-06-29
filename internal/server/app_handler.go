@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	domainapp "github.com/suparcloud/suparship/internal/app"
@@ -1188,7 +1189,7 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 	// keeps the record (the preview stays listed and retryable) rather than
 	// orphaning a running Application with no store entry.
 	if d, ok := ah.gitOpsPublisher.(AppPreviewDeleter); ok {
-		if err := d.DeleteAppPreview(r.Context(), projectName, previewName); err != nil {
+		if err := d.DeleteAppPreview(r.Context(), projectName, previewName, appName, env.BaseEnv); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to remove preview from gitops"})
 			return
 		}
@@ -1954,6 +1955,7 @@ func workloadClusterClientForEnv(ctx context.Context, orgProvider rbac.OrgProvid
 type namedClient struct {
 	name   string
 	client kubernetes.Interface
+	dyn    dynamic.Interface // for Gateway-API HTTPRoute discovery; may be nil
 }
 
 // workloadClustersForEnv resolves the env's deploy-target clusters (one in
@@ -1986,7 +1988,9 @@ func (ah *appHandler) workloadClustersForEnv(ctx context.Context, envName string
 			unreachable = append(unreachable, ref)
 			continue
 		}
-		clients = append(clients, namedClient{name: ref, client: c})
+		// Dynamic client is best-effort — HTTPRoute endpoint discovery is optional.
+		dyn, _ := ah.clusterPool.GetDynamic(ctx, ref)
+		clients = append(clients, namedClient{name: ref, client: c, dyn: dyn})
 	}
 	return clients, unreachable, true
 }
@@ -2012,7 +2016,15 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	// is exactly when the operator needs the ArgoCD/ESO failure reason.
 	defer ah.enrichEnvWithDiagnostics(ctx, appName, env)
 
-	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, env.EnvName)
+	// A preview runs on its base env's cluster (it clones that env), and its own
+	// name (e.g. "pr-712") is not a configured org environment — so resolve the
+	// workload cluster from the base env, else routing falls back to the local
+	// cluster and the preview always reads as 0/0 "not deployed".
+	routeEnv := env.EnvName
+	if env.EnvType == domain.AppEnvPreview && env.BaseEnv != "" {
+		routeEnv = env.BaseEnv
+	}
+	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, routeEnv)
 
 	// instance is the Helm release name suparship sets on every app
 	// Application/ApplicationSet (ReleaseName: app.Name), which Helm stamps as
@@ -2060,7 +2072,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	agg := &runtime.RuntimeInfo{Status: runtime.StatusHealthy}
 	got := false
 	for _, nc := range clients {
-		info, err := runtime.NewK8sProvider(nc.client).GetAppRuntime(ctx, env.Namespace, instance, appName)
+		info, err := runtime.NewK8sProvider(nc.client, nc.dyn).GetAppRuntime(ctx, env.Namespace, instance, appName)
 		if err != nil {
 			continue
 		}
@@ -2321,7 +2333,7 @@ func cdConfigFromDTO(dto *CDConfigDTO) domain.CDConfig {
 	if dto == nil {
 		return domain.CDConfig{}
 	}
-	return domain.CDConfig{Managed: dto.Managed}
+	return domain.CDConfig{Managed: dto.Managed, AutoPromote: dto.AutoPromote}
 }
 
 // appImageBindingsFromDTO converts wire image selections into domain selections.
@@ -2424,7 +2436,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		EnvRawValues:     envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
 		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
-		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed},
+		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote},
 		Images:           appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:     string(app.Spec.DeliveryMode),
 		PreviewsEnabled:  app.Spec.PreviewsEnabled,

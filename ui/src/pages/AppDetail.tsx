@@ -10,7 +10,7 @@ import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 
 // CodeMirror is heavy; only the values editor needs it.
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
-import { listTemplateVersions } from "../lib/templates";
+import { listTemplateVersions, fetchTemplateEffectiveValues } from "../lib/templates";
 import type { TemplateVersionInfo, TemplateImage, AppImageBinding } from "../types";
 import { createAppPreview, deleteAppPreview } from "../lib/previews";
 import {
@@ -1840,6 +1840,94 @@ const BASE_SCOPE = "__base__";
 // preview on top of its base env). Mirrors the backend's domain.PreviewOverrideKey.
 const PREVIEW_SCOPE = "preview";
 
+// ValuesLayers shows, read-only, the override layers that compose the effective
+// values for the selected env in precedence order (low → high), each collapsible.
+// Empty layers render a muted "inherits" note. The chart/canonical/stack
+// sub-layers are folded into the template-effective and effective maps.
+function ValuesLayers({
+  envLabel,
+  templateLayer,
+  appBase,
+  envOverride,
+  envOverrideLabel,
+  effective,
+}: {
+  envLabel: string;
+  templateLayer: string;
+  appBase: string;
+  envOverride: string;
+  envOverrideLabel: string;
+  effective: string;
+}) {
+  const layers = [
+    {
+      n: 1,
+      title: "Template & platform defaults",
+      note: "read-only — chart defaults ⊕ template defaults ⊕ operator override",
+      body: templateLayer,
+    },
+    { n: 2, title: "App base overrides", note: "all environments", body: appBase },
+    {
+      n: 3,
+      title: `${envOverrideLabel} overrides`,
+      note: "this environment, on top of the base",
+      body: envOverride,
+    },
+    {
+      n: 4,
+      title: `Effective — ${envLabel || "selected env"} (as deployed)`,
+      note: "everything merged, low → high",
+      body: effective,
+      open: true,
+    },
+  ];
+  return (
+    <div>
+      <p className="mb-3 text-xs text-gray-400">
+        How the values compose for{" "}
+        <span className="font-medium">{envLabel || "the selected environment"}</span>,
+        lowest → highest precedence. Read-only.{" "}
+        <code className="font-mono">{"{…}"}</code> tokens resolve at deploy.
+      </p>
+      <div className="space-y-2">
+        {layers.map((l) => (
+          <details
+            key={l.n}
+            open={l.open}
+            className="group rounded-lg border border-gray-200 bg-white"
+          >
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm">
+              <svg
+                className="h-3.5 w-3.5 text-gray-400 transition-transform group-open:rotate-90"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+              </svg>
+              <span className="flex h-5 w-5 items-center justify-center rounded bg-gray-100 text-xs font-medium text-gray-500">
+                {l.n}
+              </span>
+              <span className="font-medium text-gray-800">{l.title}</span>
+              <span className="text-xs text-gray-400">{l.note}</span>
+            </summary>
+            <div className="border-t border-gray-100 p-3">
+              {l.body && l.body.trim() ? (
+                <pre className="overflow-x-auto rounded bg-gray-50 p-3 font-mono text-xs text-gray-700">
+                  {l.body}
+                </pre>
+              ) : (
+                <p className="text-xs text-gray-400">— inherits (no overrides at this layer)</p>
+              )}
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // Defaults for a CD-managed image's Kargo tag selection (mirror the backend's
 // gitops.DefaultImageTagPattern / DefaultImageSelectionStrategy): match a 7-char
 // git commit SHA and promote the newest build. Editable per image.
@@ -1872,7 +1960,12 @@ function AppValuesEditor({
   const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
   const [preview, setPreview] = useState<string>("");
   const [chartAvailable, setChartAvailable] = useState(true);
+  // Read-only "Layers" view: the override layers that compose the effective values
+  // for the selected env, lowest→highest precedence.
+  const [view, setView] = useState<"edit" | "layers">("edit");
+  const [templateLayer, setTemplateLayer] = useState<string>("");
   const [cdManaged, setCdManaged] = useState(false);
+  const [autoPromote, setAutoPromote] = useState(false);
   const [cdSaving, setCdSaving] = useState(false);
   const [previewsEnabled, setPreviewsEnabled] = useState(true);
   const [deliveryMode, setDeliveryMode] = useState("pipeline");
@@ -1882,6 +1975,38 @@ function AppValuesEditor({
   const [deployEnvs, setDeployEnvs] = useState<Record<string, boolean>>({});
   const [deploySaving, setDeploySaving] = useState(false);
   const [previewsSaving, setPreviewsSaving] = useState(false);
+
+  // Keep the values scope in step with the environment selected above: a preview
+  // selects the shared preview band, a stable env selects its own overrides. So
+  // the editor (and effective pane) reflect what you're looking at.
+  useEffect(() => {
+    if (!currentEnvName) return;
+    const env = (data.environments ?? []).find((e) => e.envName === currentEnvName);
+    if (env?.envType === "preview") setScope(PREVIEW_SCOPE);
+    else if (env && envs.includes(env.envName)) setScope(env.envName);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentEnvName]);
+
+  // Template & platform layer (read-only) for the Layers view — chart defaults ⊕
+  // template defaults/env ⊕ operator override, scoped to the selected env (a
+  // preview uses its base env, since it inherits that env's template values).
+  useEffect(() => {
+    if (view !== "layers" || !currentEnvName) return;
+    const env = (data.environments ?? []).find((e) => e.envName === currentEnvName);
+    const tEnv = env?.envType === "preview" ? env.preview?.baseEnv : currentEnvName;
+    let cancelled = false;
+    fetchTemplateEffectiveValues(data.template.name, tEnv || undefined)
+      .then((res) => {
+        if (!cancelled) setTemplateLayer(stringifyOverlay(res.values));
+      })
+      .catch(() => {
+        if (!cancelled) setTemplateLayer("");
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, currentEnvName, data.template.name]);
   // Images discovered in the effective values (from the values preview below);
   // the user checks which ones Kargo manages.
   const [discoveredImages, setDiscoveredImages] = useState<TemplateImage[]>([]);
@@ -1903,6 +2028,7 @@ function AppValuesEditor({
     next[PREVIEW_SCOPE] = stringifyOverlay(data.envRawValues?.[PREVIEW_SCOPE]);
     setEnvTexts(next);
     setCdManaged(data.cd?.managed ?? false);
+    setAutoPromote(data.cd?.autoPromote ?? false);
     setPreviewsEnabled(data.previewsEnabled ?? true);
     setDeliveryMode(data.deliveryMode === "direct" ? "direct" : "pipeline");
     const de: Record<string, boolean> = {};
@@ -1983,7 +2109,9 @@ function AppValuesEditor({
     }
   }
 
-  const cdDirty = cdManaged !== (data.cd?.managed ?? false);
+  const cdDirty =
+    cdManaged !== (data.cd?.managed ?? false) ||
+    autoPromote !== (data.cd?.autoPromote ?? false);
   // Direct-delivery apps deploy each env from values — no Kargo, so the CD +
   // image-selection sections don't apply. Derived from the live selector so the
   // sections toggle as the user switches mode.
@@ -2056,7 +2184,7 @@ function AppValuesEditor({
   async function saveCD() {
     setCdSaving(true);
     try {
-      await updateApp(project, data.name, { cd: { managed: cdManaged } });
+      await updateApp(project, data.name, { cd: { managed: cdManaged, autoPromote } });
       toast.success("CD settings saved — re-publishing to GitOps.");
       await onSaved();
     } catch (err) {
@@ -2160,34 +2288,64 @@ function AppValuesEditor({
           Values
         </h2>
         <div className="flex items-center gap-2">
-          <select
-            value={scope}
-            onChange={(e) => {
-              setScope(e.target.value);
-              setYamlError(null);
-            }}
-            className="rounded-md border border-gray-300 px-2 py-1 text-xs"
-          >
-            <option value={BASE_SCOPE}>Base (all environments)</option>
-            {envs.map((env) => (
-              <option key={env} value={env}>
-                {env} overrides
-              </option>
+          {/* Edit (editable overrides) vs Layers (read-only precedence stack). */}
+          <div className="flex rounded-md border border-gray-200 p-0.5 text-xs">
+            {(["edit", "layers"] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={`rounded px-2 py-0.5 font-medium capitalize ${
+                  view === v ? "bg-gray-900 text-white" : "text-gray-500 hover:text-gray-800"
+                }`}
+              >
+                {v}
+              </button>
             ))}
-            {previewsEnabled && (
-              <option value={PREVIEW_SCOPE}>preview overrides (all previews)</option>
-            )}
-          </select>
-          <button
-            onClick={save}
-            disabled={saving || yamlError !== null}
-            className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
+          </div>
+          {view === "edit" && (
+            <>
+              <select
+                value={scope}
+                onChange={(e) => {
+                  setScope(e.target.value);
+                  setYamlError(null);
+                }}
+                className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+              >
+                <option value={BASE_SCOPE}>Base (all environments)</option>
+                {envs.map((env) => (
+                  <option key={env} value={env}>
+                    {env} overrides
+                  </option>
+                ))}
+                {previewsEnabled && (
+                  <option value={PREVIEW_SCOPE}>preview overrides (all previews)</option>
+                )}
+              </select>
+              <button
+                onClick={save}
+                disabled={saving || yamlError !== null}
+                className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+            </>
+          )}
         </div>
       </div>
       <div className="px-5 py-4">
+        {view === "layers" && (
+          <ValuesLayers
+            envLabel={currentEnvName ?? previewEnv}
+            templateLayer={templateLayer}
+            appBase={stringifyOverlay(data.rawValues)}
+            envOverride={activeText}
+            envOverrideLabel={scope === PREVIEW_SCOPE ? "preview" : (currentEnvName ?? scope)}
+            effective={preview}
+          />
+        )}
+        {view === "edit" && (
+        <>
         <p className="mb-3 text-xs text-gray-400">
           {scope === BASE_SCOPE
             ? "App-level overrides applied to every environment."
@@ -2245,6 +2403,8 @@ function AppValuesEditor({
         </Suspense>
         {yamlError && (
           <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
+        )}
+        </>
         )}
 
         <div className="mt-4 border-t border-gray-100 pt-4">
@@ -2354,6 +2514,19 @@ function AppValuesEditor({
                   resetting to the value in your overrides. Leave the tag out of the
                   overrides above once this is on. Which images Kargo watches is set
                   under Images below.
+                </p>
+                <label className="mt-3 flex items-center gap-2 text-sm font-medium text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={autoPromote}
+                    onChange={(e) => setAutoPromote(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  Auto-promote to prod
+                </label>
+                <p className="mt-1 text-xs text-gray-400">
+                  Promotes the same image to prod automatically once it's deployed and
+                  healthy in staging — no manual step. Manual “Promote” still works.
                 </p>
               </div>
               <button

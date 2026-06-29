@@ -220,6 +220,12 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("DELETE /api/v1/previews/{name}", rh.auth.requireAuth(legacyServiceRoute(rh.previewHandler.handleDeletePreview)))
 		mux.HandleFunc("GET /api/v1/projects/{project}/services/{service}/previews", viewProject(legacyServiceRoute(rh.previewHandler.handleListServicePreviews)))
 	}
+	if rh.appHandler != nil {
+		// PR-grouped previews built from the real app-scoped preview environments:
+		// one item per PR (preview name) with its per-app previews nested. Powers
+		// the global Previews page (the legacy GET /previews is deprecated).
+		mux.HandleFunc("GET /api/v1/preview-groups", rh.auth.requireAuth(rh.handleListPreviewGroups))
+	}
 	if rh.promoteHandler != nil {
 		mux.HandleFunc("POST /api/v1/projects/{project}/services/{service}/promote", manageProject(legacyServiceRoute(rh.promoteHandler.handlePromote)))
 	}

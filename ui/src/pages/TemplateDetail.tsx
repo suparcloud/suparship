@@ -216,7 +216,8 @@ export function TemplateDetail() {
 }
 
 const ALL_ENVS = "__all__";
-// Scope values are "__all__", "env:<name>", or "cluster:<ref>".
+const PREVIEW_SCOPE = "__preview__";
+// Scope values are "__all__", "__preview__", "env:<name>", or "cluster:<ref>".
 const envScope = (name: string) => `env:${name}`;
 const clusterScope = (ref: string) => `cluster:${ref}`;
 
@@ -234,6 +235,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
   const [clusters, setClusters] = useState<Cluster[]>([]);
   const [scope, setScope] = useState<string>(ALL_ENVS);
   const [allText, setAllText] = useState("");
+  const [previewText, setPreviewText] = useState("");
   const [envTexts, setEnvTexts] = useState<Record<string, string>>({});
   const [clusterTexts, setClusterTexts] = useState<Record<string, string>>({});
   const [yamlError, setYamlError] = useState<string | null>(null);
@@ -250,6 +252,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
       .then((ov) => {
         if (cancelled) return;
         setAllText(stringifyOverlay(ov.defaultValues));
+        setPreviewText(stringifyOverlay(ov.previewDefaultValues));
         const envNext: Record<string, string> = {};
         for (const [env, vals] of Object.entries(ov.envValues ?? {})) {
           envNext[env] = stringifyOverlay(vals as Record<string, unknown>);
@@ -284,6 +287,8 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
   function buildOverride(): { override: TemplateOverride; error: string | null } {
     const all = parseYamlOverlay(allText);
     if (all.error) return { override: {}, error: `All-envs: ${all.error}` };
+    const prev = parseYamlOverlay(previewText);
+    if (prev.error) return { override: {}, error: `Preview: ${prev.error}` };
     const collect = (texts: Record<string, string>, label: string) => {
       const out: Record<string, Record<string, unknown>> = {};
       for (const [key, text] of Object.entries(texts)) {
@@ -302,6 +307,8 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
         defaultValues: all.value ?? {},
         envValues: Object.keys(envs.out).length > 0 ? envs.out : undefined,
         clusterValues: Object.keys(cls.out).length > 0 ? cls.out : undefined,
+        previewDefaultValues:
+          prev.value && Object.keys(prev.value).length > 0 ? prev.value : undefined,
       },
       error: null,
     };
@@ -336,11 +343,14 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
   const activeText =
     scope === ALL_ENVS
       ? allText
-      : scope.startsWith("cluster:")
-        ? (clusterTexts[scope.slice(8)] ?? "")
-        : (envTexts[scope.slice(4)] ?? "");
+      : scope === PREVIEW_SCOPE
+        ? previewText
+        : scope.startsWith("cluster:")
+          ? (clusterTexts[scope.slice(8)] ?? "")
+          : (envTexts[scope.slice(4)] ?? "");
   function setActiveText(text: string) {
     if (scope === ALL_ENVS) setAllText(text);
+    else if (scope === PREVIEW_SCOPE) setPreviewText(text);
     else if (scope.startsWith("cluster:"))
       setClusterTexts((cur) => ({ ...cur, [scope.slice(8)]: text }));
     else setEnvTexts((cur) => ({ ...cur, [scope.slice(4)]: text }));
@@ -350,9 +360,11 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
   const activeLabel =
     scope === ALL_ENVS
       ? "All-envs overrides"
-      : scope.startsWith("cluster:")
-        ? `cluster ${scope.slice(8)} overrides`
-        : `${scope.slice(4)} overrides`;
+      : scope === PREVIEW_SCOPE
+        ? "Preview defaults (all previews)"
+        : scope.startsWith("cluster:")
+          ? `cluster ${scope.slice(8)} overrides`
+          : `${scope.slice(4)} overrides`;
 
   async function save() {
     const { override, error } = buildOverride();
@@ -410,6 +422,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
           className="rounded-md border border-gray-300 px-2 py-1 text-xs"
         >
           <option value={ALL_ENVS}>All environments</option>
+          <option value={PREVIEW_SCOPE}>Preview defaults (all previews)</option>
           {envs.length > 0 && (
             <optgroup label="Environments">
               {envs.map((env) => (
@@ -448,31 +461,44 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
             onChange={setActiveText}
             onValidChange={(_, err) => setYamlError(err)}
           />
-          <div>
-            <ValuesEditor
-              label={
-                previewCluster
-                  ? `Effective — cluster ${previewCluster}`
-                  : previewEnv
-                    ? `Effective — ${previewEnv}`
-                    : "Effective"
-              }
-              value={preview}
-              height="26rem"
-              readOnly
-            />
-            {!chartAvailable && (
-              <p className="mt-1 text-xs text-gray-400">
-                Chart defaults aren't readable for this template; preview shows
-                template + overrides only.
+          {scope === PREVIEW_SCOPE ? (
+            <div className="rounded-lg border border-gray-200 bg-gray-50/50 p-4 text-sm text-gray-500">
+              <p className="font-medium text-gray-700">Preview defaults</p>
+              <p className="mt-1">
+                Applied to <span className="font-medium">every preview</span> of
+                apps using this template, layered on the preview's base env and{" "}
+                <span className="font-medium">below each app's own preview
+                override</span> — apps can still modify or extend. Preview-only:
+                stable envs are unaffected.
               </p>
-            )}
-            <p className="mt-1 text-xs text-gray-400">
-              Preview omits per-app overrides and{" "}
-              <code className="font-mono">{"{…}"}</code> token resolution — applied
-              at deploy.
-            </p>
-          </div>
+            </div>
+          ) : (
+            <div>
+              <ValuesEditor
+                label={
+                  previewCluster
+                    ? `Effective — cluster ${previewCluster}`
+                    : previewEnv
+                      ? `Effective — ${previewEnv}`
+                      : "Effective"
+                }
+                value={preview}
+                height="26rem"
+                readOnly
+              />
+              {!chartAvailable && (
+                <p className="mt-1 text-xs text-gray-400">
+                  Chart defaults aren't readable for this template; preview shows
+                  template + overrides only.
+                </p>
+              )}
+              <p className="mt-1 text-xs text-gray-400">
+                Preview omits per-app overrides and{" "}
+                <code className="font-mono">{"{…}"}</code> token resolution —
+                applied at deploy.
+              </p>
+            </div>
+          )}
         </div>
       </Suspense>
       {yamlError && (

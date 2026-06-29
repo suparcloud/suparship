@@ -23,6 +23,11 @@ type TemplateOverride struct {
 	// express. Simple per-cluster values can instead use {platform.cluster} or
 	// cluster-scoped {vars.*}.
 	ClusterValues map[string]map[string]any `json:"clusterValues,omitempty" yaml:"clusterValues,omitempty"`
+	// PreviewDefaultValues is a default Helm values overlay applied to EVERY
+	// preview of apps built from this template, layered on top of the base env's
+	// composition and BELOW the app's own preview override (apps can modify/
+	// extend). Preview-only — does not affect stable envs. Sync-safe.
+	PreviewDefaultValues map[string]any `json:"previewDefaultValues,omitempty" yaml:"previewDefaultValues,omitempty"`
 	// Metadata holds operator-set display-metadata overrides (title/category/
 	// description) that win over the template's own. Lets operators fix
 	// auto-import mistakes on read-only synced/built-in templates from the UI

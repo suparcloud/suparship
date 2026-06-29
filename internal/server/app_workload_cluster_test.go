@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/rbac"
 )
@@ -153,6 +154,37 @@ func TestWorkloadClustersForEnv(t *testing.T) {
 	ah.clusterPool = nil
 	if _, _, r := ah.workloadClustersForEnv(ctx, "staging"); r {
 		t.Error("no pool should not route")
+	}
+}
+
+// A preview's status must be read from its BASE env's cluster — the preview's
+// own name (e.g. "pr-712") is not a configured org env, so without base-env
+// routing it falls back to the local cluster and always reads 0/0 "not deployed".
+// Proof: with the base env "staging" bound to an unregistered cluster, enriching
+// the preview surfaces that cluster as unreachable; routing on "pr-712" instead
+// would not be routed at all (no such diagnostic).
+func TestEnrichPreviewRoutesViaBaseEnv(t *testing.T) {
+	pool := k8s.NewClusterClientPool(fakeKubeconfigGetter{have: map[string]bool{}})
+	ah := &appHandler{
+		clusterPool: pool,
+		orgProvider: &staticOrgProvider{org: orgWithEnvs(
+			rbac.OrgEnvironment{Name: "staging", ActiveClusterRef: "missing"},
+		)},
+	}
+	env := &domain.AppEnvironment{
+		AppName: "web", ProjectName: "voiceai", EnvName: "pr-712",
+		EnvType: domain.AppEnvPreview, BaseEnv: "staging", Namespace: "voiceai-preview",
+	}
+	ah.enrichEnvWithLiveStatus(context.Background(), "web", env)
+
+	found := false
+	for _, d := range env.Status.Diagnostics {
+		if d.Cluster == "missing" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("preview should route via base env 'staging' to cluster 'missing'; diagnostics=%+v", env.Status.Diagnostics)
 	}
 }
 

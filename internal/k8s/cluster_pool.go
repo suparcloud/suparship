@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -24,17 +25,19 @@ type KubeconfigGetter interface {
 // state should be read from ArgoCD Application CRs on the tooling cluster
 // (see ArgoCDStatusReader).
 type ClusterClientPool struct {
-	mu      sync.RWMutex
-	clients map[string]kubernetes.Interface
-	getter  KubeconfigGetter
+	mu         sync.RWMutex
+	clients    map[string]kubernetes.Interface
+	dynClients map[string]dynamic.Interface
+	getter     KubeconfigGetter
 }
 
 // NewClusterClientPool returns a ClusterClientPool backed by getter for
 // kubeconfig retrieval.
 func NewClusterClientPool(getter KubeconfigGetter) *ClusterClientPool {
 	return &ClusterClientPool{
-		clients: make(map[string]kubernetes.Interface),
-		getter:  getter,
+		clients:    make(map[string]kubernetes.Interface),
+		dynClients: make(map[string]dynamic.Interface),
+		getter:     getter,
 	}
 }
 
@@ -77,11 +80,45 @@ func (p *ClusterClientPool) Get(ctx context.Context, clusterName string) (kubern
 	return client, nil
 }
 
-// Invalidate removes the cached client for clusterName so the next Get call
-// rebuilds it from the current kubeconfig. Call this after a cluster's
+// GetDynamic returns a dynamic client for clusterName (cached), used to read CRDs
+// the typed clientset doesn't cover (e.g. Gateway-API HTTPRoutes). Built from the
+// same kubeconfig as Get.
+func (p *ClusterClientPool) GetDynamic(ctx context.Context, clusterName string) (dynamic.Interface, error) {
+	p.mu.RLock()
+	if c, ok := p.dynClients[clusterName]; ok {
+		p.mu.RUnlock()
+		return c, nil
+	}
+	p.mu.RUnlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c, ok := p.dynClients[clusterName]; ok {
+		return c, nil
+	}
+
+	kc, err := p.getter.GetKubeconfig(ctx, clusterName)
+	if err != nil {
+		return nil, fmt.Errorf("cluster %q: fetching kubeconfig: %w", clusterName, err)
+	}
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(kc)
+	if err != nil {
+		return nil, fmt.Errorf("cluster %q: building REST config: %w", clusterName, err)
+	}
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("cluster %q: creating dynamic client: %w", clusterName, err)
+	}
+	p.dynClients[clusterName] = dyn
+	return dyn, nil
+}
+
+// Invalidate removes the cached clients for clusterName so the next Get/GetDynamic
+// call rebuilds them from the current kubeconfig. Call this after a cluster's
 // credentials are rotated.
 func (p *ClusterClientPool) Invalidate(clusterName string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.clients, clusterName)
+	delete(p.dynClients, clusterName)
 }

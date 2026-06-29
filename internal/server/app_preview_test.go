@@ -565,11 +565,11 @@ type previewDeleterPublisher struct {
 	deleteErr error
 }
 
-func (p *previewDeleterPublisher) DeleteAppPreview(_ context.Context, project, previewName string) error {
+func (p *previewDeleterPublisher) DeleteAppPreview(_ context.Context, project, previewName, appName, baseEnv string) error {
 	if p.deleteErr != nil {
 		return p.deleteErr
 	}
-	p.deleted = append(p.deleted, project+"/"+previewName)
+	p.deleted = append(p.deleted, baseEnv+"/"+project+"/"+previewName+"/"+appName)
 	return nil
 }
 
@@ -579,15 +579,16 @@ func TestDeleteAppPreviewPrunesGitops(t *testing.T) {
 	store.addApp(previewTestAppForProject(testProject))
 	store.addEnv(&domain.AppEnvironment{
 		AppName: "my-app", ProjectName: testProject, EnvName: "pr-42",
-		EnvType: domain.AppEnvPreview, Namespace: testProject + "-my-app-preview-pr-42",
+		EnvType: domain.AppEnvPreview, BaseEnv: "staging",
+		Namespace: testProject + "-my-app-preview-pr-42",
 	})
 
 	rec := deleteAppPreview(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app", "pr-42")
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204 (%s)", rec.Code, rec.Body.String())
 	}
-	if len(pub.deleted) != 1 || pub.deleted[0] != testProject+"/pr-42" {
-		t.Errorf("gitops delete calls = %v, want [%s/pr-42]", pub.deleted, testProject)
+	if len(pub.deleted) != 1 || pub.deleted[0] != "staging/"+testProject+"/pr-42/my-app" {
+		t.Errorf("gitops delete calls = %v, want [staging/%s/pr-42/my-app]", pub.deleted, testProject)
 	}
 	if _, err := store.GetAppEnvironment(context.Background(), testProject, "my-app", "pr-42"); err == nil {
 		t.Error("preview env should be removed from the store")

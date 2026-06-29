@@ -15,6 +15,9 @@ type TemplateOverrideDTO struct {
 	DefaultValues map[string]any            `json:"defaultValues,omitempty"`
 	EnvValues     map[string]map[string]any `json:"envValues,omitempty"`
 	ClusterValues map[string]map[string]any `json:"clusterValues,omitempty"`
+	// PreviewDefaultValues is the default overlay applied to every preview of this
+	// template's apps, below the app's own preview override.
+	PreviewDefaultValues map[string]any `json:"previewDefaultValues,omitempty"`
 }
 
 // handleGetTemplateOverride serves GET /api/v1/templates/{name}/overrides.
@@ -41,7 +44,7 @@ func (th *templateHandler) handleGetTemplateOverride(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusOK, TemplateOverrideDTO{})
 		return
 	}
-	writeJSON(w, http.StatusOK, TemplateOverrideDTO{DefaultValues: ov.DefaultValues, EnvValues: ov.EnvValues, ClusterValues: ov.ClusterValues})
+	writeJSON(w, http.StatusOK, TemplateOverrideDTO{DefaultValues: ov.DefaultValues, EnvValues: ov.EnvValues, ClusterValues: ov.ClusterValues, PreviewDefaultValues: ov.PreviewDefaultValues})
 }
 
 // handlePutTemplateOverride serves PUT /api/v1/templates/{name}/overrides.
@@ -78,6 +81,7 @@ func (th *templateHandler) handlePutTemplateOverride(w http.ResponseWriter, r *h
 		ov = &domain.TemplateOverride{}
 	}
 	ov.DefaultValues, ov.EnvValues, ov.ClusterValues = dto.DefaultValues, dto.EnvValues, dto.ClusterValues
+	ov.PreviewDefaultValues = dto.PreviewDefaultValues
 	if err := kube.SaveTemplateOverride(r.Context(), th.kubeClient, name, ov); err != nil {
 		if th.logger != nil {
 			th.logger.Error("save template override", "name", name, "err", err)
@@ -85,7 +89,7 @@ func (th *templateHandler) handlePutTemplateOverride(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save template override"})
 		return
 	}
-	writeJSON(w, http.StatusOK, TemplateOverrideDTO{DefaultValues: ov.DefaultValues, EnvValues: ov.EnvValues, ClusterValues: ov.ClusterValues})
+	writeJSON(w, http.StatusOK, TemplateOverrideDTO{DefaultValues: ov.DefaultValues, EnvValues: ov.EnvValues, ClusterValues: ov.ClusterValues, PreviewDefaultValues: ov.PreviewDefaultValues})
 }
 
 // handlePostEffectiveValues serves POST /api/v1/templates/{name}/effective-values?env={env}.

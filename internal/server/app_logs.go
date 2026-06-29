@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/runtime"
 )
 
@@ -63,9 +64,16 @@ func (ah *appHandler) handleGetAppLogs(w http.ResponseWriter, r *http.Request) {
 
 	// Logs must be streamed from the env's workload cluster (remote in a
 	// hub-spoke install), not suparship's own tooling cluster — the pods only
-	// exist where ArgoCD deployed them.
+	// exist where ArgoCD deployed them. A preview runs on its base env's cluster
+	// and its own name (e.g. "pr-712") is not a configured org env, so resolve
+	// the cluster from the base env — else routing falls back to the local
+	// cluster and the preview's pods (on the base env's cluster) aren't found.
+	routeEnv := envName
+	if appEnv.EnvType == domain.AppEnvPreview && appEnv.BaseEnv != "" {
+		routeEnv = appEnv.BaseEnv
+	}
 	logsProvider := ah.logsProvider
-	if client, err := ah.workloadClusterClient(r.Context(), envName); err != nil {
+	if client, err := ah.workloadClusterClient(r.Context(), routeEnv); err != nil {
 		writeJSON(w, http.StatusBadGateway, errorResponse{
 			Error: "workload cluster for environment \"" + envName + "\" is unreachable: " + err.Error(),
 		})

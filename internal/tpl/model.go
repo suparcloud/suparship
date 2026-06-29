@@ -134,6 +134,11 @@ type TemplateSpec struct {
 	// name (e.g. "staging", "prod"), layered after DefaultValues — so an org can
 	// set a smaller staging baseline and a larger prod one.
 	EnvValues map[string]map[string]any `yaml:"envValues,omitempty"`
+	// PreviewDefaultValues is a default Helm values overlay applied to EVERY
+	// preview of apps built from this template, on top of the base env's
+	// composition and below the app's own preview override. Preview-only — does
+	// not affect stable envs. String leaves may use {platform.*}/{vars.*} tokens.
+	PreviewDefaultValues map[string]any `yaml:"previewDefaultValues,omitempty"`
 	// InjectCanonicalValues controls whether the publisher injects the canonical
 	// suparship-common values base (app/platform/components/suparship/routing)
 	// into the published values.yaml. nil/true (default) = canonical, for charts

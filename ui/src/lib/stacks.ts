@@ -10,6 +10,7 @@ export interface Stack {
   description?: string;
   sharedNamespace?: boolean;
   namespacePattern?: string;
+  autoPromote?: boolean;
   rawValues?: Record<string, unknown>;
   envRawValues?: Record<string, Record<string, unknown>>;
   envConfig?: EnvConfig;
@@ -35,6 +36,7 @@ export interface UpdateStackRequest {
   description?: string;
   sharedNamespace?: boolean;
   namespacePattern?: string;
+  autoPromote?: boolean;
   rawValues?: Record<string, unknown>;
   envRawValues?: Record<string, Record<string, unknown>>;
   envConfig?: EnvConfig;

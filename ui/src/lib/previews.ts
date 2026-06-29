@@ -4,11 +4,17 @@ import type {
   CreateAppPreviewRequest,
   CreatePreviewRequest,
   PreviewEnvironment,
+  PreviewGroupsResponse,
   PreviewsResponse,
 } from "../types";
 
-export function fetchPreviews(): Promise<PreviewsResponse> {
-  return api.get<PreviewsResponse>("/previews");
+// listPreviewGroups returns previews grouped by PR (preview name) across all
+// projects — one item per PR with its per-app previews nested.
+export function listPreviewGroups(
+  project?: string,
+): Promise<PreviewGroupsResponse> {
+  const q = project ? `?project=${encodeURIComponent(project)}` : "";
+  return api.get<PreviewGroupsResponse>(`/preview-groups${q}`);
 }
 
 export function fetchServicePreviews(

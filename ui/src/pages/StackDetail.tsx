@@ -5,8 +5,10 @@ import { toast } from "sonner";
 
 import { ApiError } from "../lib/api";
 import { listApps } from "../lib/apps";
+import { listPreviewGroups } from "../lib/previews";
 import { AppTable } from "../components/AppTable";
-import type { AppSummary } from "../types";
+import { PreviewGroupCard } from "../components/PreviewGroupCard";
+import type { AppSummary, PreviewGroup } from "../types";
 import { listProjectEnvironments } from "../lib/projects";
 import type { ProjectEnvironment } from "../lib/projects";
 import {
@@ -34,6 +36,7 @@ import { SecretEditor } from "../components/SecretEditor";
 
 const TABS = [
   { id: "overview", label: "Overview" },
+  { id: "previews", label: "Previews" },
   { id: "variables", label: "Variables" },
   { id: "secrets", label: "Secrets" },
   { id: "settings", label: "Settings" },
@@ -116,6 +119,14 @@ export function StackDetail() {
   const [promoteEnv, setPromoteEnv] = useState("");
   const [previewName, setPreviewName] = useState("");
   const [cloneName, setCloneName] = useState("");
+  const [previewGroups, setPreviewGroups] = useState<PreviewGroup[]>([]);
+
+  const loadPreviews = useCallback(() => {
+    if (!project) return;
+    listPreviewGroups(project)
+      .then((r) => setPreviewGroups(r.previews ?? []))
+      .catch(() => setPreviewGroups([]));
+  }, [project]);
 
   const reload = useCallback(async () => {
     if (!project || !stackName) return;
@@ -137,6 +148,10 @@ export function StackDetail() {
     reload();
   }, [reload]);
 
+  useEffect(() => {
+    loadPreviews();
+  }, [loadPreviews]);
+
   if (!project || !stackName) return null;
   if (error) return <div className="p-6 text-sm text-red-600">{error}</div>;
   if (!stack) return <div className="p-6 text-sm text-gray-400">Loading…</div>;
@@ -150,6 +165,11 @@ export function StackDetail() {
   const memberSummaries: AppSummary[] = memberApps
     .map((n) => byName.get(n))
     .filter((a): a is AppSummary => a !== undefined);
+  // PR previews scoped to this stack: within each PR group keep only member-app
+  // previews, and drop PRs that touch none of the stack's apps.
+  const stackPreviews: PreviewGroup[] = previewGroups
+    .map((g) => ({ ...g, apps: g.apps.filter((a) => members.has(a.appName)) }))
+    .filter((g) => g.apps.length > 0);
 
   function openModal(kind: ModalKind) {
     setResults(null);
@@ -210,6 +230,7 @@ export function StackDetail() {
       const res = await fn();
       setResults(res.results);
       await reload();
+      loadPreviews(); // Preview creates previews; refresh the Previews tab.
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : `Failed to ${kind}`);
     } finally {
@@ -258,6 +279,16 @@ export function StackDetail() {
     try {
       await updateStack(project!, stackName!, { sharedNamespace: checked });
       toast.success(checked ? "Members will co-locate in one namespace" : "Members will use their own namespaces");
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to update stack");
+    }
+  }
+
+  async function toggleAutoPromote(checked: boolean) {
+    try {
+      await updateStack(project!, stackName!, { autoPromote: checked });
+      toast.success(checked ? "Member apps will auto-promote to prod" : "Member apps revert to manual promotion");
       await reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Failed to update stack");
@@ -395,6 +426,36 @@ export function StackDetail() {
         </div>
       )}
 
+      {/* Previews — PR previews scoped to this stack's member apps */}
+      {activeTab === "previews" && (
+        <div className="rounded-xl border border-gray-200 bg-white">
+          <div className="border-b border-gray-100 px-6 py-4">
+            <h2 className="text-base font-medium text-gray-900">Previews</h2>
+            <p className="mt-0.5 text-sm text-gray-500">
+              PR previews of this stack's apps — one item per PR, showing the
+              member apps deployed for it.
+            </p>
+          </div>
+          <div className="space-y-3 p-6">
+            {stackPreviews.length === 0 ? (
+              <p className="text-sm text-gray-400">
+                No previews for this stack's apps yet. Use{" "}
+                <span className="font-medium">Preview</span> above to create one
+                across the stack, or open a PR with the preview workflow.
+              </p>
+            ) : (
+              stackPreviews.map((g) => (
+                <PreviewGroupCard
+                  key={`${g.project}/${g.name}`}
+                  group={g}
+                  onAppDeleted={loadPreviews}
+                />
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Variables */}
       {activeTab === "variables" && (
         <div className="rounded-xl border border-gray-200 bg-white">
@@ -483,6 +544,25 @@ export function StackDetail() {
                   namespace so they reach each other by in-cluster DNS (e.g.{" "}
                   <code className="font-mono">web → http://agent-server-web:8080</code>). Toggling relocates
                   the apps on the next sync.
+                </span>
+              </span>
+            </label>
+          </div>
+
+          <div className="rounded-xl border border-gray-200 bg-white px-6 py-4">
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={stack.autoPromote ?? false}
+                onChange={(e) => toggleAutoPromote(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span className="text-sm">
+                <span className="font-medium text-gray-900">Auto-promote member apps to prod</span>
+                <span className="block text-xs text-gray-500">
+                  Each member's image promotes to prod automatically once it's deployed and
+                  healthy in staging — no manual step. Applies to all pipeline member apps;
+                  manual “Promote” still works. Takes effect on the next sync.
                 </span>
               </span>
             </label>

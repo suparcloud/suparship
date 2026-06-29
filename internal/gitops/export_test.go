@@ -56,8 +56,8 @@ func (p *Publisher) PublishPreviewForTest(repoDir string, app *domain.App, previ
 
 // DeletePreviewForTest exposes DeletePreview's inner file removal for white-box
 // unit testing without git operations. Returns whether anything was removed.
-func (p *Publisher) DeletePreviewForTest(repoDir, projectName, previewName string) (bool, error) {
-	return p.deletePreviewFiles(repoDir, projectName, previewName)
+func (p *Publisher) DeletePreviewForTest(repoDir, projectName, previewName, appName, baseEnv string) (bool, error) {
+	return p.deletePreviewFiles(repoDir, projectName, previewName, appName, baseEnv)
 }
 
 // FirstDeployEnvsForTest exposes firstDeployEnvs for unit testing.

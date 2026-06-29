@@ -453,6 +453,11 @@ type CDConfig struct {
 	// Managed enables external-CD tag ownership (see CDConfig docs). Default
 	// false preserves the legacy behaviour where the platform writes the tag.
 	Managed bool `json:"managed,omitempty" yaml:"managed,omitempty"`
+	// AutoPromote opts this pipeline app into automatic promotion to prod: once
+	// the same image is promoted to (and healthy in) the first stage (staging),
+	// Kargo auto-promotes it down the chain to prod without a manual click.
+	// Only meaningful for pipeline delivery; ignored for direct apps (no Kargo).
+	AutoPromote bool `json:"autoPromote,omitempty" yaml:"autoPromote,omitempty"`
 }
 
 // App is a deployable unit owned by a project. It combines identity metadata

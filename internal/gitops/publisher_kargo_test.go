@@ -205,6 +205,39 @@ func TestPublishKargoCRs_PerProjectNamespaceAndAggregation(t *testing.T) {
 	}
 }
 
+// Auto-promote opt-in: the prod policy in the ProjectConfig flips to
+// autoPromotionEnabled, while staging stays auto. Default (opted out) leaves
+// prod manual.
+func TestPublishKargoCRs_AutoPromoteProdPolicy(t *testing.T) {
+	policyFor := func(autoPromote bool) map[string]bool {
+		dir := t.TempDir()
+		p := newTestPublisher(t)
+		envs := []gitops.AppPublishEnv{
+			{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, AutoPromote: autoPromote},
+			{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, AutoPromote: autoPromote},
+		}
+		if err := p.PublishKargoCRsForTest(dir, &domain.App{Name: "web", ProjectName: "demo"}, envs); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		var cfg gitops.KargoProjectConfig
+		readYAMLInto(t, filepath.Join(dir, "_infra", "kargo", "kargo-demo-projectconfig.yaml"), &cfg)
+		auto := map[string]bool{}
+		for _, pol := range cfg.Spec.PromotionPolicies {
+			auto[pol.Stage] = pol.AutoPromotionEnabled
+		}
+		return auto
+	}
+
+	off := policyFor(false)
+	if !off["web-staging"] || off["web-prod"] {
+		t.Errorf("opted out: want staging auto + prod manual, got %+v", off)
+	}
+	on := policyFor(true)
+	if !on["web-staging"] || !on["web-prod"] {
+		t.Errorf("opted in: want staging + prod auto, got %+v", on)
+	}
+}
+
 func readYAMLInto(t *testing.T, path string, out any) {
 	t.Helper()
 	data, err := os.ReadFile(path)

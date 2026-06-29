@@ -367,3 +367,29 @@ func TestBuildKargoProjectNamespace_Deterministic(t *testing.T) {
 		t.Error("BuildKargoProjectNamespace is not deterministic")
 	}
 }
+
+// Auto-promote: staging always auto-promotes; prod auto-promotes only when the
+// app opts in (CD.AutoPromote → KargoProjectEnv.AutoPromote on every env).
+func TestBuildKargoPromotionPolicies_AutoPromote(t *testing.T) {
+	stagingProd := func(autoPromote bool) []gitops.KargoProjectEnv {
+		return []gitops.KargoProjectEnv{
+			{AppName: "web", EnvName: "staging", IsFirstStage: true, AutoPromote: autoPromote},
+			{AppName: "web", EnvName: "prod", IsFirstStage: false, AutoPromote: autoPromote},
+		}
+	}
+
+	// Default (opted out): staging auto, prod manual — today's behavior.
+	off := gitops.BuildKargoPromotionPolicies(stagingProd(false))
+	if len(off) != 2 || !off[0].AutoPromotionEnabled || off[1].AutoPromotionEnabled {
+		t.Fatalf("opted out: want staging auto + prod manual, got %+v", off)
+	}
+
+	// Opted in: prod auto-promotes too, staging still auto.
+	on := gitops.BuildKargoPromotionPolicies(stagingProd(true))
+	if !on[0].AutoPromotionEnabled || !on[1].AutoPromotionEnabled {
+		t.Fatalf("opted in: want staging+prod auto, got %+v", on)
+	}
+	if on[1].Stage != gitops.KargoStageName("web", "prod") {
+		t.Errorf("prod policy stage = %q", on[1].Stage)
+	}
+}

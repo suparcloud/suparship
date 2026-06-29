@@ -481,8 +481,11 @@ func BuildKargoPromotionPolicies(envs []KargoProjectEnv) []KargoPromotionPolicy 
 	policies := make([]KargoPromotionPolicy, 0, len(envs))
 	for _, env := range envs {
 		policies = append(policies, KargoPromotionPolicy{
-			Stage:                KargoStageName(env.AppName, env.EnvName),
-			AutoPromotionEnabled: env.IsFirstStage,
+			Stage: KargoStageName(env.AppName, env.EnvName),
+			// Staging always auto-promotes from the Warehouse. Downstream stages
+			// (prod) auto-promote only when the app opts in, so the same verified
+			// freight advances staging→prod without a manual promotion.
+			AutoPromotionEnabled: env.IsFirstStage || env.AutoPromote,
 		})
 	}
 	return policies
@@ -546,6 +549,9 @@ type KargoProjectEnv struct {
 	// IsFirstStage marks this as the first stage in the pipeline (receives
 	// Freight directly from the Warehouse). Auto-promotion is enabled for it.
 	IsFirstStage bool
+	// AutoPromote, when true, enables auto-promotion for the downstream stages
+	// too (prod), so verified freight flows staging→prod without a manual click.
+	AutoPromote bool
 }
 
 // KubernetesNamespace is retained for backward compatibility with older Kargo

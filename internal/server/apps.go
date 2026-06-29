@@ -192,6 +192,9 @@ type AppDetailDTO struct {
 // bound per-app via the Images field, not here.
 type CDConfigDTO struct {
 	Managed bool `json:"managed"`
+	// AutoPromote opts a pipeline app into automatic promotion to prod once
+	// staging is healthy (see domain.CDConfig.AutoPromote).
+	AutoPromote bool `json:"autoPromote"`
 }
 
 // AppImageBindingDTO mirrors domain.AppImageBinding on the wire: a chart image

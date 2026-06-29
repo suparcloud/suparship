@@ -324,24 +324,24 @@ func (h *PublisherHolder) Swap(p GitOpsPublisher) {
 	h.mu.Unlock()
 }
 
-// AppPreviewDeleter removes a preview's GitOps files (its previews/{project}/
-// {name} tree) so ArgoCD prunes the generated Application and namespace. It is
-// an optional capability: publishers that support it are type-asserted at the
-// delete site, keeping it off the core GitOpsPublisher interface (and its many
-// test stubs).
+// AppPreviewDeleter removes one app's preview GitOps files (its
+// previews/{baseEnv}/{project}/{name}/{app} tree) so ArgoCD prunes the generated
+// Application and namespace. It is an optional capability: publishers that
+// support it are type-asserted at the delete site, keeping it off the core
+// GitOpsPublisher interface (and its many test stubs).
 type AppPreviewDeleter interface {
-	DeleteAppPreview(ctx context.Context, projectName, previewName string) error
+	DeleteAppPreview(ctx context.Context, projectName, previewName, appName, baseEnv string) error
 }
 
 // DeleteAppPreview delegates to the held publisher when it implements
 // AppPreviewDeleter; otherwise it is a no-op. This lets PublisherHolder satisfy
 // AppPreviewDeleter without widening the GitOpsPublisher interface.
-func (h *PublisherHolder) DeleteAppPreview(ctx context.Context, projectName, previewName string) error {
+func (h *PublisherHolder) DeleteAppPreview(ctx context.Context, projectName, previewName, appName, baseEnv string) error {
 	h.mu.RLock()
 	p := h.p
 	h.mu.RUnlock()
 	if d, ok := p.(AppPreviewDeleter); ok {
-		return d.DeleteAppPreview(ctx, projectName, previewName)
+		return d.DeleteAppPreview(ctx, projectName, previewName, appName, baseEnv)
 	}
 	return nil
 }

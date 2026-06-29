@@ -81,6 +81,21 @@ export interface AppPreviewSummary {
   status: AppStatusSummary;
 }
 
+/** PreviewGroup is a PR-level preview: all app-previews sharing a preview name
+ *  within a project, grouped into one item. */
+export interface PreviewGroup {
+  name: string; // PR/preview name, e.g. "pr-712"
+  project: string;
+  baseEnv?: string;
+  /** Aggregate phase across the group's app-previews. */
+  health: string;
+  apps: AppPreviewSummary[];
+}
+
+export interface PreviewGroupsResponse {
+  previews: PreviewGroup[];
+}
+
 export interface OrgInfo {
   name: string;
   displayName: string;
@@ -414,6 +429,9 @@ export interface TemplateOverride {
   // Per-cluster overlays keyed by cluster ref (env-agnostic), for cloud-intrinsic
   // structured annotations. Applied to every env that deploys to the cluster.
   clusterValues?: Record<string, Record<string, unknown>>;
+  // Default overlay applied to every preview of this template's apps, below the
+  // app's own preview override.
+  previewDefaultValues?: Record<string, unknown>;
 }
 
 // EffectiveValuesResponse is the read-only "what will deploy" preview backing
@@ -645,6 +663,8 @@ export interface AppDetail {
 // repository each slot watches is bound per-app via AppImageBinding.
 export interface CDConfig {
   managed?: boolean;
+  /** Auto-promote this pipeline app to prod once staging is healthy. */
+  autoPromote?: boolean;
 }
 
 // ComponentResources holds raw k8s resource quantities (cpu/memory/…).

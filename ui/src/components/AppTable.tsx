@@ -29,6 +29,17 @@ function firstUrl(app: AppSummary): string | undefined {
   return app.urls?.[0];
 }
 
+// hostLabel renders a URL as its hostname (+path when not root) for a compact,
+// recognizable endpoint label in the list.
+function hostLabel(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.host + (u.pathname && u.pathname !== "/" ? u.pathname : "");
+  } catch {
+    return url.replace(/^https?:\/\//, "");
+  }
+}
+
 export function AppTable({
   project,
   apps,
@@ -279,15 +290,22 @@ function AppRowView({
       )}
       <td className="py-2">
         {url ? (
-          <a
-            href={url}
-            target="_blank"
-            rel="noreferrer"
-            className="text-indigo-600 hover:text-indigo-800"
-            title={url}
-          >
-            Open ↗
-          </a>
+          <span className="inline-flex items-center gap-1">
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="max-w-[16rem] truncate text-indigo-600 hover:text-indigo-800"
+              title={(app.urls ?? []).join("\n")}
+            >
+              {hostLabel(url)} ↗
+            </a>
+            {(app.urls?.length ?? 0) > 1 && (
+              <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">
+                +{(app.urls?.length ?? 0) - 1}
+              </span>
+            )}
+          </span>
         ) : (
           <span className="text-gray-300">—</span>
         )}

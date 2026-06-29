@@ -53,6 +53,10 @@ type StackSpec struct {
 	// NamespacePattern overrides the stack namespace naming when SharedNamespace
 	// is set. Tokens: {org}, {project}, {stack}, {env}. Empty uses the default.
 	NamespacePattern string `json:"namespacePattern,omitempty" yaml:"namespacePattern,omitempty"`
+	// AutoPromote, when set true, opts every member app into automatic promotion
+	// to prod (see CDConfig.AutoPromote). nil = inherit each app's own setting;
+	// the effective per-app value is `app.CD.AutoPromote || *stack.AutoPromote`.
+	AutoPromote *bool `json:"autoPromote,omitempty" yaml:"autoPromote,omitempty"`
 }
 
 // StackStore persists stacks. Implementations live in internal/kube.

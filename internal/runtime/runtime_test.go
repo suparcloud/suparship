@@ -46,7 +46,7 @@ func int32p(v int32) *int32 { return &v }
 
 func TestK8sProviderNotDeployed(t *testing.T) {
 	client := fake.NewSimpleClientset()
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
 	if err != nil {
@@ -88,7 +88,7 @@ func TestK8sProviderHealthy(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(dep)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
 	if err != nil {
@@ -133,7 +133,7 @@ func TestK8sProviderDegraded(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(dep)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
 	if err != nil {
@@ -198,7 +198,7 @@ func TestK8sProviderWithIngress(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(dep, ing)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "web")
 	if err != nil {
@@ -266,7 +266,7 @@ func TestK8sProviderUnrelatedIngress(t *testing.T) {
 	}
 
 	client := fake.NewSimpleClientset(dep, ing)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
 	if err != nil {
@@ -324,7 +324,7 @@ func TestGetAppRuntime_AggregatesLabelledWorkloads(t *testing.T) {
 	agent := deployWithInstance("voice-server", ns, instance, "img/agent:1", 3, 3)
 	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 1, 0) // progressing
 	client := fake.NewSimpleClientset(agent, cm)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetAppRuntime(context.Background(), ns, instance, "voice")
 	if err != nil {
@@ -348,7 +348,7 @@ func TestGetAppRuntime_FallsBackToNameWhenNoLabels(t *testing.T) {
 		Status:     appsv1.DeploymentStatus{Replicas: 2, ReadyReplicas: 2, AvailableReplicas: 2},
 	}
 	client := fake.NewSimpleClientset(dep) // no instance label
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetAppRuntime(context.Background(), "myapi-dev", "myapi-api-dev", "api")
 	if err != nil {
@@ -366,7 +366,7 @@ func TestGetAppRuntime_ScaleToZeroIsIdleNotNotDeployed(t *testing.T) {
 	agent := deployWithInstance("voice-server", ns, instance, "img/agent:1", 0, 0) // KEDA idle
 	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 1, 1)            // healthy
 	client := fake.NewSimpleClientset(agent, cm)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetAppRuntime(context.Background(), ns, instance, "voice")
 	if err != nil {
@@ -386,7 +386,7 @@ func TestGetAppRuntime_AllScaledToZeroIsIdle(t *testing.T) {
 	agent := deployWithInstance("voice-server", ns, instance, "img/agent:1", 0, 0)
 	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 0, 0)
 	client := fake.NewSimpleClientset(agent, cm)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetAppRuntime(context.Background(), ns, instance, "voice")
 	if err != nil {
@@ -441,7 +441,7 @@ func TestGetAppRuntime_DiscoversStatefulSet(t *testing.T) {
 	const ns, instance = "voiceai", "valkey-internal"
 	sts := stsWithInstance("valkey-internal", ns, instance, "valkey:9.0.2", 1, 1)
 	client := fake.NewSimpleClientset(sts)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetAppRuntime(context.Background(), ns, instance, "valkey-internal")
 	if err != nil {
@@ -463,7 +463,7 @@ func TestGetAppRuntime_StatefulSetDegraded(t *testing.T) {
 	const ns, instance = "voiceai", "valkey-internal"
 	sts := stsWithInstance("valkey-internal", ns, instance, "valkey:9.0.2", 3, 1)
 	client := fake.NewSimpleClientset(sts)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetAppRuntime(context.Background(), ns, instance, "valkey-internal")
 	if err != nil {
@@ -479,7 +479,7 @@ func TestGetAppRuntime_DiscoversDaemonSet(t *testing.T) {
 	const ns, instance = "obs", "node-agent"
 	ds := dsWithInstance("node-agent", ns, instance, "agent:1", 3, 3)
 	client := fake.NewSimpleClientset(ds)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetAppRuntime(context.Background(), ns, instance, "node-agent")
 	if err != nil {
@@ -500,7 +500,7 @@ func TestGetAppRuntime_AggregatesMixedKinds(t *testing.T) {
 	api := deployWithInstance("api", ns, instance, "img/api:1", 2, 2)   // healthy
 	db := stsWithInstance("db", ns, instance, "postgres:16", 3, 1)      // degraded
 	client := fake.NewSimpleClientset(api, db)
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetAppRuntime(context.Background(), ns, instance, "proj")
 	if err != nil {
@@ -528,7 +528,7 @@ func TestGetServiceRuntime_FindsStatefulSetByName(t *testing.T) {
 		Status: appsv1.StatefulSetStatus{Replicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
 	}
 	client := fake.NewSimpleClientset(sts) // no instance label
-	p := NewK8sProvider(client)
+	p := NewK8sProvider(client, nil)
 
 	info, err := p.GetAppRuntime(context.Background(), "myapi-dev", "myapi-valkey-dev", "valkey")
 	if err != nil {

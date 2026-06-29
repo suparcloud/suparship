@@ -441,7 +441,7 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 // BuildArgoPreviewAppSet generates the previews ApplicationSet for a GitOps repo.
 //
 // The generated ApplicationSet:
-//   - Uses a Git File generator on "gitops-output/previews/{project}/*/app.yaml".
+//   - Uses a Git File generator on "gitops-output/previews/{baseEnv}/{project}/{preview}/{app}/app.yaml".
 //   - Each preview's app.yaml must contain: name, project, template, clusterServer, namespace.
 //   - The destination.server and namespace come directly from the app.yaml parameters,
 //     allowing previews to target any registered cluster.
@@ -468,11 +468,11 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 		Helm: &HelmSource{
 			ReleaseName: "{{appName}}",
 			// The previews Git File generator reads each preview's app.yaml
-			// (PreviewAppMetadata), whose key is "previewName" — not "name". The
-			// values file lives at previews/{project}/{previewName}/values.yaml
-			// (see Publisher.PublishAppPreview), so the path must interpolate
-			// {{previewName}}; {{name}} would stay literal and 404 at render.
-			ValueFiles: []string{"$previewvalues/" + joinSubPath(opts.SubPath, "previews", "{{project}}", "{{previewName}}", "values.yaml")},
+			// (PreviewAppMetadata), whose keys include "baseEnv", "previewName" and
+			// "appName". The values file lives at
+			// previews/{baseEnv}/{project}/{previewName}/{appName}/values.yaml
+			// (env-first + app-scoped), so the path must interpolate all three.
+			ValueFiles: []string{"$previewvalues/" + joinSubPath(opts.SubPath, "previews", "{{baseEnv}}", "{{project}}", "{{previewName}}", "{{appName}}", "values.yaml")},
 		},
 	}
 
@@ -505,7 +505,7 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 						RepoURL:  repoURL,
 						Revision: opts.TargetRevision,
 						Files: []GitFilePathSpec{
-							{Path: joinSubPath(opts.SubPath, "previews", "*", "*", "app.yaml")},
+							{Path: joinSubPath(opts.SubPath, "previews", "*", "*", "*", "*", "app.yaml")},
 						},
 					},
 				},
@@ -594,7 +594,11 @@ type PreviewAppMetadata struct {
 	AppName     string `yaml:"appName"`
 	PreviewName string `yaml:"previewName"`
 	Project     string `yaml:"project"`
-	Template    string `yaml:"template"`
+	// BaseEnv is the stable env this preview clones (e.g. "staging"). It is the
+	// first path segment of the preview tree (previews/{baseEnv}/{project}/...) so
+	// the AppSet templates the values path from it.
+	BaseEnv  string `yaml:"baseEnv"`
+	Template string `yaml:"template"`
 	// ChartPath mirrors AppMetadata.ChartPath — the preview reuses the stable
 	// app's version-scoped chart directory (no separate chart copy).
 	ChartPath     string `yaml:"chartPath,omitempty"`
@@ -618,6 +622,14 @@ type PlatformAppMeta struct {
 	// ClusterServer is set only for previews (whose destination cluster is
 	// per-preview); stable envs bake the cluster into the ApplicationSet.
 	ClusterServer string `yaml:"clusterServer,omitempty"`
+	// AppName is set only for previews, where the platform-resources tree nests by
+	// app under the preview ({previewName}/{appName}) so apps in the same PR don't
+	// collide; the preview-platform AppSet reads it to template the path + a unique
+	// Application name. Empty for stable envs (which already nest by app in path).
+	AppName string `yaml:"appName,omitempty"`
+	// BaseEnv is set only for previews — the stable env the preview clones, used as
+	// the first segment of the preview platform tree so the AppSet can template it.
+	BaseEnv string `yaml:"baseEnv,omitempty"`
 }
 
 // platformResourcesInclude is the directory-source filter listing the
@@ -721,7 +733,7 @@ func BuildPreviewPlatformAppSet(repoURL string, opts AppSetOptions) *Application
 
 	manifestsSource := ApplicationSource{
 		RepoURL:        repoURL,
-		Path:           joinSubPath(opts.SubPath, "_app-resources", "previews", "{{project}}", "{{name}}"),
+		Path:           joinSubPath(opts.SubPath, "_app-resources", "previews", "{{baseEnv}}", "{{project}}", "{{name}}", "{{appName}}"),
 		TargetRevision: opts.TargetRevision,
 		Directory:      &DirectorySource{Recurse: false, Include: platformResourcesInclude},
 	}
@@ -740,13 +752,13 @@ func BuildPreviewPlatformAppSet(repoURL string, opts AppSetOptions) *Application
 					RepoURL:  repoURL,
 					Revision: opts.TargetRevision,
 					Files: []GitFilePathSpec{
-						{Path: joinSubPath(opts.SubPath, "_app-resources", "previews", "*", "*", "meta.yaml")},
+						{Path: joinSubPath(opts.SubPath, "_app-resources", "previews", "*", "*", "*", "*", "meta.yaml")},
 					},
 				}},
 			},
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
-					Name:      "{{project}}-{{name}}-preview-platform",
+					Name:      "{{project}}-{{name}}-{{appName}}-preview-platform",
 					Namespace: opts.ArgoCDNamespace,
 					Labels: map[string]string{
 						labelProject: "{{project}}",

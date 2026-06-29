@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/session"
 )
@@ -56,6 +58,38 @@ func logsTestApp() (*domain.App, *domain.AppEnvironment) {
 		Namespace:   "hello-staging",
 	}
 	return app, env
+}
+
+// Preview logs must be read from the preview's BASE env cluster — the preview's
+// own name isn't a configured org env, so without base-env routing it falls back
+// to the local cluster and finds no pods. Proof: base env "staging" bound to an
+// unregistered cluster makes the workload cluster unreachable (502); routing on
+// the preview name would instead fall back locally (not a 502).
+func TestAppLogsPreviewRoutesViaBaseEnv(t *testing.T) {
+	store := newMemAppStore()
+	store.addApp(&domain.App{Name: "web", ProjectName: "voiceai",
+		Spec: domain.AppSpec{Template: domain.AppTemplateRef{Name: "web"}}})
+	store.addEnv(&domain.AppEnvironment{
+		AppName: "web", ProjectName: "voiceai", EnvName: "pr-712",
+		EnvType: domain.AppEnvPreview, BaseEnv: "staging", Namespace: "voiceai-preview",
+	})
+	ah := &appHandler{
+		appStore:    store,
+		clusterPool: k8s.NewClusterClientPool(fakeKubeconfigGetter{have: map[string]bool{}}),
+		orgProvider: &staticOrgProvider{org: orgWithEnvs(
+			rbac.OrgEnvironment{Name: "staging", ActiveClusterRef: "missing"},
+		)},
+	}
+
+	req := httptest.NewRequest("GET", "/x?environment=pr-712", nil)
+	req.SetPathValue("project", "voiceai")
+	req.SetPathValue("app", "web")
+	rec := httptest.NewRecorder()
+	ah.handleGetAppLogs(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (routed to base env's unreachable cluster); body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func getAppLogs(mux *http.ServeMux, cookie *http.Cookie, path string) *httptest.ResponseRecorder {

@@ -606,6 +606,14 @@ func TestBuildArgoPreviewAppSet_ValuesPathUsesPreviewName(t *testing.T) {
 	if !strings.Contains(got, "{{previewName}}") {
 		t.Errorf("preview values path %q must interpolate {{previewName}}", got)
 	}
+	// App-scoped path: apps sharing a preview name must not collide.
+	if !strings.Contains(got, "{{appName}}") {
+		t.Errorf("preview values path %q must interpolate {{appName}} (app-scoped)", got)
+	}
+	// Env-first path: the base env the preview clones is the first segment.
+	if !strings.Contains(got, "{{baseEnv}}") {
+		t.Errorf("preview values path %q must interpolate {{baseEnv}} (env-first)", got)
+	}
 }
 
 // ── BuildArgoExternalAppSet — multi-source, registry-chart shape ─────────────
