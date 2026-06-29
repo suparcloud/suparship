@@ -484,8 +484,9 @@ func BuildKargoPromotionPolicies(envs []KargoProjectEnv) []KargoPromotionPolicy 
 			Stage: KargoStageName(env.AppName, env.EnvName),
 			// Staging always auto-promotes from the Warehouse. Downstream stages
 			// (prod) auto-promote only when the app opts in, so the same verified
-			// freight advances staging→prod without a manual promotion.
-			AutoPromotionEnabled: env.IsFirstStage || env.AutoPromote,
+			// freight advances staging→prod without a manual promotion. A pinned
+			// stage is frozen — auto-promotion is off so the pinned image holds.
+			AutoPromotionEnabled: (env.IsFirstStage || env.AutoPromote) && !env.Pinned,
 		})
 	}
 	return policies
@@ -552,6 +553,10 @@ type KargoProjectEnv struct {
 	// AutoPromote, when true, enables auto-promotion for the downstream stages
 	// too (prod), so verified freight flows staging→prod without a manual click.
 	AutoPromote bool
+	// Pinned, when true, freezes this stage: auto-promotion is disabled (even for
+	// the first stage) so newer Warehouse freight does not override the pinned
+	// image. The env's values.yaml holds the pinned tag (written by the publisher).
+	Pinned bool
 }
 
 // KubernetesNamespace is retained for backward compatibility with older Kargo

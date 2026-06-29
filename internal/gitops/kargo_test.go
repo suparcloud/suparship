@@ -393,3 +393,17 @@ func TestBuildKargoPromotionPolicies_AutoPromote(t *testing.T) {
 		t.Errorf("prod policy stage = %q", on[1].Stage)
 	}
 }
+
+// A pinned stage has auto-promotion forced off — even staging (the first stage),
+// which is otherwise hardwired to auto-promote from the Warehouse.
+func TestBuildKargoPromotionPolicies_PinnedDisablesAuto(t *testing.T) {
+	envs := []gitops.KargoProjectEnv{
+		{AppName: "web", EnvName: "staging", IsFirstStage: true, Pinned: true},
+		{AppName: "web", EnvName: "prod", IsFirstStage: false, AutoPromote: true, Pinned: true},
+	}
+	for _, p := range gitops.BuildKargoPromotionPolicies(envs) {
+		if p.AutoPromotionEnabled {
+			t.Errorf("pinned stage %q must have autoPromotionEnabled=false", p.Stage)
+		}
+	}
+}

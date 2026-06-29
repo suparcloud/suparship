@@ -166,6 +166,35 @@ func TestPublish_CDManaged_PreviewNotPreserved(t *testing.T) {
 	}
 }
 
+// TestPublish_PinnedEnvWritesPinnedTag: a stable env pinned to a preview's image
+// tag gets that tag in its values.yaml, overriding the create-time seed, and the
+// pin holds across republish even though CD is unmanaged (pin wins over seed).
+func TestPublish_PinnedEnvWritesPinnedTag(t *testing.T) {
+	const pinnedTag = "pr-712-aae62d96"
+	dir := t.TempDir()
+	app := cdManagedApp(false) // unmanaged: seed would normally win
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"staging": {PinnedImageTag: pinnedTag, PinnedFrom: "pr-712"},
+	}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost", TemplateImages: rootImageMapping},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, BaseDomain: "localhost", TemplateImages: rootImageMapping},
+	}
+	p := newTestPublisher(t)
+	for i := 0; i < 2; i++ { // publish twice — the pin must hold on republish
+		if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+	if got := readRootImageTag(t, valuesPath(dir, "staging")); got != pinnedTag {
+		t.Errorf("pinned staging image.tag = %q, want %q", got, pinnedTag)
+	}
+	// prod is not pinned → keeps the seed.
+	if got := readRootImageTag(t, valuesPath(dir, "prod")); got != seedTag {
+		t.Errorf("unpinned prod image.tag = %q, want seed %q", got, seedTag)
+	}
+}
+
 // tokenImageApp is a BYO/passthrough app whose RawValues pin the chart's image
 // tag to the {platform.imageTag} token (the chart-agnostic, recommended way).
 func tokenImageApp() *domain.App {

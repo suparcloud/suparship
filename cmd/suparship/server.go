@@ -553,17 +553,19 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 			// 3. Rebuild the publisher from the new config.
 			pub, err := gitops.NewPublisher(gitops.PublisherConfig{
-				RepoURL:         repoCfg.RepoURL,
-				RepoUser:        username,
-				RepoPassword:    password,
-				ArgoCDRepoURL:   repoCfg.ArgoCDRepoURL,
-				KargoGitRepoURL: repoCfg.KargoGitRepoURL,
-				Branch:          repoCfg.Branch,
-				SubPath:         repoCfg.SubPath,
-				SyncAutomated:   true,
-				TemplatesDir:    templatesDir,
-				ChartFetcher:    chartFetcherFromClient(kubeClient),
-				TemplateLoader:  templateLoaderFromClient(kubeClient),
+				RepoURL:           repoCfg.RepoURL,
+				RepoUser:          username,
+				RepoPassword:      password,
+				ArgoCDRepoURL:     repoCfg.ArgoCDRepoURL,
+				KargoGitRepoURL:   repoCfg.KargoGitRepoURL,
+				Branch:            repoCfg.Branch,
+				SubPath:           repoCfg.SubPath,
+				CommitAuthorName:  repoCfg.CommitAuthorName,
+				CommitAuthorEmail: repoCfg.CommitAuthorEmail,
+				SyncAutomated:     true,
+				TemplatesDir:      templatesDir,
+				ChartFetcher:      chartFetcherFromClient(kubeClient),
+				TemplateLoader:    templateLoaderFromClient(kubeClient),
 			})
 			if err != nil {
 				return fmt.Errorf("rebuild gitops publisher: %w", err)
@@ -928,6 +930,17 @@ func (a *kargoPromoterAdapter) CreatePromotion(ctx context.Context, projectName,
 		Freight: info.Freight,
 		Phase:   info.Phase,
 	}, nil
+}
+
+// CurrentFreightImageTag / LatestFreightImageTag expose the store methods so the
+// app handler can restore a stable env to its real Kargo image when unpinning a
+// preview (current stage freight, else the latest the Warehouse discovered).
+func (a *kargoPromoterAdapter) CurrentFreightImageTag(ctx context.Context, projectName, appName, env, repoSubstr string) (string, error) {
+	return a.store.CurrentFreightImageTag(ctx, projectName, appName, env, repoSubstr)
+}
+
+func (a *kargoPromoterAdapter) LatestFreightImageTag(ctx context.Context, projectName, appName, repoSubstr string) (string, error) {
+	return a.store.LatestFreightImageTag(ctx, projectName, appName, repoSubstr)
 }
 
 // GetPromotionStatus implements server.KargoStatusReader. The promotion lives in

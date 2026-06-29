@@ -147,6 +147,32 @@ export function undeployAppEnv(
   );
 }
 
+// pinAppEnv promotes a PR preview's image to a stable env WITHOUT merging and
+// pins it: the env holds that image and CD (Kargo auto-promotion) is paused for
+// it until unpinned, so newer images don't override it.
+export function pinAppEnv(
+  project: string,
+  app: string,
+  env: string,
+  fromPreview: string,
+): Promise<{ message: string; imageTag: string }> {
+  return api.post<{ message: string; imageTag: string }>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/pin`,
+    { fromPreview },
+  );
+}
+
+// unpinAppEnv clears a pin so the env returns to normal CD.
+export function unpinAppEnv(
+  project: string,
+  app: string,
+  env: string,
+): Promise<void> {
+  return api.del(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/pin`,
+  );
+}
+
 export function promoteApp(
   project: string,
   app: string,

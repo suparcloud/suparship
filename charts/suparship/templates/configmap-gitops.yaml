@@ -17,6 +17,12 @@ data:
     {{- if .Values.gitops.subPath }}
     subPath: {{ .Values.gitops.subPath | quote }}
     {{- end }}
+    {{- if .Values.gitops.commitAuthorName }}
+    commitAuthorName: {{ .Values.gitops.commitAuthorName | quote }}
+    {{- end }}
+    {{- if .Values.gitops.commitAuthorEmail }}
+    commitAuthorEmail: {{ .Values.gitops.commitAuthorEmail | quote }}
+    {{- end }}
     {{- if .Values.gitops.existingSecret }}
     authSecretRef: {{ .Values.gitops.existingSecret | quote }}
     {{- end }}

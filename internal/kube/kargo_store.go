@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,6 +51,11 @@ var (
 		Group:    "kargo.akuity.io",
 		Version:  "v1alpha1",
 		Resource: "promotions",
+	}
+	kargoFreightGVR = schema.GroupVersionResource{
+		Group:    "kargo.akuity.io",
+		Version:  "v1alpha1",
+		Resource: "freights",
 	}
 )
 
@@ -383,6 +389,91 @@ func (s *KargoStore) getCurrentFreight(ctx context.Context, ns, stageName string
 	return s.latestSuccessfulPromotionFreight(ctx, ns, stageName)
 }
 
+// CurrentFreightImageTag returns the image tag of the Freight currently running
+// in the app's {env} Stage (the real, Kargo-owned image for that stage), or ""
+// when the stage has no freight / no images. Used to restore a stable env to its
+// true image when unpinning a preview that was pinned onto it. When repoSubstr is
+// non-empty, the image whose repoURL contains it is preferred (multi-image apps);
+// otherwise the first image's tag is returned.
+func (s *KargoStore) CurrentFreightImageTag(ctx context.Context, projectName, appName, env, repoSubstr string) (string, error) {
+	ns := kargoNamespaceForProject(projectName)
+	stageName := kargoStageName(appName, env)
+	freightName, err := s.getCurrentFreight(ctx, ns, stageName)
+	if err != nil {
+		return "", err
+	}
+	if freightName == "" {
+		return "", nil
+	}
+	fr, err := s.dynamic.Resource(kargoFreightGVR).Namespace(ns).Get(ctx, freightName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("get kargo freight %s/%s: %w", ns, freightName, err)
+	}
+	images, found, err := unstructured.NestedSlice(fr.Object, "images")
+	if err != nil || !found {
+		return "", err //nolint:nilerr
+	}
+	return imageTagFromImages(images, repoSubstr), nil
+}
+
+// LatestFreightImageTag returns the image tag of the newest Freight produced by
+// the app's Warehouse (named after the app) — i.e. the latest image the Warehouse
+// has discovered, which is what Kargo would deploy next. Used as a fallback when a
+// stage has no current freight (e.g. it only ever held a pinned image). repoSubstr
+// picks the image within a multi-image freight. Returns "" when none exists.
+func (s *KargoStore) LatestFreightImageTag(ctx context.Context, projectName, appName, repoSubstr string) (string, error) {
+	ns := kargoNamespaceForProject(projectName)
+	list, err := s.dynamic.Resource(kargoFreightGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("list kargo freight in %s: %w", ns, err)
+	}
+	// Newest first by creationTimestamp.
+	sort.Slice(list.Items, func(i, j int) bool {
+		return list.Items[i].GetCreationTimestamp().After(list.Items[j].GetCreationTimestamp().Time)
+	})
+	for i := range list.Items {
+		// Only this app's freight — the project namespace is shared by every app's
+		// Warehouse, and each Warehouse is named after its app.
+		if origin, _, _ := unstructured.NestedString(list.Items[i].Object, "origin", "name"); origin != "" && origin != appName {
+			continue
+		}
+		images, found, err := unstructured.NestedSlice(list.Items[i].Object, "images")
+		if err != nil || !found {
+			continue
+		}
+		if tag := imageTagFromImages(images, repoSubstr); tag != "" {
+			return tag, nil
+		}
+	}
+	return "", nil
+}
+
+// imageTagFromImages returns the tag of the image whose repoURL contains
+// repoSubstr (preferred), else the first image's tag. "" when none have a tag.
+func imageTagFromImages(images []any, repoSubstr string) string {
+	first := ""
+	for _, raw := range images {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		tag, _, _ := unstructuredString(m, "tag")
+		if tag == "" {
+			continue
+		}
+		if first == "" {
+			first = tag
+		}
+		if repoSubstr != "" {
+			if repo, _, _ := unstructuredString(m, "repoURL"); strings.Contains(repo, repoSubstr) {
+				return tag
+			}
+		}
+	}
+	return first
+}
+
+
 // stagePromotionSteps returns the promotion steps defined on the target Stage's
 // spec.promotionTemplate.spec.steps (Kargo v1.x). These must be embedded in the
 // Promotion CR we create directly via the Kubernetes API, because — unlike the
@@ -535,11 +626,6 @@ func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 // that gates on an upstream stage and Kargo cannot verify delivery (e.g.
 // argoCDAppUpdates without image substitution).
 func (s *KargoStore) approveFreightForStage(ctx context.Context, ns, freightName, stageName string) error {
-	kargoFreightGVR := schema.GroupVersionResource{
-		Group:    "kargo.akuity.io",
-		Version:  "v1alpha1",
-		Resource: "freights",
-	}
 	patch := map[string]any{
 		"status": map[string]any{
 			"approvedFor": map[string]any{

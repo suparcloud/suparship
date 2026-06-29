@@ -302,6 +302,20 @@ type EnvironmentOverride struct {
 	// removal is an explicit, separate action. Ignored for pipeline apps (which
 	// use promotion). See AppSpec.DeploysToEnv.
 	Deploy *bool `json:"deploy,omitempty" yaml:"deploy,omitempty"`
+	// PinnedImageTag pins this environment to a specific image tag (e.g. a PR
+	// preview's tag "pr-712-aae62d96") promoted without merging. While set, the
+	// publisher writes this tag into the env's values.yaml on every republish and
+	// Kargo auto-promotion to this stage is paused — so newer Warehouse freight
+	// does NOT override it. Cleared by unpinning, which resumes normal CD.
+	PinnedImageTag string `json:"pinnedImageTag,omitempty" yaml:"pinnedImageTag,omitempty"`
+	// PinnedFrom records the preview (or source) the pinned tag came from. It is
+	// the user-facing "is this env pinned?" flag (a transient restore write sets
+	// PinnedImageTag but leaves this empty). Empty when not pinned.
+	PinnedFrom string `json:"pinnedFrom,omitempty" yaml:"pinnedFrom,omitempty"`
+	// PrePinImageTag captures the env's deployed image tag at the moment it was
+	// pinned, so unpinning can restore it instead of leaving the pinned image in
+	// place (the publisher would otherwise preserve the committed pinned tag).
+	PrePinImageTag string `json:"prePinImageTag,omitempty" yaml:"prePinImageTag,omitempty"`
 }
 
 // ClusterValueOverride holds per-(env, cluster) value overrides, applied on top

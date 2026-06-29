@@ -160,6 +160,10 @@ gitops:
   branch: main
   # -- Optional subpath within the repo for gitops content
   subPath: ""
+  # -- Git author name for commits suparship makes (empty = "suparShip")
+  commitAuthorName: ""
+  # -- Git author email for commits suparship makes (empty = "suparship@suparcloud.io")
+  commitAuthorEmail: ""
   # -- Initialize repo structure on first boot when true
   initializeRepo: true
   # -- ISO 8601 timestamp when the credential expires (for health warnings)

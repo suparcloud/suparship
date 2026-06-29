@@ -5,6 +5,9 @@ export interface GitOpsConfig {
   repoURL: string;
   branch: string;
   subPath?: string;
+  /** Git author for commits suparship makes (empty = "suparShip" default). */
+  commitAuthorName?: string;
+  commitAuthorEmail?: string;
   credentialExpiresAt?: string;
   argoCDRepoURL?: string;
   kargoGitRepoURL?: string;

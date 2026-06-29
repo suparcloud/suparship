@@ -12,6 +12,11 @@ type RepoConfig struct {
 	Branch string `json:"branch" yaml:"branch"`
 	// SubPath is an optional directory within the repo for gitops content.
 	SubPath string `json:"subPath,omitempty" yaml:"subPath,omitempty"`
+	// CommitAuthorName / CommitAuthorEmail set the Git author on commits suparship
+	// makes to the gitops repo. Empty falls back to the built-in defaults
+	// ("suparShip" / "suparship@suparcloud.io").
+	CommitAuthorName  string `json:"commitAuthorName,omitempty" yaml:"commitAuthorName,omitempty"`
+	CommitAuthorEmail string `json:"commitAuthorEmail,omitempty" yaml:"commitAuthorEmail,omitempty"`
 	// AuthSecretRef is the name of an existing Kubernetes Secret holding credentials.
 	AuthSecretRef string `json:"authSecretRef,omitempty" yaml:"authSecretRef,omitempty"`
 	// CredentialExpiresAt is an ISO 8601 timestamp for credential health warnings.
@@ -72,10 +77,12 @@ func (c *RepoConfig) ToPublisherConfig() PublisherConfig {
 		kargoURL = argoURL
 	}
 	return PublisherConfig{
-		RepoURL:         c.RepoURL,
-		ArgoCDRepoURL:   argoURL,
-		KargoGitRepoURL: kargoURL,
-		Branch:          branch,
-		SubPath:         c.SubPath,
+		RepoURL:           c.RepoURL,
+		ArgoCDRepoURL:     argoURL,
+		KargoGitRepoURL:   kargoURL,
+		Branch:            branch,
+		SubPath:           c.SubPath,
+		CommitAuthorName:  c.CommitAuthorName,
+		CommitAuthorEmail: c.CommitAuthorEmail,
 	}
 }

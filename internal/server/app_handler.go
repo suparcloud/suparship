@@ -981,8 +981,18 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 
 	ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
 
+	dto := appEnvToDTO(env)
+	// Surface pin state (lives in the app spec, not the env record) so the UI's
+	// single-env view can show the pinned badge + Unpin.
+	if app, err := ah.appStore.GetApp(r.Context(), projectName, appName); err == nil {
+		if ov := app.Spec.EnvironmentDefaults[envName]; ov.PinnedFrom != "" {
+			dto.PinnedTag = ov.PinnedImageTag
+			dto.PinnedFrom = ov.PinnedFrom
+		}
+	}
+
 	writeJSON(w, http.StatusOK, AppEnvironmentResponse{
-		Environment: appEnvToDTO(env),
+		Environment: dto,
 	})
 }
 
@@ -1700,6 +1710,234 @@ func (ah *appHandler) handleUndeployAppEnv(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// pinAppEnvRequest is the body for pinning a stable env to a preview's image.
+type pinAppEnvRequest struct {
+	// FromPreview is the preview env name (e.g. "pr-712") whose built image is
+	// pinned onto the target env. Its current image tag is resolved server-side.
+	FromPreview string `json:"fromPreview"`
+}
+
+// pinLabel renders a human label for a pin, preferring the source preview name.
+func pinLabel(from, tag string) string {
+	if from != "" {
+		return from + " (" + tag + ")"
+	}
+	return tag
+}
+
+// kargoFreightReader is the optional capability (implemented by the Kargo
+// promoter) to resolve an env's real image tag from Kargo, used to restore a
+// stable env when unpinning a preview.
+type kargoFreightReader interface {
+	CurrentFreightImageTag(ctx context.Context, projectName, appName, env, repoSubstr string) (string, error)
+	LatestFreightImageTag(ctx context.Context, projectName, appName, repoSubstr string) (string, error)
+}
+
+// appImageRepoSubstr returns the app's image repository (when set on the app),
+// used to pick the right image within a multi-image freight. Empty for
+// template-image apps, where the per-app freight is matched by warehouse origin.
+func appImageRepoSubstr(app *domain.App) string {
+	if repo, ok := app.Spec.Values["image_repository"].(string); ok {
+		return strings.TrimSpace(repo)
+	}
+	return ""
+}
+
+// releaseTag extracts the image tag from a release ref (the explicit Tag, else
+// the part after the last ":" of the image ref). Empty when unknown.
+func releaseTag(r *domain.AppReleaseRef) string {
+	if r == nil {
+		return ""
+	}
+	if r.Tag != "" {
+		return r.Tag
+	}
+	if i := strings.LastIndex(r.Image, ":"); i >= 0 && i < len(r.Image)-1 {
+		return r.Image[i+1:]
+	}
+	return ""
+}
+
+// handlePinAppEnv serves POST .../apps/{app}/environments/{env}/pin. It promotes a
+// PR preview's built image to a stable env WITHOUT merging and pins it: the env's
+// values.yaml holds the preview's image tag and Kargo auto-promotion to that stage
+// is paused, so newer freight doesn't override it until the env is unpinned.
+func (ah *appHandler) handlePinAppEnv(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	var req pinAppEnvRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	req.FromPreview = strings.TrimSpace(req.FromPreview)
+	if req.FromPreview == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "fromPreview is required"})
+		return
+	}
+
+	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app \"" + appName + "\" not found in project \"" + projectName + "\""})
+		return
+	}
+	if app.Spec.IsDirect() {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "pinning applies to pipeline-delivery apps only"})
+		return
+	}
+
+	// The target must be a stable env; the source must be a preview with an image.
+	targetEnv, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, envName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "environment \"" + envName + "\" not found for app \"" + appName + "\""})
+		return
+	}
+	if targetEnv.EnvType == domain.AppEnvPreview {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "cannot pin a preview environment; pin a stable env (staging/prod)"})
+		return
+	}
+	preview, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, req.FromPreview)
+	if err != nil || preview.EnvType != domain.AppEnvPreview {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "preview \"" + req.FromPreview + "\" not found for app \"" + appName + "\""})
+		return
+	}
+	if preview.Release == nil || strings.TrimSpace(preview.Release.Tag) == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "preview \"" + req.FromPreview + "\" has no image tag to pin"})
+		return
+	}
+
+	// Capture the env's current deployed image tag before pinning, so unpinning
+	// can restore it (best-effort: empty when the env isn't deployed yet).
+	prePin := ""
+	if app.Spec.EnvironmentDefaults[envName].PinnedFrom == "" { // don't overwrite an existing capture on re-pin
+		ah.enrichEnvWithLiveStatus(r.Context(), appName, targetEnv)
+		prePin = releaseTag(targetEnv.Release)
+	} else {
+		prePin = app.Spec.EnvironmentDefaults[envName].PrePinImageTag
+	}
+
+	if app.Spec.EnvironmentDefaults == nil {
+		app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+	}
+	ov := app.Spec.EnvironmentDefaults[envName]
+	ov.PinnedImageTag = strings.TrimSpace(preview.Release.Tag)
+	ov.PinnedFrom = req.FromPreview
+	if prePin != "" && prePin != ov.PinnedImageTag {
+		ov.PrePinImageTag = prePin
+	}
+	app.Spec.EnvironmentDefaults[envName] = ov
+	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
+		return
+	}
+	// Republish so the Kargo ProjectConfig pauses auto-promotion for the pinned
+	// stage, then write the target env's values directly — republishApp only
+	// (re)deploys the first stable env, so a pinned prod needs its own publish.
+	if err := ah.republishApp(r.Context(), app); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish pin: " + err.Error()})
+		return
+	}
+	if ah.gitOpsPublisher != nil {
+		ah.ensureAppNamespace(r.Context(), app, targetEnv)
+		if err := ah.gitOpsPublisher.PublishAppEnv(r.Context(), app, targetEnv); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish pinned env: " + err.Error()})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message":  "environment " + envName + " pinned to " + pinLabel(req.FromPreview, ov.PinnedImageTag),
+		"project":  projectName,
+		"app":      appName,
+		"env":      envName,
+		"imageTag": ov.PinnedImageTag,
+		"from":     req.FromPreview,
+	})
+}
+
+// handleUnpinAppEnv serves DELETE .../apps/{app}/environments/{env}/pin. It clears
+// the pin and republishes, so the env returns to normal CD (Kargo resumes
+// auto-promoting the latest freight; the seed/CD tag ownership applies again).
+func (ah *appHandler) handleUnpinAppEnv(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app \"" + appName + "\" not found in project \"" + projectName + "\""})
+		return
+	}
+	ov := app.Spec.EnvironmentDefaults[envName]
+	if ov.PinnedFrom == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"message": "environment " + envName + " is not pinned", "project": projectName, "app": appName, "env": envName})
+		return
+	}
+
+	// Restore the pre-pin image (if captured) by force-writing it ONCE: clearing
+	// PinnedFrom re-enables Kargo auto-promotion while PinnedImageTag=prePin makes
+	// the publisher write the restored tag over the committed pinned one.
+	restore := ov.PrePinImageTag
+	// No capture (e.g. pinned before capture existed, or pinned when the env was
+	// already on the preview image): ask Kargo for the env's real image — its
+	// current stage freight, else the latest the Warehouse discovered (what Kargo
+	// would deploy next). Match by the app's image repo so we don't pick another
+	// app's freight from the shared project namespace. Falls through to a plain
+	// clear if Kargo can't tell us — then Kargo reasserts on the next promote.
+	if restore == "" {
+		repo := appImageRepoSubstr(app)
+		if fr, ok := ah.kargoPromoter.(kargoFreightReader); ok {
+			if tag, ferr := fr.CurrentFreightImageTag(r.Context(), projectName, appName, envName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
+				restore = tag
+			}
+			if restore == "" {
+				if tag, ferr := fr.LatestFreightImageTag(r.Context(), projectName, appName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
+					restore = tag
+				}
+			}
+		}
+	}
+	ov.PinnedFrom = ""
+	ov.PrePinImageTag = ""
+	ov.PinnedImageTag = restore // "" when nothing captured
+	app.Spec.EnvironmentDefaults[envName] = ov
+	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
+		return
+	}
+	if err := ah.republishApp(r.Context(), app); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish unpin: " + err.Error()})
+		return
+	}
+	if ah.gitOpsPublisher != nil {
+		if targetEnv, terr := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, envName); terr == nil {
+			if perr := ah.gitOpsPublisher.PublishAppEnv(r.Context(), app, targetEnv); perr != nil {
+				slog.Warn("unpin: failed to republish env values", "project", projectName, "app", appName, "env", envName, "err", perr)
+			}
+		}
+	}
+	// One-shot: the restored tag is now committed, so clear the force-write flag —
+	// future republishes hand tag ownership back to Kargo (preserve) / the seed.
+	if restore != "" {
+		ov.PinnedImageTag = ""
+		app.Spec.EnvironmentDefaults[envName] = ov
+		if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
+			slog.Warn("unpin: failed to clear restore flag", "project", projectName, "app", appName, "env", envName, "err", err)
+		}
+	}
+	msg := "environment " + envName + " unpinned; normal delivery resumed"
+	if restore != "" {
+		msg = "environment " + envName + " unpinned; restored " + restore
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": msg,
+		"project": projectName,
+		"app":     appName,
+		"env":     envName,
+	})
+}
+
 func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
@@ -1764,6 +2002,11 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 	}
 	if targetEnv.EnvType == domain.AppEnvPreview {
 		return nil, fmt.Errorf("%w: cannot promote to a preview environment", errPromoteBadRequest)
+	}
+	// A pinned env is frozen to a specific image — promotion (auto or manual) is
+	// paused until it's unpinned.
+	if ov := app.Spec.EnvironmentDefaults[targetEnvName]; ov.PinnedFrom != "" {
+		return nil, fmt.Errorf("%w: environment %q is pinned to %s; unpin it first", errPromoteBadRequest, targetEnvName, pinLabel(ov.PinnedFrom, ov.PinnedImageTag))
 	}
 
 	// Resolve the source: the stable env with the highest Order strictly below
@@ -1855,52 +2098,42 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 	}, nil
 }
 
-// findPromotionSource returns the best source environment for a promotion to
-// the given target. It prefers the stable env with the highest Order strictly
-// below target.Order (i.e. the closest predecessor in the pipeline). When no
-// stable predecessor exists, the lexicographically first preview env is
-// returned so that preview→first-stable promotions still work.
+// findPromotionSource returns the source environment for a promotion to the given
+// target: the stable env with the highest Order strictly below target.Order (the
+// closest predecessor in the pipeline). Promotion advances freight between Kargo
+// Stages, so the source must be a stable env — a preview has no Stage. Reaching
+// the first stage (e.g. staging) is done by merging the PR (auto-promotes the
+// merged build) or by pinning a preview, not by promotion.
 func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appName string, target *domain.AppEnvironment) (*domain.AppEnvironment, error) {
 	envs, err := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list app environments")
 	}
 
-	// Find stable candidates (non-preview, Order < target.Order).
+	// Stable candidates only (non-preview, Order < target.Order).
 	var stableCandidates []*domain.AppEnvironment
-	var previewCandidates []*domain.AppEnvironment
 	for _, env := range envs {
-		if env.EnvName == target.EnvName {
+		if env.EnvName == target.EnvName || env.EnvType == domain.AppEnvPreview {
 			continue
 		}
-		if env.EnvType == domain.AppEnvPreview {
-			previewCandidates = append(previewCandidates, env)
-		} else if env.Order < target.Order {
+		if env.Order < target.Order {
 			stableCandidates = append(stableCandidates, env)
 		}
 	}
 
-	if len(stableCandidates) > 0 {
-		// Pick the stable env with the highest Order (closest predecessor).
-		// Tie-break lexicographically for determinism.
-		sort.Slice(stableCandidates, func(i, j int) bool {
-			if stableCandidates[i].Order != stableCandidates[j].Order {
-				return stableCandidates[i].Order > stableCandidates[j].Order // descending: pick highest Order
-			}
-			return stableCandidates[i].EnvName < stableCandidates[j].EnvName
-		})
-		return stableCandidates[0], nil
+	if len(stableCandidates) == 0 {
+		return nil, fmt.Errorf("%q has no upstream stage to promote from — it deploys merged builds automatically (merge the PR), or pin a preview to deploy without merging", target.EnvName)
 	}
 
-	// No stable predecessor — fall back to preview environments.
-	if len(previewCandidates) > 0 {
-		sort.Slice(previewCandidates, func(i, j int) bool {
-			return previewCandidates[i].EnvName < previewCandidates[j].EnvName
-		})
-		return previewCandidates[0], nil
-	}
-
-	return nil, fmt.Errorf("no environment found to promote from; ensure an earlier environment has been deployed")
+	// Pick the stable env with the highest Order (closest predecessor);
+	// tie-break lexicographically for determinism.
+	sort.Slice(stableCandidates, func(i, j int) bool {
+		if stableCandidates[i].Order != stableCandidates[j].Order {
+			return stableCandidates[i].Order > stableCandidates[j].Order
+		}
+		return stableCandidates[i].EnvName < stableCandidates[j].EnvName
+	})
+	return stableCandidates[0], nil
 }
 
 // workloadClusterClient resolves the cluster an environment's workloads run on
@@ -2245,6 +2478,10 @@ func buildEnvSummaryDTOs(app *domain.App, envs []*domain.AppEnvironment) []AppEn
 			envDTOs[i].Deploy = app.Spec.DeploysToEnv(envDTOs[i].EnvName, isBase)
 		} else {
 			envDTOs[i].Deploy = true
+		}
+		if ov := app.Spec.EnvironmentDefaults[envDTOs[i].EnvName]; ov.PinnedFrom != "" {
+			envDTOs[i].PinnedTag = ov.PinnedImageTag
+			envDTOs[i].PinnedFrom = ov.PinnedFrom
 		}
 	}
 	return envDTOs

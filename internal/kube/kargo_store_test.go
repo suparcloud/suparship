@@ -12,13 +12,6 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
-// kargoFreightGVR mirrors the GVR approveFreightForStage builds inline.
-var kargoFreightGVR = schema.GroupVersionResource{
-	Group:    "kargo.akuity.io",
-	Version:  "v1alpha1",
-	Resource: "freights",
-}
-
 // testKargoNS is the per-project Kargo namespace (kargo-{project}) for the test
 // project "voiceai", where the store reads/writes its CRs.
 const testKargoNS = "kargo-voiceai"
@@ -69,6 +62,80 @@ func freightCR(name, ns string) *unstructured.Unstructured {
 		"kind":       "Freight",
 		"metadata":   map[string]any{"name": name, "namespace": ns},
 	}}
+}
+
+func freightWithImages(name, ns string, images []any) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kargo.akuity.io/v1alpha1",
+		"kind":       "Freight",
+		"metadata":   map[string]any{"name": name, "namespace": ns},
+		"images":     images,
+	}}
+}
+
+// freightFromWarehouse is a freight tagged with its origin Warehouse + a
+// creationTimestamp, used to test newest-first per-app selection.
+func freightFromWarehouse(name, ns, warehouse, created string, images []any) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kargo.akuity.io/v1alpha1",
+		"kind":       "Freight",
+		"metadata":   map[string]any{"name": name, "namespace": ns, "creationTimestamp": created},
+		"origin":     map[string]any{"kind": "Warehouse", "name": warehouse},
+		"images":     images,
+	}}
+}
+
+// LatestFreightImageTag picks the newest freight from THIS app's Warehouse,
+// ignoring other apps' freight in the shared project namespace.
+func TestLatestFreightImageTag(t *testing.T) {
+	img := func(tag string) []any {
+		return []any{map[string]any{"repoURL": "acr.io/example-lk-sh-web", "tag": tag}}
+	}
+	store, _ := newKargoStore(t,
+		freightFromWarehouse("f-old", testKargoNS, "lk-sh-web", "2026-06-01T00:00:00Z", img("old1234")),
+		freightFromWarehouse("f-new", testKargoNS, "lk-sh-web", "2026-06-29T00:00:00Z", img("new5678")),
+		// Another app's freight, newer — must be ignored.
+		freightFromWarehouse("f-other", testKargoNS, "lk-sh-api", "2026-06-30T00:00:00Z", img("other999")),
+	)
+	tag, err := store.LatestFreightImageTag(context.Background(), "voiceai", "lk-sh-web", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag != "new5678" {
+		t.Errorf("tag = %q, want new5678 (newest from this app's warehouse)", tag)
+	}
+}
+
+// CurrentFreightImageTag resolves the stage's current freight down to its image
+// tag — the real Kargo-owned image used to restore an env on unpin.
+func TestCurrentFreightImageTag(t *testing.T) {
+	stage := stageCR("lk-sh-web-staging", testKargoNS, "freight-abc", nil)
+	fr := freightWithImages("freight-abc", testKargoNS, []any{
+		map[string]any{"repoURL": "acr.io/other", "tag": "zzz"},
+		map[string]any{"repoURL": "acr.io/example-lk-sh-web", "tag": "abc1234"},
+	})
+	store, _ := newKargoStore(t, stage, fr)
+
+	// repoSubstr prefers the matching image.
+	tag, err := store.CurrentFreightImageTag(context.Background(), "voiceai", "lk-sh-web", "staging", "lk-sh-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag != "abc1234" {
+		t.Errorf("tag = %q, want abc1234 (repo-matched)", tag)
+	}
+
+	// No repoSubstr → first image's tag.
+	tag, _ = store.CurrentFreightImageTag(context.Background(), "voiceai", "lk-sh-web", "staging", "")
+	if tag != "zzz" {
+		t.Errorf("tag = %q, want zzz (first image)", tag)
+	}
+
+	// A stage with no current freight → empty, no error.
+	store2, _ := newKargoStore(t, stageCR("lk-sh-web-staging", testKargoNS, "", nil))
+	if tag, err := store2.CurrentFreightImageTag(context.Background(), "voiceai", "lk-sh-web", "staging", ""); err != nil || tag != "" {
+		t.Errorf("no-freight: tag=%q err=%v, want empty", tag, err)
+	}
 }
 
 func sampleSteps() []any {

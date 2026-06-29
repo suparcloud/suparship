@@ -48,16 +48,21 @@ func TestRepoConfig_Validate(t *testing.T) {
 
 func TestRepoConfig_ToPublisherConfig(t *testing.T) {
 	cfg := RepoConfig{
-		RepoURL:         "https://github.com/org/repo",
-		Branch:          "develop",
-		ArgoCDRepoURL:   "http://internal:3000/org/repo",
-		KargoGitRepoURL: "https://kargo.example.com/org/repo",
+		RepoURL:           "https://github.com/org/repo",
+		Branch:            "develop",
+		ArgoCDRepoURL:     "http://internal:3000/org/repo",
+		KargoGitRepoURL:   "https://kargo.example.com/org/repo",
+		CommitAuthorName:  "Platform Bot",
+		CommitAuthorEmail: "bot@example.com",
 	}
 
 	pc := cfg.ToPublisherConfig()
 
 	if pc.RepoURL != cfg.RepoURL {
 		t.Errorf("RepoURL = %q, want %q", pc.RepoURL, cfg.RepoURL)
+	}
+	if pc.CommitAuthorName != "Platform Bot" || pc.CommitAuthorEmail != "bot@example.com" {
+		t.Errorf("commit author = %q <%q>, want Platform Bot <bot@example.com>", pc.CommitAuthorName, pc.CommitAuthorEmail)
 	}
 	if pc.Branch != "develop" {
 		t.Errorf("Branch = %q, want develop", pc.Branch)

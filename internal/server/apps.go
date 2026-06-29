@@ -105,6 +105,11 @@ type AppEnvironmentSummaryDTO struct {
 	// deploys by default. Both drive the per-env deploy toggles in the UI.
 	Deploy bool `json:"deploy"`
 	IsBase bool `json:"isBase"`
+	// PinnedTag / PinnedFrom report that this stable env is pinned to a specific
+	// image (e.g. a PR preview promoted without merging): CD is paused for the env
+	// until it's unpinned. Empty when not pinned.
+	PinnedTag  string `json:"pinnedTag,omitempty"`
+	PinnedFrom string `json:"pinnedFrom,omitempty"`
 }
 
 // --- App summary (list view) ---

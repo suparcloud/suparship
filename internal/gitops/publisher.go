@@ -24,6 +24,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Default Git author for commits suparship makes to the gitops repo, used when
+// the operator hasn't configured a custom CommitAuthorName / CommitAuthorEmail.
+const (
+	DefaultCommitAuthorName  = "suparShip"
+	DefaultCommitAuthorEmail = "suparship@suparcloud.io"
+)
+
 // PublisherConfig holds the configuration for the GitOps publisher.
 type PublisherConfig struct {
 	// RepoURL is the Git repository URL for cloning and pushing (host-accessible URL).
@@ -38,6 +45,10 @@ type PublisherConfig struct {
 	ArgoCDRepoURL string
 	// Branch is the Git branch to commit to. Defaults to "main".
 	Branch string
+	// CommitAuthorName / CommitAuthorEmail set the Git author on commits the
+	// publisher makes. Empty falls back to DefaultCommitAuthorName / Email.
+	CommitAuthorName  string
+	CommitAuthorEmail string
 	// SyncAutomated enables automated sync (prune + selfHeal) on generated Applications.
 	SyncAutomated bool
 	// TemplatesDir is the local filesystem path to suparship templates.
@@ -683,6 +694,15 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// republish rolls the deployed image back. Preview envs always deploy
 		// their own pipeline's tag, so they are never preserved.
 		preserveTag := app.Spec.CD.Managed && env.EnvType != domain.AppEnvPreview
+		// pinnedTag freezes a stable env to a specific image (e.g. a PR preview's
+		// tag promoted without merging). When set, it's written into every tag key
+		// on each republish — overriding both the create-time seed and any
+		// CD-committed tag — and Kargo auto-promotion for the stage is off (see
+		// publishKargoCRs), so the pinned image holds until the env is unpinned.
+		var pinnedTag string
+		if env.EnvType != domain.AppEnvPreview {
+			pinnedTag = app.Spec.EnvironmentDefaults[env.EnvName].PinnedImageTag
+		}
 		// The tag keys Kargo owns for this app — one per image source. Preserve
 		// each on republish so we never roll a CD-managed deployment back to the
 		// create-time seed. Falls back to the canonical single key when the
@@ -706,6 +726,12 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 					if tag := existingImageTag(outPath, tagKey); tag != "" {
 						setStringAtPath(overlay, tagKey, tag)
 					}
+				}
+			}
+			// A pin wins over both the seed and any CD-preserved tag.
+			if pinnedTag != "" {
+				for _, tagKey := range tagKeys {
+					setStringAtPath(overlay, tagKey, pinnedTag)
 				}
 			}
 			if env.SkipCanonicalBase {
@@ -1372,6 +1398,10 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			EnvName:      env.EnvName,
 			IsFirstStage: i == 0,
 			AutoPromote:  env.AutoPromote,
+			// Only a real, user-facing pin (PinnedFrom set) pauses Kargo. A
+			// transient unpin-restore writes PinnedImageTag with PinnedFrom empty
+			// and must leave auto-promotion on.
+			Pinned: app.Spec.EnvironmentDefaults[env.EnvName].PinnedFrom != "",
 		})
 	}
 	appPolicies := BuildKargoPromotionPolicies(projectEnvs)
@@ -2193,10 +2223,18 @@ func (p *Publisher) withClonedRepo(ctx context.Context, fn func(repoDir string) 
 		return fmt.Errorf("clone gitops repo: %w", err)
 	}
 
-	if err := p.git(ctx, repoDir, "config", "user.email", "suparship@suparcloud.io"); err != nil {
+	authorName := p.cfg.CommitAuthorName
+	if authorName == "" {
+		authorName = DefaultCommitAuthorName
+	}
+	authorEmail := p.cfg.CommitAuthorEmail
+	if authorEmail == "" {
+		authorEmail = DefaultCommitAuthorEmail
+	}
+	if err := p.git(ctx, repoDir, "config", "user.email", authorEmail); err != nil {
 		return err
 	}
-	if err := p.git(ctx, repoDir, "config", "user.name", "suparShip"); err != nil {
+	if err := p.git(ctx, repoDir, "config", "user.name", authorName); err != nil {
 		return err
 	}
 

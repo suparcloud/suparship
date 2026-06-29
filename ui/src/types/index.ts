@@ -608,6 +608,10 @@ export interface AppEnvironmentSummary {
   deploy: boolean;
   /** Marks the base (lowest-order stable) env, which deploys by default. */
   isBase: boolean;
+  /** When set, this stable env is pinned to a specific image (e.g. a PR preview
+   *  promoted without merging): CD is paused until unpinned. */
+  pinnedTag?: string;
+  pinnedFrom?: string;
 }
 
 export interface AppSummary {

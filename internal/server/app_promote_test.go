@@ -114,43 +114,44 @@ func TestAppPromote_DirectAppRejected(t *testing.T) {
 	}
 }
 
+// A pinned env is frozen — promoting to it is rejected until it's unpinned.
+func TestAppPromote_PinnedEnvRejected(t *testing.T) {
+	mux, ah, store := newTestAppPromoteMux(testProject)
+	app := promoteTestApp(testProject)
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"prod": {PinnedImageTag: "pr-1-abc", PinnedFrom: "pr-1"},
+	}
+	store.addApp(app)
+	seedFullPromotionChain(store, testProject)
+
+	rec := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 promoting to a pinned env, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // --- Happy-path tests ---
 
-// TestAppPromoteStagingFromPreview verifies that promoting to staging selects
-// the preview environment as the source and returns a well-formed response.
-func TestAppPromoteStagingFromPreview(t *testing.T) {
+// TestAppPromoteToFirstStageRejected: promotion advances freight between Kargo
+// Stages, and a preview has no Stage — so promoting to the first stage (staging)
+// is rejected. A PR's build reaches staging by merging (auto-promote) or pinning.
+func TestAppPromoteToFirstStageRejected(t *testing.T) {
 	mux, ah, store := newTestAppPromoteMux(testProject)
 	store.addApp(promoteTestApp(testProject))
-	seedFullPromotionChain(store, testProject)
+	seedFullPromotionChain(store, testProject) // preview + staging + prod
 
 	rec := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
 		AppPromoteRequest{TargetEnvironment: "staging"})
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 promoting to the first stage, got %d: %s", rec.Code, rec.Body.String())
 	}
-
-	var resp AppPromoteResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Project != testProject {
-		t.Errorf("Project = %q, want %q", resp.Project, testProject)
-	}
-	if resp.App != "my-app" {
-		t.Errorf("App = %q, want %q", resp.App, "my-app")
-	}
-	if resp.Source != "pr-1" {
-		t.Errorf("Source = %q, want %q (first preview, sorted)", resp.Source, "pr-1")
-	}
-	if resp.Destination != "staging" {
-		t.Errorf("Destination = %q, want %q", resp.Destination, "staging")
-	}
-	if resp.Namespace != "my-app-staging" {
-		t.Errorf("Namespace = %q, want %q", resp.Namespace, "my-app-staging")
-	}
-	if resp.Message == "" {
-		t.Error("expected non-empty message")
+	var errResp errorResponse
+	_ = json.NewDecoder(rec.Body).Decode(&errResp)
+	if !contains(errResp.Error, "no upstream stage") {
+		t.Errorf("expected 'no upstream stage' in error, got %q", errResp.Error)
 	}
 }
 
@@ -180,48 +181,6 @@ func TestAppPromoteProdFromStaging(t *testing.T) {
 	}
 	if resp.Namespace != "my-app-prod" {
 		t.Errorf("Namespace = %q, want %q", resp.Namespace, "my-app-prod")
-	}
-}
-
-// TestAppPromoteSourceDeterminismMultiplePreviews verifies that when multiple
-// preview environments exist, the lexicographically first is chosen as source.
-func TestAppPromoteSourceDeterminismMultiplePreviews(t *testing.T) {
-	mux, ah, store := newTestAppPromoteMux(testProject)
-	store.addApp(promoteTestApp(testProject))
-
-	ctx := context.Background()
-	// Seed previews out of alphabetical order to test sorting.
-	// Each preview must have a release so Promote can copy it.
-	for _, name := range []string{"pr-99", "pr-1", "pr-42"} {
-		_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
-			AppName:   "my-app",
-			EnvName:   name,
-			EnvType:   domain.AppEnvPreview,
-			Namespace: "my-app-" + name,
-			Release:   &domain.AppReleaseRef{Tag: name + "-sha"},
-			Status:    domain.AppRuntimeStatus{Phase: domain.StatusHealthy},
-		})
-	}
-	_ = store.SaveAppEnvironment(ctx, testProject, &domain.AppEnvironment{
-		AppName:   "my-app",
-		EnvName:   "staging",
-		EnvType:   domain.AppEnvStaging,
-		Order:     1,
-		Namespace: "my-app-staging",
-		Status:    domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
-	})
-
-	rec := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
-		AppPromoteRequest{TargetEnvironment: "staging"})
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var resp AppPromoteResponse
-	_ = json.NewDecoder(rec.Body).Decode(&resp)
-	// "pr-1" < "pr-42" < "pr-99" lexicographically.
-	if resp.Source != "pr-1" {
-		t.Errorf("Source = %q, want %q (lexicographically first preview)", resp.Source, "pr-1")
 	}
 }
 
@@ -314,8 +273,8 @@ func TestAppPromoteNoSourceEnvironment(t *testing.T) {
 	}
 	var errResp errorResponse
 	_ = json.NewDecoder(rec.Body).Decode(&errResp)
-	if !contains(errResp.Error, "no environment found") {
-		t.Errorf("expected 'no environment found' in error message, got %q", errResp.Error)
+	if !contains(errResp.Error, "no upstream stage") {
+		t.Errorf("expected 'no upstream stage' in error message, got %q", errResp.Error)
 	}
 }
 
@@ -343,8 +302,8 @@ func TestAppPromoteNoPreviewForStaging(t *testing.T) {
 	}
 	var errResp errorResponse
 	_ = json.NewDecoder(rec.Body).Decode(&errResp)
-	if !contains(errResp.Error, "no environment found") {
-		t.Errorf("expected 'no environment found' in error message, got %q", errResp.Error)
+	if !contains(errResp.Error, "no upstream stage") {
+		t.Errorf("expected 'no upstream stage' in error message, got %q", errResp.Error)
 	}
 }
 

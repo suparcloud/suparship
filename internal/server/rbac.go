@@ -377,6 +377,8 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/previews/{name}", devProject(rh.appHandler.handleDeleteAppPreview))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/promote", manageProject(rh.appHandler.handlePromoteApp))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/undeploy", manageProject(rh.appHandler.handleUndeployAppEnv))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handlePinAppEnv))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handleUnpinAppEnv))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/promotions/{name}", viewProject(rh.appHandler.handleGetKargoPromotion))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/kargo/stages", viewProject(rh.appHandler.handleGetKargoStages))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}/history", viewProject(rh.appHandler.handleGetAppDeploymentHistory))

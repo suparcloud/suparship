@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, promoteApp, syncApp, deleteApp, renameApp, undeployAppEnv, updateApp, upgradeAppTemplate } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, pinAppEnv, promoteApp, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppTemplate } from "../lib/apps";
 import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
@@ -107,12 +107,9 @@ function getPromoteTarget(
   environments: AppEnvironmentSummary[],
 ): { source: string; target: string } | null {
   if (!currentEnv) return null;
-  if (currentEnv.envType === "preview") {
-    const staging = environments.find((e) => e.envType === "staging");
-    return staging
-      ? { source: currentEnv.envName, target: staging.envName }
-      : null;
-  }
+  // Promotion advances freight between Kargo Stages (stable→stable only).
+  // Previews have no Stage: their build reaches staging by merging the PR
+  // (auto-promotes) or via Pin (deploy without merging) — not by promotion.
   if (currentEnv.envType === "staging") {
     const prod = environments.find((e) => e.envType === "prod");
     return prod ? { source: currentEnv.envName, target: prod.envName } : null;
@@ -657,6 +654,18 @@ function EnvPipelineBar({
                       {stage.availableFreightCount} new
                     </span>
                   )}
+
+                  {/* Pinned badge: env held to a specific preview image, CD paused. */}
+                  {env.pinnedTag && (
+                    <span
+                      title={`Pinned to ${env.pinnedFrom || env.pinnedTag} — auto-promote paused`}
+                      className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                        isSelected ? "bg-white/10 text-white/80" : "bg-purple-100 text-purple-700"
+                      }`}
+                    >
+                      📌 {env.pinnedFrom || "pinned"}
+                    </span>
+                  )}
                 </div>
               </button>
 
@@ -1062,6 +1071,20 @@ export function AppDetail() {
             if (data.deliveryMode === "direct") return null;
             const promotion = getPromoteTarget(currentEnv, data.environments);
             if (!promotion) return null;
+            // A pinned target is frozen — promotion is paused until it's unpinned.
+            const targetEnv = data.environments.find((e) => e.envName === promotion.target);
+            if (targetEnv?.pinnedTag) {
+              return (
+                <button
+                  disabled
+                  className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg bg-gray-200 px-3.5 py-2 text-sm font-medium text-gray-400 shadow-sm"
+                  title={`${promotion.target} is pinned to ${targetEnv.pinnedFrom || targetEnv.pinnedTag}; unpin it first`}
+                >
+                  {icons.rocket}
+                  Promote to {promotion.target}
+                </button>
+              );
+            }
             return (
               <button
                 onClick={() => {
@@ -2935,6 +2958,120 @@ function ClusterOverridesEditor({
   );
 }
 
+// PinControls promotes a PR preview's image to a stable env without merging and
+// pins it (CD paused for that env), or unpins a pinned env. Shown when a preview
+// is selected (offer pin) or a pinned stable env is selected (offer unpin).
+function PinControls({
+  project,
+  app,
+  currentEnv,
+  environments,
+  isDirect,
+  onChanged,
+}: {
+  project: string;
+  app: string;
+  currentEnv: AppEnvironmentSummary | null;
+  environments: AppEnvironmentSummary[];
+  isDirect: boolean;
+  onChanged: () => Promise<void>;
+}) {
+  const stableEnvs = environments.filter((e) => e.envType !== "preview");
+  const [target, setTarget] = useState<string>(stableEnvs[0]?.envName ?? "");
+  const [busy, setBusy] = useState(false);
+
+  if (isDirect || !currentEnv) return null;
+
+  // Pin state lives in the app spec; the per-env fetch that backs currentEnv may
+  // not carry it, so read it from the enriched app-detail env list.
+  const enriched = environments.find((e) => e.envName === currentEnv.envName);
+  const pinnedTag = enriched?.pinnedTag ?? currentEnv.pinnedTag;
+  const pinnedFrom = enriched?.pinnedFrom ?? currentEnv.pinnedFrom;
+
+  // Pinned stable env → offer unpin.
+  if (currentEnv.envType !== "preview" && pinnedTag) {
+    async function unpin() {
+      setBusy(true);
+      try {
+        await unpinAppEnv(project, app, currentEnv!.envName);
+        toast.success(`${currentEnv!.envName} unpinned — normal delivery resumed`);
+        await onChanged();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to unpin");
+      } finally {
+        setBusy(false);
+      }
+    }
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-purple-200 bg-purple-50 px-4 py-2.5">
+        <span className="text-sm text-purple-900">
+          📌 Pinned to{" "}
+          <span className="font-medium">{pinnedFrom || "a preview"}</span>{" "}
+          <code className="font-mono text-xs">{pinnedTag}</code> — auto-promote
+          paused; new images won't deploy here until unpinned.
+        </span>
+        <button
+          onClick={unpin}
+          disabled={busy}
+          className="shrink-0 rounded-md border border-purple-300 bg-white px-3 py-1 text-xs font-medium text-purple-700 hover:bg-purple-50 disabled:opacity-50"
+        >
+          {busy ? "Unpinning…" : "Unpin"}
+        </button>
+      </div>
+    );
+  }
+
+  // Preview selected → offer pinning it to a stable env.
+  if (currentEnv.envType === "preview") {
+    const previewName = currentEnv.preview?.previewName ?? currentEnv.envName;
+    const hasImage = !!currentEnv.release?.tag;
+    async function pin() {
+      if (!target) return;
+      setBusy(true);
+      try {
+        await pinAppEnv(project, app, target, currentEnv!.envName);
+        toast.success(`${previewName} pinned to ${target}`);
+        await onChanged();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to pin");
+      } finally {
+        setBusy(false);
+      }
+    }
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2.5">
+        <span className="text-sm text-gray-600">
+          Pin this preview's image to a stable env (deploy without merging). The env
+          holds it until unpinned.
+        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <select
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+          >
+            {stableEnvs.map((e) => (
+              <option key={e.envName} value={e.envName}>
+                {e.envName}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={pin}
+            disabled={busy || !target || !hasImage}
+            title={hasImage ? "" : "This preview has no image tag yet"}
+            className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+          >
+            {busy ? "Pinning…" : `Pin to ${target || "env"}`}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 function OverviewTab({
   data,
   currentEnv,
@@ -2981,6 +3118,16 @@ function OverviewTab({
           </p>
         </div>
       )}
+
+      {/* Pin a preview to a stable env (promote without merging) / unpin */}
+      <PinControls
+        project={project}
+        app={data.name}
+        currentEnv={currentEnv}
+        environments={data.environments}
+        isDirect={data.deliveryMode === "direct"}
+        onChanged={onSaved}
+      />
 
       {/* Delivery diagnostics — why an env is stuck / "not deployed" */}
       <DiagnosticsPanel diagnostics={currentEnv?.status.diagnostics ?? []} />

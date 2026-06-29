@@ -238,6 +238,42 @@ func TestPublishKargoCRs_AutoPromoteProdPolicy(t *testing.T) {
 	}
 }
 
+// Kargo pause keys on a real pin (PinnedFrom set), not on the forced tag: a real
+// pin pauses staging's auto-promotion, but the transient unpin-restore write
+// (PinnedImageTag set, PinnedFrom empty) must leave auto-promotion ON.
+func TestPublishKargoCRs_PinPausesButRestoreDoesNot(t *testing.T) {
+	stagingAuto := func(envDefaults map[string]domain.EnvironmentOverride) bool {
+		dir := t.TempDir()
+		p := newTestPublisher(t)
+		app := &domain.App{Name: "web", ProjectName: "demo", Spec: domain.AppSpec{EnvironmentDefaults: envDefaults}}
+		envs := []gitops.AppPublishEnv{
+			{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
+			{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
+		}
+		if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		var cfg gitops.KargoProjectConfig
+		readYAMLInto(t, filepath.Join(dir, "_infra", "kargo", "kargo-demo-projectconfig.yaml"), &cfg)
+		for _, pol := range cfg.Spec.PromotionPolicies {
+			if pol.Stage == gitops.KargoStageName("web", "staging") {
+				return pol.AutoPromotionEnabled
+			}
+		}
+		t.Fatal("staging policy not found")
+		return false
+	}
+
+	// Real pin → paused.
+	if stagingAuto(map[string]domain.EnvironmentOverride{"staging": {PinnedImageTag: "pr-1-x", PinnedFrom: "pr-1"}}) {
+		t.Error("a real pin must pause staging auto-promotion")
+	}
+	// Restore write (forced tag, no PinnedFrom) → still auto.
+	if !stagingAuto(map[string]domain.EnvironmentOverride{"staging": {PinnedImageTag: "restore-tag"}}) {
+		t.Error("an unpin-restore write must NOT pause staging auto-promotion")
+	}
+}
+
 func readYAMLInto(t *testing.T, path string, out any) {
 	t.Helper()
 	data, err := os.ReadFile(path)

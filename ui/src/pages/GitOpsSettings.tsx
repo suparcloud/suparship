@@ -404,6 +404,33 @@ export function GitOpsSettings() {
             />
           </Field>
 
+          {/* Commit author — who suparship's gitops commits are attributed to */}
+          <Field
+            label="Commit author name"
+            optional
+            help="Git author for commits suparship makes to the repo (default: suparShip)"
+          >
+            <input
+              className={inputClass}
+              value={config.commitAuthorName ?? ""}
+              onChange={(e) =>
+                update({ commitAuthorName: e.target.value || undefined })
+              }
+              placeholder="suparShip"
+            />
+          </Field>
+          <Field label="Commit author email" optional help="Default: suparship@suparcloud.io">
+            <input
+              className={inputClass}
+              type="email"
+              value={config.commitAuthorEmail ?? ""}
+              onChange={(e) =>
+                update({ commitAuthorEmail: e.target.value || undefined })
+              }
+              placeholder="suparship@suparcloud.io"
+            />
+          </Field>
+
           {/* Credentials — shown only when a provider is selected */}
           {config.provider && (
             <CredentialFields
