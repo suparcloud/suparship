@@ -18,11 +18,16 @@
 load('ext://helm_resource', 'helm_resource', 'helm_repo')
 load('ext://restart_process', 'docker_build_with_restart')
 
+# Prereq installs use `helm --wait` (cert-manager webhook, kargo, argocd, gitea)
+# and take well over Tilt's default 30s apply timeout — raise it generously
+# (must exceed the per-chart `--timeout` flags below).
+update_settings(k8s_upsert_timeout_secs=900)
+
 # ── Safety: only ever talk to the local dev cluster ────────────────────────
 EXPECTED_CONTEXT = 'kind-suparship-dev'
 if k8s_context() != EXPECTED_CONTEXT:
-    fail("Tilt is pointed at %r but expected %r.\n"
-         "Create/select the dev cluster first:  ctlptl apply -f hack/dev/cluster.yaml  (or run `task up`)."
+    fail(("Tilt is pointed at %r but expected %r.\n" +
+          "Create/select the dev cluster first:  ctlptl apply -f hack/dev/cluster.yaml  (or run `task up`).")
          % (k8s_context(), EXPECTED_CONTEXT))
 
 # ── Config: optional ingress + *.localhost routing ─────────────────────────
@@ -44,7 +49,7 @@ helm_repo('gitea-charts', 'https://dl.gitea.com/charts', labels=['prereq'])
 # ── Namespaces (argocd before argocd install; suparship-system before app) ──
 local_resource(
     'namespaces',
-    cmd='for ns in suparship-system argocd; do '
+    cmd='for ns in suparship-system argocd; do ' +
         'kubectl create ns "$ns" --dry-run=client -o yaml | kubectl apply -f -; done',
     labels=['cluster'],
 )
@@ -53,8 +58,8 @@ local_resource(
 if INGRESS:
     local_resource(
         'ingress-nginx',
-        cmd='kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/'
-            'controller-v1.10.1/deploy/static/provider/kind/deploy.yaml && '
+        cmd='kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/' +
+            'controller-v1.10.1/deploy/static/provider/kind/deploy.yaml && ' +
             'kubectl rollout status -n ingress-nginx deploy/ingress-nginx-controller --timeout=180s',
         resource_deps=['namespaces'],
         labels=['cluster'],
@@ -74,7 +79,7 @@ helm_resource(
 helm_resource(
     'kargo', 'oci://ghcr.io/akuity/kargo-charts/kargo', namespace='kargo',
     flags=['--create-namespace', '--version=1.9.5',
-           '--set=api.adminAccount.enabled=false', '--wait'],
+           '--set=api.adminAccount.enabled=false', '--wait', '--timeout=10m0s'],
     resource_deps=['cert-manager', 'argo-rollouts'],
     port_forwards=['8083:8080'],  # Kargo API/UI (https, self-signed) -> https://localhost:8083
     labels=['prereq'],
@@ -106,7 +111,7 @@ helm_resource(
 # ── ArgoCD (dev profile) ───────────────────────────────────────────────────
 helm_resource(
     'argocd', 'argo/argo-cd', namespace='argocd',
-    flags=['--version=7.7.0', '--values=config/argocd/values-dev.yaml', '--wait'],
+    flags=['--version=7.7.0', '--values=config/argocd/values-dev.yaml', '--wait', '--timeout=10m0s'],
     resource_deps=['argo', 'namespaces'],
     port_forwards=['8081:8080'],  # server.insecure=true -> http://localhost:8081 (admin / see notes)
     labels=['prereq'],
@@ -118,7 +123,7 @@ if INGRESS:
     gitea_deps = gitea_deps + ['ingress-nginx']
 helm_resource(
     'gitea', 'gitea-charts/gitea', namespace='gitea',
-    flags=['--create-namespace', '--version=10.6.0', '--values=config/gitea/values-dev.yaml', '--wait'],
+    flags=['--create-namespace', '--version=10.6.0', '--values=config/gitea/values-dev.yaml', '--wait', '--timeout=10m0s'],
     resource_deps=gitea_deps,
     port_forwards=['3000:3000'],  # http://localhost:3000  (gitops / gitops-dev-only)
     labels=['prereq'],
@@ -141,27 +146,46 @@ docker_build_with_restart(
     'suparship-dev',
     context='.',
     dockerfile='Dockerfile.dev',
-    entrypoint='/usr/local/bin/suparship',  # chart supplies `server --addr=... ` args
+    # restart_process wraps this as `sh -c "<entrypoint>"`, which swallows the
+    # chart's container args as sh positional params — so the full command must
+    # live here. The rest is covered by env (SUPARSHIP_CLUSTER_MODE=kubernetes
+    # from the chart; SUPARSHIP_ADDR/SUPARSHIP_UI_DIR from Dockerfile.dev) and
+    # flag defaults (admin-secret-* default to the chart's values).
+    entrypoint='/usr/local/bin/suparship server --log-level=debug',
     only=['go.mod', 'go.sum', 'cmd', 'internal', 'ui/dist'],
     live_update=[
         fall_back_on(['go.mod', 'go.sum']),   # dep change -> full image rebuild
         sync('./cmd', '/src/cmd'),
         sync('./internal', '/src/internal'),
+    ] + ui_sync + [                            # all sync steps must precede run steps
         run('go build -o /usr/local/bin/suparship ./cmd/suparship',
             trigger=['./cmd', './internal']),
-    ] + ui_sync,
+    ],
 )
 
 # ── Deploy suparShip via its own Helm chart ────────────────────────────────
-k8s_yaml(helm(
+_chart_yaml = helm(
     './charts/suparship',
     name='suparship',
     namespace='suparship-system',
     values=['./hack/dev/values-dev.yaml'],
     set=['ingress.enabled=%s' % ('true' if INGRESS else 'false')],
-))
+)
+# Strip Helm lifecycle hooks (e.g. the prereq-check Job). Tilt renders hooks as
+# plain objects with no hook ordering, so they run ungated and race the prereqs
+# that Tilt already sequences via resource_deps. Drop them for the dev deploy.
+def _is_helm_hook(o):
+    anns = (o.get('metadata') or {}).get('annotations') or {}
+    return 'helm.sh/hook' in anns
+_objs = [o for o in decode_yaml_stream(_chart_yaml) if o and not _is_helm_hook(o)]
+k8s_yaml(encode_yaml_stream(_objs))
 k8s_resource(
     'suparship',
+    # Pull the ArgoCD AppProject (createSystemProject) into this resource so it
+    # inherits resource_deps and is applied AFTER ArgoCD installs its CRDs
+    # (otherwise Tilt applies it in an ungated group -> "no matches for kind
+    # AppProject").
+    objects=['suparship-system:appproject:argocd'],
     port_forwards=['8080:8080'],  # Service 80 -> pod 8080 ; Vite proxies /api here
     resource_deps=['suparship-admin-secret', 'argocd', 'external-secrets'],
     labels=['app'],
