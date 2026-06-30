@@ -37,7 +37,7 @@ the backend directly, export the variables yourself or use a tool like
 | Mode | Behaviour |
 |------|-----------|
 | `fake` | No real Kubernetes calls. API returns stubbed responses. Ideal for frontend-only or offline work. |
-| `local` | Connects to the current kubeconfig context (e.g. k3d). |
+| `local` | Connects to the current kubeconfig context (the `kind-suparship-dev` cluster created by `task up`). |
 
 ## Security notes
 

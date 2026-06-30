@@ -4,6 +4,7 @@
 # Usage:
 #   hack/preflight.sh local    # checks: go, npm
 #   hack/preflight.sh cluster  # checks: go, npm, kind, kubectl, helm
+#   hack/preflight.sh tilt     # checks: docker, ctlptl, tilt, kubectl, helm, npm, htpasswd
 #
 # Exits 0 when all required tools are present.
 # Exits 1 and prints an install-hint table when any are missing.
@@ -32,6 +33,16 @@ if [ "$MODE" = "cluster" ]; then
   need kind    "https://kind.sigs.k8s.io/docs/user/quick-start/#installation"
   need kubectl "https://kubernetes.io/docs/tasks/tools/"
   need helm    "https://helm.sh/docs/intro/install/"
+fi
+
+# ── Tilt mode (task up) additionally requires ────────────────────────────
+if [ "$MODE" = "tilt" ]; then
+  need docker   "https://docs.docker.com/get-docker/  (or OrbStack / Docker Desktop)"
+  need ctlptl   "https://github.com/tilt-dev/ctlptl#how-do-i-install-it  (brew install tilt-dev/tap/ctlptl)"
+  need tilt     "https://docs.tilt.dev/install.html  (brew install tilt-dev/tap/tilt)"
+  need kubectl  "https://kubernetes.io/docs/tasks/tools/"
+  need helm     "https://helm.sh/docs/intro/install/"
+  need htpasswd "ships with apache2-utils / httpd-tools  (macOS: preinstalled, or 'brew install httpd')"
 fi
 
 # ── All present — nothing to do ──────────────────────────────────────────

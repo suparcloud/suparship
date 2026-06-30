@@ -12,9 +12,29 @@ LDFLAGS := -X github.com/suparcloud/suparship/internal/version.Version=$(VERSION
 # Go settings
 GOBIN := $(shell go env GOPATH)/bin
 
-.PHONY: all build test test-smoke lint fmt clean dev-api dev-ui help
+.PHONY: all build test test-smoke lint fmt clean dev-api dev-ui hack-up hack-up-ingress hack-down cluster-delete help
 
 all: build
+
+## hack-up: Start the full dev cluster with Tilt (ctlptl + prereqs + suparship, hot-reload)
+hack-up:
+	hack/preflight.sh tilt
+	ctlptl apply -f hack/dev/cluster.yaml
+	tilt up
+
+## hack-up-ingress: Like hack-up, plus NGINX ingress + *.localhost routing
+hack-up-ingress:
+	hack/preflight.sh tilt
+	ctlptl apply -f hack/dev/cluster.yaml
+	tilt up -- --ingress
+
+## hack-down: Stop Tilt and remove in-cluster workloads (keeps the cluster)
+hack-down:
+	tilt down
+
+## cluster-delete: Delete the dev cluster + local registry (ctlptl)
+cluster-delete:
+	ctlptl delete -f hack/dev/cluster.yaml
 
 ## build: Build the suparship binary
 build:

@@ -6,26 +6,27 @@ alwaysApply: true
 
 # Core Project Rules — suparship
 
+> ⚠️ **STATUS: this file's product framing is OUTDATED.** The sections below
+> describe an early CLI-only MVP that no longer reflects what shipped. Current
+> reality, which overrides anything contradictory here:
+> - **UI-first**, not CLI-only — there is a full React/Vite web app in `ui/`;
+>   the `suparship` binary is primarily the API server (`suparship server`).
+> - Local dev uses **kind via Tilt** (`task up`), **not k3d**; there are no
+>   `suparship demo` / `install --profile` flows.
+> - **External Secrets Operator**, **multi-cluster**, and **team/OIDC RBAC**
+>   are all shipped, not "out of scope".
+> Canonical sources: [`docs/contributor-guide/hacking-on-suparship.md`](../../docs/contributor-guide/hacking-on-suparship.md),
+> [`suparship-product-architecture.mdc`](./suparship-product-architecture.mdc),
+> [`docs/app-model.md`](../../docs/app-model.md). The architectural/determinism
+> rules further down (gitops output, error handling, etc.) remain valid.
+
 ## What This Repo Is
 
 - **GitOps-native platform runtime** built on ArgoCD + Kargo for Kubernetes
-- **CLI-first tool** (`suparship`) for bootstrapping environments, services, and preview environments
+- **UI-first** web app (`ui/`) backed by the `suparship` API server; a `suparship` CLI also exists for admin/bootstrap tasks
 - **Template-driven** manifest generation with deterministic, auditable Git output
-- **Developer-focused** with instant local demos via k3d requiring zero paid services
-- **Opinionated but extensible** — enforces env/project/service hierarchy with customizable profiles
-
-## MVP Non-Goals
-
-The following are explicitly **out of scope** for MVP:
-
-- ❌ Web UI or dashboard (CLI only)
-- ❌ Multi-cloud abstraction layer
-- ❌ Built-in CI/CD engine (defer to external CI; we do CD via ArgoCD)
-- ❌ Custom Kubernetes controllers beyond what ArgoCD/Kargo provide
-- ❌ Secret management backends (Vault, External Secrets) — reference-only in MVP
-- ❌ Multi-tenancy with RBAC isolation (single-tenant assumed)
-- ❌ Production-grade HA configurations
-- ❌ Cost optimization or resource quotas
+- **Developer-focused** with a one-command local cluster via kind + Tilt (`task up`), requiring zero paid services
+- **Opinionated but extensible** — enforces org/project/app/environment hierarchy
 
 ## Architectural Constraints
 
