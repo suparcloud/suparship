@@ -33,12 +33,42 @@ tasks:
     cmds:
       - cd ui && npm run dev
 
-  # ── Cluster dev — main entry points ────────────────────────────────────
-  # Run dev:cluster once to provision the cluster, then dev:cluster:serve
-  # for every subsequent dev session (fast build + restart, no cluster touch).
+  # ── Tilt cluster dev (recommended) ─────────────────────────────────────
+  # One command: ctlptl cluster + local registry, all prerequisites, and
+  # suparship deployed in-cluster with hot-reload. See docs/contributor-guide/
+  # hacking-on-suparship.md.
+
+  up:
+    desc: "Start the full dev cluster with Tilt — cluster + prereqs + suparship (hot-reload). Tilt UI: http://localhost:10350"
+    cmds:
+      - hack/preflight.sh tilt
+      - ctlptl apply -f hack/dev/cluster.yaml
+      - tilt up
+
+  up:ingress:
+    desc: "Like `task up`, plus NGINX ingress + *.localhost routing"
+    cmds:
+      - hack/preflight.sh tilt
+      - ctlptl apply -f hack/dev/cluster.yaml
+      - tilt up -- --ingress
+
+  down:
+    desc: "Stop Tilt and remove the in-cluster workloads (keeps the cluster running)"
+    cmds:
+      - tilt down
+
+  cluster:delete:
+    desc: "Delete the dev cluster + local registry (ctlptl)"
+    cmds:
+      - ctlptl delete -f hack/dev/cluster.yaml
+
+  # ── Cluster dev — legacy script path ───────────────────────────────────
+  # Prefer `task up` (Tilt). These shell-script tasks remain for targeted
+  # re-installs and as a fallback. Run dev:cluster once to provision, then
+  # dev:cluster:serve for each session (runs the server on the host).
 
   dev:cluster:
-    desc: "Set up dev cluster — DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed + cert-manager + Argo Rollouts + Kargo + ESO + Replicator + Reloader (idempotent)"
+    desc: "[legacy — prefer `task up`] Provision dev cluster via shell scripts: DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed + cert-manager + Argo Rollouts + Kargo + ESO + Replicator + Reloader (idempotent)"
     cmds:
       - hack/setup-cluster.sh
 

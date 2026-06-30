@@ -1,7 +1,7 @@
 # Seed: demo cluster registrations for local development.
 # Applied by: hack/seed.sh  (kubectl apply -f config/seed/)
 #
-# In the local demo setup, both environments share the single k3d cluster
+# In the local demo setup, both environments share the single kind cluster
 # (https://kubernetes.default.svc). In real deployments, each entry would
 # point to a separate workload cluster and a corresponding kubeconfig Secret
 # would exist at suparship-cluster-kubeconfig-{name}.

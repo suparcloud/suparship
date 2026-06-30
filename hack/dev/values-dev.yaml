@@ -1,0 +1,30 @@
+# charts/suparship value overrides for the Tilt dev loop (see Tiltfile).
+# NOT for production.
+image:
+  # Tilt builds Dockerfile.dev and injects it wherever this image ref appears.
+  repository: suparship-dev
+  tag: dev
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+server:
+  logLevel: debug
+
+# Off by default — flipped on with `task up:ingress` / `tilt up -- --ingress`.
+ingress:
+  enabled: false
+  className: nginx
+  host: suparship.localhost
+
+# Dev admin Secret is created by hack/dev/admin-secret.sh (login admin / devpass).
+admin:
+  secret:
+    name: suparship-admin-auth
+    namespace: suparship-system
+    usernameKey: username
+    passwordHashKey: password-hash
+
+argocd:
+  namespace: argocd
+  createSystemProject: true

@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.7
+#
+# suparShip DEVELOPMENT image — used only by the Tilt dev loop (Tiltfile).
+# NOT for production (use the root Dockerfile for that).
+#
+# Why a Go-toolchain image instead of the slim prod runtime:
+#   Tilt live_update sync()s changed .go files into the running container and
+#   runs `go build` IN PLACE, so the warm Go build cache lives in the container
+#   and an edit→rebuild is ~1-3s. The binary needs CGO (the 1Password SDK), so
+#   we ship gcc + musl-dev. Built NATIVELY for the kind node arch — no
+#   tonistiigi/xx / QEMU (that machinery is only for prod cross-compile).
+#
+# The server shells out to `helm` and `kubeseal`, so those are installed too.
+FROM golang:1.25-alpine
+
+ARG HELM_VERSION=3.16.4
+ARG KUBESEAL_VERSION=0.27.3
+
+# CGO toolchain (1Password SDK) + tools the server shells out to + git.
+RUN set -eux; \
+    apk add --no-cache gcc musl-dev git ca-certificates wget tar; \
+    ARCH="$(go env GOARCH)"; \
+    wget -qO- "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${ARCH}.tar.gz" \
+      | tar -xz -C /tmp; \
+    mv "/tmp/linux-${ARCH}/helm" /usr/local/bin/helm; \
+    wget -qO /tmp/ks.tgz \
+      "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-${ARCH}.tar.gz"; \
+    tar -xzf /tmp/ks.tgz -C /usr/local/bin kubeseal; \
+    chmod +x /usr/local/bin/helm /usr/local/bin/kubeseal
+
+ENV CGO_ENABLED=1 \
+    GOCACHE=/root/.cache/go-build \
+    GOMODCACHE=/go/pkg/mod \
+    HOME=/root \
+    SUPARSHIP_UI_DIR=/app/ui \
+    SUPARSHIP_ADDR=:8080
+
+WORKDIR /src
+
+# Warm the module + build cache so the FIRST live_update is already incremental.
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o /usr/local/bin/suparship ./cmd/suparship
+RUN mkdir -p /app/ui   # --ui-dir target exists even before the UI is synced
+
+# Entry is JUST the binary; the Helm chart supplies the `server --addr=... ` args
+# (Tilt's restart_process wrapper re-execs this on each live_update sync).
+ENTRYPOINT ["/usr/local/bin/suparship"]
