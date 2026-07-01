@@ -148,6 +148,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		projectAppCounter       server.ProjectAppCounter
 		appDiagnosticsReader    server.AppDiagnosticsReader
 		stuckAppManager         server.StuckAppManager
+		argoRefresh             argoRefresher // triggers ArgoCD refresh after publish
+
 		kubeClient              kubernetes.Interface
 		dynClient               dynamic.Interface
 		gitopsConfigStore       *gitops.ConfigStore
@@ -241,6 +243,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			projectAppCounter = argoCDReader
 			appDiagnosticsReader = argoCDReader
 			stuckAppManager = &stuckAppAdapter{reader: argoCDReader}
+			argoRefresh = argoCDReader
 			logger.Info("kargo promoter enabled via dynamic client")
 			logger.Info("argocd deployment history reader enabled")
 		}
@@ -443,6 +446,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					builtin:         templates,
 					clusterLoader:   clusterTemplateLoaderFromClient(kubeClient),
 					overrideLoader:  templateOverrideLoaderFromClient(kubeClient),
+					argoRefresher:   argoRefresh,
 				}
 				sealPublisherHolder.Swap(pub)
 				logger.Info("gitops publisher enabled",
@@ -584,6 +588,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				builtin:         templates,
 				clusterLoader:   clusterTemplateLoaderFromClient(kubeClient),
 				overrideLoader:  templateOverrideLoaderFromClient(kubeClient),
+				argoRefresher:   argoRefresh,
 			})
 			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
@@ -709,6 +714,28 @@ type gitOpsPublisherAdapter struct {
 	// it). Merged on top of the template's own Default/Env values. Optional: nil
 	// → no org layer. Best-effort — a load error degrades to "no override".
 	overrideLoader func(ctx context.Context, name string) (*domain.TemplateOverride, error)
+	// argoRefresher triggers an ArgoCD refresh on the affected Application(s)
+	// right after a publish commits, so the change applies immediately instead of
+	// waiting for ArgoCD's poll interval. Best-effort; nil → rely on the poll.
+	argoRefresher argoRefresher
+}
+
+// argoRefresher triggers ArgoCD reconciliation after a publish. Implemented by
+// kube.ArgoCDStatusReader (RefreshApps/RefreshAppSets).
+type argoRefresher interface {
+	RefreshApps(ctx context.Context, project string, appNames []string) error
+	RefreshAppSets(ctx context.Context, appSetNames []string) error
+}
+
+// refreshApps triggers a best-effort ArgoCD refresh of the given apps; a failure
+// is logged and swallowed (ArgoCD's poll is the fallback).
+func (a *gitOpsPublisherAdapter) refreshApps(ctx context.Context, project string, appNames ...string) {
+	if a.argoRefresher == nil || len(appNames) == 0 {
+		return
+	}
+	if err := a.argoRefresher.RefreshApps(ctx, project, appNames); err != nil {
+		slog.Warn("argocd refresh failed; falling back to poll", "project", project, "apps", appNames, "err", err)
+	}
 }
 
 // resolveTemplate resolves a template by name live (cluster overrides built-in)
@@ -1007,7 +1034,11 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 		return fmt.Errorf("publish env infra: %w", err)
 	}
 	// Write app.yaml + values.yaml for each bound environment.
-	return a.inner.PublishApp(ctx, app, pubEnvs)
+	if err := a.inner.PublishApp(ctx, app, pubEnvs); err != nil {
+		return err
+	}
+	a.refreshApps(ctx, app.ProjectName, app.Name)
+	return nil
 }
 
 // buildAppBundle resolves an app's per-env AppPublishEnv slice (values overlays,
@@ -1117,7 +1148,17 @@ func (a *gitOpsPublisherAdapter) PublishApps(ctx context.Context, targets []serv
 		}
 		bundles = append(bundles, b)
 	}
-	return a.inner.PublishApps(ctx, bundles)
+	if err := a.inner.PublishApps(ctx, bundles); err != nil {
+		return err
+	}
+	byProject := map[string][]string{}
+	for _, t := range targets {
+		byProject[t.App.ProjectName] = append(byProject[t.App.ProjectName], t.App.Name)
+	}
+	for proj, names := range byProject {
+		a.refreshApps(ctx, proj, names...)
+	}
+	return nil
 }
 
 // lookupOrgEnvRoutingProfiles returns the per-env RoutingProfiles override
@@ -1353,7 +1394,11 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 	if err != nil {
 		return err
 	}
-	return a.inner.PublishAppEnv(ctx, app, pub)
+	if err := a.inner.PublishAppEnv(ctx, app, pub); err != nil {
+		return err
+	}
+	a.refreshApps(ctx, app.ProjectName, app.Name)
+	return nil
 }
 
 // buildAppEnvPub resolves one env's full AppPublishEnv (cluster, secrets, env
@@ -1417,7 +1462,23 @@ func (a *gitOpsPublisherAdapter) PublishAppsEnv(ctx context.Context, targets []s
 		}
 		items = append(items, gitops.AppEnvPublish{App: t.App, Env: pub})
 	}
-	return a.inner.PublishAppsEnv(ctx, items)
+	if err := a.inner.PublishAppsEnv(ctx, items); err != nil {
+		return err
+	}
+	a.refreshTargets(ctx, targets)
+	return nil
+}
+
+// refreshTargets triggers an ArgoCD refresh for every target's app, grouped by
+// project (a stack fan-out is one project, but group defensively).
+func (a *gitOpsPublisherAdapter) refreshTargets(ctx context.Context, targets []server.AppEnvTarget) {
+	byProject := map[string][]string{}
+	for _, t := range targets {
+		byProject[t.App.ProjectName] = append(byProject[t.App.ProjectName], t.App.Name)
+	}
+	for proj, names := range byProject {
+		a.refreshApps(ctx, proj, names...)
+	}
 }
 
 // PublishAppPreview implements server.GitOpsPublisher for previews. A preview
@@ -1522,7 +1583,19 @@ func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *dom
 		StackEnvRawValues:     basePub.StackEnvRawValues,
 		TemplatePreviewValues: templatePreviewValues,
 	}
-	return a.inner.PublishPreview(ctx, app, spec)
+	if err := a.inner.PublishPreview(ctx, app, spec); err != nil {
+		return err
+	}
+	// Refresh the app's existing preview Application (re-publish case), and nudge
+	// the preview ApplicationSets to re-scan so a brand-new preview Application is
+	// generated immediately rather than on the appset's poll interval.
+	a.refreshApps(ctx, app.ProjectName, app.Name)
+	if a.argoRefresher != nil {
+		if err := a.argoRefresher.RefreshAppSets(ctx, []string{"previews", "previews-platform"}); err != nil {
+			slog.Warn("argocd preview appset refresh failed; falling back to poll", "project", app.ProjectName, "app", app.Name, "err", err)
+		}
+	}
+	return nil
 }
 
 // DeleteAppPreview implements server.AppPreviewDeleter by removing one app's
