@@ -1814,33 +1814,96 @@ func pinIsSkippable(err error) bool {
 		errors.Is(err, errPinNoTag)
 }
 
-// pinAppEnv promotes a PR preview's built image to a stable env WITHOUT merging
-// and pins it: the env's values.yaml holds the preview's image tag and Kargo
-// auto-promotion to that stage is paused, so newer freight doesn't override it
-// until unpinned. Shared core of the per-app pin handler and the stack batch pin.
-// Returns the pinned image tag.
-func (ah *appHandler) pinAppEnv(ctx context.Context, projectName, appName, envName, fromPreview string) (string, error) {
+// appFocusPublish is one member of a batched full-app publish: the app plus an
+// optional focus env whose values must be force-written (the pinned/unpinned
+// stable env, which pipeline apps don't rewrite via the first-deploy set).
+type appFocusPublish struct {
+	app      *domain.App
+	focusEnv *domain.AppEnvironment
+}
+
+// stableEnvsForPublish returns an app's stable (non-preview) env records, or the
+// org-derived defaults when none are persisted — mirroring republishApp.
+func (ah *appHandler) stableEnvsForPublish(ctx context.Context, app *domain.App) []*domain.AppEnvironment {
+	envs, _ := ah.appStore.ListAppEnvironments(ctx, app.ProjectName, app.Name)
+	var stable []*domain.AppEnvironment
+	for _, e := range envs {
+		if e.EnvType != domain.AppEnvPreview {
+			stable = append(stable, e)
+		}
+	}
+	if len(stable) == 0 {
+		stable = ah.stableEnvsFromOrg(ctx, app)
+	}
+	return stable
+}
+
+// republishAppsFocus publishes many apps' full trees (infra + values + Kargo
+// CRs) plus each app's focus env in ONE git commit when the publisher supports
+// batching (BatchAppPublisher), else falls back to per-app republishApp +
+// PublishAppEnv. This is the batched equivalent of republishApp +
+// PublishAppEnv(focus) — the 504 fix for stack pin/unpin.
+func (ah *appHandler) republishAppsFocus(ctx context.Context, items []appFocusPublish) error {
+	if ah.gitOpsPublisher == nil || len(items) == 0 {
+		return nil
+	}
+	targets := make([]AppPublishTarget, 0, len(items))
+	for _, it := range items {
+		stable := ah.stableEnvsForPublish(ctx, it.app)
+		ah.resolveEnvNamespaces(ctx, it.app, stable)
+		ah.ensureAppNamespaces(ctx, it.app, stable)
+		var focus []*domain.AppEnvironment
+		if it.focusEnv != nil {
+			ah.ensureAppNamespace(ctx, it.app, it.focusEnv)
+			focus = []*domain.AppEnvironment{it.focusEnv}
+		}
+		targets = append(targets, AppPublishTarget{App: it.app, Envs: stable, FocusEnvs: focus})
+	}
+	if b, ok := ah.gitOpsPublisher.(BatchAppPublisher); ok {
+		if err := b.PublishApps(ctx, targets); !errors.Is(err, errUnbatched) {
+			return err // batched (success or a real publish error)
+		}
+	}
+	// Fallback: publisher without the batch capability (e.g. test stubs).
+	for _, t := range targets {
+		if err := ah.gitOpsPublisher.PublishApp(ctx, t.App, t.Envs); err != nil {
+			return err
+		}
+		for _, fe := range t.FocusEnvs {
+			if err := ah.gitOpsPublisher.PublishAppEnv(ctx, t.App, fe); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// pinAppEnvSpec validates and persists a pin (capturing the pre-pin image for
+// restore) WITHOUT publishing (no git). Returns the app, target env record, and
+// pinned tag so the caller can batch the publish. Shared by the single-app op
+// and the stack fan-out.
+func (ah *appHandler) pinAppEnvSpec(ctx context.Context, projectName, appName, envName, fromPreview string) (*domain.App, *domain.AppEnvironment, string, error) {
 	app, err := ah.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
-		return "", fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
+		return nil, nil, "", fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
 	}
 	if app.Spec.IsDirect() {
-		return "", errPinNotPipeline
+		return nil, nil, "", errPinNotPipeline
 	}
 	// The target must be a stable env; the source must be a preview with an image.
 	targetEnv, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName)
 	if err != nil {
-		return "", fmt.Errorf("%w: %q for app %q", errPinTargetNotFound, envName, appName)
+		return nil, nil, "", fmt.Errorf("%w: %q for app %q", errPinTargetNotFound, envName, appName)
 	}
 	if targetEnv.EnvType == domain.AppEnvPreview {
-		return "", errPinTargetIsPreview
+		return nil, nil, "", errPinTargetIsPreview
 	}
 	preview, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, fromPreview)
 	if err != nil || preview.EnvType != domain.AppEnvPreview {
-		return "", fmt.Errorf("%w: %q for app %q", errPinPreviewNotFound, fromPreview, appName)
+		return nil, nil, "", fmt.Errorf("%w: %q for app %q", errPinPreviewNotFound, fromPreview, appName)
 	}
 	if preview.Release == nil || strings.TrimSpace(preview.Release.Tag) == "" {
-		return "", fmt.Errorf("%w: %q", errPinNoTag, fromPreview)
+		return nil, nil, "", fmt.Errorf("%w: %q", errPinNoTag, fromPreview)
 	}
 
 	// Capture the env's current deployed image tag before pinning, so unpinning
@@ -1864,35 +1927,36 @@ func (ah *appHandler) pinAppEnv(ctx context.Context, projectName, appName, envNa
 	}
 	app.Spec.EnvironmentDefaults[envName] = ov
 	if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
-		return "", fmt.Errorf("failed to save app: %w", err)
+		return nil, nil, "", fmt.Errorf("failed to save app: %w", err)
 	}
-	// Republish so the Kargo ProjectConfig pauses auto-promotion for the pinned
-	// stage, then write the target env's values directly — republishApp only
-	// (re)deploys the first stable env, so a pinned prod needs its own publish.
-	if err := ah.republishApp(ctx, app); err != nil {
-		return "", fmt.Errorf("failed to publish pin: %w", err)
-	}
-	if ah.gitOpsPublisher != nil {
-		ah.ensureAppNamespace(ctx, app, targetEnv)
-		if err := ah.gitOpsPublisher.PublishAppEnv(ctx, app, targetEnv); err != nil {
-			return "", fmt.Errorf("failed to publish pinned env: %w", err)
-		}
-	}
-	return ov.PinnedImageTag, nil
+	return app, targetEnv, ov.PinnedImageTag, nil
 }
 
-// unpinAppEnv clears a pin and republishes, so the env returns to normal CD
-// (Kargo resumes auto-promoting the latest freight; seed/CD tag ownership
-// applies again). Shared core of the per-app unpin handler and the stack batch
-// unpin. Returns (restoredTag, wasPinned): wasPinned=false is a no-op success.
-func (ah *appHandler) unpinAppEnv(ctx context.Context, projectName, appName, envName string) (string, bool, error) {
+// pinAppEnv pins a PR preview's built image to a stable env WITHOUT merging: the
+// env's values.yaml holds the preview's image tag and Kargo auto-promotion to
+// that stage is paused. Mutates the spec then publishes in one batched op.
+func (ah *appHandler) pinAppEnv(ctx context.Context, projectName, appName, envName, fromPreview string) (string, error) {
+	app, targetEnv, tag, err := ah.pinAppEnvSpec(ctx, projectName, appName, envName, fromPreview)
+	if err != nil {
+		return "", err
+	}
+	if err := ah.republishAppsFocus(ctx, []appFocusPublish{{app: app, focusEnv: targetEnv}}); err != nil {
+		return "", fmt.Errorf("failed to publish pin: %w", err)
+	}
+	return tag, nil
+}
+
+// unpinAppEnvSpec clears a pin, computing the restore image, and persists it
+// WITHOUT publishing (no git). Returns the app, target env record (nil if the
+// env has no record), restore tag, and wasPinned (false = no-op success).
+func (ah *appHandler) unpinAppEnvSpec(ctx context.Context, projectName, appName, envName string) (*domain.App, *domain.AppEnvironment, string, bool, error) {
 	app, err := ah.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
-		return "", false, fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
+		return nil, nil, "", false, fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
 	}
 	ov := app.Spec.EnvironmentDefaults[envName]
 	if ov.PinnedFrom == "" {
-		return "", false, nil
+		return app, nil, "", false, nil
 	}
 
 	// Restore the pre-pin image (if captured) by force-writing it ONCE: clearing
@@ -1923,27 +1987,38 @@ func (ah *appHandler) unpinAppEnv(ctx context.Context, projectName, appName, env
 	ov.PinnedImageTag = restore // "" when nothing captured
 	app.Spec.EnvironmentDefaults[envName] = ov
 	if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
-		return "", true, fmt.Errorf("failed to save app: %w", err)
+		return nil, nil, "", true, fmt.Errorf("failed to save app: %w", err)
 	}
-	if err := ah.republishApp(ctx, app); err != nil {
+	targetEnv, _ := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName)
+	return app, targetEnv, restore, true, nil
+}
+
+// unpinClearRestoreFlag clears the one-shot restore force-write flag after the
+// unpin publish, handing tag ownership back to Kargo (preserve) / the seed.
+func (ah *appHandler) unpinClearRestoreFlag(ctx context.Context, app *domain.App, envName, restore string) {
+	if restore == "" {
+		return
+	}
+	ov := app.Spec.EnvironmentDefaults[envName]
+	ov.PinnedImageTag = ""
+	app.Spec.EnvironmentDefaults[envName] = ov
+	if err := ah.appStore.SaveApp(ctx, app.ProjectName, app); err != nil {
+		slog.Warn("unpin: failed to clear restore flag", "project", app.ProjectName, "app", app.Name, "env", envName, "err", err)
+	}
+}
+
+// unpinAppEnv clears a pin and republishes so the env returns to normal CD.
+// Mutates the spec, publishes in one batched op, then clears the one-shot restore
+// flag. Returns (restoredTag, wasPinned): wasPinned=false is a no-op success.
+func (ah *appHandler) unpinAppEnv(ctx context.Context, projectName, appName, envName string) (string, bool, error) {
+	app, targetEnv, restore, wasPinned, err := ah.unpinAppEnvSpec(ctx, projectName, appName, envName)
+	if err != nil || !wasPinned {
+		return restore, wasPinned, err
+	}
+	if err := ah.republishAppsFocus(ctx, []appFocusPublish{{app: app, focusEnv: targetEnv}}); err != nil {
 		return "", true, fmt.Errorf("failed to publish unpin: %w", err)
 	}
-	if ah.gitOpsPublisher != nil {
-		if targetEnv, terr := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName); terr == nil {
-			if perr := ah.gitOpsPublisher.PublishAppEnv(ctx, app, targetEnv); perr != nil {
-				slog.Warn("unpin: failed to republish env values", "project", projectName, "app", appName, "env", envName, "err", perr)
-			}
-		}
-	}
-	// One-shot: the restored tag is now committed, so clear the force-write flag —
-	// future republishes hand tag ownership back to Kargo (preserve) / the seed.
-	if restore != "" {
-		ov.PinnedImageTag = ""
-		app.Spec.EnvironmentDefaults[envName] = ov
-		if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
-			slog.Warn("unpin: failed to clear restore flag", "project", projectName, "app", appName, "env", envName, "err", err)
-		}
-	}
+	ah.unpinClearRestoreFlag(ctx, app, envName, restore)
 	return restore, true, nil
 }
 
@@ -2026,22 +2101,21 @@ func suspendIsSkippable(err error) bool {
 	return errors.Is(err, errSuspendEnvNotFound)
 }
 
-// suspendAppEnv sets (suspend=true) or clears (suspend=false) the suspend flag
-// on a stable env and republishes. When suspended the publisher writes the
-// template's suspend values key so the chart scales the workload down; the env
-// stays published (no data loss, unlike undeploy). Works for pipeline and direct
-// apps. Shared core of the per-app and stack batch suspend/resume ops.
-func (ah *appHandler) suspendAppEnv(ctx context.Context, projectName, appName, envName string, suspend bool) error {
+// suspendAppEnvSpec validates and persists the suspend flag on a stable env
+// WITHOUT publishing (no git). It returns the app + target env record so the
+// caller can batch the publish. Shared by the single-app op and the stack
+// fan-out (which mutates every member's spec, then publishes them in one commit).
+func (ah *appHandler) suspendAppEnvSpec(ctx context.Context, projectName, appName, envName string, suspend bool) (*domain.App, *domain.AppEnvironment, error) {
 	app, err := ah.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
-		return fmt.Errorf("%w: app %q in project %q", errSuspendAppNotFound, appName, projectName)
+		return nil, nil, fmt.Errorf("%w: app %q in project %q", errSuspendAppNotFound, appName, projectName)
 	}
 	targetEnv, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName)
 	if err != nil {
-		return fmt.Errorf("%w: %q for app %q", errSuspendEnvNotFound, envName, appName)
+		return nil, nil, fmt.Errorf("%w: %q for app %q", errSuspendEnvNotFound, envName, appName)
 	}
 	if targetEnv.EnvType == domain.AppEnvPreview {
-		return errSuspendPreview
+		return nil, nil, errSuspendPreview
 	}
 	if app.Spec.EnvironmentDefaults == nil {
 		app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
@@ -2055,17 +2129,43 @@ func (ah *appHandler) suspendAppEnv(ctx context.Context, projectName, appName, e
 	}
 	app.Spec.EnvironmentDefaults[envName] = ov
 	if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
-		return fmt.Errorf("failed to save app: %w", err)
+		return nil, nil, fmt.Errorf("failed to save app: %w", err)
 	}
-	// republishApp only (re)deploys the first stable env, so a suspended prod
-	// needs its own publish — same as pin.
-	if err := ah.republishApp(ctx, app); err != nil {
-		return fmt.Errorf("failed to publish suspend: %w", err)
+	return app, targetEnv, nil
+}
+
+// suspendAppEnv sets (suspend=true) or clears (suspend=false) the suspend flag on
+// a stable env and publishes just that env's values (where the flag lives). When
+// suspended the publisher writes the template's suspend values key so the chart
+// scales the workload down; the env stays published (no data loss, unlike
+// undeploy). Works for pipeline and direct apps.
+func (ah *appHandler) suspendAppEnv(ctx context.Context, projectName, appName, envName string, suspend bool) error {
+	app, targetEnv, err := ah.suspendAppEnvSpec(ctx, projectName, appName, envName, suspend)
+	if err != nil {
+		return err
 	}
-	if ah.gitOpsPublisher != nil {
-		ah.ensureAppNamespace(ctx, app, targetEnv)
-		if err := ah.gitOpsPublisher.PublishAppEnv(ctx, app, targetEnv); err != nil {
-			return fmt.Errorf("failed to publish suspended env: %w", err)
+	return ah.republishAppsEnv(ctx, []AppEnvTarget{{App: app, Env: targetEnv}})
+}
+
+// republishAppsEnv publishes one env's values for many apps. It ensures each
+// target env's namespace, then uses the batched BatchEnvPublisher (a single
+// clone/commit/push) when the publisher supports it, else falls back to a
+// per-app PublishAppEnv. This is what lets a stack suspend/resume fan out to N
+// members in ONE git round-trip instead of N (the 504 fix).
+func (ah *appHandler) republishAppsEnv(ctx context.Context, targets []AppEnvTarget) error {
+	if ah.gitOpsPublisher == nil || len(targets) == 0 {
+		return nil
+	}
+	for _, t := range targets {
+		ah.resolveEnvNamespaces(ctx, t.App, []*domain.AppEnvironment{t.Env})
+		ah.ensureAppNamespace(ctx, t.App, t.Env)
+	}
+	if b, ok := ah.gitOpsPublisher.(BatchEnvPublisher); ok {
+		return b.PublishAppsEnv(ctx, targets)
+	}
+	for _, t := range targets {
+		if err := ah.gitOpsPublisher.PublishAppEnv(ctx, t.App, t.Env); err != nil {
+			return err
 		}
 	}
 	return nil

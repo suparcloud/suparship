@@ -350,16 +350,36 @@ func (rh *rbacHandler) handlePinStack(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "unknown target environment: " + req.TargetEnv})
 		return
 	}
+	// Phase 1: mutate each member's spec (no git), collecting publish items and
+	// each member's pinned tag for the success message.
 	results := make([]stackOpResult, 0, len(members))
+	var items []appFocusPublish
+	tags := map[string]string{}
+	var pubNames []string
 	for _, a := range members {
-		tag, err := rh.appHandler.pinAppEnv(r.Context(), project, a.Name, req.TargetEnv, req.FromPreview)
+		app, targetEnv, tag, err := rh.appHandler.pinAppEnvSpec(r.Context(), project, a.Name, req.TargetEnv, req.FromPreview)
 		switch {
 		case err == nil:
-			results = append(results, okResult(a.Name, "pinned "+req.TargetEnv+" → "+tag))
+			items = append(items, appFocusPublish{app: app, focusEnv: targetEnv})
+			tags[a.Name] = tag
+			pubNames = append(pubNames, a.Name)
 		case pinIsSkippable(err):
 			results = append(results, skipResult(a.Name, err.Error()))
 		default:
 			results = append(results, errResult(a.Name, err))
+		}
+	}
+	// Phase 2: publish every pinned member (tree + Kargo pause + target env) in
+	// ONE clone/commit/push — the 504 fix.
+	if len(items) > 0 {
+		if err := rh.appHandler.republishAppsFocus(r.Context(), items); err != nil {
+			for _, n := range pubNames {
+				results = append(results, errResult(n, err))
+			}
+		} else {
+			for _, n := range pubNames {
+				results = append(results, okResult(n, "pinned "+req.TargetEnv+" → "+tags[n]))
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "pin", Results: results})
@@ -400,18 +420,46 @@ func (rh *rbacHandler) handleUnpinStack(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "unknown target environment: " + req.TargetEnv})
 		return
 	}
+	// Phase 1: clear each member's pin in the spec (no git), collecting publish
+	// items and per-member restore tags. Members not pinned are skipped.
 	results := make([]stackOpResult, 0, len(members))
+	var items []appFocusPublish
+	type unpinned struct {
+		app     *domain.App
+		restore string
+	}
+	pending := map[string]unpinned{}
+	var pubNames []string
 	for _, a := range members {
-		restore, wasPinned, err := rh.appHandler.unpinAppEnv(r.Context(), project, a.Name, req.TargetEnv)
+		app, targetEnv, restore, wasPinned, err := rh.appHandler.unpinAppEnvSpec(r.Context(), project, a.Name, req.TargetEnv)
 		switch {
 		case err != nil:
 			results = append(results, errResult(a.Name, err))
 		case !wasPinned:
 			results = append(results, skipResult(a.Name, "not pinned"))
-		case restore != "":
-			results = append(results, okResult(a.Name, "unpinned; restored "+restore))
 		default:
-			results = append(results, okResult(a.Name, "unpinned; normal delivery resumed"))
+			items = append(items, appFocusPublish{app: app, focusEnv: targetEnv})
+			pending[a.Name] = unpinned{app: app, restore: restore}
+			pubNames = append(pubNames, a.Name)
+		}
+	}
+	// Phase 2: publish every unpinned member in ONE commit, then clear the
+	// one-shot restore flag per member.
+	if len(items) > 0 {
+		if err := rh.appHandler.republishAppsFocus(r.Context(), items); err != nil {
+			for _, n := range pubNames {
+				results = append(results, errResult(n, err))
+			}
+		} else {
+			for _, n := range pubNames {
+				u := pending[n]
+				rh.appHandler.unpinClearRestoreFlag(r.Context(), u.app, req.TargetEnv, u.restore)
+				if u.restore != "" {
+					results = append(results, okResult(n, "unpinned; restored "+u.restore))
+				} else {
+					results = append(results, okResult(n, "unpinned; normal delivery resumed"))
+				}
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "unpin", Results: results})
@@ -470,16 +518,34 @@ func (rh *rbacHandler) serveStackSuspend(w http.ResponseWriter, r *http.Request,
 	if suspend {
 		action, verb = "suspend", "suspended"
 	}
+	// Phase 1: mutate each member's spec (no git), collecting the publish
+	// targets. Skips/errors are recorded now; the git work is batched below.
 	results := make([]stackOpResult, 0, len(members))
+	var targets []AppEnvTarget
+	var pubNames []string
 	for _, a := range members {
-		err := rh.appHandler.suspendAppEnv(r.Context(), project, a.Name, req.TargetEnv, suspend)
+		app, env, err := rh.appHandler.suspendAppEnvSpec(r.Context(), project, a.Name, req.TargetEnv, suspend)
 		switch {
 		case err == nil:
-			results = append(results, okResult(a.Name, req.TargetEnv+" "+verb))
+			targets = append(targets, AppEnvTarget{App: app, Env: env})
+			pubNames = append(pubNames, a.Name)
 		case suspendIsSkippable(err):
 			results = append(results, skipResult(a.Name, err.Error()))
 		default:
 			results = append(results, errResult(a.Name, err))
+		}
+	}
+	// Phase 2: publish every mutated member's target env in ONE clone/commit/push
+	// (batched) — the fix for the 504 on large stacks. All-or-nothing per commit.
+	if len(targets) > 0 {
+		if err := rh.appHandler.republishAppsEnv(r.Context(), targets); err != nil {
+			for _, n := range pubNames {
+				results = append(results, errResult(n, err))
+			}
+		} else {
+			for _, n := range pubNames {
+				results = append(results, okResult(n, req.TargetEnv+" "+verb))
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: action, Results: results})

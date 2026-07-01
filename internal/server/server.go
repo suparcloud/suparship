@@ -346,6 +346,80 @@ func (h *PublisherHolder) DeleteAppPreview(ctx context.Context, projectName, pre
 	return nil
 }
 
+// AppEnvTarget pairs an app with one of its env records for a batched publish.
+type AppEnvTarget struct {
+	App *domain.App
+	Env *domain.AppEnvironment
+}
+
+// BatchEnvPublisher writes many apps' env values in one git commit — the batched
+// form of PublishAppEnv. Optional capability (like AppPreviewDeleter), asserted
+// at the call site, so it stays off the core GitOpsPublisher interface and its
+// many test stubs. Callers fall back to per-app PublishAppEnv when unavailable.
+type BatchEnvPublisher interface {
+	PublishAppsEnv(ctx context.Context, targets []AppEnvTarget) error
+}
+
+// PublishAppsEnv delegates to the held publisher when it implements
+// BatchEnvPublisher (one clone/commit/push); otherwise it falls back to a
+// per-target PublishAppEnv. Lets PublisherHolder satisfy BatchEnvPublisher
+// without widening the core GitOpsPublisher interface.
+func (h *PublisherHolder) PublishAppsEnv(ctx context.Context, targets []AppEnvTarget) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	if b, ok := p.(BatchEnvPublisher); ok {
+		return b.PublishAppsEnv(ctx, targets)
+	}
+	for _, t := range targets {
+		if err := p.PublishAppEnv(ctx, t.App, t.Env); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AppPublishTarget bundles an app with its stable envs (full-app publish
+// semantics) plus optional focus envs to force-write (e.g. a pinned/suspended
+// prod not in the pipeline's first-deploy set), for the batched PublishApps.
+type AppPublishTarget struct {
+	App       *domain.App
+	Envs      []*domain.AppEnvironment
+	FocusEnvs []*domain.AppEnvironment
+}
+
+// BatchAppPublisher writes many apps' full trees (infra + values + Kargo CRs)
+// plus focus envs in one git commit — the batched form of republishApp +
+// PublishAppEnv. Optional capability (like BatchEnvPublisher), asserted at the
+// call site; callers fall back to per-app publish when unavailable.
+type BatchAppPublisher interface {
+	PublishApps(ctx context.Context, targets []AppPublishTarget) error
+}
+
+// PublishApps delegates to the held publisher when it implements
+// BatchAppPublisher (one clone/commit/push). Returns errUnbatched when the held
+// publisher lacks the capability, so the caller can fall back to its per-app
+// path (which needs store access the holder doesn't have).
+func (h *PublisherHolder) PublishApps(ctx context.Context, targets []AppPublishTarget) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	if b, ok := p.(BatchAppPublisher); ok {
+		return b.PublishApps(ctx, targets)
+	}
+	return errUnbatched
+}
+
+// errUnbatched signals that the held publisher does not support batched
+// PublishApps, so the caller should fall back to its per-app republish path.
+var errUnbatched = errors.New("batch app publish unsupported")
+
 // SecretStoreReconciler recomputes and publishes the full set of ESO
 // ClusterSecretStores (global + per-env + per-cluster) to the gitops repo.
 // Called by the env/cluster lifecycle hooks so the stores exist before app

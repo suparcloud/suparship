@@ -997,6 +997,23 @@ func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, project
 }
 
 func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
+	pubEnvs, appSetEnvs, err := a.buildAppBundle(ctx, app, envs)
+	if err != nil {
+		return err
+	}
+	// Write appset.yaml + appproject.yaml for each bound environment so ArgoCD
+	// can discover apps through its Git File generator. This is idempotent.
+	if err := a.inner.PublishEnvInfra(ctx, app.ProjectName, appSetEnvs); err != nil {
+		return fmt.Errorf("publish env infra: %w", err)
+	}
+	// Write app.yaml + values.yaml for each bound environment.
+	return a.inner.PublishApp(ctx, app, pubEnvs)
+}
+
+// buildAppBundle resolves an app's per-env AppPublishEnv slice (values overlays,
+// secrets, CD images, suspend key) and the AppSet envs for its infra. Shared by
+// PublishApp and the batched PublishApps so both produce identical output.
+func (a *gitOpsPublisherAdapter) buildAppBundle(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) ([]gitops.AppPublishEnv, []gitops.AppSetEnv, error) {
 	resolved := a.resolveEnvs(ctx)
 
 	// Resolve the app's template ONCE (the name is fixed across envs; only the
@@ -1004,7 +1021,7 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 	// than publishing values.yaml without the PE platform/env overlays.
 	tmpl, err := a.resolveTemplate(ctx, app.Spec.Template.Name)
 	if err != nil {
-		return fmt.Errorf("publish app %s/%s: %w", app.ProjectName, app.Name, err)
+		return nil, nil, fmt.Errorf("publish app %s/%s: %w", app.ProjectName, app.Name, err)
 	}
 	// Org-level platform override (best-effort; additive). Loaded once.
 	ov := a.loadOverride(ctx, app.Spec.Template.Name)
@@ -1076,15 +1093,31 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 
 		pubEnvs = append(pubEnvs, pub)
 	}
+	return pubEnvs, appSetEnvs, nil
+}
 
-	// Write appset.yaml + appproject.yaml for each bound environment so ArgoCD
-	// can discover apps through its Git File generator. This is idempotent.
-	if err := a.inner.PublishEnvInfra(ctx, app.ProjectName, appSetEnvs); err != nil {
-		return fmt.Errorf("publish env infra: %w", err)
+// PublishApps implements server.BatchAppPublisher — the batched form of
+// republishApp + PublishAppEnv(focus): it resolves every target's bundle then
+// writes them all in one clone/commit/push, so a stack pin/unpin fan-out is one
+// git round-trip instead of ~3 per member.
+func (a *gitOpsPublisherAdapter) PublishApps(ctx context.Context, targets []server.AppPublishTarget) error {
+	bundles := make([]gitops.AppPublishBundle, 0, len(targets))
+	for _, t := range targets {
+		pubEnvs, appSetEnvs, err := a.buildAppBundle(ctx, t.App, t.Envs)
+		if err != nil {
+			return err
+		}
+		b := gitops.AppPublishBundle{App: t.App, Envs: pubEnvs, AppSetEnvs: appSetEnvs}
+		for _, fe := range t.FocusEnvs {
+			pe, err := a.buildAppEnvPub(ctx, t.App, fe)
+			if err != nil {
+				return err
+			}
+			b.FocusEnvs = append(b.FocusEnvs, pe)
+		}
+		bundles = append(bundles, b)
 	}
-
-	// Write app.yaml + values.yaml for each bound environment.
-	return a.inner.PublishApp(ctx, app, pubEnvs)
+	return a.inner.PublishApps(ctx, bundles)
 }
 
 // lookupOrgEnvRoutingProfiles returns the per-env RoutingProfiles override
@@ -1316,11 +1349,22 @@ func (a *gitOpsPublisherAdapter) mergeAllEnvVars(ctx context.Context, app *domai
 // repo. Called on every explicit promotion so the target env's files exist
 // before Kargo / ArgoCD act.
 func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error {
+	pub, err := a.buildAppEnvPub(ctx, app, env)
+	if err != nil {
+		return err
+	}
+	return a.inner.PublishAppEnv(ctx, app, pub)
+}
+
+// buildAppEnvPub resolves one env's full AppPublishEnv (cluster, secrets, env
+// vars, platform/stack overlays, CD images, suspend key). Shared by PublishAppEnv
+// and the batched PublishAppsEnv so both write identical values.yaml.
+func (a *gitOpsPublisherAdapter) buildAppEnvPub(ctx context.Context, app *domain.App, env *domain.AppEnvironment) (gitops.AppPublishEnv, error) {
 	// Resolve the template up front; fail loud on a cluster-fetch error so a
 	// promote never writes values.yaml missing the platform/env overlays.
 	tmpl, err := a.resolveTemplate(ctx, app.Spec.Template.Name)
 	if err != nil {
-		return fmt.Errorf("publish app env %s/%s/%s: %w", app.ProjectName, app.Name, env.EnvName, err)
+		return gitops.AppPublishEnv{}, fmt.Errorf("publish app env %s/%s/%s: %w", app.ProjectName, app.Name, env.EnvName, err)
 	}
 	ov := a.loadOverride(ctx, app.Spec.Template.Name)
 
@@ -1357,8 +1401,23 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 		pub.SuspendKey = tmpl.Spec.SuspendKey()
 	}
 	a.setStackOverlays(ctx, &pub, app, env.EnvName)
+	return pub, nil
+}
 
-	return a.inner.PublishAppEnv(ctx, app, pub)
+// PublishAppsEnv implements server.GitOpsPublisher — the batched form of
+// PublishAppEnv: it resolves each (app, env) target then writes them all in a
+// single git commit, so a stack fan-out is one clone/commit/push instead of one
+// per member.
+func (a *gitOpsPublisherAdapter) PublishAppsEnv(ctx context.Context, targets []server.AppEnvTarget) error {
+	items := make([]gitops.AppEnvPublish, 0, len(targets))
+	for _, t := range targets {
+		pub, err := a.buildAppEnvPub(ctx, t.App, t.Env)
+		if err != nil {
+			return err
+		}
+		items = append(items, gitops.AppEnvPublish{App: t.App, Env: pub})
+	}
+	return a.inner.PublishAppsEnv(ctx, items)
 }
 
 // PublishAppPreview implements server.GitOpsPublisher for previews. A preview

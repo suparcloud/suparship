@@ -553,6 +553,33 @@ func TestAppPromoteThreeEnvChain(t *testing.T) {
 type recordingPublisher struct {
 	publishedEnvs []string
 	removedEnvs   []string
+	// batchCalls counts PublishAppsEnv invocations; batchTargets records the
+	// number of targets in each, so a test can assert one batched git op.
+	batchCalls   int
+	batchTargets []int
+	// batchAppCalls/batchAppTargets do the same for the full-app PublishApps
+	// batch (pin/unpin).
+	batchAppCalls   int
+	batchAppTargets []int
+}
+
+// PublishAppsEnv makes recordingPublisher a BatchEnvPublisher so tests can assert
+// the stack fan-out publishes in one batched call rather than N per-env calls.
+func (r *recordingPublisher) PublishAppsEnv(_ context.Context, targets []AppEnvTarget) error {
+	r.batchCalls++
+	r.batchTargets = append(r.batchTargets, len(targets))
+	for _, t := range targets {
+		r.publishedEnvs = append(r.publishedEnvs, t.Env.EnvName)
+	}
+	return nil
+}
+
+// PublishApps makes recordingPublisher a BatchAppPublisher so tests can assert
+// the stack pin/unpin fan-out publishes in one batched call.
+func (r *recordingPublisher) PublishApps(_ context.Context, targets []AppPublishTarget) error {
+	r.batchAppCalls++
+	r.batchAppTargets = append(r.batchAppTargets, len(targets))
+	return nil
 }
 
 func (r *recordingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*domain.AppEnvironment) error {

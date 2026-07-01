@@ -55,6 +55,13 @@ func (m *memStackStore) DeleteStack(_ context.Context, project, name string) err
 // newTestStackMux wires an rbacHandler with both an appHandler and a stackStore
 // so the stack batch routes are registered.
 func newTestStackMux(projectName string) (*http.ServeMux, *authHandler, *memAppStore, *memStackStore) {
+	mux, ah, store, ss, _ := newTestStackMuxPub(projectName, nil)
+	return mux, ah, store, ss
+}
+
+// newTestStackMuxPub is newTestStackMux with an injectable GitOpsPublisher and the
+// appHandler exposed, so a test can assert publish behavior (e.g. batching).
+func newTestStackMuxPub(projectName string, pub GitOpsPublisher) (*http.ServeMux, *authHandler, *memAppStore, *memStackStore, *appHandler) {
 	mux := http.NewServeMux()
 	ah := &authHandler{
 		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
@@ -72,6 +79,9 @@ func newTestStackMux(projectName string) (*http.ServeMux, *authHandler, *memAppS
 	appH := newAppHandler(store, nil, nil, nil)
 	appH.stackStore = stackStore
 	appH.orgProvider = orgProv // needed so relocate can resolve env namespaces
+	if pub != nil {
+		appH.gitOpsPublisher = pub
+	}
 
 	rh := &rbacHandler{
 		auth:       ah,
@@ -81,7 +91,7 @@ func newTestStackMux(projectName string) (*http.ServeMux, *authHandler, *memAppS
 	}
 	rh.registerRoutes(mux)
 
-	return mux, ah, store, stackStore
+	return mux, ah, store, stackStore, appH
 }
 
 // seedStackMember adds an app to the store as a member of stackName with a full
@@ -505,6 +515,63 @@ func TestStackSuspend_FansOutAndResumes(t *testing.T) {
 	web2, _ := store.GetApp(ctx, testProject, "web")
 	if s := web2.Spec.EnvironmentDefaults["staging"].Suspend; s != nil {
 		t.Errorf("web staging Suspend after resume = %v, want nil", s)
+	}
+}
+
+// TestStackSuspend_BatchesGitPublish verifies the fan-out publishes every member
+// in ONE batched call (PublishAppsEnv) rather than N per-member publishes — the
+// fix for the 504 on large stacks.
+func TestStackSuspend_BatchesGitPublish(t *testing.T) {
+	pub := &recordingPublisher{}
+	mux, ah, store, stackStore, _ := newTestStackMuxPub(testProject, pub)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	seedStackMember(store, testProject, "web", "voiceai")
+	seedStackMember(store, testProject, "agent", "voiceai")
+	seedStackMember(store, testProject, "worker", "voiceai")
+
+	rec := postStackJSON(mux, sessionCookieFor(ah, "bob", "developer"),
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/suspend",
+		stackSuspendRequest{TargetEnv: "staging"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("suspend: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if pub.batchCalls != 1 {
+		t.Errorf("expected 1 batched PublishAppsEnv call, got %d (targets=%v)", pub.batchCalls, pub.batchTargets)
+	}
+	if len(pub.batchTargets) != 1 || pub.batchTargets[0] != 3 {
+		t.Errorf("expected one batch of 3 targets, got %v", pub.batchTargets)
+	}
+}
+
+// TestStackPin_BatchesGitPublish verifies the pin fan-out publishes every
+// pinned member in ONE batched PublishApps call (tree + Kargo pause + target
+// env) rather than N per-member republish+publish — the 504 fix for pin.
+func TestStackPin_BatchesGitPublish(t *testing.T) {
+	pub := &recordingPublisher{}
+	mux, ah, store, stackStore, _ := newTestStackMuxPub(testProject, pub)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	seedStackMember(store, testProject, "web", "voiceai")
+	seedStackMember(store, testProject, "agent", "voiceai")
+	// Both members carry the PR preview with a built image.
+	for _, app := range []string{"web", "agent"} {
+		_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
+			AppName: app, EnvName: "pr-5", EnvType: domain.AppEnvPreview, BaseEnv: "staging",
+			Namespace: testProject + "-voiceai-preview-pr-5",
+			Release:   &domain.AppReleaseRef{Tag: "sha-" + app},
+		})
+	}
+
+	rec := postStackJSON(mux, sessionCookieFor(ah, "alice", "org_admin"),
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/pin",
+		stackPinRequest{FromPreview: "pr-5", TargetEnv: "staging"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pin: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if pub.batchAppCalls != 1 {
+		t.Errorf("expected 1 batched PublishApps call, got %d (targets=%v)", pub.batchAppCalls, pub.batchAppTargets)
+	}
+	if len(pub.batchAppTargets) != 1 || pub.batchAppTargets[0] != 2 {
+		t.Errorf("expected one batch of 2 targets, got %v", pub.batchAppTargets)
 	}
 }
 

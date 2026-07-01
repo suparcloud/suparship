@@ -240,6 +240,18 @@ func (p *Publisher) kargoGitRepoURL() string {
 // PublishEnvInfra is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, envs []AppSetEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
+		if err := p.writeEnvInfra(repoDir, projectName, envs); err != nil {
+			return err
+		}
+		return p.commitAndPush(ctx, repoDir, "feat(infra): update appsets and appprojects for "+projectName)
+	})
+}
+
+// writeEnvInfra writes the per-env ApplicationSets + per-project AppProject into
+// repoDir (no git). Extracted from PublishEnvInfra so the batch publisher can
+// write many apps' infra into one clone and commit once.
+func (p *Publisher) writeEnvInfra(repoDir, projectName string, envs []AppSetEnv) error {
+	{
 		// Collect destinations from all envs to build a single AppProject.
 		destinations := make([]AppProjectDestination, 0, len(envs))
 		// infra base path: all ArgoCD CRD manifests are written here so the
@@ -339,9 +351,8 @@ func (p *Publisher) PublishEnvInfra(ctx context.Context, projectName string, env
 
 		// ClusterSecretStores (global + per-env + per-cluster) are provisioned
 		// by the env/cluster lifecycle hooks, not on every app publish.
-
-		return p.commitAndPush(ctx, repoDir, "feat(infra): update appsets and appprojects for "+projectName)
-	})
+	}
+	return nil
 }
 
 // ProjectNamespaceEnv carries the resolved namespace for one stable environment
@@ -554,56 +565,67 @@ func enabledDeployEnvs(app *domain.App, envs []AppPublishEnv) []AppPublishEnv {
 // PublishApp is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppPublishEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		// Pipeline apps deploy only the first stable env (+ previews) on create;
-		// prod waits for a promotion. Direct apps have no promotion, so every bound
-		// stable env deploys from its own values immediately.
-		deployEnvs := firstDeployEnvs(envs)
-		if app.Spec.IsDirect() {
-			deployEnvs = enabledDeployEnvs(app, envs)
-		}
-		if err := p.publishAppFiles(repoDir, app, deployEnvs); err != nil {
+		if err := p.writeAppTree(ctx, repoDir, app, envs); err != nil {
 			return err
 		}
-
-		// External-mode templates have no local chart bytes — Argo's
-		// repo-server pulls fresh from the Helm registry. Skip the
-		// gitops-repo chart copy so we don't bloat history with bytes
-		// nobody reads.
-		mode, _ := p.resolveTemplateChartMode(app.Spec.Template.Name)
-		if mode == AppMetadataChartTypeInline {
-			// Sync the Helm chart into charts/{template}/{version}/ so
-			// ArgoCD's ApplicationSet can resolve the chart path. The
-			// version the app was created against is honored — bumping the
-			// templates registry doesn't silently re-version every running
-			// app's chart bytes, and two apps pinning different versions of
-			// the same template get distinct, non-colliding chart dirs.
-			if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name, app.Spec.Template.Version); err != nil {
-				return fmt.Errorf("sync chart for template %s@%s: %w", app.Spec.Template.Name, app.Spec.Template.Version, err)
-			}
-		}
-
-		// Addon wrapper charts are inline templates too (e.g. "valkey"); sync
-		// each so the addon Applications publishAppAddons emits can resolve
-		// their charts/<chart>/latest/ path.
-		if err := p.syncAddonCharts(ctx, repoDir, app, envs); err != nil {
-			return err
-		}
-
-		// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
-		// full promotion pipeline is wired from day one. Direct-delivery apps have
-		// no pipeline — remove any Kargo CRs the app may have had (e.g. it was
-		// switched from pipeline→direct) so they don't linger and keep watching.
-		if app.Spec.IsDirect() {
-			if err := p.cleanupKargoCRs(repoDir, app); err != nil {
-				return fmt.Errorf("cleanup kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
-			}
-		} else if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
-			return fmt.Errorf("write kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
-		}
-
 		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s\n\nCreated by suparShip.", app.ProjectName, app.Name)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// writeAppTree writes one app's full gitops tree into repoDir (no git): the
+// deploy-env values/app.yaml, the inline chart bytes, addon charts, and the
+// Kargo Warehouse/Stage CRs (or their cleanup for direct apps). Extracted from
+// PublishApp so the batch publisher (PublishApps) can write many apps into one
+// clone and commit once.
+func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	// Pipeline apps deploy only the first stable env (+ previews) on create;
+	// prod waits for a promotion. Direct apps have no promotion, so every bound
+	// stable env deploys from its own values immediately.
+	deployEnvs := firstDeployEnvs(envs)
+	if app.Spec.IsDirect() {
+		deployEnvs = enabledDeployEnvs(app, envs)
+	}
+	if err := p.publishAppFiles(repoDir, app, deployEnvs); err != nil {
+		return err
+	}
+
+	// External-mode templates have no local chart bytes — Argo's
+	// repo-server pulls fresh from the Helm registry. Skip the
+	// gitops-repo chart copy so we don't bloat history with bytes
+	// nobody reads.
+	mode, _ := p.resolveTemplateChartMode(app.Spec.Template.Name)
+	if mode == AppMetadataChartTypeInline {
+		// Sync the Helm chart into charts/{template}/{version}/ so
+		// ArgoCD's ApplicationSet can resolve the chart path. The
+		// version the app was created against is honored — bumping the
+		// templates registry doesn't silently re-version every running
+		// app's chart bytes, and two apps pinning different versions of
+		// the same template get distinct, non-colliding chart dirs.
+		if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name, app.Spec.Template.Version); err != nil {
+			return fmt.Errorf("sync chart for template %s@%s: %w", app.Spec.Template.Name, app.Spec.Template.Version, err)
+		}
+	}
+
+	// Addon wrapper charts are inline templates too (e.g. "valkey"); sync
+	// each so the addon Applications publishAppAddons emits can resolve
+	// their charts/<chart>/latest/ path.
+	if err := p.syncAddonCharts(ctx, repoDir, app, envs); err != nil {
+		return err
+	}
+
+	// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
+	// full promotion pipeline is wired from day one. Direct-delivery apps have
+	// no pipeline — remove any Kargo CRs the app may have had (e.g. it was
+	// switched from pipeline→direct) so they don't linger and keep watching.
+	if app.Spec.IsDirect() {
+		if err := p.cleanupKargoCRs(repoDir, app); err != nil {
+			return fmt.Errorf("cleanup kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
+		}
+	} else if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
+		return fmt.Errorf("write kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
+	}
+	return nil
 }
 
 // PublishAppEnv writes app.yaml and values.yaml for a single environment to
@@ -618,6 +640,77 @@ func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppP
 			return err
 		}
 		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s to %s\n\nPromoted by suparShip.", app.ProjectName, app.Name, env.EnvName)
+		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
+// AppEnvPublish pairs an app with one resolved env to publish. It is the unit of
+// PublishAppsEnv, the batched form of PublishAppEnv.
+type AppEnvPublish struct {
+	App *domain.App
+	Env AppPublishEnv
+}
+
+// PublishAppsEnv writes one env's values.yaml/app.yaml for MANY apps in a SINGLE
+// clone/commit/push — the batched form of PublishAppEnv. It collapses a stack
+// fan-out's N×(clone+commit+push) into one git round-trip (fixing the 504 on
+// stack suspend/resume). Each item reuses the exact per-env writer PublishAppEnv
+// uses; only the git transaction is shared.
+func (p *Publisher) PublishAppsEnv(ctx context.Context, items []AppEnvPublish) error {
+	if len(items) == 0 {
+		return nil
+	}
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		for _, it := range items {
+			if err := p.publishAppFiles(repoDir, it.App, []AppPublishEnv{it.Env}); err != nil {
+				return err
+			}
+		}
+		commitMsg := fmt.Sprintf("feat(apps): batch env publish (%d app(s))\n\nCreated by suparShip.", len(items))
+		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
+// AppPublishBundle is one app's inputs for the batched PublishApps: its full
+// stable-env set (PublishApp semantics — infra + first-env values + Kargo CRs)
+// plus optional FocusEnvs to force-write (e.g. a pinned/suspended prod that
+// isn't in the pipeline's first-deploy env set).
+type AppPublishBundle struct {
+	App        *domain.App
+	Envs       []AppPublishEnv
+	AppSetEnvs []AppSetEnv
+	FocusEnvs  []AppPublishEnv
+}
+
+// PublishApps publishes many apps in a SINGLE clone/commit/push — the batched
+// equivalent of republishApp + PublishAppEnv(focus) per app. For each bundle it
+// writes the per-project infra (once), the app tree (values + charts + Kargo
+// CRs), and any focus envs, then commits once. This collapses a stack pin/unpin
+// fan-out's N×(≈3 clone/commit/push) into one git round-trip (the 504 fix).
+func (p *Publisher) PublishApps(ctx context.Context, bundles []AppPublishBundle) error {
+	if len(bundles) == 0 {
+		return nil
+	}
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		infraDone := map[string]bool{}
+		for _, b := range bundles {
+			// Infra is per-project and idempotent — write it once per project.
+			if !infraDone[b.App.ProjectName] {
+				if err := p.writeEnvInfra(repoDir, b.App.ProjectName, b.AppSetEnvs); err != nil {
+					return err
+				}
+				infraDone[b.App.ProjectName] = true
+			}
+			if err := p.writeAppTree(ctx, repoDir, b.App, b.Envs); err != nil {
+				return err
+			}
+			for i := range b.FocusEnvs {
+				if err := p.publishAppFiles(repoDir, b.App, []AppPublishEnv{b.FocusEnvs[i]}); err != nil {
+					return err
+				}
+			}
+		}
+		commitMsg := fmt.Sprintf("feat(apps): batch publish (%d app(s))\n\nCreated by suparShip.", len(bundles))
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
