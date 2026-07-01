@@ -12,7 +12,9 @@
 #   vars.SUPARSHIP_APP       — the app name (e.g. "livekit-express-caller-v2")
 #
 # Single-app shown here; for a monorepo, loop the create/delete over each app
-# (e.g. read an app list from a matrix) — the API call is per app.
+# (e.g. read an app list from a matrix) — the API call is per app. If those apps
+# form a suparShip stack, prefer stack-preview-from-pr.yml: one call previews the
+# whole collection and membership changes need no workflow edit.
 
 name: suparship-preview
 

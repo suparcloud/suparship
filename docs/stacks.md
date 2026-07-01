@@ -95,10 +95,32 @@ error}` rows) so partial failures are visible.
   `appHandler.promoteAppEnv` (Kargo Promotion when wired, else store-copy) so the
   per-app handler and the batch share one path; status mapping via
   `statusForPromoteErr`.
-- `POST .../stacks/{stack}/previews {name}` / `DELETE …/previews/{name}` —
-  preview/tear down the whole collection co-located in one
-  `{project}-{stack}-preview-{name}` namespace (`createStackPreview` overrides
-  each member's preview namespace + stamps the stack ownership label + publishes).
+- `POST .../stacks/{stack}/previews {name, baseEnv?, imageTag?, apps?}` /
+  `DELETE …/previews/{name}` — preview/tear down the whole collection co-located
+  in one `{project}-{stack}-preview-{name}` namespace. `createStackPreview`
+  clones the base env (via the per-app `PublishAppPreview` path) and overrides
+  each member's namespace to co-locate them. It is an **upsert** (re-point every
+  member at a new `imageTag`), **developer-callable** (CI once per PR), **skips**
+  members with previews disabled, and honors an optional `apps` subset. Delete
+  prunes each member's preview gitops so ArgoCD removes the Applications +
+  namespace. See [previews.md](previews.md#stack-previews-preview-a-whole-collection-in-one-call).
+- `POST .../stacks/{stack}/pin {fromPreview, targetEnv, apps?}` /
+  `DELETE .../stacks/{stack}/pin {targetEnv, apps?}` — pin a PR preview
+  group to a stable env across the stack, then unpin. Pin state is per-(app,env,
+  Kargo-stage), so this is a **fan-out, not a shared field**: each **pipeline**
+  member pins its OWN image tag (resolved from its `fromPreview` preview) and
+  pauses its own stage; **direct-delivery** members and members lacking that
+  preview are **skipped**. Unpin runs each member's freight-restore. Reuses the
+  per-app `pinAppEnv`/`unpinAppEnv` cores (extracted like `promoteAppEnv`).
+- `POST .../stacks/{stack}/suspend {targetEnv, apps?}` /
+  `POST .../stacks/{stack}/resume {targetEnv, apps?}` — suspend (scale down) or
+  resume an env across member apps. **Developer-triggerable** and API-first (a CI
+  job can suspend idle preview/staging envs off-hours). Fan-out over the
+  (optionally subset-narrowed) members via the per-app `suspendAppEnv` core; a
+  member not deployed to `targetEnv` is skipped. Each member's chart honors the
+  platform's suspend key (default `suspend`; see
+  [chart-conventions.md](chart-conventions.md#suspend)). The env stays published
+  — no data loss, unlike undeploy.
 - `DELETE .../stacks/{stack}?deleteApps=true` — delete every member app (store +
   gitops) and reclaim the stack's shared namespaces
   (`deleteOwnedStackNamespaces`, by the `suparship.io/stack` selector). Without

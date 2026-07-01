@@ -1,0 +1,73 @@
+# Example GitHub Actions workflow — launch a suparShip preview for a whole STACK
+# per pull request, in ONE call.
+#
+# Unlike examples/preview-from-pr.yml (which is per app and must be edited every
+# time you add/remove an app), this targets the stack: the server resolves the
+# member apps, so membership changes need no workflow edit. Every previewable
+# member is brought up in one shared namespace ({project}-{stack}-preview-{name})
+# and reaches its siblings by in-cluster DNS. Members with previews disabled are
+# skipped (not failed).
+#
+# See docs/previews.md#stack-previews and docs/stacks.md. Set these repo
+# secrets/vars:
+#   secrets.SUPARSHIP_TOKEN  — a project API token with developer (or higher)
+#                              role; mint one per docs/api-tokens.md
+#   vars.SUPARSHIP_API       — e.g. https://suparship.acme.com/api/v1
+#   vars.SUPARSHIP_PROJECT   — the project name (e.g. "voiceai")
+#   vars.SUPARSHIP_STACK     — the stack name (e.g. "voiceai")
+#
+# Monorepo assumption: a single imageTag applies to every member — the common
+# case where all apps are built from one commit SHA. Build & push that tag for
+# each member image BEFORE the create call (registry-specific; omitted here).
+
+name: suparship-stack-preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+# One in-flight run per PR; a newer push supersedes an older create.
+concurrency:
+  group: suparship-stack-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    env:
+      API: ${{ vars.SUPARSHIP_API }}
+      PROJECT: ${{ vars.SUPARSHIP_PROJECT }}
+      STACK: ${{ vars.SUPARSHIP_STACK }}
+      TOKEN: ${{ secrets.SUPARSHIP_TOKEN }}
+      NAME: pr-${{ github.event.pull_request.number }}
+      # Tag each member image with the PR head commit so every push is a
+      # distinct, immutable tag the preview redeploys to.
+      IMAGE_TAG: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # - name: Build & push member images    # your registry/Dockerfiles
+      #   run: ...  # tag every member image with $IMAGE_TAG
+
+      - name: Create or update stack preview
+        if: github.event.action != 'closed'
+        run: |
+          # Upsert: re-POSTing re-points every member at this PR's freshly-built
+          # image. 201 = created. Passing imageTag applies to all members (omit
+          # to inherit each member's base env image).
+          code=$(curl -sS -o /tmp/resp -w '%{http_code}' \
+            -X POST "$API/projects/$PROJECT/stacks/$STACK/previews" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "{\"name\":\"$NAME\",\"imageTag\":\"$IMAGE_TAG\"}")
+          echo "HTTP $code"; cat /tmp/resp
+          if [ "$code" != "201" ]; then exit 1; fi
+
+      - name: Delete stack preview
+        if: github.event.action == 'closed'
+        run: |
+          # 200 = torn down (per-member rows); members without the preview are
+          # skipped server-side.
+          code=$(curl -sS -o /tmp/resp -w '%{http_code}' \
+            -X DELETE "$API/projects/$PROJECT/stacks/$STACK/previews/$NAME" \
+            -H "Authorization: Bearer $TOKEN")
+          echo "HTTP $code"; cat /tmp/resp
+          case "$code" in 200|204) ;; *) exit 1 ;; esac

@@ -1065,6 +1065,13 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 		pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
 		setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
 		pub.TemplateImages = a.resolveCDImages(ctx, tmpl, ov, app, env, orgNameOf(org))
+		if tmpl != nil {
+			// Suspend is read per-env from the app spec by the publisher, but the
+			// values KEY comes from the template — thread it on EVERY publish path
+			// (not just PublishAppEnv) so a suspended env stays suspended across
+			// full-app republishes (config edits, sync, promote, stack sync).
+			pub.SuspendKey = tmpl.Spec.SuspendKey()
+		}
 		a.setStackOverlays(ctx, &pub, app, env.EnvName)
 
 		pubEnvs = append(pubEnvs, pub)
@@ -1346,6 +1353,9 @@ func (a *gitOpsPublisherAdapter) PublishAppEnv(ctx context.Context, app *domain.
 	pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
 	setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
 	pub.TemplateImages = a.resolveCDImages(ctx, tmpl, ov, app, env, orgNameOf(org))
+	if tmpl != nil {
+		pub.SuspendKey = tmpl.Spec.SuspendKey()
+	}
 	a.setStackOverlays(ctx, &pub, app, env.EnvName)
 
 	return a.inner.PublishAppEnv(ctx, app, pub)

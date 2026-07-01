@@ -173,6 +173,31 @@ export function unpinAppEnv(
   );
 }
 
+// suspendAppEnv scales an env's workload down (the env stays published, no data
+// loss); resumeAppEnv brings it back. The chart honors the platform's suspend
+// values key (default `suspend`).
+export function suspendAppEnv(
+  project: string,
+  app: string,
+  env: string,
+): Promise<{ message: string }> {
+  return api.post<{ message: string }>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/suspend`,
+    {},
+  );
+}
+
+export function resumeAppEnv(
+  project: string,
+  app: string,
+  env: string,
+): Promise<{ message: string }> {
+  return api.post<{ message: string }>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/resume`,
+    {},
+  );
+}
+
 export function promoteApp(
   project: string,
   app: string,

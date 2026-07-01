@@ -227,6 +227,37 @@ Default chart values use `small`. Heavier workloads override per app.
 > Capacity-manager keeps an explicit `requests/limits` block for the
 > same reason. New stateful workloads should follow this pattern.
 
+## Suspend
+
+The platform's **suspend/resume** ops (per-env, and stack-wide via fan-out) work
+by writing a single boolean into the env's values. By convention that key is
+top-level **`suspend`**:
+
+```yaml
+suspend: true   # written by the platform when an env is suspended; absent otherwise
+```
+
+A chart honors it by scaling its workloads to zero (or gating them) when
+`.Values.suspend` is true — keeping the Deployment/StatefulSet and its
+Service/PVCs in place so resume is instant and no data is lost (unlike
+undeploy/prune). suparship-common-based charts get this for free; BYO charts
+should branch on `.Values.suspend`.
+
+A template can point suspend at a **different** values key (e.g. a per-component
+toggle) by declaring it:
+
+```yaml
+# template.yaml
+spec:
+  features:
+    suspend:
+      valuesKey: components.web.suspend   # default when omitted: "suspend"
+```
+
+The platform only ever writes the key when suspended; on resume it writes nothing
+and the chart default (running) applies. A chart that ignores the key simply
+won't react — suspend is then a no-op for it.
+
 ## Workload conventions
 
 - **Service account**: `serviceAccount.create: true` by default; named

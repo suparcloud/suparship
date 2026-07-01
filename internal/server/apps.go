@@ -110,6 +110,9 @@ type AppEnvironmentSummaryDTO struct {
 	// until it's unpinned. Empty when not pinned.
 	PinnedTag  string `json:"pinnedTag,omitempty"`
 	PinnedFrom string `json:"pinnedFrom,omitempty"`
+	// Suspended reports that this env's workload is scaled down via the suspend
+	// op (env stays published; resume brings it back). Absent when running.
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // --- App summary (list view) ---

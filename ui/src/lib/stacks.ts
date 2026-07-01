@@ -83,10 +83,13 @@ export function deleteStack(
 
 // --- Batch lifecycle (Phase 3) ---
 
-// stackOpResult is one app's outcome in a batch operation.
+// stackOpResult is one app's outcome in a batch operation. `skipped` marks a
+// member the op did not apply to (e.g. previews disabled) — distinct from a
+// failure.
 export interface StackOpResult {
   app: string;
   ok: boolean;
+  skipped?: boolean;
   message?: string;
   error?: string;
 }
@@ -120,16 +123,28 @@ export function promoteStack(
   });
 }
 
-// createStackPreview brings up a preview of the whole stack co-located in one
-// {project}-{stack}-preview-{name} namespace.
+// CreateStackPreviewRequest brings up a preview of the whole stack co-located in
+// one {project}-{stack}-preview-{name} namespace. baseEnv/imageTag mirror the
+// per-app preview; apps optionally narrows to a subset (default: all previewable
+// members). Members with previews disabled are skipped (not failed).
+export interface CreateStackPreviewRequest {
+  name: string;
+  baseEnv?: string;
+  imageTag?: string;
+  apps?: string[];
+}
+
+// createStackPreview upserts a preview of the stack (re-POST re-points members
+// at a new imageTag, so CI can call it once per PR push).
 export function createStackPreview(
   project: string,
   stack: string,
-  name: string,
+  req: CreateStackPreviewRequest,
 ): Promise<StackBatchResponse> {
-  return api.post<StackBatchResponse>(`${stackBase(project, stack)}/previews`, {
-    name,
-  });
+  return api.post<StackBatchResponse>(
+    `${stackBase(project, stack)}/previews`,
+    req,
+  );
 }
 
 // CloneStackRequest duplicates a stack. Override fields, when set, replace the
@@ -171,6 +186,59 @@ export function deleteStackPreview(
   return api.del(
     `${stackBase(project, stack)}/previews/${encodeURIComponent(name)}`,
   );
+}
+
+// pinStack pins a PR preview group to a stable env across the stack's pipeline
+// members (each resolves its own image tag). Direct-delivery members and members
+// lacking the named preview are skipped. apps optionally narrows to a subset.
+export function pinStack(
+  project: string,
+  stack: string,
+  req: { fromPreview: string; targetEnv: string; apps?: string[] },
+): Promise<StackBatchResponse> {
+  return api.post<StackBatchResponse>(`${stackBase(project, stack)}/pin`, req);
+}
+
+// unpinStack clears the pin on a stable env across the stack, restoring each
+// member's pre-pin image. Sends a JSON body {targetEnv, apps?} — symmetric with
+// pinStack. targetEnv is required; apps optionally narrows.
+export function unpinStack(
+  project: string,
+  stack: string,
+  targetEnv: string,
+  apps?: string[],
+): Promise<StackBatchResponse> {
+  return api.del<StackBatchResponse>(`${stackBase(project, stack)}/pin`, {
+    targetEnv,
+    apps,
+  });
+}
+
+// suspendStack suspends (scales down) an env across the stack; resumeStack brings
+// it back. targetEnv is required; apps optionally narrows to a subset. A member
+// not deployed to targetEnv is skipped.
+export function suspendStack(
+  project: string,
+  stack: string,
+  targetEnv: string,
+  apps?: string[],
+): Promise<StackBatchResponse> {
+  return api.post<StackBatchResponse>(`${stackBase(project, stack)}/suspend`, {
+    targetEnv,
+    apps,
+  });
+}
+
+export function resumeStack(
+  project: string,
+  stack: string,
+  targetEnv: string,
+  apps?: string[],
+): Promise<StackBatchResponse> {
+  return api.post<StackBatchResponse>(`${stackBase(project, stack)}/resume`, {
+    targetEnv,
+    apps,
+  });
 }
 
 // setAppStack adds an app to a stack (or removes it when stack is ""). The

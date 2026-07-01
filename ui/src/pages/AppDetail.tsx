@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, pinAppEnv, promoteApp, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppTemplate } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppTemplate } from "../lib/apps";
 import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
@@ -664,6 +664,18 @@ function EnvPipelineBar({
                       }`}
                     >
                       📌 {env.pinnedFrom || "pinned"}
+                    </span>
+                  )}
+
+                  {/* Suspended badge: env's workload scaled down (still published). */}
+                  {env.suspended && (
+                    <span
+                      title="Suspended — workload scaled down; resume to bring it back"
+                      className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                        isSelected ? "bg-white/10 text-white/80" : "bg-amber-100 text-amber-700"
+                      }`}
+                    >
+                      ⏸ suspended
                     </span>
                   )}
                 </div>
@@ -2980,7 +2992,9 @@ function PinControls({
   const [target, setTarget] = useState<string>(stableEnvs[0]?.envName ?? "");
   const [busy, setBusy] = useState(false);
 
-  if (isDirect || !currentEnv) return null;
+  // Pinning is pipeline-only, but suspend/resume works for direct apps too — so
+  // gate only on currentEnv here and guard the pin branches on !isDirect below.
+  if (!currentEnv) return null;
 
   // Pin state lives in the app spec; the per-env fetch that backs currentEnv may
   // not carry it, so read it from the enriched app-detail env list.
@@ -2988,8 +3002,8 @@ function PinControls({
   const pinnedTag = enriched?.pinnedTag ?? currentEnv.pinnedTag;
   const pinnedFrom = enriched?.pinnedFrom ?? currentEnv.pinnedFrom;
 
-  // Pinned stable env → offer unpin.
-  if (currentEnv.envType !== "preview" && pinnedTag) {
+  // Pinned stable env → offer unpin (pipeline-only; direct apps never pin).
+  if (!isDirect && currentEnv.envType !== "preview" && pinnedTag) {
     async function unpin() {
       setBusy(true);
       try {
@@ -3021,8 +3035,8 @@ function PinControls({
     );
   }
 
-  // Preview selected → offer pinning it to a stable env.
-  if (currentEnv.envType === "preview") {
+  // Preview selected → offer pinning it to a stable env (pipeline-only).
+  if (!isDirect && currentEnv.envType === "preview") {
     const previewName = currentEnv.preview?.previewName ?? currentEnv.envName;
     const hasImage = !!currentEnv.release?.tag;
     async function pin() {
@@ -3069,7 +3083,49 @@ function PinControls({
     );
   }
 
-  return null;
+  // Non-stable (preview) envs can't be suspended — nothing more to offer.
+  if (currentEnv.envType === "preview") return null;
+
+  // Stable, unpinned env → offer suspend/resume (scale the workload down/up
+  // without deleting it — no data loss, unlike undeploy). Works for direct apps.
+  const suspended = enriched?.suspended ?? currentEnv.suspended ?? false;
+  async function toggleSuspend() {
+    setBusy(true);
+    try {
+      if (suspended) {
+        await resumeAppEnv(project, app, currentEnv!.envName);
+        toast.success(`${currentEnv!.envName} resumed`);
+      } else {
+        await suspendAppEnv(project, app, currentEnv!.envName);
+        toast.success(`${currentEnv!.envName} suspended`);
+      }
+      await onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to change suspend state");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div
+      className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-4 py-2.5 ${
+        suspended ? "border-amber-200 bg-amber-50" : "border-gray-200 bg-white"
+      }`}
+    >
+      <span className={`text-sm ${suspended ? "text-amber-900" : "text-gray-600"}`}>
+        {suspended
+          ? "⏸ Suspended — this env's workload is scaled down. Resume to bring it back."
+          : "Suspend this env to scale its workload down without deleting it (no data loss)."}
+      </span>
+      <button
+        onClick={toggleSuspend}
+        disabled={busy}
+        className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+      >
+        {busy ? "…" : suspended ? "Resume" : "Suspend"}
+      </button>
+    </div>
+  );
 }
 
 function OverviewTab({

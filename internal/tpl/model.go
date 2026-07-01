@@ -159,6 +159,9 @@ type TemplateSpec struct {
 	// deployed to each env straight from values with no Kargo/promotion. The
 	// create wizard pre-selects this; the user can override per app.
 	DeliveryMode string `yaml:"deliveryMode,omitempty"`
+	// Features declares optional platform operations this template's chart
+	// supports and the values keys that drive them (currently suspend/resume).
+	Features *TemplateFeatures `yaml:"features,omitempty"`
 }
 
 // TemplateImage maps one of a chart's services to its image source and the Helm
@@ -186,6 +189,38 @@ type TemplateImage struct {
 // injected for this template. Defaults to true (back-compat) when unset.
 func (s TemplateSpec) CanonicalValues() bool {
 	return s.InjectCanonicalValues == nil || *s.InjectCanonicalValues
+}
+
+// DefaultSuspendKey is the convention Helm values key the platform toggles for
+// suspend/resume when a template does not declare its own. Charts built on
+// suparship-common honor a top-level `suspend: true` to scale the workload down.
+const DefaultSuspendKey = "suspend"
+
+// TemplateFeatures declares optional platform operations this template's chart
+// supports and how to drive them. Extensible; currently only suspend/resume.
+type TemplateFeatures struct {
+	// Suspend, when set, declares the chart supports suspend/resume. Its ValuesKey
+	// names the dotted Helm values key the platform sets true to suspend. Absent
+	// ValuesKey => DefaultSuspendKey ("suspend"). Leaving Suspend nil also falls
+	// back to the convention key — every app can suspend via `suspend: true`; a
+	// chart that ignores it simply doesn't react.
+	Suspend *FeatureToggle `yaml:"suspend,omitempty"`
+}
+
+// FeatureToggle maps a platform feature to the Helm values key that drives it.
+type FeatureToggle struct {
+	// ValuesKey is the dotted Helm values path the platform writes (e.g.
+	// "suspend" or "components.web.suspend"). Empty uses the feature's default.
+	ValuesKey string `yaml:"valuesKey,omitempty"`
+}
+
+// SuspendKey returns the dotted Helm values key the platform toggles to suspend
+// this template's workload: the declared key when set, else DefaultSuspendKey.
+func (s TemplateSpec) SuspendKey() string {
+	if s.Features != nil && s.Features.Suspend != nil && s.Features.Suspend.ValuesKey != "" {
+		return s.Features.Suspend.ValuesKey
+	}
+	return DefaultSuspendKey
 }
 
 // TemplateAddon declares one addon shape this template's chart

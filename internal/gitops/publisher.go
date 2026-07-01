@@ -703,6 +703,14 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if env.EnvType != domain.AppEnvPreview {
 			pinnedTag = app.Spec.EnvironmentDefaults[env.EnvName].PinnedImageTag
 		}
+		// suspended writes the chart's suspend toggle (SuspendKey) to true so the
+		// workload scales down while the env stays published (no data loss, unlike
+		// undeploy). Resume clears the override, so nothing is written and the
+		// chart default (running) applies on the next republish.
+		suspended := false
+		if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && ov.Suspend != nil {
+			suspended = *ov.Suspend
+		}
 		// The tag keys Kargo owns for this app — one per image source. Preserve
 		// each on republish so we never roll a CD-managed deployment back to the
 		// create-time seed. Falls back to the canonical single key when the
@@ -733,6 +741,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 				for _, tagKey := range tagKeys {
 					setStringAtPath(overlay, tagKey, pinnedTag)
 				}
+			}
+			// Suspend: toggle the chart's suspend key on. Only written when
+			// suspended, so resume drops back to the chart default.
+			if suspended && env.SuspendKey != "" {
+				setValueAtPath(overlay, env.SuspendKey, true)
 			}
 			if env.SkipCanonicalBase {
 				// BYO/passthrough: emit only the overlay; hv.Platform still drives
@@ -1015,6 +1028,13 @@ func stringAtPath(m map[string]any, dotted string) string {
 // intermediate maps as needed. A non-map value encountered along the path is
 // replaced with a map so the leaf can be written.
 func setStringAtPath(m map[string]any, dotted, val string) {
+	setValueAtPath(m, dotted, val)
+}
+
+// setValueAtPath sets an arbitrary-typed val at a dotted key path within a
+// nested map, creating intermediate maps as needed. A non-map value encountered
+// along the path is replaced with a map so the leaf can be written.
+func setValueAtPath(m map[string]any, dotted string, val any) {
 	parts := strings.Split(dotted, ".")
 	cur := m
 	for i, key := range parts {
@@ -1660,6 +1680,12 @@ type AppPublishEnv struct {
 	// (identical across envs); empty means the template declares no mapping and
 	// the publisher falls back to a single legacy image.
 	TemplateImages []KargoImage
+	// SuspendKey is the dotted Helm values key that toggles suspend for this
+	// app's chart (the template's declared key, or the "suspend" convention
+	// default). When the env override sets Suspend=true, the publisher writes
+	// `true` here so the chart scales the workload down; resume writes nothing
+	// (the overlay is rebuilt each publish, so the flag simply disappears).
+	SuspendKey string
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD

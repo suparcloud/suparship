@@ -345,8 +345,17 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/sync", manageProject(rh.handleSyncStack))
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/promote", manageProject(rh.handlePromoteStack))
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/clone", manageProject(rh.handleCloneStack))
-			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/previews", manageProject(rh.handleCreateStackPreview))
-			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/previews/{name}", manageProject(rh.handleDeleteStackPreview))
+			// Previews are developer-triggerable (CI-callable, once per PR for the
+			// whole stack) — matching the per-app preview routes below.
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/previews", devProject(rh.handleCreateStackPreview))
+			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/previews/{name}", devProject(rh.handleDeleteStackPreview))
+			// Pin/unpin a PR preview group to a stable env — matching the per-app
+			// pin routes (manageProject).
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/pin", manageProject(rh.handlePinStack))
+			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/pin", manageProject(rh.handleUnpinStack))
+			// Suspend/resume are developer-triggerable (reversible, CI-callable).
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/suspend", devProject(rh.handleSuspendStack))
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/resume", devProject(rh.handleResumeStack))
 		}
 
 		// Stack-scope shared secrets (shared by every app in the stack).
@@ -379,6 +388,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/undeploy", manageProject(rh.appHandler.handleUndeployAppEnv))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handlePinAppEnv))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handleUnpinAppEnv))
+		// Suspend/resume an env (developer-triggerable, reversible, CI-callable).
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/suspend", devProject(rh.appHandler.handleSuspendAppEnv))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/resume", devProject(rh.appHandler.handleResumeAppEnv))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/promotions/{name}", viewProject(rh.appHandler.handleGetKargoPromotion))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/kargo/stages", viewProject(rh.appHandler.handleGetKargoStages))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}/history", viewProject(rh.appHandler.handleGetAppDeploymentHistory))

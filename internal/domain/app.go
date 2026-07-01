@@ -316,6 +316,12 @@ type EnvironmentOverride struct {
 	// pinned, so unpinning can restore it instead of leaving the pinned image in
 	// place (the publisher would otherwise preserve the committed pinned tag).
 	PrePinImageTag string `json:"prePinImageTag,omitempty" yaml:"prePinImageTag,omitempty"`
+	// Suspend, when non-nil and true, suspends this environment's workload: the
+	// publisher writes the template's suspend values key (or the "suspend"
+	// convention default) as true so the chart scales it down, while the env
+	// stays published (no data loss, unlike undeploy). nil/false = running.
+	// Works for pipeline and direct apps; toggled by the suspend/resume ops.
+	Suspend *bool `json:"suspend,omitempty" yaml:"suspend,omitempty"`
 }
 
 // ClusterValueOverride holds per-(env, cluster) value overrides, applied on top

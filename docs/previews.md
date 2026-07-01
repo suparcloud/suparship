@@ -172,6 +172,42 @@ To give a specific PR its own secrets, write the `<app>-env-preview-pr-<name>`
 item into the base env vault before (or after) creating the preview; the
 ExternalSecret references it automatically when present.
 
+## Stack previews (preview a whole collection in one call)
+
+When your service is a [stack](stacks.md) of apps, you can preview **every member
+at once** instead of looping over each app. The whole collection comes up in one
+shared namespace — `{project}-{stack}-preview-{name}` — so members reach each
+other by in-cluster DNS (e.g. `web` → `agent-server`), exactly as a stack's
+shared namespace does for stable envs.
+
+```http
+POST   /api/v1/projects/{project}/stacks/{stack}/previews
+DELETE /api/v1/projects/{project}/stacks/{stack}/previews/{name}
+```
+
+```jsonc
+{ "name": "pr-42" }                             // all previewable members, base env's image
+{ "name": "pr-42", "imageTag": "sha-abc1234" }  // re-point every member at this tag
+{ "name": "pr-42", "baseEnv": "prod" }          // clone prod instead of staging
+{ "name": "pr-42", "apps": ["web", "agent"] }   // only these members
+```
+
+- **Developer-callable** (same role as the per-app preview route), so CI can hit
+  it with a project developer token.
+- **Upsert**, per member — re-POSTing re-points every member at a new `imageTag`,
+  so CI can call it once per PR **push**. The response is a per-app summary
+  (`{app, ok, skipped, message, error}` rows).
+- **Skips** members with previews disabled (`PreviewsEnabled=false`) — a skipped
+  row, not a failure — so a mixed stack previews cleanly.
+- **`imageTag` applies to every member.** This fits the monorepo case where all
+  apps are built from one commit SHA. If members use different tags, omit it (each
+  inherits its base env image) or drive them via the per-app endpoint.
+
+The big win over the per-app loop: **membership is resolved server-side**, so
+adding or removing a member app needs no change to your CI workflow. See
+[`examples/stack-preview-from-pr.yml`](../examples/stack-preview-from-pr.yml) for
+a once-per-PR GitHub Actions workflow.
+
 ## How it's published
 
 Creating a preview persists an `AppEnvironment` (`EnvType=preview`) and publishes

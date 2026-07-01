@@ -16,9 +16,13 @@ import {
   createStackPreview,
   deleteStack,
   getStack,
+  pinStack,
   promoteStack,
+  resumeStack,
   setAppStack,
+  suspendStack,
   syncStack,
+  unpinStack,
   updateStack,
 } from "../lib/stacks";
 import type { Stack, StackBatchResponse, StackOpResult } from "../lib/stacks";
@@ -43,7 +47,7 @@ const TABS = [
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
-type ModalKind = "promote" | "preview" | "clone" | "delete";
+type ModalKind = "promote" | "preview" | "clone" | "delete" | "suspend";
 
 const btnPrimary =
   "rounded-md bg-gray-900 px-3.5 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50";
@@ -94,10 +98,15 @@ function ResultRows({ results }: { results: StackOpResult[] }) {
   return (
     <ul className="mt-4 max-h-52 space-y-1 overflow-auto rounded-md border border-gray-100 bg-gray-50 p-3 text-xs">
       {results.map((r) => (
-        <li key={r.app} className={r.ok ? "text-gray-600" : "text-red-600"}>
+        <li
+          key={r.app}
+          className={
+            !r.ok ? "text-red-600" : r.skipped ? "text-gray-400" : "text-gray-600"
+          }
+        >
           <span className="font-mono font-medium">{r.app}</span>
           {" — "}
-          {r.ok ? r.message || "ok" : r.error}
+          {r.skipped ? `skipped (${r.message})` : r.ok ? r.message || "ok" : r.error}
         </li>
       ))}
     </ul>
@@ -117,9 +126,12 @@ export function StackDetail() {
   const [modal, setModal] = useState<ModalKind | null>(null);
   const [results, setResults] = useState<StackOpResult[] | null>(null);
   const [promoteEnv, setPromoteEnv] = useState("");
+  const [suspendEnv, setSuspendEnv] = useState("");
   const [previewName, setPreviewName] = useState("");
   const [cloneName, setCloneName] = useState("");
   const [previewGroups, setPreviewGroups] = useState<PreviewGroup[]>([]);
+  // Per-preview-group selected pin target env (keyed by preview name).
+  const [pinTargets, setPinTargets] = useState<Record<string, string>>({});
 
   const loadPreviews = useCallback(() => {
     if (!project) return;
@@ -180,6 +192,7 @@ export function StackDetail() {
     setModal(null);
     setResults(null);
     setPromoteEnv("");
+    setSuspendEnv("");
     setPreviewName("");
     setCloneName("");
   }
@@ -199,14 +212,72 @@ export function StackDetail() {
   // no modal of its own).
   function summarize(action: string, res: StackBatchResponse) {
     const failed = res.results.filter((r) => !r.ok);
+    const skipped = res.results.filter((r) => r.ok && r.skipped);
+    const done = res.results.length - failed.length - skipped.length;
     if (failed.length === 0) {
-      toast.success(`${action}: ${res.results.length} app(s) succeeded`);
+      toast.success(
+        `${action}: ${done} app(s) succeeded${skipped.length ? `, ${skipped.length} skipped` : ""}`,
+      );
     } else {
       toast.error(
         `${action}: ${failed.length}/${res.results.length} failed — ${failed
           .map((r) => `${r.app}: ${r.error}`)
           .join("; ")}`,
       );
+    }
+  }
+
+  // doPin pins a whole PR preview group to a stable env across the stack's
+  // pipeline members (direct members / members without the preview are skipped).
+  async function doPin(previewName: string, targetEnv: string) {
+    if (!targetEnv) return;
+    setBusy(`pin:${previewName}`);
+    try {
+      summarize(
+        `Pin ${previewName} → ${targetEnv}`,
+        await pinStack(project!, stackName!, { fromPreview: previewName, targetEnv }),
+      );
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to pin preview");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // doSuspend/doResume scale the stack's workloads down/up for a chosen env,
+  // showing the per-member result rows in the suspend modal.
+  async function doSuspendResume(resume: boolean) {
+    if (!suspendEnv) return;
+    const kind = resume ? "resume" : "suspend";
+    setBusy(kind);
+    try {
+      const res = resume
+        ? await resumeStack(project!, stackName!, suspendEnv)
+        : await suspendStack(project!, stackName!, suspendEnv);
+      setResults(res.results);
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : `Failed to ${kind}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // doUnpin clears the stack's pin on a stable env (restores each member's
+  // pre-pin image).
+  async function doUnpin(previewName: string, targetEnv: string) {
+    setBusy(`unpin:${previewName}`);
+    try {
+      summarize(
+        `Unpin ${targetEnv}`,
+        await unpinStack(project!, stackName!, targetEnv),
+      );
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to unpin");
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -339,6 +410,9 @@ export function StackDetail() {
         <button onClick={() => openModal("preview")} disabled={busy !== null || noMembers} className={btnSecondary}>
           Preview
         </button>
+        <button onClick={() => openModal("suspend")} disabled={busy !== null || noMembers} className={btnSecondary}>
+          Suspend / Resume
+        </button>
         <button onClick={() => openModal("clone")} disabled={busy !== null} className={btnSecondary}>
           Clone
         </button>
@@ -444,13 +518,50 @@ export function StackDetail() {
                 across the stack, or open a PR with the preview workflow.
               </p>
             ) : (
-              stackPreviews.map((g) => (
-                <PreviewGroupCard
-                  key={`${g.project}/${g.name}`}
-                  group={g}
-                  onAppDeleted={loadPreviews}
-                />
-              ))
+              stackPreviews.map((g) => {
+                const target = pinTargets[g.name] ?? envs[0]?.name ?? "";
+                const pinning = busy === `pin:${g.name}`;
+                const unpinning = busy === `unpin:${g.name}`;
+                return (
+                  <div key={`${g.project}/${g.name}`} className="space-y-2">
+                    <PreviewGroupCard group={g} onAppDeleted={loadPreviews} />
+                    {/* Pin this PR's build to a stable env across the stack.
+                        Each pipeline member pins its own image; direct members
+                        and members without this preview are skipped. */}
+                    <div className="flex flex-wrap items-center gap-2 pl-1 text-xs text-gray-500">
+                      <span>Pin {g.name} to</span>
+                      <select
+                        value={target}
+                        onChange={(e) =>
+                          setPinTargets((m) => ({ ...m, [g.name]: e.target.value }))
+                        }
+                        disabled={busy !== null}
+                        className="rounded border border-gray-200 px-2 py-1 text-xs"
+                      >
+                        {envs.map((env) => (
+                          <option key={env.name} value={env.name}>
+                            {env.displayName || env.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={() => doPin(g.name, target)}
+                        disabled={busy !== null || !target}
+                        className={btnSecondary}
+                      >
+                        {pinning ? "Pinning…" : "Pin"}
+                      </button>
+                      <button
+                        onClick={() => doUnpin(g.name, target)}
+                        disabled={busy !== null || !target}
+                        className="text-xs text-gray-400 underline hover:text-gray-600"
+                      >
+                        {unpinning ? "Unpinning…" : "Unpin env"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
@@ -629,6 +740,55 @@ export function StackDetail() {
         </Modal>
       )}
 
+      {/* Suspend / resume modal */}
+      {modal === "suspend" && (
+        <Modal
+          title="Suspend / resume stack"
+          description="Scale the stack's workloads down (or back up) for an environment. The env stays published — no data loss — and each member's chart honors the platform's suspend key."
+          onClose={closeModal}
+          closable={busy === null}
+        >
+          {!results && (
+            <select
+              value={suspendEnv}
+              onChange={(e) => setSuspendEnv(e.target.value)}
+              className="mt-4 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+            >
+              <option value="">Environment…</option>
+              {envs.map((env) => (
+                <option key={env.name} value={env.name}>
+                  {env.displayName || env.name}
+                </option>
+              ))}
+            </select>
+          )}
+          {results && <ResultRows results={results} />}
+          <div className="mt-5 flex justify-end gap-2">
+            <button onClick={closeModal} disabled={busy !== null} className={btnSecondary}>
+              {results ? "Done" : "Cancel"}
+            </button>
+            {!results && (
+              <>
+                <button
+                  onClick={() => doSuspendResume(true)}
+                  disabled={!suspendEnv || busy !== null}
+                  className={btnSecondary}
+                >
+                  {busy === "resume" ? "Resuming…" : "Resume"}
+                </button>
+                <button
+                  onClick={() => doSuspendResume(false)}
+                  disabled={!suspendEnv || busy !== null}
+                  className={btnPrimary}
+                >
+                  {busy === "suspend" ? "Suspending…" : "Suspend"}
+                </button>
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
+
       {/* Preview modal */}
       {modal === "preview" && (
         <Modal
@@ -660,7 +820,7 @@ export function StackDetail() {
             </button>
             {!results && (
               <button
-                onClick={() => runModalBatch("preview", () => createStackPreview(project, stackName, previewName))}
+                onClick={() => runModalBatch("preview", () => createStackPreview(project, stackName, { name: previewName }))}
                 disabled={!previewName || busy !== null}
                 className={btnPrimary}
               >

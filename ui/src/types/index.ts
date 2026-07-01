@@ -612,6 +612,9 @@ export interface AppEnvironmentSummary {
    *  promoted without merging): CD is paused until unpinned. */
   pinnedTag?: string;
   pinnedFrom?: string;
+  /** When true, this env's workload is scaled down via the suspend op (the env
+   *  stays published; resume brings it back). */
+  suspended?: boolean;
 }
 
 export interface AppSummary {

@@ -989,6 +989,9 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 			dto.PinnedTag = ov.PinnedImageTag
 			dto.PinnedFrom = ov.PinnedFrom
 		}
+		if ov := app.Spec.EnvironmentDefaults[envName]; ov.Suspend != nil && *ov.Suspend {
+			dto.Suspended = true
+		}
 	}
 
 	writeJSON(w, http.StatusOK, AppEnvironmentResponse{
@@ -1039,6 +1042,76 @@ func (ah *appHandler) handleListAppPreviews(w http.ResponseWriter, r *http.Reque
 // uses), and generates the ArgoCD Application manifest as a pure function.
 // Persistence to the AppStore is handled by projecting the EnvironmentInstance
 // back onto an AppEnvironment (compat layer).
+
+// errPreviewsDisabled is returned by upsertAppPreview when the app opts out of
+// previews (AppSpec.PreviewsEnabled=false); the HTTP handler maps it to 422.
+var errPreviewsDisabled = errors.New("previews disabled")
+
+// upsertAppPreview creates or re-publishes (upsert) a preview environment for one
+// app: it clones baseEnv via PublishAppPreview and applies imageTag. When
+// namespaceOverride is non-empty it replaces the computed preview namespace (used
+// by stack previews to co-locate every member in one namespace). Returns whether
+// the preview already existed (200-vs-201 semantics) and the persisted env. On a
+// publish failure it restores the prior env (or deletes the fresh record) so a
+// retry is clean. Shared core of the per-app and stack preview paths.
+func (ah *appHandler) upsertAppPreview(ctx context.Context, a *domain.App, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride string) (bool, *domain.AppEnvironment, error) {
+	if !a.Spec.PreviewsEnabled {
+		return false, nil, fmt.Errorf("app %q: %w", a.Name, errPreviewsDisabled)
+	}
+	previewResult, err := domainapp.CreatePreview(domainapp.PreviewRequest{
+		App:              a,
+		PreviewName:      previewName,
+		BaseDomain:       baseDomain,
+		NamespacePattern: namespacePattern,
+	})
+	if err != nil {
+		return false, nil, err
+	}
+	inst := previewResult.Instance
+	if namespaceOverride != "" {
+		inst.Namespace = namespaceOverride // co-locate stack-preview members
+	}
+	imageTag = strings.TrimSpace(imageTag)
+
+	// Upsert: capture the prior env so a failed publish can roll back cleanly.
+	prior, getErr := ah.appStore.GetAppEnvironment(ctx, a.ProjectName, a.Name, previewName)
+	existed := getErr == nil
+
+	urls := []string{}
+	if inst.URL != "" {
+		urls = []string{inst.URL}
+	}
+	env := &domain.AppEnvironment{
+		AppName:     inst.AppName,
+		ProjectName: inst.ProjectName,
+		EnvName:     inst.EnvName,
+		EnvType:     inst.EnvType,
+		BaseEnv:     baseEnv, // the stable env this preview clones (grouping + delete)
+		Namespace:   inst.Namespace,
+		URLs:        urls,
+		Status:      inst.Status,
+	}
+	if imageTag != "" {
+		env.Release = &domain.AppReleaseRef{Tag: imageTag}
+	} else if existed {
+		env.Release = prior.Release // preserve a previously-set tag on re-publish
+	}
+	if err := ah.appStore.SaveAppEnvironment(ctx, a.ProjectName, env); err != nil {
+		return existed, nil, fmt.Errorf("failed to save preview: %w", err)
+	}
+	if ah.gitOpsPublisher != nil {
+		if err := ah.gitOpsPublisher.PublishAppPreview(ctx, a, inst, baseEnv, imageTag); err != nil {
+			if existed {
+				_ = ah.appStore.SaveAppEnvironment(ctx, a.ProjectName, prior)
+			} else {
+				_ = ah.appStore.DeleteAppEnvironment(ctx, a.ProjectName, a.Name, previewName)
+			}
+			return existed, nil, fmt.Errorf("failed to publish preview: %w", err)
+		}
+	}
+	return existed, env, nil
+}
+
 func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
@@ -1098,71 +1171,19 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Run the full preview creation pipeline: EnvironmentInstance + Helm values
-	// + ArgoCD Application. Errors only when the app has previews disabled. The
-	// base env's domain drives the preview routing host so the stored URL matches
-	// what the chart renders (rather than a fabricated localhost host).
-	previewResult, err := domainapp.CreatePreview(domainapp.PreviewRequest{
-		App:              a,
-		PreviewName:      sanitized,
-		BaseDomain:       ah.baseDomainForEnv(r.Context(), baseEnv),
-		NamespacePattern: ah.previewNamespacePattern(r.Context(), projectName),
-	})
+	// Run the full preview upsert (EnvironmentInstance + Helm values + ArgoCD
+	// Application + publish). The base env's domain drives the preview routing
+	// host so the stored URL matches what the chart renders. 201 on first create,
+	// 200 on update (CI re-POSTing a new image tag on each PR push).
+	existed, env, err := ah.upsertAppPreview(r.Context(), a, sanitized, baseEnv, req.ImageTag,
+		ah.baseDomainForEnv(r.Context(), baseEnv), ah.previewNamespacePattern(r.Context(), projectName), "")
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
-		return
-	}
-
-	// Create is an upsert: re-POSTing an existing preview re-publishes it (e.g.
-	// CI updating the image tag on each PR push). 201 on first create, 200 on
-	// update. Capture the prior env so a failed publish can roll back cleanly.
-	imageTag := strings.TrimSpace(req.ImageTag)
-	prior, getErr := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, sanitized)
-	existed := getErr == nil
-
-	// Project the EnvironmentInstance onto AppEnvironment for the compat store.
-	// URLs is empty for apps with no exposed HTTP route (inst.URL == ""), so the
-	// UI shows no "Open" link for worker/agent previews.
-	inst := previewResult.Instance
-	urls := []string{}
-	if inst.URL != "" {
-		urls = []string{inst.URL}
-	}
-	env := &domain.AppEnvironment{
-		AppName:     inst.AppName,
-		ProjectName: inst.ProjectName,
-		EnvName:     inst.EnvName,
-		EnvType:     inst.EnvType,
-		BaseEnv:     baseEnv, // the stable env this preview clones (UI grouping)
-		Namespace:   inst.Namespace,
-		URLs:        urls,
-		Status:      inst.Status,
-	}
-	// Record the resolved image tag so the Previews UI shows what's deployed.
-	if imageTag != "" {
-		env.Release = &domain.AppReleaseRef{Tag: imageTag}
-	} else if existed {
-		env.Release = prior.Release // preserve a previously-set tag on re-publish
-	}
-
-	if err := ah.appStore.SaveAppEnvironment(r.Context(), projectName, env); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save preview"})
-		return
-	}
-
-	// Publish the preview to GitOps (values + ConfigMap + ExternalSecret reusing
-	// the base env vault). On failure, restore the prior env (or delete it when
-	// this was a fresh create) so a retry is clean.
-	if ah.gitOpsPublisher != nil {
-		if err := ah.gitOpsPublisher.PublishAppPreview(r.Context(), a, previewResult.Instance, baseEnv, imageTag); err != nil {
-			if existed {
-				_ = ah.appStore.SaveAppEnvironment(r.Context(), projectName, prior)
-			} else {
-				_ = ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, sanitized)
-			}
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish preview: " + err.Error()})
-			return
+		code := http.StatusInternalServerError
+		if errors.Is(err, errPreviewsDisabled) {
+			code = http.StatusUnprocessableEntity
 		}
+		writeJSON(w, code, errorResponse{Error: err.Error()})
+		return
 	}
 
 	status := http.StatusCreated
@@ -1758,61 +1779,75 @@ func releaseTag(r *domain.AppReleaseRef) string {
 	return ""
 }
 
-// handlePinAppEnv serves POST .../apps/{app}/environments/{env}/pin. It promotes a
-// PR preview's built image to a stable env WITHOUT merging and pins it: the env's
-// values.yaml holds the preview's image tag and Kargo auto-promotion to that stage
-// is paused, so newer freight doesn't override it until the env is unpinned.
-func (ah *appHandler) handlePinAppEnv(w http.ResponseWriter, r *http.Request) {
-	projectName := r.PathValue("project")
-	appName := r.PathValue("app")
-	envName := r.PathValue("env")
+// Sentinels let the per-app HTTP handler map pinAppEnv/unpinAppEnv failures back
+// to status codes, and let the stack batch path classify a failure as
+// "skip this member" (not applicable) vs a real error.
+var (
+	errPinAppNotFound     = errors.New("app not found")
+	errPinNotPipeline     = errors.New("pinning applies to pipeline-delivery apps only")
+	errPinTargetNotFound  = errors.New("target environment not found")
+	errPinTargetIsPreview = errors.New("cannot pin a preview environment")
+	errPinPreviewNotFound = errors.New("source preview not found")
+	errPinNoTag           = errors.New("source preview has no image tag")
+)
 
-	var req pinAppEnvRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
-		return
+// statusForPinErr maps a pinAppEnv/unpinAppEnv error to an HTTP status.
+func statusForPinErr(err error) int {
+	switch {
+	case errors.Is(err, errPinAppNotFound), errors.Is(err, errPinTargetNotFound), errors.Is(err, errPinPreviewNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, errPinNotPipeline), errors.Is(err, errPinTargetIsPreview), errors.Is(err, errPinNoTag):
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusInternalServerError
 	}
-	req.FromPreview = strings.TrimSpace(req.FromPreview)
-	if req.FromPreview == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "fromPreview is required"})
-		return
-	}
+}
 
-	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+// pinIsSkippable reports whether a pin failure means the op does not apply to
+// this member (a skip row in a stack fan-out) rather than a real error: a
+// direct-delivery member, a member not deployed to the target env, or a member
+// without the named preview / with no built image.
+func pinIsSkippable(err error) bool {
+	return errors.Is(err, errPinNotPipeline) ||
+		errors.Is(err, errPinTargetNotFound) ||
+		errors.Is(err, errPinPreviewNotFound) ||
+		errors.Is(err, errPinNoTag)
+}
+
+// pinAppEnv promotes a PR preview's built image to a stable env WITHOUT merging
+// and pins it: the env's values.yaml holds the preview's image tag and Kargo
+// auto-promotion to that stage is paused, so newer freight doesn't override it
+// until unpinned. Shared core of the per-app pin handler and the stack batch pin.
+// Returns the pinned image tag.
+func (ah *appHandler) pinAppEnv(ctx context.Context, projectName, appName, envName, fromPreview string) (string, error) {
+	app, err := ah.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app \"" + appName + "\" not found in project \"" + projectName + "\""})
-		return
+		return "", fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
 	}
 	if app.Spec.IsDirect() {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "pinning applies to pipeline-delivery apps only"})
-		return
+		return "", errPinNotPipeline
 	}
-
 	// The target must be a stable env; the source must be a preview with an image.
-	targetEnv, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, envName)
+	targetEnv, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "environment \"" + envName + "\" not found for app \"" + appName + "\""})
-		return
+		return "", fmt.Errorf("%w: %q for app %q", errPinTargetNotFound, envName, appName)
 	}
 	if targetEnv.EnvType == domain.AppEnvPreview {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "cannot pin a preview environment; pin a stable env (staging/prod)"})
-		return
+		return "", errPinTargetIsPreview
 	}
-	preview, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, req.FromPreview)
+	preview, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, fromPreview)
 	if err != nil || preview.EnvType != domain.AppEnvPreview {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "preview \"" + req.FromPreview + "\" not found for app \"" + appName + "\""})
-		return
+		return "", fmt.Errorf("%w: %q for app %q", errPinPreviewNotFound, fromPreview, appName)
 	}
 	if preview.Release == nil || strings.TrimSpace(preview.Release.Tag) == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "preview \"" + req.FromPreview + "\" has no image tag to pin"})
-		return
+		return "", fmt.Errorf("%w: %q", errPinNoTag, fromPreview)
 	}
 
 	// Capture the env's current deployed image tag before pinning, so unpinning
 	// can restore it (best-effort: empty when the env isn't deployed yet).
 	prePin := ""
 	if app.Spec.EnvironmentDefaults[envName].PinnedFrom == "" { // don't overwrite an existing capture on re-pin
-		ah.enrichEnvWithLiveStatus(r.Context(), appName, targetEnv)
+		ah.enrichEnvWithLiveStatus(ctx, appName, targetEnv)
 		prePin = releaseTag(targetEnv.Release)
 	} else {
 		prePin = app.Spec.EnvironmentDefaults[envName].PrePinImageTag
@@ -1823,56 +1858,41 @@ func (ah *appHandler) handlePinAppEnv(w http.ResponseWriter, r *http.Request) {
 	}
 	ov := app.Spec.EnvironmentDefaults[envName]
 	ov.PinnedImageTag = strings.TrimSpace(preview.Release.Tag)
-	ov.PinnedFrom = req.FromPreview
+	ov.PinnedFrom = fromPreview
 	if prePin != "" && prePin != ov.PinnedImageTag {
 		ov.PrePinImageTag = prePin
 	}
 	app.Spec.EnvironmentDefaults[envName] = ov
-	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
-		return
+	if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
+		return "", fmt.Errorf("failed to save app: %w", err)
 	}
 	// Republish so the Kargo ProjectConfig pauses auto-promotion for the pinned
 	// stage, then write the target env's values directly — republishApp only
 	// (re)deploys the first stable env, so a pinned prod needs its own publish.
-	if err := ah.republishApp(r.Context(), app); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish pin: " + err.Error()})
-		return
+	if err := ah.republishApp(ctx, app); err != nil {
+		return "", fmt.Errorf("failed to publish pin: %w", err)
 	}
 	if ah.gitOpsPublisher != nil {
-		ah.ensureAppNamespace(r.Context(), app, targetEnv)
-		if err := ah.gitOpsPublisher.PublishAppEnv(r.Context(), app, targetEnv); err != nil {
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish pinned env: " + err.Error()})
-			return
+		ah.ensureAppNamespace(ctx, app, targetEnv)
+		if err := ah.gitOpsPublisher.PublishAppEnv(ctx, app, targetEnv); err != nil {
+			return "", fmt.Errorf("failed to publish pinned env: %w", err)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"message":  "environment " + envName + " pinned to " + pinLabel(req.FromPreview, ov.PinnedImageTag),
-		"project":  projectName,
-		"app":      appName,
-		"env":      envName,
-		"imageTag": ov.PinnedImageTag,
-		"from":     req.FromPreview,
-	})
+	return ov.PinnedImageTag, nil
 }
 
-// handleUnpinAppEnv serves DELETE .../apps/{app}/environments/{env}/pin. It clears
-// the pin and republishes, so the env returns to normal CD (Kargo resumes
-// auto-promoting the latest freight; the seed/CD tag ownership applies again).
-func (ah *appHandler) handleUnpinAppEnv(w http.ResponseWriter, r *http.Request) {
-	projectName := r.PathValue("project")
-	appName := r.PathValue("app")
-	envName := r.PathValue("env")
-
-	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+// unpinAppEnv clears a pin and republishes, so the env returns to normal CD
+// (Kargo resumes auto-promoting the latest freight; seed/CD tag ownership
+// applies again). Shared core of the per-app unpin handler and the stack batch
+// unpin. Returns (restoredTag, wasPinned): wasPinned=false is a no-op success.
+func (ah *appHandler) unpinAppEnv(ctx context.Context, projectName, appName, envName string) (string, bool, error) {
+	app, err := ah.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app \"" + appName + "\" not found in project \"" + projectName + "\""})
-		return
+		return "", false, fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
 	}
 	ov := app.Spec.EnvironmentDefaults[envName]
 	if ov.PinnedFrom == "" {
-		writeJSON(w, http.StatusOK, map[string]string{"message": "environment " + envName + " is not pinned", "project": projectName, "app": appName, "env": envName})
-		return
+		return "", false, nil
 	}
 
 	// Restore the pre-pin image (if captured) by force-writing it ONCE: clearing
@@ -1888,11 +1908,11 @@ func (ah *appHandler) handleUnpinAppEnv(w http.ResponseWriter, r *http.Request) 
 	if restore == "" {
 		repo := appImageRepoSubstr(app)
 		if fr, ok := ah.kargoPromoter.(kargoFreightReader); ok {
-			if tag, ferr := fr.CurrentFreightImageTag(r.Context(), projectName, appName, envName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
+			if tag, ferr := fr.CurrentFreightImageTag(ctx, projectName, appName, envName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
 				restore = tag
 			}
 			if restore == "" {
-				if tag, ferr := fr.LatestFreightImageTag(r.Context(), projectName, appName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
+				if tag, ferr := fr.LatestFreightImageTag(ctx, projectName, appName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
 					restore = tag
 				}
 			}
@@ -1902,17 +1922,15 @@ func (ah *appHandler) handleUnpinAppEnv(w http.ResponseWriter, r *http.Request) 
 	ov.PrePinImageTag = ""
 	ov.PinnedImageTag = restore // "" when nothing captured
 	app.Spec.EnvironmentDefaults[envName] = ov
-	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
-		return
+	if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
+		return "", true, fmt.Errorf("failed to save app: %w", err)
 	}
-	if err := ah.republishApp(r.Context(), app); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to publish unpin: " + err.Error()})
-		return
+	if err := ah.republishApp(ctx, app); err != nil {
+		return "", true, fmt.Errorf("failed to publish unpin: %w", err)
 	}
 	if ah.gitOpsPublisher != nil {
-		if targetEnv, terr := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, envName); terr == nil {
-			if perr := ah.gitOpsPublisher.PublishAppEnv(r.Context(), app, targetEnv); perr != nil {
+		if targetEnv, terr := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName); terr == nil {
+			if perr := ah.gitOpsPublisher.PublishAppEnv(ctx, app, targetEnv); perr != nil {
 				slog.Warn("unpin: failed to republish env values", "project", projectName, "app", appName, "env", envName, "err", perr)
 			}
 		}
@@ -1922,16 +1940,162 @@ func (ah *appHandler) handleUnpinAppEnv(w http.ResponseWriter, r *http.Request) 
 	if restore != "" {
 		ov.PinnedImageTag = ""
 		app.Spec.EnvironmentDefaults[envName] = ov
-		if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
+		if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
 			slog.Warn("unpin: failed to clear restore flag", "project", projectName, "app", appName, "env", envName, "err", err)
 		}
+	}
+	return restore, true, nil
+}
+
+// handlePinAppEnv serves POST .../apps/{app}/environments/{env}/pin.
+func (ah *appHandler) handlePinAppEnv(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	var req pinAppEnvRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	req.FromPreview = strings.TrimSpace(req.FromPreview)
+	if req.FromPreview == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "fromPreview is required"})
+		return
+	}
+	tag, err := ah.pinAppEnv(r.Context(), projectName, appName, envName, req.FromPreview)
+	if err != nil {
+		writeJSON(w, statusForPinErr(err), errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message":  "environment " + envName + " pinned to " + pinLabel(req.FromPreview, tag),
+		"project":  projectName,
+		"app":      appName,
+		"env":      envName,
+		"imageTag": tag,
+		"from":     req.FromPreview,
+	})
+}
+
+// handleUnpinAppEnv serves DELETE .../apps/{app}/environments/{env}/pin.
+func (ah *appHandler) handleUnpinAppEnv(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	restore, wasPinned, err := ah.unpinAppEnv(r.Context(), projectName, appName, envName)
+	if err != nil {
+		writeJSON(w, statusForPinErr(err), errorResponse{Error: err.Error()})
+		return
+	}
+	if !wasPinned {
+		writeJSON(w, http.StatusOK, map[string]string{"message": "environment " + envName + " is not pinned", "project": projectName, "app": appName, "env": envName})
+		return
 	}
 	msg := "environment " + envName + " unpinned; normal delivery resumed"
 	if restore != "" {
 		msg = "environment " + envName + " unpinned; restored " + restore
 	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": msg, "project": projectName, "app": appName, "env": envName})
+}
+
+// Sentinels for suspend/resume, mapped to HTTP status by statusForSuspendErr.
+var (
+	errSuspendAppNotFound = errors.New("app not found")
+	errSuspendEnvNotFound = errors.New("environment not found")
+	errSuspendPreview     = errors.New("cannot suspend a preview environment")
+)
+
+// statusForSuspendErr maps a suspendAppEnv error to an HTTP status.
+func statusForSuspendErr(err error) int {
+	switch {
+	case errors.Is(err, errSuspendAppNotFound), errors.Is(err, errSuspendEnvNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, errSuspendPreview):
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// suspendIsSkippable reports whether a suspend failure means the op does not
+// apply to this member (a skip row in a stack fan-out) rather than a real error:
+// a member not deployed to the target env.
+func suspendIsSkippable(err error) bool {
+	return errors.Is(err, errSuspendEnvNotFound)
+}
+
+// suspendAppEnv sets (suspend=true) or clears (suspend=false) the suspend flag
+// on a stable env and republishes. When suspended the publisher writes the
+// template's suspend values key so the chart scales the workload down; the env
+// stays published (no data loss, unlike undeploy). Works for pipeline and direct
+// apps. Shared core of the per-app and stack batch suspend/resume ops.
+func (ah *appHandler) suspendAppEnv(ctx context.Context, projectName, appName, envName string, suspend bool) error {
+	app, err := ah.appStore.GetApp(ctx, projectName, appName)
+	if err != nil {
+		return fmt.Errorf("%w: app %q in project %q", errSuspendAppNotFound, appName, projectName)
+	}
+	targetEnv, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName)
+	if err != nil {
+		return fmt.Errorf("%w: %q for app %q", errSuspendEnvNotFound, envName, appName)
+	}
+	if targetEnv.EnvType == domain.AppEnvPreview {
+		return errSuspendPreview
+	}
+	if app.Spec.EnvironmentDefaults == nil {
+		app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+	}
+	ov := app.Spec.EnvironmentDefaults[envName]
+	if suspend {
+		t := true
+		ov.Suspend = &t
+	} else {
+		ov.Suspend = nil // resume: drop back to the chart default (running)
+	}
+	app.Spec.EnvironmentDefaults[envName] = ov
+	if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
+		return fmt.Errorf("failed to save app: %w", err)
+	}
+	// republishApp only (re)deploys the first stable env, so a suspended prod
+	// needs its own publish — same as pin.
+	if err := ah.republishApp(ctx, app); err != nil {
+		return fmt.Errorf("failed to publish suspend: %w", err)
+	}
+	if ah.gitOpsPublisher != nil {
+		ah.ensureAppNamespace(ctx, app, targetEnv)
+		if err := ah.gitOpsPublisher.PublishAppEnv(ctx, app, targetEnv); err != nil {
+			return fmt.Errorf("failed to publish suspended env: %w", err)
+		}
+	}
+	return nil
+}
+
+// handleSuspendAppEnv serves POST .../apps/{app}/environments/{env}/suspend.
+func (ah *appHandler) handleSuspendAppEnv(w http.ResponseWriter, r *http.Request) {
+	ah.serveSuspendAppEnv(w, r, true)
+}
+
+// handleResumeAppEnv serves POST .../apps/{app}/environments/{env}/resume.
+func (ah *appHandler) handleResumeAppEnv(w http.ResponseWriter, r *http.Request) {
+	ah.serveSuspendAppEnv(w, r, false)
+}
+
+func (ah *appHandler) serveSuspendAppEnv(w http.ResponseWriter, r *http.Request, suspend bool) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	if err := ah.suspendAppEnv(r.Context(), projectName, appName, envName, suspend); err != nil {
+		writeJSON(w, statusForSuspendErr(err), errorResponse{Error: err.Error()})
+		return
+	}
+	verb := "resumed"
+	if suspend {
+		verb = "suspended"
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"message": msg,
+		"message": "environment " + envName + " " + verb,
 		"project": projectName,
 		"app":     appName,
 		"env":     envName,
@@ -2482,6 +2646,9 @@ func buildEnvSummaryDTOs(app *domain.App, envs []*domain.AppEnvironment) []AppEn
 		if ov := app.Spec.EnvironmentDefaults[envDTOs[i].EnvName]; ov.PinnedFrom != "" {
 			envDTOs[i].PinnedTag = ov.PinnedImageTag
 			envDTOs[i].PinnedFrom = ov.PinnedFrom
+		}
+		if ov := app.Spec.EnvironmentDefaults[envDTOs[i].EnvName]; ov.Suspend != nil && *ov.Suspend {
+			envDTOs[i].Suspended = true
 		}
 	}
 	return envDTOs

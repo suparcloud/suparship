@@ -110,7 +110,10 @@ export const api = {
     });
   },
 
-  del(path: string): Promise<void> {
-    return request<void>(path, { method: "DELETE" });
+  del<T = void>(path: string, body?: unknown): Promise<T> {
+    return request<T>(path, {
+      method: "DELETE",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
   },
 };

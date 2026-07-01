@@ -240,6 +240,274 @@ func TestStackSync_RepublishesMembers(t *testing.T) {
 	}
 }
 
+// setPreviewsEnabled flips an existing stored app's PreviewsEnabled flag.
+func setPreviewsEnabled(store *memAppStore, project, appName string, enabled bool) {
+	ctx := context.Background()
+	a, _ := store.GetApp(ctx, project, appName)
+	a.Spec.PreviewsEnabled = enabled
+	_ = store.SaveApp(ctx, project, a)
+}
+
+// TestStackPreview_SkipsDisabledHonorsSubsetAndTag covers the stack preview
+// fan-out: members with previews disabled are skipped (not failed), an optional
+// apps subset targets only the named members, a single imageTag is recorded on
+// every previewed member, and each preview lands in the shared stack namespace.
+func TestStackPreview_SkipsDisabledHonorsSubsetAndTag(t *testing.T) {
+	mux, ah, store, stackStore := newTestStackMux(testProject)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	seedStackMember(store, testProject, "web", "voiceai")
+	seedStackMember(store, testProject, "agent", "voiceai")
+	seedStackMember(store, testProject, "nopreview", "voiceai")
+	setPreviewsEnabled(store, testProject, "web", true)
+	setPreviewsEnabled(store, testProject, "agent", true)
+	setPreviewsEnabled(store, testProject, "nopreview", false)
+	cookie := sessionCookieFor(ah, "alice", "org_admin")
+	ctx := context.Background()
+
+	// Full stack preview with an image tag.
+	rec := postStackJSON(mux, cookie,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/previews",
+		stackPreviewRequest{Name: "pr-42", ImageTag: "sha-abc1234"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp stackBatchResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	byApp := map[string]stackOpResult{}
+	for _, r := range resp.Results {
+		byApp[r.App] = r
+	}
+	if len(byApp) != 3 {
+		t.Fatalf("expected 3 rows, got %d: %+v", len(resp.Results), resp.Results)
+	}
+	if !byApp["nopreview"].Skipped {
+		t.Errorf("nopreview should be skipped, got %+v", byApp["nopreview"])
+	}
+	if byApp["web"].Skipped || !byApp["web"].OK {
+		t.Errorf("web should be a non-skipped success, got %+v", byApp["web"])
+	}
+	env, err := store.GetAppEnvironment(ctx, testProject, "web", "pr-42")
+	if err != nil {
+		t.Fatalf("web preview missing: %v", err)
+	}
+	if env.EnvType != domain.AppEnvPreview {
+		t.Errorf("env type = %q, want preview", env.EnvType)
+	}
+	if env.Release == nil || env.Release.Tag != "sha-abc1234" {
+		t.Errorf("web preview tag = %+v, want sha-abc1234", env.Release)
+	}
+	if want := testProject + "-voiceai-preview-pr-42"; env.Namespace != want {
+		t.Errorf("web preview namespace = %q, want %q", env.Namespace, want)
+	}
+	if env.BaseEnv != "staging" {
+		t.Errorf("web preview baseEnv = %q, want staging", env.BaseEnv)
+	}
+	if _, err := store.GetAppEnvironment(ctx, testProject, "nopreview", "pr-42"); err == nil {
+		t.Error("nopreview should not have a preview env (skipped)")
+	}
+
+	// Subset: only agent gets pr-99.
+	rec = postStackJSON(mux, cookie,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/previews",
+		stackPreviewRequest{Name: "pr-99", Apps: []string{"agent"}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("subset preview: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := store.GetAppEnvironment(ctx, testProject, "agent", "pr-99"); err != nil {
+		t.Errorf("agent should have pr-99: %v", err)
+	}
+	if _, err := store.GetAppEnvironment(ctx, testProject, "web", "pr-99"); err == nil {
+		t.Error("web should not have pr-99 (excluded by subset)")
+	}
+
+	// Unknown app in subset → 400.
+	rec = postStackJSON(mux, cookie,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/previews",
+		stackPreviewRequest{Name: "pr-1", Apps: []string{"ghost"}})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown subset app: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Delete with a differently-cased name resolves the sanitized env: the
+	// preview "pr-42" is torn down when the caller deletes "PR-42".
+	delReq := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/previews/PR-42", nil)
+	delReq.AddCookie(cookie)
+	delRec := httptest.NewRecorder()
+	mux.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("delete PR-42: expected 200, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+	if _, err := store.GetAppEnvironment(ctx, testProject, "web", "pr-42"); err == nil {
+		t.Error("web preview pr-42 should be deleted via the raw name 'PR-42'")
+	}
+}
+
+// TestStackPreview_DeveloperRole verifies a developer (not just project admin)
+// can create a stack preview — the route CI uses once per PR.
+func TestStackPreview_DeveloperRole(t *testing.T) {
+	mux, ah, store, stackStore := newTestStackMux(testProject)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	seedStackMember(store, testProject, "web", "voiceai")
+	setPreviewsEnabled(store, testProject, "web", true)
+
+	rec := postStackJSON(mux, sessionCookieFor(ah, "bob", "developer"),
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/previews",
+		stackPreviewRequest{Name: "pr-7"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("developer stack preview: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestStackPin_FansOutSkippingDirectAndMissing covers the stack pin/unpin
+// fan-out: a pipeline member with the named preview is pinned to its own tag, a
+// member lacking that preview is skipped, a direct-delivery member is skipped,
+// and unpin clears the pin (skipping members that weren't pinned).
+func TestStackPin_FansOutSkippingDirectAndMissing(t *testing.T) {
+	mux, ah, store, stackStore := newTestStackMux(testProject)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	seedStackMember(store, testProject, "web", "voiceai")
+	seedStackMember(store, testProject, "agent", "voiceai")
+	// Direct-delivery member: pinning does not apply → skipped.
+	store.addApp(&domain.App{
+		Name: "cache", ProjectName: testProject,
+		Spec: domain.AppSpec{
+			Stack:        "voiceai",
+			DeliveryMode: domain.DeliveryDirect,
+			Template:     domain.AppTemplateRef{Name: "redis"},
+		},
+	})
+	_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
+		AppName: "cache", EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1,
+		Namespace: testProject + "-cache-staging",
+	})
+	// Only web has the PR preview with a built image.
+	_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
+		AppName: "web", EnvName: "pr-5", EnvType: domain.AppEnvPreview, BaseEnv: "staging",
+		Namespace: testProject + "-voiceai-preview-pr-5",
+		Release:   &domain.AppReleaseRef{Tag: "sha-web5"},
+	})
+	cookie := sessionCookieFor(ah, "alice", "org_admin")
+	ctx := context.Background()
+
+	rec := postStackJSON(mux, cookie,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/pin",
+		stackPinRequest{FromPreview: "pr-5", TargetEnv: "staging"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pin: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp stackBatchResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	byApp := map[string]stackOpResult{}
+	for _, r := range resp.Results {
+		byApp[r.App] = r
+	}
+	if len(byApp) != 3 {
+		t.Fatalf("expected 3 rows, got %+v", resp.Results)
+	}
+	if byApp["web"].Skipped || !byApp["web"].OK {
+		t.Errorf("web should be pinned, got %+v", byApp["web"])
+	}
+	if !byApp["agent"].Skipped {
+		t.Errorf("agent should be skipped (no pr-5 preview), got %+v", byApp["agent"])
+	}
+	if !byApp["cache"].Skipped {
+		t.Errorf("cache should be skipped (direct delivery), got %+v", byApp["cache"])
+	}
+	web, _ := store.GetApp(ctx, testProject, "web")
+	if ov := web.Spec.EnvironmentDefaults["staging"]; ov.PinnedFrom != "pr-5" || ov.PinnedImageTag != "sha-web5" {
+		t.Errorf("web staging pin = %+v, want from=pr-5 tag=sha-web5", ov)
+	}
+
+	// Unpin the stack (JSON body, symmetric with pin).
+	body, _ := json.Marshal(stackSuspendRequest{TargetEnv: "staging"})
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/pin", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("unpin: expected 200, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	var uresp stackBatchResponse
+	_ = json.NewDecoder(rec2.Body).Decode(&uresp)
+	ubyApp := map[string]stackOpResult{}
+	for _, r := range uresp.Results {
+		ubyApp[r.App] = r
+	}
+	if ubyApp["web"].Skipped || !ubyApp["web"].OK {
+		t.Errorf("web should be unpinned, got %+v", ubyApp["web"])
+	}
+	if !ubyApp["agent"].Skipped {
+		t.Errorf("agent should be skipped (not pinned), got %+v", ubyApp["agent"])
+	}
+	web2, _ := store.GetApp(ctx, testProject, "web")
+	if pf := web2.Spec.EnvironmentDefaults["staging"].PinnedFrom; pf != "" {
+		t.Errorf("web staging should be unpinned, got PinnedFrom=%q", pf)
+	}
+
+	// A mistyped targetEnv is rejected (422), not silently skipped as success.
+	recBad := postStackJSON(mux, cookie,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/pin",
+		stackPinRequest{FromPreview: "pr-5", TargetEnv: "stagingX"})
+	if recBad.Code != http.StatusUnprocessableEntity {
+		t.Errorf("bogus targetEnv: expected 422, got %d: %s", recBad.Code, recBad.Body.String())
+	}
+}
+
+// TestStackSuspend_FansOutAndResumes covers stack suspend/resume: it fans out
+// over members setting the per-env Suspend flag (a member without the target env
+// is skipped), works for a developer, and resume clears the flag.
+func TestStackSuspend_FansOutAndResumes(t *testing.T) {
+	mux, ah, store, stackStore := newTestStackMux(testProject)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	seedStackMember(store, testProject, "web", "voiceai")
+	seedStackMember(store, testProject, "agent", "voiceai")
+	// A member with no staging env → skipped.
+	store.addApp(&domain.App{
+		Name: "noenv", ProjectName: testProject,
+		Spec: domain.AppSpec{Stack: "voiceai", Template: domain.AppTemplateRef{Name: "web-service"}},
+	})
+	cookie := sessionCookieFor(ah, "bob", "developer") // developer role is allowed
+	ctx := context.Background()
+
+	rec := postStackJSON(mux, cookie,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/suspend",
+		stackSuspendRequest{TargetEnv: "staging"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("suspend: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp stackBatchResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	byApp := map[string]stackOpResult{}
+	for _, r := range resp.Results {
+		byApp[r.App] = r
+	}
+	if byApp["web"].Skipped || !byApp["web"].OK {
+		t.Errorf("web should be suspended, got %+v", byApp["web"])
+	}
+	if !byApp["noenv"].Skipped {
+		t.Errorf("noenv should be skipped (no staging env), got %+v", byApp["noenv"])
+	}
+	web, _ := store.GetApp(ctx, testProject, "web")
+	if s := web.Spec.EnvironmentDefaults["staging"].Suspend; s == nil || !*s {
+		t.Errorf("web staging Suspend = %v, want true", s)
+	}
+
+	// Resume clears the flag.
+	rec2 := postStackJSON(mux, cookie,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/resume",
+		stackSuspendRequest{TargetEnv: "staging"})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("resume: expected 200, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	web2, _ := store.GetApp(ctx, testProject, "web")
+	if s := web2.Spec.EnvironmentDefaults["staging"].Suspend; s != nil {
+		t.Errorf("web staging Suspend after resume = %v, want nil", s)
+	}
+}
+
 // TestStackDelete_WithApps removes every member app and the stack record.
 func TestStackDelete_WithApps(t *testing.T) {
 	mux, ah, store, stackStore := newTestStackMux(testProject)

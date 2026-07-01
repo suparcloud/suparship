@@ -195,6 +195,46 @@ func TestPublish_PinnedEnvWritesPinnedTag(t *testing.T) {
 	}
 }
 
+// readRootMap parses a published values.yaml into its top-level map.
+func readRootMap(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal %s: %v", path, err)
+	}
+	return m
+}
+
+// TestPublish_SuspendWritesSuspendKey: an env with Suspend=true gets the chart's
+// suspend key set true in values.yaml; a non-suspended env omits the key so the
+// chart default (running) applies — i.e. resume drops the flag.
+func TestPublish_SuspendWritesSuspendKey(t *testing.T) {
+	dir := t.TempDir()
+	app := cdManagedApp(false)
+	suspended := true
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"staging": {Suspend: &suspended},
+	}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost", TemplateImages: rootImageMapping, SuspendKey: "suspend"},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, BaseDomain: "localhost", TemplateImages: rootImageMapping, SuspendKey: "suspend"},
+	}
+	p := newTestPublisher(t)
+	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if got, _ := readRootMap(t, valuesPath(dir, "staging"))["suspend"].(bool); !got {
+		t.Errorf("suspended staging: suspend = %v, want true", got)
+	}
+	if _, present := readRootMap(t, valuesPath(dir, "prod"))["suspend"]; present {
+		t.Errorf("non-suspended prod should not carry a suspend key")
+	}
+}
+
 // tokenImageApp is a BYO/passthrough app whose RawValues pin the chart's image
 // tag to the {platform.imageTag} token (the chart-agnostic, recommended way).
 func tokenImageApp() *domain.App {
