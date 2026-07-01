@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -1746,6 +1747,11 @@ func pinLabel(from, tag string) string {
 	return tag
 }
 
+// liveReadTimeout bounds best-effort live cluster reads (pre-pin status capture,
+// Kargo freight lookup) so one slow/unreachable cluster can't hang a request —
+// especially a stack fan-out that repeats the read per member.
+const liveReadTimeout = 5 * time.Second
+
 // kargoFreightReader is the optional capability (implemented by the Kargo
 // promoter) to resolve an env's real image tag from Kargo, used to restore a
 // stable env when unpinning a preview.
@@ -1760,21 +1766,6 @@ type kargoFreightReader interface {
 func appImageRepoSubstr(app *domain.App) string {
 	if repo, ok := app.Spec.Values["image_repository"].(string); ok {
 		return strings.TrimSpace(repo)
-	}
-	return ""
-}
-
-// releaseTag extracts the image tag from a release ref (the explicit Tag, else
-// the part after the last ":" of the image ref). Empty when unknown.
-func releaseTag(r *domain.AppReleaseRef) string {
-	if r == nil {
-		return ""
-	}
-	if r.Tag != "" {
-		return r.Tag
-	}
-	if i := strings.LastIndex(r.Image, ":"); i >= 0 && i < len(r.Image)-1 {
-		return r.Image[i+1:]
 	}
 	return ""
 }
@@ -1910,8 +1901,19 @@ func (ah *appHandler) pinAppEnvSpec(ctx context.Context, projectName, appName, e
 	// can restore it (best-effort: empty when the env isn't deployed yet).
 	prePin := ""
 	if app.Spec.EnvironmentDefaults[envName].PinnedFrom == "" { // don't overwrite an existing capture on re-pin
-		ah.enrichEnvWithLiveStatus(ctx, appName, targetEnv)
-		prePin = releaseTag(targetEnv.Release)
+		// Read the current image from Kargo's stage freight rather than a live
+		// workload-cluster status enrichment: it's a single Freight lookup (the
+		// same source unpin uses to restore), not a full ArgoCD/runtime round
+		// trip — so a large pin fan-out doesn't pay a heavy per-member live read.
+		// Bounded so a slow tooling cluster can't hang the request; best-effort
+		// (unpin has its own restore fallback when this is empty).
+		if fr, ok := ah.kargoPromoter.(kargoFreightReader); ok {
+			frCtx, cancel := context.WithTimeout(ctx, liveReadTimeout)
+			if tag, ferr := fr.CurrentFreightImageTag(frCtx, projectName, appName, envName, appImageRepoSubstr(app)); ferr == nil {
+				prePin = tag
+			}
+			cancel()
+		}
 	} else {
 		prePin = app.Spec.EnvironmentDefaults[envName].PrePinImageTag
 	}
@@ -1972,14 +1974,18 @@ func (ah *appHandler) unpinAppEnvSpec(ctx context.Context, projectName, appName,
 	if restore == "" {
 		repo := appImageRepoSubstr(app)
 		if fr, ok := ah.kargoPromoter.(kargoFreightReader); ok {
-			if tag, ferr := fr.CurrentFreightImageTag(ctx, projectName, appName, envName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
+			// Bound the Kargo freight reads so a slow tooling cluster can't hang a
+			// stack unpin fan-out (best-effort restore; falls through to a plain clear).
+			frCtx, cancel := context.WithTimeout(ctx, liveReadTimeout)
+			if tag, ferr := fr.CurrentFreightImageTag(frCtx, projectName, appName, envName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
 				restore = tag
 			}
 			if restore == "" {
-				if tag, ferr := fr.LatestFreightImageTag(ctx, projectName, appName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
+				if tag, ferr := fr.LatestFreightImageTag(frCtx, projectName, appName, repo); ferr == nil && tag != "" && tag != ov.PinnedImageTag {
 					restore = tag
 				}
 			}
+			cancel()
 		}
 	}
 	ov.PinnedFrom = ""

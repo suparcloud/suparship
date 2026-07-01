@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,6 +16,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/domain"
@@ -163,6 +167,21 @@ type TemplateLoader interface {
 // per file to the cluster configured in appset.yaml.
 type Publisher struct {
 	cfg PublisherConfig
+	// repoCacheDir is a persistent working clone of the gitops repo, refreshed
+	// with fetch+reset instead of a full clone on every publish (see
+	// withClonedRepo). Derived once from RepoURL+Branch in NewPublisher.
+	repoCacheDir string
+}
+
+// repoLocks serializes access to each persistent repo cache dir across all
+// Publisher instances that share it (keyed by cache dir), so concurrent
+// publishes can't corrupt a single working tree. One in-flight publish per
+// gitops repo+branch; git push already serializes at the origin anyway.
+var repoLocks sync.Map // cacheDir(string) -> *sync.Mutex
+
+func repoLockFor(dir string) *sync.Mutex {
+	m, _ := repoLocks.LoadOrStore(dir, &sync.Mutex{})
+	return m.(*sync.Mutex)
 }
 
 // SetOrgConfig updates the publisher's org-scoped configuration (naming
@@ -207,7 +226,12 @@ func NewPublisher(cfg PublisherConfig) (*Publisher, error) {
 	if cfg.Branch == "" {
 		cfg.Branch = "main"
 	}
-	return &Publisher{cfg: cfg}, nil
+	// Stable, credential-free cache dir per (repo, branch) so the working clone
+	// is reused across publishes (and shared/serialized between Publisher
+	// instances pointing at the same repo via repoLocks).
+	sum := sha256.Sum256([]byte(cfg.RepoURL + "\n" + cfg.Branch))
+	cacheDir := filepath.Join(os.TempDir(), "suparship-gitops-"+hex.EncodeToString(sum[:8]), "gitops")
+	return &Publisher{cfg: cfg, repoCacheDir: cacheDir}, nil
 }
 
 // argoCDRepoURL returns the gitops repo URL as ArgoCD sees it inside the cluster.
@@ -1279,6 +1303,17 @@ func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName, versio
 		}
 	}
 
+	// A versioned chart is immutable, so if it's already synced in the (freshly
+	// cloned) repo, skip the fetch + extract. This is a large win for fan-outs
+	// that republish many apps of the same template in one commit (e.g. a stack
+	// pin re-publishing 6 members): the charts are already committed, so
+	// re-extracting them per member is pure waste. Only the first publish of a
+	// new template@version fetches. (Dev-mode disk templates above always copy,
+	// so local chart edits still take effect.)
+	if dirNonEmpty(dstDir) {
+		return nil
+	}
+
 	if p.cfg.ChartFetcher == nil {
 		slog.Debug("gitops: no local chart and no ChartFetcher configured", "template", templateName)
 		return nil
@@ -1292,6 +1327,13 @@ func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName, versio
 		return nil
 	}
 	return p.extractChartTGZ(data, dstDir)
+}
+
+// dirNonEmpty reports whether path is a directory that contains at least one
+// entry. Used to skip re-syncing an already-present (immutable) chart version.
+func dirNonEmpty(path string) bool {
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) > 0
 }
 
 // copyChartDir copies a chart from a local directory into the gitops repo,
@@ -2328,20 +2370,100 @@ func (p *Publisher) UnpublishProjectInfra(ctx context.Context, projectName strin
 // publish operation also lands the take-over contract for new SREs
 // inheriting the repo.
 func (p *Publisher) withClonedRepo(ctx context.Context, fn func(repoDir string) error) error {
-	tmpDir, err := os.MkdirTemp("", "suparship-gitops-*")
+	// Serialize on the shared cache dir: one publish at a time reuses the
+	// persistent working clone. Held for the whole publish (refresh → write →
+	// commit → push) so a concurrent publish never sees a half-written tree.
+	lock := repoLockFor(p.repoCacheDir)
+	waitStart := time.Now()
+	lock.Lock()
+	defer lock.Unlock()
+	lockWait := time.Since(waitStart)
+
+	syncStart := time.Now()
+	repoDir, err := p.syncRepo(ctx)
 	if err != nil {
-		return fmt.Errorf("create temp dir: %w", err)
+		return err
 	}
-	defer os.RemoveAll(tmpDir)
+	syncDur := time.Since(syncStart)
 
-	repoDir := filepath.Join(tmpDir, "gitops")
+	writeStart := time.Now()
+	err = fn(repoDir)
+	// One line per publish so a 504 can be attributed: lock contention vs repo
+	// sync (fetch/clone) vs the write+commit+push done inside fn (commitAndPush
+	// logs its own git-level breakdown).
+	slog.Info("gitops: publish timing",
+		"repo", p.cfg.RepoURL,
+		"lock_wait", lockWait.Round(time.Millisecond).String(),
+		"repo_sync", syncDur.Round(time.Millisecond).String(),
+		"write_commit_push", time.Since(writeStart).Round(time.Millisecond).String(),
+	)
+	return err
+}
+
+// syncRepo brings the persistent cache clone up to date with the remote and
+// returns its path. It refreshes an existing cache with fetch+reset (fast,
+// incremental — the win over re-cloning the whole repo per publish) and falls
+// back to a fresh clone when the cache is absent or a refresh fails (corrupt
+// clone, force-push, rotated creds, etc.).
+func (p *Publisher) syncRepo(ctx context.Context) (string, error) {
+	repoDir := p.repoCacheDir
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err == nil {
+		if err := p.refreshRepo(ctx, repoDir); err == nil {
+			return repoDir, nil
+		} else {
+			slog.Warn("gitops: cache refresh failed; re-cloning", "repo", p.cfg.RepoURL, "err", err)
+		}
+	}
+	if err := p.freshClone(ctx, repoDir); err != nil {
+		return "", err
+	}
+	return repoDir, nil
+}
+
+// refreshRepo updates an existing cache clone to the remote branch head
+// (shallow fetch + hard reset + clean), discarding any leftover state from a
+// prior publish. Re-points origin first so rotated credentials are picked up.
+func (p *Publisher) refreshRepo(ctx context.Context, repoDir string) error {
 	cloneURL := p.embedCredentials(p.cfg.RepoURL)
+	if err := p.git(ctx, repoDir, "remote", "set-url", "origin", cloneURL); err != nil {
+		return err
+	}
+	slog.Debug("gitops: refreshing cache", "repo", p.cfg.RepoURL, "branch", p.cfg.Branch)
+	fetchStart := time.Now()
+	if err := p.git(ctx, repoDir, "fetch", "--depth=1", "origin", p.cfg.Branch); err != nil {
+		return err
+	}
+	if err := p.git(ctx, repoDir, "reset", "--hard", "FETCH_HEAD"); err != nil {
+		return err
+	}
+	if err := p.git(ctx, repoDir, "clean", "-fd"); err != nil {
+		return err
+	}
+	slog.Info("gitops: cache refresh (fetch+reset)", "repo", p.cfg.RepoURL, "dur", time.Since(fetchStart).Round(time.Millisecond).String())
+	return p.configureRepo(ctx, repoDir)
+}
 
-	slog.Debug("gitops: cloning repo", "repo", p.cfg.RepoURL, "branch", p.cfg.Branch)
-	if err := p.git(ctx, tmpDir, "clone", "--depth=1", "--branch="+p.cfg.Branch, cloneURL, repoDir); err != nil {
+// freshClone wipes any stale cache dir and does a shallow clone into repoDir.
+func (p *Publisher) freshClone(ctx context.Context, repoDir string) error {
+	if err := os.RemoveAll(repoDir); err != nil {
+		return fmt.Errorf("reset gitops cache: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(repoDir), 0o755); err != nil {
+		return fmt.Errorf("create gitops cache dir: %w", err)
+	}
+	cloneURL := p.embedCredentials(p.cfg.RepoURL)
+	slog.Debug("gitops: cloning repo (cache miss)", "repo", p.cfg.RepoURL, "branch", p.cfg.Branch)
+	cloneStart := time.Now()
+	if err := p.git(ctx, filepath.Dir(repoDir), "clone", "--depth=1", "--branch="+p.cfg.Branch, cloneURL, repoDir); err != nil {
 		return fmt.Errorf("clone gitops repo: %w", err)
 	}
+	slog.Info("gitops: fresh clone (cache miss)", "repo", p.cfg.RepoURL, "dur", time.Since(cloneStart).Round(time.Millisecond).String())
+	return p.configureRepo(ctx, repoDir)
+}
 
+// configureRepo sets the commit identity and seeds the operator README. Cheap
+// and idempotent, so it runs after both refresh and fresh clone.
+func (p *Publisher) configureRepo(ctx context.Context, repoDir string) error {
 	authorName := p.cfg.CommitAuthorName
 	if authorName == "" {
 		authorName = DefaultCommitAuthorName
@@ -2356,15 +2478,13 @@ func (p *Publisher) withClonedRepo(ctx context.Context, fn func(repoDir string) 
 	if err := p.git(ctx, repoDir, "config", "user.name", authorName); err != nil {
 		return err
 	}
-
 	if err := p.ensureRepoREADME(repoDir); err != nil {
 		// README is operator-facing documentation, not infrastructure —
 		// log and continue rather than aborting a publish if the write
 		// fails for some odd reason.
 		slog.Warn("gitops: README seeding failed; continuing publish", "err", err)
 	}
-
-	return fn(repoDir)
+	return nil
 }
 
 // ensureRepoREADME writes gitops-output/README.md when absent. Operator
@@ -2734,24 +2854,44 @@ with your own charts, or leave it alone.
 // commitAndPush stages all changes, commits with msg (when there is something
 // to commit), and pushes to origin. It is a no-op if the working tree is clean.
 func (p *Publisher) commitAndPush(ctx context.Context, repoDir, msg string) error {
+	addStart := time.Now()
 	if err := p.git(ctx, repoDir, "add", "."); err != nil {
 		return err
 	}
-	if empty, err := p.stagedIsEmpty(ctx, repoDir); err != nil {
+	addDur := time.Since(addStart)
+
+	statusStart := time.Now()
+	empty, err := p.stagedIsEmpty(ctx, repoDir)
+	if err != nil {
 		return err
-	} else if empty {
+	}
+	statusDur := time.Since(statusStart)
+	if empty {
 		slog.Debug("gitops: nothing to commit — already up to date")
 		return nil
 	}
+
 	slog.Debug("gitops: committing", "msg", msg)
+	commitStart := time.Now()
 	if err := p.git(ctx, repoDir, "commit", "-m", msg); err != nil {
 		return fmt.Errorf("git commit: %w", err)
 	}
+	commitDur := time.Since(commitStart)
+
 	slog.Debug("gitops: pushing to origin", "branch", p.cfg.Branch)
+	pushStart := time.Now()
 	if err := p.git(ctx, repoDir, "push", "origin", p.cfg.Branch); err != nil {
 		return fmt.Errorf("push to gitops repo: %w", err)
 	}
-	slog.Debug("gitops: push complete")
+	// Breakdown so a slow publish can be pinned to add/status (working-tree
+	// scan size) vs push (network) rather than lumped into write_commit_push.
+	slog.Info("gitops: commit+push timing",
+		"repo", p.cfg.RepoURL,
+		"git_add", addDur.Round(time.Millisecond).String(),
+		"git_status", statusDur.Round(time.Millisecond).String(),
+		"git_commit", commitDur.Round(time.Millisecond).String(),
+		"git_push", time.Since(pushStart).Round(time.Millisecond).String(),
+	)
 	return nil
 }
 

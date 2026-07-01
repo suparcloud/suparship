@@ -63,6 +63,43 @@ func buildPackagedChart(t *testing.T, chartName string, files map[string]string)
 	return buf.Bytes()
 }
 
+// countingFetcher records how many times a chart bundle is fetched, so a test
+// can assert the publisher skips re-fetching an already-synced chart.
+type countingFetcher struct {
+	templateName string
+	data         []byte
+	calls        int
+}
+
+func (f *countingFetcher) LoadChartBundle(_ context.Context, name, _ string) ([]byte, error) {
+	if name == f.templateName {
+		f.calls++
+		return f.data, nil
+	}
+	return nil, nil
+}
+
+// TestSyncChart_SkipsWhenAlreadyPresent verifies an already-synced (immutable)
+// chart version is not re-fetched/re-extracted — the perf fix that keeps a stack
+// pin re-publishing N members of one template from re-pulling the chart N times.
+func TestSyncChart_SkipsWhenAlreadyPresent(t *testing.T) {
+	repoDir := t.TempDir()
+	tgz := buildPackagedChart(t, "demo", map[string]string{"Chart.yaml": "name: demo\nversion: 1.0.0\n"})
+	fetcher := &countingFetcher{templateName: "demo", data: tgz}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{RepoURL: "http://localhost/fake.git", ChartFetcher: fetcher})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.SyncChartForTest(context.Background(), repoDir, "demo", "1.0.0"); err != nil {
+			t.Fatalf("sync %d: %v", i, err)
+		}
+	}
+	if fetcher.calls != 1 {
+		t.Errorf("expected the chart to be fetched once and reused; got %d fetches", fetcher.calls)
+	}
+}
+
 func TestSyncChart_LocalDiskTakesPrecedence(t *testing.T) {
 	repoDir := t.TempDir()
 	templatesDir := t.TempDir()

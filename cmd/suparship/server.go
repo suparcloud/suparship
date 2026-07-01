@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -1132,15 +1133,19 @@ func (a *gitOpsPublisherAdapter) buildAppBundle(ctx context.Context, app *domain
 // writes them all in one clone/commit/push, so a stack pin/unpin fan-out is one
 // git round-trip instead of ~3 per member.
 func (a *gitOpsPublisherAdapter) PublishApps(ctx context.Context, targets []server.AppPublishTarget) error {
+	// Build bundles through a request-scoped cached vault so the shared-scope
+	// (project/stack) 1Password lookups run once for the whole fan-out, not once
+	// per member — the fix for stack pin/unpin 504s.
+	ca := a.withCachedVault()
 	bundles := make([]gitops.AppPublishBundle, 0, len(targets))
 	for _, t := range targets {
-		pubEnvs, appSetEnvs, err := a.buildAppBundle(ctx, t.App, t.Envs)
+		pubEnvs, appSetEnvs, err := ca.buildAppBundle(ctx, t.App, t.Envs)
 		if err != nil {
 			return err
 		}
 		b := gitops.AppPublishBundle{App: t.App, Envs: pubEnvs, AppSetEnvs: appSetEnvs}
 		for _, fe := range t.FocusEnvs {
-			pe, err := a.buildAppEnvPub(ctx, t.App, fe)
+			pe, err := ca.buildAppEnvPub(ctx, t.App, fe)
 			if err != nil {
 				return err
 			}
@@ -1180,6 +1185,74 @@ func lookupOrgEnvRoutingProfiles(org *rbac.Org, envName string) domain.RoutingPr
 // enrichPubEnvWithSecrets sets ClusterRef and ScopeKeys on pub. ScopeKeys
 // reports which (scope, tier) items have keys so the publisher only emits
 // ExternalSecrets that resolve — ESO errors trying to extract a missing item.
+// cachedVault memoizes the idempotent read/ensure vault operations for the
+// duration of one publish batch. A stack fan-out enriches secrets per member and
+// per env, but the project- and stack-scope 1Password lookups are IDENTICAL
+// across members — without caching they run once per member (dozens of slow
+// 1Password round-trips), which was timing publishes out at the gateway (504).
+type cachedVault struct {
+	secrets.VaultStore
+	mu      sync.Mutex
+	ensured map[string]error
+	listed  map[string]cachedList
+}
+
+type cachedList struct {
+	entries []secrets.SecretEntry
+	err     error
+}
+
+func newCachedVault(v secrets.VaultStore) *cachedVault {
+	return &cachedVault{VaultStore: v, ensured: map[string]error{}, listed: map[string]cachedList{}}
+}
+
+func vaultKey(scope secrets.Scope, tier secrets.Tier, app string) string {
+	return fmt.Sprintf("%+v|%s|%s", scope, tier, app)
+}
+
+func (c *cachedVault) EnsureItem(ctx context.Context, scope secrets.Scope, tier secrets.Tier, app string) error {
+	key := vaultKey(scope, tier, app)
+	c.mu.Lock()
+	if err, ok := c.ensured[key]; ok {
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+	err := c.VaultStore.EnsureItem(ctx, scope, tier, app)
+	c.mu.Lock()
+	c.ensured[key] = err
+	c.mu.Unlock()
+	return err
+}
+
+func (c *cachedVault) ListKeys(ctx context.Context, scope secrets.Scope, tier secrets.Tier, app string) ([]secrets.SecretEntry, error) {
+	key := vaultKey(scope, tier, app)
+	c.mu.Lock()
+	if r, ok := c.listed[key]; ok {
+		c.mu.Unlock()
+		return r.entries, r.err
+	}
+	c.mu.Unlock()
+	entries, err := c.VaultStore.ListKeys(ctx, scope, tier, app)
+	c.mu.Lock()
+	c.listed[key] = cachedList{entries: entries, err: err}
+	c.mu.Unlock()
+	return entries, err
+}
+
+// withCachedVault returns a shallow copy of the adapter whose vault is a
+// request-scoped cache — so enrich/collectScopeKeys (which use the receiver's
+// a.vault) dedupe the shared-scope 1Password lookups across a fan-out. The copy
+// is local to one call, so it never races other requests.
+func (a *gitOpsPublisherAdapter) withCachedVault() *gitOpsPublisherAdapter {
+	if a.vault == nil {
+		return a
+	}
+	cp := *a
+	cp.vault = newCachedVault(a.vault)
+	return &cp
+}
+
 func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, org *rbac.Org, app *domain.App, envName string, pub *gitops.AppPublishEnv) {
 	// Resolve the cluster bound to this env from the org config so the
 	// publisher can emit the cluster-scope ExternalSecret.
@@ -1454,9 +1527,11 @@ func (a *gitOpsPublisherAdapter) buildAppEnvPub(ctx context.Context, app *domain
 // single git commit, so a stack fan-out is one clone/commit/push instead of one
 // per member.
 func (a *gitOpsPublisherAdapter) PublishAppsEnv(ctx context.Context, targets []server.AppEnvTarget) error {
+	// Cached vault: dedupe shared-scope 1Password lookups across members.
+	ca := a.withCachedVault()
 	items := make([]gitops.AppEnvPublish, 0, len(targets))
 	for _, t := range targets {
-		pub, err := a.buildAppEnvPub(ctx, t.App, t.Env)
+		pub, err := ca.buildAppEnvPub(ctx, t.App, t.Env)
 		if err != nil {
 			return err
 		}

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/suparcloud/suparship/internal/domain"
 )
@@ -307,6 +310,32 @@ func (rh *rbacHandler) validTargetEnv(ctx context.Context, members []*domain.App
 	return false
 }
 
+// stackPrepConcurrency bounds how many members' spec-prep steps run at once in a
+// fan-out. Prep does a bounded live cluster read per member (pre-pin capture /
+// Kargo freight lookup); running them concurrently keeps one slow/unreachable
+// cluster from serializing the whole request into a gateway timeout.
+const stackPrepConcurrency = 8
+
+// prepMembers runs prep for each member concurrently (bounded), returning the
+// results in member order. prep must be safe for concurrent use across members —
+// each touches a distinct app, and the app store + live readers are goroutine-safe.
+func prepMembers[T any](members []*domain.App, prep func(a *domain.App) T) []T {
+	out := make([]T, len(members))
+	sem := make(chan struct{}, stackPrepConcurrency)
+	var wg sync.WaitGroup
+	for i, a := range members {
+		wg.Add(1)
+		go func(i int, a *domain.App) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[i] = prep(a)
+		}(i, a)
+	}
+	wg.Wait()
+	return out
+}
+
 // stackPinRequest pins a PR preview group to a stable env across the stack. Each
 // pipeline member resolves its OWN image tag from its preview named fromPreview
 // (a single tag can't apply — members have different image repos). Members that
@@ -350,27 +379,41 @@ func (rh *rbacHandler) handlePinStack(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "unknown target environment: " + req.TargetEnv})
 		return
 	}
-	// Phase 1: mutate each member's spec (no git), collecting publish items and
-	// each member's pinned tag for the success message.
+	// Phase 1 (concurrent): mutate each member's spec — each prep does a bounded
+	// live-status read (pre-pin capture), so run them in parallel to avoid a
+	// gateway timeout on a large stack. No git yet.
+	type pinPrep struct {
+		app       *domain.App
+		targetEnv *domain.AppEnvironment
+		tag       string
+		err       error
+	}
+	prepStart := time.Now()
+	preps := prepMembers(members, func(a *domain.App) pinPrep {
+		app, targetEnv, tag, err := rh.appHandler.pinAppEnvSpec(r.Context(), project, a.Name, req.TargetEnv, req.FromPreview)
+		return pinPrep{app: app, targetEnv: targetEnv, tag: tag, err: err}
+	})
+	prepDur := time.Since(prepStart)
 	results := make([]stackOpResult, 0, len(members))
 	var items []appFocusPublish
 	tags := map[string]string{}
 	var pubNames []string
-	for _, a := range members {
-		app, targetEnv, tag, err := rh.appHandler.pinAppEnvSpec(r.Context(), project, a.Name, req.TargetEnv, req.FromPreview)
+	for i, a := range members {
+		p := preps[i]
 		switch {
-		case err == nil:
-			items = append(items, appFocusPublish{app: app, focusEnv: targetEnv})
-			tags[a.Name] = tag
+		case p.err == nil:
+			items = append(items, appFocusPublish{app: p.app, focusEnv: p.targetEnv})
+			tags[a.Name] = p.tag
 			pubNames = append(pubNames, a.Name)
-		case pinIsSkippable(err):
-			results = append(results, skipResult(a.Name, err.Error()))
+		case pinIsSkippable(p.err):
+			results = append(results, skipResult(a.Name, p.err.Error()))
 		default:
-			results = append(results, errResult(a.Name, err))
+			results = append(results, errResult(a.Name, p.err))
 		}
 	}
 	// Phase 2: publish every pinned member (tree + Kargo pause + target env) in
 	// ONE clone/commit/push — the 504 fix.
+	pubStart := time.Now()
 	if len(items) > 0 {
 		if err := rh.appHandler.republishAppsFocus(r.Context(), items); err != nil {
 			for _, n := range pubNames {
@@ -382,6 +425,14 @@ func (rh *rbacHandler) handlePinStack(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Endpoint-level split so a 504 is attributable to the concurrent per-member
+	// prep (Kargo freight reads) vs the single batched publish.
+	slog.Info("stack pin timing",
+		"project", project, "stack", name,
+		"members", len(members), "published", len(items),
+		"prep", prepDur.Round(time.Millisecond).String(),
+		"publish", time.Since(pubStart).Round(time.Millisecond).String(),
+	)
 	writeJSON(w, http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "pin", Results: results})
 }
 
@@ -420,8 +471,20 @@ func (rh *rbacHandler) handleUnpinStack(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "unknown target environment: " + req.TargetEnv})
 		return
 	}
-	// Phase 1: clear each member's pin in the spec (no git), collecting publish
-	// items and per-member restore tags. Members not pinned are skipped.
+	// Phase 1 (concurrent): clear each member's pin in the spec — each prep does a
+	// bounded Kargo freight read per member, so run them in parallel to avoid a
+	// gateway timeout on a large stack. No git yet.
+	type unpinPrep struct {
+		app       *domain.App
+		targetEnv *domain.AppEnvironment
+		restore   string
+		wasPinned bool
+		err       error
+	}
+	preps := prepMembers(members, func(a *domain.App) unpinPrep {
+		app, targetEnv, restore, wasPinned, err := rh.appHandler.unpinAppEnvSpec(r.Context(), project, a.Name, req.TargetEnv)
+		return unpinPrep{app: app, targetEnv: targetEnv, restore: restore, wasPinned: wasPinned, err: err}
+	})
 	results := make([]stackOpResult, 0, len(members))
 	var items []appFocusPublish
 	type unpinned struct {
@@ -430,16 +493,16 @@ func (rh *rbacHandler) handleUnpinStack(w http.ResponseWriter, r *http.Request) 
 	}
 	pending := map[string]unpinned{}
 	var pubNames []string
-	for _, a := range members {
-		app, targetEnv, restore, wasPinned, err := rh.appHandler.unpinAppEnvSpec(r.Context(), project, a.Name, req.TargetEnv)
+	for i, a := range members {
+		p := preps[i]
 		switch {
-		case err != nil:
-			results = append(results, errResult(a.Name, err))
-		case !wasPinned:
+		case p.err != nil:
+			results = append(results, errResult(a.Name, p.err))
+		case !p.wasPinned:
 			results = append(results, skipResult(a.Name, "not pinned"))
 		default:
-			items = append(items, appFocusPublish{app: app, focusEnv: targetEnv})
-			pending[a.Name] = unpinned{app: app, restore: restore}
+			items = append(items, appFocusPublish{app: p.app, focusEnv: p.targetEnv})
+			pending[a.Name] = unpinned{app: p.app, restore: p.restore}
 			pubNames = append(pubNames, a.Name)
 		}
 	}
