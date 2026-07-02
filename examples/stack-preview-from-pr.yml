@@ -1,73 +1,216 @@
-# Example GitHub Actions workflow — launch a suparShip preview for a whole STACK
-# per pull request, in ONE call.
+# Example GitHub Actions workflow — suparShip STACK previews + label-driven pinning.
 #
-# Unlike examples/preview-from-pr.yml (which is per app and must be edited every
-# time you add/remove an app), this targets the stack: the server resolves the
-# member apps, so membership changes need no workflow edit. Every previewable
-# member is brought up in one shared namespace ({project}-{stack}-preview-{name})
-# and reaches its siblings by in-cluster DNS. Members with previews disabled are
-# skipped (not failed).
+# What it does, per pull request:
+#   • Preview (automatic): opens/updates a preview of the WHOLE stack in one call
+#     on every push, and tears it down when the PR closes. The server resolves
+#     the member apps, so adding/removing an app needs no workflow edit. Members
+#     with previews disabled are skipped server-side (not failed).
+#   • Pin (opt-in, label-driven): add a "pin-<env>" label (e.g. pin-staging) to
+#     deploy this PR's preview image to a STABLE env without merging. Remove the
+#     label — or close the PR — to restore that env to normal delivery. While the
+#     label is on, each new push re-pins so the env tracks the latest PR image.
+#   • Status comment: upserts one sticky PR comment with each member's preview
+#     URL and health, pulled from the preview-groups API.
 #
-# See docs/previews.md#stack-previews and docs/stacks.md. Set these repo
-# secrets/vars:
-#   secrets.SUPARSHIP_TOKEN  — a project API token with developer (or higher)
-#                              role; mint one per docs/api-tokens.md
+# Why labels (not "/pin" comments): a pin is a STATE ("this PR owns staging"),
+# and a label models state — visible in the PR UI, gated by repo write access,
+# and trivially handled via labeled/unlabeled/closed events. Comment commands
+# need the issue_comment trigger, author-permission checks, arg parsing, and
+# separate state tracking. Labels keep it simple.
+#
+# See docs/previews.md#stack-previews and docs/stacks.md. Repo secrets/vars:
+#   secrets.SUPARSHIP_TOKEN  — project API token. Preview needs the DEVELOPER
+#                              role; PIN/UNPIN need the MANAGE role. If you use
+#                              pinning, mint one manage-role token (simplest) or
+#                              split it into SUPARSHIP_PIN_TOKEN. See
+#                              docs/api-tokens.md.
 #   vars.SUPARSHIP_API       — e.g. https://suparship.acme.com/api/v1
 #   vars.SUPARSHIP_PROJECT   — the project name (e.g. "voiceai")
 #   vars.SUPARSHIP_STACK     — the stack name (e.g. "voiceai")
 #
-# Monorepo assumption: a single imageTag applies to every member — the common
-# case where all apps are built from one commit SHA. Build & push that tag for
-# each member image BEFORE the create call (registry-specific; omitted here).
+# Monorepo assumption: one imageTag applies to every member (all apps built from
+# one commit SHA). Build & push that tag for each member image BEFORE the create
+# call (registry-specific; the build step is omitted here).
 
 name: suparship-stack-preview
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, closed]
+    types: [opened, synchronize, reopened, closed, labeled, unlabeled]
 
-# One in-flight run per PR; a newer push supersedes an older create.
+# One in-flight run per PR; a newer push supersedes an older create/pin.
 concurrency:
   group: suparship-stack-preview-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  pull-requests: write   # upsert the sticky status comment
+
+env:
+  API: ${{ vars.SUPARSHIP_API }}
+  PROJECT: ${{ vars.SUPARSHIP_PROJECT }}
+  STACK: ${{ vars.SUPARSHIP_STACK }}
+  TOKEN: ${{ secrets.SUPARSHIP_TOKEN }}
+  NAME: pr-${{ github.event.pull_request.number }}
+  # Tag every member image with the PR head commit — each push is a distinct,
+  # immutable tag the preview (and any pin) redeploys to.
+  IMAGE_TAG: ${{ github.event.pull_request.head.sha }}
+  # Envs a "pin-<env>" label may target, and that close-cleanup unpins. Keep
+  # this to envs you actually want pinnable (pinning to prod deploys unmerged
+  # PR code to production — gate accordingly via who can apply the label).
+  PIN_ENVS: "staging prod"
+
 jobs:
+  # 1) Preview lifecycle — automatic; no developer action required.
   preview:
+    if: github.event.action != 'closed' && github.event.action != 'labeled' && github.event.action != 'unlabeled'
     runs-on: ubuntu-latest
-    env:
-      API: ${{ vars.SUPARSHIP_API }}
-      PROJECT: ${{ vars.SUPARSHIP_PROJECT }}
-      STACK: ${{ vars.SUPARSHIP_STACK }}
-      TOKEN: ${{ secrets.SUPARSHIP_TOKEN }}
-      NAME: pr-${{ github.event.pull_request.number }}
-      # Tag each member image with the PR head commit so every push is a
-      # distinct, immutable tag the preview redeploys to.
-      IMAGE_TAG: ${{ github.event.pull_request.head.sha }}
     steps:
-      # - name: Build & push member images    # your registry/Dockerfiles
+      # - name: Build & push member images   # your registry/Dockerfiles
       #   run: ...  # tag every member image with $IMAGE_TAG
 
       - name: Create or update stack preview
-        if: github.event.action != 'closed'
         run: |
           # Upsert: re-POSTing re-points every member at this PR's freshly-built
-          # image. 201 = created. Passing imageTag applies to all members (omit
+          # image. 201 = created/updated. imageTag applies to all members (omit
           # to inherit each member's base env image).
           code=$(curl -sS -o /tmp/resp -w '%{http_code}' \
             -X POST "$API/projects/$PROJECT/stacks/$STACK/previews" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
             -d "{\"name\":\"$NAME\",\"imageTag\":\"$IMAGE_TAG\"}")
-          echo "HTTP $code"; cat /tmp/resp
-          if [ "$code" != "201" ]; then exit 1; fi
+          echo "HTTP $code"; cat /tmp/resp; echo
+          [ "$code" = "201" ] || { echo "stack preview create failed"; exit 1; }
+
+      - name: Upsert preview status comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # preview-groups groups the PR's per-app previews and carries each
+          # member's URLs + health. Render one sticky comment (marker-tagged).
+          curl -sS "$API/preview-groups?project=$PROJECT" \
+            -H "Authorization: Bearer $TOKEN" > /tmp/groups
+          body=$(jq -r --arg n "$NAME" '
+            (.previews[] | select(.name==$n)) as $g
+            | "### 🚀 suparShip preview `\($n)` — \($g.health)\n"
+              + ( [ $g.apps[]
+                    | "- **\(.appName)**: "
+                      + (if (.urls|length) > 0
+                         then (.urls | map("<\(.)>") | join(", "))
+                         else "_pending_" end)
+                      + " — \(.status.phase)" ]
+                  | join("\n") )
+          ' /tmp/groups)
+          [ -n "$body" ] || body="### 🚀 suparShip preview \`$NAME\`\n_provisioning…_"
+          printf '%b\n\n<sub>suparship-preview-comment</sub>\n' "$body" > /tmp/body.md
+          # Find an existing sticky comment by its marker and PATCH it, else POST.
+          id=$(gh api "repos/$REPO/issues/$PR/comments" \
+                 --jq 'map(select(.body|test("suparship-preview-comment")))[0].id // empty')
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@/tmp/body.md >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@/tmp/body.md >/dev/null
+          fi
+
+  # 2) Pin lifecycle — label-driven, plus a re-pin on each push so a pinned env
+  #    tracks the latest PR image. needs:[preview] so a push updates the preview
+  #    before we re-pin; always() lets the label paths run when preview is skipped.
+  pin:
+    needs: [preview]
+    if: >
+      always() &&
+      (
+        (github.event.action == 'labeled'   && startsWith(github.event.label.name, 'pin-')) ||
+        (github.event.action == 'unlabeled' && startsWith(github.event.label.name, 'pin-')) ||
+        (github.event.action == 'synchronize' && needs.preview.result == 'success')
+      )
+    runs-on: ubuntu-latest
+    env:
+      # Use a manage-role token for pin/unpin. Falls back to SUPARSHIP_TOKEN,
+      # which then must itself have the manage role.
+      TOKEN: ${{ secrets.SUPARSHIP_PIN_TOKEN || secrets.SUPARSHIP_TOKEN }}
+      ACTION: ${{ github.event.action }}
+      LABEL: ${{ github.event.label.name }}
+      LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+    steps:
+      - name: Apply pin / unpin
+        run: |
+          set -euo pipefail
+
+          # Pin the stack's PR preview to a stable env. Each pipeline member
+          # resolves its own image tag from its preview; non-previewable / not-
+          # deployed / no-image members are skipped server-side (reported, not
+          # failed). Re-pinning an already-pinned env is last-write-wins: this PR
+          # takes it over (the server preserves the pre-pin image so a later
+          # unpin still restores the original). To REFUSE a takeover instead,
+          # GET .../apps/{app} and check .environments[].pinnedFrom first.
+          do_pin() {
+            env="$1"
+            echo "==> pin $STACK preview '$NAME' → $env"
+            code=$(curl -sS -o /tmp/pin -w '%{http_code}' \
+              -X POST "$API/projects/$PROJECT/stacks/$STACK/pin" \
+              -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+              -d "{\"fromPreview\":\"$NAME\",\"targetEnv\":\"$env\"}")
+            echo "HTTP $code"; jq . /tmp/pin 2>/dev/null || cat /tmp/pin
+            [ "$code" = "200" ] || { echo "pin failed"; exit 1; }
+          }
+          do_unpin() {
+            env="$1"
+            echo "==> unpin $STACK $env"
+            code=$(curl -sS -o /tmp/pin -w '%{http_code}' \
+              -X DELETE "$API/projects/$PROJECT/stacks/$STACK/pin" \
+              -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+              -d "{\"targetEnv\":\"$env\"}")
+            echo "HTTP $code"; jq . /tmp/pin 2>/dev/null || cat /tmp/pin
+            [ "$code" = "200" ] || { echo "unpin failed"; exit 1; }
+          }
+
+          case "$ACTION" in
+            labeled)   do_pin   "${LABEL#pin-}" ;;
+            unlabeled) do_unpin "${LABEL#pin-}" ;;
+            synchronize)
+              # Re-pin every pin-<env> label currently on the PR so the pinned
+              # env(s) advance to this push's image. Read from the label list
+              # (process substitution keeps do_pin's exit in this shell).
+              while IFS= read -r l; do
+                case "$l" in pin-*) do_pin "${l#pin-}" ;; esac
+              done < <(printf '%s' "$LABELS_JSON" | jq -r '.[]')
+              ;;
+          esac
+
+  # 3) Cleanup on PR close (merged or not): unpin every pinnable env (idempotent
+  #    — a no-op when not pinned) THEN tear down the stack preview.
+  cleanup:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    env:
+      TOKEN: ${{ secrets.SUPARSHIP_PIN_TOKEN || secrets.SUPARSHIP_TOKEN }}
+    steps:
+      - name: Unpin any envs this PR pinned
+        run: |
+          set -euo pipefail
+          # Unpin is safe/idempotent: members not pinned on the env are skipped.
+          # We don't know which envs were pinned, so unpin all pinnable ones.
+          for env in $PIN_ENVS; do
+            echo "==> unpin $STACK $env"
+            code=$(curl -sS -o /tmp/unpin -w '%{http_code}' \
+              -X DELETE "$API/projects/$PROJECT/stacks/$STACK/pin" \
+              -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+              -d "{\"targetEnv\":\"$env\"}")
+            echo "HTTP $code"; jq . /tmp/unpin 2>/dev/null || cat /tmp/unpin
+            [ "$code" = "200" ] || { echo "unpin $env failed"; exit 1; }
+          done
 
       - name: Delete stack preview
-        if: github.event.action == 'closed'
+        # TOKEN here only needs the developer role; SUPARSHIP_TOKEN is fine.
+        env:
+          TOKEN: ${{ secrets.SUPARSHIP_TOKEN }}
         run: |
-          # 200 = torn down (per-member rows); members without the preview are
-          # skipped server-side.
+          # 200 = torn down (per-member); members without the preview are skipped.
           code=$(curl -sS -o /tmp/resp -w '%{http_code}' \
             -X DELETE "$API/projects/$PROJECT/stacks/$STACK/previews/$NAME" \
             -H "Authorization: Bearer $TOKEN")
-          echo "HTTP $code"; cat /tmp/resp
+          echo "HTTP $code"; cat /tmp/resp; echo
           case "$code" in 200|204) ;; *) exit 1 ;; esac
