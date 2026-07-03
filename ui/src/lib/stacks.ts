@@ -241,6 +241,22 @@ export function resumeStack(
   });
 }
 
+// setStackTargetClusters sets which of a stable env's clusters the stack's
+// members deploy to. clusters is ["*"] (all env clusters), an explicit subset,
+// or [] to clear (inherit the env DeployMode default). Same env for every
+// member; a member not deployed to targetEnv is skipped. apps optionally
+// narrows to a subset.
+export function setStackTargetClusters(
+  project: string,
+  stack: string,
+  req: { targetEnv: string; clusters: string[]; apps?: string[] },
+): Promise<StackBatchResponse> {
+  return api.post<StackBatchResponse>(
+    `${stackBase(project, stack)}/target-clusters`,
+    req,
+  );
+}
+
 // setAppStack adds an app to a stack (or removes it when stack is ""). The
 // server republishes the app so the stack override layer takes effect.
 export function setAppStack(

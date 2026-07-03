@@ -45,6 +45,7 @@ import {
   getResolvedSecrets,
 } from "../lib/secrets";
 import { listOrgEnvironments } from "../lib/settings";
+import type { OrgEnvironment } from "../lib/settings";
 import type { ResolvedSecretEntry } from "../lib/secrets";
 import type {
   AppDeploymentHistoryResponse,
@@ -2010,6 +2011,16 @@ function AppValuesEditor({
   const [deployEnvs, setDeployEnvs] = useState<Record<string, boolean>>({});
   const [deploySaving, setDeploySaving] = useState(false);
   const [previewsSaving, setPreviewsSaving] = useState(false);
+  // Org environments (for resolving each env's clusterRefs / active cluster).
+  const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
+  // Per-env target-cluster selection draft, keyed env name → selected cluster
+  // names. ["*"] means all of that env's clusters; any other list is an explicit
+  // subset. The inherit state (env default only) is shown as the active cluster
+  // selected and omitted from the save payload.
+  const [targetClusters, setTargetClusters] = useState<Record<string, string[]>>(
+    {},
+  );
+  const [targetClustersSaving, setTargetClustersSaving] = useState(false);
 
   // Keep the values scope in step with the environment selected above: a preview
   // selects the shared preview band, a stable env selects its own overrides. So
@@ -2087,6 +2098,20 @@ function AppValuesEditor({
       .then(setConfigVars)
       .catch(() => setConfigVars({ platform: [], vars: [] }));
   }, [project]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listOrgEnvironments()
+      .then((res) => {
+        if (!cancelled) setOrgEnvs(res.environments ?? []);
+      })
+      .catch(() => {
+        /* org envs optional; the target-clusters picker just won't show */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const activeText = scope === BASE_SCOPE ? baseText : (envTexts[scope] ?? "");
   function setActiveText(text: string) {
@@ -2193,6 +2218,100 @@ function AppValuesEditor({
       );
     } finally {
       setDeploySaving(false);
+    }
+  }
+
+  // Resolve an env's bound clusters + its default (active) cluster from the org
+  // env registry, mirroring AppClusterSecrets: clusterRefs, else [activeClusterRef].
+  function resolveEnvClusters(envName: string): {
+    clusters: string[];
+    defaultCluster: string;
+  } {
+    const oe = orgEnvs.find((e) => e.name === envName);
+    const clusters = oe?.clusterRefs?.length
+      ? oe.clusterRefs
+      : oe?.activeClusterRef
+        ? [oe.activeClusterRef]
+        : [];
+    const defaultCluster = oe?.activeClusterRef || clusters[0] || "";
+    return { clusters, defaultCluster };
+  }
+
+  // Only envs with more than one cluster to choose from get a picker.
+  const targetClusterEnvs = stableEnvList
+    .map((e) => ({ envName: e.envName, ...resolveEnvClusters(e.envName) }))
+    .filter((e) => e.clusters.length > 1);
+
+  // Seed the target-cluster draft from the persisted selection whenever the app
+  // data or the resolved org envs change. ["*"] → all; a stored subset → those;
+  // absent/empty → the env default (active cluster), shown as the inherit state.
+  useEffect(() => {
+    const next: Record<string, string[]> = {};
+    for (const e of targetClusterEnvs) {
+      const saved = data.targetClusters?.[e.envName];
+      if (saved && saved.length === 1 && saved[0] === "*") {
+        next[e.envName] = ["*"];
+      } else if (saved && saved.length > 0) {
+        next[e.envName] = saved.filter((c) => e.clusters.includes(c));
+      } else {
+        next[e.envName] = e.defaultCluster ? [e.defaultCluster] : [];
+      }
+    }
+    setTargetClusters(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, orgEnvs]);
+
+  // Normalize a per-env selection to its wire value, or null to inherit (omit).
+  // ["*"] → all; just the default cluster (or nothing) → inherit; else the subset.
+  function targetClusterValue(
+    envName: string,
+    sel: string[],
+  ): string[] | null {
+    if (sel.length === 1 && sel[0] === "*") return ["*"];
+    const { clusters, defaultCluster } = resolveEnvClusters(envName);
+    const chosen = sel.filter((c) => clusters.includes(c));
+    if (chosen.length === 0) return null;
+    if (chosen.length === 1 && chosen[0] === defaultCluster) return null;
+    return [...chosen].sort();
+  }
+
+  function buildTargetClusters(
+    source: Record<string, string[]>,
+  ): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const e of targetClusterEnvs) {
+      const v = targetClusterValue(e.envName, source[e.envName] ?? []);
+      if (v) out[e.envName] = v;
+    }
+    return out;
+  }
+
+  const savedTargetClusters = buildTargetClusters(
+    Object.fromEntries(
+      targetClusterEnvs.map((e) => [
+        e.envName,
+        data.targetClusters?.[e.envName] ?? [],
+      ]),
+    ),
+  );
+  const draftTargetClusters = buildTargetClusters(targetClusters);
+  const targetClustersDirty =
+    JSON.stringify(savedTargetClusters) !== JSON.stringify(draftTargetClusters);
+
+  async function saveTargetClusters() {
+    setTargetClustersSaving(true);
+    try {
+      await updateApp(project, data.name, {
+        targetClusters: draftTargetClusters,
+      });
+      toast.success("Target clusters saved — re-publishing to GitOps.");
+      await onSaved();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to save target clusters",
+      );
+    } finally {
+      setTargetClustersSaving(false);
     }
   }
 
@@ -2525,6 +2644,98 @@ function AppValuesEditor({
                 className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
               >
                 {deploySaving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {targetClusterEnvs.length > 0 && (
+          <div className="mt-4 border-t border-gray-100 pt-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-gray-700">
+                  Target clusters
+                </p>
+                <p className="mt-1 text-xs text-gray-400">
+                  Choose which of each environment's clusters this app deploys
+                  to. Leave the default (the environment's active cluster) to
+                  inherit, pick a specific subset, or select “All clusters” to
+                  follow every cluster the environment has.
+                </p>
+                <div className="mt-3 space-y-3">
+                  {targetClusterEnvs.map((e) => {
+                    const sel = targetClusters[e.envName] ?? [];
+                    const isAll = sel.length === 1 && sel[0] === "*";
+                    return (
+                      <div
+                        key={e.envName}
+                        className="rounded-lg border border-gray-200 p-3"
+                      >
+                        <p className="mb-2 text-xs font-medium capitalize text-gray-700">
+                          {e.envName}
+                        </p>
+                        <div className="flex flex-wrap gap-x-4 gap-y-2">
+                          <label className="flex items-center gap-2 text-xs text-gray-600">
+                            <input
+                              type="checkbox"
+                              checked={isAll}
+                              onChange={(ev) =>
+                                setTargetClusters((cur) => ({
+                                  ...cur,
+                                  [e.envName]: ev.target.checked
+                                    ? ["*"]
+                                    : e.defaultCluster
+                                      ? [e.defaultCluster]
+                                      : [],
+                                }))
+                              }
+                              className="h-4 w-4 rounded border-gray-300"
+                            />
+                            <span className="font-medium">All clusters</span>
+                          </label>
+                          {e.clusters.map((cluster) => (
+                            <label
+                              key={cluster}
+                              className="flex items-center gap-2 text-xs text-gray-600"
+                            >
+                              <input
+                                type="checkbox"
+                                disabled={isAll}
+                                checked={isAll || sel.includes(cluster)}
+                                onChange={(ev) =>
+                                  setTargetClusters((cur) => {
+                                    const prev = cur[e.envName] ?? [];
+                                    const nextSel = ev.target.checked
+                                      ? [
+                                          ...prev.filter((c) => c !== "*"),
+                                          cluster,
+                                        ]
+                                      : prev.filter((c) => c !== cluster);
+                                    return { ...cur, [e.envName]: nextSel };
+                                  })
+                                }
+                                className="h-4 w-4 rounded border-gray-300 disabled:opacity-50"
+                              />
+                              <span className="font-mono">{cluster}</span>
+                              {cluster === e.defaultCluster && (
+                                <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
+                                  active
+                                </span>
+                              )}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <button
+                onClick={saveTargetClusters}
+                disabled={targetClustersSaving || !targetClustersDirty}
+                className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {targetClustersSaving ? "Saving…" : "Save"}
               </button>
             </div>
           </div>

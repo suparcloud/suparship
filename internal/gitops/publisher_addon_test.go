@@ -164,8 +164,8 @@ func TestPublishAppFiles_AddonWithoutProfile_Skipped(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	// Main app files still produced …
-	mainApp := filepath.Join(dir, "envs", "staging", "demo", "hello", "app.yaml")
+	// Main app files still produced … (per-cluster in-cluster fallback target)
+	mainApp := filepath.Join(dir, "envs", "staging", "demo", "hello", "_targets", "in-cluster", "app.yaml")
 	if _, err := os.Stat(mainApp); os.IsNotExist(err) {
 		t.Error("main app.yaml should exist even when addon profile is missing")
 	}

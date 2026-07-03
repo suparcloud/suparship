@@ -296,6 +296,17 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fold the per-env cluster-targeting selection into the app's
+	// EnvironmentDefaults (mirrors ClusterOverrides), rejecting any cluster that
+	// is not registered on the env first.
+	if req.TargetClusters != nil {
+		if err := ah.validateTargetClusters(r.Context(), req.TargetClusters); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		result.App.Spec.EnvironmentDefaults = foldTargetClusters(result.App.Spec.EnvironmentDefaults, req.TargetClusters)
+	}
+
 	// Verify at least one environment is registered in the org before creating
 	// the app. Deploying to unregistered environments silently would produce
 	// orphaned GitOps manifests pointing at clusters that don't exist.
@@ -511,6 +522,15 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			ed[envName] = ov
 		}
 		app.Spec.EnvironmentDefaults = ed
+	}
+	if req.TargetClusters != nil {
+		// Reject any selection naming a cluster not registered on the env before
+		// folding it into the app's per-env override record.
+		if err := ah.validateTargetClusters(r.Context(), req.TargetClusters); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		app.Spec.EnvironmentDefaults = foldTargetClusters(app.Spec.EnvironmentDefaults, req.TargetClusters)
 	}
 	if req.RawValues != nil {
 		app.Spec.RawValues = *req.RawValues
@@ -2153,6 +2173,57 @@ func (ah *appHandler) suspendAppEnv(ctx context.Context, projectName, appName, e
 	return ah.republishAppsEnv(ctx, []AppEnvTarget{{App: app, Env: targetEnv}})
 }
 
+// Sentinels for the stack-level target-clusters fan-out: a member not deployed
+// to the env is a skip (not applicable), the rest are real errors.
+var (
+	errTargetAppNotFound = errors.New("app not found")
+	errTargetEnvNotFound = errors.New("environment not found")
+	errTargetIsPreview   = errors.New("cannot target a preview environment")
+)
+
+// targetClustersIsSkippable reports whether a set-target-clusters failure means
+// the op doesn't apply to this member (it isn't deployed to the env) rather than
+// a real error — a skip row in a stack fan-out.
+func targetClustersIsSkippable(err error) bool {
+	return errors.Is(err, errTargetEnvNotFound)
+}
+
+// setAppEnvTargetClustersSpec sets (or clears, when clusters is empty) the
+// per-env TargetClusters selection on one app WITHOUT publishing (no git),
+// returning the app + target env record so the caller can batch the publish.
+// Shared by the stack fan-out; per-app selection goes through PATCH app.
+// Callers must validate clusters against the env's ClusterRefs first
+// (validateTargetClusters). Changing targets rewrites the env's _targets/ app
+// files AND the Kargo Stage's argocd-update app list, so publish the full app
+// tree (republishAppsFocus), not just the env values.
+func (ah *appHandler) setAppEnvTargetClustersSpec(ctx context.Context, projectName, appName, envName string, clusters []string) (*domain.App, *domain.AppEnvironment, error) {
+	app, err := ah.appStore.GetApp(ctx, projectName, appName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: app %q in project %q", errTargetAppNotFound, appName, projectName)
+	}
+	targetEnv, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %q for app %q", errTargetEnvNotFound, envName, appName)
+	}
+	if targetEnv.EnvType == domain.AppEnvPreview {
+		return nil, nil, errTargetIsPreview
+	}
+	if app.Spec.EnvironmentDefaults == nil {
+		app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+	}
+	ov := app.Spec.EnvironmentDefaults[envName]
+	if len(clusters) == 0 {
+		ov.TargetClusters = nil // clear → inherit the env DeployMode default
+	} else {
+		ov.TargetClusters = clusters
+	}
+	app.Spec.EnvironmentDefaults[envName] = ov
+	if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
+		return nil, nil, fmt.Errorf("failed to save app: %w", err)
+	}
+	return app, targetEnv, nil
+}
+
 // republishAppsEnv publishes one env's values for many apps. It ensures each
 // target env's namespace, then uses the batched BatchEnvPublisher (a single
 // clone/commit/push) when the publisher supports it, else falls back to a
@@ -2624,16 +2695,28 @@ type argoClusterApp struct {
 // mirroring the publisher's gitops.appSetClusterTargets fallback.
 func (ah *appHandler) argoAppNamesForEnv(ctx context.Context, projectName, appName, envName string) []argoClusterApp {
 	var pattern string
-	var clusters []string
+	var deployTargets, clusterRefs []string
 	if ah.orgProvider != nil {
 		if org, err := ah.orgProvider.GetOrg(ctx); err == nil && org != nil {
 			pattern = org.ResourceNaming.EffectiveArgoAppName()
 			for _, e := range org.Environments {
 				if e.Name == envName {
-					clusters = e.ResolveDeployTargets()
+					deployTargets = e.ResolveDeployTargets()
+					clusterRefs = e.ClusterRefs
 					break
 				}
 			}
+		}
+	}
+	// Resolve the app's per-env cluster selection so status/diagnostics read the
+	// Applications the app actually deploys (a targeted app may run on a subset
+	// of, or different clusters than, the env default). Unset selection → the env
+	// default, so single-cluster / untargeted apps are unchanged.
+	clusters := deployTargets
+	if ah.appStore != nil {
+		if app, err := ah.appStore.GetApp(ctx, projectName, appName); err == nil && app != nil {
+			clusters = domain.ResolveAppClusterTargets(
+				app.Spec.EnvironmentDefaults[envName].TargetClusters, deployTargets, clusterRefs)
 		}
 	}
 	if len(clusters) == 0 {
@@ -2942,6 +3025,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		Addons:           addonDTOs(app.Spec.Addons),
 		Environments:     envDTOs,
 		ClusterOverrides: clusterOverridesDTO(app.Spec.EnvironmentDefaults),
+		TargetClusters:   targetClustersDTO(app.Spec.EnvironmentDefaults),
 		RawValues:        app.Spec.RawValues,
 		EnvRawValues:     envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
@@ -3030,6 +3114,83 @@ func clusterOverridesDTO(defaults map[string]domain.EnvironmentOverride) map[str
 			out = map[string]map[string]domain.ClusterValueOverride{}
 		}
 		out[envName] = ov.ClusterOverrides
+	}
+	return out
+}
+
+// foldTargetClusters folds a per-env cluster-targeting selection (env →
+// cluster names) into the app's EnvironmentDefaults, mirroring how
+// ClusterOverrides is folded. An env with an empty list clears the override
+// (inherit the env default); creates the per-env override record when nil.
+func foldTargetClusters(defaults map[string]domain.EnvironmentOverride, targetClusters map[string][]string) map[string]domain.EnvironmentOverride {
+	ed := defaults
+	if ed == nil {
+		ed = map[string]domain.EnvironmentOverride{}
+	}
+	for envName, clusters := range targetClusters {
+		ov := ed[envName]
+		if len(clusters) == 0 {
+			ov.TargetClusters = nil
+		} else {
+			ov.TargetClusters = clusters
+		}
+		ed[envName] = ov
+	}
+	return ed
+}
+
+// validateTargetClusters rejects any per-env cluster-targeting selection that
+// names a cluster not in that env's registered ClusterRefs. The
+// AllClustersSentinel ("*") and an empty/omitted list are always allowed. If
+// the org config can't be loaded or an env's ClusterRefs can't be resolved,
+// strict validation for that env is skipped — the generation layer drops
+// unknown refs anyway, so a lookup miss must not hard-fail the request.
+func (ah *appHandler) validateTargetClusters(ctx context.Context, targetClusters map[string][]string) error {
+	if len(targetClusters) == 0 || ah.orgProvider == nil {
+		return nil
+	}
+	org, err := ah.orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		return nil
+	}
+	refsByEnv := make(map[string]map[string]struct{}, len(org.Environments))
+	for _, e := range org.Environments {
+		set := make(map[string]struct{}, len(e.ClusterRefs))
+		for _, c := range e.ClusterRefs {
+			set[c] = struct{}{}
+		}
+		refsByEnv[e.Name] = set
+	}
+	for envName, sel := range targetClusters {
+		refs, ok := refsByEnv[envName]
+		if !ok || len(refs) == 0 {
+			continue // unknown env / unresolved refs → skip strict validation
+		}
+		for _, c := range sel {
+			if c == domain.AllClustersSentinel {
+				continue
+			}
+			if _, inEnv := refs[c]; !inEnv {
+				return fmt.Errorf("environment %q: cluster %q is not one of the environment's registered clusters", envName, c)
+			}
+		}
+	}
+	return nil
+}
+
+// targetClustersDTO extracts the per-env cluster-targeting selection from the
+// app's EnvironmentDefaults into the env → cluster-names map the API exposes.
+// Mirrors clusterOverridesDTO. Returns nil when no env sets one.
+func targetClustersDTO(defaults map[string]domain.EnvironmentOverride) map[string][]string {
+	var out map[string][]string
+	for envName, ov := range defaults {
+		if len(ov.TargetClusters) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string][]string{}
+		}
+		out[envName] = ov.TargetClusters
 	}
 	return out
 }

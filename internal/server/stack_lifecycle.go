@@ -538,6 +538,110 @@ type stackSuspendRequest struct {
 // handleSuspendStack suspends a stack's env across member apps; handleResumeStack
 // resumes it. Both fan out over the (optionally subset-narrowed) members; a
 // member not deployed to targetEnv is skipped.
+// stackTargetClustersRequest sets which of a stable env's clusters the stack's
+// members deploy to, across member apps. clusters is ["*"] (all env clusters),
+// an explicit subset, or [] to clear (each member inherits the env DeployMode
+// default). Same env for every member, so validation runs once. Apps optionally
+// narrows to a subset (default: all). Members not deployed to targetEnv are
+// skipped, not failed.
+type stackTargetClustersRequest struct {
+	TargetEnv string   `json:"targetEnv"`
+	Clusters  []string `json:"clusters"`
+	Apps      []string `json:"apps,omitempty"`
+}
+
+// handleSetStackTargetClusters sets the per-env target clusters across a stack's
+// member apps in ONE batched publish. Mirrors handlePinStack (full-tree focus
+// republish, since changing targets rewrites each app's _targets/ files and its
+// Kargo Stage argocd-update list).
+func (rh *rbacHandler) handleSetStackTargetClusters(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("project")
+	name := r.PathValue("stack")
+	if rh.appHandler == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "app store not configured"})
+		return
+	}
+	var req stackTargetClustersRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	req.TargetEnv = strings.TrimSpace(req.TargetEnv)
+	if req.TargetEnv == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "targetEnv is required"})
+		return
+	}
+	if _, err := rh.stackStore.GetStack(r.Context(), project, name); err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "stack not found: " + name})
+		return
+	}
+	members, err := selectStackMembers(rh.stackMemberApps(r.Context(), project, name), req.Apps)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if !rh.validTargetEnv(r.Context(), members, req.TargetEnv) {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "unknown target environment: " + req.TargetEnv})
+		return
+	}
+	// Same env for every member — validate the cluster selection once.
+	if err := rh.appHandler.validateTargetClusters(r.Context(), map[string][]string{req.TargetEnv: req.Clusters}); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+	// Phase 1 (concurrent): mutate each member's spec. No git yet.
+	type targetPrep struct {
+		app       *domain.App
+		targetEnv *domain.AppEnvironment
+		err       error
+	}
+	preps := prepMembers(members, func(a *domain.App) targetPrep {
+		app, targetEnv, err := rh.appHandler.setAppEnvTargetClustersSpec(r.Context(), project, a.Name, req.TargetEnv, req.Clusters)
+		return targetPrep{app: app, targetEnv: targetEnv, err: err}
+	})
+	results := make([]stackOpResult, 0, len(members))
+	var items []appFocusPublish
+	var pubNames []string
+	for i, a := range members {
+		p := preps[i]
+		switch {
+		case p.err == nil:
+			items = append(items, appFocusPublish{app: p.app, focusEnv: p.targetEnv})
+			pubNames = append(pubNames, a.Name)
+		case targetClustersIsSkippable(p.err):
+			results = append(results, skipResult(a.Name, p.err.Error()))
+		default:
+			results = append(results, errResult(a.Name, p.err))
+		}
+	}
+	// Phase 2: publish every mutated member's full tree + target env in ONE
+	// clone/commit/push.
+	msg := req.TargetEnv + " → " + targetClustersLabel(req.Clusters)
+	if len(items) > 0 {
+		if err := rh.appHandler.republishAppsFocus(r.Context(), items); err != nil {
+			for _, n := range pubNames {
+				results = append(results, errResult(n, err))
+			}
+		} else {
+			for _, n := range pubNames {
+				results = append(results, okResult(n, msg))
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "target-clusters", Results: results})
+}
+
+// targetClustersLabel renders a human summary of a target-clusters selection.
+func targetClustersLabel(clusters []string) string {
+	if len(clusters) == 0 {
+		return "env default"
+	}
+	if len(clusters) == 1 && clusters[0] == domain.AllClustersSentinel {
+		return "all clusters"
+	}
+	return strings.Join(clusters, ", ")
+}
+
 func (rh *rbacHandler) handleSuspendStack(w http.ResponseWriter, r *http.Request) {
 	rh.serveStackSuspend(w, r, true)
 }

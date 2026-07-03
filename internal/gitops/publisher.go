@@ -769,8 +769,10 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			ns = app.Name + "-" + env.EnvName
 		}
 
-		// Write app.yaml — Git File generator parameters.
-		appMeta := AppMetadata{
+		// Base app.yaml fields shared across the app's target clusters. The
+		// per-(app,cluster) fields (AppName/ClusterName/ClusterServer/ValuesPath)
+		// are filled per target inside the write loop below.
+		baseMeta := AppMetadata{
 			Name:      app.Name,
 			Project:   app.ProjectName,
 			Template:  app.Spec.Template.Name,
@@ -781,20 +783,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// BuildArgoExternalAppSet's generator can render
 		// {{chartRepoURL}}, {{chartName}}, {{chartVersion}} per app.
 		if chartMode == AppMetadataChartTypeExternal && chartRef != nil {
-			appMeta.ChartType = ChartTypeExternal
-			appMeta.ChartRepoURL = chartRef.Repository
-			appMeta.ChartName = chartRef.Name
-			appMeta.ChartVersion = chartRef.Version
+			baseMeta.ChartType = ChartTypeExternal
+			baseMeta.ChartRepoURL = chartRef.Repository
+			baseMeta.ChartName = chartRef.Name
+			baseMeta.ChartVersion = chartRef.Version
 		}
-		appMetaBytes, err := yaml.Marshal(appMeta)
-		if err != nil {
-			return fmt.Errorf("marshal app.yaml for env %s: %w", env.EnvName, err)
-		}
-		appMetaPath := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name, "app.yaml")
-		if err := p.writeFile(appMetaPath, appMetaBytes); err != nil {
-			return err
-		}
-
 		// Write values.yaml — Helm values with env-specific baseDomain and
 		// the resolved namespace so secretName/configName are consistent.
 		// Org-level profiles come from PublisherConfig (set by SetOrgConfig
@@ -871,24 +864,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			}
 			return marshalValuesWithOverlay(hv, overlay, env.EnvVars)
 		}
-		if len(env.Clusters) > 1 {
-			// Fan-out: one values.yaml per cluster under _clusters/<cluster>/,
-			// each merged with that cluster's overrides + routing. The matrix
-			// ApplicationSet points its valueFile at this path via {{clusterName}}.
-			for _, c := range env.Clusters {
-				cvPath := p.envAppDir(chartMode, repoDir, env, "_clusters", c.Name, app.ProjectName, app.Name, "values.yaml")
-				hvBytes, err := marshalValues(c, cvPath)
-				if err != nil {
-					return fmt.Errorf("marshal values.yaml for env %s cluster %s: %w", env.EnvName, c.Name, err)
-				}
-				if err := p.writeFile(cvPath, hvBytes); err != nil {
-					return err
-				}
-			}
-		} else {
-			// Single cluster: use the resolved active cluster's routing when
-			// present (so a lone remote cluster on another cloud still gets its
-			// own domain/ingress), else fall back to the env's ClusterRef.
+		if env.EnvType == domain.AppEnvPreview {
+			// Previews keep the flat single app.yaml + values.yaml layout: a
+			// preview always targets its base env's one cluster, and its own
+			// ApplicationSet globs the preview tree — per-app cluster targeting
+			// (below) is a stable-env feature only.
 			target := ClusterTarget{Name: env.ClusterRef}
 			if len(env.Clusters) == 1 {
 				target = env.Clusters[0]
@@ -900,6 +880,76 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			}
 			if err := p.writeFile(valuesPath, hvBytes); err != nil {
 				return err
+			}
+			appMetaBytes, err := yaml.Marshal(baseMeta)
+			if err != nil {
+				return fmt.Errorf("marshal app.yaml for env %s: %w", env.EnvName, err)
+			}
+			if err := p.writeFile(p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name, "app.yaml"), appMetaBytes); err != nil {
+				return err
+			}
+		} else {
+			// Stable env: write one values.yaml + one app.yaml per cluster the app
+			// targets (env.Clusters is this app's resolved selection). A single
+			// target uses the shared env values.yaml (unchanged layout); >1 fans
+			// out to _clusters/<cluster>/ values. Each app.yaml is a plain git-file
+			// the ApplicationSet turns into exactly one Application — no env-wide
+			// cluster matrix — so sibling apps in the same env can target different
+			// clusters. Prune stale _targets (de-selected clusters) and the legacy
+			// flat app.yaml first so nothing generates a phantom Application.
+			if err := os.RemoveAll(p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name, "_targets")); err != nil {
+				return fmt.Errorf("prune _targets for env %s: %w", env.EnvName, err)
+			}
+			_ = os.Remove(p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name, "app.yaml"))
+
+			targets := env.Clusters
+			if len(targets) == 0 {
+				// Unbound / no resolvable cluster: keep the app publishable on the
+				// active ClusterRef (may be "") — falls back to the in-cluster server.
+				targets = []ClusterTarget{{Name: env.ClusterRef}}
+			}
+			fanOut := len(targets) > 1
+			namePattern := p.cfg.ResourceNaming.EffectiveArgoAppName()
+			for _, c := range targets {
+				targetName := c.Name
+				if targetName == "" {
+					targetName = fallbackClusterName
+				}
+				server := c.Server
+				if server == "" {
+					server = defaultDestination
+				}
+				// Shared env values file for a single target; per-cluster file when
+				// fanning out. valueParts is relative to envs/{env} (or
+				// envs-external/{env} for external-mode apps).
+				valueParts := []string{app.ProjectName, app.Name, "values.yaml"}
+				if fanOut {
+					valueParts = []string{"_clusters", c.Name, app.ProjectName, app.Name, "values.yaml"}
+				}
+				valuesAbs := p.envAppDir(chartMode, repoDir, env, valueParts...)
+				hvBytes, err := marshalValues(c, valuesAbs)
+				if err != nil {
+					return fmt.Errorf("marshal values.yaml for env %s cluster %s: %w", env.EnvName, targetName, err)
+				}
+				if err := p.writeFile(valuesAbs, hvBytes); err != nil {
+					return err
+				}
+
+				// app.yaml for this (app, cluster): fully-rendered Application name
+				// so existing names are unchanged, plus destination + values path.
+				meta := baseMeta
+				meta.AppName = RenderArgoAppName(namePattern, app.ProjectName, app.Name, env.EnvName, targetName)
+				meta.ClusterName = targetName
+				meta.ClusterServer = server
+				meta.ValuesPath = p.envAppRelPath(chartMode, env, valueParts...)
+				metaBytes, err := yaml.Marshal(meta)
+				if err != nil {
+					return fmt.Errorf("marshal app.yaml for env %s cluster %s: %w", env.EnvName, targetName, err)
+				}
+				metaPath := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name, "_targets", targetName, "app.yaml")
+				if err := p.writeFile(metaPath, metaBytes); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -2530,6 +2580,19 @@ func (p *Publisher) appEnvDirExternal(repoDir string, env AppPublishEnv, parts .
 	}
 	all := append([]string{"envs-external", env.EnvName}, parts...)
 	return p.outputDir(repoDir, all...)
+}
+
+// envAppRelPath is envAppDir's repo-root-relative twin: the slash-joined path
+// (under SubPath) used inside YAML manifests — e.g. AppMetadata.ValuesPath that
+// the ApplicationSet reads via $appvalues/{{valuesPath}}. Mirrors the
+// inline/external routing of envAppDir/appEnvDir(External).
+func (p *Publisher) envAppRelPath(mode AppMetadataChartType, env AppPublishEnv, parts ...string) string {
+	prefix := "envs"
+	if mode == AppMetadataChartTypeExternal && env.EnvType != domain.AppEnvPreview {
+		prefix = "envs-external"
+	}
+	all := append([]string{prefix, env.EnvName}, parts...)
+	return p.relativeOutputPath(all...)
 }
 
 // AppMetadataChartType is an internal flag the publisher uses to route

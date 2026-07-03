@@ -20,12 +20,15 @@ import {
   promoteStack,
   resumeStack,
   setAppStack,
+  setStackTargetClusters,
   suspendStack,
   syncStack,
   unpinStack,
   updateStack,
 } from "../lib/stacks";
 import type { Stack, StackBatchResponse, StackOpResult } from "../lib/stacks";
+import { listOrgEnvironments } from "../lib/settings";
+import type { OrgEnvironment } from "../lib/settings";
 import type { EnvConfig } from "../lib/envconfig";
 import {
   listStackGlobalSecretKeys,
@@ -113,6 +116,36 @@ function ResultRows({ results }: { results: StackOpResult[] }) {
   );
 }
 
+// effectiveClusters resolves which cluster(s) an environment deploys to by
+// default: every clusterRef in "all" (fan-out) mode, else the active one
+// (falling back to the first). Mirrors NewService's helper of the same name.
+function effectiveClusters(env: OrgEnvironment): string[] {
+  if ((env.deployMode ?? "active") === "all") {
+    return env.clusterRefs ?? [];
+  }
+  const active = env.activeClusterRef || env.clusterRefs?.[0] || "";
+  return active ? [active] : [];
+}
+
+// sameSet reports whether two string slices contain the same elements.
+function sameSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const s = new Set(a);
+  return b.every((x) => s.has(x));
+}
+
+// stackClustersForEnv maps a per-env UI selection to the wire `clusters` value
+// for setStackTargetClusters: empty or == the env's DeployMode default → [] (clear
+// the per-member override, inherit the default); all of the env's clusters →
+// ["*"] (track the env dynamically); any other set → that explicit subset.
+function stackClustersForEnv(env: OrgEnvironment, chosen: string[]): string[] {
+  const refs = env.clusterRefs ?? [];
+  if (chosen.length === 0) return []; // clear → inherit default
+  if (sameSet(chosen, refs)) return ["*"]; // all → dynamic
+  if (sameSet(chosen, effectiveClusters(env))) return []; // == default → inherit
+  return [...chosen].sort();
+}
+
 export function StackDetail() {
   const { project, stack: stackName } = useParams<{ project: string; stack: string }>();
   const navigate = useNavigate();
@@ -132,6 +165,12 @@ export function StackDetail() {
   const [previewGroups, setPreviewGroups] = useState<PreviewGroup[]>([]);
   // Per-preview-group selected pin target env (keyed by preview name).
   const [pinTargets, setPinTargets] = useState<Record<string, string>>({});
+  // Org environments (excluding "preview") — drives the Target clusters control.
+  const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
+  // Per-env chosen cluster names for the Target clusters control (UI state). An
+  // env absent here defaults to its DeployMode default; see stackClustersForEnv
+  // for the wire mapping. Only meaningful for envs with more than one cluster.
+  const [targetSel, setTargetSel] = useState<Record<string, string[]>>({});
 
   const loadPreviews = useCallback(() => {
     if (!project) return;
@@ -163,6 +202,14 @@ export function StackDetail() {
   useEffect(() => {
     loadPreviews();
   }, [loadPreviews]);
+
+  useEffect(() => {
+    listOrgEnvironments()
+      .then((res) =>
+        setOrgEnvs((res.environments ?? []).filter((e) => e.name !== "preview")),
+      )
+      .catch(() => setOrgEnvs([]));
+  }, []);
 
   if (!project || !stackName) return null;
   if (error) return <div className="p-6 text-sm text-red-600">{error}</div>;
@@ -276,6 +323,29 @@ export function StackDetail() {
       await reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Failed to unpin");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // doSetTargetClusters applies the chosen cluster selection for one stable env
+  // across the stack's members. Members not deployed to that env are skipped; a
+  // default/empty selection clears each member's override back to the env default.
+  async function doSetTargetClusters(env: OrgEnvironment) {
+    const chosen = targetSel[env.name] ?? effectiveClusters(env);
+    const clusters = stackClustersForEnv(env, chosen);
+    setBusy(`target:${env.name}`);
+    try {
+      summarize(
+        `Target clusters ${env.displayName || env.name}`,
+        await setStackTargetClusters(project!, stackName!, {
+          targetEnv: env.name,
+          clusters,
+        }),
+      );
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to set target clusters");
     } finally {
       setBusy(null);
     }
@@ -677,6 +747,120 @@ export function StackDetail() {
                 </span>
               </span>
             </label>
+          </div>
+
+          {/* Target clusters — per stable env, choose which of the env's
+              clusters the stack's members deploy to. Only multi-cluster envs
+              offer a choice; single-cluster envs are shown read-only. */}
+          <div className="rounded-xl border border-gray-200 bg-white">
+            <div className="border-b border-gray-100 px-6 py-4">
+              <h2 className="text-base font-medium text-gray-900">Target clusters</h2>
+              <p className="mt-0.5 text-sm text-gray-500">
+                For a multi-cluster environment, pick which clusters this stack's
+                member apps deploy to. Members not deployed to an environment are
+                skipped. Applying the environment's default resets each member's
+                override to inherit the environment default.
+              </p>
+            </div>
+            <div className="px-6 py-2">
+              {orgEnvs.length === 0 ? (
+                <p className="py-2 text-sm text-gray-400">No environments.</p>
+              ) : (
+                <ul className="divide-y divide-gray-50">
+                  {[...orgEnvs]
+                    .sort((a, b) => a.order - b.order)
+                    .map((env) => {
+                      const refs = env.clusterRefs ?? [];
+                      const multi = refs.length > 1;
+                      const current = targetSel[env.name] ?? effectiveClusters(env);
+                      const allSelected = multi && sameSet(current, refs);
+                      const applying = busy === `target:${env.name}`;
+                      function toggle(cluster: string) {
+                        const next = current.includes(cluster)
+                          ? current.filter((c) => c !== cluster)
+                          : [...current, cluster];
+                        setTargetSel((prev) => ({ ...prev, [env.name]: next }));
+                      }
+                      return (
+                        <li key={env.name} className="py-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-sm font-medium text-gray-800">
+                              {env.displayName || env.name}
+                            </span>
+                            {!multi && (
+                              <span className="font-mono text-xs text-gray-500">
+                                {refs[0] || env.activeClusterRef ? (
+                                  refs[0] || env.activeClusterRef
+                                ) : (
+                                  <span className="text-amber-600">no cluster bound</span>
+                                )}
+                              </span>
+                            )}
+                          </div>
+                          {multi && (
+                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setTargetSel((prev) => ({
+                                    ...prev,
+                                    [env.name]: allSelected
+                                      ? effectiveClusters(env)
+                                      : refs,
+                                  }))
+                                }
+                                disabled={busy !== null}
+                                className={`rounded border px-2 py-0.5 text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                                  allSelected
+                                    ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                                    : "border-gray-200 text-gray-500 hover:bg-gray-50"
+                                }`}
+                              >
+                                All clusters
+                              </button>
+                              {refs.map((c) => {
+                                const on = current.includes(c);
+                                return (
+                                  <button
+                                    key={c}
+                                    type="button"
+                                    onClick={() => toggle(c)}
+                                    disabled={busy !== null}
+                                    className={`rounded border px-2 py-0.5 font-mono text-[11px] transition-colors disabled:opacity-50 ${
+                                      on
+                                        ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                                        : "border-gray-200 text-gray-500 hover:bg-gray-50"
+                                    }`}
+                                  >
+                                    {c}
+                                    {c === env.activeClusterRef && (
+                                      <span className="ml-1 text-[9px] uppercase text-gray-400">
+                                        active
+                                      </span>
+                                    )}
+                                  </button>
+                                );
+                              })}
+                              <button
+                                onClick={() => doSetTargetClusters(env)}
+                                disabled={busy !== null}
+                                className="ml-1 rounded-md border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                              >
+                                {applying ? "Applying…" : "Apply"}
+                              </button>
+                              {current.length === 0 && (
+                                <span className="text-[11px] text-amber-600">
+                                  applying with none clears the override (inherit default)
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </li>
+                      );
+                    })}
+                </ul>
+              )}
+            </div>
           </div>
 
           {/* Danger zone */}

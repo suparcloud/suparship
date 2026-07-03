@@ -168,6 +168,11 @@ type AppDetailDTO struct {
 	// env → cluster, so the UI can edit them. Only populated for envs that have
 	// any. Mirrors what the edit PATCH accepts.
 	ClusterOverrides map[string]map[string]domain.ClusterValueOverride `json:"clusterOverrides,omitempty"`
+	// TargetClusters surfaces the per-env cluster-targeting selection keyed by
+	// environment name → cluster names. A value of ["*"] means all of the env's
+	// clusters (tracks the env); an explicit list means that subset; an omitted
+	// env inherits the env default. Only populated for envs that set one.
+	TargetClusters map[string][]string `json:"targetClusters,omitempty"`
 	// RawValues surfaces the app-level freeform Helm values overlay so the UI can
 	// edit it. Omitted when unset.
 	RawValues map[string]any `json:"rawValues,omitempty"`
@@ -325,6 +330,12 @@ type createAppRequest struct {
 	// EnvComponents holds per-(env, component) overrides keyed env → component,
 	// for setting staging≠prod tuning at creation.
 	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
+	// TargetClusters selects, per environment, which of the env's clusters this
+	// app deploys to, keyed by environment name → cluster names. A value of
+	// ["*"] means all of the env's clusters (tracks the env); an explicit list
+	// means that subset; an omitted env inherits the env default. Cluster names
+	// must be members of that env's registered ClusterRefs.
+	TargetClusters map[string][]string `json:"targetClusters,omitempty"`
 	// CD configures external-CD (Kargo) ownership of the image tag. Optional;
 	// omit to leave it disabled.
 	CD *CDConfigDTO `json:"cd,omitempty"`
@@ -360,6 +371,12 @@ type updateAppRequest struct {
 	// environments; each entry is deep-merged over the env values for that
 	// cluster at publish. Omit to leave existing overrides untouched.
 	ClusterOverrides map[string]map[string]domain.ClusterValueOverride `json:"clusterOverrides,omitempty"`
+	// TargetClusters, when non-nil, replaces the per-env cluster-targeting
+	// selection keyed by environment name → cluster names. A value of ["*"]
+	// means all of the env's clusters (tracks the env); an explicit list means
+	// that subset; an empty/omitted env inherits the env default. Cluster names
+	// must be members of that env's registered ClusterRefs.
+	TargetClusters map[string][]string `json:"targetClusters,omitempty"`
 	// RawValues, when non-nil, replaces the app-level freeform Helm values
 	// overlay. Send an empty object to clear it.
 	RawValues *map[string]any `json:"rawValues,omitempty"`

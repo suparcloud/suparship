@@ -353,6 +353,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 			// pin routes (manageProject).
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/pin", manageProject(rh.handlePinStack))
 			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/pin", manageProject(rh.handleUnpinStack))
+			// Set per-env target clusters across the stack (same privilege as the
+			// per-app PATCH that carries targetClusters).
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/target-clusters", manageProject(rh.handleSetStackTargetClusters))
 			// Suspend/resume are developer-triggerable (reversible, CI-callable).
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/suspend", devProject(rh.handleSuspendStack))
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/resume", devProject(rh.handleResumeStack))

@@ -79,18 +79,20 @@ func TestPublishAppFiles_ExternalMode_RoutesToEnvsExternal(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	// app.yaml + values.yaml must land under envs-external/staging/...
+	// app.yaml lands under envs-external/staging/.../_targets/{cluster}/ (per
+	// target cluster; in-cluster fallback here); values.yaml stays shared.
 	externalDir := filepath.Join(dir, "envs-external", "staging", "demo", "hello")
-	for _, name := range []string{"app.yaml", "values.yaml"} {
-		if _, err := os.Stat(filepath.Join(externalDir, name)); err != nil {
-			t.Errorf("expected %s under envs-external; got: %v", name, err)
-		}
+	if _, err := os.Stat(filepath.Join(externalDir, "_targets", "in-cluster", "app.yaml")); err != nil {
+		t.Errorf("expected app.yaml under envs-external _targets/in-cluster; got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(externalDir, "values.yaml")); err != nil {
+		t.Errorf("expected values.yaml under envs-external; got: %v", err)
 	}
 
 	// And NOT under envs/staging/... — that path belongs to the inline
 	// AppSet's glob and would double-deploy.
 	inlineDir := filepath.Join(dir, "envs", "staging", "demo", "hello")
-	if _, err := os.Stat(filepath.Join(inlineDir, "app.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(inlineDir, "_targets", "in-cluster", "app.yaml")); !os.IsNotExist(err) {
 		t.Errorf("inline envs/ path must be empty for external-mode apps; stat err = %v", err)
 	}
 }
@@ -120,7 +122,7 @@ func TestPublishAppFiles_ExternalMode_AppMetadataPopulated(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	appYAMLBytes, err := os.ReadFile(filepath.Join(dir, "envs-external", "staging", "demo", "hello", "app.yaml"))
+	appYAMLBytes, err := os.ReadFile(filepath.Join(dir, "envs-external", "staging", "demo", "hello", "_targets", "in-cluster", "app.yaml"))
 	if err != nil {
 		t.Fatalf("read app.yaml: %v", err)
 	}
@@ -165,16 +167,16 @@ func TestPublishAppFiles_InlineMode_BackCompat(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	// Files land under envs/, not envs-external/.
-	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "hello", "app.yaml")); err != nil {
+	// Files land under envs/.../_targets/{cluster}/, not envs-external/.
+	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "hello", "_targets", "in-cluster", "app.yaml")); err != nil {
 		t.Errorf("inline mode should write to envs/; got: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "envs-external", "staging", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs-external", "staging", "demo", "hello", "_targets", "in-cluster", "app.yaml")); !os.IsNotExist(err) {
 		t.Errorf("inline mode must not write to envs-external/; stat err = %v", err)
 	}
 
 	// AppMetadata's chart fields are empty (omitempty drops them).
-	appYAMLBytes, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "hello", "app.yaml"))
+	appYAMLBytes, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "hello", "_targets", "in-cluster", "app.yaml"))
 	if err != nil {
 		t.Fatalf("read app.yaml: %v", err)
 	}

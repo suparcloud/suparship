@@ -295,6 +295,13 @@ type EnvironmentOverride struct {
 	// (deployMode "all"). Each cluster's published values.yaml is the env values
 	// deep-merged with its ClusterOverrides entry. Only meaningful in "all" mode.
 	ClusterOverrides map[string]ClusterValueOverride `json:"clusterOverrides,omitempty" yaml:"clusterOverrides,omitempty"`
+	// TargetClusters selects which of the environment's clusters this app deploys
+	// to, overriding the env-level DeployMode default. nil/empty = inherit the env
+	// default (active cluster, or all when the env is DeployMode="all"). The
+	// sentinel []string{"*"} = all of the env's ClusterRefs (tracks the env).
+	// Otherwise an explicit subset of the env's ClusterRefs (one or many).
+	// Resolved via ResolveAppClusterTargets.
+	TargetClusters []string `json:"targetClusters,omitempty" yaml:"targetClusters,omitempty"`
 	// Deploy, for direct-delivery apps, opts this environment in or out of being
 	// deployed (published) by suparship. nil = default: the base env (lowest
 	// Order) deploys, higher envs don't (opt-in). Setting it false stops
@@ -332,6 +339,63 @@ type ClusterValueOverride struct {
 	SizePreset SizePreset        `json:"sizePreset,omitempty" yaml:"sizePreset,omitempty"`
 	Values     map[string]any    `json:"values,omitempty" yaml:"values,omitempty"`
 	Config     map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
+}
+
+// AllClustersSentinel is the EnvironmentOverride.TargetClusters value meaning
+// "all of the environment's clusters" — resolved dynamically against the env's
+// current ClusterRefs so adding a cluster to the env extends a "*" app to it.
+const AllClustersSentinel = "*"
+
+// ResolveAppClusterTargets resolves the cluster names an app deploys to in one
+// environment. Inputs:
+//   - sel:        the app's EnvironmentOverride.TargetClusters (per-env override)
+//   - envDefault: the env's DeployMode targets (OrgEnvironment.ResolveDeployTargets)
+//   - envRefs:    the env's full ClusterRefs (every allowed cluster)
+//
+// Precedence:
+//   - no selection (nil/empty) → envDefault (inherit the env's DeployMode)
+//   - ["*"]                    → envRefs (all of the env's clusters)
+//   - explicit list           → sel ∩ envRefs, order preserved, dups/unknowns
+//     dropped (a stale ref can never generate a phantom Application)
+//
+// The result preserves envRefs/envDefault ordering and is deduplicated.
+func ResolveAppClusterTargets(sel, envDefault, envRefs []string) []string {
+	if len(sel) == 0 {
+		return dedupe(envDefault)
+	}
+	for _, s := range sel {
+		if s == AllClustersSentinel {
+			return dedupe(envRefs)
+		}
+	}
+	allowed := make(map[string]bool, len(envRefs))
+	for _, r := range envRefs {
+		allowed[r] = true
+	}
+	seen := make(map[string]bool, len(sel))
+	out := make([]string, 0, len(sel))
+	for _, s := range sel {
+		if allowed[s] && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func dedupe(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // AppSpec is the desired configuration for an app. It is deterministic and

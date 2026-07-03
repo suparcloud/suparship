@@ -151,12 +151,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		stuckAppManager         server.StuckAppManager
 		argoRefresh             argoRefresher // triggers ArgoCD refresh after publish
 
-		kubeClient              kubernetes.Interface
-		dynClient               dynamic.Interface
-		gitopsConfigStore       *gitops.ConfigStore
-		templateRegistryStore   *tpl.RegistryStore
-		registryStore           *registry.Store
-		clusterPool             *k8s.ClusterClientPool
+		kubeClient            kubernetes.Interface
+		dynClient             dynamic.Interface
+		gitopsConfigStore     *gitops.ConfigStore
+		templateRegistryStore *tpl.RegistryStore
+		registryStore         *registry.Store
+		clusterPool           *k8s.ClusterClientPool
 	)
 
 	switch cfg.RuntimeMode {
@@ -861,10 +861,14 @@ type envResolved struct {
 	clusterServer    string
 	baseDomain       string
 	namespacePattern string
-	// clusters is the resolved deploy-target set (one entry in "active" mode,
-	// every bound cluster in "all" mode), each with its API server URL. The
-	// ApplicationSet fans out across these when there is more than one.
+	// clusters is the env's DEFAULT deploy-target set from DeployMode (one entry
+	// in "active" mode, every bound cluster in "all" mode). Used as the fallback
+	// when an app makes no per-env cluster selection.
 	clusters []gitops.ClusterTarget
+	// allClusters is every bound cluster the env is allowed to use (all
+	// ClusterRefs resolved), regardless of DeployMode — the superset a per-app
+	// TargetClusters selection picks from, and the AppProject destination set.
+	allClusters []gitops.ClusterTarget
 	// bound is true when the org environment has a non-empty ClusterRef that
 	// maps to a known cluster. GitOps artifacts are only published for bound
 	// environments; unbound envs are tracked in the store so the UI can prompt
@@ -933,12 +937,74 @@ func (a *gitOpsPublisherAdapter) resolveEnvs(ctx context.Context) map[string]env
 					RoutingProfiles: cluster.RoutingProfiles,
 				})
 			}
+
+			// allClusters resolves EVERY ClusterRef the env is allowed to use
+			// (independent of DeployMode), so a per-app TargetClusters selection can
+			// pick any subset — and the AppProject authorizes them all.
+			for _, ref := range orgEnv.ClusterRefs {
+				cluster, err := a.clusterStore.GetCluster(ctx, ref)
+				if err != nil || cluster == nil || cluster.APIServer == "" {
+					continue
+				}
+				res.allClusters = append(res.allClusters, gitops.ClusterTarget{
+					Name:            ref,
+					Server:          cluster.APIServer,
+					BaseDomain:      cluster.BaseDomain,
+					RoutingProfiles: cluster.RoutingProfiles,
+				})
+			}
 		}
 
 		result[orgEnv.Name] = res
 	}
 
 	return result
+}
+
+// appClusterTargets resolves an app's deploy-target clusters for one env: its
+// per-env TargetClusters selection against the env's DeployMode default
+// (res.clusters) and full set (res.allClusters). Empty selection inherits the
+// env default; ["*"] = all; else a subset. Falls back to the env default when
+// the env has no resolvable full set (unbound/edge).
+func (a *gitOpsPublisherAdapter) appClusterTargets(app *domain.App, envName string, res envResolved) []gitops.ClusterTarget {
+	if len(res.allClusters) == 0 {
+		return res.clusters
+	}
+	names := domain.ResolveAppClusterTargets(
+		app.Spec.EnvironmentDefaults[envName].TargetClusters,
+		clusterTargetNames(res.clusters),
+		clusterTargetNames(res.allClusters),
+	)
+	if sel := selectClusterTargets(res.allClusters, names); len(sel) > 0 {
+		return sel
+	}
+	return res.clusters
+}
+
+// clusterTargetNames extracts the cluster names from a ClusterTarget slice,
+// preserving order.
+func clusterTargetNames(targets []gitops.ClusterTarget) []string {
+	names := make([]string, len(targets))
+	for i, t := range targets {
+		names[i] = t.Name
+	}
+	return names
+}
+
+// selectClusterTargets returns the ClusterTargets from pool whose names are in
+// want, in want's order. Names not in pool are skipped.
+func selectClusterTargets(pool []gitops.ClusterTarget, want []string) []gitops.ClusterTarget {
+	byName := make(map[string]gitops.ClusterTarget, len(pool))
+	for _, t := range pool {
+		byName[t.Name] = t
+	}
+	out := make([]gitops.ClusterTarget, 0, len(want))
+	for _, n := range want {
+		if t, ok := byName[n]; ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // kargoPromoterAdapter bridges kube.KargoStore (which returns *kube.KargoPromotionInfo)
@@ -1079,13 +1145,24 @@ func (a *gitOpsPublisherAdapter) buildAppBundle(ctx context.Context, app *domain
 			}
 		}
 
+		// Resolve this app's target clusters for the env (per-env selection vs.
+		// the env's DeployMode default / full set).
+		appTargets := a.appClusterTargets(app, env.EnvName, res)
+
 		// Only include bound environments in the ApplicationSet so ArgoCD
-		// doesn't try to connect to a cluster that hasn't been registered.
+		// doesn't try to connect to a cluster that hasn't been registered. The
+		// AppSet/AppProject infra spans the env's FULL cluster set (allClusters)
+		// since it is shared by every app in the env; per-app targeting is
+		// expressed by which per-cluster app.yaml files each app writes.
 		if res.bound {
+			infraClusters := res.allClusters
+			if len(infraClusters) == 0 {
+				infraClusters = res.clusters
+			}
 			appSetEnvs = append(appSetEnvs, gitops.AppSetEnv{
 				EnvName:       env.EnvName,
 				ClusterServer: res.clusterServer,
-				Clusters:      res.clusters,
+				Clusters:      infraClusters,
 				BaseDomain:    res.baseDomain,
 			})
 		}
@@ -1098,7 +1175,7 @@ func (a *gitOpsPublisherAdapter) buildAppBundle(ctx context.Context, app *domain
 			BaseDomain:      res.baseDomain,
 			Namespace:       env.Namespace,
 			RoutingProfiles: lookupOrgEnvRoutingProfiles(org, env.EnvName),
-			Clusters:        res.clusters,
+			Clusters:        appTargets,
 			AutoPromote:     app.Spec.CD.AutoPromote,
 		}
 
@@ -1382,7 +1459,7 @@ func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *doma
 //  1. org           (org.EnvConfig.Vars)
 //  2. env-type      (org.Environments[envName].EnvConfig.Vars)
 //  3. project       (project.Spec.EnvConfig.Vars)
-//  3b. project-env   (project.Spec.EnvConfigByEnv[env].Vars)
+//     3b. project-env   (project.Spec.EnvConfigByEnv[env].Vars)
 //  4. app           (app.Spec.EnvConfig.Vars)
 //  5. app-env       (app.Spec.EnvironmentDefaults[envName].EnvConfig.Vars)
 //  6. cluster       (suparship-envvars-cluster-{name} ConfigMap data)
@@ -1502,6 +1579,7 @@ func (a *gitOpsPublisherAdapter) buildAppEnvPub(ctx context.Context, app *domain
 		Bound:      res.bound,
 		BaseDomain: res.baseDomain,
 		Namespace:  env.Namespace,
+		Clusters:   a.appClusterTargets(app, env.EnvName, res),
 	}
 
 	var org *rbac.Org

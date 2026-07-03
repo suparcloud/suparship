@@ -118,13 +118,13 @@ func TestPublishApp_OnlyFirstEnvGetsFiles(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	// staging files must exist
-	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
+	// staging files must exist (per-cluster in-cluster fallback target)
+	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "hello", "_targets", "in-cluster", "app.yaml")); os.IsNotExist(err) {
 		t.Error("expected app.yaml for staging to exist after initial publish")
 	}
 
 	// prod files must NOT exist (publish-on-promote, not on create)
-	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "_targets", "in-cluster", "app.yaml")); !os.IsNotExist(err) {
 		t.Error("prod app.yaml must NOT exist after initial publish — it should only be written on promotion")
 	}
 }
@@ -147,16 +147,17 @@ func TestPublishApp_PreviewEnvPublishedOnCreate(t *testing.T) {
 		t.Fatalf("PublishAppFilesForTest: %v", err)
 	}
 
-	// preview env always gets files on create
+	// preview env always gets files on create — previews keep the flat layout
+	// (no _targets/), so this path is unchanged.
 	if _, err := os.Stat(filepath.Join(dir, "pr-1", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
 		t.Error("expected preview env pr-1 app.yaml to exist after create")
 	}
-	// first stable env gets files on create
-	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
+	// first stable env gets files on create (per-cluster in-cluster fallback target)
+	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "hello", "_targets", "in-cluster", "app.yaml")); os.IsNotExist(err) {
 		t.Error("expected staging app.yaml to exist after create")
 	}
 	// higher stable env must NOT have files yet
-	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "_targets", "in-cluster", "app.yaml")); !os.IsNotExist(err) {
 		t.Error("prod app.yaml must NOT exist after create — only written on promotion")
 	}
 }
@@ -183,8 +184,8 @@ func TestPublishAppEnv_WritesTargetEnv(t *testing.T) {
 		t.Fatalf("PublishAppEnvForTest: %v", err)
 	}
 
-	// prod files must now exist (simulate promotion)
-	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "app.yaml")); os.IsNotExist(err) {
+	// prod files must now exist (simulate promotion; per-cluster in-cluster target)
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "_targets", "in-cluster", "app.yaml")); os.IsNotExist(err) {
 		t.Error("expected prod app.yaml to exist after PublishAppEnv")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "values.yaml")); os.IsNotExist(err) {
@@ -211,7 +212,7 @@ func TestPublishAppEnv_UnboundEnvWritesNothing(t *testing.T) {
 		t.Fatalf("PublishAppEnvForTest: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "app.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "_targets", "in-cluster", "app.yaml")); !os.IsNotExist(err) {
 		t.Error("unbound env should NOT produce app.yaml even when explicitly promoted")
 	}
 }

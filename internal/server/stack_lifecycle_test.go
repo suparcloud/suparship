@@ -702,3 +702,56 @@ func TestStackDelete_DefaultDetaches(t *testing.T) {
 		t.Errorf("detached app should have empty Stack, got %q", app.Spec.Stack)
 	}
 }
+
+// TestStackTargetClusters_FansOutAndClears verifies the stack target-clusters
+// batch sets EnvironmentDefaults[env].TargetClusters on every member deployed to
+// the env (skipping members without it) and clears it when sent an empty list.
+func TestStackTargetClusters_FansOutAndClears(t *testing.T) {
+	mux, ah, store, stackStore := newTestStackMux(testProject)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	seedStackMember(store, testProject, "web", "voiceai")
+	seedStackMember(store, testProject, "agent", "voiceai")
+	// A member with no staging env → skipped.
+	store.addApp(&domain.App{
+		Name: "noenv", ProjectName: testProject,
+		Spec: domain.AppSpec{Stack: "voiceai", Template: domain.AppTemplateRef{Name: "web-service"}},
+	})
+	cookie := sessionCookieFor(ah, "alice", "org_admin") // manageProject route
+	ctx := context.Background()
+
+	// Set "all clusters" (sentinel is always valid, so no ClusterRefs setup needed).
+	rec := postStackJSON(mux, cookie,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/target-clusters",
+		stackTargetClustersRequest{TargetEnv: "staging", Clusters: []string{domain.AllClustersSentinel}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("target-clusters: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp stackBatchResponse
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	byApp := map[string]stackOpResult{}
+	for _, r := range resp.Results {
+		byApp[r.App] = r
+	}
+	if byApp["web"].Skipped || !byApp["web"].OK {
+		t.Errorf("web should be set, got %+v", byApp["web"])
+	}
+	if !byApp["noenv"].Skipped {
+		t.Errorf("noenv should be skipped (no staging env), got %+v", byApp["noenv"])
+	}
+	web, _ := store.GetApp(ctx, testProject, "web")
+	if got := web.Spec.EnvironmentDefaults["staging"].TargetClusters; len(got) != 1 || got[0] != domain.AllClustersSentinel {
+		t.Errorf("web staging TargetClusters = %v, want [*]", got)
+	}
+
+	// Empty list clears the override (back to env default).
+	rec2 := postStackJSON(mux, cookie,
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/target-clusters",
+		stackTargetClustersRequest{TargetEnv: "staging", Clusters: []string{}})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("clear: expected 200, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	web2, _ := store.GetApp(ctx, testProject, "web")
+	if got := web2.Spec.EnvironmentDefaults["staging"].TargetClusters; got != nil {
+		t.Errorf("web staging TargetClusters after clear = %v, want nil", got)
+	}
+}

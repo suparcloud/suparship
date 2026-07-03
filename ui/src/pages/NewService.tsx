@@ -316,8 +316,12 @@ function ConfigureStep({
   const [overlayError, setOverlayError] = useState<string | null>(null);
   // Read-only effective base (chart ⊕ platform defaults) for the preview pane.
   const [base, setBase] = useState<EffectiveValuesResponse | null>(null);
-  // Org environments — drives the read-only "Deployment targets" panel.
+  // Org environments — drives the "Deployment targets" panel.
   const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
+  // Per-env cluster selection (UI state: the checked cluster names). An env
+  // absent here inherits its DeployMode default; see buildTargetClusters for the
+  // wire mapping. Only meaningful for envs with more than one bound cluster.
+  const [targetSel, setTargetSel] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
     listConfigVariables(project)
@@ -383,6 +387,7 @@ function ConfigureStep({
     }
 
     try {
+      const targetClusters = buildTargetClusters(orgEnvs, targetSel);
       await createApp(project, {
         name: appName,
         template: template.name,
@@ -393,6 +398,8 @@ function ConfigureStep({
         rawValues: Object.keys(overlay).length > 0 ? overlay : undefined,
         cd: !isDirect && cdManaged ? { managed: true } : undefined,
         deliveryMode,
+        targetClusters:
+          Object.keys(targetClusters).length > 0 ? targetClusters : undefined,
       });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not reach the server.");
@@ -441,8 +448,15 @@ function ConfigureStep({
         </button>
       </div>
 
-      {/* Deployment targets (read-only) */}
-      <DeploymentTargets envs={orgEnvs} direct={isDirect} />
+      {/* Deployment targets — per-env cluster selection */}
+      <DeploymentTargets
+        envs={orgEnvs}
+        direct={isDirect}
+        value={targetSel}
+        onChange={(env, names) =>
+          setTargetSel((prev) => ({ ...prev, [env]: names }))
+        }
+      />
 
       {/* App name */}
       <div>
@@ -746,16 +760,53 @@ function effectiveClusters(env: OrgEnvironment): string[] {
   return active ? [active] : [];
 }
 
-// DeploymentTargets shows, read-only, where the app will land: every org
-// environment (the app is created across all of them), which env gets the first
-// deploy (lowest order), and the cluster(s) each env maps to. The env→cluster
-// binding is owned by platform engineers in org settings, not chosen per app.
+// sameSet reports whether two string slices contain the same elements.
+function sameSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const s = new Set(a);
+  return b.every((x) => s.has(x));
+}
+
+// buildTargetClusters maps the UI selection to the wire payload
+// (targetClusters: env -> cluster names). An env is OMITTED (inherit the env
+// DeployMode default) when the user didn't touch it, cleared it, or left it at
+// the default set; all of the env's clusters -> ["*"] (tracks the env); any
+// other set -> that explicit subset. Single-cluster envs are never sent.
+function buildTargetClusters(
+  envs: OrgEnvironment[],
+  sel: Record<string, string[]>,
+): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const env of envs) {
+    const refs = env.clusterRefs ?? [];
+    if (refs.length <= 1) continue; // nothing to choose
+    const chosen = sel[env.name];
+    if (!chosen || chosen.length === 0) continue; // untouched / cleared → inherit
+    if (sameSet(chosen, effectiveClusters(env))) continue; // == default → inherit
+    if (sameSet(chosen, refs)) {
+      out[env.name] = ["*"];
+      continue;
+    }
+    out[env.name] = [...chosen].sort();
+  }
+  return out;
+}
+
+// DeploymentTargets shows where the app will land — every org environment (the
+// app is created across all of them), which env gets the first deploy, and the
+// cluster(s) each env maps to. For an env with more than one bound cluster the
+// operator can pick one, several, or all; single-cluster envs are read-only.
+// No selection inherits the env's DeployMode default (the active cluster).
 function DeploymentTargets({
   envs,
   direct,
+  value,
+  onChange,
 }: {
   envs: OrgEnvironment[];
   direct?: boolean;
+  value: Record<string, string[]>;
+  onChange: (env: string, names: string[]) => void;
 }) {
   if (envs.length === 0) return null;
   const sorted = [...envs].sort((a, b) => a.order - b.order);
@@ -769,46 +820,103 @@ function DeploymentTargets({
       </div>
       <ul className="divide-y divide-gray-50">
         {sorted.map((env, i) => {
-          const clusters = effectiveClusters(env);
-          return (
-            <li
-              key={env.name}
-              className="flex items-center justify-between gap-3 px-4 py-2.5"
+          const refs = env.clusterRefs ?? [];
+          const multi = refs.length > 1;
+          const current = value[env.name] ?? effectiveClusters(env);
+          const badge = (
+            <span
+              className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                direct || i === 0
+                  ? "bg-indigo-50 text-indigo-600"
+                  : "bg-gray-100 text-gray-500"
+              }`}
             >
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-gray-800">
-                  {env.displayName || env.name}
-                </span>
-                <span
-                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                    direct || i === 0
-                      ? "bg-indigo-50 text-indigo-600"
-                      : "bg-gray-100 text-gray-500"
-                  }`}
-                >
-                  {direct ? "from values" : i === 0 ? "first deploy" : "via promotion"}
-                </span>
-                {(env.deployMode ?? "active") === "all" && (
-                  <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-                    fan-out
+              {direct ? "from values" : i === 0 ? "first deploy" : "via promotion"}
+            </span>
+          );
+
+          function toggle(cluster: string) {
+            const next = current.includes(cluster)
+              ? current.filter((c) => c !== cluster)
+              : [...current, cluster];
+            onChange(env.name, next);
+          }
+          const allSelected = multi && sameSet(current, refs);
+
+          return (
+            <li key={env.name} className="px-4 py-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-800">
+                    {env.displayName || env.name}
+                  </span>
+                  {badge}
+                </div>
+                {!multi && (
+                  <span className="font-mono text-xs text-gray-500">
+                    {refs[0] || env.activeClusterRef ? (
+                      refs[0] || env.activeClusterRef
+                    ) : (
+                      <span className="text-amber-600">no cluster bound</span>
+                    )}
                   </span>
                 )}
               </div>
-              <span className="font-mono text-xs text-gray-500">
-                {clusters.length > 0 ? (
-                  clusters.join(", ")
-                ) : (
-                  <span className="text-amber-600">no cluster bound</span>
-                )}
-              </span>
+              {multi && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onChange(
+                        env.name,
+                        allSelected ? effectiveClusters(env) : refs,
+                      )
+                    }
+                    className={`rounded border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                      allSelected
+                        ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                        : "border-gray-200 text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    All clusters
+                  </button>
+                  {refs.map((c) => {
+                    const on = current.includes(c);
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => toggle(c)}
+                        className={`rounded border px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                          on
+                            ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                            : "border-gray-200 text-gray-500 hover:bg-gray-50"
+                        }`}
+                      >
+                        {c}
+                        {c === env.activeClusterRef && (
+                          <span className="ml-1 text-[9px] uppercase text-gray-400">
+                            active
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {current.length === 0 && (
+                    <span className="text-[11px] text-amber-600">
+                      pick at least one cluster
+                    </span>
+                  )}
+                </div>
+              )}
             </li>
           );
         })}
       </ul>
       <p className="border-t border-gray-100 px-4 py-2 text-xs text-gray-400">
         {direct
-          ? "The app is created in every environment and each deploys straight from its own values — no promotion. Clusters are bound per environment in org settings — not chosen per app."
-          : "The app is created in every environment; the lowest one deploys first and you promote to advance it. Clusters are bound per environment in org settings — not chosen per app."}
+          ? "The app is created in every environment and each deploys straight from its own values — no promotion. For a multi-cluster environment, choose which clusters this app targets (default: the environment's active cluster)."
+          : "The app is created in every environment; the lowest one deploys first and you promote to advance it. For a multi-cluster environment, choose which clusters this app targets (default: the environment's active cluster)."}
       </p>
     </div>
   );

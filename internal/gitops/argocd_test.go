@@ -643,19 +643,23 @@ func TestBuildArgoExternalAppSet_GeneratorPathSeparate(t *testing.T) {
 	env := gitops.AppSetEnv{EnvName: "staging", ClusterServer: "https://kubernetes.default.svc"}
 	appSet := gitops.BuildArgoExternalAppSet(env, "https://gitea.local/gitops/gitops", gitops.AppSetOptions{})
 
-	// Generator is now a matrix (git × cluster list) even for a single cluster.
-	if len(appSet.Spec.Generators) != 1 || appSet.Spec.Generators[0].Matrix == nil {
-		t.Fatalf("expected one matrix generator, got %+v", appSet.Spec.Generators)
+	// A single plain git-files generator (no matrix/list) globbing the
+	// per-(app,cluster) app.yaml files under _targets/.
+	if len(appSet.Spec.Generators) != 1 {
+		t.Fatalf("expected one generator, got %+v", appSet.Spec.Generators)
 	}
-	gitGen := appSet.Spec.Generators[0].Matrix.Generators[0].Git
-	if gitGen == nil {
-		t.Fatalf("expected git generator inside matrix, got %+v", appSet.Spec.Generators[0].Matrix.Generators)
+	gitGen := appSet.Spec.Generators[0].Git
+	if gitGen == nil || appSet.Spec.Generators[0].Matrix != nil || appSet.Spec.Generators[0].List != nil {
+		t.Fatalf("expected a single plain git-files generator, got %+v", appSet.Spec.Generators[0])
 	}
 	if len(gitGen.Files) != 1 {
 		t.Fatalf("expected one Files entry, got %d", len(gitGen.Files))
 	}
 	if !strings.Contains(gitGen.Files[0].Path, "envs-external/staging") {
 		t.Errorf("generator path = %q, want it to contain envs-external/staging", gitGen.Files[0].Path)
+	}
+	if !strings.Contains(gitGen.Files[0].Path, "_targets") {
+		t.Errorf("generator path = %q, want it to descend into _targets/ (per-cluster app.yaml)", gitGen.Files[0].Path)
 	}
 	if strings.Contains(gitGen.Files[0].Path, "envs/staging") {
 		t.Errorf("generator path = %q, must NOT match the inline AppSet's envs/ glob", gitGen.Files[0].Path)

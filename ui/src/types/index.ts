@@ -643,6 +643,10 @@ export interface AppDetail {
   environments: AppEnvironmentSummary[];
   // Per-(env, cluster) value overrides keyed env → cluster (fan-out envs only).
   clusterOverrides?: Record<string, Record<string, ClusterValueOverrideDTO>>;
+  // Per-env target clusters, keyed env name → cluster names. Value ["*"] = ALL
+  // of that env's clusters (dynamic); explicit list = that subset; an omitted
+  // env (or empty array) = inherit the env default (active cluster).
+  targetClusters?: Record<string, string[]>;
   // App-level freeform Helm values overlay.
   rawValues?: Record<string, unknown>;
   // Per-environment freeform overlays keyed by env name.
@@ -857,6 +861,10 @@ export interface CreateAppRequest {
   images?: AppImageBinding[];
   /** "pipeline" (default) or "direct". Omit to inherit the template default. */
   deliveryMode?: string;
+  /** Per-env target clusters, keyed env name → cluster names. Value ["*"] = ALL
+   *  of that env's clusters (dynamic); explicit list = that subset; an omitted
+   *  env (or empty array) = inherit the env default (active cluster). */
+  targetClusters?: Record<string, string[]>;
 }
 
 export interface CreateAppResponse {

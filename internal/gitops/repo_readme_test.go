@@ -39,8 +39,10 @@ func TestPublishAppFiles_PrependsGeneratedHeader(t *testing.T) {
 	}
 
 	files := map[string][]string{
-		filepath.Join(dir, "envs", "staging", "demo", "nginx"):           {"app.yaml", "values.yaml"},
-		filepath.Join(dir, "_app-resources", "staging", "demo", "nginx"): {"meta.yaml", "env-configmap.yaml", "external-secret.yaml"},
+		// app.yaml is now per target cluster (in-cluster fallback); values.yaml stays shared.
+		filepath.Join(dir, "envs", "staging", "demo", "nginx", "_targets", "in-cluster"): {"app.yaml"},
+		filepath.Join(dir, "envs", "staging", "demo", "nginx"):                           {"values.yaml"},
+		filepath.Join(dir, "_app-resources", "staging", "demo", "nginx"):                 {"meta.yaml", "env-configmap.yaml", "external-secret.yaml"},
 	}
 	for base, names := range files {
 		for _, name := range names {

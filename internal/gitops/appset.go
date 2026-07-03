@@ -203,14 +203,10 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 
 	// Source 2: Helm chart; reads per-app values from the repo via $appvalues.
 	// The full path is used because $appvalues resolves to the repo root (see above).
-	// Fan-out (deployMode "all") reads a per-cluster values file under
-	// _clusters/{{clusterName}}/ so per-cluster overrides apply; single-cluster
-	// reads the shared env values file.
-	fanOut := len(env.Clusters) > 1
-	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
-	if fanOut {
-		valuesFilePath = "$appvalues/" + joinSubPath(opts.SubPath, "envs", env.EnvName, "_clusters", "{{clusterName}}", "{{project}}", "{{name}}", "values.yaml")
-	}
+	// Each app.yaml carries its own repo-relative ValuesPath (shared env file for a
+	// single-target app, per-cluster _clusters/<cluster>/ file when the app fans
+	// out), so the template just references {{valuesPath}}.
+	valuesFilePath := "$appvalues/{{valuesPath}}"
 	chartSource := ApplicationSource{
 		RepoURL:        repoURL,
 		Path:           joinSubPath(opts.SubPath, "charts", "{{chartPath}}"),
@@ -241,25 +237,22 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 		}
 	}
 
-	// Always fan the git-file generator over the env's cluster list (≥1 entry)
-	// so the Application name and cluster label render per-cluster — adding a 2nd
-	// cluster to an env never renames the 1st cluster's Application. The name
-	// itself comes from the org ResourceNaming pattern. (The values-file path
-	// above still switches shared vs per-cluster on actual fan-out, matching what
-	// the publisher writes.)
-	gitGen := ApplicationSetGenerator{
+	// Plain git-files generator over the per-(app,cluster) app.yaml files: one
+	// Application per file. The publisher writes an app.yaml under _targets/
+	// <cluster>/ for each cluster the app selects, each carrying its own
+	// {{appName}} (fully rendered — no name churn), {{clusterServer}} destination,
+	// and {{valuesPath}}. There is no env-wide cluster matrix, so sibling apps in
+	// the same env can target different clusters.
+	generators := []ApplicationSetGenerator{{
 		Git: &GitFileGenerator{
 			RepoURL:  repoURL,
 			Revision: opts.TargetRevision,
 			Files: []GitFilePathSpec{
-				{Path: joinSubPath(opts.SubPath, "envs", env.EnvName, "*", "*", "app.yaml")},
+				{Path: joinSubPath(opts.SubPath, "envs", env.EnvName, "*", "*", "_targets", "*", "app.yaml")},
 			},
 		},
-	}
-
-	clusters := appSetClusterTargets(env)
-	generators := matrixOverClusters(gitGen, clusters)
-	appName := RenderArgoAppNameTemplate(opts.ArgoAppNamePattern, env.EnvName)
+	}}
+	appName := "{{appName}}"
 	destServer := "{{clusterServer}}"
 
 	return &ApplicationSet{
@@ -352,11 +345,7 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 	// chartRepoURL/chartName/chartVersion come from the per-app app.yaml
 	// (AppMetadata.ChartRepoURL etc.) which the Git File generator
 	// flattens into template parameters.
-	fanOut := len(env.Clusters) > 1
-	valuesFilePath := "$appvalues/" + joinSubPath(opts.SubPath, "envs-external", env.EnvName, "{{project}}", "{{name}}", "values.yaml")
-	if fanOut {
-		valuesFilePath = "$appvalues/" + joinSubPath(opts.SubPath, "envs-external", env.EnvName, "_clusters", "{{clusterName}}", "{{project}}", "{{name}}", "values.yaml")
-	}
+	valuesFilePath := "$appvalues/{{valuesPath}}"
 	chartSource := ApplicationSource{
 		RepoURL:        "{{chartRepoURL}}",
 		Chart:          "{{chartName}}",
@@ -382,21 +371,19 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 		}
 	}
 
-	// Matches inline-mode: always fan over the env's cluster list (≥1) so the
-	// Application name + cluster label render per-cluster; the name comes from the
-	// org ResourceNaming pattern.
-	gitGen := ApplicationSetGenerator{
+	// Matches inline-mode: plain git-files generator over the per-(app,cluster)
+	// app.yaml files under _targets/<cluster>/, each carrying its own {{appName}}
+	// / {{clusterServer}} / {{valuesPath}}. One Application per file, no matrix.
+	generators := []ApplicationSetGenerator{{
 		Git: &GitFileGenerator{
 			RepoURL:  repoURL,
 			Revision: opts.TargetRevision,
 			Files: []GitFilePathSpec{
-				{Path: joinSubPath(opts.SubPath, "envs-external", env.EnvName, "*", "*", "app.yaml")},
+				{Path: joinSubPath(opts.SubPath, "envs-external", env.EnvName, "*", "*", "_targets", "*", "app.yaml")},
 			},
 		},
-	}
-	clusters := appSetClusterTargets(env)
-	generators := matrixOverClusters(gitGen, clusters)
-	appName := RenderArgoAppNameTemplate(opts.ArgoAppNamePattern, env.EnvName)
+	}}
+	appName := "{{appName}}"
 	destServer := "{{clusterServer}}"
 
 	return &ApplicationSet{
@@ -580,6 +567,25 @@ type AppMetadata struct {
 	ChartName string `yaml:"chartName,omitempty"`
 	// ChartVersion is the chart version pin. Empty for inline.
 	ChartVersion string `yaml:"chartVersion,omitempty"`
+
+	// Per-(app,cluster) targeting fields. app.yaml is written once per cluster
+	// the app targets (under _targets/{cluster}/), and the ApplicationSet's
+	// plain git-files generator turns each into one Application — this is how a
+	// per-app cluster selection is expressed without an env-wide cluster matrix.
+	//
+	// AppName is the FULLY-RENDERED ArgoCD Application name for this (app,
+	// cluster), precomputed by the publisher (RenderArgoAppName) so the AppSet
+	// template is just "{{appName}}" and names are identical to the pre-matrix
+	// era (no Application churn on upgrade).
+	AppName string `yaml:"appName,omitempty"`
+	// ClusterName is the target cluster's registered name (label + naming).
+	ClusterName string `yaml:"clusterName,omitempty"`
+	// ClusterServer is the target cluster's API server → spec.destination.server.
+	ClusterServer string `yaml:"clusterServer,omitempty"`
+	// ValuesPath is the repo-root-relative path to this (app,cluster) values.yaml
+	// (shared env file for a single-target app, per-cluster file when the app
+	// fans out to >1 cluster). The AppSet reads it via $appvalues/{{valuesPath}}.
+	ValuesPath string `yaml:"valuesPath,omitempty"`
 }
 
 // Constants for the ChartType values to keep callers consistent.

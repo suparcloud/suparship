@@ -79,6 +79,11 @@ export interface UpdateAppRequest {
   values?: Record<string, unknown>;
   // clusterOverrides replaces per-(env, cluster) overrides, keyed env → cluster.
   clusterOverrides?: Record<string, Record<string, ClusterValueOverride>>;
+  // targetClusters selects which of each env's clusters the app deploys to,
+  // keyed env name → cluster names. Value ["*"] = ALL of that env's clusters
+  // (dynamic); an explicit list = that subset; omit an env (or empty array) =
+  // inherit the env default (active cluster). Mirrors clusterOverrides' keying.
+  targetClusters?: Record<string, string[]>;
   // rawValues replaces the app-level freeform Helm values overlay.
   rawValues?: Record<string, unknown>;
   // envRawValues replaces per-environment overlays keyed by env name.

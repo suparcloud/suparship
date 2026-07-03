@@ -191,3 +191,36 @@ func contains(s, sub string) bool {
 			return false
 		}())
 }
+
+func TestResolveAppClusterTargets(t *testing.T) {
+	envRefs := []string{"a", "b", "c"}
+	tests := []struct {
+		name       string
+		sel        []string
+		envDefault []string
+		envRefs    []string
+		want       []string
+	}{
+		{name: "unset inherits env default (active)", sel: nil, envDefault: []string{"a"}, envRefs: envRefs, want: []string{"a"}},
+		{name: "unset inherits env default (all)", sel: nil, envDefault: []string{"a", "b", "c"}, envRefs: envRefs, want: []string{"a", "b", "c"}},
+		{name: "star = all env refs", sel: []string{"*"}, envDefault: []string{"a"}, envRefs: envRefs, want: []string{"a", "b", "c"}},
+		{name: "star among others still all", sel: []string{"b", "*"}, envDefault: []string{"a"}, envRefs: envRefs, want: []string{"a", "b", "c"}},
+		{name: "explicit subset", sel: []string{"c", "a"}, envDefault: []string{"a"}, envRefs: envRefs, want: []string{"c", "a"}},
+		{name: "unknown refs dropped", sel: []string{"a", "zzz"}, envDefault: []string{"a"}, envRefs: envRefs, want: []string{"a"}},
+		{name: "dups collapsed", sel: []string{"a", "a", "b"}, envDefault: []string{"a"}, envRefs: envRefs, want: []string{"a", "b"}},
+		{name: "all unknown yields empty", sel: []string{"zzz"}, envDefault: []string{"a"}, envRefs: envRefs, want: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveAppClusterTargets(tt.sel, tt.envDefault, tt.envRefs)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
