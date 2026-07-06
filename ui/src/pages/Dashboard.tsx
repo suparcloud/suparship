@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { listApps } from "../lib/apps";
@@ -141,48 +141,44 @@ function StatCard({
 
 // --- Data loading ---
 
-interface DashboardData {
+// The dashboard loads in two phases so it paints immediately. Phase 1 (base) is
+// org/projects/environments — three fast reads that populate the header, stat
+// cards, env chips, and project rows. Phase 2 (per-project apps) is the slow
+// status-enriched fan-out; it fills in health/app/preview counts as it arrives,
+// rather than blocking the whole page behind the slowest project.
+
+interface BaseData {
   org: OrgInfo | null;
   projects: Project[];
   environments: EnvironmentInfo[];
-  appsByProject: Map<string, AppSummary[]>;
-  previewCount: number;
 }
 
-async function loadDashboard(): Promise<DashboardData> {
+async function loadBase(): Promise<BaseData> {
   const [orgData, projectsData, envsData] = await Promise.all([
     fetchOrg().catch(() => null),
     fetchProjects().catch(() => ({ projects: [] as Project[] })),
     fetchEnvironments().catch(() => ({ environments: [] as EnvironmentInfo[] })),
   ]);
+  return {
+    org: orgData,
+    projects: projectsData.projects,
+    environments: envsData.environments,
+  };
+}
 
-  // Per-project apps power the health summary rows. Stacks aren't needed on the
-  // dashboard anymore (apps are viewed on the project detail page).
+async function loadApps(
+  projects: Project[],
+): Promise<Map<string, AppSummary[]>> {
   const appsByProject = new Map<string, AppSummary[]>();
   const results = await Promise.allSettled(
-    projectsData.projects.map((p) => listApps(p.name)),
+    projects.map((p) => listApps(p.name)),
   );
   for (const result of results) {
     if (result.status === "fulfilled") {
       appsByProject.set(result.value.project, result.value.apps);
     }
   }
-
-  // Preview count = number of distinct PRs across all projects (consistent with
-  // the per-project preview column and the Previews page), derived from the apps
-  // we already loaded — no separate previews fetch.
-  let previewCount = 0;
-  for (const apps of appsByProject.values()) {
-    previewCount += distinctPreviewCount(apps);
-  }
-
-  return {
-    org: orgData,
-    projects: projectsData.projects,
-    environments: envsData.environments,
-    appsByProject,
-    previewCount,
-  };
+  return appsByProject;
 }
 
 // --- Component ---
@@ -190,44 +186,57 @@ async function loadDashboard(): Promise<DashboardData> {
 export function Dashboard() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [base, setBase] = useState<BaseData | null>(null);
+  const [appsByProject, setAppsByProject] = useState<Map<string, AppSummary[]>>(
+    () => new Map(),
+  );
+  const [appsLoading, setAppsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showNewProject, setShowNewProject] = useState(
     searchParams.get("newProject") === "1",
   );
 
+  // load runs the two phases. setBase paints the page as soon as the fast reads
+  // resolve; the per-project apps fill in afterwards. cancelled guards against a
+  // late resolve writing to an unmounted component.
+  const load = useCallback((cancelled?: () => boolean) => {
+    const isCancelled = () => cancelled?.() ?? false;
+    setError(null);
+    setAppsLoading(true);
+    loadBase()
+      .then((b) => {
+        if (isCancelled()) return;
+        setBase(b);
+        return loadApps(b.projects).then((m) => {
+          if (!isCancelled()) setAppsByProject(m);
+        });
+      })
+      .catch((err) => {
+        if (!isCancelled())
+          setError(err instanceof Error ? err.message : "Failed to load");
+      })
+      .finally(() => {
+        if (!isCancelled()) setAppsLoading(false);
+      });
+  }, []);
+
   function refresh() {
-    setLoading(true);
-    loadDashboard()
-      .then((d) => setData(d))
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Failed to load"),
-      )
-      .finally(() => setLoading(false));
+    setBase(null);
+    setAppsByProject(new Map());
+    load();
   }
 
   useEffect(() => {
     let cancelled = false;
-
-    loadDashboard()
-      .then((d) => {
-        if (!cancelled) setData(d);
-      })
-      .catch((err) => {
-        if (!cancelled)
-          setError(err instanceof Error ? err.message : "Failed to load");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
+    load(() => cancelled);
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [load]);
 
-  if (loading) return <DashboardSkeleton />;
+  // Skeleton only until the fast base reads land; per-project health then streams
+  // in without blocking the frame.
+  if (!base && !error) return <DashboardSkeleton />;
 
   if (error) {
     return (
@@ -239,10 +248,15 @@ export function Dashboard() {
     );
   }
 
-  if (!data) return null;
+  if (!base) return null;
+  const data = base;
 
-  const totalServices = Array.from(data.appsByProject.values()).reduce(
+  const totalServices = Array.from(appsByProject.values()).reduce(
     (sum, apps) => sum + apps.length,
+    0,
+  );
+  const previewCount = Array.from(appsByProject.values()).reduce(
+    (sum, apps) => sum + distinctPreviewCount(apps),
     0,
   );
 
@@ -292,8 +306,8 @@ export function Dashboard() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Projects" value={data.projects.length} />
         <StatCard label="Environments" value={uniqueEnvNames.length} />
-        <StatCard label="Apps" value={totalServices} />
-        <StatCard label="Previews" value={data.previewCount} />
+        <StatCard label="Apps" value={appsLoading ? "…" : totalServices} />
+        <StatCard label="Previews" value={appsLoading ? "…" : previewCount} />
       </div>
 
       {/* Environments */}
@@ -339,7 +353,8 @@ export function Dashboard() {
       ) : (
         <ProjectsSection
           projects={data.projects}
-          appsByProject={data.appsByProject}
+          appsByProject={appsByProject}
+          appsLoading={appsLoading}
           environments={data.environments}
         />
       )}
@@ -397,10 +412,12 @@ function distinctPreviewCount(apps: AppSummary[]): number {
 function ProjectsSection({
   projects,
   appsByProject,
+  appsLoading,
   environments,
 }: {
   projects: Project[];
   appsByProject: Map<string, AppSummary[]>;
+  appsLoading: boolean;
   environments: EnvironmentInfo[];
 }) {
   const { query, setQuery, page, setPage, pageItems, pageCount, total } =
@@ -455,6 +472,7 @@ function ProjectsSection({
                 key={p.name}
                 project={p}
                 apps={appsByProject.get(p.name) ?? []}
+                loading={appsLoading && !appsByProject.has(p.name)}
                 envCols={envCols}
               />
             ))}
@@ -523,16 +541,25 @@ function EnvHealthCell({ count }: { count: EnvCount | undefined }) {
 function ProjectSummaryRow({
   project,
   apps,
+  loading,
   envCols,
 }: {
   project: Project;
   apps: AppSummary[];
+  loading: boolean;
   envCols: EnvironmentInfo[];
 }) {
-  const summary = projectSummary(
-    apps,
-    envCols.map((e) => e.name),
+  // Recompute the rollup only when this project's apps (or the env columns)
+  // change — not on every dashboard re-render (search, pagination, modal).
+  const envNames = useMemo(() => envCols.map((e) => e.name), [envCols]);
+  const summary = useMemo(
+    () => projectSummary(apps, envNames),
+    [apps, envNames],
   );
+
+  // A muted pulse stands in for the health/counts until this project's apps
+  // arrive, so the row is visible immediately without showing a false "0".
+  const pending = <span className="inline-block h-3 w-8 animate-pulse rounded bg-gray-100" />;
 
   return (
     <tr className="hover:bg-gray-50/50">
@@ -550,16 +577,24 @@ function ProjectSummaryRow({
         )}
       </td>
       <td className="px-5 py-3">
-        <StatusBadge status={summary.overall} />
+        {loading ? pending : <StatusBadge status={summary.overall} />}
       </td>
-      <td className="px-5 py-3 text-gray-600 tabular-nums">{summary.total}</td>
+      <td className="px-5 py-3 text-gray-600 tabular-nums">
+        {loading ? pending : summary.total}
+      </td>
       {envCols.map((e) => (
         <td key={e.name} className="px-5 py-3">
-          <EnvHealthCell count={summary.perEnv[e.name]} />
+          {loading ? pending : <EnvHealthCell count={summary.perEnv[e.name]} />}
         </td>
       ))}
       <td className="px-5 py-3 text-gray-600 tabular-nums">
-        {summary.previews > 0 ? summary.previews : <span className="text-gray-300">—</span>}
+        {loading ? (
+          pending
+        ) : summary.previews > 0 ? (
+          summary.previews
+        ) : (
+          <span className="text-gray-300">—</span>
+        )}
       </td>
       <td className="px-5 py-3">
         <div className="flex items-center justify-end gap-3 text-xs font-medium">

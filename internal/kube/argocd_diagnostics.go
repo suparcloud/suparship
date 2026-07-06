@@ -38,7 +38,53 @@ func (r *ArgoCDStatusReader) GetAppDiagnostics(ctx context.Context, argoAppName,
 	if !ok {
 		return nil, nil
 	}
+	return diagnosticsFromStatus(status, source), nil
+}
 
+// AppDiagnosticsSnapshot indexes every ArgoCD Application in the namespace by
+// name, so per-app diagnostics resolve from memory instead of a live Get each.
+// Diagnostics for a whole page (N apps × 2 sources × C clusters) then cost a
+// single LIST rather than N×2×C serial Gets against the ArgoCD namespace.
+type AppDiagnosticsSnapshot struct {
+	// byName maps Application name → its status object (nil when the app has no
+	// status yet). A name absent from the map means the Application doesn't
+	// exist — the same "nothing to report" case as a NotFound Get.
+	byName map[string]map[string]any
+}
+
+// SnapshotAppDiagnostics lists every ArgoCD Application in the namespace once and
+// returns a lookup closure that resolves per-app diagnostics from memory. All the
+// Applications a page needs live in this one namespace on the tooling cluster, so
+// one LIST replaces the per-app Gets. Returning a plain closure (over domain +
+// stdlib) keeps callers from having to import this package's snapshot type.
+func (r *ArgoCDStatusReader) SnapshotAppDiagnostics(ctx context.Context) (func(argoAppName, source string) []domain.Diagnostic, error) {
+	list, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing argocd applications: %w", err)
+	}
+	byName := make(map[string]map[string]any, len(list.Items))
+	for i := range list.Items {
+		status, _ := list.Items[i].Object["status"].(map[string]any)
+		byName[list.Items[i].GetName()] = status
+	}
+	return (&AppDiagnosticsSnapshot{byName: byName}).Diagnostics, nil
+}
+
+// Diagnostics returns the diagnostics for one Application from the snapshot,
+// labelled with source. An unknown/absent Application yields nil (nothing to
+// report) — identical to GetAppDiagnostics on a NotFound.
+func (s *AppDiagnosticsSnapshot) Diagnostics(argoAppName, source string) []domain.Diagnostic {
+	status, ok := s.byName[argoAppName]
+	if !ok || status == nil {
+		return nil
+	}
+	return diagnosticsFromStatus(status, source)
+}
+
+// diagnosticsFromStatus converts one Application's status object into
+// domain.Diagnostics. Shared by the single-app Get and the snapshot LIST so both
+// paths classify identically.
+func diagnosticsFromStatus(status map[string]any, source string) []domain.Diagnostic {
 	var out []domain.Diagnostic
 
 	// status.conditions[]: ArgoCD reports spec/sync/comparison errors here.
@@ -100,7 +146,7 @@ func (r *ArgoCDStatusReader) GetAppDiagnostics(ctx context.Context, argoAppName,
 		}
 	}
 
-	return out, nil
+	return out
 }
 
 // condTitle humanizes an ArgoCD condition type for display.

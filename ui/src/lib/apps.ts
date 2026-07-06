@@ -18,9 +18,19 @@ import type {
   PromoteResponse,
 } from "../types";
 
-export function listApps(project: string): Promise<AppListResponse> {
+// listApps returns a project's apps with live per-env status. Pass opts.stack to
+// scope live-status enrichment to that stack's members: non-member apps are still
+// returned (names, for pickers) but without the per-env cluster reads, so a stack
+// detail view doesn't pay to enrich apps it won't show status for.
+export function listApps(
+  project: string,
+  opts?: { stack?: string },
+): Promise<AppListResponse> {
+  const qs = opts?.stack
+    ? `?stack=${encodeURIComponent(opts.stack)}`
+    : "";
   return api.get<AppListResponse>(
-    `/projects/${encodeURIComponent(project)}/apps`,
+    `/projects/${encodeURIComponent(project)}/apps${qs}`,
   );
 }
 

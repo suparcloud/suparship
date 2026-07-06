@@ -107,11 +107,18 @@ func stackToDTO(s *domain.Stack, appNames []string) StackDTO {
 
 // stackMemberNames returns the names of apps whose Spec.Stack == stackName.
 func (rh *rbacHandler) stackMemberNames(ctx context.Context, project, stackName string) []string {
-	var names []string
 	if rh.appHandler == nil {
-		return names
+		return nil
 	}
 	apps, _ := rh.appHandler.appStore.ListApps(ctx, project)
+	return stackMemberNamesFrom(apps, stackName)
+}
+
+// stackMemberNamesFrom filters an already-loaded app list to the members of a
+// stack. Lets callers that list every stack read the app list once instead of
+// re-reading it per stack (an N+1 against the app store).
+func stackMemberNamesFrom(apps []*domain.App, stackName string) []string {
+	var names []string
 	for _, a := range apps {
 		if a.Spec.Stack == stackName {
 			names = append(names, a.Name)
@@ -127,9 +134,15 @@ func (rh *rbacHandler) handleListStacks(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "project not found: " + project})
 		return
 	}
+	// Read the project's apps once and derive every stack's members from it,
+	// rather than re-listing apps per stack.
+	var apps []*domain.App
+	if rh.appHandler != nil {
+		apps, _ = rh.appHandler.appStore.ListApps(r.Context(), project)
+	}
 	dtos := make([]StackDTO, 0, len(stacks))
 	for _, s := range stacks {
-		dtos = append(dtos, stackToDTO(s, rh.stackMemberNames(r.Context(), project, s.Name)))
+		dtos = append(dtos, stackToDTO(s, stackMemberNamesFrom(apps, s.Name)))
 	}
 	sort.Slice(dtos, func(i, j int) bool { return dtos[i].Name < dtos[j].Name })
 	writeJSON(w, http.StatusOK, map[string]any{"project": project, "stacks": dtos})

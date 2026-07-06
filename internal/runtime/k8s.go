@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -116,17 +117,33 @@ func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceN
 // canonical apps predating instance labels keep working.
 func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fallbackName string) (*RuntimeInfo, error) {
 	selector := instanceLabel + "=" + instance
-	workloads, err := p.listLabelledWorkloads(ctx, namespace, selector)
-	if err != nil {
-		return nil, err
-	}
 
-	// Routing resources this app owns (by label), independent of workloads — so a
-	// resource-only app (httproute/ingress) is recognized as deployed and its
-	// endpoints surface even though there are no replicas to count.
-	routeURLs, hasRouting, err := p.labelledRoutes(ctx, namespace, selector)
-	if err != nil {
-		return nil, err
+	// Workload and routing discovery are independent reads; run them concurrently
+	// (and each fans out its own LISTs in parallel) so one app-env's live status
+	// is ~1 wall-clock round-trip instead of 5 serial ones. This dominates page
+	// latency on a cold cache, multiplied by every app×env×cluster.
+	var (
+		workloads  []workload
+		routeURLs  []string
+		hasRouting bool
+		wErr, rErr error
+		wg         sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		workloads, wErr = p.listLabelledWorkloads(ctx, namespace, selector)
+	}()
+	go func() {
+		defer wg.Done()
+		routeURLs, hasRouting, rErr = p.labelledRoutes(ctx, namespace, selector)
+	}()
+	wg.Wait()
+	if wErr != nil {
+		return nil, wErr
+	}
+	if rErr != nil {
+		return nil, rErr
 	}
 
 	if len(workloads) == 0 {
@@ -179,23 +196,44 @@ func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fa
 // resource exists (used to recognize a workload-less app as deployed). HTTPRoute
 // discovery degrades gracefully (see listHTTPRoutes).
 func (p *K8sProvider) labelledRoutes(ctx context.Context, namespace, selector string) (urls []string, found bool, err error) {
-	ingList, ierr := p.client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	if ierr != nil && !apierrors.IsNotFound(ierr) && !apierrors.IsForbidden(ierr) {
-		return nil, false, fmt.Errorf("listing ingresses in %s: %w", namespace, ierr)
-	}
-	if ingList != nil {
-		for i := range ingList.Items {
-			found = true
-			urls = append(urls, ingressHostURLs(&ingList.Items[i])...)
+	// Ingresses (typed) and HTTPRoutes (dynamic) are independent; list them
+	// concurrently and combine in a fixed order (ingress URLs first) so output
+	// stays deterministic.
+	var (
+		ingURLs, rtURLs   []string
+		ingFound, rtFound bool
+		ingErr            error
+		wg                sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ingList, ierr := p.client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if ierr != nil && !apierrors.IsNotFound(ierr) && !apierrors.IsForbidden(ierr) {
+			ingErr = fmt.Errorf("listing ingresses in %s: %w", namespace, ierr)
+			return
 		}
-	}
-	if routes := p.listHTTPRoutes(ctx, namespace, selector); len(routes) > 0 {
-		found = true
-		for _, rt := range routes {
-			urls = append(urls, httpRouteHostURLs(rt)...)
+		if ingList != nil {
+			for i := range ingList.Items {
+				ingFound = true
+				ingURLs = append(ingURLs, ingressHostURLs(&ingList.Items[i])...)
+			}
 		}
+	}()
+	go func() {
+		defer wg.Done()
+		if routes := p.listHTTPRoutes(ctx, namespace, selector); len(routes) > 0 {
+			rtFound = true
+			for _, rt := range routes {
+				rtURLs = append(rtURLs, httpRouteHostURLs(rt)...)
+			}
+		}
+	}()
+	wg.Wait()
+	if ingErr != nil {
+		return nil, false, ingErr
 	}
-	return dedupeStrings(urls), found, nil
+	return dedupeStrings(append(ingURLs, rtURLs...)), ingFound || rtFound, nil
 }
 
 // workload is the subset of a Deployment/StatefulSet/DaemonSet runtime state the
@@ -217,38 +255,67 @@ type workload struct {
 // kinds) so a readable kind still reports; any other list error is returned.
 func (p *K8sProvider) listLabelledWorkloads(ctx context.Context, namespace, selector string) ([]workload, error) {
 	opts := metav1.ListOptions{LabelSelector: selector}
+
+	// The three kinds are separate typed endpoints; list them concurrently and
+	// merge in a fixed kind order afterwards so the result is deterministic. A
+	// per-kind Forbidden error is tolerated (RBAC may scope us to a subset).
+	var (
+		perKind [3][]workload
+		errs    [3]error
+		wg      sync.WaitGroup
+	)
+	list := []func() ([]workload, error){
+		func() ([]workload, error) {
+			l, err := p.client.AppsV1().Deployments(namespace).List(ctx, opts)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]workload, 0, len(l.Items))
+			for i := range l.Items {
+				out = append(out, deploymentWorkload(&l.Items[i]))
+			}
+			return out, nil
+		},
+		func() ([]workload, error) {
+			l, err := p.client.AppsV1().StatefulSets(namespace).List(ctx, opts)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]workload, 0, len(l.Items))
+			for i := range l.Items {
+				out = append(out, statefulSetWorkload(&l.Items[i]))
+			}
+			return out, nil
+		},
+		func() ([]workload, error) {
+			l, err := p.client.AppsV1().DaemonSets(namespace).List(ctx, opts)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]workload, 0, len(l.Items))
+			for i := range l.Items {
+				out = append(out, daemonSetWorkload(&l.Items[i]))
+			}
+			return out, nil
+		},
+	}
+	wg.Add(len(list))
+	for i, fn := range list {
+		go func(i int, fn func() ([]workload, error)) {
+			defer wg.Done()
+			perKind[i], errs[i] = fn()
+		}(i, fn)
+	}
+	wg.Wait()
+
+	kinds := []string{"deployments", "statefulsets", "daemonsets"}
 	var out []workload
-
-	deps, err := p.client.AppsV1().Deployments(namespace).List(ctx, opts)
-	if err != nil && !apierrors.IsForbidden(err) {
-		return nil, fmt.Errorf("listing deployments in %s: %w", namespace, err)
-	}
-	if deps != nil {
-		for i := range deps.Items {
-			out = append(out, deploymentWorkload(&deps.Items[i]))
+	for i, err := range errs {
+		if err != nil && !apierrors.IsForbidden(err) {
+			return nil, fmt.Errorf("listing %s in %s: %w", kinds[i], namespace, err)
 		}
+		out = append(out, perKind[i]...)
 	}
-
-	stss, err := p.client.AppsV1().StatefulSets(namespace).List(ctx, opts)
-	if err != nil && !apierrors.IsForbidden(err) {
-		return nil, fmt.Errorf("listing statefulsets in %s: %w", namespace, err)
-	}
-	if stss != nil {
-		for i := range stss.Items {
-			out = append(out, statefulSetWorkload(&stss.Items[i]))
-		}
-	}
-
-	dss, err := p.client.AppsV1().DaemonSets(namespace).List(ctx, opts)
-	if err != nil && !apierrors.IsForbidden(err) {
-		return nil, fmt.Errorf("listing daemonsets in %s: %w", namespace, err)
-	}
-	if dss != nil {
-		for i := range dss.Items {
-			out = append(out, daemonSetWorkload(&dss.Items[i]))
-		}
-	}
-
 	return out, nil
 }
 

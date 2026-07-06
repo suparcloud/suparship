@@ -79,6 +79,10 @@ type appHandler struct {
 	// auditor records app lifecycle events (create/delete/rename/promote).
 	// Defaults to a Nop when unset.
 	auditor audit.Auditor
+	// statusCache memoizes enriched env live-status for a short TTL so the list
+	// path (dashboard/project/stack) doesn't re-hit K8s + ArgoCD on every load.
+	// nil is a valid no-op cache (test handlers built as literals skip caching).
+	statusCache *statusCache
 }
 
 // ensureKargoProjectCreds provisions/refreshes both Kargo credential Secrets in
@@ -114,6 +118,7 @@ func newAppHandler(store domain.AppStore, templates []*tpl.Template, clusterLoad
 		builtin:       templates,
 		clusterLoader: clusterLoader,
 		projectStore:  projectStore,
+		statusCache:   newStatusCache(statusCacheTTL),
 	}
 }
 
@@ -904,13 +909,55 @@ func (ah *appHandler) handleListApps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dtos := make([]AppSummaryDTO, 0, len(apps))
+	// Optional ?stack= scopes live enrichment to that stack's member apps. The
+	// stack detail page needs live status only for members but still wants every
+	// app's name (for the "add app" picker), so non-members are returned with
+	// their stored status un-enriched rather than paying the per-env K8s/ArgoCD
+	// cost. Empty (the default) enriches every app, as the dashboard/project
+	// pages require.
+	stackFilter := r.URL.Query().Get("stack")
+	enrichApp := func(app *domain.App) bool {
+		return stackFilter == "" || app.Spec.Stack == stackFilter
+	}
+
+	// Resolve org + apps once per request (shared across the concurrent env
+	// fan-out below) instead of re-reading them ~2× per env.
+	ctx := withEnrichMemos(r.Context())
+	m := appMemoFrom(ctx)
 	for _, app := range apps {
-		envs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, app.Name)
-		for _, env := range envs {
-			ah.enrichEnvWithLiveStatus(r.Context(), app.Name, env)
+		m.seed(projectName, app)
+	}
+
+	// Gather each app's environments (cheap store reads), then enrich every
+	// (app, env) pair with bounded concurrency. Each task owns its own distinct
+	// *AppEnvironment, so no shared-state races. The list path reads through the
+	// short-TTL status cache; DTOs are assembled in app order afterwards.
+	envsByApp := make([][]*domain.AppEnvironment, len(apps))
+	for i, app := range apps {
+		envsByApp[i], _ = ah.appStore.ListAppEnvironments(ctx, projectName, app.Name)
+	}
+
+	type enrichTask struct {
+		appName string
+		env     *domain.AppEnvironment
+	}
+	var tasks []enrichTask
+	for i, app := range apps {
+		if !enrichApp(app) {
+			continue
 		}
-		dtos = append(dtos, appToSummaryDTO(app, envs))
+		for _, env := range envsByApp[i] {
+			tasks = append(tasks, enrichTask{appName: app.Name, env: env})
+		}
+	}
+	runBounded(len(tasks), appEnrichConcurrency, func(i int) {
+		t := tasks[i]
+		ah.enrichCachedOrLive(ctx, projectName, t.appName, t.env)
+	})
+
+	dtos := make([]AppSummaryDTO, 0, len(apps))
+	for i, app := range apps {
+		dtos = append(dtos, appToSummaryDTO(app, envsByApp[i]))
 	}
 
 	writeJSON(w, http.StatusOK, AppListResponse{
@@ -933,10 +980,15 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	envs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
-	for _, env := range envs {
-		ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
-	}
+	// Detail view: always recompute live (and refresh the cache) so an operator
+	// on an app page never sees stale status. Memo the org + this app so the
+	// per-env fan-out doesn't re-read them.
+	ctx := withEnrichMemos(r.Context())
+	appMemoFrom(ctx).seed(projectName, app)
+	envs, _ := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
+	runBounded(len(envs), appEnrichConcurrency, func(i int) {
+		ah.enrichAndCache(ctx, projectName, appName, envs[i])
+	})
 
 	detail := appToDetailDTO(app, envs)
 	// BYO/passthrough apps don't use the canonical component model — the chart
@@ -956,22 +1008,25 @@ func (ah *appHandler) handleListAppEnvironments(w http.ResponseWriter, r *http.R
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
 
-	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
+	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{
 			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
 		})
 		return
 	}
 
-	envs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
+	ctx := withEnrichMemos(r.Context())
+	appMemoFrom(ctx).seed(projectName, app)
+	envs, err := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list environments"})
 		return
 	}
 
-	for _, env := range envs {
-		ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
-	}
+	runBounded(len(envs), appEnrichConcurrency, func(i int) {
+		ah.enrichAndCache(ctx, projectName, appName, envs[i])
+	})
 
 	dtos := make([]AppEnvironmentSummaryDTO, 0, len(envs))
 	for _, env := range envs {
@@ -1000,7 +1055,7 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	ah.enrichEnvWithLiveStatus(r.Context(), appName, env)
+	ah.enrichAndCache(withEnrichMemos(r.Context()), projectName, appName, env)
 
 	dto := appEnvToDTO(env)
 	// Surface pin state (lives in the app spec, not the env record) so the UI's
@@ -2542,8 +2597,8 @@ func (ah *appHandler) workloadClustersForEnv(ctx context.Context, envName string
 	if ah.clusterPool == nil || ah.orgProvider == nil {
 		return nil, nil, false
 	}
-	org, err := ah.orgProvider.GetOrg(ctx)
-	if err != nil {
+	org, err := ah.orgOnce(ctx)
+	if err != nil || org == nil {
 		return nil, nil, false
 	}
 	var targets []string
@@ -2642,12 +2697,23 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 		return // all targets unreachable; diagnostics above explain
 	}
 
-	// Aggregate across reachable clusters: worst-of phase, summed replicas.
+	// Query every reachable cluster concurrently (a fan-out "all" env otherwise
+	// serializes one full GetAppRuntime per cluster), then aggregate in cluster
+	// order so the worst-of phase, summed replicas, and per-cluster diagnostics
+	// are deterministic regardless of completion order.
+	infos := make([]*runtime.RuntimeInfo, len(clients))
+	runBounded(len(clients), appEnrichConcurrency, func(i int) {
+		nc := clients[i]
+		if info, err := runtime.NewK8sProvider(nc.client, nc.dyn).GetAppRuntime(ctx, env.Namespace, instance, appName); err == nil {
+			infos[i] = info
+		}
+	})
+
 	agg := &runtime.RuntimeInfo{Status: runtime.StatusHealthy}
 	got := false
-	for _, nc := range clients {
-		info, err := runtime.NewK8sProvider(nc.client, nc.dyn).GetAppRuntime(ctx, env.Namespace, instance, appName)
-		if err != nil {
+	for i, nc := range clients {
+		info := infos[i]
+		if info == nil {
 			continue
 		}
 		got = true
@@ -2697,7 +2763,7 @@ func (ah *appHandler) argoAppNamesForEnv(ctx context.Context, projectName, appNa
 	var pattern string
 	var deployTargets, clusterRefs []string
 	if ah.orgProvider != nil {
-		if org, err := ah.orgProvider.GetOrg(ctx); err == nil && org != nil {
+		if org, err := ah.orgOnce(ctx); err == nil && org != nil {
 			pattern = org.ResourceNaming.EffectiveArgoAppName()
 			for _, e := range org.Environments {
 				if e.Name == envName {
@@ -2714,7 +2780,7 @@ func (ah *appHandler) argoAppNamesForEnv(ctx context.Context, projectName, appNa
 	// default, so single-cluster / untargeted apps are unchanged.
 	clusters := deployTargets
 	if ah.appStore != nil {
-		if app, err := ah.appStore.GetApp(ctx, projectName, appName); err == nil && app != nil {
+		if app, err := ah.appOnce(ctx, projectName, appName); err == nil && app != nil {
 			clusters = domain.ResolveAppClusterTargets(
 				app.Spec.EnvironmentDefaults[envName].TargetClusters, deployTargets, clusterRefs)
 		}
@@ -2762,6 +2828,9 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 	// Only tag diagnostics with a cluster when the env actually fans out, to keep
 	// single-cluster output unchanged.
 	multi := len(apps) > 1
+	// Prefer the per-request snapshot (one LIST for the whole page) when available;
+	// otherwise fall back to per-app live Gets, which also surface read errors.
+	lookup, useSnapshot := ah.diagLookup(ctx)
 	for _, ca := range apps {
 		cluster := ""
 		if multi {
@@ -2771,20 +2840,26 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 			{ca.name, "argocd"},
 			{ca.name + "-platform", "external-secrets"},
 		} {
-			diags, err := ah.diagnosticsReader.GetAppDiagnostics(ctx, t.app, t.source)
-			if err != nil {
-				// Don't silently drop a read failure (RBAC, throttling, API down) —
-				// that would falsely present a broken env as having no problems.
-				// Surface it as a warning so the operator knows status is unknown.
-				env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
-					Source:  t.source,
-					Level:   domain.DiagnosticWarning,
-					Title:   "Delivery status unavailable",
-					Detail:  err.Error(),
-					Hint:    "Could not read the ArgoCD Application status; the env's real health is unknown. Check suparShip's access to the ArgoCD namespace and that ArgoCD is reachable.",
-					Cluster: cluster,
-				})
-				continue
+			var diags []domain.Diagnostic
+			if useSnapshot {
+				diags = lookup(t.app, t.source)
+			} else {
+				var err error
+				diags, err = ah.diagnosticsReader.GetAppDiagnostics(ctx, t.app, t.source)
+				if err != nil {
+					// Don't silently drop a read failure (RBAC, throttling, API down) —
+					// that would falsely present a broken env as having no problems.
+					// Surface it as a warning so the operator knows status is unknown.
+					env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
+						Source:  t.source,
+						Level:   domain.DiagnosticWarning,
+						Title:   "Delivery status unavailable",
+						Detail:  err.Error(),
+						Hint:    "Could not read the ArgoCD Application status; the env's real health is unknown. Check suparShip's access to the ArgoCD namespace and that ArgoCD is reachable.",
+						Cluster: cluster,
+					})
+					continue
+				}
 			}
 			for i := range diags {
 				diags[i].Cluster = cluster

@@ -184,7 +184,9 @@ export function StackDetail() {
     try {
       const [s, apps, envList] = await Promise.all([
         getStack(project, stackName),
-        listApps(project),
+        // Only the stack's members need live status here; non-members come back
+        // as names for the "add app" picker without paying the enrichment cost.
+        listApps(project, { stack: stackName }),
         listProjectEnvironments(project),
       ]);
       setStack(s);
@@ -213,7 +215,7 @@ export function StackDetail() {
 
   if (!project || !stackName) return null;
   if (error) return <div className="p-6 text-sm text-red-600">{error}</div>;
-  if (!stack) return <div className="p-6 text-sm text-gray-400">Loading…</div>;
+  if (!stack) return <StackDetailSkeleton />;
 
   const memberApps = stack.apps ?? [];
   const members = new Set(memberApps);
@@ -1078,6 +1080,18 @@ export function StackDetail() {
           </div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+// StackDetailSkeleton mirrors the page's header + table shell so the layout
+// doesn't jump when the stack loads (replaces a bare "Loading…").
+function StackDetailSkeleton() {
+  return (
+    <div className="space-y-6 p-6">
+      <div className="h-4 w-40 animate-pulse rounded bg-gray-100" />
+      <div className="h-8 w-64 animate-pulse rounded bg-gray-100" />
+      <div className="h-40 animate-pulse rounded-lg bg-gray-50" />
     </div>
   );
 }

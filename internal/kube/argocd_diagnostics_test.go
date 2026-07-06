@@ -139,6 +139,49 @@ func TestGetAppDiagnostics_FailedSyncOperation(t *testing.T) {
 	}
 }
 
+// The snapshot LIST path must classify identically to the per-app Get path, and
+// yield nothing for an app absent from the snapshot (same as a NotFound Get).
+func TestSnapshotAppDiagnostics_MatchesPerAppGet(t *testing.T) {
+	chart := argoApp("web-staging", map[string]any{
+		"operationState": map[string]any{"phase": "Failed", "message": "apply failed"},
+	})
+	platform := argoApp("web-staging-platform", map[string]any{
+		"health": map[string]any{
+			"status":  "Degraded",
+			"message": `ClusterSecretStore "suparship-store" is not ready`,
+		},
+	})
+	r := newDiagReader(t, chart, platform)
+	ctx := context.Background()
+
+	lookup, err := r.SnapshotAppDiagnostics(ctx)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	cases := []struct{ app, source string }{
+		{"web-staging", "argocd"},
+		{"web-staging-platform", "external-secrets"},
+		{"web-staging", "external-secrets"}, // same app, different source label
+		{"absent-staging", "argocd"},        // not in the snapshot → nil
+	}
+	for _, c := range cases {
+		want, gerr := r.GetAppDiagnostics(ctx, c.app, c.source)
+		if gerr != nil {
+			t.Fatalf("GetAppDiagnostics(%s): %v", c.app, gerr)
+		}
+		got := lookup(c.app, c.source)
+		if len(got) != len(want) {
+			t.Fatalf("%s/%s: snapshot returned %d diagnostics, Get returned %d", c.app, c.source, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%s/%s diag[%d]: snapshot=%+v get=%+v", c.app, c.source, i, got[i], want[i])
+			}
+		}
+	}
+}
+
 // Progressing health with a message must NOT be reported as a problem.
 func TestGetAppDiagnostics_ProgressingIsNotADiagnostic(t *testing.T) {
 	app := argoApp("web-staging", map[string]any{
