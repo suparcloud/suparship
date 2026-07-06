@@ -148,6 +148,12 @@ export function TemplateSources() {
   const [syncingOne, setSyncingOne] = useState<string | null>(null);
   const [draft, setDraft] = useState<ExternalTemplateRepo>(emptyRepo);
   const [showAdd, setShowAdd] = useState(false);
+  // editingName holds the original name of the source being edited, or null
+  // when the form is in "add" mode. The name is the source's identity (it keys
+  // the managed credential SealedSecret and the synced sources list), so it's
+  // read-only while editing — editingName also lets the submit path replace the
+  // right row instead of appending a new one.
+  const [editingName, setEditingName] = useState<string | null>(null);
   const [credsFor, setCredsFor] = useState<ExternalTemplateRepo | null>(null);
 
   // sourceState maps repo name → { lastSynced, templateCount } derived from
@@ -231,11 +237,36 @@ export function TemplateSources() {
     }
   }
 
-  // handleAdd persists the source. When `thenSetCredentials` is true the
-  // credentials dialog opens against the freshly saved row — that's the
-  // path operators take for private repos so they don't have to find the
-  // per-row "Set credentials" button after saving.
-  async function handleAdd(thenSetCredentials: boolean) {
+  // openAdd resets the form to a blank add. Also used to toggle the panel
+  // closed from the header button.
+  function openAdd() {
+    setEditingName(null);
+    setDraft(emptyRepo);
+    setShowAdd(true);
+  }
+
+  // handleEdit opens the form pre-filled with an existing source. Spreading
+  // over emptyRepo guarantees every field is a defined string so the inputs
+  // stay controlled even if the stored row omits optionals.
+  function handleEdit(repo: ExternalTemplateRepo) {
+    setDraft({ ...emptyRepo, ...repo });
+    setEditingName(repo.name);
+    setShowAdd(true);
+  }
+
+  function closeForm() {
+    setShowAdd(false);
+    setEditingName(null);
+    setDraft(emptyRepo);
+  }
+
+  // handleSave persists the source — appending when adding, or replacing the
+  // matching row when editing. When `thenSetCredentials` is true the
+  // credentials dialog opens against the saved row — that's the path operators
+  // take for private repos so they don't have to find the per-row
+  // "Set credentials" button after saving.
+  async function handleSave(thenSetCredentials: boolean) {
+    const isEdit = editingName !== null;
     if (!draft.name.trim() || !draft.repoURL.trim()) {
       toast.error("Name and Repo URL are required");
       return;
@@ -248,7 +279,9 @@ export function TemplateSources() {
       toast.error("Path to the .tgz file is required for git-tgz sources");
       return;
     }
-    if ((registry.external ?? []).some((r) => r.name === draft.name)) {
+    // Name is immutable while editing, so a collision is only possible when
+    // adding a brand-new source.
+    if (!isEdit && (registry.external ?? []).some((r) => r.name === draft.name)) {
       toast.error(`A source named ${draft.name} already exists`);
       return;
     }
@@ -257,13 +290,18 @@ export function TemplateSources() {
       const saved: ExternalTemplateRepo = { ...draft };
       const next: TemplateRegistry = {
         ...registry,
-        external: [...(registry.external ?? []), saved],
+        external: isEdit
+          ? (registry.external ?? []).map((r) =>
+              r.name === editingName ? saved : r,
+            )
+          : [...(registry.external ?? []), saved],
       };
       const res = await updateTemplateRegistry(next);
       setRegistry(res.registry);
-      setDraft(emptyRepo);
-      setShowAdd(false);
-      toast.success(`Added source ${saved.name}`);
+      closeForm();
+      toast.success(
+        isEdit ? `Updated source ${saved.name}` : `Added source ${saved.name}`,
+      );
       if (thenSetCredentials) {
         // Use the saved draft directly; the registry response also
         // contains the row but lookup-by-name would have to handle the
@@ -347,7 +385,7 @@ export function TemplateSources() {
           </button>
           <button
             type="button"
-            onClick={() => setShowAdd((v) => !v)}
+            onClick={() => (showAdd ? closeForm() : openAdd())}
             className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
           >
             {showAdd ? "Cancel" : "Add source"}
@@ -356,12 +394,13 @@ export function TemplateSources() {
       </div>
 
       {showAdd && (
-        <AddSourceForm
+        <SourceForm
           draft={draft}
           onChange={setDraft}
-          onSubmit={() => handleAdd(false)}
-          onSubmitWithCredentials={() => handleAdd(true)}
+          onSubmit={() => handleSave(false)}
+          onSubmitWithCredentials={() => handleSave(true)}
           saving={savingRepo}
+          isEdit={editingName !== null}
         />
       )}
 
@@ -439,6 +478,13 @@ export function TemplateSources() {
                       </button>
                       <button
                         type="button"
+                        onClick={() => handleEdit(repo)}
+                        className="ml-2 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => setCredsFor(repo)}
                         className="ml-2 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
                       >
@@ -484,18 +530,20 @@ export function TemplateSources() {
   );
 }
 
-function AddSourceForm({
+function SourceForm({
   draft,
   onChange,
   onSubmit,
   onSubmitWithCredentials,
   saving,
+  isEdit,
 }: {
   draft: ExternalTemplateRepo;
   onChange: (next: ExternalTemplateRepo) => void;
   onSubmit: () => void;
   onSubmitWithCredentials: () => void;
   saving: boolean;
+  isEdit: boolean;
 }) {
   const set = (partial: Partial<ExternalTemplateRepo>) =>
     onChange({ ...draft, ...partial });
@@ -505,11 +553,13 @@ function AddSourceForm({
   const showGitTgzFields = usesGitTgz(sourceType);
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-6">
-      <h2 className="text-base font-semibold text-gray-900">Add source</h2>
+      <h2 className="text-base font-semibold text-gray-900">
+        {isEdit ? "Edit source" : "Add source"}
+      </h2>
       <p className="mt-1 text-xs text-gray-500">
-        Pick a source type below; fields adjust to match. Git sources walk a
-        repo path for templates; OCI sources pull a single chart by name and
-        version.
+        {isEdit
+          ? "Update the source's location or parameters. Re-sync after saving to pick up templates from the new location. The name is fixed — remove and re-add to rename."
+          : "Pick a source type below; fields adjust to match. Git sources walk a repo path for templates; OCI sources pull a single chart by name and version."}
       </p>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <Field label="Source type" help="Git for a templates repo; OCI for a single Helm-registry chart.">
@@ -523,12 +573,20 @@ function AddSourceForm({
             ))}
           </select>
         </Field>
-        <Field label="Name" help="Unique identifier shown in this list.">
+        <Field
+          label="Name"
+          help={
+            isEdit
+              ? "Fixed for existing sources — it keys stored credentials and synced templates."
+              : "Unique identifier shown in this list."
+          }
+        >
           <input
-            className={inputClass}
+            className={`${inputClass}${isEdit ? " cursor-not-allowed bg-gray-50 text-gray-500" : ""}`}
             value={draft.name}
             onChange={(e) => set({ name: e.target.value })}
             placeholder={showChartFields ? "web-service-stdlib" : "myorg-charts"}
+            disabled={isEdit}
           />
         </Field>
         <Field
@@ -638,7 +696,8 @@ function AddSourceForm({
       </div>
       <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
         <p className="mr-auto text-xs text-gray-500">
-          Public source? Save source. Private? Save &amp; set credentials seals
+          Public source? {isEdit ? "Save changes" : "Save source"}. Private?{" "}
+          {isEdit ? "Save & update credentials" : "Save & set credentials"} seals
           a token for the source in one step.
         </p>
         <button
@@ -647,7 +706,7 @@ function AddSourceForm({
           disabled={saving}
           className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
         >
-          {saving ? "Saving…" : "Save source"}
+          {saving ? "Saving…" : isEdit ? "Save changes" : "Save source"}
         </button>
         <button
           type="button"
@@ -655,7 +714,11 @@ function AddSourceForm({
           disabled={saving}
           className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
         >
-          {saving ? "Saving…" : "Save & set credentials"}
+          {saving
+            ? "Saving…"
+            : isEdit
+              ? "Save & update credentials"
+              : "Save & set credentials"}
         </button>
       </div>
     </div>
