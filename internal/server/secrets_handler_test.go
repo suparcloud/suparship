@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -84,6 +85,38 @@ func TestGetSecretsBackend_Default(t *testing.T) {
 	mustDecode(t, rec.Body.Bytes(), &dto)
 	if dto.Type != "k8s" {
 		t.Errorf("expected default type 'k8s', got %q", dto.Type)
+	}
+}
+
+// clusterVaultIDs must expose an env's vault to EVERY cluster the env is bound
+// to (ClusterRefs), not only the active one — otherwise a standby cluster's
+// suparship-store lists only the global vault and cannot resolve env secrets
+// before/after an active-cluster failover.
+func TestClusterVaultIDs_AllBoundClustersGetEnvVault(t *testing.T) {
+	org := &rbac.Org{
+		SecretBackend: secrets.BackendConfig{
+			Type: secrets.Backend1Password,
+			OnePassword: &secrets.OnePasswordConfig{
+				GlobalVault: secrets.VaultRef{VaultID: "v-global"},
+				EnvVaults:   []secrets.VaultRef{{Key: "staging", VaultID: "v-staging"}},
+			},
+		},
+		Environments: []rbac.OrgEnvironment{{
+			Name:             "staging",
+			ClusterRefs:      []string{"clusterA", "clusterB"},
+			ActiveClusterRef: "clusterA",
+		}},
+	}
+
+	want := map[string][]string{
+		"clusterA": {"v-global", "v-staging"}, // active bound cluster
+		"clusterB": {"v-global", "v-staging"}, // non-active but bound → must include env vault
+		"clusterC": {"v-global"},              // not bound to the env → global only
+	}
+	for cluster, exp := range want {
+		if got := clusterVaultIDs(org, cluster); !slices.Equal(got, exp) {
+			t.Errorf("clusterVaultIDs(%q) = %v, want %v", cluster, got, exp)
+		}
 	}
 }
 

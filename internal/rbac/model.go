@@ -23,6 +23,7 @@ package rbac
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/suparcloud/suparship/internal/branding"
@@ -168,6 +169,16 @@ func (e OrgEnvironment) EffectiveClusterRef() string {
 		return e.ClusterRefs[0]
 	}
 	return ""
+}
+
+// IsBoundTo reports whether clusterName is one of the clusters this environment
+// is bound to (a member of ClusterRefs), regardless of which is currently
+// active. Use this for cluster-scoped read access that must survive an
+// active-cluster failover — e.g. which vaults a cluster's secret store must
+// expose — as opposed to EffectiveClusterRef, which is only where deploys
+// currently land. The active cluster is always a member, so this is a superset.
+func (e OrgEnvironment) IsBoundTo(clusterName string) bool {
+	return slices.Contains(e.ClusterRefs, clusterName)
 }
 
 // EffectiveProjectNamespacePattern returns the per-env override that applies

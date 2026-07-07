@@ -595,7 +595,10 @@ func clusterVaultIDs(org *rbac.Org, clusterName string) []string {
 		ids = append(ids, ref.VaultID)
 	}
 	for _, e := range org.Environments {
-		if e.EffectiveClusterRef() != clusterName {
+		// Every cluster the env is bound to reads its env vault — not just the
+		// active one — so a standby cluster resolves secrets before/after an
+		// active-cluster failover.
+		if !e.IsBoundTo(clusterName) {
 			continue
 		}
 		if ref := org.SecretBackend.FindVault(secrets.EnvScope(e.Name)); ref != nil && ref.VaultID != "" {

@@ -2216,7 +2216,7 @@ func selfHealSealedTokens(
 			vaultIDs = append(vaultIDs, ref.VaultID)
 		}
 		for _, e := range org.Environments {
-			if e.EffectiveClusterRef() != c.Name {
+			if !e.IsBoundTo(c.Name) {
 				continue
 			}
 			if ref := org.SecretBackend.FindVault(secrets.EnvScope(e.Name)); ref != nil && ref.VaultID != "" {
