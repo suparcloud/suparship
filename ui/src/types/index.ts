@@ -442,7 +442,7 @@ export interface EffectiveValuesResponse {
   // false when the chart bundle couldn't be read (built-in/disk/external-mode);
   // the preview then reflects only platform/env defaults + overrides.
   chartDefaultsAvailable: boolean;
-  // whether {platform.*}/{vars.*} tokens were resolved (always false in v1).
+  // whether ((platform.*))/((vars.*)) tokens were resolved (always false in v1).
   interpolated: boolean;
   // overlays that contributed, low→high.
   layers: string[];
@@ -849,7 +849,7 @@ export interface CreateAppRequest {
   /** Optional namespace pattern override. Only applies when namespaceScope is "app". */
   namespacePattern?: string;
   /** Optional freeform Helm values overlay, deep-merged onto generated values at
-   *  publish. String leaves may reference {platform.*}/{vars.*} tokens. No secrets. */
+   *  publish. String leaves may reference ((platform.*))/((vars.*)) tokens. No secrets. */
   rawValues?: Record<string, unknown>;
   /** App-level per-component config keyed by component name. */
   componentConfigs?: Record<string, ComponentConfig>;

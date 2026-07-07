@@ -136,7 +136,7 @@ func TestMarshalPassthroughValues_OverlayOnlyWithTokens(t *testing.T) {
 	overlay := map[string]any{
 		"replicaCount": 4,
 		"ingress": map[string]any{
-			"annotations": map[string]any{"region": "{platform.cluster}"},
+			"annotations": map[string]any{"region": "[[platform.cluster]]"},
 		},
 	}
 	got, err := marshalPassthroughValues(pv, overlay, nil)
@@ -153,7 +153,7 @@ func TestMarshalPassthroughValues_OverlayOnlyWithTokens(t *testing.T) {
 			t.Errorf("passthrough must not inject canonical key %q: %v", k, out)
 		}
 	}
-	// Overlay present; {platform.cluster} token resolved.
+	// Overlay present; [[platform.cluster]] token resolved.
 	if out["replicaCount"] != 4 {
 		t.Errorf("overlay lost: %v", out)
 	}
@@ -191,7 +191,7 @@ func TestMarshalValuesWithOverlay_MergesAndInterpolates(t *testing.T) {
 		Platform: helmvalues.PlatformValues{Env: "prod", RoutingHost: "hello.prod.acme.com"},
 	}
 	overlay := map[string]any{
-		"podAnnotations": map[string]any{"host": "{platform.routingHost}", "region": "{vars.REGION}"},
+		"podAnnotations": map[string]any{"host": "[[platform.routingHost]]", "region": "[[vars.REGION]]"},
 	}
 	got, err := marshalValuesWithOverlay(hv, overlay, map[string]string{"REGION": "us-east"})
 	if err != nil {
@@ -220,7 +220,7 @@ func TestMarshalValuesWithOverlay_InterpolatesBaseTokens(t *testing.T) {
 	hv := helmvalues.HelmValues{
 		Platform: helmvalues.PlatformValues{Env: "staging"},
 		Components: map[string]*helmvalues.ComponentValues{
-			"web": {Image: helmvalues.ImageValues{Repository: "ghcr.io/org/hello", Tag: "{platform.env}-latest"}},
+			"web": {Image: helmvalues.ImageValues{Repository: "ghcr.io/org/hello", Tag: "[[platform.env]]-latest"}},
 		},
 	}
 	got, err := marshalValuesWithOverlay(hv, nil, nil)

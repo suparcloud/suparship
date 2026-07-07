@@ -956,7 +956,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// Platform-managed per-app resources (ConfigMap + ExternalSecret) are
 		// written to the platform-owned _app-resources/ tree and shipped by the
 		// platform ApplicationSet — NOT into the app's chart Application.
-		// Env-var values may reference {platform.*}/{vars.*}; resolve them against
+		// Env-var values may reference ((platform.*))/((vars.*)); resolve them against
 		// the env's ACTIVE cluster (MVP — the ConfigMap is a single per-env write).
 		envVars := env.EnvVars
 		if hasInterpToken(envVars) {
@@ -1030,7 +1030,7 @@ func previewRawValuesOverlay(app *domain.App, preview PreviewPublishSpec) map[st
 	// preview inherits the base env's template/org → cluster → stack → app value
 	// overrides, then layer the reserved preview band on top. Without this the
 	// preview would render only the preview band over the chart defaults, losing
-	// the base env's overrides (e.g. envConfigMapName → {platform.configMapName}).
+	// the base env's overrides (e.g. envConfigMapName → ((platform.configMapName))).
 	overlay := deepMerge(deepCopyMap(preview.PlatformDefaultValues), deepCopyMap(preview.PlatformEnvValues))
 	if preview.Cluster != "" && preview.PlatformClusterValues != nil {
 		overlay = deepMerge(overlay, deepCopyMap(preview.PlatformClusterValues[preview.Cluster]))
@@ -1080,14 +1080,14 @@ func (p *Publisher) platformVarsContext(app *domain.App, env AppPublishEnv, orgN
 // so the publisher can skip the work (and avoid churn) when none do.
 func hasInterpToken(m map[string]string) bool {
 	for _, v := range m {
-		if strings.Contains(v, "{platform.") || strings.Contains(v, "{vars.") {
+		if platform.HasToken(v) {
 			return true
 		}
 	}
 	return false
 }
 
-// marshalValuesWithOverlay serializes hv to YAML, applying platform/{vars.*}
+// marshalValuesWithOverlay serializes hv to YAML, applying platform/((vars.*))
 // interpolation and the raw-values overlay only when needed. When there is no
 // overlay and no interpolation token anywhere in the values, it returns the
 // struct-marshalled bytes unchanged (stable, declaration-order keys) so existing
@@ -1099,9 +1099,7 @@ func marshalValuesWithOverlay(hv helmvalues.HelmValues, overlay map[string]any, 
 	if err != nil {
 		return nil, err
 	}
-	needsInterp := len(overlay) > 0 ||
-		bytes.Contains(raw, []byte("{platform.")) ||
-		bytes.Contains(raw, []byte("{vars."))
+	needsInterp := len(overlay) > 0 || platform.HasToken(string(raw))
 	if !needsInterp {
 		return raw, nil
 	}
@@ -1122,7 +1120,7 @@ func marshalValuesWithOverlay(hv helmvalues.HelmValues, overlay map[string]any, 
 // marshalPassthroughValues is the BYO/passthrough counterpart: it emits ONLY the
 // (interpolated) overlay — no canonical suparship-common base — so the chart's own
 // values.yaml (applied by Helm underneath) is the foundation. The platform values
-// are used solely for {platform.*}/{vars.*} token resolution, not injected as a
+// are used solely for ((platform.*))/((vars.*)) token resolution, not injected as a
 // values block. Returns "{}" when the overlay is empty.
 func marshalPassthroughValues(pv helmvalues.PlatformValues, overlay map[string]any, vars map[string]string) ([]byte, error) {
 	if len(overlay) == 0 {
@@ -1836,7 +1834,7 @@ type AppPublishEnv struct {
 	// PlatformDefaultValues / PlatformEnvValues are the Platform-Engineer-authored
 	// Helm values overlays from the app's template: DefaultValues (all envs) and
 	// EnvValues[thisEnv]. Layered on top of the chart/base values and below the
-	// developer RawValues, then {platform.*}/{vars.*} interpolated. Populated by
+	// developer RawValues, then ((platform.*))/((vars.*)) interpolated. Populated by
 	// the publish adapter from the resolved template.
 	PlatformDefaultValues map[string]any
 	PlatformEnvValues     map[string]any
@@ -1855,7 +1853,7 @@ type AppPublishEnv struct {
 	// SkipCanonicalBase, when true, omits the canonical suparship-common values
 	// base (app/platform/components/suparship/routing) from the published
 	// values.yaml — for BYO/passthrough templates (Spec.CanonicalValues()==false).
-	// The platform context is still built so {platform.*}/{vars.*} tokens in the
+	// The platform context is still built so ((platform.*))/((vars.*)) tokens in the
 	// overlay resolve; only the injected schema is dropped.
 	SkipCanonicalBase bool
 	// TemplateImages are the app's resolved image sources (one per service),
@@ -1927,8 +1925,8 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	// names are PR-specific and have no static config).
 	//
 	// A per-preview image tag is surfaced two ways, so any chart shape works:
-	//   - {platform.imageTag}: set on hv.Platform below, so an override like
-	//     `image.tag: "{platform.imageTag}"` resolves to the PR build at publish
+	//   - ((platform.imageTag)): set on hv.Platform below, so an override like
+	//     `image.tag: "((platform.imageTag))"` resolves to the PR build at publish
 	//     (overlay tokens interpolate against hv.Platform). Chart-agnostic — the
 	//     recommended way for BYO/passthrough charts whose image key varies.
 	//   - canonical fold: for canonical templates the tag is also folded into the
@@ -1946,7 +1944,7 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 		mapApp = &clone
 	}
 	hv := helmvalues.MapToHelmValuesForEnv(mapApp, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
-	// Expose the per-PR tag as {platform.imageTag} for overlay/raw-values token
+	// Expose the per-PR tag as ((platform.imageTag)) for overlay/raw-values token
 	// interpolation, independent of the chart's image-mapping shape.
 	if preview.ImageTag != "" {
 		hv.Platform.ImageTag = preview.ImageTag
@@ -1955,11 +1953,11 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	// namespace (the namespace pattern omits {name}), so the resolved namespace
 	// doesn't carry the preview name. Suffix the platform-managed resource names
 	// (env ConfigMap + ExternalSecret/target Secret) with the preview name so
-	// previews of the same app don't collide; the {platform.configMapName} /
-	// {platform.secretName} tokens follow suit so the chart's
+	// previews of the same app don't collide; the ((platform.configMapName)) /
+	// ((platform.secretName)) tokens follow suit so the chart's
 	// envConfigMapName/envSecretName references resolve to the suffixed objects.
 	// Workload resource names are the chart's responsibility (via the
-	// {platform.previewName} token in fullnameOverride).
+	// ((platform.previewName)) token in fullnameOverride).
 	resBase := app.Name
 	if !strings.Contains(preview.Namespace, preview.PreviewName) {
 		resBase = app.Name + "-" + preview.PreviewName
@@ -2042,7 +2040,7 @@ type PreviewPublishSpec struct {
 	// ConfigMap alongside app.Spec.EnvConfig.Vars.
 	EnvVars map[string]string
 	// ImageTag, when non-empty, overrides the image tag in the preview's values:
-	// it is exposed as {platform.imageTag} (for `image.tag: "{platform.imageTag}"`
+	// it is exposed as ((platform.imageTag)) (for `image.tag: "((platform.imageTag))"`
 	// style overrides) and, for canonical templates, folded into each component's
 	// image.tag. Empty inherits the base env's image tag.
 	ImageTag string

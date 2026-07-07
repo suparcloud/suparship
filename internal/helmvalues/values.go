@@ -61,7 +61,7 @@ type HelmValues struct {
 	App AppContext `json:"app" yaml:"app"`
 	// Platform carries suparShip-injected platform metadata (identity + routing
 	// context) for this app/env/cluster. Chart authors can reference it via
-	// .Values.platform.*, and it is the source of truth for {platform.*} tokens
+	// .Values.platform.*, and it is the source of truth for ((platform.*)) tokens
 	// the publisher interpolates in user-supplied values. Never contains secrets.
 	Platform PlatformValues `json:"platform" yaml:"platform"`
 	// Components is a map from component name to its resolved configuration.
@@ -107,7 +107,7 @@ type SuparshipValues struct {
 // PlatformValues carries suparShip platform metadata injected into every app
 // chart's values: app/env identity and the resolved routing context for this
 // (env, cluster). It is emitted as `.Values.platform` and is the source of truth
-// for {platform.*} interpolation tokens. Secrets are never included.
+// for ((platform.*)) interpolation tokens. Secrets are never included.
 type PlatformValues struct {
 	// Org is the organization name.
 	Org string `json:"org" yaml:"org"`
@@ -136,12 +136,12 @@ type PlatformValues struct {
 	ClusterIssuer string `json:"clusterIssuer,omitempty" yaml:"clusterIssuer,omitempty"`
 	// ImageTag is the app's resolved image tag for this instance — the same tag
 	// the canonical image mapping bakes into each component's image.tag. For a
-	// preview it is the per-PR tag. Exposed as {platform.imageTag} so charts can
+	// preview it is the per-PR tag. Exposed as ((platform.imageTag)) so charts can
 	// pin secondary images (sidecars, init containers) the canonical mapping
 	// doesn't cover to the same build. Empty when the app sets no image_tag.
 	ImageTag string `json:"imageTag,omitempty" yaml:"imageTag,omitempty"`
 	// PreviewName is the preview (PR) identifier (e.g. "pr-42"), empty for stable
-	// envs. Exposed as {platform.previewName} so a shared-namespace preview can
+	// envs. Exposed as ((platform.previewName)) so a shared-namespace preview can
 	// suffix its workload resource names (e.g. fullnameOverride) per preview.
 	PreviewName string `json:"previewName,omitempty" yaml:"previewName,omitempty"`
 	// ConfigMapName / SecretName are the resolved names of the platform-managed

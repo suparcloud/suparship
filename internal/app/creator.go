@@ -214,7 +214,7 @@ type CreateRequest struct {
 	NamespacePattern string
 	// RawValues is an optional freeform Helm values overlay (escape hatch),
 	// deep-merged onto the generated chart values at publish. May reference
-	// {platform.*}/{vars.*} tokens. No secrets.
+	// ((platform.*))/((vars.*)) tokens. No secrets.
 	RawValues map[string]any
 	// ComponentConfigs holds per-component config (resources, envFrom, scaling,
 	// env) keyed by component name, applied over the template defaults. Optional.

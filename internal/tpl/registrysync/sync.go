@@ -335,7 +335,7 @@ func (f *gitFetcher) resolveChart(chartDir string) (fetcher.ResolvedTemplate, er
 
 // makePassthrough converts an inferred (canonical) template into a passthrough/
 // BYO one: the platform injects no canonical values base and exposes only
-// {platform.*}/{vars.*} tokens, with the chart's own values.yaml as the base.
+// ((platform.*))/((vars.*)) tokens, with the chart's own values.yaml as the base.
 // The inferred inputs/mappings/components describe the canonical schema the
 // chart doesn't use, so they're dropped. Mirrors the clearing in
 // internal/server/template_metadata_handler.go.

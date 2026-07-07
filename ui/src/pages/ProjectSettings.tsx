@@ -638,7 +638,7 @@ function ProjectNamespaceSection({ projectName }: { projectName: string }) {
                   <code className="font-mono text-xs">{"{project}-previews"}</code>)
                   — suparship then suffixes its ConfigMap/Secret per preview, and
                   you suffix workloads via{" "}
-                  <code className="font-mono text-xs">{"{platform.previewName}"}</code>{" "}
+                  <code className="font-mono text-xs">{"((platform.previewName))"}</code>{" "}
                   in fullnameOverride. Blank uses the default{" "}
                   <code className="font-mono text-xs">
                     {DEFAULT_PREVIEW_NS_PATTERN}

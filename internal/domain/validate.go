@@ -344,7 +344,7 @@ func ValidateNamespacePattern(pattern string) error {
 // Omitting {name} is allowed: it yields a SHARED namespace for all of a
 // project's previews (e.g. "{project}-previews"). The publisher then suffixes
 // each preview's platform resources with the preview name to avoid collisions,
-// and workloads should include {platform.previewName} in their resource names.
+// and workloads should include ((platform.previewName)) in their resource names.
 //
 // An empty pattern is valid and resolves to DefaultPreviewNamespacePattern.
 func ValidatePreviewNamespacePattern(pattern string) error {

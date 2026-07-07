@@ -127,7 +127,7 @@ type TemplateSpec struct {
 	// DefaultValues is a Platform-Engineer-authored Helm values overlay applied
 	// to EVERY environment, layered on top of the chart's own default values
 	// (and below per-env EnvValues and developer overrides). Arbitrary Helm
-	// values (BYO-chart friendly); string leaves may use {platform.*}/{vars.*}
+	// values (BYO-chart friendly); string leaves may use ((platform.*))/((vars.*))
 	// tokens resolved at publish.
 	DefaultValues map[string]any `yaml:"defaultValues,omitempty"`
 	// EnvValues holds per-environment Helm values overlays keyed by environment
@@ -137,14 +137,14 @@ type TemplateSpec struct {
 	// PreviewDefaultValues is a default Helm values overlay applied to EVERY
 	// preview of apps built from this template, on top of the base env's
 	// composition and below the app's own preview override. Preview-only — does
-	// not affect stable envs. String leaves may use {platform.*}/{vars.*} tokens.
+	// not affect stable envs. String leaves may use ((platform.*))/((vars.*)) tokens.
 	PreviewDefaultValues map[string]any `yaml:"previewDefaultValues,omitempty"`
 	// InjectCanonicalValues controls whether the publisher injects the canonical
 	// suparship-common values base (app/platform/components/suparship/routing)
 	// into the published values.yaml. nil/true (default) = canonical, for charts
 	// built on suparship-common. Set false for BYO/passthrough charts that bring
 	// their own values structure: the platform then emits only the overlays +
-	// resolved {platform.*}/{vars.*} tokens, no injected schema.
+	// resolved ((platform.*))/((vars.*)) tokens, no injected schema.
 	InjectCanonicalValues *bool `yaml:"injectCanonicalValues,omitempty"`
 	// Images declares the container images this chart deploys, one entry per
 	// service, so external-CD (Kargo) can be wired generically: each entry says

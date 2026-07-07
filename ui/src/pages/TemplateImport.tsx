@@ -317,8 +317,8 @@ export function TemplateImport() {
                     </span>
                     <span className="block text-xs text-gray-500">
                       The chart brings its own values; the platform only exposes
-                      metadata tokens (<code className="font-mono">{`{platform.*}`}</code>,{" "}
-                      <code className="font-mono">{`{vars.*}`}</code>). Drops the
+                      metadata tokens (<code className="font-mono">{`((platform.*))`}</code>,{" "}
+                      <code className="font-mono">{`((vars.*))`}</code>). Drops the
                       inferred inputs/mappings.
                     </span>
                   </span>

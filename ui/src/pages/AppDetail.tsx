@@ -2508,8 +2508,8 @@ function AppValuesEditor({
               : `Overrides for ${scope}, layered on top of the base.`}{" "}
           Edit only what you override — empty inherits the chart and platform
           defaults. Reference{" "}
-          <code className="font-mono">{"{platform.*}"}</code> /{" "}
-          <code className="font-mono">{"{vars.*}"}</code> tokens.
+          <code className="font-mono">{"((platform.*))"}</code> /{" "}
+          <code className="font-mono">{"((vars.*))"}</code> tokens.
         </p>
         <Suspense
           fallback={

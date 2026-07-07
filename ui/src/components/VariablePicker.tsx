@@ -17,7 +17,7 @@ interface Entry {
 }
 
 // VariablePicker renders an "Insert variable" dropdown: a grouped, searchable
-// list of platform metadata ({platform.*}) and non-secret env vars ({vars.*}).
+// list of platform metadata (((platform.*))) and non-secret env vars (((vars.*))).
 // Clicking an entry calls onInsert with its token. Discoverable — users never
 // type the token syntax by hand.
 export function VariablePicker({

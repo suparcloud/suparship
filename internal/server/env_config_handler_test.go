@@ -143,7 +143,7 @@ func TestGetConfigVariables_ListsPlatformAndVars_NoSecrets(t *testing.T) {
 	names := map[string]string{}
 	for _, v := range resp.Vars {
 		names[v.Name] = v.Scope
-		if v.Token != "{vars."+v.Name+"}" {
+		if v.Token != "((vars."+v.Name+"))" {
 			t.Errorf("token format = %q", v.Token)
 		}
 	}

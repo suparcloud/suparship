@@ -20,14 +20,14 @@ and it's gone — no lingering state.
 `{project}-previews`) to put **every preview of the project in one namespace**.
 suparship then suffixes its own platform resources per preview — the env
 ConfigMap becomes `{app}-{name}-config` and the ExternalSecret/Secret
-`{app}-{name}-secrets`, and the `{platform.configMapName}` / `{platform.secretName}`
+`{app}-{name}-secrets`, and the `((platform.configMapName))` / `((platform.secretName))`
 tokens resolve to those suffixed names automatically. **Workload** resources are
-the chart's responsibility: include `{platform.previewName}` (the PR id, e.g.
+the chart's responsibility: include `((platform.previewName))` (the PR id, e.g.
 `pr-42`) in the chart's name, typically in `fullnameOverride`:
 
 ```yaml
 # preview overrides for a shared-namespace project
-fullnameOverride: "{platform.project}-{platform.app}-{platform.previewName}"
+fullnameOverride: "((platform.project))-((platform.app))-((platform.previewName))"
 ```
 
 Without this, two previews of the same app would collide in the shared namespace.
@@ -81,7 +81,7 @@ ClusterSecretStore — the same pattern cluster overrides use. This scales to N
 open PRs with zero new vaults or stores. The non-secret ConfigMap mirrors the
 same layering.
 
-Charts can also branch on the platform token **`{platform.envType}`** (which is
+Charts can also branch on the platform token **`((platform.envType))`** (which is
 `"preview"` in a preview) for anything that must differ structurally.
 
 ### Configuring the overlays in the UI
@@ -130,15 +130,21 @@ update — so CI can push a fresh image and re-point the preview on every commit
 the template *maps* (the canonical `image.repository`/`image.tag`). A chart with a
 second image the mapping doesn't cover — e.g. a sidecar — would otherwise fall
 back to its chart default (often `:latest`) and fail to pull in a preview. Pin it
-to the resolved tag with the **`{platform.imageTag}`** token in the app's values
+to the resolved tag with the **`((platform.imageTag))`** token in the app's values
 (or preview overrides), which resolves to the per-PR tag at deploy:
 
 ```yaml
 sidecar:
   image:
     repository: acr.io/org/app   # already correct in your values
-    tag: "{platform.imageTag}"   # tracks the same build as the main container
+    tag: ((platform.imageTag))   # tracks the same build as the main container
 ```
+
+> **Token syntax.** Platform tokens use the `(( ))` delimiter —
+> `((platform.*))` and `((vars.*))`. Unlike the older `[[ ]]` form, `(( ))` is
+> YAML-safe: `tag: ((platform.imageTag))` parses as a plain string, so it no
+> longer needs quoting. The legacy `[[ ]]` delimiter still resolves (quote it in
+> YAML), but new values should use `(( ))`.
 
 Tear down with:
 

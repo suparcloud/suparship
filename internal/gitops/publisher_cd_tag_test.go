@@ -236,7 +236,7 @@ func TestPublish_SuspendWritesSuspendKey(t *testing.T) {
 }
 
 // tokenImageApp is a BYO/passthrough app whose RawValues pin the chart's image
-// tag to the {platform.imageTag} token (the chart-agnostic, recommended way).
+// tag to the [[platform.imageTag]] token (the chart-agnostic, recommended way).
 func tokenImageApp() *domain.App {
 	return &domain.App{
 		Name:        "hello",
@@ -246,7 +246,7 @@ func tokenImageApp() *domain.App {
 			RawValues: map[string]any{
 				"image": map[string]any{
 					"repository": "registry.example.com/demo/hello",
-					"tag":        "{platform.imageTag}",
+					"tag":        "[[platform.imageTag]]",
 				},
 			},
 		},
@@ -254,8 +254,8 @@ func tokenImageApp() *domain.App {
 }
 
 // TestPublishPreview_TokenImageTagResolvesToPR is the core fix: a per-PR image
-// tag must be exposed as {platform.imageTag} so a passthrough chart's
-// `image.tag: "{platform.imageTag}"` override renders the PR build — regardless
+// tag must be exposed as [[platform.imageTag]] so a passthrough chart's
+// `image.tag: "[[platform.imageTag]]"` override renders the PR build — regardless
 // of the template's image-mapping shape.
 func TestPublishPreview_TokenImageTagResolvesToPR(t *testing.T) {
 	dir := t.TempDir()
@@ -276,7 +276,7 @@ func TestPublishPreview_TokenImageTagResolvesToPR(t *testing.T) {
 	}
 	path := filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello", "values.yaml")
 	if got := readRootImageTag(t, path); got != prTag {
-		t.Errorf("preview image.tag = %q, want %q ({platform.imageTag} must resolve to the per-PR tag)", got, prTag)
+		t.Errorf("preview image.tag = %q, want %q ([[platform.imageTag]] must resolve to the per-PR tag)", got, prTag)
 	}
 }
 
@@ -440,9 +440,9 @@ func platformNameApp() *domain.App {
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"},
 			RawValues: map[string]any{
-				"envConfigMapName": "{platform.configMapName}",
-				"envSecretName":    "{platform.secretName}",
-				"fullnameOverride": "{platform.app}-{platform.previewName}",
+				"envConfigMapName": "[[platform.configMapName]]",
+				"envSecretName":    "[[platform.secretName]]",
+				"fullnameOverride": "[[platform.app]]-[[platform.previewName]]",
 			},
 		},
 	}
@@ -525,7 +525,7 @@ func TestPublishPreview_InheritsBaseEnvOverlay(t *testing.T) {
 		// The base env's resolved template/org platform overrides — the layer the
 		// preview was dropping.
 		PlatformDefaultValues: map[string]any{
-			"envConfigMapName": "{platform.configMapName}",
+			"envConfigMapName": "[[platform.configMapName]]",
 			"fromTemplate":     "yes",
 		},
 		PlatformEnvValues: map[string]any{"fromStagingTemplate": "yes"},

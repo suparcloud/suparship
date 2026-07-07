@@ -1,6 +1,6 @@
 import { api } from "./api";
 
-// PlatformToken is a static {platform.*} variable available in app config.
+// PlatformToken is a static ((platform.*)) variable available in app config.
 export interface PlatformToken {
   token: string;
   label: string;
@@ -8,7 +8,7 @@ export interface PlatformToken {
   description?: string;
 }
 
-// VarToken is a non-secret {vars.NAME} platform env var, scope-labelled.
+// VarToken is a non-secret ((vars.NAME)) platform env var, scope-labelled.
 export interface VarToken {
   token: string;
   name: string;
@@ -33,7 +33,7 @@ export async function listConfigVariables(
 }
 
 // listPlatformConfigVariables fetches the project-agnostic catalog: the static
-// {platform.*} tokens plus org/env/cluster-scoped {vars.*} (no project/app
+// ((platform.*)) tokens plus org/env/cluster-scoped ((vars.*)) (no project/app
 // scope). Used by the template-level platform-overrides editor, which has no
 // project context. Secrets are never returned.
 export async function listPlatformConfigVariables(): Promise<ConfigVariables> {

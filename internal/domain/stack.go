@@ -41,7 +41,7 @@ type StackSpec struct {
 	EnvConfigByEnv map[string]envconfig.EnvConfig `json:"envConfigByEnv,omitempty" yaml:"envConfigByEnv,omitempty"`
 	// RawValues is a freeform Helm values overlay applied to every member app,
 	// layered above the template platform values and below the app's own
-	// RawValues. May reference {platform.*}/{vars.*} tokens. No secrets.
+	// RawValues. May reference ((platform.*))/((vars.*)) tokens. No secrets.
 	RawValues map[string]any `json:"rawValues,omitempty" yaml:"rawValues,omitempty"`
 	// EnvRawValues holds per-environment Helm overlays keyed by env name,
 	// layered after RawValues.

@@ -8,7 +8,7 @@ import (
 )
 
 // A stable deploy whose image tag is owned by external CD (no resolved tag yet)
-// must NOT commit a literal "{platform.imageTag}" into values: charts stamp it
+// must NOT commit a literal "[[platform.imageTag]]" into values: charts stamp it
 // into metadata.labels (app.kubernetes.io/version) + image refs, and "{...}" is
 // an invalid label value that fails the whole apply. It must resolve to empty so
 // the chart can default it to .Chart.AppVersion.
@@ -17,7 +17,7 @@ func TestMarshalValuesWithOverlay_NoLiteralImageTag(t *testing.T) {
 	overlay := map[string]any{
 		"components": map[string]any{
 			"web": map[string]any{
-				"image": map[string]any{"tag": "{platform.imageTag}"},
+				"image": map[string]any{"tag": "[[platform.imageTag]]"},
 			},
 		},
 	}
@@ -25,7 +25,7 @@ func TestMarshalValuesWithOverlay_NoLiteralImageTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if bytes.Contains(out, []byte("{platform.imageTag}")) {
+	if bytes.Contains(out, []byte("[[platform.imageTag]]")) {
 		t.Fatalf("committed values must not contain the literal token:\n%s", out)
 	}
 }

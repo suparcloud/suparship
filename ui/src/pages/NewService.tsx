@@ -665,8 +665,8 @@ function ConfigureStep({
           Edit only what you want to override — leave empty to inherit the chart
           and platform defaults entirely. Deep-merged on top of those at deploy.
           Reference platform metadata / variables with{" "}
-          <code className="font-mono">{"{platform.*}"}</code> /{" "}
-          <code className="font-mono">{"{vars.*}"}</code> tokens. No secrets.
+          <code className="font-mono">{"((platform.*))"}</code> /{" "}
+          <code className="font-mono">{"((vars.*))"}</code> tokens. No secrets.
         </p>
         <Suspense
           fallback={

@@ -20,8 +20,8 @@ type TemplateOverride struct {
 	// after EnvValues. Env-agnostic: a cluster's block applies in every env that
 	// deploys to it — for cloud-intrinsic structured annotations (e.g. an
 	// Azure-internal-LB or AWS-NLB annotation) that token substitution can't
-	// express. Simple per-cluster values can instead use {platform.cluster} or
-	// cluster-scoped {vars.*}.
+	// express. Simple per-cluster values can instead use ((platform.cluster)) or
+	// cluster-scoped ((vars.*)).
 	ClusterValues map[string]map[string]any `json:"clusterValues,omitempty" yaml:"clusterValues,omitempty"`
 	// PreviewDefaultValues is a default Helm values overlay applied to EVERY
 	// preview of apps built from this template, layered on top of the base env's

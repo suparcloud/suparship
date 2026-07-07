@@ -395,8 +395,8 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
             below per-app overrides (developers can still override). Stored
             separately from the template, so an external sync won't clobber it.
             Simple per-cluster values can use{" "}
-            <code className="font-mono">{"{platform.cluster}"}</code> or
-            cluster-scoped <code className="font-mono">{"{vars.*}"}</code>; these
+            <code className="font-mono">{"((platform.cluster))"}</code> or
+            cluster-scoped <code className="font-mono">{"((vars.*))"}</code>; these
             blocks are for complex cluster-specific (e.g. cloud) annotations.
           </p>
         </div>

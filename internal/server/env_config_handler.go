@@ -855,7 +855,7 @@ func (h *envConfigHandler) republishProjectApps(ctx context.Context, projectName
 
 // ── Config-variable catalog (for the UI variable picker) ─────────────────────
 
-// VarTokenDTO is one referenceable {vars.NAME} token, scope-labelled.
+// VarTokenDTO is one referenceable ((vars.NAME)) token, scope-labelled.
 type VarTokenDTO struct {
 	Token string `json:"token"`
 	Name  string `json:"name"`
@@ -873,7 +873,7 @@ type ConfigVariablesResponse struct {
 }
 
 // handleGetConfigVariables returns the variable catalog for the given project:
-// the static {platform.*} tokens and the union of non-secret {vars.*} keys from
+// the static ((platform.*)) tokens and the union of non-secret ((vars.*)) keys from
 // org, each environment, the project, and each bound cluster. Resolution of the
 // actual values happens per (env, cluster) at publish time; this only advertises
 // the names. Project-read authorized (registered with viewProject).
@@ -898,7 +898,7 @@ func (h *envConfigHandler) handleGetConfigVariables(w http.ResponseWriter, r *ht
 }
 
 // handleGetPlatformConfigVariables returns the project-agnostic variable catalog:
-// the static {platform.*} tokens plus org/env/cluster-scoped {vars.*} (no
+// the static ((platform.*)) tokens plus org/env/cluster-scoped ((vars.*)) (no
 // project/app scope). Powers the "Insert variable" picker in the template-level
 // platform-overrides editor, which has no project context. Authenticated.
 func (h *envConfigHandler) handleGetPlatformConfigVariables(w http.ResponseWriter, r *http.Request) {
@@ -915,7 +915,7 @@ func (h *envConfigHandler) handleGetPlatformConfigVariables(w http.ResponseWrite
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// collectConfigVars unions the non-secret {vars.*} names across scopes (org, each
+// collectConfigVars unions the non-secret ((vars.*)) names across scopes (org, each
 // env, optionally the project, each bound cluster), deduped by first-seen so the
 // picker shows where each name comes from. A non-empty projectName adds the
 // project scope; "" omits it (project-agnostic / template-level catalog).
@@ -933,7 +933,7 @@ func (h *envConfigHandler) collectConfigVars(ctx context.Context, org *rbac.Org,
 				continue
 			}
 			seen[name] = true
-			out = append(out, VarTokenDTO{Token: "{vars." + name + "}", Name: name, Scope: scope})
+			out = append(out, VarTokenDTO{Token: "((vars." + name + "))", Name: name, Scope: scope})
 		}
 	}
 

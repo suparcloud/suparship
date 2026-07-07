@@ -58,7 +58,7 @@ const yamlLinter = linter((view): Diagnostic[] => {
 
 // ValuesEditor is a CodeMirror-backed YAML editor for Helm values overlays. The
 // developer edits ONLY their override layer; a sibling read-only instance is used
-// for the effective-values preview. VariablePicker inserts {platform.*}/{vars.*}
+// for the effective-values preview. VariablePicker inserts ((platform.*))/((vars.*))
 // tokens at the cursor via a CodeMirror transaction (no <textarea> to target).
 export function ValuesEditor({
   value,

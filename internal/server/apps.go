@@ -322,7 +322,7 @@ type createAppRequest struct {
 	NamespacePattern string `json:"namespacePattern,omitempty"`
 	// RawValues is an optional freeform Helm values overlay deep-merged onto the
 	// generated chart values at publish. String leaves may reference
-	// {platform.*}/{vars.*} tokens. No secrets.
+	// ((platform.*))/((vars.*)) tokens. No secrets.
 	RawValues map[string]any `json:"rawValues,omitempty"`
 	// ComponentConfigs holds app-level per-component config (resources, envFrom,
 	// scaling, env) keyed by component name, applied over the template defaults.

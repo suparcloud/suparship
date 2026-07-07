@@ -18,7 +18,7 @@ import (
 // EffectiveValuesDTO is the read-only "what will deploy" preview that backs the
 // values-editor UI. It is the values-document layering (chart defaults ⊕ template
 // platform/env defaults ⊕ developer rawValues), NOT the fully rendered chart:
-// the canonical struct-mapping and {platform.*}/{vars.*} interpolation are applied
+// the canonical struct-mapping and ((platform.*))/((vars.*)) interpolation are applied
 // later at publish with per-env cluster/domain context that isn't available here.
 type EffectiveValuesDTO struct {
 	// Values is the merged values document.
@@ -27,7 +27,7 @@ type EffectiveValuesDTO struct {
 	// (built-in/disk/external-mode templates) — the preview then reflects only
 	// the platform/env defaults + overrides, not the chart's own defaults.
 	ChartDefaultsAvailable bool `json:"chartDefaultsAvailable"`
-	// Interpolated reports whether {platform.*}/{vars.*} tokens were resolved.
+	// Interpolated reports whether ((platform.*))/((vars.*)) tokens were resolved.
 	// Always false in v1 — tokens are shown literally because the platform
 	// context is only fully known at publish time.
 	Interpolated bool `json:"interpolated"`
