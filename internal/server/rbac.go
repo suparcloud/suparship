@@ -391,6 +391,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/undeploy", manageProject(rh.appHandler.handleUndeployAppEnv))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handlePinAppEnv))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handleUnpinAppEnv))
+		// Poll the result of an async (Prefer: respond-async) pin/unpin. Project-
+		// scoped read: same view privilege as any other project status read.
+		mux.HandleFunc("GET /api/v1/projects/{project}/pin-tasks/{taskId}", viewProject(rh.handleGetPinTask))
 		// Suspend/resume an env (developer-triggerable, reversible, CI-callable).
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/suspend", devProject(rh.appHandler.handleSuspendAppEnv))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/resume", devProject(rh.appHandler.handleResumeAppEnv))

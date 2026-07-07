@@ -575,6 +575,12 @@ type Config struct {
 type Server struct {
 	httpServer *http.Server
 	logger     *slog.Logger
+	// bg tracks detached background work (async pin/unpin tasks) so graceful
+	// shutdown waits for it instead of abandoning it mid git-push. bgCancel
+	// cancels the base context those tasks run under once the drain deadline
+	// passes.
+	bg       *sync.WaitGroup
+	bgCancel context.CancelFunc
 }
 
 // New creates a Server from the given Config.
@@ -585,6 +591,13 @@ func New(cfg Config) *Server {
 	// Resolve the audit sink once (Nop when none configured) so handlers can
 	// record unconditionally.
 	auditor := audit.Resolve(cfg.Auditor)
+
+	// Background-task lifecycle: async pin/unpin work runs under bgCtx (survives
+	// the request that scheduled it) and is tracked by bgWG so Run's shutdown can
+	// drain it. bgCancel is invoked after the drain deadline.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	var bgWG sync.WaitGroup
+	asyncRunner := newAsyncRunner(bgCtx, &bgWG)
 
 	var ah *authHandler
 	if cfg.Authenticator != nil {
@@ -667,6 +680,7 @@ func New(cfg Config) *Server {
 		if cfg.AppStore != nil {
 			rh.appHandler = newAppHandler(cfg.AppStore, cfg.Templates, cfg.ClusterTemplateLoader, cfg.ProjectStore)
 			rh.appHandler.auditor = auditor
+			rh.appHandler.async = asyncRunner
 			rh.appHandler.kubeClient = cfg.KubeClient
 			rh.appHandler.registryStore = cfg.RegistryStore
 			rh.appHandler.gitopsConfigStore = cfg.GitOpsConfigStore
@@ -918,7 +932,9 @@ func New(cfg Config) *Server {
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		logger: cfg.Logger,
+		logger:   cfg.Logger,
+		bg:       &bgWG,
+		bgCancel: bgCancel,
 	}
 }
 
@@ -987,10 +1003,37 @@ func (s *Server) Run(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
+	// Stop accepting connections and drain in-flight HTTP requests first.
 	if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("server shutdown: %w", err)
 	}
 
+	// Then let already-accepted async pin/unpin tasks finish (a mid-flight git
+	// push shouldn't be abandoned). Bounded by the same deadline; if they exceed
+	// it, cancel the base context so the remaining tasks unwind.
+	s.waitBackground(shutdownTimeout)
+
 	s.logger.Info("server stopped")
 	return nil
+}
+
+// waitBackground blocks until tracked background tasks finish or the deadline
+// passes, then cancels the base context so any stragglers stop. Safe when no
+// tasks were ever scheduled.
+func (s *Server) waitBackground(timeout time.Duration) {
+	if s.bg != nil {
+		done := make(chan struct{})
+		go func() {
+			s.bg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(timeout):
+			s.logger.Warn("background tasks did not finish before shutdown deadline")
+		}
+	}
+	if s.bgCancel != nil {
+		s.bgCancel()
+	}
 }

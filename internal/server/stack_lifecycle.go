@@ -379,6 +379,19 @@ func (rh *rbacHandler) handlePinStack(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "unknown target environment: " + req.TargetEnv})
 		return
 	}
+	// The prep + single batched publish is the slow part; defer it when the caller
+	// opts into async (Prefer: respond-async / ?async=1) so a large stack doesn't
+	// 504. Validation above already ran synchronously.
+	op := func(ctx context.Context) (int, any, error) {
+		return http.StatusOK, rh.pinStackExec(ctx, project, name, members, req), nil
+	}
+	dispatchOp(w, r, rh.appHandler.async, "pin-stack", project, op)
+}
+
+// pinStackExec runs the two-phase pin for the resolved members and returns the
+// per-member batch result. Phase 1 mutates each member's spec concurrently
+// (bounded), phase 2 publishes every pinned member in ONE clone/commit/push.
+func (rh *rbacHandler) pinStackExec(ctx context.Context, project, name string, members []*domain.App, req stackPinRequest) stackBatchResponse {
 	// Phase 1 (concurrent): mutate each member's spec — each prep does a bounded
 	// live-status read (pre-pin capture), so run them in parallel to avoid a
 	// gateway timeout on a large stack. No git yet.
@@ -390,7 +403,7 @@ func (rh *rbacHandler) handlePinStack(w http.ResponseWriter, r *http.Request) {
 	}
 	prepStart := time.Now()
 	preps := prepMembers(members, func(a *domain.App) pinPrep {
-		app, targetEnv, tag, err := rh.appHandler.pinAppEnvSpec(r.Context(), project, a.Name, req.TargetEnv, req.FromPreview)
+		app, targetEnv, tag, err := rh.appHandler.pinAppEnvSpec(ctx, project, a.Name, req.TargetEnv, req.FromPreview)
 		return pinPrep{app: app, targetEnv: targetEnv, tag: tag, err: err}
 	})
 	prepDur := time.Since(prepStart)
@@ -415,7 +428,7 @@ func (rh *rbacHandler) handlePinStack(w http.ResponseWriter, r *http.Request) {
 	// ONE clone/commit/push — the 504 fix.
 	pubStart := time.Now()
 	if len(items) > 0 {
-		if err := rh.appHandler.republishAppsFocus(r.Context(), items); err != nil {
+		if err := rh.appHandler.republishAppsFocus(ctx, items); err != nil {
 			for _, n := range pubNames {
 				results = append(results, errResult(n, err))
 			}
@@ -433,7 +446,7 @@ func (rh *rbacHandler) handlePinStack(w http.ResponseWriter, r *http.Request) {
 		"prep", prepDur.Round(time.Millisecond).String(),
 		"publish", time.Since(pubStart).Round(time.Millisecond).String(),
 	)
-	writeJSON(w, http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "pin", Results: results})
+	return stackBatchResponse{Project: project, Stack: name, Action: "pin", Results: results}
 }
 
 // handleUnpinStack clears a stack's pin on a stable env across member apps,
@@ -471,6 +484,15 @@ func (rh *rbacHandler) handleUnpinStack(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "unknown target environment: " + req.TargetEnv})
 		return
 	}
+	op := func(ctx context.Context) (int, any, error) {
+		return http.StatusOK, rh.unpinStackExec(ctx, project, name, members, req), nil
+	}
+	dispatchOp(w, r, rh.appHandler.async, "unpin-stack", project, op)
+}
+
+// unpinStackExec runs the two-phase unpin for the resolved members and returns
+// the per-member batch result.
+func (rh *rbacHandler) unpinStackExec(ctx context.Context, project, name string, members []*domain.App, req stackSuspendRequest) stackBatchResponse {
 	// Phase 1 (concurrent): clear each member's pin in the spec — each prep does a
 	// bounded Kargo freight read per member, so run them in parallel to avoid a
 	// gateway timeout on a large stack. No git yet.
@@ -482,7 +504,7 @@ func (rh *rbacHandler) handleUnpinStack(w http.ResponseWriter, r *http.Request) 
 		err       error
 	}
 	preps := prepMembers(members, func(a *domain.App) unpinPrep {
-		app, targetEnv, restore, wasPinned, err := rh.appHandler.unpinAppEnvSpec(r.Context(), project, a.Name, req.TargetEnv)
+		app, targetEnv, restore, wasPinned, err := rh.appHandler.unpinAppEnvSpec(ctx, project, a.Name, req.TargetEnv)
 		return unpinPrep{app: app, targetEnv: targetEnv, restore: restore, wasPinned: wasPinned, err: err}
 	})
 	results := make([]stackOpResult, 0, len(members))
@@ -509,14 +531,14 @@ func (rh *rbacHandler) handleUnpinStack(w http.ResponseWriter, r *http.Request) 
 	// Phase 2: publish every unpinned member in ONE commit, then clear the
 	// one-shot restore flag per member.
 	if len(items) > 0 {
-		if err := rh.appHandler.republishAppsFocus(r.Context(), items); err != nil {
+		if err := rh.appHandler.republishAppsFocus(ctx, items); err != nil {
 			for _, n := range pubNames {
 				results = append(results, errResult(n, err))
 			}
 		} else {
 			for _, n := range pubNames {
 				u := pending[n]
-				rh.appHandler.unpinClearRestoreFlag(r.Context(), u.app, req.TargetEnv, u.restore)
+				rh.appHandler.unpinClearRestoreFlag(ctx, u.app, req.TargetEnv, u.restore)
 				if u.restore != "" {
 					results = append(results, okResult(n, "unpinned; restored "+u.restore))
 				} else {
@@ -525,7 +547,7 @@ func (rh *rbacHandler) handleUnpinStack(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "unpin", Results: results})
+	return stackBatchResponse{Project: project, Stack: name, Action: "unpin", Results: results}
 }
 
 // stackSuspendRequest suspends/resumes a stack's env across member apps. Apps

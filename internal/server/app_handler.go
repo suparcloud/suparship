@@ -83,6 +83,10 @@ type appHandler struct {
 	// path (dashboard/project/stack) doesn't re-hit K8s + ArgoCD on every load.
 	// nil is a valid no-op cache (test handlers built as literals skip caching).
 	statusCache *statusCache
+	// async runs slow pin/unpin work in the background when a caller opts in
+	// (Prefer: respond-async), returning 202 + a task id instead of blocking the
+	// request on git round-trips. nil disables async (handlers stay synchronous).
+	async *asyncRunner
 }
 
 // ensureKargoProjectCreds provisions/refreshes both Kargo credential Secrets in
@@ -2119,19 +2123,24 @@ func (ah *appHandler) handlePinAppEnv(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "fromPreview is required"})
 		return
 	}
-	tag, err := ah.pinAppEnv(r.Context(), projectName, appName, envName, req.FromPreview)
-	if err != nil {
-		writeJSON(w, statusForPinErr(err), errorResponse{Error: err.Error()})
-		return
+	// The pin itself (spec mutation + git clone/commit/push) is the slow part;
+	// defer it when the caller opts in (Prefer: respond-async / ?async=1) so the
+	// gateway doesn't 504. Validation above already ran synchronously.
+	op := func(ctx context.Context) (int, any, error) {
+		tag, err := ah.pinAppEnv(ctx, projectName, appName, envName, req.FromPreview)
+		if err != nil {
+			return statusForPinErr(err), nil, err
+		}
+		return http.StatusOK, map[string]string{
+			"message":  "environment " + envName + " pinned to " + pinLabel(req.FromPreview, tag),
+			"project":  projectName,
+			"app":      appName,
+			"env":      envName,
+			"imageTag": tag,
+			"from":     req.FromPreview,
+		}, nil
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"message":  "environment " + envName + " pinned to " + pinLabel(req.FromPreview, tag),
-		"project":  projectName,
-		"app":      appName,
-		"env":      envName,
-		"imageTag": tag,
-		"from":     req.FromPreview,
-	})
+	dispatchOp(w, r, ah.async, "pin-app", projectName, op)
 }
 
 // handleUnpinAppEnv serves DELETE .../apps/{app}/environments/{env}/pin.
@@ -2140,20 +2149,21 @@ func (ah *appHandler) handleUnpinAppEnv(w http.ResponseWriter, r *http.Request) 
 	appName := r.PathValue("app")
 	envName := r.PathValue("env")
 
-	restore, wasPinned, err := ah.unpinAppEnv(r.Context(), projectName, appName, envName)
-	if err != nil {
-		writeJSON(w, statusForPinErr(err), errorResponse{Error: err.Error()})
-		return
+	op := func(ctx context.Context) (int, any, error) {
+		restore, wasPinned, err := ah.unpinAppEnv(ctx, projectName, appName, envName)
+		if err != nil {
+			return statusForPinErr(err), nil, err
+		}
+		if !wasPinned {
+			return http.StatusOK, map[string]string{"message": "environment " + envName + " is not pinned", "project": projectName, "app": appName, "env": envName}, nil
+		}
+		msg := "environment " + envName + " unpinned; normal delivery resumed"
+		if restore != "" {
+			msg = "environment " + envName + " unpinned; restored " + restore
+		}
+		return http.StatusOK, map[string]string{"message": msg, "project": projectName, "app": appName, "env": envName}, nil
 	}
-	if !wasPinned {
-		writeJSON(w, http.StatusOK, map[string]string{"message": "environment " + envName + " is not pinned", "project": projectName, "app": appName, "env": envName})
-		return
-	}
-	msg := "environment " + envName + " unpinned; normal delivery resumed"
-	if restore != "" {
-		msg = "environment " + envName + " unpinned; restored " + restore
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": msg, "project": projectName, "app": appName, "env": envName})
+	dispatchOp(w, r, ah.async, "unpin-app", projectName, op)
 }
 
 // Sentinels for suspend/resume, mapped to HTTP status by statusForSuspendErr.
