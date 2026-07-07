@@ -1926,10 +1926,18 @@ func publishInitialEnvInfra(
 		if baseDomain == "" {
 			baseDomain = "localhost"
 		}
-		// Resolve the full fan-out target set so the ApplicationSet covers every
-		// cluster in "all" mode (active mode resolves to just the active cluster).
+		// Authorize EVERY cluster the env is allowed to use (its full ClusterRefs),
+		// not just the DeployMode target. The AppProject destinations built from
+		// this list must be a superset of what any app can pick: a per-app
+		// TargetClusters selection may deploy to a non-active cluster in the env's
+		// ClusterRefs, and ArgoCD rejects (InvalidSpecError) any Application whose
+		// destination isn't in the AppProject. This MUST match resolveEnvs'
+		// allClusters (the per-app publish path) so the two writers of this same
+		// AppProject don't disagree — using ResolveDeployTargets() here narrowed it
+		// to the active cluster and dropped per-app targets whenever this
+		// startup/reload writer ran last.
 		var clusters []gitops.ClusterTarget
-		for _, ref := range orgEnv.ResolveDeployTargets() {
+		for _, ref := range orgEnv.ClusterRefs {
 			c, cerr := clusterStore.GetCluster(ctx, ref)
 			if cerr != nil || c == nil || c.APIServer == "" {
 				continue
