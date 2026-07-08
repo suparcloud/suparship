@@ -77,7 +77,7 @@ func TestWorkloadClustersForEnvUnderMemo(t *testing.T) {
 	ah := &appHandler{clusterPool: pool, orgProvider: prov}
 	ctx := withOrgMemo(context.Background())
 
-	clients, _, routed := ah.workloadClustersForEnv(ctx, "staging")
+	clients, _, routed := ah.workloadClustersForEnv(ctx, "", "", "staging")
 	if !routed || len(clients) != 2 {
 		t.Fatalf("all-mode fan-out: got %d clients (routed=%v), want 2", len(clients), routed)
 	}

@@ -73,7 +73,7 @@ func (ah *appHandler) handleGetAppLogs(w http.ResponseWriter, r *http.Request) {
 		routeEnv = appEnv.BaseEnv
 	}
 	logsProvider := ah.logsProvider
-	if client, err := ah.workloadClusterClient(r.Context(), routeEnv); err != nil {
+	if client, err := ah.workloadClusterClient(r.Context(), projectName, appName, routeEnv); err != nil {
 		writeJSON(w, http.StatusBadGateway, errorResponse{
 			Error: "workload cluster for environment \"" + envName + "\" is unreachable: " + err.Error(),
 		})

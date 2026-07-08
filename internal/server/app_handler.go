@@ -2603,33 +2603,21 @@ func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appN
 //   - (nil, err): the env IS bound to a remote cluster but it's unreachable
 //     (kubeconfig missing/bad) — the caller must NOT silently fall back to the
 //     local cluster, since that would falsely report "not deployed".
-func (ah *appHandler) workloadClusterClient(ctx context.Context, envName string) (kubernetes.Interface, error) {
-	return workloadClusterClientForEnv(ctx, ah.orgProvider, ah.clusterPool, envName)
-}
-
-// workloadClusterClientForEnv resolves the cluster an environment's workloads
-// run on and returns a Kubernetes client for it, shared by the app, inventory,
-// and (future) preview status paths. See workloadClusterClient for the return
-// contract; nil pool or orgProvider means "use the local provider".
-func workloadClusterClientForEnv(ctx context.Context, orgProvider rbac.OrgProvider, pool *k8s.ClusterClientPool, envName string) (kubernetes.Interface, error) {
-	if pool == nil || orgProvider == nil {
+func (ah *appHandler) workloadClusterClient(ctx context.Context, projectName, appName, envName string) (kubernetes.Interface, error) {
+	if ah.clusterPool == nil || ah.orgProvider == nil {
 		return nil, nil
 	}
-	org, err := orgProvider.GetOrg(ctx)
-	if err != nil {
-		return nil, nil // org unreadable — degrade to the local provider
-	}
-	var ref string
-	for _, e := range org.Environments {
-		if e.Name == envName {
-			ref = e.EffectiveClusterRef()
-			break
-		}
-	}
-	if ref == "" {
+	// Resolve the app's actual deploy clusters (env default ⊕ per-app
+	// TargetClusters) so logs stream from the cluster the app really runs on —
+	// not the env's default cluster, which for a per-app-targeted app has no pods.
+	refs := ah.appDeployClusterRefs(ctx, projectName, appName, envName)
+	if len(refs) == 0 {
 		return nil, nil // env not bound to a cluster — single-cluster/local mode
 	}
-	client, err := pool.Get(ctx, ref)
+	// Logs stream from a single cluster; use the app's first target (which is the
+	// env's active cluster for an untargeted app).
+	ref := refs[0]
+	client, err := ah.clusterPool.Get(ctx, ref)
 	if err != nil {
 		return nil, fmt.Errorf("workload cluster %q: %w", ref, err)
 	}
@@ -2643,27 +2631,52 @@ type namedClient struct {
 	dyn    dynamic.Interface // for Gateway-API HTTPRoute discovery; may be nil
 }
 
-// workloadClustersForEnv resolves the env's deploy-target clusters (one in
-// "active" mode, all bound clusters in "all" mode) to Kubernetes clients.
-// routed=false means no remote routing applies (no pool/org wired, or the env
-// is unbound) — the caller uses its locally-injected provider. When routed, it
-// returns a client per reachable target plus the names of targets it couldn't
-// reach (surfaced as diagnostics, never silently dropped).
-func (ah *appHandler) workloadClustersForEnv(ctx context.Context, envName string) (clients []namedClient, unreachable []string, routed bool) {
-	if ah.clusterPool == nil || ah.orgProvider == nil {
-		return nil, nil, false
+// appDeployClusterRefs resolves the cluster refs an app actually deploys to in an
+// env: the env's deploy targets (the active cluster in "active" mode, all bound
+// clusters in "all" mode) narrowed/overridden by the app's per-env TargetClusters
+// selection. This is the single source of truth for "where does this app run in
+// this env", so live status, logs, and ArgoCD diagnostics all read the SAME
+// clusters. Critically, an app targeted to a non-active cluster (per-app cluster
+// targeting) resolves to that cluster here — without this, status/logs query the
+// env's default cluster, find nothing, and falsely report "not deployed". Empty
+// when the env is unbound (single-cluster / local mode). appName may be "" to get
+// the plain env defaults (no per-app override).
+func (ah *appHandler) appDeployClusterRefs(ctx context.Context, projectName, appName, envName string) []string {
+	if ah.orgProvider == nil {
+		return nil
 	}
 	org, err := ah.orgOnce(ctx)
 	if err != nil || org == nil {
-		return nil, nil, false
+		return nil
 	}
-	var targets []string
+	var deployTargets, clusterRefs []string
 	for _, e := range org.Environments {
 		if e.Name == envName {
-			targets = e.ResolveDeployTargets()
+			deployTargets = e.ResolveDeployTargets()
+			clusterRefs = e.ClusterRefs
 			break
 		}
 	}
+	if ah.appStore != nil && appName != "" {
+		if app, err := ah.appOnce(ctx, projectName, appName); err == nil && app != nil {
+			return domain.ResolveAppClusterTargets(
+				app.Spec.EnvironmentDefaults[envName].TargetClusters, deployTargets, clusterRefs)
+		}
+	}
+	return deployTargets
+}
+
+// workloadClustersForEnv resolves the clusters an app's workloads run on in an
+// env (env deploy targets ⊕ the app's per-env TargetClusters) to Kubernetes
+// clients. routed=false means no remote routing applies (no pool/org wired, or
+// the env is unbound) — the caller uses its locally-injected provider. When
+// routed, it returns a client per reachable target plus the names of targets it
+// couldn't reach (surfaced as diagnostics, never silently dropped).
+func (ah *appHandler) workloadClustersForEnv(ctx context.Context, projectName, appName, envName string) (clients []namedClient, unreachable []string, routed bool) {
+	if ah.clusterPool == nil || ah.orgProvider == nil {
+		return nil, nil, false
+	}
+	targets := ah.appDeployClusterRefs(ctx, projectName, appName, envName)
 	if len(targets) == 0 {
 		return nil, nil, false // unbound — single-cluster/local mode
 	}
@@ -2709,7 +2722,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	if env.EnvType == domain.AppEnvPreview && env.BaseEnv != "" {
 		routeEnv = env.BaseEnv
 	}
-	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, routeEnv)
+	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, env.ProjectName, appName, routeEnv)
 
 	// instance is the Helm release name suparship sets on every app
 	// Application/ApplicationSet (ReleaseName: app.Name), which Helm stamps as
@@ -2817,30 +2830,15 @@ type argoClusterApp struct {
 // mirroring the publisher's gitops.appSetClusterTargets fallback.
 func (ah *appHandler) argoAppNamesForEnv(ctx context.Context, projectName, appName, envName string) []argoClusterApp {
 	var pattern string
-	var deployTargets, clusterRefs []string
 	if ah.orgProvider != nil {
 		if org, err := ah.orgOnce(ctx); err == nil && org != nil {
 			pattern = org.ResourceNaming.EffectiveArgoAppName()
-			for _, e := range org.Environments {
-				if e.Name == envName {
-					deployTargets = e.ResolveDeployTargets()
-					clusterRefs = e.ClusterRefs
-					break
-				}
-			}
 		}
 	}
-	// Resolve the app's per-env cluster selection so status/diagnostics read the
-	// Applications the app actually deploys (a targeted app may run on a subset
-	// of, or different clusters than, the env default). Unset selection → the env
-	// default, so single-cluster / untargeted apps are unchanged.
-	clusters := deployTargets
-	if ah.appStore != nil {
-		if app, err := ah.appOnce(ctx, projectName, appName); err == nil && app != nil {
-			clusters = domain.ResolveAppClusterTargets(
-				app.Spec.EnvironmentDefaults[envName].TargetClusters, deployTargets, clusterRefs)
-		}
-	}
+	// Read the Applications on the clusters the app actually deploys to (env
+	// default ⊕ per-app TargetClusters) — the same resolution the workload-status
+	// path uses, so status and diagnostics never disagree on which clusters.
+	clusters := ah.appDeployClusterRefs(ctx, projectName, appName, envName)
 	if len(clusters) == 0 {
 		clusters = []string{"in-cluster"}
 	}

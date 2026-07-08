@@ -96,7 +96,7 @@ func TestWorkloadClusterClient(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ah := &appHandler{orgProvider: &staticOrgProvider{org: tc.org}, clusterPool: tc.pool}
-			client, err := ah.workloadClusterClient(context.Background(), tc.envName)
+			client, err := ah.workloadClusterClient(context.Background(), "", "", tc.envName)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected an error for an unregistered cluster, got nil")
@@ -127,7 +127,7 @@ func TestWorkloadClustersForEnv(t *testing.T) {
 	ah := &appHandler{clusterPool: pool, orgProvider: &staticOrgProvider{org: orgWithEnvs(
 		rbac.OrgEnvironment{Name: "staging", ClusterRefs: []string{"c1", "c2"}, ActiveClusterRef: "c1", DeployMode: rbac.DeployModeActive},
 	)}}
-	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, "staging")
+	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, "", "", "staging")
 	if !routed || len(clients) != 1 || clients[0].name != "c1" || len(unreachable) != 0 {
 		t.Fatalf("active: got clients=%v unreachable=%v routed=%v", names(clients), unreachable, routed)
 	}
@@ -136,7 +136,7 @@ func TestWorkloadClustersForEnv(t *testing.T) {
 	ah.orgProvider = &staticOrgProvider{org: orgWithEnvs(
 		rbac.OrgEnvironment{Name: "staging", ClusterRefs: []string{"c1", "c2"}, DeployMode: rbac.DeployModeAll},
 	)}
-	clients, _, routed = ah.workloadClustersForEnv(ctx, "staging")
+	clients, _, routed = ah.workloadClustersForEnv(ctx, "", "", "staging")
 	if !routed || len(clients) != 2 {
 		t.Fatalf("all: expected 2 clients, got %v (routed=%v)", names(clients), routed)
 	}
@@ -145,14 +145,14 @@ func TestWorkloadClustersForEnv(t *testing.T) {
 	ah.orgProvider = &staticOrgProvider{org: orgWithEnvs(
 		rbac.OrgEnvironment{Name: "staging", ClusterRefs: []string{"c1", "missing"}, DeployMode: rbac.DeployModeAll},
 	)}
-	clients, unreachable, routed = ah.workloadClustersForEnv(ctx, "staging")
+	clients, unreachable, routed = ah.workloadClustersForEnv(ctx, "", "", "staging")
 	if !routed || len(clients) != 1 || len(unreachable) != 1 || unreachable[0] != "missing" {
 		t.Fatalf("unreachable: got clients=%v unreachable=%v", names(clients), unreachable)
 	}
 
 	// no pool → not routed (local fallback).
 	ah.clusterPool = nil
-	if _, _, r := ah.workloadClustersForEnv(ctx, "staging"); r {
+	if _, _, r := ah.workloadClustersForEnv(ctx, "", "", "staging"); r {
 		t.Error("no pool should not route")
 	}
 }
@@ -185,6 +185,42 @@ func TestEnrichPreviewRoutesViaBaseEnv(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("preview should route via base env 'staging' to cluster 'missing'; diagnostics=%+v", env.Status.Diagnostics)
+	}
+}
+
+// A per-app-targeted app must resolve to ITS target cluster for live status —
+// not the env's active cluster — else an app deployed to a non-active cluster
+// (per-app cluster targeting) reads back as "not deployed" with no workloads or
+// routes. This is the biglysales-tts regression.
+func TestWorkloadClustersForEnv_HonorsPerAppTargetClusters(t *testing.T) {
+	pool := k8s.NewClusterClientPool(fakeKubeconfigGetter{have: map[string]bool{"aks": true, "eks": true}})
+	store := newMemAppStore()
+	store.addApp(&domain.App{
+		Name: "web", ProjectName: "demo",
+		Spec: domain.AppSpec{EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+			"staging": {TargetClusters: []string{"eks"}}, // deploys to the non-active cluster
+		}},
+	})
+	ah := &appHandler{
+		clusterPool: pool,
+		appStore:    store,
+		orgProvider: &staticOrgProvider{org: orgWithEnvs(rbac.OrgEnvironment{
+			Name: "staging", ClusterRefs: []string{"aks", "eks"},
+			ActiveClusterRef: "aks", DeployMode: rbac.DeployModeActive,
+		})},
+	}
+	ctx := context.Background()
+
+	// The targeted app reads status from "eks", not the env-active "aks".
+	clients, _, routed := ah.workloadClustersForEnv(ctx, "demo", "web", "staging")
+	if !routed || len(clients) != 1 || clients[0].name != "eks" {
+		t.Fatalf("per-app target: got clients=%v routed=%v, want [eks]", names(clients), routed)
+	}
+
+	// An untargeted app (empty appName) still resolves to the env's active cluster.
+	clients, _, _ = ah.workloadClustersForEnv(ctx, "demo", "", "staging")
+	if len(clients) != 1 || clients[0].name != "aks" {
+		t.Errorf("untargeted: got %v, want [aks] (env active)", names(clients))
 	}
 }
 
