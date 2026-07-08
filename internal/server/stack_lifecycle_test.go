@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/session"
 )
 
@@ -782,5 +783,71 @@ func TestStackTargetClusters_FansOutAndClears(t *testing.T) {
 	web2, _ := store.GetApp(ctx, testProject, "web")
 	if got := web2.Spec.EnvironmentDefaults["staging"].TargetClusters; got != nil {
 		t.Errorf("web staging TargetClusters after clear = %v, want nil", got)
+	}
+}
+
+// TestStackPreviewNamespace_HonorsProjectPattern pins the namespace resolution
+// for stack previews. The empty pattern must reproduce the historical hardcoded
+// "{project}-{stack}-preview-{name}" namespace exactly (no migration for existing
+// previews), and a project-configured pattern must win — including a shared one
+// that omits {name}.
+func TestStackPreviewNamespace_HonorsProjectPattern(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		want    string
+	}{
+		{"empty falls back to legacy hardcoded namespace", "", "voiceai-lk-sh-preview-pr-724"},
+		{"explicit default matches legacy", "{project}-{app}-preview-{name}", "voiceai-lk-sh-preview-pr-724"},
+		{"project pattern wins", "{project}-preview-{name}", "voiceai-preview-pr-724"},
+		{"shared namespace omits name", "{project}-preview", "voiceai-preview"},
+		{"stack fills the app slot", "{app}-{name}", "lk-sh-pr-724"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stackPreviewNamespace("voiceai", "lk-sh", "pr-724", tc.pattern)
+			if got != tc.want {
+				t.Errorf("stackPreviewNamespace(pattern=%q) = %q, want %q", tc.pattern, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStackPreview_UsesProjectPreviewNamespacePattern is the end-to-end guard for
+// the bug this fixes: a project that sets previewNamespacePattern was ignored by
+// the stack preview path, which hardcoded its own namespace. Every member must
+// land in the project-configured namespace, and still be co-located there.
+func TestStackPreview_UsesProjectPreviewNamespacePattern(t *testing.T) {
+	mux, ah, store, stackStore, appH := newTestStackMuxPub(testProject, nil)
+	projStore := newMemProjectStore()
+	_ = projStore.Save(context.Background(), &project.Project{
+		Metadata: project.ProjectMeta{Name: testProject},
+		Spec:     project.ProjectSpec{PreviewNamespacePattern: "{project}-preview-{name}"},
+	})
+	appH.projectStore = projStore
+
+	ctx := context.Background()
+	_ = stackStore.SaveStack(ctx, &domain.Stack{Name: "lk-sh", ProjectName: testProject})
+	seedStackMember(store, testProject, "web", "lk-sh")
+	seedStackMember(store, testProject, "agent", "lk-sh")
+	setPreviewsEnabled(store, testProject, "web", true)
+	setPreviewsEnabled(store, testProject, "agent", true)
+
+	rec := postStackJSON(mux, sessionCookieFor(ah, "alice", "org_admin"),
+		"/api/v1/projects/"+testProject+"/stacks/lk-sh/previews",
+		stackPreviewRequest{Name: "pr-724"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	want := testProject + "-preview-pr-724"
+	for _, app := range []string{"web", "agent"} {
+		env, err := store.GetAppEnvironment(ctx, testProject, app, "pr-724")
+		if err != nil {
+			t.Fatalf("no preview env for %q: %v", app, err)
+		}
+		if env.Namespace != want {
+			t.Errorf("%s preview namespace = %q, want %q (project pattern ignored)", app, env.Namespace, want)
+		}
 	}
 }

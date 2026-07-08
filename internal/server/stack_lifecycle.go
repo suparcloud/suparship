@@ -164,11 +164,17 @@ type stackPreviewRequest struct {
 }
 
 // handleCreateStackPreview brings up a preview of the whole stack in one shared
-// namespace ({project}-{stack}-preview-{name}) so the previewed collection is
-// co-located and reaches itself by in-cluster DNS. It is an upsert (like the
-// per-app preview) so CI can re-point every member at a freshly built image on
-// each PR push in one call. Members with previews disabled are skipped (not
-// failed) so a mixed stack previews cleanly.
+// namespace so the previewed collection is co-located and reaches itself by
+// in-cluster DNS. The namespace comes from the project's PreviewNamespacePattern
+// (stack name in the {app} slot), defaulting to "{project}-{stack}-preview-{name}".
+// It is an upsert (like the per-app preview) so CI can re-point every member at a
+// freshly built image on each PR push in one call. Members with previews disabled
+// are skipped (not failed) so a mixed stack previews cleanly.
+//
+// A pattern without {name} (e.g. "{project}-preview") puts every preview of every
+// stack in ONE namespace. Members must then disambiguate their workload names with
+// ((platform.previewName)) in fullnameOverride, or concurrent PRs overwrite each
+// other's Deployments — suparship only suffixes the platform ConfigMap/Secret.
 func (rh *rbacHandler) handleCreateStackPreview(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	name := r.PathValue("stack")
@@ -224,7 +230,9 @@ func (rh *rbacHandler) handleCreateStackPreview(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	ns := stackPreviewNamespace(project, name, preview)
+	// Resolve the namespace once, from the project's preview namespace pattern, and
+	// pass it to every member: the whole stack preview lands in one namespace.
+	ns := stackPreviewNamespace(project, name, preview, rh.appHandler.previewNamespacePattern(r.Context(), project))
 	imageTag := strings.TrimSpace(req.ImageTag)
 	// The prep + batched publish is the slow part; defer it when the caller opts
 	// into async (Prefer: respond-async / ?async=1) so a large stack doesn't 504.
@@ -805,6 +813,16 @@ func (rh *rbacHandler) serveStackSuspend(w http.ResponseWriter, r *http.Request,
 }
 
 // stackPreviewNamespace is the shared namespace a stack preview deploys into.
-func stackPreviewNamespace(project, stack, preview string) string {
-	return project + "-" + stack + "-preview-" + preview
+//
+// It resolves the project's PreviewNamespacePattern with the stack name in the
+// {app} slot, so a stack preview honours the same project setting an app preview
+// does. An empty pattern falls back to domain.DefaultPreviewNamespacePattern
+// ("{project}-{app}-preview-{name}"), which reproduces the historical
+// "{project}-{stack}-preview-{name}" namespace exactly.
+//
+// Every member of the stack preview shares this one namespace so the previewed
+// collection reaches itself by in-cluster DNS. When the pattern omits {name} the
+// namespace is shared across previews too — see handleCreateStackPreview.
+func stackPreviewNamespace(project, stack, preview, pattern string) string {
+	return domain.GeneratePreviewNamespaceFromPattern(stack, preview, project, pattern)
 }
