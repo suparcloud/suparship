@@ -1134,9 +1134,14 @@ var errPreviewsDisabled = errors.New("previews disabled")
 // the preview already existed (200-vs-201 semantics) and the persisted env. On a
 // publish failure it restores the prior env (or deletes the fresh record) so a
 // retry is clean. Shared core of the per-app and stack preview paths.
-func (ah *appHandler) upsertAppPreview(ctx context.Context, a *domain.App, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride string) (bool, *domain.AppEnvironment, error) {
+// prepAppPreview does the git-free part of a preview upsert: build the preview
+// EnvironmentInstance and persist its env record, returning the instance (to
+// publish), the saved env, and the prior env + existed flag (for rollback). No
+// git. Shared by the single-app upsert and the batched stack-preview path so the
+// spec/store prep can run concurrently across members before one batch publish.
+func (ah *appHandler) prepAppPreview(ctx context.Context, a *domain.App, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride string) (inst *domain.EnvironmentInstance, env, prior *domain.AppEnvironment, existed bool, err error) {
 	if !a.Spec.PreviewsEnabled {
-		return false, nil, fmt.Errorf("app %q: %w", a.Name, errPreviewsDisabled)
+		return nil, nil, nil, false, fmt.Errorf("app %q: %w", a.Name, errPreviewsDisabled)
 	}
 	previewResult, err := domainapp.CreatePreview(domainapp.PreviewRequest{
 		App:              a,
@@ -1145,23 +1150,24 @@ func (ah *appHandler) upsertAppPreview(ctx context.Context, a *domain.App, previ
 		NamespacePattern: namespacePattern,
 	})
 	if err != nil {
-		return false, nil, err
+		return nil, nil, nil, false, err
 	}
-	inst := previewResult.Instance
+	inst = previewResult.Instance
 	if namespaceOverride != "" {
 		inst.Namespace = namespaceOverride // co-locate stack-preview members
 	}
 	imageTag = strings.TrimSpace(imageTag)
 
 	// Upsert: capture the prior env so a failed publish can roll back cleanly.
-	prior, getErr := ah.appStore.GetAppEnvironment(ctx, a.ProjectName, a.Name, previewName)
-	existed := getErr == nil
+	var getErr error
+	prior, getErr = ah.appStore.GetAppEnvironment(ctx, a.ProjectName, a.Name, previewName)
+	existed = getErr == nil
 
 	urls := []string{}
 	if inst.URL != "" {
 		urls = []string{inst.URL}
 	}
-	env := &domain.AppEnvironment{
+	env = &domain.AppEnvironment{
 		AppName:     inst.AppName,
 		ProjectName: inst.ProjectName,
 		EnvName:     inst.EnvName,
@@ -1177,15 +1183,51 @@ func (ah *appHandler) upsertAppPreview(ctx context.Context, a *domain.App, previ
 		env.Release = prior.Release // preserve a previously-set tag on re-publish
 	}
 	if err := ah.appStore.SaveAppEnvironment(ctx, a.ProjectName, env); err != nil {
-		return existed, nil, fmt.Errorf("failed to save preview: %w", err)
+		return nil, nil, prior, existed, fmt.Errorf("failed to save preview: %w", err)
+	}
+	return inst, env, prior, existed, nil
+}
+
+// rollbackPreviewPrep undoes prepAppPreview's store write after a failed publish:
+// restore the prior env on an update, or delete the freshly-created record.
+func (ah *appHandler) rollbackPreviewPrep(ctx context.Context, a *domain.App, previewName string, prior *domain.AppEnvironment, existed bool) {
+	if existed && prior != nil {
+		_ = ah.appStore.SaveAppEnvironment(ctx, a.ProjectName, prior)
+	} else {
+		_ = ah.appStore.DeleteAppEnvironment(ctx, a.ProjectName, a.Name, previewName)
+	}
+}
+
+// publishPreviewsBatch publishes many previews in ONE git commit when the
+// publisher supports batching (BatchPreviewPublisher), else falls back to
+// per-member PublishAppPreview. Batched form of PublishAppPreview — the stack
+// preview 504 fix, mirroring republishAppsFocus.
+func (ah *appHandler) publishPreviewsBatch(ctx context.Context, targets []PreviewPublishTarget) error {
+	if ah.gitOpsPublisher == nil || len(targets) == 0 {
+		return nil
+	}
+	if b, ok := ah.gitOpsPublisher.(BatchPreviewPublisher); ok {
+		if err := b.PublishPreviews(ctx, targets); !errors.Is(err, errUnbatched) {
+			return err // batched (success or a real publish error)
+		}
+	}
+	// Fallback: publisher without the batch capability (e.g. test stubs).
+	for _, t := range targets {
+		if err := ah.gitOpsPublisher.PublishAppPreview(ctx, t.App, t.Preview, t.BaseEnv, t.ImageTag); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ah *appHandler) upsertAppPreview(ctx context.Context, a *domain.App, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride string) (bool, *domain.AppEnvironment, error) {
+	inst, env, prior, existed, err := ah.prepAppPreview(ctx, a, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride)
+	if err != nil {
+		return existed, nil, err
 	}
 	if ah.gitOpsPublisher != nil {
 		if err := ah.gitOpsPublisher.PublishAppPreview(ctx, a, inst, baseEnv, imageTag); err != nil {
-			if existed {
-				_ = ah.appStore.SaveAppEnvironment(ctx, a.ProjectName, prior)
-			} else {
-				_ = ah.appStore.DeleteAppEnvironment(ctx, a.ProjectName, a.Name, previewName)
-			}
+			ah.rollbackPreviewPrep(ctx, a, previewName, prior, existed)
 			return existed, nil, fmt.Errorf("failed to publish preview: %w", err)
 		}
 	}
@@ -1254,23 +1296,26 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 	// Run the full preview upsert (EnvironmentInstance + Helm values + ArgoCD
 	// Application + publish). The base env's domain drives the preview routing
 	// host so the stored URL matches what the chart renders. 201 on first create,
-	// 200 on update (CI re-POSTing a new image tag on each PR push).
-	existed, env, err := ah.upsertAppPreview(r.Context(), a, sanitized, baseEnv, req.ImageTag,
-		ah.baseDomainForEnv(r.Context(), baseEnv), ah.previewNamespacePattern(r.Context(), projectName), "")
-	if err != nil {
-		code := http.StatusInternalServerError
-		if errors.Is(err, errPreviewsDisabled) {
-			code = http.StatusUnprocessableEntity
+	// 200 on update (CI re-POSTing a new image tag on each PR push). The upsert
+	// clones/commits/pushes the gitops repo, so it's deferred when the caller opts
+	// into async (Prefer: respond-async / ?async=1) to avoid a gateway 504.
+	op := func(ctx context.Context) (int, any, error) {
+		existed, env, err := ah.upsertAppPreview(ctx, a, sanitized, baseEnv, req.ImageTag,
+			ah.baseDomainForEnv(ctx, baseEnv), ah.previewNamespacePattern(ctx, projectName), "")
+		if err != nil {
+			code := http.StatusInternalServerError
+			if errors.Is(err, errPreviewsDisabled) {
+				code = http.StatusUnprocessableEntity
+			}
+			return code, nil, err
 		}
-		writeJSON(w, code, errorResponse{Error: err.Error()})
-		return
+		status := http.StatusCreated
+		if existed {
+			status = http.StatusOK
+		}
+		return status, appPreviewToDTO(env), nil
 	}
-
-	status := http.StatusCreated
-	if existed {
-		status = http.StatusOK
-	}
-	writeJSON(w, status, appPreviewToDTO(env))
+	dispatchOp(w, r, ah.async, "preview-app", projectName, op)
 }
 
 // handleDeleteAppPreview handles DELETE /api/v1/projects/{project}/apps/{app}/previews/{name}.
@@ -1298,20 +1343,21 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 	// Prune the preview's GitOps files first so ArgoCD removes the generated
 	// Application + namespace. Done before the store delete so a gitops failure
 	// keeps the record (the preview stays listed and retryable) rather than
-	// orphaning a running Application with no store entry.
-	if d, ok := ah.gitOpsPublisher.(AppPreviewDeleter); ok {
-		if err := d.DeleteAppPreview(r.Context(), projectName, previewName, appName, env.BaseEnv); err != nil {
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to remove preview from gitops"})
-			return
+	// orphaning a running Application with no store entry. The gitops prune
+	// clones/commits/pushes, so it's deferred when the caller opts into async.
+	op := func(ctx context.Context) (int, any, error) {
+		if d, ok := ah.gitOpsPublisher.(AppPreviewDeleter); ok {
+			if err := d.DeleteAppPreview(ctx, projectName, previewName, appName, env.BaseEnv); err != nil {
+				return http.StatusInternalServerError, nil, fmt.Errorf("failed to remove preview from gitops")
+			}
 		}
+		if err := ah.appStore.DeleteAppEnvironment(ctx, projectName, appName, previewName); err != nil {
+			return http.StatusInternalServerError, nil, fmt.Errorf("failed to delete preview")
+		}
+		// 204 No Content: nil result → dispatchOp writes just the status, no body.
+		return http.StatusNoContent, nil, nil
 	}
-
-	if err := ah.appStore.DeleteAppEnvironment(r.Context(), projectName, appName, previewName); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to delete preview"})
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
+	dispatchOp(w, r, ah.async, "preview-app-delete", projectName, op)
 }
 
 // handleSyncApp handles POST /api/v1/projects/{project}/apps/{app}/sync.

@@ -1640,9 +1640,70 @@ func (a *gitOpsPublisherAdapter) refreshTargets(ctx context.Context, targets []s
 // ExternalSecret reads the base env vault's preview-band (+ per-PR) items on top
 // of the base env's own items. No per-preview vault or store is created.
 func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *domain.App, preview *domain.EnvironmentInstance, baseEnv, imageTag string) error {
+	spec, err := a.buildPreviewSpec(ctx, app, preview, baseEnv, imageTag)
+	if err != nil {
+		return err
+	}
+	if err := a.inner.PublishPreview(ctx, app, spec); err != nil {
+		return err
+	}
+	// Refresh the app's existing preview Application (re-publish case), and nudge
+	// the preview ApplicationSets to re-scan so a brand-new preview Application is
+	// generated immediately rather than on the appset's poll interval.
+	a.refreshApps(ctx, app.ProjectName, app.Name)
+	if a.argoRefresher != nil {
+		if err := a.argoRefresher.RefreshAppSets(ctx, []string{"previews", "previews-platform"}); err != nil {
+			slog.Warn("argocd preview appset refresh failed; falling back to poll", "project", app.ProjectName, "app", app.Name, "err", err)
+		}
+	}
+	return nil
+}
+
+// PublishPreviews implements server.BatchPreviewPublisher — the batched form of
+// PublishAppPreview. It builds every target's spec through a request-scoped
+// cached vault (shared-scope 1Password lookups run once for the whole fan-out,
+// not per member), writes them all in ONE clone/commit/push, then consolidates
+// the per-app refresh + one preview-appset refresh. This is the stack-preview
+// 504 fix, mirroring PublishApps for pin.
+func (a *gitOpsPublisherAdapter) PublishPreviews(ctx context.Context, targets []server.PreviewPublishTarget) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	ca := a.withCachedVault()
+	bundles := make([]gitops.PreviewPublishBundle, 0, len(targets))
+	for _, t := range targets {
+		spec, err := ca.buildPreviewSpec(ctx, t.App, t.Preview, t.BaseEnv, t.ImageTag)
+		if err != nil {
+			return err
+		}
+		bundles = append(bundles, gitops.PreviewPublishBundle{App: t.App, Preview: spec})
+	}
+	if err := a.inner.PublishPreviews(ctx, bundles); err != nil {
+		return err
+	}
+	byProject := map[string][]string{}
+	for _, t := range targets {
+		byProject[t.App.ProjectName] = append(byProject[t.App.ProjectName], t.App.Name)
+	}
+	for proj, names := range byProject {
+		a.refreshApps(ctx, proj, names...)
+	}
+	if a.argoRefresher != nil {
+		if err := a.argoRefresher.RefreshAppSets(ctx, []string{"previews", "previews-platform"}); err != nil {
+			slog.Warn("argocd preview appset refresh failed; falling back to poll", "err", err)
+		}
+	}
+	return nil
+}
+
+// buildPreviewSpec resolves everything a preview publish needs — template, base
+// env cluster/domain, secret wiring, env vars, overlays — into a
+// gitops.PreviewPublishSpec. Git-free, so a stack fan-out can build every
+// member's spec concurrently (through a cached vault) before one batch publish.
+func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *domain.App, preview *domain.EnvironmentInstance, baseEnv, imageTag string) (gitops.PreviewPublishSpec, error) {
 	tmpl, err := a.resolveTemplate(ctx, app.Spec.Template.Name)
 	if err != nil {
-		return fmt.Errorf("publish preview %s/%s/%s: %w", app.ProjectName, app.Name, preview.EnvName, err)
+		return gitops.PreviewPublishSpec{}, fmt.Errorf("publish preview %s/%s/%s: %w", app.ProjectName, app.Name, preview.EnvName, err)
 	}
 
 	// Resolve the BASE env's cluster + base domain — the preview deploys there.
@@ -1736,19 +1797,7 @@ func (a *gitOpsPublisherAdapter) PublishAppPreview(ctx context.Context, app *dom
 		StackEnvRawValues:     basePub.StackEnvRawValues,
 		TemplatePreviewValues: templatePreviewValues,
 	}
-	if err := a.inner.PublishPreview(ctx, app, spec); err != nil {
-		return err
-	}
-	// Refresh the app's existing preview Application (re-publish case), and nudge
-	// the preview ApplicationSets to re-scan so a brand-new preview Application is
-	// generated immediately rather than on the appset's poll interval.
-	a.refreshApps(ctx, app.ProjectName, app.Name)
-	if a.argoRefresher != nil {
-		if err := a.argoRefresher.RefreshAppSets(ctx, []string{"previews", "previews-platform"}); err != nil {
-			slog.Warn("argocd preview appset refresh failed; falling back to poll", "project", app.ProjectName, "app", app.Name, "err", err)
-		}
-	}
-	return nil
+	return spec, nil
 }
 
 // DeleteAppPreview implements server.AppPreviewDeleter by removing one app's

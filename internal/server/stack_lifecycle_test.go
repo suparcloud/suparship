@@ -543,6 +543,35 @@ func TestStackSuspend_BatchesGitPublish(t *testing.T) {
 	}
 }
 
+// TestStackPreview_BatchesGitPublish verifies the stack preview fan-out prepares
+// each member's spec concurrently then publishes them all in ONE batched
+// PublishPreviews call — not N per-member PublishAppPreview — the 504 fix.
+func TestStackPreview_BatchesGitPublish(t *testing.T) {
+	pub := &recordingPublisher{}
+	mux, ah, store, stackStore, _ := newTestStackMuxPub(testProject, pub)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	for _, app := range []string{"web", "agent", "worker"} {
+		seedStackMember(store, testProject, app, "voiceai")
+		setPreviewsEnabled(store, testProject, app, true)
+	}
+
+	rec := postStackJSON(mux, sessionCookieFor(ah, "bob", "developer"),
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/previews",
+		stackPreviewRequest{Name: "pr-42", ImageTag: "sha-abc"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("preview: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if pub.batchPreviewCalls != 1 {
+		t.Errorf("expected 1 batched PublishPreviews call, got %d (targets=%v)", pub.batchPreviewCalls, pub.batchPreviewTargets)
+	}
+	if len(pub.batchPreviewTargets) != 1 || pub.batchPreviewTargets[0] != 3 {
+		t.Errorf("expected one batch of 3 targets, got %v", pub.batchPreviewTargets)
+	}
+	if pub.previewCalls != 0 {
+		t.Errorf("per-member PublishAppPreview should not be called on the batch path, got %d", pub.previewCalls)
+	}
+}
+
 // TestStackPin_BatchesGitPublish verifies the pin fan-out publishes every
 // pinned member in ONE batched PublishApps call (tree + Kargo pause + target
 // env) rather than N per-member republish+publish — the 504 fix for pin.

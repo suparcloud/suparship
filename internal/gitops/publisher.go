@@ -1892,6 +1892,34 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 	})
 }
 
+// PreviewPublishBundle is one member of a batched preview publish: an app plus
+// its resolved preview spec.
+type PreviewPublishBundle struct {
+	App     *domain.App
+	Preview PreviewPublishSpec
+}
+
+// PublishPreviews writes many previews' files in ONE clone/commit/push — the
+// batched form of PublishPreview per app. It collapses a stack preview fan-out's
+// N×(clone/commit/push) into one git round-trip (the preview 504 fix, mirroring
+// PublishApps for pin). Every preview targets the same repo, so N un-batched
+// publishes would serialize on the repo lock anyway; only batching removes the
+// per-member git cost.
+func (p *Publisher) PublishPreviews(ctx context.Context, bundles []PreviewPublishBundle) error {
+	if len(bundles) == 0 {
+		return nil
+	}
+	return p.withClonedRepo(ctx, func(repoDir string) error {
+		for _, b := range bundles {
+			if err := p.publishPreviewFiles(repoDir, b.App, b.Preview); err != nil {
+				return err
+			}
+		}
+		commitMsg := fmt.Sprintf("feat(previews): batch publish (%d preview(s))\n\nCreated by suparShip.", len(bundles))
+		return p.commitAndPush(ctx, repoDir, commitMsg)
+	})
+}
+
 // publishPreviewFiles writes a preview's app.yaml, values.yaml and platform
 // resources into repoDir (no git commit). Extracted from PublishPreview so the
 // file-generation logic — notably image-tag resolution — is testable without a

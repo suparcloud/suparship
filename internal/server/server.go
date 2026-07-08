@@ -420,6 +420,40 @@ func (h *PublisherHolder) PublishApps(ctx context.Context, targets []AppPublishT
 // PublishApps, so the caller should fall back to its per-app republish path.
 var errUnbatched = errors.New("batch app publish unsupported")
 
+// PreviewPublishTarget bundles an app with the preview instance to publish, for
+// the batched PublishPreviews (baseEnv + imageTag mirror PublishAppPreview).
+type PreviewPublishTarget struct {
+	App      *domain.App
+	Preview  *domain.EnvironmentInstance
+	BaseEnv  string
+	ImageTag string
+}
+
+// BatchPreviewPublisher writes many previews in one git commit — the batched
+// form of PublishAppPreview. Optional capability (like BatchAppPublisher),
+// asserted at the call site; callers fall back to per-preview publish when
+// unavailable.
+type BatchPreviewPublisher interface {
+	PublishPreviews(ctx context.Context, targets []PreviewPublishTarget) error
+}
+
+// PublishPreviews delegates to the held publisher when it implements
+// BatchPreviewPublisher (one clone/commit/push). Returns errUnbatched when the
+// held publisher lacks the capability, so the caller can fall back to its
+// per-preview path.
+func (h *PublisherHolder) PublishPreviews(ctx context.Context, targets []PreviewPublishTarget) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	if b, ok := p.(BatchPreviewPublisher); ok {
+		return b.PublishPreviews(ctx, targets)
+	}
+	return errUnbatched
+}
+
 // SecretStoreReconciler recomputes and publishes the full set of ESO
 // ClusterSecretStores (global + per-env + per-cluster) to the gitops repo.
 // Called by the env/cluster lifecycle hooks so the stores exist before app

@@ -74,6 +74,43 @@ func TestDispatchOpSyncError(t *testing.T) {
 	}
 }
 
+// A nil result with a 2xx status writes just the status code, no JSON body —
+// preserving the 204 No Content contract of the delete-preview endpoints.
+func TestDispatchOpNoBody204(t *testing.T) {
+	op := func(context.Context) (int, any, error) {
+		return http.StatusNoContent, nil, nil
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/x", nil)
+	w := httptest.NewRecorder()
+	dispatchOp(w, req, nil, "preview-app-delete", "demo", op)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("204 must have an empty body, got %q", w.Body.String())
+	}
+}
+
+// An async no-body op records a terminal 204 the poller can read.
+func TestAsyncNoBodyRecords204(t *testing.T) {
+	var wg sync.WaitGroup
+	runner := newAsyncRunner(context.Background(), &wg)
+	op := func(context.Context) (int, any, error) {
+		return http.StatusNoContent, nil, nil
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/x?async=1", nil)
+	w := httptest.NewRecorder()
+	dispatchOp(w, req, runner, "preview-app-delete", "demo", op)
+	wg.Wait()
+
+	var acc acceptedResponse
+	json.Unmarshal(w.Body.Bytes(), &acc)
+	task, ok := runner.store.get(acc.TaskID)
+	if !ok || task.State != asyncSucceeded || task.Status != http.StatusNoContent || task.Result != nil {
+		t.Errorf("no-body task = %+v (ok=%v)", task, ok)
+	}
+}
+
 // The async path returns 202 + a task id, runs the op in the background, and the
 // status endpoint then reports the terminal result — the same payload the sync
 // call would have produced.
@@ -106,7 +143,7 @@ func TestAsyncPinAcceptAndPoll(t *testing.T) {
 	sreq.SetPathValue("project", "demo")
 	sreq.SetPathValue("taskId", acc.TaskID)
 	sw := httptest.NewRecorder()
-	rh.handleGetPinTask(sw, sreq)
+	rh.handleGetTask(sw, sreq)
 
 	if sw.Code != http.StatusOK {
 		t.Fatalf("status endpoint = %d, want 200", sw.Code)
@@ -162,7 +199,7 @@ func TestGetPinTaskCrossProjectIsolation(t *testing.T) {
 	sreq.SetPathValue("project", "projB") // wrong project
 	sreq.SetPathValue("taskId", task.ID)
 	sw := httptest.NewRecorder()
-	rh.handleGetPinTask(sw, sreq)
+	rh.handleGetTask(sw, sreq)
 	if sw.Code != http.StatusNotFound {
 		t.Errorf("cross-project read = %d, want 404", sw.Code)
 	}

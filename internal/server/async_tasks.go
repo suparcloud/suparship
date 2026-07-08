@@ -166,7 +166,7 @@ func (a *asyncRunner) accept(w http.ResponseWriter, kind, project string, op asy
 	writeJSON(w, http.StatusAccepted, acceptedResponse{
 		TaskID:    t.ID,
 		State:     string(t.State),
-		StatusURL: pinTaskStatusURL(project, t.ID),
+		StatusURL: taskStatusURL(project, t.ID),
 		Message:   "accepted; poll statusUrl for the result",
 	})
 }
@@ -179,8 +179,8 @@ type acceptedResponse struct {
 	Message   string `json:"message,omitempty"`
 }
 
-func pinTaskStatusURL(project, id string) string {
-	return "/api/v1/projects/" + project + "/pin-tasks/" + id
+func taskStatusURL(project, id string) string {
+	return "/api/v1/projects/" + project + "/tasks/" + id
 }
 
 // wantAsync reports whether the caller opted into async handling, via the
@@ -213,13 +213,19 @@ func dispatchOp(w http.ResponseWriter, r *http.Request, async *asyncRunner, kind
 		writeJSON(w, status, errorResponse{Error: err.Error()})
 		return
 	}
+	if result == nil {
+		// No-body success (e.g. a 204 delete). Never write a JSON null body.
+		w.WriteHeader(status)
+		return
+	}
 	writeJSON(w, status, result)
 }
 
-// handleGetPinTask serves GET /api/v1/projects/{project}/pin-tasks/{taskId}.
-// Project-scoped (viewProject RBAC) and cross-checked against the task's own
-// project so a token for one project can't read another's task.
-func (rh *rbacHandler) handleGetPinTask(w http.ResponseWriter, r *http.Request) {
+// handleGetTask serves GET /api/v1/projects/{project}/tasks/{taskId} (and the
+// legacy /pin-tasks/{taskId} alias). Project-scoped (viewProject RBAC) and
+// cross-checked against the task's own project so a token for one project can't
+// read another's task.
+func (rh *rbacHandler) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
 	id := r.PathValue("taskId")
 	if rh.appHandler == nil || rh.appHandler.async == nil {
@@ -228,7 +234,7 @@ func (rh *rbacHandler) handleGetPinTask(w http.ResponseWriter, r *http.Request) 
 	}
 	t, ok := rh.appHandler.async.store.get(id)
 	if !ok || t.Project != project {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "pin task not found: " + id})
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "task not found: " + id})
 		return
 	}
 	writeJSON(w, http.StatusOK, t)

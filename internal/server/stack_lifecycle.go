@@ -226,19 +226,78 @@ func (rh *rbacHandler) handleCreateStackPreview(w http.ResponseWriter, r *http.R
 
 	ns := stackPreviewNamespace(project, name, preview)
 	imageTag := strings.TrimSpace(req.ImageTag)
-	results := make([]stackOpResult, 0, len(members))
-	for _, a := range members {
-		if !a.Spec.PreviewsEnabled {
-			results = append(results, skipResult(a.Name, "previews disabled"))
-			continue
-		}
-		if err := rh.appHandler.createStackPreview(r.Context(), a, preview, ns, baseEnv, imageTag); err != nil {
-			results = append(results, errResult(a.Name, err))
-			continue
-		}
-		results = append(results, okResult(a.Name, "preview "+preview+" → "+ns))
+	// The prep + batched publish is the slow part; defer it when the caller opts
+	// into async (Prefer: respond-async / ?async=1) so a large stack doesn't 504.
+	// Validation above already ran synchronously.
+	op := func(ctx context.Context) (int, any, error) {
+		return http.StatusCreated, rh.createStackPreviewExec(ctx, project, name, members, preview, ns, baseEnv, imageTag), nil
 	}
-	writeJSON(w, http.StatusCreated, stackBatchResponse{Project: project, Stack: name, Action: "preview", Results: results})
+	dispatchOp(w, r, rh.appHandler.async, "preview-stack", project, op)
+}
+
+// createStackPreviewExec builds each member's preview spec + store record
+// concurrently (bounded, git-free), then publishes them all in ONE
+// clone/commit/push. Mirrors pinStackExec: prep can't 504 (no git) and the single
+// batched publish collapses N members' clone/commit/push into one git round-trip.
+// On a batch publish failure nothing was pushed, so every prepared member's store
+// record is rolled back.
+func (rh *rbacHandler) createStackPreviewExec(ctx context.Context, project, name string, members []*domain.App, preview, ns, baseEnv, imageTag string) stackBatchResponse {
+	ah := rh.appHandler
+	baseDomain := ah.baseDomainForEnv(ctx, baseEnv)
+
+	type previewPrep struct {
+		app     *domain.App
+		inst    *domain.EnvironmentInstance
+		prior   *domain.AppEnvironment
+		existed bool
+		skip    string
+		err     error
+	}
+	prepStart := time.Now()
+	preps := prepMembers(members, func(a *domain.App) previewPrep {
+		if !a.Spec.PreviewsEnabled {
+			return previewPrep{app: a, skip: "previews disabled"}
+		}
+		inst, _, prior, existed, err := ah.prepAppPreview(ctx, a, preview, baseEnv, imageTag, baseDomain, "", ns)
+		return previewPrep{app: a, inst: inst, prior: prior, existed: existed, err: err}
+	})
+	prepDur := time.Since(prepStart)
+
+	results := make([]stackOpResult, 0, len(members))
+	var targets []PreviewPublishTarget
+	var published []previewPrep
+	for _, p := range preps {
+		switch {
+		case p.skip != "":
+			results = append(results, skipResult(p.app.Name, p.skip))
+		case p.err != nil:
+			results = append(results, errResult(p.app.Name, p.err))
+		default:
+			targets = append(targets, PreviewPublishTarget{App: p.app, Preview: p.inst, BaseEnv: baseEnv, ImageTag: imageTag})
+			published = append(published, p)
+		}
+	}
+
+	pubStart := time.Now()
+	if len(targets) > 0 {
+		if err := ah.publishPreviewsBatch(ctx, targets); err != nil {
+			for _, p := range published {
+				ah.rollbackPreviewPrep(ctx, p.app, preview, p.prior, p.existed)
+				results = append(results, errResult(p.app.Name, err))
+			}
+		} else {
+			for _, p := range published {
+				results = append(results, okResult(p.app.Name, "preview "+preview+" → "+ns))
+			}
+		}
+	}
+	slog.Info("stack preview timing",
+		"project", project, "stack", name,
+		"members", len(members), "published", len(targets),
+		"prep", prepDur.Round(time.Millisecond).String(),
+		"publish", time.Since(pubStart).Round(time.Millisecond).String(),
+	)
+	return stackBatchResponse{Project: project, Stack: name, Action: "preview", Results: results}
 }
 
 // handleDeleteStackPreview tears down a stack preview by removing each member's
@@ -261,36 +320,41 @@ func (rh *rbacHandler) handleDeleteStackPreview(w http.ResponseWriter, r *http.R
 		return
 	}
 	members := rh.stackMemberApps(r.Context(), project, name)
-	results := make([]stackOpResult, 0, len(members))
-	for _, a := range members {
-		env, err := rh.appHandler.appStore.GetAppEnvironment(r.Context(), project, a.Name, preview)
-		if err != nil || env.EnvType != domain.AppEnvPreview {
-			continue // app has no such preview — skip silently
-		}
-		// baseEnv locates the preview's gitops tree (previews/{baseEnv}/...).
-		// Fall back to the app's first stable env for records created before
-		// BaseEnv was persisted, so the prune still targets a real path.
-		baseEnv := env.BaseEnv
-		if baseEnv == "" {
-			if stable := rh.appHandler.stableEnvsFromOrg(r.Context(), a); len(stable) > 0 {
-				baseEnv = stable[0].EnvName
+	// Per-member gitops prune (clone/commit/push) is the slow part; defer it when
+	// the caller opts into async so tearing down a large stack preview can't 504.
+	op := func(ctx context.Context) (int, any, error) {
+		results := make([]stackOpResult, 0, len(members))
+		for _, a := range members {
+			env, err := rh.appHandler.appStore.GetAppEnvironment(ctx, project, a.Name, preview)
+			if err != nil || env.EnvType != domain.AppEnvPreview {
+				continue // app has no such preview — skip silently
 			}
-		}
-		// Prune gitops first (so ArgoCD prunes the Application), then drop the
-		// store record — mirrors the per-app preview delete ordering.
-		if d, ok := rh.appHandler.gitOpsPublisher.(AppPreviewDeleter); ok {
-			if err := d.DeleteAppPreview(r.Context(), project, preview, a.Name, baseEnv); err != nil {
+			// baseEnv locates the preview's gitops tree (previews/{baseEnv}/...).
+			// Fall back to the app's first stable env for records created before
+			// BaseEnv was persisted, so the prune still targets a real path.
+			baseEnv := env.BaseEnv
+			if baseEnv == "" {
+				if stable := rh.appHandler.stableEnvsFromOrg(ctx, a); len(stable) > 0 {
+					baseEnv = stable[0].EnvName
+				}
+			}
+			// Prune gitops first (so ArgoCD prunes the Application), then drop the
+			// store record — mirrors the per-app preview delete ordering.
+			if d, ok := rh.appHandler.gitOpsPublisher.(AppPreviewDeleter); ok {
+				if err := d.DeleteAppPreview(ctx, project, preview, a.Name, baseEnv); err != nil {
+					results = append(results, errResult(a.Name, err))
+					continue
+				}
+			}
+			if err := rh.appHandler.appStore.DeleteAppEnvironment(ctx, project, a.Name, preview); err != nil {
 				results = append(results, errResult(a.Name, err))
 				continue
 			}
+			results = append(results, okResult(a.Name, "preview "+preview+" deleted"))
 		}
-		if err := rh.appHandler.appStore.DeleteAppEnvironment(r.Context(), project, a.Name, preview); err != nil {
-			results = append(results, errResult(a.Name, err))
-			continue
-		}
-		results = append(results, okResult(a.Name, "preview "+preview+" deleted"))
+		return http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "preview-delete", Results: results}, nil
 	}
-	writeJSON(w, http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "preview-delete", Results: results})
+	dispatchOp(w, r, rh.appHandler.async, "preview-stack-delete", project, op)
 }
 
 // validTargetEnv reports whether envName is a real stable env of the project
@@ -743,14 +807,4 @@ func (rh *rbacHandler) serveStackSuspend(w http.ResponseWriter, r *http.Request,
 // stackPreviewNamespace is the shared namespace a stack preview deploys into.
 func stackPreviewNamespace(project, stack, preview string) string {
 	return project + "-" + stack + "-preview-" + preview
-}
-
-// createStackPreview upserts a preview for one member into the shared stack
-// preview namespace, so every member co-locates and reaches itself by in-cluster
-// DNS. It delegates to the shared upsertAppPreview core with a namespace override
-// (baseDomain from the base env, no per-app namespace pattern).
-func (ah *appHandler) createStackPreview(ctx context.Context, a *domain.App, preview, namespace, baseEnv, imageTag string) error {
-	_, _, err := ah.upsertAppPreview(ctx, a, preview, baseEnv, imageTag,
-		ah.baseDomainForEnv(ctx, baseEnv), "", namespace)
-	return err
 }

@@ -561,6 +561,20 @@ type recordingPublisher struct {
 	// batch (pin/unpin).
 	batchAppCalls   int
 	batchAppTargets []int
+	// batchPreviewCalls/batchPreviewTargets track the PublishPreviews batch
+	// (stack preview); previewCalls counts per-member PublishAppPreview so a test
+	// can assert the batch path was taken (previewCalls stays 0).
+	batchPreviewCalls   int
+	batchPreviewTargets []int
+	previewCalls        int
+}
+
+// PublishPreviews makes recordingPublisher a BatchPreviewPublisher so tests can
+// assert the stack preview fan-out publishes in one batched call.
+func (r *recordingPublisher) PublishPreviews(_ context.Context, targets []PreviewPublishTarget) error {
+	r.batchPreviewCalls++
+	r.batchPreviewTargets = append(r.batchPreviewTargets, len(targets))
+	return nil
 }
 
 // PublishAppsEnv makes recordingPublisher a BatchEnvPublisher so tests can assert
@@ -590,6 +604,7 @@ func (r *recordingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, env
 	return nil
 }
 func (r *recordingPublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _, _ string) error {
+	r.previewCalls++
 	return nil
 }
 func (r *recordingPublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }
