@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -153,6 +153,9 @@ export function StackDetail() {
   const [allApps, setAllApps] = useState<AppSummary[]>([]);
   const [envs, setEnvs] = useState<ProjectEnvironment[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // getStack is cheap and gates the page; the status-enriched listApps (member
+  // summaries) streams into the members table under its own flag.
+  const [appsLoading, setAppsLoading] = useState(true);
   const [addApp, setAddApp] = useState("");
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [busy, setBusy] = useState<string | null>(null);
@@ -181,20 +184,26 @@ export function StackDetail() {
 
   const reload = useCallback(async () => {
     if (!project || !stackName) return;
-    try {
-      const [s, apps, envList] = await Promise.all([
-        getStack(project, stackName),
-        // Only the stack's members need live status here; non-members come back
-        // as names for the "add app" picker without paying the enrichment cost.
-        listApps(project, { stack: stackName }),
-        listProjectEnvironments(project),
-      ]);
-      setStack(s);
-      setAllApps(apps.apps);
-      setEnvs(envList);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load stack");
-    }
+    // Fire the three reads together but set each state as it resolves, so the
+    // stack header paints as soon as getStack lands instead of waiting on the
+    // enriched listApps. Still await all three so mutation callers that
+    // `await reload()` see a fully-refreshed view.
+    setAppsLoading(true);
+    const p1 = getStack(project, stackName)
+      .then(setStack)
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : "Failed to load stack"),
+      );
+    // Only the stack's members need live status here; non-members come back as
+    // names for the "add app" picker without paying the enrichment cost.
+    const p2 = listApps(project, { stack: stackName })
+      .then((apps) => setAllApps(apps.apps))
+      .catch(() => setAllApps([]))
+      .finally(() => setAppsLoading(false));
+    const p3 = listProjectEnvironments(project)
+      .then(setEnvs)
+      .catch(() => setEnvs([]));
+    await Promise.all([p1, p2, p3]);
   }, [project, stackName]);
 
   useEffect(() => {
@@ -213,24 +222,38 @@ export function StackDetail() {
       .catch(() => setOrgEnvs([]));
   }, []);
 
+  // Derived views, memoized so they aren't rebuilt on every unrelated re-render
+  // (this component has ~18 state hooks — modals, selects, per-env pickers — that
+  // re-render frequently). Computed before the early returns to respect hook
+  // ordering; each guards the null-stack case.
+  const memberApps = useMemo(() => stack?.apps ?? [], [stack]);
+  const members = useMemo(() => new Set(memberApps), [memberApps]);
+  const addable = useMemo(
+    () => allApps.filter((a) => !members.has(a.name)).map((a) => a.name),
+    [allApps, members],
+  );
+  // Member apps as full summaries (with per-env status), in stack order.
+  const memberSummaries = useMemo<AppSummary[]>(() => {
+    const byName = new Map(allApps.map((a) => [a.name, a]));
+    return memberApps
+      .map((n) => byName.get(n))
+      .filter((a): a is AppSummary => a !== undefined);
+  }, [allApps, memberApps]);
+  // PR previews scoped to this stack: within each PR group keep only member-app
+  // previews, and drop PRs that touch none of the stack's apps.
+  const stackPreviews = useMemo<PreviewGroup[]>(
+    () =>
+      previewGroups
+        .map((g) => ({ ...g, apps: g.apps.filter((a) => members.has(a.appName)) }))
+        .filter((g) => g.apps.length > 0),
+    [previewGroups, members],
+  );
+
   if (!project || !stackName) return null;
   if (error) return <div className="p-6 text-sm text-red-600">{error}</div>;
   if (!stack) return <StackDetailSkeleton />;
 
-  const memberApps = stack.apps ?? [];
-  const members = new Set(memberApps);
-  const addable = allApps.filter((a) => !members.has(a.name)).map((a) => a.name);
   const noMembers = memberApps.length === 0;
-  // Member apps as full summaries (with per-env status), in stack order.
-  const byName = new Map(allApps.map((a) => [a.name, a]));
-  const memberSummaries: AppSummary[] = memberApps
-    .map((n) => byName.get(n))
-    .filter((a): a is AppSummary => a !== undefined);
-  // PR previews scoped to this stack: within each PR group keep only member-app
-  // previews, and drop PRs that touch none of the stack's apps.
-  const stackPreviews: PreviewGroup[] = previewGroups
-    .map((g) => ({ ...g, apps: g.apps.filter((a) => members.has(a.appName)) }))
-    .filter((g) => g.apps.length > 0);
 
   function openModal(kind: ModalKind) {
     setResults(null);
@@ -522,6 +545,12 @@ export function StackDetail() {
           <div className="px-6 py-4">
             {noMembers ? (
               <p className="text-sm text-gray-400">No apps yet. Add one below.</p>
+            ) : appsLoading ? (
+              <div className="space-y-3">
+                {[1, 2, 3].map((n) => (
+                  <div key={n} className="h-10 animate-pulse rounded bg-gray-50" />
+                ))}
+              </div>
             ) : (
               <AppTable
                 project={project}

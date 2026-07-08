@@ -17,7 +17,10 @@ export function ProjectDetail() {
   const [apps, setApps] = useState<AppSummary[]>([]);
   const [stacks, setStacks] = useState<Stack[]>([]);
   const [newStack, setNewStack] = useState<string | null>(null); // null = form hidden
-  const [loading, setLoading] = useState(true);
+  // The page shell (header, actions) needs no data — it paints immediately from
+  // the URL. Only the app table waits on the status-enriched listApps, so it gets
+  // its own loading flag and streams in rather than blocking the whole page.
+  const [appsLoading, setAppsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -31,17 +34,18 @@ export function ProjectDetail() {
     if (!project) return;
     let cancelled = false;
 
-    // listApps now returns per-env status inline, so no per-app enrichment.
+    // listApps returns per-env status inline (the slow call); stream it into the
+    // table area instead of gating the whole page on it.
     listApps(project)
       .then((data) => {
         if (cancelled) return;
         setApps(data.apps);
-        setLoading(false);
+        setAppsLoading(false);
       })
       .catch((err) => {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load");
-          setLoading(false);
+          setAppsLoading(false);
         }
       });
 
@@ -49,16 +53,6 @@ export function ProjectDetail() {
       cancelled = true;
     };
   }, [project]);
-
-  if (loading) return <ProjectSkeleton />;
-
-  if (error) {
-    return (
-      <div className="rounded-lg border border-red-200 bg-red-50 p-4">
-        <p className="text-sm text-red-700">Failed to load project: {error}</p>
-      </div>
-    );
-  }
 
   const healthyCt = apps.filter((a) => a.status.phase === "healthy").length;
   const totalCt = apps.length;
@@ -78,12 +72,18 @@ export function ProjectDetail() {
           <div>
             <h1 className="text-2xl font-semibold text-gray-900">{project}</h1>
             <p className="mt-1 text-sm text-gray-500">
-              {totalCt} {totalCt === 1 ? "app" : "apps"}
-              {healthyCt > 0 && (
-                <span className="text-emerald-600">
-                  {" "}
-                  &middot; {healthyCt} healthy
-                </span>
+              {appsLoading ? (
+                <span className="inline-block h-4 w-24 animate-pulse rounded bg-gray-100 align-middle" />
+              ) : (
+                <>
+                  {totalCt} {totalCt === 1 ? "app" : "apps"}
+                  {healthyCt > 0 && (
+                    <span className="text-emerald-600">
+                      {" "}
+                      &middot; {healthyCt} healthy
+                    </span>
+                  )}
+                </>
               )}
             </p>
           </div>
@@ -141,8 +141,14 @@ export function ProjectDetail() {
         </div>
       )}
 
-      {/* Unified apps + stacks table */}
-      {apps.length === 0 ? (
+      {/* Unified apps + stacks table — streams in after the shell paints */}
+      {appsLoading ? (
+        <AppTableSkeleton />
+      ) : error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+          <p className="text-sm text-red-700">Failed to load apps: {error}</p>
+        </div>
+      ) : apps.length === 0 ? (
         <EmptyApps project={project!} />
       ) : (
         <div className="rounded-xl border border-gray-200 bg-white p-5">
@@ -189,17 +195,14 @@ function EmptyApps({ project }: { project: string }) {
 
 // --- Skeleton ---
 
-function ProjectSkeleton() {
+// AppTableSkeleton stands in for the apps table while the status-enriched listApps
+// resolves, so the page shell stays visible instead of a full-page placeholder.
+function AppTableSkeleton() {
   return (
-    <div className="space-y-6">
-      <div className="space-y-2">
-        <div className="h-4 w-32 animate-pulse rounded bg-gray-100" />
-        <div className="h-8 w-48 animate-pulse rounded bg-gray-100" />
-        <div className="h-5 w-64 animate-pulse rounded bg-gray-50" />
-      </div>
-      <div className="grid gap-4 sm:grid-cols-2">
+    <div className="rounded-xl border border-gray-200 bg-white p-5">
+      <div className="space-y-3">
         {[1, 2, 3, 4].map((n) => (
-          <div key={n} className="h-40 animate-pulse rounded-xl bg-gray-50" />
+          <div key={n} className="h-10 animate-pulse rounded bg-gray-50" />
         ))}
       </div>
     </div>
