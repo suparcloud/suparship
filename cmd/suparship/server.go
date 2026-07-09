@@ -1357,6 +1357,32 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, or
 			pub.ScopeKeys.GlobalApp = true
 		}
 
+		// The per-env app item is the home for this app's env-specific secrets.
+		// Ensure it exists (empty) in the target env's vault and always reference
+		// it, so promoting/syncing an app makes the env vault ready to receive
+		// values without a manual "add a secret to create the item" step — and a
+		// later value is picked up by ESO's refresh without re-publishing. Skipped
+		// gracefully when the env vault isn't provisioned (EnsureItem errors →
+		// presence left as collectScopeKeys probed it).
+		if err := a.vault.EnsureItem(ctx, secrets.EnvScope(envName), secrets.TierApp, app.Name); err != nil {
+			slog.Warn("gitops: ensuring env-app secret item",
+				"app", app.Name, "env", envName, "err", err)
+		} else {
+			pub.ScopeKeys.EnvApp = true
+		}
+
+		// Org-level env-shared secrets apply to every app in this environment.
+		// Ensure the item exists (empty) and always reference it — the same
+		// ensure-and-always-reference contract as the project-env / stack-env
+		// shared items below — so an org-admin setting an env-shared secret is
+		// picked up by ESO's refresh without re-publishing every app in the env.
+		if err := a.vault.EnsureItem(ctx, secrets.EnvScope(envName), secrets.TierShared, ""); err != nil {
+			slog.Warn("gitops: ensuring env-shared secret item",
+				"env", envName, "err", err)
+		} else {
+			pub.ScopeKeys.EnvShared = true
+		}
+
 		// Project-scope shared secrets apply to every app in the project. Like
 		// the baseline app item, ensure the project items exist (empty) and
 		// always reference them, so setting a project secret is picked up by

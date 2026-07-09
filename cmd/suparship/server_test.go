@@ -174,6 +174,39 @@ func TestEnrichPubEnv_AlwaysEnsuresBaselineAppSecret(t *testing.T) {
 	}
 }
 
+// TestEnrichPubEnv_EnsuresEnvAppSecret: publishing an app into an env seeds the
+// app's per-env secret item (empty) in that env's vault and forces EnvApp
+// presence, so the emitted ExternalSecret wires the env scope and the vault is
+// ready to receive values — no manual "add a secret to create the item" step.
+func TestEnrichPubEnv_EnsuresEnvAppSecret(t *testing.T) {
+	vault := secrets.NewMemVaultStore()
+	a := &gitOpsPublisherAdapter{vault: vault}
+	app := &domain.App{Name: "api", ProjectName: "proj"}
+
+	var pub gitops.AppPublishEnv
+	a.enrichPubEnvWithSecrets(context.Background(), &rbac.Org{}, app, "prod", &pub)
+
+	if !pub.ScopeKeys.EnvApp {
+		t.Fatal("expected EnvApp presence forced true after publishing into the env")
+	}
+	if !pub.ScopeKeys.EnvShared {
+		t.Fatal("expected EnvShared presence forced true after publishing into the env")
+	}
+	// The item must actually exist in the env's vault now (Upsert-then-ListKeys
+	// on a just-ensured item; ListKeys errors/omits a missing item).
+	if err := vault.Upsert(context.Background(), secrets.EnvScope("prod"), secrets.TierApp, "api",
+		map[string][]byte{"DB_PASSWORD": []byte("x")}); err != nil {
+		t.Fatalf("upsert into the ensured env-app item: %v", err)
+	}
+	keys, err := vault.ListKeys(context.Background(), secrets.EnvScope("prod"), secrets.TierApp, "api")
+	if err != nil {
+		t.Fatalf("listing the env-app item: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected the env-app item to exist with 1 key, got %d", len(keys))
+	}
+}
+
 // TestEnrichPubEnv_NoVaultNoForce: with no vault configured there is no backend
 // to extract from, so presence is left untouched (no dangling ExternalSecret ref).
 func TestEnrichPubEnv_NoVaultNoForce(t *testing.T) {
@@ -183,6 +216,12 @@ func TestEnrichPubEnv_NoVaultNoForce(t *testing.T) {
 	a.enrichPubEnvWithSecrets(context.Background(), &rbac.Org{}, app, "staging", &pub)
 	if pub.ScopeKeys.GlobalApp {
 		t.Fatal("without a vault, GlobalApp must not be forced")
+	}
+	if pub.ScopeKeys.EnvApp {
+		t.Fatal("without a vault, EnvApp must not be forced")
+	}
+	if pub.ScopeKeys.EnvShared {
+		t.Fatal("without a vault, EnvShared must not be forced")
 	}
 }
 
