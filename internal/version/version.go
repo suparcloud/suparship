@@ -29,5 +29,10 @@ const (
 	// v0.2.0: version-scoped chart layout — charts moved to
 	// charts/{template}/{version}/ and app.yaml gained a chartPath key
 	// (ApplicationSet sources charts/{{chartPath}}). See docs/upgrading.md.
-	Generator = "v0.2.0"
+	//
+	// v0.3.0: app-tier secret items are project-qualified
+	// ({project}-{app}-{scope}); the boot-time copy migration renames legacy
+	// items and this bump forces the fleet republish that flips every
+	// ExternalSecret's dataFrom to the new names.
+	Generator = "v0.3.0"
 )

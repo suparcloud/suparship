@@ -153,6 +153,78 @@ func (w *SAVaultStore) DeleteKey(ctx context.Context, scope secrets.Scope, tier 
 	return nil
 }
 
+var _ secrets.LegacyItemMigrator = (*SAVaultStore)(nil)
+
+// CopyItem implements secrets.LegacyItemMigrator: read the source item's fields
+// and upsert them into a new-titled item in the same vault (merge). No-op when
+// the source item is absent.
+func (w *SAVaultStore) CopyItem(ctx context.Context, scope secrets.Scope, fromName, toName string) error {
+	vaultID, err := w.resolver(scope)
+	if err != nil {
+		return err
+	}
+	fromID, err := w.findItemID(ctx, vaultID, fromName)
+	if err != nil {
+		return err
+	}
+	if fromID == "" {
+		return nil // nothing to copy
+	}
+	src, err := w.client.GetItem(ctx, vaultID, fromID)
+	if err != nil {
+		return err
+	}
+	// Merge onto any existing destination fields so a re-run is safe.
+	merged := map[string]ItemField{}
+	if toID, err := w.findItemID(ctx, vaultID, toName); err != nil {
+		return err
+	} else if toID != "" {
+		dst, err := w.client.GetItem(ctx, vaultID, toID)
+		if err != nil {
+			return err
+		}
+		for _, f := range dst.Fields {
+			merged[f.Label] = ItemField{Label: f.Label, Value: f.Value, Type: f.Type}
+		}
+	}
+	for _, f := range src.Fields {
+		merged[f.Label] = ItemField{Label: f.Label, Value: f.Value, Type: f.Type}
+	}
+	labels := make([]string, 0, len(merged))
+	for k := range merged {
+		labels = append(labels, k)
+	}
+	sort.Strings(labels)
+	fields := make([]ItemField, 0, len(labels))
+	for _, k := range labels {
+		fields = append(fields, merged[k])
+	}
+	if _, err := w.client.UpsertItem(ctx, vaultID, toName, fields); err != nil {
+		return fmt.Errorf("copy item %q → %q: %w", fromName, toName, err)
+	}
+	return nil
+}
+
+// DeleteItem implements secrets.LegacyItemMigrator: remove the whole item by
+// title. No-op when absent.
+func (w *SAVaultStore) DeleteItem(ctx context.Context, scope secrets.Scope, itemName string) error {
+	vaultID, err := w.resolver(scope)
+	if err != nil {
+		return err
+	}
+	id, err := w.findItemID(ctx, vaultID, itemName)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return nil
+	}
+	if err := w.client.DeleteItem(ctx, vaultID, id); err != nil {
+		return fmt.Errorf("delete item %q: %w", itemName, err)
+	}
+	return nil
+}
+
 func (w *SAVaultStore) Probe(ctx context.Context, scope secrets.Scope) error {
 	vaultID, err := w.resolver(scope)
 	if err != nil {

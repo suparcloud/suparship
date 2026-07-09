@@ -804,6 +804,21 @@ func tierAndApp(r *http.Request) (secrets.Tier, string) {
 // item — so without this remap an app-env request for a preview resolves to a
 // non-existent "suparship-secrets-env-<preview>" vault.
 func (h *secretsHandler) scopeForRequest(r *http.Request) secrets.Scope {
+	scope := h.scopeForRequestBase(r)
+	// App-tier items are project-qualified so a same-named app in another project
+	// never collides on the shared org/env vault. Tag the scope with the request's
+	// project whenever it targets an app tier ({app} present) — matching the
+	// publisher/vault write path. Shared-tier scopes already carry project via
+	// their constructors (or are legitimately project-less).
+	if app := r.PathValue("app"); app != "" {
+		if project := r.PathValue("project"); project != "" {
+			return scope.WithProject(project)
+		}
+	}
+	return scope
+}
+
+func (h *secretsHandler) scopeForRequestBase(r *http.Request) secrets.Scope {
 	scope := scopeFromPath(r)
 	if scope.Kind != secrets.ScopeEnv || h.appStore == nil {
 		return scope
@@ -877,7 +892,8 @@ func (h *secretsHandler) handleGetResolvedSecrets(w http.ResponseWriter, r *http
 		if err != nil {
 			h.logger.Warn("resolved: shared read failed", "scope", scope.Kind, "err", err)
 		}
-		app, err := h.vault.ListKeys(ctx, scope, secrets.TierApp, appName)
+		// App-tier items are project-qualified (WithProject); shared items are not.
+		app, err := h.vault.ListKeys(ctx, scope.WithProject(project), secrets.TierApp, appName)
 		if err != nil {
 			h.logger.Warn("resolved: app read failed", "scope", scope.Kind, "err", err)
 		}

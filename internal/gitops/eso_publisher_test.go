@@ -164,8 +164,8 @@ func TestBuildAppExternalSecret_ProjectItemsOrderedWithinBands(t *testing.T) {
 	}
 	// Within each band: org-shared → project-shared → app.
 	wantKeys := []string{
-		"shared-global", "shared-project-acme", "web-global",
-		"shared-env-prod", "shared-project-acme-env-prod", "web-env-prod",
+		"shared-global", "shared-project-acme", "acme-web-global",
+		"shared-env-prod", "shared-project-acme-env-prod", "acme-web-env-prod",
 	}
 	if len(cfg.Items) != len(wantKeys) {
 		t.Fatalf("expected %d items, got %d: %+v", len(wantKeys), len(cfg.Items), cfg.Items)
@@ -419,8 +419,8 @@ func TestBuildAppExternalSecret_StackItemsAfterProject(t *testing.T) {
 		t.Fatal("expected a config")
 	}
 	want := []string{
-		"shared-global", "shared-project-proj", "shared-stack-proj-voiceai", "web-global",
-		"shared-env-prod", "shared-project-proj-env-prod", "shared-stack-proj-voiceai-env-prod", "web-env-prod",
+		"shared-global", "shared-project-proj", "shared-stack-proj-voiceai", "proj-web-global",
+		"shared-env-prod", "shared-project-proj-env-prod", "shared-stack-proj-voiceai-env-prod", "proj-web-env-prod",
 	}
 	if len(cfg.Items) != len(want) {
 		t.Fatalf("expected %d items, got %d: %+v", len(want), len(cfg.Items), cfg.Items)

@@ -9,6 +9,83 @@ import (
 
 // ── naming ──────────────────────────────────────────────────────────────────
 
+// TestAppItemName_ProjectQualified pins the collision fix: app-tier items are
+// project-qualified when the scope carries a project (WithProject), so a
+// same-named app in a different project never collides on the shared org/env
+// vault. WithProject does not affect vault selection.
+func TestAppItemName_ProjectQualified(t *testing.T) {
+	global := GlobalScope().WithProject("voiceai")
+	env := EnvScope("production").WithProject("voiceai")
+	cluster := ClusterScope("production", "eks-aws").WithProject("voiceai")
+
+	cases := map[string]string{
+		AppItemName(global, "biglysales-tts"):  "voiceai-biglysales-tts-global",
+		AppItemName(env, "biglysales-tts"):     "voiceai-biglysales-tts-env-production",
+		AppItemName(cluster, "biglysales-tts"): "voiceai-biglysales-tts-cluster-eks-aws",
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Errorf("AppItemName = %q, want %q", got, want)
+		}
+	}
+
+	// Two projects, same app name → distinct items in the same (shared) vault.
+	a := AppItemName(GlobalScope().WithProject("proj-a"), "api")
+	b := AppItemName(GlobalScope().WithProject("proj-b"), "api")
+	if a == b {
+		t.Fatalf("same-named app in different projects collided: both %q", a)
+	}
+	if VaultName(GlobalScope().WithProject("proj-a")) != VaultName(GlobalScope()) {
+		t.Error("WithProject must not change vault selection")
+	}
+
+	// Legacy (project-less) form is retained for the migration's old-name compute.
+	if got := AppItemName(GlobalScope(), "api"); got != "api-global" {
+		t.Errorf("legacy AppItemName = %q, want api-global", got)
+	}
+	// Shared-tier names are unchanged by the project qualifier.
+	if got := SharedItemName(EnvScope("production")); got != "shared-env-production" {
+		t.Errorf("SharedItemName = %q, want shared-env-production", got)
+	}
+}
+
+// TestMemVaultStore_CopyAndDeleteItem covers the LegacyItemMigrator primitives
+// the rename migration relies on: copy-if-present (merge into the new name) and
+// whole-item delete.
+func TestMemVaultStore_CopyAndDeleteItem(t *testing.T) {
+	m := NewMemVaultStore()
+	ctx := context.Background()
+	scope := EnvScope("prod")
+
+	if err := m.Upsert(ctx, scope, TierApp, "api", map[string][]byte{"K": []byte("v")}); err != nil {
+		t.Fatal(err)
+	}
+	legacy := AppItemName(scope, "api")                   // api-env-prod
+	newer := AppItemName(scope.WithProject("proj"), "api") // proj-api-env-prod
+
+	if err := m.CopyItem(ctx, scope, legacy, newer); err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := m.ListKeys(ctx, scope.WithProject("proj"), TierApp, "api")
+	if len(keys) != 1 || keys[0].Key != "K" {
+		t.Fatalf("copy failed, new item keys = %+v", keys)
+	}
+	// Copy-if-present: a missing source is a no-op, not an error.
+	if err := m.CopyItem(ctx, scope, "does-not-exist", "whatever"); err != nil {
+		t.Fatalf("copy of absent item should be a no-op: %v", err)
+	}
+
+	if err := m.DeleteItem(ctx, scope, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if old, _ := m.ListKeys(ctx, scope, TierApp, "api"); len(old) != 0 {
+		t.Fatalf("legacy item still present after delete: %+v", old)
+	}
+	if k2, _ := m.ListKeys(ctx, scope.WithProject("proj"), TierApp, "api"); len(k2) != 1 {
+		t.Fatal("new item lost when legacy was deleted")
+	}
+}
+
 func TestVaultName(t *testing.T) {
 	cases := map[Scope]string{
 		GlobalScope():       "suparship-secrets-global",

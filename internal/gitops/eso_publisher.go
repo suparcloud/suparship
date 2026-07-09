@@ -302,7 +302,10 @@ func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretCo
 		items = append(items, ESOItemRef{Key: secrets.SharedItemName(scope), StoreName: storeFor(scope)})
 	}
 	appItem := func(scope secrets.Scope) {
-		items = append(items, ESOItemRef{Key: secrets.AppItemName(scope, p.App), StoreName: storeFor(scope)})
+		// App-tier items are project-qualified (WithProject) so a same-named app
+		// in another project never collides on the shared org/env vault. StoreName
+		// keys on Kind only, so the un-tagged scope still selects the right store.
+		items = append(items, ESOItemRef{Key: secrets.AppItemName(scope.WithProject(p.Project), p.App), StoreName: storeFor(scope)})
 	}
 	hasProject := p.Project != ""
 	hasStack := p.Stack != ""

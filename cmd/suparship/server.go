@@ -457,18 +457,35 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				go func() {
 					bg := context.Background()
 					publishInitialEnvInfra(bg, pub, orgProvider, clusterStore, projectStore, logger)
+					// Copy legacy-named app-tier secret items to their new
+					// project-qualified names BEFORE the republish below emits those
+					// new names, so every ExternalSecret's dataFrom resolves at
+					// cut-over (no NotReady gap; deletionPolicy:Retain covers the
+					// rest). Runs once per fleet, gated by its own marker; legacy
+					// items are pruned later via `suparship secrets prune-legacy-items`.
+					if migrator, ok := vaultStore.(secrets.LegacyItemMigrator); !ok {
+						logger.Info("item migration: backend does not support item copy; skipping")
+					} else if generatorStateValue(bg, kubeClient, itemNameMigrationKey) == itemNameMigrationDone {
+						logger.Info("item migration: skipped — fleet already migrated")
+					} else if failures := copyLegacyAppItems(bg, migrator, appStore, projectStore, orgProvider, logger); failures == 0 {
+						setGeneratorStateValue(bg, kubeClient, itemNameMigrationKey, itemNameMigrationDone, logger)
+					} else {
+						logger.Warn("item migration: not marking done — some copies failed; will retry next boot", "failures", failures)
+					}
 					// Re-publish every app so manifest-contract changes (e.g. the
-					// version-scoped chart layout) land fleet-wide — but only once
-					// per generator bump, not on every boot. The republish is a
-					// full clone+commit+push per app; gating on a persisted marker
-					// keeps restarts (and crash loops) from re-running the whole
-					// fleet. Sequential after env infra to avoid concurrent pushes.
-					if applied := appliedGeneratorVersion(bg, kubeClient); applied == version.Generator {
+					// version-scoped chart layout, and the project-qualified item
+					// names above) land fleet-wide — but only once per generator
+					// bump, not on every boot. The republish is a full
+					// clone+commit+push per app; gating on a persisted marker keeps
+					// restarts (and crash loops) from re-running the whole fleet.
+					// Sequential after env infra + item copy to avoid concurrent
+					// pushes and to guarantee new items exist first.
+					if applied := generatorStateValue(bg, kubeClient, generatorStateKey); applied == version.Generator {
 						logger.Info("republish apps: skipped — fleet already on current generator", "generator", version.Generator)
 					} else if failures := republishAllApps(bg, gitOpsPublisher, appStore, projectStore, orgProvider, logger); failures == 0 {
 						// Mark the boundary crossed only on a clean run, so a
 						// partial failure re-runs (self-heals) on the next boot.
-						setAppliedGeneratorVersion(bg, kubeClient, version.Generator, logger)
+						setGeneratorStateValue(bg, kubeClient, generatorStateKey, version.Generator, logger)
 					} else {
 						logger.Warn("republish apps: not marking generator applied — some apps failed; will retry next boot",
 							"failures", failures, "generator", version.Generator)
@@ -1350,7 +1367,7 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, or
 	// ExternalSecret. Only when a vault is configured: without a backend there is
 	// nothing for ESO to extract, and forcing the ref would dangle.
 	if a.vault != nil {
-		if err := a.vault.EnsureItem(ctx, secrets.GlobalScope(), secrets.TierApp, app.Name); err != nil {
+		if err := a.vault.EnsureItem(ctx, secrets.GlobalScope().WithProject(app.ProjectName), secrets.TierApp, app.Name); err != nil {
 			slog.Warn("gitops: ensuring baseline app secret item",
 				"app", app.Name, "err", err)
 		} else {
@@ -1364,7 +1381,7 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, or
 		// later value is picked up by ESO's refresh without re-publishing. Skipped
 		// gracefully when the env vault isn't provisioned (EnsureItem errors →
 		// presence left as collectScopeKeys probed it).
-		if err := a.vault.EnsureItem(ctx, secrets.EnvScope(envName), secrets.TierApp, app.Name); err != nil {
+		if err := a.vault.EnsureItem(ctx, secrets.EnvScope(envName).WithProject(app.ProjectName), secrets.TierApp, app.Name); err != nil {
 			slog.Warn("gitops: ensuring env-app secret item",
 				"app", app.Name, "env", envName, "err", err)
 		} else {
@@ -1462,18 +1479,21 @@ func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *doma
 		return err == nil && len(entries) > 0
 	}
 
+	// App-tier probes tag the scope with the app's project so the item name
+	// matches what the publisher/vault write path uses (project-qualified);
+	// shared-tier probes stay project-less (org/env-wide items).
 	g := secrets.GlobalScope()
 	p.GlobalShared = has(g, secrets.TierShared, "")
-	p.GlobalApp = has(g, secrets.TierApp, app.Name)
+	p.GlobalApp = has(g.WithProject(app.ProjectName), secrets.TierApp, app.Name)
 
 	e := secrets.EnvScope(envName)
 	p.EnvShared = has(e, secrets.TierShared, "")
-	p.EnvApp = has(e, secrets.TierApp, app.Name)
+	p.EnvApp = has(e.WithProject(app.ProjectName), secrets.TierApp, app.Name)
 
 	if clusterRef != "" {
 		c := secrets.ClusterScope(envName, clusterRef)
 		p.ClusterShared = has(c, secrets.TierShared, "")
-		p.ClusterApp = has(c, secrets.TierApp, app.Name)
+		p.ClusterApp = has(c.WithProject(app.ProjectName), secrets.TierApp, app.Name)
 	}
 	return p
 }
@@ -1770,7 +1790,7 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 	if a.vault != nil {
 		// Always provision + reference the per-app preview band so a "preview"-scope
 		// secret set later resolves without re-publishing.
-		if err := a.vault.EnsureItem(ctx, secrets.PreviewScope(baseEnv), secrets.TierApp, app.Name); err == nil {
+		if err := a.vault.EnsureItem(ctx, secrets.PreviewScope(baseEnv).WithProject(app.ProjectName), secrets.TierApp, app.Name); err == nil {
 			scopeKeys.PreviewApp = true
 		}
 		has := func(scope secrets.Scope, tier secrets.Tier, appName string) bool {
@@ -1783,7 +1803,7 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 		// only when present so ESO never extracts a missing item.
 		pr := secrets.PreviewPRScope(baseEnv, preview.EnvName)
 		scopeKeys.PreviewPRShared = has(pr, secrets.TierShared, "")
-		scopeKeys.PreviewPRApp = has(pr, secrets.TierApp, app.Name)
+		scopeKeys.PreviewPRApp = has(pr.WithProject(app.ProjectName), secrets.TierApp, app.Name)
 	}
 
 	// Env vars: base env's merged vars + the reserved "preview" band on top.
@@ -2183,12 +2203,17 @@ func republishAllApps(
 const (
 	generatorStateConfigMap = "suparship-generator-state"
 	generatorStateKey       = "appliedGeneratorVersion"
+	// itemNameMigrationKey records whether the app-tier secret item rename
+	// ({app}-* → {project}-{app}-*) has copied the fleet's legacy items. Value is
+	// itemNameMigrationDone once a clean copy has run; bump that sentinel to force
+	// a re-copy. Stored in the same ConfigMap as the generator marker.
+	itemNameMigrationKey  = "appliedItemNameMigration"
+	itemNameMigrationDone = "v1"
 )
 
-// appliedGeneratorVersion returns the generator version the fleet was last
-// republished for, or "" when unknown (no client, missing ConfigMap, read
-// error) — which conservatively triggers a republish.
-func appliedGeneratorVersion(ctx context.Context, client kubernetes.Interface) string {
+// generatorStateValue returns the value stored under key in the generator-state
+// ConfigMap, or "" when unknown (no client, missing ConfigMap, read error).
+func generatorStateValue(ctx context.Context, client kubernetes.Interface, key string) string {
 	if client == nil {
 		return ""
 	}
@@ -2196,12 +2221,12 @@ func appliedGeneratorVersion(ctx context.Context, client kubernetes.Interface) s
 	if err != nil {
 		return ""
 	}
-	return cm.Data[generatorStateKey]
+	return cm.Data[key]
 }
 
-// setAppliedGeneratorVersion upserts the generator-state marker. Best-effort:
-// a failure just means the next boot re-runs the (idempotent) republish.
-func setAppliedGeneratorVersion(ctx context.Context, client kubernetes.Interface, v string, logger *slog.Logger) {
+// setGeneratorStateValue upserts key=value in the generator-state ConfigMap.
+// Best-effort: a failure just means the next boot re-runs the (idempotent) work.
+func setGeneratorStateValue(ctx context.Context, client kubernetes.Interface, key, value string, logger *slog.Logger) {
 	if client == nil {
 		return
 	}
@@ -2214,23 +2239,23 @@ func setAppliedGeneratorVersion(ctx context.Context, client kubernetes.Interface
 				Namespace: secrets.SystemNamespace,
 				Labels:    map[string]string{"app.kubernetes.io/managed-by": "suparship"},
 			},
-			Data: map[string]string{generatorStateKey: v},
+			Data: map[string]string{key: value},
 		}, metav1.CreateOptions{})
 		if err != nil {
-			logger.Warn("republish apps: could not record generator marker", "error", err)
+			logger.Warn("generator-state: could not record marker", "key", key, "error", err)
 		}
 		return
 	}
 	if err != nil {
-		logger.Warn("republish apps: could not read generator marker for update", "error", err)
+		logger.Warn("generator-state: could not read marker for update", "key", key, "error", err)
 		return
 	}
 	if cm.Data == nil {
 		cm.Data = map[string]string{}
 	}
-	cm.Data[generatorStateKey] = v
+	cm.Data[key] = value
 	if _, err := api.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
-		logger.Warn("republish apps: could not update generator marker", "error", err)
+		logger.Warn("generator-state: could not update marker", "key", key, "error", err)
 	}
 }
 

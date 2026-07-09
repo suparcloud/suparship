@@ -48,6 +48,18 @@ type Scope struct {
 	Preview string
 }
 
+// WithProject returns a copy of the scope tagged with the owning project. It is
+// used for app-tier items in the global/env/cluster/preview scopes (whose
+// constructors leave Project empty): AppItemName project-qualifies the item name
+// when Project is set, so a same-named app in a different project never collides
+// on the shared org/env vault. Project does not affect vault selection
+// (VaultName/FindVault/StoreName key on Kind only), so tagging it is inert
+// everywhere except the app-tier item name.
+func (s Scope) WithProject(project string) Scope {
+	s.Project = project
+	return s
+}
+
 // GlobalScope returns the global scope.
 func GlobalScope() Scope { return Scope{Kind: ScopeGlobal} }
 
@@ -135,4 +147,21 @@ type VaultStore interface {
 
 	// Probe verifies connectivity and access to the vault for the given scope.
 	Probe(ctx context.Context, scope Scope) error
+}
+
+// LegacyItemMigrator is implemented by the concrete vault stores to support the
+// one-shot app-tier item rename migration ({app}-* → {project}-{app}-*). It
+// operates at the item-name level — below the value-blind VaultStore surface, so
+// values never leak through the general API — and is consumed only by the
+// migration (copy) and prune paths. Kept off VaultStore so the common interface
+// and its many fakes stay unchanged; the migration uses the raw backing store
+// (not the cached publish wrapper) which is a concrete type.
+type LegacyItemMigrator interface {
+	// CopyItem copies every key from item fromName into item toName within the
+	// scope's vault (merge semantics — existing keys on toName are preserved).
+	// No-op (nil) when fromName does not exist.
+	CopyItem(ctx context.Context, scope Scope, fromName, toName string) error
+	// DeleteItem removes the whole item named itemName from the scope's vault.
+	// No-op (nil) when it does not exist. Used by prune-legacy-items after cutover.
+	DeleteItem(ctx context.Context, scope Scope, itemName string) error
 }

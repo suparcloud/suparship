@@ -75,3 +75,31 @@ func (m *MemVaultStore) DeleteKey(_ context.Context, scope Scope, tier Tier, app
 }
 
 func (m *MemVaultStore) Probe(_ context.Context, _ Scope) error { return nil }
+
+var _ LegacyItemMigrator = (*MemVaultStore)(nil)
+
+// CopyItem implements LegacyItemMigrator.
+func (m *MemVaultStore) CopyItem(_ context.Context, scope Scope, fromName, toName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	src := m.items[VaultName(scope)+"/"+fromName]
+	if src == nil {
+		return nil
+	}
+	dstKey := VaultName(scope) + "/" + toName
+	if m.items[dstKey] == nil {
+		m.items[dstKey] = make(map[string][]byte)
+	}
+	for k, v := range src {
+		m.items[dstKey][k] = v
+	}
+	return nil
+}
+
+// DeleteItem implements LegacyItemMigrator.
+func (m *MemVaultStore) DeleteItem(_ context.Context, scope Scope, itemName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.items, VaultName(scope)+"/"+itemName)
+	return nil
+}

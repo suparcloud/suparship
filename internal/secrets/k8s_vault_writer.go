@@ -160,6 +160,64 @@ func (w *K8sVaultStore) DeleteKey(ctx context.Context, scope Scope, tier Tier, a
 	return nil
 }
 
+var _ LegacyItemMigrator = (*K8sVaultStore)(nil)
+
+// CopyItem implements LegacyItemMigrator: copy the source Secret's data into a
+// new-named Secret in the same vault namespace (merge). No-op when the source is
+// absent.
+func (w *K8sVaultStore) CopyItem(ctx context.Context, scope Scope, fromName, toName string) error {
+	ns := VaultName(scope)
+	src, err := w.client.CoreV1().Secrets(ns).Get(ctx, fromName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading secret %s/%s: %w", ns, fromName, err)
+	}
+	if err := w.ensureNamespace(ctx, ns); err != nil {
+		return err
+	}
+	dst, err := w.client.CoreV1().Secrets(ns).Get(ctx, toName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      toName,
+				Namespace: ns,
+				Labels:    map[string]string{labelManagedBy: "suparship", labelType: "vault-item"},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: src.Data,
+		}
+		if _, err := w.client.CoreV1().Secrets(ns).Create(ctx, secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating secret %s/%s: %w", ns, toName, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading secret %s/%s: %w", ns, toName, err)
+	}
+	if dst.Data == nil {
+		dst.Data = make(map[string][]byte)
+	}
+	for k, v := range src.Data {
+		dst.Data[k] = v
+	}
+	if _, err := w.client.CoreV1().Secrets(ns).Update(ctx, dst, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("updating secret %s/%s: %w", ns, toName, err)
+	}
+	return nil
+}
+
+// DeleteItem implements LegacyItemMigrator: delete the whole Secret by name.
+func (w *K8sVaultStore) DeleteItem(ctx context.Context, scope Scope, itemName string) error {
+	ns := VaultName(scope)
+	err := w.client.CoreV1().Secrets(ns).Delete(ctx, itemName, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting secret %s/%s: %w", ns, itemName, err)
+	}
+	return nil
+}
+
 func (w *K8sVaultStore) Probe(ctx context.Context, scope Scope) error {
 	ns := VaultName(scope)
 	if err := w.ensureNamespace(ctx, ns); err != nil {

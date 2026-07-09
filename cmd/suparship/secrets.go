@@ -1,16 +1,23 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/k8s"
+	"github.com/suparcloud/suparship/internal/kube"
+	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 )
 
 var secretsCmd = &cobra.Command{
@@ -68,6 +75,20 @@ var secretsUnbindCmd = &cobra.Command{
 	RunE:    runSecretsUnbind,
 }
 
+var secretsPruneLegacyItemsCmd = &cobra.Command{
+	Use:   "prune-legacy-items",
+	Short: "Delete legacy unqualified app-tier secret items after the rename migration",
+	Long: `Deletes the legacy-named app-tier secret vault items ({app}-{scope}) that the
+project-qualified rename ({project}-{app}-{scope}) migration replaced. Run this
+ONLY after the new binary has booted (which copies items to the new names and
+republishes every app's ExternalSecret to reference them) and you have verified
+the ExternalSecrets are Ready. This is destructive; use --dry-run first to list
+what would be removed.`,
+	Example: `  suparship secrets prune-legacy-items --dry-run
+  suparship secrets prune-legacy-items`,
+	RunE: runSecretsPruneLegacyItems,
+}
+
 func init() {
 	secretsBackendSetCmd.Flags().String("type", "", "backend type: k8s, onepassword")
 
@@ -78,12 +99,15 @@ func init() {
 	secretsBindCmd.Flags().String("vault-name", "", "human-readable vault name (optional)")
 	secretsUnbindCmd.Flags().String("env", "", "environment to unbind (required)")
 
+	secretsPruneLegacyItemsCmd.Flags().Bool("dry-run", false, "list the legacy items that would be deleted without deleting them")
+
 	secretsBackendCmd.AddCommand(secretsBackendSetCmd)
 	secretsCmd.AddCommand(secretsBackendCmd)
 	secretsCmd.AddCommand(secretsSATokenCmd)
 	secretsCmd.AddCommand(secretsStatusCmd)
 	secretsCmd.AddCommand(secretsBindCmd)
 	secretsCmd.AddCommand(secretsUnbindCmd)
+	secretsCmd.AddCommand(secretsPruneLegacyItemsCmd)
 	rootCmd.AddCommand(secretsCmd)
 }
 
@@ -314,4 +338,71 @@ func runSecretsUnbind(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Unbound environment %q. The 1Password vault is kept.\n", env)
 	return nil
+}
+
+func runSecretsPruneLegacyItems(cmd *cobra.Command, _ []string) error {
+	ctx := cmd.Context()
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+	kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
+	kubecontext, _ := cmd.Root().PersistentFlags().GetString("context")
+	client, err := k8s.NewClientset(kubeconfig, kubecontext)
+	if err != nil {
+		return fmt.Errorf("connecting to cluster: %w", err)
+	}
+	orgProvider := rbac.NewK8sOrgProvider(client, nil)
+	org, err := orgProvider.GetOrg(ctx)
+	if err != nil {
+		return fmt.Errorf("loading org config: %w", err)
+	}
+
+	migrator, err := buildLegacyItemMigrator(ctx, client, org)
+	if err != nil {
+		return err
+	}
+
+	appStore := kube.NewK8sAppStore(client)
+	projectStore := project.NewK8sStore(client)
+	logger := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
+
+	names, failures := pruneLegacyAppItems(ctx, migrator, appStore, projectStore, org, dryRun, logger)
+	if dryRun {
+		fmt.Fprintf(cmd.OutOrStdout(), "Dry run — %d legacy app-tier items would be deleted:\n", len(names))
+		for _, n := range names {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", n)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "\nRe-run without --dry-run to delete them.")
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Pruned %d legacy app-tier items (%d failures).\n", len(names)-failures, failures)
+	if failures > 0 {
+		return fmt.Errorf("%d legacy items failed to delete; see logs", failures)
+	}
+	return nil
+}
+
+// buildLegacyItemMigrator constructs the concrete vault store for the org's
+// backend, asserted to secrets.LegacyItemMigrator. Mirrors the server's vault
+// wiring: k8s Secrets by default, or the 1Password SA store when that backend is
+// active and its SA token is present.
+func buildLegacyItemMigrator(ctx context.Context, client kubernetes.Interface, org *rbac.Org) (secrets.LegacyItemMigrator, error) {
+	if org.SecretBackend.Effective() == secrets.Backend1Password {
+		sec, err := client.CoreV1().Secrets(secrets.SystemNamespace).Get(ctx, secrets.SATokenSecretName, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("reading SA token %s: %w", secrets.SATokenSecretName, err)
+		}
+		token := strings.TrimSpace(string(sec.Data[secrets.SATokenSecretKey]))
+		if token == "" {
+			return nil, fmt.Errorf("SA token secret %s is empty", secrets.SATokenSecretName)
+		}
+		saClient, err := onepassword.NewSDKClient(ctx, token)
+		if err != nil {
+			return nil, fmt.Errorf("init 1Password SA client: %w", err)
+		}
+		resolver := func(scope secrets.Scope) (string, error) {
+			return org.SecretBackend.VaultIDForScope(scope)
+		}
+		return onepassword.NewSAVaultStore(saClient, resolver), nil
+	}
+	return secrets.NewK8sVaultStore(client), nil
 }

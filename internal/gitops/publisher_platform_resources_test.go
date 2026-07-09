@@ -121,7 +121,7 @@ func TestPublishAppFiles_WritesMergedExternalSecret(t *testing.T) {
 	if !strings.Contains(es, "name: suparship-store-global") {
 		t.Errorf("expected default global store ref, got:\n%s", es)
 	}
-	for _, key := range []string{`"nginx-global"`, `"shared-env-staging"`, `"nginx-env-staging"`, `"nginx-cluster-prod-eu"`} {
+	for _, key := range []string{`"demo-nginx-global"`, `"shared-env-staging"`, `"demo-nginx-env-staging"`, `"demo-nginx-cluster-prod-eu"`} {
 		if !strings.Contains(es, key) {
 			t.Errorf("expected dataFrom item %s, got:\n%s", key, es)
 		}

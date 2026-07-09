@@ -73,9 +73,23 @@ func SharedItemName(scope Scope) string {
 	return "shared-" + scopeSuffix(scope)
 }
 
-// AppItemName returns the item name for one app's secrets in a scope's vault
-// (e.g. "myapp-global", "myapp-env-staging", "myapp-cluster-prod-us").
+// AppItemName returns the item name for one app's secrets in a scope's vault.
+//
+// App-tier items live in vaults shared across the whole org (global vault) or
+// across every project in an environment (env vault), but app names are unique
+// only within a project. So the name is project-qualified when the scope carries
+// a project (set via Scope.WithProject) — e.g.
+// "voiceai-platform-myapp-env-staging" — which prevents a same-named app in a
+// different project from colliding on the same vault item.
+//
+// When Project is empty the legacy unqualified form ("myapp-env-staging") is
+// returned. That path is retained only so the item-name migration can compute an
+// app's old names by passing a project-less scope; steady-state app-tier callers
+// always tag the scope with the project.
 func AppItemName(scope Scope, app string) string {
+	if scope.Project != "" {
+		return scope.Project + "-" + app + "-" + scopeSuffix(scope)
+	}
 	return app + "-" + scopeSuffix(scope)
 }
 
