@@ -17,6 +17,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/suparcloud/suparship/internal/domain"
 )
@@ -24,10 +25,11 @@ import (
 // RoutingProfileDTO is the JSON wire form of a single profile. Mirrors
 // domain.RoutingProfile but uses JSON tags suited for a UI client.
 type RoutingProfileDTO struct {
-	Name             string `json:"name"`
-	IngressClassName string `json:"ingressClassName"`
-	ClusterIssuer    string `json:"clusterIssuer,omitempty"`
-	BaseDomain       string `json:"baseDomain,omitempty"`
+	Name             string             `json:"name"`
+	IngressClassName string             `json:"ingressClassName"`
+	ClusterIssuer    string             `json:"clusterIssuer,omitempty"`
+	BaseDomain       string             `json:"baseDomain,omitempty"`
+	Gateway          *domain.GatewayRef `json:"gateway,omitempty"`
 }
 
 // GET /api/v1/org/routing-profiles — returns the org-level map only.
@@ -45,6 +47,7 @@ func (rh *rbacHandler) handleListOrgRoutingProfiles(w http.ResponseWriter, r *ht
 			IngressClassName: p.IngressClassName,
 			ClusterIssuer:    p.ClusterIssuer,
 			BaseDomain:       p.BaseDomain,
+			Gateway:          p.Gateway,
 		})
 	}
 	// Stable order: profiles render as a list in the UI.
@@ -58,9 +61,10 @@ func (rh *rbacHandler) handleListOrgRoutingProfiles(w http.ResponseWriter, r *ht
 // plain HTTP ingress (no cert-manager annotation, no tls block). BaseDomain
 // is optional and overrides Environment.BaseDomain when set.
 type upsertRoutingProfileRequest struct {
-	IngressClassName string `json:"ingressClassName"`
-	ClusterIssuer    string `json:"clusterIssuer,omitempty"`
-	BaseDomain       string `json:"baseDomain,omitempty"`
+	IngressClassName string             `json:"ingressClassName"`
+	ClusterIssuer    string             `json:"clusterIssuer,omitempty"`
+	BaseDomain       string             `json:"baseDomain,omitempty"`
+	Gateway          *domain.GatewayRef `json:"gateway,omitempty"`
 }
 
 // PUT /api/v1/org/routing-profiles/{name} — upsert a single profile by
@@ -95,10 +99,12 @@ func (rh *rbacHandler) handlePutOrgRoutingProfile(w http.ResponseWriter, r *http
 	if org.RoutingProfiles == nil {
 		org.RoutingProfiles = domain.RoutingProfiles{}
 	}
+	gw := normalizeGatewayRef(req.Gateway)
 	org.RoutingProfiles[name] = domain.RoutingProfile{
 		IngressClassName: req.IngressClassName,
 		ClusterIssuer:    req.ClusterIssuer,
 		BaseDomain:       req.BaseDomain,
+		Gateway:          gw,
 	}
 
 	if err := rh.orgStore.SaveOrg(r.Context(), org); err != nil {
@@ -111,7 +117,27 @@ func (rh *rbacHandler) handlePutOrgRoutingProfile(w http.ResponseWriter, r *http
 		IngressClassName: req.IngressClassName,
 		ClusterIssuer:    req.ClusterIssuer,
 		BaseDomain:       req.BaseDomain,
+		Gateway:          gw,
 	})
+}
+
+// normalizeGatewayRef drops an all-blank gateway (a form that submitted empty
+// fields) to nil, and trims whitespace, so a tier without a gateway stores no
+// GatewayRef rather than an empty {}. A gateway with a blank Name is treated as
+// unset — Name is the one required field.
+func normalizeGatewayRef(g *domain.GatewayRef) *domain.GatewayRef {
+	if g == nil {
+		return nil
+	}
+	name := strings.TrimSpace(g.Name)
+	if name == "" {
+		return nil
+	}
+	return &domain.GatewayRef{
+		Name:        name,
+		Namespace:   strings.TrimSpace(g.Namespace),
+		SectionName: strings.TrimSpace(g.SectionName),
+	}
 }
 
 // DELETE /api/v1/org/routing-profiles/{name} — remove a single profile.

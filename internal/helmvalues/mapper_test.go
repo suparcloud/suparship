@@ -107,6 +107,76 @@ func TestMapToHelmValuesForEnv_PlatformBlock(t *testing.T) {
 	}
 }
 
+// TestMapToHelmValuesForEnv_PerTierRoutingTokens pins the per-tier routing
+// context exposed as ((platform.{internal,external}*)). It is the regression
+// guard for the reported bug: a per-cluster base-domain override must reach the
+// tier base-domain tokens even when the tier's own RoutingProfile.baseDomain is
+// blank — the tier base domain falls back profile → (env, cluster) base. It also
+// covers cluster→env→org precedence for ingress class / issuer / gateway.
+func TestMapToHelmValuesForEnv_PerTierRoutingTokens(t *testing.T) {
+	app := webApp("tts", webComponent("web"))
+	org := domain.RoutingProfiles{
+		string(domain.ExposeInternal): {IngressClassName: "nginx-internal", ClusterIssuer: "internal-ca"},
+		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt"},
+	}
+	// Cluster overrides only the internal tier (different ingress + issuer + a
+	// gateway). Neither profile sets baseDomain, so both tier base domains must
+	// fall back to the passed (cluster) base domain "aws.example.com".
+	cluster := domain.RoutingProfiles{
+		string(domain.ExposeInternal): {
+			IngressClassName: "nginx-internal-aws",
+			ClusterIssuer:    "letsencrypt-aws",
+			Gateway:          &domain.GatewayRef{Name: "envoy-internal", Namespace: "envoy-gateway-system", SectionName: "https"},
+		},
+	}
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
+		"aws.example.com", "tts-staging", "eks-aws", "acme",
+		org, nil, cluster, nil, nil)
+	p := hv.Platform
+
+	// Bug fix: cluster base-domain override reaches BOTH tier base-domain tokens.
+	if p.InternalBaseDomain != "aws.example.com" || p.ExternalBaseDomain != "aws.example.com" {
+		t.Errorf("tier base domains = %q/%q, want both aws.example.com", p.InternalBaseDomain, p.ExternalBaseDomain)
+	}
+	// Cluster wins for internal; org fills external (no cluster override).
+	if p.InternalIngressClassName != "nginx-internal-aws" || p.InternalClusterIssuer != "letsencrypt-aws" {
+		t.Errorf("internal tier = %q/%q, want nginx-internal-aws/letsencrypt-aws (cluster)", p.InternalIngressClassName, p.InternalClusterIssuer)
+	}
+	if p.ExternalIngressClassName != "nginx" || p.ExternalClusterIssuer != "letsencrypt" {
+		t.Errorf("external tier = %q/%q, want nginx/letsencrypt (org)", p.ExternalIngressClassName, p.ExternalClusterIssuer)
+	}
+	// Gateway resolved from the cluster internal profile; external tier has none.
+	if p.InternalGatewayName != "envoy-internal" || p.InternalGatewayNamespace != "envoy-gateway-system" || p.InternalGatewaySectionName != "https" {
+		t.Errorf("internal gateway = %q/%q/%q, want envoy-internal/envoy-gateway-system/https",
+			p.InternalGatewayName, p.InternalGatewayNamespace, p.InternalGatewaySectionName)
+	}
+	if p.ExternalGatewayName != "" || p.ExternalGatewayNamespace != "" || p.ExternalGatewaySectionName != "" {
+		t.Errorf("external gateway should be empty, got %q/%q/%q",
+			p.ExternalGatewayName, p.ExternalGatewayNamespace, p.ExternalGatewaySectionName)
+	}
+}
+
+// TestMapToHelmValuesForEnv_TierBaseDomainProfileWins verifies a profile's own
+// baseDomain still wins over the (env, cluster) base for that tier, and that the
+// two tiers can resolve to different domains.
+func TestMapToHelmValuesForEnv_TierBaseDomainProfileWins(t *testing.T) {
+	app := webApp("tts", webComponent("web"))
+	org := domain.RoutingProfiles{
+		string(domain.ExposeInternal): {IngressClassName: "nginx-internal", BaseDomain: "svc.internal.acme"},
+		string(domain.ExposeExternal): {IngressClassName: "nginx"},
+	}
+	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd,
+		"acme.com", "tts-prod", "", "acme",
+		org, nil, nil, nil, nil)
+	p := hv.Platform
+	if p.InternalBaseDomain != "svc.internal.acme" {
+		t.Errorf("internal base = %q, want svc.internal.acme (profile baseDomain wins)", p.InternalBaseDomain)
+	}
+	if p.ExternalBaseDomain != "acme.com" {
+		t.Errorf("external base = %q, want acme.com (fallback to env base)", p.ExternalBaseDomain)
+	}
+}
+
 func TestMapToHelmValuesForEnv_PlatformBlock_Preview(t *testing.T) {
 	app := webApp("hello", webComponent("web"))
 	hv := MapToHelmValuesForEnv(app, "pr-42", domain.AppEnvPreview,

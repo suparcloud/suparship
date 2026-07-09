@@ -6,10 +6,12 @@ import (
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/tpl"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func overlayTemplate(name, version string) *tpl.Template {
@@ -181,5 +183,69 @@ func TestEnrichPubEnv_NoVaultNoForce(t *testing.T) {
 	a.enrichPubEnvWithSecrets(context.Background(), &rbac.Org{}, app, "staging", &pub)
 	if pub.ScopeKeys.GlobalApp {
 		t.Fatal("without a vault, GlobalApp must not be forced")
+	}
+}
+
+// TestMergeAllEnvVars_ClusterEnvWinsAndLayersFallThrough locks the env-var
+// precedence on the real publish path: cluster-env (per cluster, per env) is the
+// most specific layer and wins, cluster-global overrides app-env, and keys set
+// only at a lower layer fall through untouched.
+func TestMergeAllEnvVars_ClusterEnvWinsAndLayersFallThrough(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	w := envconfig.NewUpperLevelEnvWriter(client)
+	ctx := context.Background()
+
+	// LEVEL is written at every scope so we can see who wins; each scope also sets
+	// a unique key so we can confirm it fell through.
+	if err := w.WriteClusterEnvConfig(ctx, "eks-aws", envconfig.EnvConfig{
+		Vars: map[string]string{"LEVEL": "cluster-global", "ONLY_CLUSTER_GLOBAL": "1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteClusterEnvScopedConfig(ctx, "eks-aws", "staging", envconfig.EnvConfig{
+		Vars: map[string]string{"LEVEL": "cluster-env", "ONLY_CLUSTER_ENV": "1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	org := &rbac.Org{
+		EnvConfig: envconfig.EnvConfig{Vars: map[string]string{"LEVEL": "org", "ONLY_ORG": "1"}},
+		Environments: []rbac.OrgEnvironment{{
+			Name:      "staging",
+			EnvConfig: envconfig.EnvConfig{Vars: map[string]string{"LEVEL": "env", "ONLY_ENV": "1"}},
+		}},
+	}
+	app := &domain.App{
+		Name: "api", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			EnvConfig: envconfig.EnvConfig{Vars: map[string]string{"LEVEL": "app", "ONLY_APP": "1"}},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"staging": {EnvConfig: envconfig.EnvConfig{Vars: map[string]string{"LEVEL": "app-env", "ONLY_APP_ENV": "1"}}},
+			},
+		},
+	}
+
+	a := &gitOpsPublisherAdapter{envConfigReader: w}
+	got := a.mergeAllEnvVars(ctx, app, "staging", "eks-aws", org)
+
+	if got["LEVEL"] != "cluster-env" {
+		t.Errorf("LEVEL = %q, want cluster-env (most specific wins)", got["LEVEL"])
+	}
+	for k := range map[string]string{
+		"ONLY_ORG": "", "ONLY_ENV": "", "ONLY_APP": "", "ONLY_APP_ENV": "",
+		"ONLY_CLUSTER_GLOBAL": "", "ONLY_CLUSTER_ENV": "",
+	} {
+		if got[k] != "1" {
+			t.Errorf("%s = %q, want 1 (should fall through)", k, got[k])
+		}
+	}
+
+	// A different env on the same cluster does NOT see staging's cluster-env vars.
+	prod := a.mergeAllEnvVars(ctx, app, "prod", "eks-aws", org)
+	if _, ok := prod["ONLY_CLUSTER_ENV"]; ok {
+		t.Error("prod merge leaked staging's cluster-env var")
+	}
+	if prod["LEVEL"] != "cluster-global" {
+		t.Errorf("prod LEVEL = %q, want cluster-global (no cluster-env for prod, wins over app)", prod["LEVEL"])
 	}
 }

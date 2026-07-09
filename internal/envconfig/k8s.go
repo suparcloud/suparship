@@ -62,6 +62,12 @@ const (
 	envVarsEnvPrefix     = "suparship-envvars-env-"
 	envVarsProjectPrefix = "suparship-envvars-project-"
 	envVarsClusterPrefix = "suparship-envvars-cluster-"
+	// envVarsClusterEnvPrefix keys the per-(cluster, environment) override set,
+	// stored separately from the cluster-global set so the two layers merge
+	// (cluster-env wins). The infix "--env-" keeps it unambiguous from the
+	// cluster-global name (which never contains that infix).
+	envVarsClusterEnvPrefix = "suparship-envvars-cluster-"
+	clusterEnvInfix         = "--env-"
 )
 
 // OrgEnvConfigMapName returns the ConfigMap name for the Org-level env vars.
@@ -84,6 +90,14 @@ func ProjectEnvConfigMapName(projectName string) string {
 // deployed to the named cluster.
 func ClusterEnvConfigMapName(clusterName string) string {
 	return envVarsClusterPrefix + clusterName
+}
+
+// ClusterEnvScopedConfigMapName returns the ConfigMap name for a per-(cluster,
+// environment) env var set — cluster-scope overrides that apply only when the
+// cluster hosts the named environment. Distinct from ClusterEnvConfigMapName
+// (which is env-agnostic) via the "--env-" infix.
+func ClusterEnvScopedConfigMapName(clusterName, envName string) string {
+	return envVarsClusterEnvPrefix + clusterName + clusterEnvInfix + envName
 }
 
 // UpperLevelEnvWriter writes the Org/Environment/Project runtime ConfigMaps to
@@ -156,6 +170,21 @@ func (w *UpperLevelEnvWriter) WriteClusterEnvConfig(ctx context.Context, cluster
 	return w.upsertEnvConfigMap(ctx, ClusterEnvConfigMapName(clusterName), annotations, cfg.Vars)
 }
 
+// WriteClusterEnvScopedConfig creates or updates the per-(cluster, environment)
+// env var ConfigMap in suparship-system. Like the cluster-global set it carries
+// the cluster label selector so Stakater replicates it to that cluster's app
+// namespaces. Replication is not the canonical delivery path (the publisher folds
+// every scope into the single per-app <app>-config ConfigMap at publish time, and
+// that merge IS env-aware), so the cluster-wide label selector is harmless: the
+// env-specific ConfigMap name keeps the two envs' sets distinct for any BYO chart
+// that references one directly.
+func (w *UpperLevelEnvWriter) WriteClusterEnvScopedConfig(ctx context.Context, clusterName, envName string, cfg EnvConfig) error {
+	annotations := map[string]string{
+		ReplicatorMatchingAnnotation: fmt.Sprintf("%s=%s", w.Branding.LabelKey("cluster"), clusterName),
+	}
+	return w.upsertEnvConfigMap(ctx, ClusterEnvScopedConfigMapName(clusterName, envName), annotations, cfg.Vars)
+}
+
 // ReadOrgEnvConfig reads the Org-level env var ConfigMap from suparship-system.
 // Returns an empty EnvConfig (not an error) when the ConfigMap does not exist.
 // Note: only Vars are stored in the ConfigMap; SecretRefs must be loaded from
@@ -180,6 +209,12 @@ func (w *UpperLevelEnvWriter) ReadProjectEnvConfig(ctx context.Context, projectN
 // cluster. Returns an empty EnvConfig when not found.
 func (w *UpperLevelEnvWriter) ReadClusterEnvConfig(ctx context.Context, clusterName string) (EnvConfig, error) {
 	return w.readEnvConfigMap(ctx, ClusterEnvConfigMapName(clusterName))
+}
+
+// ReadClusterEnvScopedConfig reads the per-(cluster, environment) env var
+// ConfigMap. Returns an empty EnvConfig (not an error) when it does not exist.
+func (w *UpperLevelEnvWriter) ReadClusterEnvScopedConfig(ctx context.Context, clusterName, envName string) (EnvConfig, error) {
+	return w.readEnvConfigMap(ctx, ClusterEnvScopedConfigMapName(clusterName, envName))
 }
 
 // upsertEnvConfigMap creates or updates a ConfigMap in suparship-system.

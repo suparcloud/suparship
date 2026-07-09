@@ -134,6 +134,30 @@ type PlatformValues struct {
 	// ClusterIssuer is the resolved cert-manager ClusterIssuer. Empty for plain
 	// HTTP or no profile.
 	ClusterIssuer string `json:"clusterIssuer,omitempty" yaml:"clusterIssuer,omitempty"`
+
+	// Per-tier routing context. Unlike the single BaseDomain/IngressClassName/
+	// ClusterIssuer above (which reflect the app's one routing component), these
+	// expose the resolved "internal" and "external" routing profiles directly, so
+	// a chart that authors BOTH an internal and an external route (e.g. a gateway
+	// app) can reference each tier independently. Each field resolves through the
+	// cluster→env→org precedence; a tier's base domain falls back to the profile's
+	// own baseDomain, then the (env, cluster) base domain. Empty when the tier has
+	// no profile configured.
+	InternalBaseDomain       string `json:"internalBaseDomain,omitempty" yaml:"internalBaseDomain,omitempty"`
+	ExternalBaseDomain       string `json:"externalBaseDomain,omitempty" yaml:"externalBaseDomain,omitempty"`
+	InternalIngressClassName string `json:"internalIngressClassName,omitempty" yaml:"internalIngressClassName,omitempty"`
+	ExternalIngressClassName string `json:"externalIngressClassName,omitempty" yaml:"externalIngressClassName,omitempty"`
+	InternalClusterIssuer    string `json:"internalClusterIssuer,omitempty" yaml:"internalClusterIssuer,omitempty"`
+	ExternalClusterIssuer    string `json:"externalClusterIssuer,omitempty" yaml:"externalClusterIssuer,omitempty"`
+	// Per-tier Gateway API references (Envoy Gateway), from each tier's resolved
+	// RoutingProfile.Gateway. Exposed so a chart's HTTPRoute parentRefs are
+	// authored against the platform-resolved gateway instead of hardcoding it.
+	InternalGatewayName        string `json:"internalGatewayName,omitempty" yaml:"internalGatewayName,omitempty"`
+	InternalGatewayNamespace   string `json:"internalGatewayNamespace,omitempty" yaml:"internalGatewayNamespace,omitempty"`
+	InternalGatewaySectionName string `json:"internalGatewaySectionName,omitempty" yaml:"internalGatewaySectionName,omitempty"`
+	ExternalGatewayName        string `json:"externalGatewayName,omitempty" yaml:"externalGatewayName,omitempty"`
+	ExternalGatewayNamespace   string `json:"externalGatewayNamespace,omitempty" yaml:"externalGatewayNamespace,omitempty"`
+	ExternalGatewaySectionName string `json:"externalGatewaySectionName,omitempty" yaml:"externalGatewaySectionName,omitempty"`
 	// ImageTag is the app's resolved image tag for this instance — the same tag
 	// the canonical image mapping bakes into each component's image.tag. For a
 	// preview it is the per-PR tag. Exposed as ((platform.imageTag)) so charts can

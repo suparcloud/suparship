@@ -53,18 +53,26 @@ export function updateEnvTypeEnvConfig(
 
 // ── Cluster level (platform escape hatch — wins over every layer) ─────────────
 
-export function getClusterEnvConfig(cluster: string): Promise<EnvConfig> {
+// getClusterEnvConfig reads cluster-scope vars. Pass env to read the
+// per-(cluster, env) override set instead of the cluster-global set.
+export function getClusterEnvConfig(
+  cluster: string,
+  env?: string,
+): Promise<EnvConfig> {
+  const q = env ? `?env=${encodeURIComponent(env)}` : "";
   return api.get<EnvConfig>(
-    `/clusters/${encodeURIComponent(cluster)}/envconfig`,
+    `/clusters/${encodeURIComponent(cluster)}/envconfig${q}`,
   );
 }
 
 export function updateClusterEnvConfig(
   cluster: string,
   cfg: EnvConfig,
+  env?: string,
 ): Promise<unknown> {
+  const q = env ? `?env=${encodeURIComponent(env)}` : "";
   return api.put<unknown>(
-    `/clusters/${encodeURIComponent(cluster)}/envconfig`,
+    `/clusters/${encodeURIComponent(cluster)}/envconfig${q}`,
     cfg,
   );
 }

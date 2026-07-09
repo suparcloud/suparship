@@ -21,6 +21,31 @@ func testCtx() Context {
 	}
 }
 
+func TestInterpolate_PerTierRoutingTokens(t *testing.T) {
+	c := Context{Platform: helmvalues.PlatformValues{
+		App:                        "tts",
+		InternalBaseDomain:         "aws.example.com",
+		ExternalBaseDomain:         "ext.example.com",
+		InternalIngressClassName:   "nginx-internal",
+		ExternalClusterIssuer:      "letsencrypt",
+		InternalGatewayName:        "envoy-internal",
+		InternalGatewayNamespace:   "envoy-gateway-system",
+		InternalGatewaySectionName: "https",
+	}}
+	cases := map[string]string{
+		"((platform.app)).internal.((platform.internalBaseDomain))": "tts.internal.aws.example.com",
+		"((platform.app)).((platform.externalBaseDomain))":          "tts.ext.example.com",
+		"class=((platform.internalIngressClassName))":               "class=nginx-internal",
+		"issuer=((platform.externalClusterIssuer))":                 "issuer=letsencrypt",
+		"((platform.internalGatewayName))/((platform.internalGatewayNamespace))/((platform.internalGatewaySectionName))": "envoy-internal/envoy-gateway-system/https",
+	}
+	for in, want := range cases {
+		if got := c.Interpolate(in); got != want {
+			t.Errorf("Interpolate(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestInterpolate_PlatformAndVars(t *testing.T) {
 	c := testCtx()
 	cases := map[string]string{

@@ -38,6 +38,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
@@ -294,9 +295,18 @@ func (h *envConfigHandler) handleGetClusterEnvConfig(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusOK, toEnvConfigDTO(envconfig.EnvConfig{}))
 		return
 	}
-	cfg, err := h.upperLevelWriter.ReadClusterEnvConfig(r.Context(), cluster)
+	// ?env=<name> selects the per-(cluster, env) override set; absent selects the
+	// cluster-global set (every env on this cluster).
+	env := strings.TrimSpace(r.URL.Query().Get("env"))
+	var cfg envconfig.EnvConfig
+	var err error
+	if env != "" {
+		cfg, err = h.upperLevelWriter.ReadClusterEnvScopedConfig(r.Context(), cluster, env)
+	} else {
+		cfg, err = h.upperLevelWriter.ReadClusterEnvConfig(r.Context(), cluster)
+	}
 	if err != nil {
-		h.logger.Error("failed to read cluster env configmap", "cluster", cluster, "err", err)
+		h.logger.Error("failed to read cluster env configmap", "cluster", cluster, "env", env, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to read cluster env config"})
 		return
 	}
@@ -330,8 +340,17 @@ func (h *envConfigHandler) handlePutClusterEnvConfig(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "cluster env config writer not configured"})
 		return
 	}
-	if err := h.upperLevelWriter.WriteClusterEnvConfig(r.Context(), cluster, cfg); err != nil {
-		h.logger.Error("failed to write cluster env configmap", "cluster", cluster, "err", err)
+	// ?env=<name> writes the per-(cluster, env) override set; absent writes the
+	// cluster-global set.
+	env := strings.TrimSpace(r.URL.Query().Get("env"))
+	var err error
+	if env != "" {
+		err = h.upperLevelWriter.WriteClusterEnvScopedConfig(r.Context(), cluster, env, cfg)
+	} else {
+		err = h.upperLevelWriter.WriteClusterEnvConfig(r.Context(), cluster, cfg)
+	}
+	if err != nil {
+		h.logger.Error("failed to write cluster env configmap", "cluster", cluster, "env", env, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save cluster env config"})
 		return
 	}
@@ -365,6 +384,16 @@ func (h *envConfigHandler) readClusterEnvConfig(ctx context.Context, envs []rbac
 		h.logger.Warn("failed to read cluster env configmap during resolve — treating as empty",
 			"cluster", clusterRef, "env", envName, "err", err)
 		return envconfig.EnvConfig{}
+	}
+	// Fold the per-(cluster, env) override on top so the resolved preview matches
+	// what the publisher merges: cluster-env wins over cluster-global.
+	if envCfg, err := h.upperLevelWriter.ReadClusterEnvScopedConfig(ctx, clusterRef, envName); err == nil {
+		if len(envCfg.Vars) > 0 && cfg.Vars == nil {
+			cfg.Vars = map[string]string{}
+		}
+		for k, v := range envCfg.Vars {
+			cfg.Vars[k] = v
+		}
 	}
 	return cfg
 }
@@ -966,7 +995,14 @@ func (h *envConfigHandler) collectConfigVars(ctx context.Context, org *rbac.Org,
 		clusterSeen := map[string]bool{}
 		for _, e := range org.Environments {
 			for _, c := range clusterRefsOf(e) {
-				if c == "" || clusterSeen[c] {
+				if c == "" {
+					continue
+				}
+				// Per-(cluster, env) vars: read once per (cluster, env) pair.
+				if cfg, err := h.upperLevelWriter.ReadClusterEnvScopedConfig(ctx, c, e.Name); err == nil {
+					add("cluster:"+c+":"+e.Name, cfg.Vars)
+				}
+				if clusterSeen[c] {
 					continue
 				}
 				clusterSeen[c] = true

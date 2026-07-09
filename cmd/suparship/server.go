@@ -1522,9 +1522,19 @@ func (a *gitOpsPublisherAdapter) mergeAllEnvVars(ctx context.Context, app *domai
 	}
 
 	if clusterRef != "" && a.envConfigReader != nil {
+		// Cluster-global (every env on this cluster) then cluster-env (this env
+		// only) — the per-env set is the most specific, so it wins over both
+		// cluster-global and every lower scope.
 		if cfg, err := a.envConfigReader.ReadClusterEnvConfig(ctx, clusterRef); err == nil {
 			for k, v := range cfg.Vars {
 				merged[k] = v
+			}
+		}
+		if envName != "" {
+			if cfg, err := a.envConfigReader.ReadClusterEnvScopedConfig(ctx, clusterRef, envName); err == nil {
+				for k, v := range cfg.Vars {
+					merged[k] = v
+				}
 			}
 		}
 	}

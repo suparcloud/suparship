@@ -1009,6 +1009,9 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
   const [ingressClassName, setIngressClassName] = useState(profile?.ingressClassName ?? "");
   const [clusterIssuer, setClusterIssuer] = useState(profile?.clusterIssuer ?? "");
   const [baseDomain, setBaseDomain] = useState(profile?.baseDomain ?? "");
+  const [gatewayName, setGatewayName] = useState(profile?.gateway?.name ?? "");
+  const [gatewayNamespace, setGatewayNamespace] = useState(profile?.gateway?.namespace ?? "");
+  const [gatewaySectionName, setGatewaySectionName] = useState(profile?.gateway?.sectionName ?? "");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1020,6 +1023,9 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
     setIngressClassName(profile?.ingressClassName ?? "");
     setClusterIssuer(profile?.clusterIssuer ?? "");
     setBaseDomain(profile?.baseDomain ?? "");
+    setGatewayName(profile?.gateway?.name ?? "");
+    setGatewayNamespace(profile?.gateway?.namespace ?? "");
+    setGatewaySectionName(profile?.gateway?.sectionName ?? "");
   }, [profile]);
 
   async function handleSave() {
@@ -1031,10 +1037,18 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
     setSaveError(null);
     setSaved(false);
     try {
+      const gwName = gatewayName.trim();
       const updated = await upsertOrgRoutingProfile(tier.name, {
         ingressClassName: ingressClassName.trim(),
         clusterIssuer: clusterIssuer.trim() || undefined,
         baseDomain: baseDomain.trim() || undefined,
+        gateway: gwName
+          ? {
+              name: gwName,
+              namespace: gatewayNamespace.trim() || undefined,
+              sectionName: gatewaySectionName.trim() || undefined,
+            }
+          : undefined,
       });
       onSaved(updated);
       setSaved(true);
@@ -1110,6 +1124,38 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
             value={baseDomain}
             onChange={(e) => setBaseDomain(e.target.value)}
           />
+        </div>
+        <div className="sm:col-span-2">
+          <label className="block text-xs font-medium text-gray-700">
+            Gateway API (optional)
+          </label>
+          <p className="mt-0.5 text-xs text-gray-400">
+            For charts routing via Gateway API / Envoy. Exposed as{" "}
+            <span className="font-mono">
+              ((platform.{tier.name}Gateway*))
+            </span>{" "}
+            for HTTPRoute parentRefs.
+          </p>
+          <div className="mt-1 grid gap-2 sm:grid-cols-3">
+            <input
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder={tier.name === "internal" ? "envoy-internal" : "envoy-external"}
+              value={gatewayName}
+              onChange={(e) => setGatewayName(e.target.value)}
+            />
+            <input
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder="envoy-gateway-system"
+              value={gatewayNamespace}
+              onChange={(e) => setGatewayNamespace(e.target.value)}
+            />
+            <input
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder="https (section)"
+              value={gatewaySectionName}
+              onChange={(e) => setGatewaySectionName(e.target.value)}
+            />
+          </div>
         </div>
       </div>
 

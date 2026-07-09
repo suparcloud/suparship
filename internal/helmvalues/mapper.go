@@ -194,6 +194,36 @@ func MapToHelmValuesForEnv(
 		platform.ClusterIssuer = rc.Ingress.ClusterIssuer
 	}
 
+	// Per-tier routing context: resolve the "internal" and "external" profiles
+	// directly (cluster → env → org) and expose them, independent of the app's
+	// single routing component. A tier's base domain falls back to the profile's
+	// own baseDomain, then to the (env, cluster) base domain passed in — so a
+	// per-cluster base-domain override reaches ((platform.{tier}BaseDomain)) even
+	// when the tier's profile leaves baseDomain blank. A tier with no profile
+	// configured leaves its fields empty.
+	resolveTier := func(mode domain.ExposeMode) (dom, class, issuer, gwName, gwNS, gwSection string) {
+		prof, err := domain.ResolveRoutingProfile(orgProfiles, envProfiles, clusterProfiles, mode)
+		if err != nil {
+			return "", "", "", "", "", ""
+		}
+		dom = prof.BaseDomain
+		if dom == "" {
+			dom = baseDomain
+		}
+		class = prof.IngressClassName
+		issuer = prof.ClusterIssuer
+		if prof.Gateway != nil {
+			gwName = prof.Gateway.Name
+			gwNS = prof.Gateway.Namespace
+			gwSection = prof.Gateway.SectionName
+		}
+		return dom, class, issuer, gwName, gwNS, gwSection
+	}
+	platform.InternalBaseDomain, platform.InternalIngressClassName, platform.InternalClusterIssuer,
+		platform.InternalGatewayName, platform.InternalGatewayNamespace, platform.InternalGatewaySectionName = resolveTier(domain.ExposeInternal)
+	platform.ExternalBaseDomain, platform.ExternalIngressClassName, platform.ExternalClusterIssuer,
+		platform.ExternalGatewayName, platform.ExternalGatewayNamespace, platform.ExternalGatewaySectionName = resolveTier(domain.ExposeExternal)
+
 	return HelmValues{
 		App: AppContext{
 			Name: app.Name,

@@ -276,6 +276,29 @@ type RoutingProfile struct {
 	// BaseDomain overrides Environment.BaseDomain for components routed via
 	// this profile. Empty means inherit the environment's base domain.
 	BaseDomain string `json:"baseDomain,omitempty" yaml:"baseDomain,omitempty"`
+	// Gateway names the Gateway API Gateway apps in this tier attach their
+	// HTTPRoutes to (parentRefs), for charts that route via Gateway API /
+	// Envoy Gateway instead of Ingress. Empty means the tier has no gateway
+	// configured. Resolved with the same cluster→env→org precedence as the
+	// rest of the profile, so a per-cluster gateway (e.g. a different Envoy
+	// install per cloud) overrides the env/org default.
+	Gateway *GatewayRef `json:"gateway,omitempty" yaml:"gateway,omitempty"`
+}
+
+// GatewayRef identifies a Gateway API Gateway for a routing tier. It is exposed
+// to app configs as ((platform.{internal,external}Gateway{Name,Namespace,SectionName}))
+// so a chart's HTTPRoute parentRefs can be authored against the platform-resolved
+// gateway rather than hardcoding it per app.
+type GatewayRef struct {
+	// Name is the Gateway resource name (e.g. "envoy-internal"). Required when
+	// a GatewayRef is present.
+	Name string `json:"name" yaml:"name"`
+	// Namespace is the Gateway's namespace (e.g. "envoy-gateway-system"). Empty
+	// means the app authors its own (or a same-namespace) reference.
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	// SectionName is the Gateway listener section (e.g. "https"). Empty means
+	// the app omits sectionName (attaches to all listeners).
+	SectionName string `json:"sectionName,omitempty" yaml:"sectionName,omitempty"`
 }
 
 // RoutingProfiles maps ExposeMode names to their resolved configuration.

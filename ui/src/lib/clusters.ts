@@ -1,10 +1,18 @@
 import { api } from "./api";
 
+// GatewayRef mirrors the backend Gateway API reference for a routing tier.
+export interface GatewayRef {
+  name: string;
+  namespace?: string;
+  sectionName?: string;
+}
+
 // RoutingProfile mirrors the backend per-ExposeMode routing config.
 export interface RoutingProfile {
   ingressClassName: string;
   clusterIssuer?: string;
   baseDomain?: string;
+  gateway?: GatewayRef;
 }
 
 // RoutingProfiles is keyed by ExposeMode ("internal" | "external").

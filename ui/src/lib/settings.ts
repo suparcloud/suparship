@@ -149,11 +149,18 @@ export function updateOrgNaming(naming: OrgNaming): Promise<OrgNaming> {
 
 export type ExposeMode = "internal" | "external";
 
+export interface GatewayRef {
+  name: string;
+  namespace?: string;
+  sectionName?: string;
+}
+
 export interface RoutingProfile {
   name: ExposeMode;
   ingressClassName: string;
   clusterIssuer?: string;
   baseDomain?: string;
+  gateway?: GatewayRef;
 }
 
 export interface RoutingProfilesResponse {

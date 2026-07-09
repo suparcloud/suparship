@@ -404,7 +404,17 @@ function RegisterModal({ onClose, onRegistered }: RegisterModalProps) {
 // and cert issuer. These override the env → org routing for apps deployed here.
 
 const routingModes = ["internal", "external"] as const;
-type RoutingDraft = Record<string, { ingressClassName: string; clusterIssuer: string; baseDomain: string }>;
+type RoutingDraft = Record<
+  string,
+  {
+    ingressClassName: string;
+    clusterIssuer: string;
+    baseDomain: string;
+    gatewayName: string;
+    gatewayNamespace: string;
+    gatewaySectionName: string;
+  }
+>;
 
 function ClusterRoutingSection({
   cluster,
@@ -421,6 +431,9 @@ function ClusterRoutingSection({
         ingressClassName: p?.ingressClassName ?? "",
         clusterIssuer: p?.clusterIssuer ?? "",
         baseDomain: p?.baseDomain ?? "",
+        gatewayName: p?.gateway?.name ?? "",
+        gatewayNamespace: p?.gateway?.namespace ?? "",
+        gatewaySectionName: p?.gateway?.sectionName ?? "",
       };
     }
     return d;
@@ -441,10 +454,18 @@ function ClusterRoutingSection({
         const p = draft[m];
         if (!p) continue;
         if (p.ingressClassName.trim()) {
+          const gwName = p.gatewayName.trim();
           profiles[m] = {
             ingressClassName: p.ingressClassName.trim(),
             clusterIssuer: p.clusterIssuer.trim() || undefined,
             baseDomain: p.baseDomain.trim() || undefined,
+            gateway: gwName
+              ? {
+                  name: gwName,
+                  namespace: p.gatewayNamespace.trim() || undefined,
+                  sectionName: p.gatewaySectionName.trim() || undefined,
+                }
+              : undefined,
           };
         }
       }
@@ -484,7 +505,14 @@ function ClusterRoutingSection({
 
       <div className="grid gap-3 sm:grid-cols-2">
         {routingModes.map((m) => {
-          const p = draft[m] ?? { ingressClassName: "", clusterIssuer: "", baseDomain: "" };
+          const p = draft[m] ?? {
+            ingressClassName: "",
+            clusterIssuer: "",
+            baseDomain: "",
+            gatewayName: "",
+            gatewayNamespace: "",
+            gatewaySectionName: "",
+          };
           const set = (patch: Partial<RoutingDraft[string]>) =>
             setDraft((d) => ({ ...d, [m]: { ...(d[m] ?? p), ...patch } }));
           return (
@@ -506,6 +534,27 @@ function ClusterRoutingSection({
                 <input className={inputCls} value={p.baseDomain}
                   placeholder="inherit cluster/env" onChange={(e) => set({ baseDomain: e.target.value })} />
               </label>
+              <div className="mt-3 border-t border-gray-100 pt-2">
+                <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-gray-400">
+                  Gateway API (optional)
+                </p>
+                <label className="block">
+                  <span className="text-xs text-gray-500">Gateway name</span>
+                  <input className={inputCls} value={p.gatewayName}
+                    placeholder={m === "external" ? "envoy-external" : "envoy-internal"}
+                    onChange={(e) => set({ gatewayName: e.target.value })} />
+                </label>
+                <label className="mt-2 block">
+                  <span className="text-xs text-gray-500">Gateway namespace</span>
+                  <input className={inputCls} value={p.gatewayNamespace}
+                    placeholder="envoy-gateway-system" onChange={(e) => set({ gatewayNamespace: e.target.value })} />
+                </label>
+                <label className="mt-2 block">
+                  <span className="text-xs text-gray-500">Listener section</span>
+                  <input className={inputCls} value={p.gatewaySectionName}
+                    placeholder="https" onChange={(e) => set({ gatewaySectionName: e.target.value })} />
+                </label>
+              </div>
             </div>
           );
         })}
@@ -575,8 +624,8 @@ function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
       </div>
       <EnvConfigEditor
         key={`env-${cluster.name}`}
-        title={`Variables for cluster "${cluster.name}"`}
-        description="Plain-text variables applied to every app deployed onto this cluster."
+        title={`Variables for cluster "${cluster.name}" (all environments)`}
+        description="Plain-text variables applied to every app deployed onto this cluster, in any environment. Per-environment overrides below win over these."
         fetchFn={fetchEnv}
         saveFn={saveEnv}
       />
@@ -590,18 +639,27 @@ function ClusterOverridesSection({ cluster }: { cluster: Cluster }) {
         </p>
       ) : (
         boundEnvs.map((env) => (
-          <SecretEditor
-            key={`secrets-${env.name}-${cluster.name}`}
-            title={`Shared cluster secrets for "${cluster.name}" in env "${env.name}"`}
-            description={`Shared secrets applied to every app of env "${env.name}" deployed onto this cluster (cluster scope, stored in the "${env.name}" env vault). App-level cluster secrets override these.`}
-            fetchFn={() => listSharedClusterSecretKeys(env.name, cluster.name)}
-            upsertFn={(entries) =>
-              upsertSharedClusterSecrets(env.name, cluster.name, entries)
-            }
-            deleteFn={(key) =>
-              deleteSharedClusterSecretKey(env.name, cluster.name, key)
-            }
-          />
+          <div key={`clusterenv-${env.name}-${cluster.name}`} className="space-y-3">
+            <EnvConfigEditor
+              key={`env-${cluster.name}-${env.name}`}
+              title={`Variables for cluster "${cluster.name}" in env "${env.name}"`}
+              description={`Plain-text variables applied only to apps of env "${env.name}" deployed onto this cluster. These override the cluster-wide variables above and every lower scope.`}
+              fetchFn={() => getClusterEnvConfig(cluster.name, env.name)}
+              saveFn={(cfg) => updateClusterEnvConfig(cluster.name, cfg, env.name)}
+            />
+            <SecretEditor
+              key={`secrets-${env.name}-${cluster.name}`}
+              title={`Shared cluster secrets for "${cluster.name}" in env "${env.name}"`}
+              description={`Shared secrets applied to every app of env "${env.name}" deployed onto this cluster (cluster scope, stored in the "${env.name}" env vault). App-level cluster secrets override these.`}
+              fetchFn={() => listSharedClusterSecretKeys(env.name, cluster.name)}
+              upsertFn={(entries) =>
+                upsertSharedClusterSecrets(env.name, cluster.name, entries)
+              }
+              deleteFn={(key) =>
+                deleteSharedClusterSecretKey(env.name, cluster.name, key)
+              }
+            />
+          </div>
         ))
       )}
     </div>

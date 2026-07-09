@@ -200,3 +200,53 @@ func TestUpperLevelEnvWriter_UpdatePreservesExtraAnnotations(t *testing.T) {
 		t.Error("old data not cleared")
 	}
 }
+
+// TestClusterEnvScopedConfig_DistinctFromGlobal proves the per-(cluster, env)
+// override set is stored and read independently of the cluster-global set, and
+// that the two ConfigMap names never collide.
+func TestClusterEnvScopedConfig_DistinctFromGlobal(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	w := envconfig.NewUpperLevelEnvWriter(client)
+	ctx := context.Background()
+
+	if err := w.WriteClusterEnvConfig(ctx, "eks-aws", envconfig.EnvConfig{
+		Vars: map[string]string{"REGION": "global"},
+	}); err != nil {
+		t.Fatalf("WriteClusterEnvConfig: %v", err)
+	}
+	if err := w.WriteClusterEnvScopedConfig(ctx, "eks-aws", "staging", envconfig.EnvConfig{
+		Vars: map[string]string{"REGION": "staging"},
+	}); err != nil {
+		t.Fatalf("WriteClusterEnvScopedConfig: %v", err)
+	}
+
+	// Distinct ConfigMap names.
+	if a, b := envconfig.ClusterEnvConfigMapName("eks-aws"), envconfig.ClusterEnvScopedConfigMapName("eks-aws", "staging"); a == b {
+		t.Fatalf("global and env-scoped names collide: %q", a)
+	}
+
+	global, err := w.ReadClusterEnvConfig(ctx, "eks-aws")
+	if err != nil {
+		t.Fatalf("ReadClusterEnvConfig: %v", err)
+	}
+	if global.Vars["REGION"] != "global" {
+		t.Errorf("cluster-global REGION = %q, want global", global.Vars["REGION"])
+	}
+
+	scoped, err := w.ReadClusterEnvScopedConfig(ctx, "eks-aws", "staging")
+	if err != nil {
+		t.Fatalf("ReadClusterEnvScopedConfig: %v", err)
+	}
+	if scoped.Vars["REGION"] != "staging" {
+		t.Errorf("cluster-env REGION = %q, want staging", scoped.Vars["REGION"])
+	}
+
+	// A different env has its own (empty) set — no bleed from staging.
+	prod, err := w.ReadClusterEnvScopedConfig(ctx, "eks-aws", "prod")
+	if err != nil {
+		t.Fatalf("ReadClusterEnvScopedConfig(prod): %v", err)
+	}
+	if len(prod.Vars) != 0 {
+		t.Errorf("cluster-env prod should be empty, got %v", prod.Vars)
+	}
+}
