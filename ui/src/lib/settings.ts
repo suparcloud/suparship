@@ -29,6 +29,9 @@ export interface OrgEnvironment {
   deployMode?: string;
   baseDomain?: string;
   namespacePattern?: string;
+  // Set on an update response only when the change relocates workloads (active
+  // cluster or namespace pattern moved) and was saved but NOT auto-applied.
+  warning?: string;
 }
 
 export interface OrgEnvironmentsResponse {

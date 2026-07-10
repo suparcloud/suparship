@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import {
   fetchOrg,
@@ -185,6 +186,11 @@ function OrgEnvironmentsSection() {
         setEnvs((prev) =>
           prev.map((e) => (e.name === editTarget.name ? updated : e)),
         );
+        // A relocating change (active cluster / namespace) is saved but not
+        // auto-applied — surface the migration notice so it isn't silent.
+        if (updated.warning) {
+          toast.warning(updated.warning, { duration: 12000 });
+        }
       } else {
         if (!form.name.trim()) {
           setSaveError("Name is required");

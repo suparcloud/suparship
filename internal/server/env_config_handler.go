@@ -810,6 +810,32 @@ func (h *envConfigHandler) scheduleRepublishProjectApps(projectName, reason stri
 //
 // The cluster → env-name mapping is resolved from the org's Environments list
 // at fan-out time, so the cluster's current bindings are always honoured.
+// scheduleRepublishEnvApps republishes, in the background, every app that
+// deploys to envName, so an env cluster-binding change (ClusterRefs /
+// ActiveClusterRef / DeployMode) re-resolves each app's per-cluster targets:
+// newly-selected clusters get an Application, de-selected ones are pruned. Env
+// binding edits are rare admin actions, so the fleet-scale fan-out is fine; it's
+// best-effort (a per-app publish failure is logged, not surfaced). No-op when the
+// publisher/projectStore isn't wired.
+func (h *envConfigHandler) scheduleRepublishEnvApps(envName string) {
+	if h.publisher == nil || h.projectStore == nil {
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		projects, err := h.projectStore.List(ctx)
+		if err != nil {
+			h.logger.Error("republish: failed to list projects for env fan-out", "env", envName, "err", err)
+			return
+		}
+		filter := map[string]bool{envName: true}
+		reason := "env=" + envName
+		for _, p := range projects {
+			h.republishProjectApps(ctx, p.Metadata.Name, filter, reason)
+		}
+	}()
+}
+
 func (h *envConfigHandler) scheduleRepublishClusterApps(clusterName string) {
 	if h.publisher == nil || h.projectStore == nil || h.orgStore == nil {
 		return

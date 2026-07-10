@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
+	"slices"
 	"sort"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -49,6 +51,10 @@ type OrgEnvironmentDTO struct {
 	// inherit the org default. Use this for per-env provider swaps
 	// (staging on valkey-operator, prod on Crossplane ElastiCache, …).
 	AddonProfiles domain.AddonProfiles `json:"addonProfiles,omitempty"`
+	// Warning is set on an update response only when the change relocates
+	// workloads (active cluster or namespace pattern moved) and was therefore
+	// saved but not auto-applied. Empty on list/get.
+	Warning string `json:"warning,omitempty"`
 }
 
 func orgEnvToDTO(e rbac.OrgEnvironment) OrgEnvironmentDTO {
@@ -230,8 +236,11 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 	}
 
 	found := false
+	relocated := false
+	deployChanged := false
 	for i, e := range org.Environments {
 		if e.Name == envName {
+			before := e // range copy holds the pre-mutation env definition
 			if req.DisplayName != "" {
 				org.Environments[i].DisplayName = req.DisplayName
 			}
@@ -269,6 +278,8 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 				return
 			}
+			relocated = envWorkloadRelocated(before, org.Environments[i])
+			deployChanged = envDeployConfigChanged(before, org.Environments[i])
 			found = true
 			break
 		}
@@ -288,9 +299,31 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 	// unified stores (their vault lists embed the env↔cluster bindings).
 	rh.reconcileSecretStores("env-update:" + envName)
 
+	// A deploy-affecting change propagates to apps. Split by risk:
+	//   - relocating (active cluster or namespace moved): the workload's home
+	//     changes, so an auto-publish would prune the old cluster/namespace and
+	//     recreate it empty (data loss for stateful apps). Save it, but do NOT
+	//     auto-apply — warn so the operator migrates deliberately (drain/backup,
+	//     then republish the affected apps).
+	//   - additive / in-place (add a cluster, active→all, base domain, routing,
+	//     addons, order, remove a non-active cluster): safe to auto-republish so
+	//     apps re-resolve their targets / re-render values immediately.
+	var warning string
+	switch {
+	case relocated:
+		warning = "This change relocates workloads (active cluster or namespace pattern): " +
+			"their old cluster/namespace is pruned and recreated empty — data-bearing for " +
+			"stateful apps. It was saved but NOT auto-applied. Republish the affected apps " +
+			"deliberately (after draining/backing up) to migrate them."
+	case deployChanged && rh.envConfigHandler != nil:
+		rh.envConfigHandler.scheduleRepublishEnvApps(envName)
+	}
+
 	for _, e := range org.Environments {
 		if e.Name == envName {
-			writeJSON(w, http.StatusOK, orgEnvToDTO(e))
+			dto := orgEnvToDTO(e)
+			dto.Warning = warning
+			writeJSON(w, http.StatusOK, dto)
 			return
 		}
 	}
@@ -358,4 +391,35 @@ func validateActiveInRefs(e rbac.OrgEnvironment) error {
 		}
 	}
 	return fmt.Errorf("activeClusterRef %q must be present in clusterRefs %v", e.ActiveClusterRef, e.ClusterRefs)
+}
+
+// envWorkloadRelocated reports whether an env change moves an app's workload
+// HOME — its target cluster or its namespace — between two revisions. Such a
+// change is data-bearing: the generated ArgoCD Application (Prune=true) would
+// delete the old cluster/namespace's resources and recreate them empty. Signals:
+//   - EffectiveClusterRef changed (an active-cluster switch, or removing the
+//     active cluster so the ClusterRefs[0] fallback moves).
+//   - The effective namespace pattern (app- or project-scope) changed.
+func envWorkloadRelocated(a, b rbac.OrgEnvironment) bool {
+	return a.EffectiveClusterRef() != b.EffectiveClusterRef() ||
+		a.EffectiveAppNamespacePattern() != b.EffectiveAppNamespacePattern() ||
+		a.EffectiveProjectNamespacePattern() != b.EffectiveProjectNamespacePattern()
+}
+
+// envDeployConfigChanged reports whether any field that affects an env's
+// published app manifests differs between two revisions — the trigger for an
+// auto-republish. Covers cluster binding (ClusterRefs order-sensitive, active,
+// mode), namespace patterns, and the in-place render inputs (base domain,
+// routing/addon profiles, promotion order). DisplayName is excluded so a
+// cosmetic edit doesn't fleet-republish.
+func envDeployConfigChanged(a, b rbac.OrgEnvironment) bool {
+	return !slices.Equal(a.ClusterRefs, b.ClusterRefs) ||
+		a.ActiveClusterRef != b.ActiveClusterRef ||
+		a.DeployMode != b.DeployMode ||
+		a.BaseDomain != b.BaseDomain ||
+		a.Order != b.Order ||
+		a.EffectiveAppNamespacePattern() != b.EffectiveAppNamespacePattern() ||
+		a.EffectiveProjectNamespacePattern() != b.EffectiveProjectNamespacePattern() ||
+		!reflect.DeepEqual(a.RoutingProfiles, b.RoutingProfiles) ||
+		!reflect.DeepEqual(a.AddonProfiles, b.AddonProfiles)
 }
