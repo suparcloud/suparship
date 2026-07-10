@@ -302,12 +302,17 @@ type EnvironmentOverride struct {
 	// Otherwise an explicit subset of the env's ClusterRefs (one or many).
 	// Resolved via ResolveAppClusterTargets.
 	TargetClusters []string `json:"targetClusters,omitempty" yaml:"targetClusters,omitempty"`
-	// Deploy, for direct-delivery apps, opts this environment in or out of being
-	// deployed (published) by suparship. nil = default: the base env (lowest
-	// Order) deploys, higher envs don't (opt-in). Setting it false stops
-	// publishing updates to the env but does NOT remove its running workload —
-	// removal is an explicit, separate action. Ignored for pipeline apps (which
-	// use promotion). See AppSpec.DeploysToEnv.
+	// Deploy opts this environment in or out for the app. nil = default: for a
+	// direct app the base env (lowest Order) deploys and higher envs are opt-in;
+	// for a pipeline app every env is in the promotion chain.
+	//
+	// Setting it false decommissions the env for this app: the publisher stops
+	// deploying it AND (for pipeline apps) drops it from the Kargo chain —
+	// publishKargoCRs skips it, re-linking the neighbours below so the previous
+	// env becomes terminal. Toggling the flag alone does not remove a running
+	// workload; the explicit undeploy action (handleUndeployAppEnv) sets it false
+	// AND removes the env's GitOps files (incl. its Kargo stage). See
+	// AppSpec.DeploysToEnv.
 	Deploy *bool `json:"deploy,omitempty" yaml:"deploy,omitempty"`
 	// PinnedImageTag pins this environment to a specific image tag (e.g. a PR
 	// preview's tag "pr-712-aae62d96") promoted without merging. While set, the

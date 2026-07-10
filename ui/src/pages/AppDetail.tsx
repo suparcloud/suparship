@@ -2335,6 +2335,18 @@ function AppValuesEditor({
     }
   }
 
+  async function redeployEnv(envName: string) {
+    try {
+      await updateApp(project, data.name, { deployEnvs: { [envName]: true } });
+      toast.success(
+        `Re-enabled ${envName} — its Kargo stage is back. Promote to deploy it.`,
+      );
+      await onSaved();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to re-enable");
+    }
+  }
+
   async function saveCD() {
     setCdSaving(true);
     try {
@@ -2645,6 +2657,60 @@ function AppValuesEditor({
               >
                 {deploySaving ? "Saving…" : "Save"}
               </button>
+            </div>
+          </div>
+        )}
+
+        {!isDirect && (
+          <div className="mt-4 border-t border-gray-100 pt-4">
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-gray-700">Environments</p>
+              <p className="mt-1 text-xs text-gray-400">
+                Remove an app from an environment above the base to take it out
+                of the promotion pipeline — its workload is pruned and its Kargo
+                stage is dropped, re-linking the chain. The base env can't be
+                removed. Re-deploy to add it back, then promote.
+              </p>
+              <div className="mt-3 space-y-2">
+                {stableEnvList.map((e) => (
+                  <div
+                    key={e.envName}
+                    className="flex items-center justify-between gap-3 text-xs text-gray-600"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className="font-medium capitalize">
+                        {e.envName}
+                      </span>
+                      {e.isBase && (
+                        <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
+                          base
+                        </span>
+                      )}
+                      {!e.deploy && (
+                        <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">
+                          decommissioned
+                        </span>
+                      )}
+                    </span>
+                    {!e.isBase &&
+                      (e.deploy ? (
+                        <button
+                          onClick={() => removeFromCluster(e.envName)}
+                          className="shrink-0 text-[11px] font-medium text-red-600 hover:text-red-800"
+                        >
+                          Remove from cluster
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => redeployEnv(e.envName)}
+                          className="shrink-0 text-[11px] font-medium text-indigo-600 hover:text-indigo-800"
+                        >
+                          Re-deploy
+                        </button>
+                      ))}
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}

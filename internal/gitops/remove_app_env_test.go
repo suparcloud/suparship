@@ -27,6 +27,16 @@ func TestRemoveAppEnvFiles(t *testing.T) {
 	prodValkey := mk("envs", "prod", "demo", "valkey", "app.yaml")
 	prodValkeyRes := mk("_app-resources", "prod", "demo", "valkey", "cm.yaml")
 	prodAPI := mk("envs", "prod", "demo", "api", "app.yaml") // sibling app, same env
+	// Kargo stage files (mk returns the parent dir, so keep the file paths
+	// separately): the target env's stage must go; the app's other-env stage and
+	// a sibling app's same-env stage must survive.
+	mkFile := func(name string) string {
+		mk("_infra", "kargo", name)
+		return filepath.Join(dir, "_infra", "kargo", name)
+	}
+	prodValkeyStage := mkFile("kargo-demo-valkey-prod-stage.yaml")
+	stagingValkeyStage := mkFile("kargo-demo-valkey-staging-stage.yaml")
+	prodAPIStage := mkFile("kargo-demo-api-prod-stage.yaml")
 
 	removed, err := p.RemoveAppEnvFilesForTest(dir, "demo", "valkey", "prod")
 	if err != nil {
@@ -49,8 +59,11 @@ func TestRemoveAppEnvFiles(t *testing.T) {
 
 	gone(prodValkey)
 	gone(prodValkeyRes)
-	intact(stagingValkey) // other env of the same app survives
-	intact(prodAPI)       // sibling app in the same env survives
+	gone(prodValkeyStage)      // the target env's kargo stage is removed
+	intact(stagingValkey)      // other env of the same app survives
+	intact(prodAPI)            // sibling app in the same env survives
+	intact(stagingValkeyStage) // other-env stage of the same app survives
+	intact(prodAPIStage)       // sibling app's same-env stage survives
 
 	// No-op when nothing to remove.
 	removed, err = p.RemoveAppEnvFilesForTest(dir, "demo", "valkey", "prod")

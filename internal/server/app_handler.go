@@ -1685,6 +1685,44 @@ func (ah *appHandler) stableEnvsFromOrg(ctx context.Context, app *domain.App) []
 	return StableEnvsFromOrg(ctx, ah.orgProvider, app)
 }
 
+// appStableEnvs returns the app's non-preview environments — the persisted
+// records when present, otherwise the org-derived fallback (same source
+// republishAllApps uses). Order is carried on each record.
+func (ah *appHandler) appStableEnvs(ctx context.Context, app *domain.App) []*domain.AppEnvironment {
+	envs, _ := ah.appStore.ListAppEnvironments(ctx, app.ProjectName, app.Name)
+	stable := make([]*domain.AppEnvironment, 0, len(envs))
+	for _, e := range envs {
+		if e.EnvType != domain.AppEnvPreview {
+			stable = append(stable, e)
+		}
+	}
+	if len(stable) == 0 {
+		for _, e := range ah.stableEnvsFromOrg(ctx, app) {
+			if e.EnvType != domain.AppEnvPreview {
+				stable = append(stable, e)
+			}
+		}
+	}
+	return stable
+}
+
+// baseStableEnvName returns the app's base environment name — the lowest-Order
+// non-preview env (Name tiebreak), matching the base the env-summary DTOs mark.
+// Returns "" when the app has no stable env.
+func (ah *appHandler) baseStableEnvName(ctx context.Context, app *domain.App) string {
+	stable := ah.appStableEnvs(ctx, app)
+	if len(stable) == 0 {
+		return ""
+	}
+	sort.Slice(stable, func(i, j int) bool {
+		if stable[i].Order != stable[j].Order {
+			return stable[i].Order < stable[j].Order
+		}
+		return stable[i].EnvName < stable[j].EnvName
+	})
+	return stable[0].EnvName
+}
+
 // baseDomainForEnv returns the ingress DNS zone configured for the named org
 // environment, or "localhost" when none is set (or no org provider). This
 // mirrors the publisher's preview base-domain resolution (orgEnv.BaseDomain →
@@ -1829,7 +1867,19 @@ func (ah *appHandler) handleUndeployAppEnv(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Mark the env opted-out so a later re-publish doesn't recreate it.
+	// The base env (lowest Order) is the pipeline's warehouse source and the
+	// previews' clone target — removing it would break both. Only envs above the
+	// base can be decommissioned.
+	if base := ah.baseStableEnvName(r.Context(), app); base != "" && envName == base {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "cannot remove the base environment \"" + envName + "\"; it is the pipeline source",
+		})
+		return
+	}
+
+	// Mark the env opted-out so a later re-publish doesn't recreate it. For a
+	// pipeline app this also drops it from the Kargo chain (publishKargoCRs skips
+	// Deploy=false envs), re-linking the neighbours below.
 	if app.Spec.EnvironmentDefaults == nil {
 		app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
 	}
@@ -1842,11 +1892,22 @@ func (ah *appHandler) handleUndeployAppEnv(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Remove the env's GitOps files so ArgoCD prunes the workload.
+	// Remove the env's GitOps files (app + platform resources + Kargo stage) so
+	// ArgoCD prunes the workload and the stage leaves the pipeline.
 	if ah.gitOpsPublisher != nil {
 		if err := ah.gitOpsPublisher.RemoveAppEnv(r.Context(), projectName, appName, envName); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to remove environment: " + err.Error()})
 			return
+		}
+		// Pipeline apps: republish so the Kargo chain + promotion policies rebuild
+		// without the decommissioned env (the previous env becomes terminal).
+		// Direct apps have no pipeline — skip. Best-effort: the removal already
+		// pruned the workload; a chain-rebuild failure self-heals on next publish.
+		if !app.Spec.IsDirect() {
+			if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, ah.appStableEnvs(r.Context(), app)); err != nil {
+				slog.Warn("undeploy: kargo chain rebuild failed — will self-heal on next publish",
+					"project", projectName, "app", appName, "env", envName, "err", err)
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -2460,6 +2521,11 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 	if ov := app.Spec.EnvironmentDefaults[targetEnvName]; ov.PinnedFrom != "" {
 		return nil, fmt.Errorf("%w: environment %q is pinned to %s; unpin it first", errPromoteBadRequest, targetEnvName, pinLabel(ov.PinnedFrom, ov.PinnedImageTag))
 	}
+	// A decommissioned env has left the pipeline (no Kargo stage) — re-enable it
+	// before promoting, otherwise the promotion has no target stage.
+	if ov := app.Spec.EnvironmentDefaults[targetEnvName]; ov.Deploy != nil && !*ov.Deploy {
+		return nil, fmt.Errorf("%w: environment %q is decommissioned; re-enable it first", errPromoteBadRequest, targetEnvName)
+	}
 
 	// Resolve the source: the stable env with the highest Order strictly below
 	// the target's Order (closest predecessor). Falls back to preview envs when
@@ -2959,7 +3025,14 @@ func buildEnvSummaryDTOs(app *domain.App, envs []*domain.AppEnvironment) []AppEn
 		if app.Spec.IsDirect() {
 			envDTOs[i].Deploy = app.Spec.DeploysToEnv(envDTOs[i].EnvName, isBase)
 		} else {
-			envDTOs[i].Deploy = true
+			// Pipeline apps deploy every env by default; a decommissioned env
+			// (Deploy explicitly false) reports false so the UI can show it left
+			// the pipeline and offer a re-deploy.
+			deploy := true
+			if ov, ok := app.Spec.EnvironmentDefaults[envDTOs[i].EnvName]; ok && ov.Deploy != nil {
+				deploy = *ov.Deploy
+			}
+			envDTOs[i].Deploy = deploy
 		}
 		if ov := app.Spec.EnvironmentDefaults[envDTOs[i].EnvName]; ov.PinnedFrom != "" {
 			envDTOs[i].PinnedTag = ov.PinnedImageTag

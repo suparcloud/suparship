@@ -567,6 +567,9 @@ type recordingPublisher struct {
 	batchPreviewCalls   int
 	batchPreviewTargets []int
 	previewCalls        int
+	// publishAppCalls counts full-app PublishApp invocations, so a test can
+	// assert the pipeline undeploy path republishes to rebuild the Kargo chain.
+	publishAppCalls int
 }
 
 // PublishPreviews makes recordingPublisher a BatchPreviewPublisher so tests can
@@ -597,6 +600,7 @@ func (r *recordingPublisher) PublishApps(_ context.Context, targets []AppPublish
 }
 
 func (r *recordingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*domain.AppEnvironment) error {
+	r.publishAppCalls++
 	return nil
 }
 func (r *recordingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, env *domain.AppEnvironment) error {

@@ -1567,6 +1567,13 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 				"app", app.Name, "env", env.EnvName)
 			continue
 		}
+		// A decommissioned env (Deploy explicitly false) leaves the app's
+		// pipeline: it gets no stage and no promotion policy, and the chain
+		// re-links the surviving neighbours below (the previous env becomes
+		// terminal). Its orphaned stage file is removed by removeAppEnvFiles.
+		if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && ov.Deploy != nil && !*ov.Deploy {
+			continue
+		}
 		stableEnvs = append(stableEnvs, env)
 	}
 	sort.Slice(stableEnvs, func(i, j int) bool {
@@ -2300,6 +2307,16 @@ func (p *Publisher) removeAppEnvFiles(repoDir, projectName, appName, envName str
 				}
 			}
 		}
+	}
+	// Remove this env's Kargo Stage file so a pipeline app's decommissioned env
+	// leaves no orphaned stage (publishKargoCRs only writes stages, never deletes
+	// a departed one). The chain re-links via the Deploy-false filter in
+	// publishKargoCRs on the app's republish. Direct apps have no stage file — the
+	// rm is a no-op then.
+	projectNS := KargoNamespaceForProject(projectName)
+	stagePath := filepath.Join(p.outputDir(repoDir, "_infra", "kargo"), projectNS+"-"+appName+"-"+envName+"-stage.yaml")
+	if err := u.rm(stagePath); err != nil {
+		return false, err
 	}
 	return u.removed, nil
 }

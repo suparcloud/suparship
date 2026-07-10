@@ -64,6 +64,62 @@ func TestPublishKargoCRs_WritesExpectedFiles(t *testing.T) {
 	}
 }
 
+// TestPublishKargoCRs_ExcludesDecommissionedEnv verifies that an env with
+// Deploy=false leaves the pipeline: it gets no Stage and no promotion policy, and
+// the chain re-links so the previous env becomes terminal (its stage's upstream
+// no longer points at the removed env — and here staging pulls only from the
+// Warehouse). Regression guard for pipeline-aware undeploy.
+func TestPublishKargoCRs_ExcludesDecommissionedEnv(t *testing.T) {
+	dir := t.TempDir()
+
+	no := false
+	app := &domain.App{
+		Name: "hello", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"prod": {Deploy: &no},
+			},
+		},
+	}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
+	}
+
+	p := newTestPublisher(t)
+	if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishKargoCRsForTest: %v", err)
+	}
+	kargoDir := filepath.Join(dir, "_infra", "kargo")
+
+	// staging keeps its stage; prod's stage is not written.
+	if _, err := os.Stat(filepath.Join(kargoDir, "kargo-demo-hello-staging-stage.yaml")); err != nil {
+		t.Errorf("staging stage should exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(kargoDir, "kargo-demo-hello-prod-stage.yaml")); !os.IsNotExist(err) {
+		t.Error("decommissioned prod stage should NOT be written")
+	}
+
+	// staging is now terminal — its stage requests freight directly from the
+	// Warehouse (no upstream stage). Assert prod is not referenced anywhere.
+	stagingBytes, err := os.ReadFile(filepath.Join(kargoDir, "kargo-demo-hello-staging-stage.yaml"))
+	if err != nil {
+		t.Fatalf("read staging stage: %v", err)
+	}
+	if strings.Contains(string(stagingBytes), "prod") {
+		t.Errorf("staging stage should not reference the removed prod env:\n%s", stagingBytes)
+	}
+
+	// The ProjectConfig must not carry a prod promotion policy.
+	pcBytes, err := os.ReadFile(filepath.Join(kargoDir, "kargo-demo-projectconfig.yaml"))
+	if err != nil {
+		t.Fatalf("read projectconfig: %v", err)
+	}
+	if strings.Contains(string(pcBytes), "hello-prod") {
+		t.Errorf("projectconfig should not carry a prod policy for the app:\n%s", pcBytes)
+	}
+}
+
 // TestPublishKargoCRs_TemplateImageMappingRoundTrip is the regression guard for
 // the voiceai case: a template image mapping carrying a tag pattern + selection
 // strategy must flow through to the published Warehouse subscription (allowTags
