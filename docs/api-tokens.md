@@ -1,7 +1,7 @@
 # Project API tokens
 
 API tokens authenticate non-interactive callers — CI pipelines, scripts, bots —
-against the suparShip API. A token is scoped to a **single project** and carries
+against the suparship API. A token is scoped to a **single project** and carries
 a **fixed RBAC role**; it authenticates via the standard `Authorization: Bearer`
 header, independently of the human who created it.
 

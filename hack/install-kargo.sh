@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hack/install-kargo.sh — install Kargo into the suparShip dev cluster.
+# hack/install-kargo.sh — install Kargo into the suparship dev cluster.
 #
 # Idempotent: uses `helm upgrade --install` so re-running is safe.
 #
@@ -51,7 +51,7 @@ die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — Kargo install  (dev profile, ${KARGO_APP_VERSION})"
+echo "  suparship — Kargo install  (dev profile, ${KARGO_APP_VERSION})"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

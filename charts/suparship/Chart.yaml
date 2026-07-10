@@ -1,7 +1,7 @@
 apiVersion: v2
 name: suparship
 description: >-
-  suparShip — GitOps-native platform runtime. Vercel-like developer experience
+  suparship — GitOps-native platform runtime. Vercel-like developer experience
   on Kubernetes, powered by ArgoCD and Kargo.
 type: application
 version: 0.1.0-2

@@ -24,7 +24,7 @@ const checklist: ChecklistItem[] = [
   {
     key: "clusterConnected",
     title: "Cluster connected",
-    description: "suparShip can reach the Kubernetes API.",
+    description: "suparship can reach the Kubernetes API.",
     successText: "Connected",
     // No UI action — requires infra-level fix (kubeconfig / cluster).
   },
@@ -138,7 +138,7 @@ export function Onboarding() {
     <div className="flex min-h-screen flex-col bg-gray-50">
       {/* Minimal header */}
       <header className="flex h-14 items-center justify-between border-b border-gray-200 bg-white px-6">
-        <span className="text-lg font-semibold tracking-tight">suparShip</span>
+        <span className="text-lg font-semibold tracking-tight">suparship</span>
         {user && (
           <span className="text-sm text-gray-500">
             Signed in as <span className="font-medium text-gray-700">{user.username}</span>
@@ -156,7 +156,7 @@ export function Onboarding() {
               </svg>
             </div>
             <h1 className="text-3xl font-bold tracking-tight text-gray-900">
-              {allComplete ? "You're all set!" : "Welcome to suparShip"}
+              {allComplete ? "You're all set!" : "Welcome to suparship"}
             </h1>
             <p className="mx-auto mt-2 max-w-md text-base text-gray-500">
               {allComplete

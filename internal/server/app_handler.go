@@ -2824,7 +2824,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 			Level:   domain.DiagnosticWarning,
 			Title:   "Workload cluster unreachable",
 			Detail:  fmt.Sprintf("cluster %q could not be reached", name),
-			Hint:    "Live replica count for this cluster is unavailable (ArgoCD may still show it Healthy). Check the cluster's kubeconfig/credentials under Clusters and that its API server is reachable from suparShip.",
+			Hint:    "Live replica count for this cluster is unavailable (ArgoCD may still show it Healthy). Check the cluster's kubeconfig/credentials under Clusters and that its API server is reachable from suparship.",
 			Cluster: name,
 		})
 	}
@@ -2975,7 +2975,7 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 						Level:   domain.DiagnosticWarning,
 						Title:   "Delivery status unavailable",
 						Detail:  err.Error(),
-						Hint:    "Could not read the ArgoCD Application status; the env's real health is unknown. Check suparShip's access to the ArgoCD namespace and that ArgoCD is reachable.",
+						Hint:    "Could not read the ArgoCD Application status; the env's real health is unknown. Check suparship's access to the ArgoCD namespace and that ArgoCD is reachable.",
 						Cluster: cluster,
 					})
 					continue

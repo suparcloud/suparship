@@ -54,7 +54,7 @@ func CheckSchema(org *Org) (SchemaCheck, string) {
 			stored, current)
 	case serr == nil && cerr == nil && si > ci:
 		return SchemaDowngrade, fmt.Sprintf(
-			"org config schema v%s is NEWER than this binary (v%s). You appear to be running an older suparShip than wrote this config — upgrade the binary to avoid losing config it doesn't understand.",
+			"org config schema v%s is NEWER than this binary (v%s). You appear to be running an older suparship than wrote this config — upgrade the binary to avoid losing config it doesn't understand.",
 			stored, current)
 	default:
 		// Non-integer versions: can't order them, just flag the mismatch.

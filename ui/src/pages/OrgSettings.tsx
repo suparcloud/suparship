@@ -1506,7 +1506,7 @@ function SecretsBackendSection() {
                         <strong>one Connect token per cluster</strong>.
                         1Password Service Accounts cannot create vaults or
                         Connect tokens — you create both manually in the
-                        1Password console; suparShip handles the cluster-side
+                        1Password console; suparship handles the cluster-side
                         automation (sealing the token, generating the store,
                         publishing to GitOps).
                       </p>
@@ -1525,7 +1525,7 @@ function SecretsBackendSection() {
                         </li>
                         <li>
                           <strong>3. Paste the SA token</strong> below —
-                          suparShip validates it and shows how many vaults
+                          suparship validates it and shows how many vaults
                           are visible.
                         </li>
                         <li>
@@ -1539,7 +1539,7 @@ function SecretsBackendSection() {
                         <li>
                           <strong>6. Set up a Connect Server</strong> in
                           1Password, grant it access to <strong>all</strong>{" "}
-                          suparShip vaults, and deploy Connect to your workload
+                          suparship vaults, and deploy Connect to your workload
                           clusters (Helm chart or Docker).
                         </li>
                         <li>
@@ -1550,7 +1550,7 @@ function SecretsBackendSection() {
                         </li>
                         <li>
                           <strong>8. Paste each cluster&apos;s token</strong> in
-                          the Cluster Connect Tokens section below — suparShip
+                          the Cluster Connect Tokens section below — suparship
                           seals it and publishes the cluster&apos;s single
                           SealedSecret + ClusterSecretStore to GitOps. Binding a
                           new env to a cluster later requires a token that also
@@ -1573,7 +1573,7 @@ function SecretsBackendSection() {
                   </label>
                   <p className="text-xs text-gray-500">
                     Paste the 1Password Service Account token. It needs Read
-                    &amp; Write access to every vault you want suparShip to
+                    &amp; Write access to every vault you want suparship to
                     manage — the global vault and each env vault. 1Password
                     Service Accounts cannot create vaults, so make sure these
                     vaults already exist before pasting.
@@ -1603,7 +1603,7 @@ function SecretsBackendSection() {
 
                 {/* Global vault picker — operator selects the vault they
                     created manually in the 1Password console. 1Password
-                    Service Accounts cannot create vaults, so suparShip cannot
+                    Service Accounts cannot create vaults, so suparship cannot
                     auto-provision this. */}
                 <PlatformVaultPicker
                   config={config}
@@ -1904,7 +1904,7 @@ function SecretsBackendSection() {
 // ── Global vault picker ──────────────────────────────────────────────────────
 //
 // 1Password Service Accounts cannot create new vaults. The operator creates
-// the global vault by hand in the 1Password console; suparShip just needs to
+// the global vault by hand in the 1Password console; suparship just needs to
 // know which vault it is. This component lists every vault the SA token can
 // see, lets the operator pick one, and PUTs the choice to
 // /org/secret-backend/global-vault. Clusters read the vault through their own

@@ -1,6 +1,6 @@
 # Templates and components
 
-Templates are the golden-path mechanism for creating apps in suparShip. A
+Templates are the golden-path mechanism for creating apps in suparship. A
 template defines:
 
 - The rendering engine and chart (Helm in MVP).
@@ -244,7 +244,7 @@ spec:
       previewEnabled: false   # omitted from previews — saves cluster resources
 ```
 
-When suparShip creates a preview environment it skips every component whose
+When suparship creates a preview environment it skips every component whose
 `previewEnabled` is false. This is checked at the `ComponentSpec` level in
 `internal/domain/app.go`.
 

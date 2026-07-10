@@ -1,6 +1,6 @@
 # Secrets Management
 
-suparShip organises secrets along two axes — **scope** (where a value varies) and
+suparship organises secrets along two axes — **scope** (where a value varies) and
 **tier** (who owns it) — and materialises them at runtime with the
 [External Secrets Operator](https://external-secrets.io) (ESO). The same model
 works with two backends: plain Kubernetes Secrets (`k8s`) and **1Password**.
@@ -81,11 +81,11 @@ exactly one `remoteNamespace` per store.
 ## Two credential types (1Password)
 
 1Password Service Accounts **cannot create vaults or issue Connect tokens** — the
-operator creates both manually in the 1Password console. suparShip handles the
+operator creates both manually in the 1Password console. suparship handles the
 cluster-side automation: sealing each cluster's Connect token, generating its
 unified `ClusterSecretStore`, and publishing the manifests to GitOps.
 
-- **Service Account (SA) token** (stored in suparShip): used to write/read/delete
+- **Service Account (SA) token** (stored in suparship): used to write/read/delete
   secret items in 1Password vaults — the data plane for developer secrets.
 - **Connect token, one per cluster** (sealed, deployed to that cluster): ESO uses
   it to read secret values at runtime. Each cluster's token is granted access to
@@ -100,7 +100,7 @@ unified `ClusterSecretStore`, and publishing the manifests to GitOps.
 > **Binding changes need a token re-issue.** A cluster's token must cover its
 > vault set. When you bind a *new* env to a cluster, issue a new Connect token in
 > the 1Password console that also covers the new env vault, and re-paste it for
-> that cluster — suparShip re-seals and republishes the store. (Registering a new
+> that cluster — suparship re-seals and republishes the store. (Registering a new
 > env vault or changing bindings already republishes the store automatically; only
 > the token's vault access needs the manual step.)
 
@@ -114,8 +114,8 @@ unified `ClusterSecretStore`, and publishing the manifests to GitOps.
 sequenceDiagram
     participant Admin as Admin (manual)
     participant OP as 1Password Console
-    participant UI as suparShip UI
-    participant API as suparShip Backend
+    participant UI as suparship UI
+    participant API as suparship Backend
     participant Git as GitOps Repo
     participant Argo as ArgoCD
     participant Cluster as Workload Cluster
@@ -161,13 +161,13 @@ Service Accounts can't create vaults, so the operator creates them by hand:
    per-cluster vault is needed.
 3. A **Service Account** with Read & Write access to all of them. Copy its token.
 
-> No vault naming convention is enforced — suparShip stores the UUID of whichever
+> No vault naming convention is enforced — suparship stores the UUID of whichever
 > vault you pick/register, not its name.
 
 ### Step 2: Save the SA token
 
 **UI:** Settings → Secrets Backend → Provider: 1Password → paste SA token → Save.
-suparShip validates it and reports how many vaults are visible. The token is
+suparship validates it and reports how many vaults are visible. The token is
 stored as a K8s Secret `suparship-system/suparship-op-sa-token`.
 
 ### Step 3: Register vaults (IDs only)
@@ -189,7 +189,7 @@ overrides need no registration of their own; they ride along in the env vault.
 ### Step 4: Check cluster prerequisites
 
 **UI:** Settings → Secrets Backend → Prerequisites shows green/red per component.
-If sealed-secrets or ESO are missing, suparShip offers a one-click install
+If sealed-secrets or ESO are missing, suparship offers a one-click install
 (pinned chart versions):
 
 - sealed-secrets: `2.16.2` from `bitnami-labs.github.io/sealed-secrets`
@@ -214,7 +214,7 @@ curl -X POST $SUPARSHIP_URL/api/v1/org/secret-backend/clusters/prod-eu/connect-t
   -d '{"connectToken": "<that cluster's connect token>"}'
 ```
 
-suparShip stashes the token, seals it against the cluster's sealed-secrets cert,
+suparship stashes the token, seals it against the cluster's sealed-secrets cert,
 and publishes exactly two files under `_secret-stores/{cluster}/` —
 `sealed-token.yaml` (Secret `op-connect-token`) and `store.yaml` (the unified
 `suparship-store` listing every vault the cluster reads) — synced by that
@@ -223,7 +223,7 @@ republishes the store automatically using the stashed token.
 
 ### Rotating a Connect token
 
-Re-paste a new token for the cluster — suparShip re-stashes, re-seals, and
+Re-paste a new token for the cluster — suparship re-stashes, re-seals, and
 re-publishes. Revoke the old token manually in 1Password afterward. The same
 flow covers widening access when a new env is bound to the cluster.
 
@@ -235,11 +235,11 @@ needed.
 
 ## Platform-managed Secret & ConfigMap (per app)
 
-When suparShip publishes an app it generates exactly **one** `ExternalSecret`
+When suparship publishes an app it generates exactly **one** `ExternalSecret`
 (→ K8s `Secret` `{app}-secrets`) and **one** `ConfigMap` (`{app}-config`) per
 bound environment. These are **owned by the platform, not the app chart** — they
 are written into a platform-owned GitOps tree and shipped by a platform
-ApplicationSet, so application charts stay decoupled from suparShip and only need
+ApplicationSet, so application charts stay decoupled from suparship and only need
 to `envFrom` the two well-known names.
 
 ### GitOps layout
@@ -268,7 +268,7 @@ workload clusters in the app's namespace.
 
 ### The chart contract
 
-App charts never define these objects — they just `envFrom` the names suparShip
+App charts never define these objects — they just `envFrom` the names suparship
 passes via values (`suparship.envFromConfigMaps` = `[{app}-config]`,
 `suparship.envFromSecrets` = `[{app}-secrets]`):
 
@@ -289,7 +289,7 @@ No sync-wave dependency is required.
 
 ### Preview environments
 
-On preview create suparShip writes `meta.yaml`, `env-configmap.yaml`, and
+On preview create suparship writes `meta.yaml`, `env-configmap.yaml`, and
 `external-secret.yaml` to `_app-resources/previews/{project}/{preview}/`
 (carrying the preview's `clusterServer`). The `previews-platform-appset.yaml`
 ApplicationSet fans these out per preview. On preview delete the directory is
@@ -373,7 +373,7 @@ After app creation:
 
 1. Open the vault that backs the scope you want — the global vault, or the env
    vault (which also holds that env's cluster-override items).
-2. Find the item suparShip created (`shared-*` for org-admin defaults,
+2. Find the item suparship created (`shared-*` for org-admin defaults,
    `{app}-*` for an app).
 3. Replace the `_placeholder` field with real `KEY = value` pairs.
 
@@ -414,7 +414,7 @@ All scopes are readable by any authenticated user (`viewer` and above).
 
 | Risk | Mitigation |
 |---|---|
-| SA token blast radius | suparShip validates vault count on paste; scope the SA to suparship vaults only. |
+| SA token blast radius | suparship validates vault count on paste; scope the SA to suparship vaults only. |
 | SA token leak from cluster | K8s Secret restricted via RBAC to the suparship controller ServiceAccount. |
 | Per-cluster credential blast radius | One Connect token per cluster, granted access only to the vaults that cluster reads (global + its envs). Clusters sharing an env vault can read each other's override items — accepted trade-off. |
 | Connect token in Git | Always sealed before commit; plaintext never crosses the suparship process boundary except during in-memory seal (a stash copy lives in `suparship-system` for re-seals). |

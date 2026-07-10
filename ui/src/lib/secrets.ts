@@ -141,7 +141,7 @@ export function unregisterEnvVault(env: string): Promise<void> {
 
 // ── Per-cluster Connect token (1Password) ───────────────────────────────────
 // One token per cluster, with access to every vault the cluster reads (the
-// global vault + its bound env vaults). suparShip stashes it, seals it, and
+// global vault + its bound env vaults). suparship stashes it, seals it, and
 // publishes the cluster's single unified ClusterSecretStore.
 
 export function setClusterConnectToken(

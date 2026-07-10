@@ -117,7 +117,7 @@ auth:
     issuerURL: ""
     # -- OAuth2 client ID registered with the IdP.
     clientID: ""
-    # -- suparShip's callback URL registered with the IdP.
+    # -- suparship's callback URL registered with the IdP.
     redirectURL: ""
     # -- Secret + key holding the OAuth2 client secret.
     clientSecretRef:
@@ -125,7 +125,7 @@ auth:
       key: client-secret
     # -- ID-token scopes requested at login.
     scopes: [openid, profile, email, groups]
-    # -- ID-token claim used as the suparShip username.
+    # -- ID-token claim used as the suparship username.
     usernameClaim: email
     # -- ID-token claim carrying IdP groups, matched against roleBindings[].group.
     groupsClaim: groups
@@ -160,7 +160,7 @@ gitops:
   branch: main
   # -- Optional subpath within the repo for gitops content
   subPath: ""
-  # -- Git author name for commits suparship makes (empty = "suparShip")
+  # -- Git author name for commits suparship makes (empty = "suparship")
   commitAuthorName: ""
   # -- Git author email for commits suparship makes (empty = "suparship@suparcloud.io")
   commitAuthorEmail: ""

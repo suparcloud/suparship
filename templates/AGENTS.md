@@ -1,17 +1,17 @@
-# AGENTS.md — suparShip templates repo
+# AGENTS.md — suparship templates repo
 
 Guidance for AI coding agents (Claude Code, Cursor, …) working in a
-suparShip *external templates repo*. Read this before editing template
+suparship *external templates repo*. Read this before editing template
 or chart files.
 
 ## What this repo is
 
-A library of suparShip **templates**. A template is a `template.yaml`
-plus an optional Helm chart. suparShip's `registrysync` engine clones
+A library of suparship **templates**. A template is a `template.yaml`
+plus an optional Helm chart. suparship's `registrysync` engine clones
 this repo on a schedule (default 5m), packages each chart it finds, and
 saves the result as a cluster-side ConfigMap. End users pick a template
-in the suparShip UI, fill out the form (driven by `inputs:`), and an
-**app** is created and rendered into a GitOps repo by suparShip's
+in the suparship UI, fill out the form (driven by `inputs:`), and an
+**app** is created and rendered into a GitOps repo by suparship's
 publisher.
 
 You are *not* writing app manifests directly. You are writing the
@@ -22,7 +22,7 @@ You are *not* writing app manifests directly. You are writing the
 ```
 templates/
   <template-name>/
-    template.yaml             # suparShip metadata: inputs, mappings, presets
+    template.yaml             # suparship metadata: inputs, mappings, presets
     chart/                    # Helm chart (inline mode) — optional in external mode
       Chart.yaml
       Chart.lock              # commit this
@@ -135,7 +135,7 @@ or in mappings. Use `secretInputs` + `secretRef`.
 
 ## Chart conventions
 
-Charts MUST follow the conventions documented in suparShip's
+Charts MUST follow the conventions documented in suparship's
 `docs/chart-conventions.md`. The non-negotiables:
 
 1. **Depend on `suparship-common`** (the shared library chart) and use
@@ -171,7 +171,7 @@ Multi-component charts use one file per component
 `<chart>.<component>.<aspect>`. Avoid `range`-over-components in a
 single template.
 
-## Releases — how a new version reaches suparShip
+## Releases — how a new version reaches suparship
 
 This repo has **no automated release pipeline**. A release is a
 versioned git commit on the branch the cluster's `ExternalTemplateRepo`
@@ -287,8 +287,8 @@ commit message.
 
 ## Quick reference
 
-- `template.yaml` schema: `docs/templates.md` in the suparShip repo.
-- Chart conventions: `docs/chart-conventions.md` in the suparShip repo.
+- `template.yaml` schema: `docs/templates.md` in the suparship repo.
+- Chart conventions: `docs/chart-conventions.md` in the suparship repo.
 - Sync engine: `internal/tpl/registrysync/` — read `sync.go` to
   understand exactly what gets packaged and persisted.
 - Source-type semantics: `internal/tpl/model.go` (`SourceTypeGit`,

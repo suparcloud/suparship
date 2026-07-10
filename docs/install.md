@@ -1,11 +1,11 @@
-# Installing suparShip — SRE Day-1 runbook
+# Installing suparship — SRE Day-1 runbook
 
-This is the platform team's path to a working suparShip install. It's a
+This is the platform team's path to a working suparship install. It's a
 **dedicated, single-org install**: you (SRE/platform) stand it up and operate
 it; your developers consume it to ship apps (see
 [apps-and-images.md](apps-and-images.md)).
 
-The end state: the **Platform setup** checklist on the suparShip onboarding page
+The end state: the **Platform setup** checklist on the suparship onboarding page
 is all green, and a developer can create an app that deploys. Work top to
 bottom; each step ends with a **Verify** you can check before moving on.
 
@@ -13,8 +13,8 @@ bottom; each step ends with a **Verify** you can check before moving on.
 
 ## 0. Prerequisites
 
-suparShip is a control plane over ArgoCD + Kargo + External Secrets. These must
-exist on the **tooling cluster** (where suparShip and ArgoCD run); workload
+suparship is a control plane over ArgoCD + Kargo + External Secrets. These must
+exist on the **tooling cluster** (where suparship and ArgoCD run); workload
 clusters need sealed-secrets + ESO.
 
 | Component | Where | Required for | Install |
@@ -70,7 +70,7 @@ Useful values (full list in `charts/suparship/values.yaml`):
 | `gitops.*`, `clusters[]`, `environments[]`, `secrets.*`, `registry.*` | optional: declare setup in values instead of via the UI |
 
 You can declare the entire setup in values (clusters, environments, gitops,
-secrets) and suparShip reconciles it into config on first boot — or leave them
+secrets) and suparship reconciles it into config on first boot — or leave them
 empty and drive everything through the UI checklist (steps 4+). Either works;
 the UI is friendlier for a first install.
 
@@ -116,7 +116,7 @@ Settings → GitOps. Provide the repo URL, provider, branch, and a credential
 Secret (or paste credentials). Click **Test connection** — it runs
 `git ls-remote` and must succeed.
 
-suparShip commits rendered manifests here; ArgoCD syncs them. Without it, app
+suparship commits rendered manifests here; ArgoCD syncs them. Without it, app
 creation only persists to the cluster store (no delivery).
 
 **Verify:** "Test connection" is green; the **GitOps repository** gate is green.
@@ -126,7 +126,7 @@ creation only persists to the cluster store (no delivery).
 ## 6. Register at least one workload cluster
 
 Settings → Clusters → Register. Provide a name (DNS label), the API server URL
-(`https://…`, no trailing space — it's validated), and the kubeconfig. suparShip
+(`https://…`, no trailing space — it's validated), and the kubeconfig. suparship
 fetches the sealed-secrets cert in the background.
 
 > The first cluster can be the tooling cluster itself (`inCluster: true` /
@@ -183,7 +183,7 @@ five sub-steps done).
 ## 9. (Optional) Configure a private registry
 
 Settings → Registry, if your developers' images are private. URL is a bare host
-(`ghcr.io`, no scheme). suparShip then creates `imagePullSecret`s in app
+(`ghcr.io`, no scheme). suparship then creates `imagePullSecret`s in app
 namespaces. Public images need nothing here.
 
 ---
@@ -203,7 +203,7 @@ on the onboarding page is true.
 
 ## Recovery & operations
 
-- **Wiped the GitOps `_secret-stores/` tree?** Restart the suparShip pod —
+- **Wiped the GitOps `_secret-stores/` tree?** Restart the suparship pod —
   startup self-heal re-seals each cluster's Connect token + store from the local
   stash (1Password backend). Clusters with no stashed token are logged; re-paste
   those.
@@ -219,7 +219,7 @@ on the onboarding page is true.
 
 | Thing | Location |
 |---|---|
-| suparShip server + config | `suparship-system` namespace (ConfigMaps + Secrets) |
+| suparship server + config | `suparship-system` namespace (ConfigMaps + Secrets) |
 | Admin credential | Secret `suparship-admin-auth` (configurable) |
 | Rendered manifests | your GitOps repo (`_app-resources/`, `_infra/`, `_secret-stores/`, `envs/`) |
 | Per-cluster sealed token + store | `_secret-stores/{cluster}/` |

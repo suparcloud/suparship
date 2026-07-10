@@ -393,7 +393,7 @@ func TestDeleteCluster_PreserversPreExistingArgoCDSecret_ViaFlag(t *testing.T) {
 		t.Errorf("pre-existing ArgoCD secret was deleted: %v", err)
 	}
 
-	// Suparship ConfigMap must be gone.
+	// suparship ConfigMap must be gone.
 	if _, err := client.CoreV1().ConfigMaps(suparshipSystemNS).Get(
 		context.Background(), clusterConfigMapPrefix+clusterName, metav1.GetOptions{}); err == nil {
 		t.Error("cluster ConfigMap should have been deleted")

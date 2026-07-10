@@ -1,4 +1,4 @@
-# Kind cluster configuration for suparShip local development.
+# Kind cluster configuration for suparship local development.
 #
 # Creates a single-node cluster named "suparship-dev".
 # Port mappings are pre-wired so that a future NGINX ingress controller

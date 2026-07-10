@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hack/bootstrap-cluster.sh — create and configure the suparShip dev cluster.
+# hack/bootstrap-cluster.sh — create and configure the suparship dev cluster.
 #
 # Idempotent: safe to run multiple times. Skips any step that is already done.
 #
@@ -26,7 +26,7 @@ KIND_CONFIG="config/kind/cluster.yaml"
 # Foundational namespaces — created now so subsequent install steps can
 # target them without needing to create them again.
 NAMESPACES=(
-  suparship-system   # suparShip control-plane components
+  suparship-system   # suparship control-plane components
   argocd             # pre-create so ArgoCD install can target it later
 )
 
@@ -43,7 +43,7 @@ die()   { err "$*"; exit 1; }
 
 # ── Banner ────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — cluster bootstrap"
+echo "  suparship — cluster bootstrap"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

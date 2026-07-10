@@ -1,6 +1,6 @@
 # Migration guide: service model → app model
 
-suparShip is transitioning its primary UX and API object from **service** to
+suparship is transitioning its primary UX and API object from **service** to
 **app**. This document explains why the change is happening, what the old and
 new models look like, and how existing callers should migrate.
 

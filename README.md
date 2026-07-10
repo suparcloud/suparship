@@ -1,13 +1,13 @@
-# suparShip
+# suparship
 
 **Vercel-like developer experience for Kubernetes teams.**  
 Open source. GitOps-native. Built on CNCF projects.
 
 ---
 
-## What is suparShip?
+## What is suparship?
 
-**suparShip** is an open-source platform runtime from **suparCloud** that lets small SRE / DevOps teams provide a **simple, self-service PaaS-like experience** to developers — without building or maintaining a full platform team.
+**suparship** is an open-source platform runtime from **suparCloud** that lets small SRE / DevOps teams provide a **simple, self-service PaaS-like experience** to developers — without building or maintaining a full platform team.
 
 It standardizes the *golden paths* for:
 - deploying applications
@@ -20,7 +20,7 @@ It standardizes the *golden paths* for:
 
 ---
 
-## Why suparShip?
+## Why suparship?
 
 Most teams want:
 - preview environments for every change
@@ -32,7 +32,7 @@ But they:
 - don’t want vendor lock-in
 - eventually outgrow hosted PaaS solutions
 
-**suparShip sits in the middle**:
+**suparship sits in the middle**:
 - simple like a PaaS
 - flexible like Kubernetes
 - transparent like GitOps
@@ -41,7 +41,7 @@ But they:
 
 ## Key concepts
 
-suparShip is built around a four-level hierarchy:
+suparship is built around a four-level hierarchy:
 
 ```
 org
@@ -77,7 +77,7 @@ SREs define:
 
 ## Quickstart
 
-Two ways to start, depending on whether you want to *try* suparShip or *run* it.
+Two ways to start, depending on whether you want to *try* suparship or *run* it.
 
 ### A. Try it locally — no cluster, no cloud (~1 min)
 
@@ -95,7 +95,7 @@ Open the UI and sign in with **`admin@local` / `admin123`**. Details in
 
 ### B. Install on a cluster (Helm)
 
-suparShip runs in a **hub** cluster and deploys your apps there — or to registered
+suparship runs in a **hub** cluster and deploys your apps there — or to registered
 **remote** clusters — via ArgoCD. You need a cluster with ArgoCD (+ Kargo, ESO);
 see the prerequisites in [docs/install.md](docs/install.md).
 
@@ -306,7 +306,7 @@ To fix:
 
 ## Admin Auth
 
-suparShip uses a single bootstrap admin account stored as a Kubernetes Secret
+suparship uses a single bootstrap admin account stored as a Kubernetes Secret
 in the `suparship-system` namespace.
 
 ### Bootstrap the admin user
@@ -347,7 +347,7 @@ stringData:
 
 ## Authorization Model
 
-suparShip uses a single-org RBAC model. The org configuration is stored in a
+suparship uses a single-org RBAC model. The org configuration is stored in a
 Kubernetes ConfigMap (`suparship-system/suparship-org-config`).
 
 ### Roles (highest → lowest privilege)
@@ -625,7 +625,7 @@ both.
 Expected output:
 
 ```
-  suparShip — local dev  (fake / in-memory mode, no cluster required)
+  suparship — local dev  (fake / in-memory mode, no cluster required)
   ────────────────────────────────────────────────────────────────────
   Backend   →  http://localhost:8080
   Frontend  →  http://localhost:5173

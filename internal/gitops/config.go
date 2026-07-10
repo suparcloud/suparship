@@ -14,7 +14,7 @@ type RepoConfig struct {
 	SubPath string `json:"subPath,omitempty" yaml:"subPath,omitempty"`
 	// CommitAuthorName / CommitAuthorEmail set the Git author on commits suparship
 	// makes to the gitops repo. Empty falls back to the built-in defaults
-	// ("suparShip" / "suparship@suparcloud.io").
+	// ("suparship" / "suparship@suparcloud.io").
 	CommitAuthorName  string `json:"commitAuthorName,omitempty" yaml:"commitAuthorName,omitempty"`
 	CommitAuthorEmail string `json:"commitAuthorEmail,omitempty" yaml:"commitAuthorEmail,omitempty"`
 	// AuthSecretRef is the name of an existing Kubernetes Secret holding credentials.

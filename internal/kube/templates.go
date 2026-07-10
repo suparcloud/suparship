@@ -47,7 +47,7 @@ const (
 	templateRoleArchive = "archive"
 
 	// systemNamespace mirrors the namespace constant used by project.K8sStore
-	// and preview.K8sStore so all suparShip ConfigMaps live together.
+	// and preview.K8sStore so all suparship ConfigMaps live together.
 	systemNamespace = "suparship-system"
 )
 

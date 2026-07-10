@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hack/install-argo-rollouts.sh — install Argo Rollouts into the suparShip dev cluster.
+# hack/install-argo-rollouts.sh — install Argo Rollouts into the suparship dev cluster.
 #
 # Argo Rollouts is a required dependency for Kargo: it provides the
 # progressive-delivery primitives (canary, blue/green) that Kargo's
@@ -39,7 +39,7 @@ die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — Argo Rollouts install  (dev profile, chart ${ROLLOUTS_CHART_VERSION})"
+echo "  suparship — Argo Rollouts install  (dev profile, chart ${ROLLOUTS_CHART_VERSION})"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

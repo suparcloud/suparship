@@ -1,6 +1,6 @@
 # Local Development Configuration
 
-suparShip uses environment variables for local development settings.
+suparship uses environment variables for local development settings.
 A root `.env.example` file contains sensible defaults — copy it to get
 started:
 

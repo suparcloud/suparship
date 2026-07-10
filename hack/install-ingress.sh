@@ -37,7 +37,7 @@ die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — NGINX ingress controller  (kind profile, ${INGRESS_NGINX_VERSION})"
+echo "  suparship — NGINX ingress controller  (kind profile, ${INGRESS_NGINX_VERSION})"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// labeledAppCR builds a suparShip Application with explicit project+app labels
+// labeledAppCR builds a suparship Application with explicit project+app labels
 // (appCR defaults the app label to the CR name; here the CR is "{app}-{env}").
 func labeledAppCR(crName, project, app string) *unstructured.Unstructured {
 	a := appCR(crName, project, false, nil)

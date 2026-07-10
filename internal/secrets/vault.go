@@ -124,7 +124,7 @@ const (
 // vault, items are keyed by (tier, app): the shared tier ignores app, the app
 // tier scopes to a single app so apps never see each other's secrets.
 //
-// Suparship writes values into the vault; ESO pulls them back into app
+// suparship writes values into the vault; ESO pulls them back into app
 // namespaces at sync time. Values are never returned through this interface —
 // ListKeys returns key names only.
 type VaultStore interface {

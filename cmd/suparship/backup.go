@@ -14,8 +14,8 @@ import (
 
 var backupCmd = &cobra.Command{
 	Use:   "backup",
-	Short: "Back up suparShip control-plane state to a file",
-	Long: `Capture all suparShip control-plane state — the ConfigMaps and Secrets
+	Short: "Back up suparship control-plane state to a file",
+	Long: `Capture all suparship control-plane state — the ConfigMaps and Secrets
 in the suparship-system namespace (org config, gitops/registry config,
 project/app/cluster/preview records, env-var layers, admin credential,
 1Password SA token and per-cluster Connect-token stashes + kubeconfigs) — into
@@ -25,7 +25,7 @@ The archive contains Secrets in plaintext (base64). Treat it as sensitive:
 store it encrypted and restrict access.
 
 ArgoCD-namespace secrets (cluster registrations, repo creds) are NOT included —
-suparShip re-derives them from the kubeconfig secrets + gitops config on
+suparship re-derives them from the kubeconfig secrets + gitops config on
 reconcile. SealedSecret template credentials are out of scope.`,
 	Example: `  # Write a backup to a file
   suparship backup --output suparship-backup.yaml
@@ -37,12 +37,12 @@ reconcile. SealedSecret template credentials are out of scope.`,
 
 var restoreCmd = &cobra.Command{
 	Use:   "restore",
-	Short: "Restore suparShip control-plane state from a backup file",
+	Short: "Restore suparship control-plane state from a backup file",
 	Long: `Apply a backup archive into the cluster. Restore is additive: it creates
 missing ConfigMaps/Secrets and updates existing ones in place. It never deletes
 resources that aren't in the archive.
 
-After restoring onto a fresh cluster, restart the suparShip server so it
+After restoring onto a fresh cluster, restart the suparship server so it
 reconciles derived state (ArgoCD AppProject, root app, per-cluster secret
 stores).`,
 	Example: `  suparship restore --input suparship-backup.yaml`,
@@ -51,7 +51,7 @@ stores).`,
 
 func init() {
 	backupCmd.Flags().StringP("output", "o", "-", "output file path (\"-\" for stdout)")
-	backupCmd.Flags().String("namespace", backup.SystemNamespace, "namespace holding suparShip state")
+	backupCmd.Flags().String("namespace", backup.SystemNamespace, "namespace holding suparship state")
 
 	restoreCmd.Flags().StringP("input", "i", "", "backup file path (required)")
 	restoreCmd.Flags().String("namespace", "", "override the target namespace (default: the archive's namespace)")
@@ -138,7 +138,7 @@ func runRestore(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(),
-		"Restored into %q: %d created, %d updated.\nRestart the suparShip server to reconcile derived state.\n",
+		"Restored into %q: %d created, %d updated.\nRestart the suparship server to reconcile derived state.\n",
 		ns, len(res.Created), len(res.Updated))
 	return nil
 }

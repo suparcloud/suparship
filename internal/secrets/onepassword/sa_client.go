@@ -99,7 +99,7 @@ type SAClient interface {
 
 	// IssueConnectToken is NOT SUPPORTED via SA tokens. Always returns
 	// ErrConnectNotReady. Admins must issue Connect tokens manually via the
-	// 1Password web console and provide them through the suparShip binding flow.
+	// 1Password web console and provide them through the suparship binding flow.
 	IssueConnectToken(ctx context.Context, serverName string, vaultIDs []string, label string) (ConnectToken, error)
 
 	// RevokeConnectToken is NOT SUPPORTED via SA tokens. Always returns

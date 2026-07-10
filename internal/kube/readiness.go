@@ -40,7 +40,7 @@ func NewArgoCDReadinessProbe(dyn dynamic.Interface, argoCDNamespace string) func
 
 // NewKubernetesReadinessProbe returns a readiness check function that verifies
 // the Kubernetes API server is reachable by listing namespaces. This is a
-// coarse liveness check; it does not verify any specific suparShip resource.
+// coarse liveness check; it does not verify any specific suparship resource.
 func NewKubernetesReadinessProbe(client kubernetes.Interface) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		_, err := client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{Limit: 1})

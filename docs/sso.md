@@ -1,6 +1,6 @@
 # Single Sign-On (OIDC)
 
-suparShip authenticates users in one of two ways:
+suparship authenticates users in one of two ways:
 
 - **Local admin credential** — a single break-glass account (username + bcrypt
   password) stored in a Kubernetes Secret. Always available; see
@@ -61,7 +61,7 @@ emits an `auth.oidc` block (secret **reference** only, never the value), and
    - Note the **Client ID** and **Client secret**.
 2. Configure the OAuth consent screen (Internal user type keeps it to your
    Workspace).
-3. In suparShip → Settings → Auth:
+3. In suparship → Settings → Auth:
    - Issuer URL: `https://accounts.google.com`
    - Client ID / Client Secret: from step 1
    - Redirect URL: as registered above

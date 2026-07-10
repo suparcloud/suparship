@@ -30,7 +30,7 @@ hack/preflight.sh local
 # ── Banner ────────────────────────────────────────────────────────────────
 cat <<EOF
 
-  suparShip — local dev  (fake / in-memory mode, no cluster required)
+  suparship — local dev  (fake / in-memory mode, no cluster required)
   ────────────────────────────────────────────────────────────────────
   Backend   →  http://localhost:${BACKEND_PORT}
   Frontend  →  http://localhost:${FRONTEND_PORT}

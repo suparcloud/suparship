@@ -15,7 +15,7 @@
 package gitops
 
 // AppProject is a minimal, serializable representation of an ArgoCD
-// AppProject CRD. Only the fields needed by suparShip are included.
+// AppProject CRD. Only the fields needed by suparship are included.
 type AppProject struct {
 	APIVersion string         `json:"apiVersion" yaml:"apiVersion"`
 	Kind       string         `json:"kind"       yaml:"kind"`

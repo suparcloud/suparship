@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # hack/install-replicator.sh — install Stakater Replicator (kubernetes-replicator)
-# into the suparShip dev cluster.
+# into the suparship dev cluster.
 #
 # Replicator watches ConfigMaps and Secrets annotated for replication and
-# automatically copies them into target namespaces. suparShip uses it to
+# automatically copies them into target namespaces. suparship uses it to
 # propagate upper-level (Org, Environment, Project) env-var ConfigMaps from
 # suparship-system into each app namespace without duplicating manifests.
 #
@@ -43,7 +43,7 @@ die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ─────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — Stakater Replicator install  (${REPLICATOR_APP_VERSION})"
+echo "  suparship — Stakater Replicator install  (${REPLICATOR_APP_VERSION})"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

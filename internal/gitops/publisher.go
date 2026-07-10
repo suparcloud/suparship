@@ -31,7 +31,7 @@ import (
 // Default Git author for commits suparship makes to the gitops repo, used when
 // the operator hasn't configured a custom CommitAuthorName / CommitAuthorEmail.
 const (
-	DefaultCommitAuthorName  = "suparShip"
+	DefaultCommitAuthorName  = "suparship"
 	DefaultCommitAuthorEmail = "suparship@suparcloud.io"
 )
 
@@ -331,7 +331,7 @@ func (p *Publisher) writeEnvInfra(repoDir, projectName string, envs []AppSetEnv)
 		// Write a SINGLE {project}-appproject.yaml per project (not one per env)
 		// to avoid ArgoCD rejecting the root app due to duplicate resource names.
 		appProject := BuildArgoAppProject(projectName, AppProjectOptions{
-			Description:           "suparShip project: " + projectName,
+			Description:           "suparship project: " + projectName,
 			AllowClusterResources: true,
 			Destinations:          destinations,
 		})
@@ -592,7 +592,7 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 		if err := p.writeAppTree(ctx, repoDir, app, envs); err != nil {
 			return err
 		}
-		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s\n\nCreated by suparShip.", app.ProjectName, app.Name)
+		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s\n\nCreated by suparship.", app.ProjectName, app.Name)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -663,7 +663,7 @@ func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppP
 		if err := p.publishAppFiles(repoDir, app, []AppPublishEnv{env}); err != nil {
 			return err
 		}
-		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s to %s\n\nPromoted by suparShip.", app.ProjectName, app.Name, env.EnvName)
+		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s to %s\n\nPromoted by suparship.", app.ProjectName, app.Name, env.EnvName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -690,7 +690,7 @@ func (p *Publisher) PublishAppsEnv(ctx context.Context, items []AppEnvPublish) e
 				return err
 			}
 		}
-		commitMsg := fmt.Sprintf("feat(apps): batch env publish (%d app(s))\n\nCreated by suparShip.", len(items))
+		commitMsg := fmt.Sprintf("feat(apps): batch env publish (%d app(s))\n\nCreated by suparship.", len(items))
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -734,7 +734,7 @@ func (p *Publisher) PublishApps(ctx context.Context, bundles []AppPublishBundle)
 				}
 			}
 		}
-		commitMsg := fmt.Sprintf("feat(apps): batch publish (%d app(s))\n\nCreated by suparShip.", len(bundles))
+		commitMsg := fmt.Sprintf("feat(apps): batch publish (%d app(s))\n\nCreated by suparship.", len(bundles))
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -1894,7 +1894,7 @@ func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview
 		if err := p.publishPreviewFiles(repoDir, app, preview); err != nil {
 			return err
 		}
-		commitMsg := fmt.Sprintf("feat(previews): create preview %s/%s\n\nCreated by suparShip.", app.ProjectName, preview.PreviewName)
+		commitMsg := fmt.Sprintf("feat(previews): create preview %s/%s\n\nCreated by suparship.", app.ProjectName, preview.PreviewName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -1922,7 +1922,7 @@ func (p *Publisher) PublishPreviews(ctx context.Context, bundles []PreviewPublis
 				return err
 			}
 		}
-		commitMsg := fmt.Sprintf("feat(previews): batch publish (%d preview(s))\n\nCreated by suparShip.", len(bundles))
+		commitMsg := fmt.Sprintf("feat(previews): batch publish (%d preview(s))\n\nCreated by suparship.", len(bundles))
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -2127,7 +2127,7 @@ func (p *Publisher) DeletePreview(ctx context.Context, projectName, previewName,
 			slog.Debug("gitops: preview directories not found, nothing to delete", "preview", previewName, "app", appName)
 			return nil
 		}
-		commitMsg := fmt.Sprintf("feat(previews): delete preview %s/%s/%s/%s\n\nDeleted by suparShip.", baseEnv, projectName, previewName, appName)
+		commitMsg := fmt.Sprintf("feat(previews): delete preview %s/%s/%s/%s\n\nDeleted by suparship.", baseEnv, projectName, previewName, appName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -2258,7 +2258,7 @@ func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName strin
 			return nil
 		}
 
-		commitMsg := fmt.Sprintf("feat(apps): delete app %s/%s\n\nDeleted by suparShip.", projectName, appName)
+		commitMsg := fmt.Sprintf("feat(apps): delete app %s/%s\n\nDeleted by suparship.", projectName, appName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -2281,7 +2281,7 @@ func (p *Publisher) RemoveAppEnv(ctx context.Context, projectName, appName, envN
 				"project", projectName, "app", appName, "env", envName)
 			return nil
 		}
-		commitMsg := fmt.Sprintf("feat(apps): remove %s/%s from %s\n\nRemoved by suparShip.", projectName, appName, envName)
+		commitMsg := fmt.Sprintf("feat(apps): remove %s/%s from %s\n\nRemoved by suparship.", projectName, appName, envName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -2432,7 +2432,7 @@ func (p *Publisher) UnpublishProjectApps(ctx context.Context, projectName string
 			return nil
 		}
 
-		commitMsg := fmt.Sprintf("feat(projects): delete project %s apps (phase 1/2)\n\nDeleted by suparShip.", projectName)
+		commitMsg := fmt.Sprintf("feat(projects): delete project %s apps (phase 1/2)\n\nDeleted by suparship.", projectName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }
@@ -2450,7 +2450,7 @@ func (p *Publisher) UnpublishProjectInfra(ctx context.Context, projectName strin
 			slog.Debug("gitops: no project infra files found — nothing to delete", "project", projectName)
 			return nil
 		}
-		commitMsg := fmt.Sprintf("feat(projects): delete project %s infra (phase 2/2)\n\nDeleted by suparShip.", projectName)
+		commitMsg := fmt.Sprintf("feat(projects): delete project %s infra (phase 2/2)\n\nDeleted by suparship.", projectName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
 }

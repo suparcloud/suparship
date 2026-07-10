@@ -729,7 +729,7 @@ function ImportModal({ onClose, onImported }: ImportModalProps) {
           Import clusters from ArgoCD
         </h2>
         <p className="mt-1 text-sm text-gray-500">
-          suparShip reconstructs a kubeconfig from each ArgoCD registration and
+          suparship reconstructs a kubeconfig from each ArgoCD registration and
           wires it for secret delivery (sealing cert + secret store). Clusters
           using exec / cloud-IAM auth (EKS/GKE) can't be imported — register
           those with a token-based kubeconfig instead.
@@ -914,7 +914,7 @@ export function ClusterSettings() {
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Clusters</h1>
           <p className="mt-1 text-sm text-gray-500">
-            Workload clusters that suparShip deploys apps to via ArgoCD.
+            Workload clusters that suparship deploys apps to via ArgoCD.
           </p>
         </div>
         <div className="flex gap-3">

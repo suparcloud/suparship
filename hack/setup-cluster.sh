@@ -41,7 +41,7 @@ hack/preflight.sh cluster
 
 # ── Header ────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — cluster setup  (idempotent)"
+echo "  suparship — cluster setup  (idempotent)"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

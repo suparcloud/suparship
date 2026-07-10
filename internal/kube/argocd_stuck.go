@@ -11,7 +11,7 @@ import (
 
 // StuckApplication describes an ArgoCD Application stuck in Terminating: its
 // deletion was requested but a finalizer can't complete, so it lingers
-// indefinitely. The recurring cause on suparShip is a cascade-delete finalizer
+// indefinitely. The recurring cause on suparship is a cascade-delete finalizer
 // that can't resolve the Application's AppProject (removed too early), but any
 // blocked finalizer produces the same symptom.
 type StuckApplication struct {
@@ -34,13 +34,13 @@ type StuckApplication struct {
 const argoResourcesFinalizer = "resources-finalizer.argocd.argoproj.io"
 
 // isSuparshipManagedApp reports whether an ArgoCD Application was emitted by
-// suparShip. The ArgoCD namespace is frequently shared with the platform
+// suparship. The ArgoCD namespace is frequently shared with the platform
 // team's own Applications (cert-manager, ingress controllers, node-feature-
-// discovery, …); those are none of suparShip's business — surfacing them as
+// discovery, …); those are none of suparship's business — surfacing them as
 // "stuck" is noise, and unsticking them would strip finalizers off objects we
 // don't own.
 //
-// Every Application suparShip writes carries a suparship.io/* ownership label:
+// Every Application suparship writes carries a suparship.io/* ownership label:
 // ApplicationSet-generated app/addon/preview Applications get suparship.io/project
 // (and usually suparship.io/app); directly-created infra Applications hardcode
 // suparship.io/managed-by=suparship. A foreign Application has none of these.
@@ -107,7 +107,7 @@ func (r *ArgoCDStatusReader) UnstickApplication(ctx context.Context, name string
 		return fmt.Errorf("getting application %q: %w", name, err)
 	}
 	if !isSuparshipManagedApp(app.GetLabels()) {
-		return fmt.Errorf("application %q is not managed by suparShip; refusing to modify finalizers on a foreign object", name)
+		return fmt.Errorf("application %q is not managed by suparship; refusing to modify finalizers on a foreign object", name)
 	}
 	if app.GetDeletionTimestamp() == nil {
 		return fmt.Errorf("application %q is not being deleted; refusing to remove finalizers from a live app", name)

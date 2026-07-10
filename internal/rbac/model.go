@@ -270,12 +270,12 @@ type OIDCConfig struct {
 	// ClientSecretRef names the Kubernetes Secret + key holding the client
 	// secret. Empty key defaults to "client-secret".
 	ClientSecretRef SecretKeyRef `yaml:"clientSecretRef,omitempty"`
-	// RedirectURL is suparShip's callback URL registered with the IdP, e.g.
+	// RedirectURL is suparship's callback URL registered with the IdP, e.g.
 	// https://suparship.example.com/api/v1/auth/oidc/callback.
 	RedirectURL string `yaml:"redirectURL"`
 	// Scopes requested at login. Defaults to openid, profile, email, groups.
 	Scopes []string `yaml:"scopes,omitempty"`
-	// UsernameClaim is the ID-token claim used as the suparShip username.
+	// UsernameClaim is the ID-token claim used as the suparship username.
 	// Defaults to "email".
 	UsernameClaim string `yaml:"usernameClaim,omitempty"`
 	// GroupsClaim is the ID-token claim carrying the user's IdP groups, matched

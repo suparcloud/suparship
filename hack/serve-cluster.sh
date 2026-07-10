@@ -56,7 +56,7 @@ fi
 # ── Banner ────────────────────────────────────────────────────────────────
 cat <<EOF
 
-  suparShip — cluster dev  (backend → ${KUBE_CONTEXT})
+  suparship — cluster dev  (backend → ${KUBE_CONTEXT})
   ──────────────────────────────────────────────────────────────────
   Backend   →  http://localhost:${BACKEND_PORT}
                local process, talks to kind cluster via KUBECONFIG

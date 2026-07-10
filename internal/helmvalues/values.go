@@ -1,11 +1,11 @@
 //go:generate go run ../../cmd/gen-values-schema
 
 // Package helmvalues defines the canonical Helm values structure for
-// suparShip app charts and the mapper that derives it from an AppSpec.
+// suparship app charts and the mapper that derives it from an AppSpec.
 //
 // # Design
 //
-// suparShip charts use a single, well-known values schema regardless of which
+// suparship charts use a single, well-known values schema regardless of which
 // template the app was created from. The schema models apps as a set of named
 // components and a single routing declaration. Template-specific mappings
 // (template.yaml) are intentionally NOT leaked here: this package depends only
@@ -54,12 +54,12 @@ import (
 )
 
 // HelmValues is the root of the canonical Helm values document for a
-// suparShip app chart. All fields are exported with both JSON and YAML tags
+// suparship app chart. All fields are exported with both JSON and YAML tags
 // so the struct can be serialized directly to either format.
 type HelmValues struct {
 	// App identifies which app and environment these values belong to.
 	App AppContext `json:"app" yaml:"app"`
-	// Platform carries suparShip-injected platform metadata (identity + routing
+	// Platform carries suparship-injected platform metadata (identity + routing
 	// context) for this app/env/cluster. Chart authors can reference it via
 	// .Values.platform.*, and it is the source of truth for ((platform.*)) tokens
 	// the publisher interpolates in user-supplied values. Never contains secrets.
@@ -104,7 +104,7 @@ type SuparshipValues struct {
 	EnvFromSecrets    []string `json:"envFromSecrets,omitempty" yaml:"envFromSecrets,omitempty"`
 }
 
-// PlatformValues carries suparShip platform metadata injected into every app
+// PlatformValues carries suparship platform metadata injected into every app
 // chart's values: app/env identity and the resolved routing context for this
 // (env, cluster). It is emitted as `.Values.platform` and is the source of truth
 // for ((platform.*)) interpolation tokens. Secrets are never included.

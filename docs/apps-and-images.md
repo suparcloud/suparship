@@ -1,6 +1,6 @@
 # Apps & Images — the developer path
 
-This is the day-to-day developer flow on suparShip: create an app from a
+This is the day-to-day developer flow on suparship: create an app from a
 template, point it at your container image, push from CI, and promote it
 through environments. The SRE/platform team does the one-time setup (clusters,
 GitOps repo, registry, secrets — see the platform setup checklist on the
@@ -20,7 +20,7 @@ your CI builds + pushes an image  ─►  registry (e.g. ghcr.io/acme/web:1.4.2)
                               next env (e.g. prod)
 ```
 
-suparShip never builds images — that's your CI's job. suparShip watches the
+suparship never builds images — that's your CI's job. suparship watches the
 registry, renders the Kubernetes manifests into the GitOps repo, and ArgoCD
 delivers them. Promotion between environments is gated and explicit (except the
 first environment, which auto-promotes new freight).
@@ -35,7 +35,7 @@ reference, no scheme and no tag:
 | `image_repository` | `ghcr.io/acme/web` | host + path only. **No** `https://`, **no** `:tag`, **no** `@sha256:…`. |
 | `image_tag` | `1.4.2` | optional; the running tag. CI updates this via new images, not by editing here. |
 
-suparShip rejects a malformed `image_repository` at creation time (a scheme, a
+suparship rejects a malformed `image_repository` at creation time (a scheme, a
 tag, a digest, or whitespace) so you find out immediately rather than seeing
 pods stuck in `InvalidImageName` later.
 
@@ -49,7 +49,7 @@ pods stuck in `InvalidImageName` later.
 ## 2. Make sure the registry is reachable
 
 If your image is in a **private** registry, the platform team configures it once
-under Settings → Registry (host, username, credential Secret). suparShip then
+under Settings → Registry (host, username, credential Secret). suparship then
 creates the `imagePullSecret` in each app namespace. Public images (e.g.
 `ghcr.io` public, Docker Hub library images) need no registry config.
 
@@ -67,7 +67,7 @@ docker push ghcr.io/acme/web:1.4.2
 
 By default the Kargo Warehouse only treats **SemVer** tags (`1.4.2`,
 `2.0.0`) as new freight. When you set a concrete `image_repository` on the app,
-suparShip relaxes the Warehouse to accept any tag — tighten the tag pattern on
+suparship relaxes the Warehouse to accept any tag — tighten the tag pattern on
 the Warehouse directly if you want stricter matching.
 
 No webhook is required: Kargo polls the registry. A newly pushed tag appears as
@@ -78,7 +78,7 @@ freight within the Warehouse's polling interval.
 - The **first** environment in the pipeline (lowest `Order`, e.g. `staging`)
   **auto-promotes** new freight — push a tag and it rolls out there on its own.
 - Every later environment is **gated**: open the app, review the freight, and
-  click **Promote** to advance it (e.g. staging → prod). suparShip creates a
+  click **Promote** to advance it (e.g. staging → prod). suparship creates a
   Kargo Promotion; ArgoCD then syncs the new revision to that env's cluster.
 
 The promotion order is the org environment `Order` set by the platform team

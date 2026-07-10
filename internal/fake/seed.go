@@ -93,7 +93,7 @@ func seedProjects(r *DevRuntime) {
 	demo := &domain.Project{
 		Name:        "demo",
 		DisplayName: "Demo Project",
-		Description: "Explore suparShip with a pre-seeded project.",
+		Description: "Explore suparship with a pre-seeded project.",
 		Environments: []domain.Environment{
 			{
 				Name:             "staging",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hack/seed.sh — apply deterministic demo data to the suparShip cluster.
+# hack/seed.sh — apply deterministic demo data to the suparship cluster.
 #
 # Creates (or updates) three ConfigMaps in the suparship-system namespace:
 #   suparship-org-config      — default org (admins team, org_admin binding)
@@ -38,7 +38,7 @@ kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 \
   || die "Namespace '$NAMESPACE' not found. Run: task dev:cluster:bootstrap"
 
 echo ""
-echo "  suparShip — seed demo data  (kubectl apply -f ${SEED_DIR}/)"
+echo "  suparship — seed demo data  (kubectl apply -f ${SEED_DIR}/)"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 
@@ -66,7 +66,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "-1"
     suparship.io/managed-by: suparship
 spec:
-  description: suparShip demo project
+  description: suparship demo project
   sourceRepos:
     - '*'
   destinations:

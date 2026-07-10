@@ -1,6 +1,6 @@
-# suparShip Chart Conventions
+# suparship Chart Conventions
 
-This document is the contract for authors of suparShip *template charts*
+This document is the contract for authors of suparship *template charts*
 (those under `templates/<name>/chart/`). It is enforced through the
 shared library chart at `charts/lib/suparship-common/`. New templates
 should depend on the library and follow the conventions below; existing
@@ -134,7 +134,7 @@ in the future without forcing a Deployment recreate.
 > **Documented exception — voiceai-agent.** Each component uses
 > `app: <component-name>` instead of `app.kubernetes.io/name`. This
 > matches the prior kustomize manifests so an in-place migration from
-> kustomize → suparShip does not force a Deployment recreate. This
+> kustomize → suparship does not force a Deployment recreate. This
 > exception is grandfathered, not a pattern to copy: new charts use
 > `app.kubernetes.io/name`.
 

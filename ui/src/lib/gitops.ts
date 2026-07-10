@@ -5,7 +5,7 @@ export interface GitOpsConfig {
   repoURL: string;
   branch: string;
   subPath?: string;
-  /** Git author for commits suparship makes (empty = "suparShip" default). */
+  /** Git author for commits suparship makes (empty = "suparship" default). */
   commitAuthorName?: string;
   commitAuthorEmail?: string;
   credentialExpiresAt?: string;

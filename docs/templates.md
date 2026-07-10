@@ -1,10 +1,10 @@
 # Templates
 
-suparShip templates are the primary mechanism for creating and deploying **apps**. When a developer picks a template and fills in the form, suparShip creates an **app** backed by that template's rendering configuration. The template does not create a raw Kubernetes Service or Deployment directly — it creates an app that suparShip then renders into the appropriate GitOps manifests.
+suparship templates are the primary mechanism for creating and deploying **apps**. When a developer picks a template and fills in the form, suparship creates an **app** backed by that template's rendering configuration. The template does not create a raw Kubernetes Service or Deployment directly — it creates an app that suparship then renders into the appropriate GitOps manifests.
 
 ## What a template creates
 
-A template creates an **app** — the primary user-facing deployment object in suparShip. See [ADR-0001](adr/0001-app-as-primary-deployment-object.md) for the rationale behind the app-first model.
+A template creates an **app** — the primary user-facing deployment object in suparship. See [ADR-0001](adr/0001-app-as-primary-deployment-object.md) for the rationale behind the app-first model.
 
 An app:
 
@@ -49,7 +49,7 @@ Workers and cron jobs are **not enabled in preview environments by default** to 
 
 ### Category → default component mapping
 
-suparShip derives the default component list from the template's `category` field when no explicit component list is provided:
+suparship derives the default component list from the template's `category` field when no explicit component list is provided:
 
 | Template `category` | Default component | Preview enabled |
 |---------------------|-------------------|-----------------|
@@ -127,7 +127,7 @@ In a future iteration, environment-specific overrides (e.g. replica count, resou
 
 ## Secrets
 
-Secret values **must never** be stored in Git or in the app spec. suparShip enforces this through the `secretInputs` block in the template schema.
+Secret values **must never** be stored in Git or in the app spec. suparship enforces this through the `secretInputs` block in the template schema.
 
 ### Secret input declaration
 
@@ -141,7 +141,7 @@ secretInputs:
     secretRef: db-credentials.url
 ```
 
-Each secret input carries a `secretRef` in `secret-name.key` format. This is the reference that suparShip stores in the app spec (`AppSecretRef.SecretRef`). The actual secret value is resolved at runtime by the cluster from the named Kubernetes Secret — it is never written to Git or stored in the suparShip database.
+Each secret input carries a `secretRef` in `secret-name.key` format. This is the reference that suparship stores in the app spec (`AppSecretRef.SecretRef`). The actual secret value is resolved at runtime by the cluster from the named Kubernetes Secret — it is never written to Git or stored in the suparship database.
 
 ### Reference format
 

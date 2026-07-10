@@ -1,5 +1,5 @@
 // Package gitops defines types and builder functions for generating ArgoCD
-// manifests from suparShip domain objects.
+// manifests from suparship domain objects.
 //
 // # Design
 //
@@ -59,7 +59,7 @@ const (
 )
 
 // Application is a minimal, serializable representation of an ArgoCD
-// Application CRD. Only the fields required for suparShip's app-per-environment
+// Application CRD. Only the fields required for suparship's app-per-environment
 // model are included; advanced ArgoCD features (health checks, ignoreDifferences,
 // multi-source, etc.) are out of scope for MVP.
 type Application struct {

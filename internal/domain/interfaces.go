@@ -103,8 +103,8 @@ type RuntimeStatusReader interface {
 	GetServiceStatus(ctx context.Context, projectName, serviceName, environment string) (*ServiceStatus, error)
 }
 
-// ClusterStore manages the registry of Kubernetes clusters that suparShip
-// deploys to. The tooling cluster (where suparShip itself runs) is not
+// ClusterStore manages the registry of Kubernetes clusters that suparship
+// deploys to. The tooling cluster (where suparship itself runs) is not
 // registered here — only workload clusters are.
 //
 // The K8s implementation stores cluster metadata as ConfigMaps and kubeconfigs

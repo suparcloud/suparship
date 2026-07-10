@@ -1,4 +1,4 @@
-// Package backup captures and restores suparShip's control-plane state — the
+// Package backup captures and restores suparship's control-plane state — the
 // ConfigMaps and Secrets in the suparship-system namespace that hold the org
 // config, gitops/registry config, project/app/cluster/preview records,
 // env-var layers, admin credential, 1Password SA token, and per-cluster
@@ -7,7 +7,7 @@
 // All authoritative state lives in one namespace and is name-prefixed
 // "suparship-", so capture is a prefix+namespace sweep rather than relying on
 // the (inconsistent) label conventions. ArgoCD-namespace secrets (cluster
-// registrations, repo creds) are intentionally NOT captured: suparShip
+// registrations, repo creds) are intentionally NOT captured: suparship
 // re-derives them from the kubeconfig secrets + gitops config on reconcile.
 // SealedSecret CRs (template credentials) are out of scope — encrypted and
 // regenerable by re-adding the template source.
@@ -29,7 +29,7 @@ import (
 // SystemNamespace is where all backup-worthy state lives.
 const SystemNamespace = "suparship-system"
 
-// resourcePrefix selects suparShip-owned ConfigMaps/Secrets by name.
+// resourcePrefix selects suparship-owned ConfigMaps/Secrets by name.
 const resourcePrefix = "suparship-"
 
 // APIVersion identifies the archive format for forward compatibility.
@@ -70,7 +70,7 @@ var dropAnnotations = map[string]bool{
 	"kubectl.kubernetes.io/last-applied-configuration": true,
 }
 
-// Create snapshots all suparShip ConfigMaps and Secrets in namespace (default
+// Create snapshots all suparship ConfigMaps and Secrets in namespace (default
 // SystemNamespace). extraNames lets the caller include resources that don't
 // match the "suparship-" prefix — e.g. an admin Secret renamed via
 // adminSecretRef. now is injected for deterministic timestamps in tests.
@@ -125,7 +125,7 @@ func Create(ctx context.Context, client kubernetes.Interface, namespace string, 
 			continue
 		}
 		// Skip ServiceAccount token Secrets — they're minted by the cluster,
-		// not suparShip state, and restoring them is meaningless.
+		// not suparship state, and restoring them is meaningless.
 		if s.Type == corev1.SecretTypeServiceAccountToken {
 			continue
 		}

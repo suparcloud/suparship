@@ -1,6 +1,6 @@
 # App model
 
-suparShip organises every deployable workload around a four-level hierarchy:
+suparship organises every deployable workload around a four-level hierarchy:
 
 ```
 org

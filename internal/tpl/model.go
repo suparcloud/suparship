@@ -2,7 +2,7 @@
 //
 // Templates describe golden paths for creating apps. Each template
 // lives in its own directory and is defined by a template.yaml file.
-// When a user picks a template and submits the form, suparShip creates
+// When a user picks a template and submits the form, suparship creates
 // an app — not a raw Kubernetes resource — that is then rendered into
 // GitOps manifests by the appropriate engine (Helm in MVP).
 //

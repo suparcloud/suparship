@@ -25,7 +25,7 @@ ok()    { printf "  \033[0;32m✓\033[0m  %s\n" "$*"; }
 skip()  { printf "  \033[0;33m–\033[0m  %s\n" "$*"; }
 
 echo ""
-echo "  suparShip — Gitea TLS proxy"
+echo "  suparship — Gitea TLS proxy"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hack/install-cert-manager.sh — install cert-manager into the suparShip dev cluster.
+# hack/install-cert-manager.sh — install cert-manager into the suparship dev cluster.
 #
 # cert-manager is required by Kargo to provision TLS certificates for the
 # Kargo API server and webhooks server (via a self-signed Issuer).
@@ -38,7 +38,7 @@ die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — cert-manager install  (dev profile, ${CERTMANAGER_CHART_VERSION})"
+echo "  suparship — cert-manager install  (dev profile, ${CERTMANAGER_CHART_VERSION})"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

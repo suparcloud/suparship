@@ -44,7 +44,7 @@ skip()  { printf "  \033[0;33m–\033[0m  %s\n" "$*"; }
 die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 echo ""
-echo "  suparShip — init color-app source repo in Gitea"
+echo "  suparship — init color-app source repo in Gitea"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 
@@ -78,7 +78,7 @@ else
     -d "{
       \"username\": \"${COLOR_APP_ORG}\",
       \"full_name\": \"Demo\",
-      \"description\": \"Demo apps for suparShip\",
+      \"description\": \"Demo apps for suparship\",
       \"visibility\": \"public\"
     }" \
     -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
@@ -144,7 +144,7 @@ git -c advice.detachedHead=false clone --quiet "${CLONE_URL}" "${TMPDIR}/color-a
 cd "${TMPDIR}/color-app"
 
 git config user.email "suparship-dev@local"
-git config user.name  "suparShip Dev Bot"
+git config user.name  "suparship Dev Bot"
 
 # Copy source files.
 cp "${REPO_ROOT}/demo/color-app/main.go" .
@@ -155,7 +155,7 @@ cp "${REPO_ROOT}/demo/color-app/.dockerignore" .
 cat > README.md <<'EOF'
 # color-app
 
-A tiny Go HTTP server that displays its configured color. Used by **suparShip**
+A tiny Go HTTP server that displays its configured color. Used by **suparship**
 to demonstrate Kargo promotion pipelines.
 
 ## Endpoints
@@ -185,7 +185,7 @@ git add .
 git commit --quiet -m "feat: initial color-app source
 
 Go HTTP server that returns a configurable color.
-Used for suparShip Kargo promotion demos."
+Used for suparship Kargo promotion demos."
 
 git push --quiet origin main
 ok "pushed to ${GITEA_HOST_URL}/${COLOR_APP_ORG}/${COLOR_APP_REPO}"

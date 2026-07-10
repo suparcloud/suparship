@@ -1,4 +1,4 @@
-# Gitea Helm values — suparShip local development profile.
+# Gitea Helm values — suparship local development profile.
 #
 # Installs a minimal, single-replica Gitea suitable for a kind cluster.
 # NOT suitable for staging or production.

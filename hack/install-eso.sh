@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # hack/install-eso.sh — install External Secrets Operator (ESO) and
-# bootstrap the demo ClusterSecretStores into the suparShip dev cluster.
+# bootstrap the demo ClusterSecretStores into the suparship dev cluster.
 #
 # ESO translates external secret backend references into native Kubernetes
-# Secrets. suparShip uses it to pull secrets referenced by SecretRefs in
+# Secrets. suparship uses it to pull secrets referenced by SecretRefs in
 # the five-level env config hierarchy into Kubernetes Secrets that containers
 # load via envFrom.
 #
@@ -53,7 +53,7 @@ die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ─────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — External Secrets Operator install  (${ESO_APP_VERSION})"
+echo "  suparship — External Secrets Operator install  (${ESO_APP_VERSION})"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

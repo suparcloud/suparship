@@ -4,7 +4,7 @@
 //
 // # Background
 //
-// suparShip is mid-transition from a service-centric model
+// suparship is mid-transition from a service-centric model
 // (domain.Service, project.Service) to an app-centric model
 // (domain.App, domain.AppEnvironment).  During this transition, existing
 // runtime and demo data is expressed in service-oriented types while the HTTP

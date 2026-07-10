@@ -1,4 +1,4 @@
-# suparShip Template: color-app
+# suparship Template: color-app
 #
 # A demo template for the color-app: a tiny HTTP service that returns its
 # configured color as both an HTML page and a JSON API. Designed for

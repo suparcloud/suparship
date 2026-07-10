@@ -1,4 +1,4 @@
-# Contributing to suparShip
+# Contributing to suparship
 
 Thanks for your interest in contributing! We welcome PRs of all sizes.
 
@@ -87,7 +87,7 @@ backed by the same fake deps that `task dev` uses. They are included in
 
 ## Development Modes
 
-suparShip supports three development modes depending on what you are working on:
+suparship supports three development modes depending on what you are working on:
 
 ### 1. Fast local dev
 
@@ -105,7 +105,7 @@ errors).
 ### 2. Cluster dev
 
 Spin up a local [kind](https://kind.sigs.k8s.io/) cluster and configure it as
-the suparShip dev target. Use this when you need to test any feature that
+the suparship dev target. Use this when you need to test any feature that
 reads or writes real Kubernetes resources (namespaces, deployments, ingresses).
 
 #### Required tools

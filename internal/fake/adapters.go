@@ -230,7 +230,7 @@ func newFakeProjectStore() *FakeProjectStore {
 		Metadata:   project.ProjectMeta{Name: "demo"},
 		Spec: project.ProjectSpec{
 			DisplayName: "Demo Project",
-			Description: "Explore suparShip with a pre-seeded project.",
+			Description: "Explore suparship with a pre-seeded project.",
 			// Environments are inherited from the org defaults; no project-level
 		// overrides or project-specific environments for the demo project.
 		Environments: []project.Environment{},

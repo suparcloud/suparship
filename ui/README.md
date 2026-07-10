@@ -1,6 +1,6 @@
-# suparShip UI
+# suparship UI
 
-React + Vite + TypeScript + Tailwind frontend for suparShip.
+React + Vite + TypeScript + Tailwind frontend for suparship.
 
 ---
 

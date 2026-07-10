@@ -48,7 +48,7 @@ tasks:
       - hack/serve-cluster.sh
 
   dev:cluster:delete:
-    desc: "Tear down the suparShip dev cluster"
+    desc: "Tear down the suparship dev cluster"
     cmds:
       - |
         kind delete cluster --name suparship-dev \
@@ -142,7 +142,7 @@ tasks:
       - hack/reset-cluster.sh
 
   dev:cluster:seed-color-app:
-    desc: "Seed color-app demo via the suparShip API (requires running server)"
+    desc: "Seed color-app demo via the suparship API (requires running server)"
     cmds:
       - hack/seed-color-app.sh
 

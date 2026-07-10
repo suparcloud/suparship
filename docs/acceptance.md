@@ -16,7 +16,7 @@ Two layers verify the golden path:
 
 ## Prerequisites
 
-- A hub cluster running suparShip + ArgoCD (+ Kargo, ESO) per [install.md](install.md).
+- A hub cluster running suparship + ArgoCD (+ Kargo, ESO) per [install.md](install.md).
 - At least one **remote** workload cluster registered (Settings → Clusters), so
   status/logs routing is genuinely cross-cluster — not in-cluster.
 - A GitOps repo connected and green on the Platform-setup checklist.
@@ -52,7 +52,7 @@ Tick each; note the build/image tag under test.
 - [ ] **Break-glass** — the local admin password login still works.
 - [ ] **Delete** — deleting the app removes its gitops files and the ArgoCD
       Application terminates cleanly (no stuck-in-Terminating; if any, the
-      dashboard surfaces only suparShip-managed stuck apps).
+      dashboard surfaces only suparship-managed stuck apps).
 - [ ] **Config export** — `GET /api/v1/org/export?format=yaml` reproduces the
       configured org/envs/clusters/gitops/registry/auth/teams/roleBindings with
       no secret values (refs only).
@@ -116,18 +116,18 @@ Per-cluster override:
 Only verifiable against a real ArgoCD that already has a cluster registered with
 a **token-based** kubeconfig (not exec/cloud-IAM).
 
-- [ ] In an ArgoCD that pre-dates suparShip, register a workload cluster with a
+- [ ] In an ArgoCD that pre-dates suparship, register a workload cluster with a
       token kubeconfig (`argocd cluster add` against a context that uses a bearer
       token / service-account token).
 - [ ] Settings → Clusters → **Import from ArgoCD** lists that cluster as
       importable; a cluster ArgoCD added with exec/cloud-IAM auth (EKS/GKE)
       appears greyed with the "exec / cloud-IAM auth not supported" reason; a
-      cluster suparShip already manages appears greyed as "already registered".
+      cluster suparship already manages appears greyed as "already registered".
 - [ ] Select the token cluster → Import → it appears in the Clusters list as
       **ready**; live status/logs work (proves the reconstructed kubeconfig
       builds a working client); the Routing editor is available.
 - [ ] No **new** ArgoCD cluster Secret was created for that server (import linked
-      the existing one); deleting the imported cluster from suparShip leaves the
+      the existing one); deleting the imported cluster from suparship leaves the
       original ArgoCD cluster Secret intact.
 - [ ] On the **k8s** secret backend, deploy an app to an env on the imported
       cluster and confirm its secrets materialize (the ESO ClusterSecretStore was

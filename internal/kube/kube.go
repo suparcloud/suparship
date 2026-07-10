@@ -1,9 +1,9 @@
 // Package kube provides Kubernetes-backed implementations of the server
-// dependency interfaces for suparShip.
+// dependency interfaces for suparship.
 //
 // # Storage model (MVP)
 //
-// Rather than introducing custom CRDs immediately, all persistent suparShip
+// Rather than introducing custom CRDs immediately, all persistent suparship
 // state is stored as Kubernetes ConfigMaps in the suparship-system namespace:
 //
 //	suparship-project-<name>   — project + service definitions (project.yaml)
@@ -15,7 +15,7 @@
 //
 // # Future CRD migration
 //
-// TODO: When suparShip CRDs are introduced (e.g. a typed Project or
+// TODO: When suparship CRDs are introduced (e.g. a typed Project or
 // PreviewEnvironment resource), replace the ConfigMap-backed stores
 // (project.K8sStore, preview.K8sStore) with typed CRD clients generated
 // by controller-gen or written against controller-runtime. The interface

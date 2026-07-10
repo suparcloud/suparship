@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hack/setup-dns.sh — configure wildcard DNS for suparShip local development.
+# hack/setup-dns.sh — configure wildcard DNS for suparship local development.
 #
 # Without this, every new ingress hostname (argocd.localhost, gitea.localhost,
 # pr-123.hello.preview.localhost, …) must be added manually to /etc/hosts.
@@ -75,7 +75,7 @@ fi
 
 # ── Banner ────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — local DNS setup (wildcard *.localhost)"
+echo "  suparship — local DNS setup (wildcard *.localhost)"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 
@@ -138,7 +138,7 @@ if [ -f "${RESOLVER_FILE}" ] && grep -qF "nameserver 127.0.0.1" "${RESOLVER_FILE
 else
   sudo mkdir -p "${RESOLVER_DIR}"
   cat <<EOF | sudo tee "${RESOLVER_FILE}" >/dev/null
-# suparShip: route *.localhost DNS queries to local dnsmasq
+# suparship: route *.localhost DNS queries to local dnsmasq
 domain localhost
 search localhost
 nameserver 127.0.0.1

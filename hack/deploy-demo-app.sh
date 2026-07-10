@@ -54,7 +54,7 @@ die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — deploy demo app  (hello / staging)"
+echo "  suparship — deploy demo app  (hello / staging)"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 
@@ -90,7 +90,7 @@ echo ""
 
 cd "${TMPDIR}/gitops"
 git config user.email "suparship-dev@local"
-git config user.name  "suparShip Dev Bot"
+git config user.name  "suparship Dev Bot"
 
 # ── 4. Check if already deployed ─────────────────────────────────────────
 if [ -f "${APP_FILE}" ]; then

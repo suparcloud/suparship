@@ -1,4 +1,4 @@
-# ArgoCD Helm values — suparShip local development profile.
+# ArgoCD Helm values — suparship local development profile.
 #
 # Installs a minimal, single-replica ArgoCD suitable for a kind cluster.
 # NOT suitable for staging or production.

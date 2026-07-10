@@ -1,4 +1,4 @@
-# Local DNS for suparShip Development
+# Local DNS for suparship Development
 
 Without wildcard DNS you need a manual `/etc/hosts` entry for every ingress
 hostname — which is unworkable for preview environments like
@@ -98,7 +98,7 @@ sudo systemctl restart systemd-resolved
 
 ## Why `*.localhost` and not a custom TLD?
 
-suparShip ingresses already use `*.localhost` hostnames (e.g. `argocd.localhost`,
+suparship ingresses already use `*.localhost` hostnames (e.g. `argocd.localhost`,
 `gitea.localhost`, `hello-staging.localhost`). Keeping that convention means:
 
 - No extra configuration when deploying to a real cluster (hostnames change

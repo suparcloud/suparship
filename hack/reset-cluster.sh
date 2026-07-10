@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hack/reset-cluster.sh — remove suparShip seed data from the cluster.
+# hack/reset-cluster.sh — remove suparship seed data from the cluster.
 #
 # Deletes only the three ConfigMaps applied by hack/seed.sh:
 #   suparship-org-config
@@ -34,7 +34,7 @@ die()  { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 command -v kubectl >/dev/null 2>&1 || die "'kubectl' not found."
 
 echo ""
-echo "  suparShip — reset cluster seed data"
+echo "  suparship — reset cluster seed data"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

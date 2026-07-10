@@ -33,7 +33,7 @@ skip()  { printf "  \033[0;33m–\033[0m  %s\n" "$*"; }
 die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 echo ""
-echo "  suparShip — local registry setup"
+echo "  suparship — local registry setup"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

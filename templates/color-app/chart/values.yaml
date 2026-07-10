@@ -1,13 +1,13 @@
 # Default values for the color-app template chart.
 #
-# Follows the suparShip canonical HelmValues schema. Keys under
-# `components.web.*` and `routing.*` are set by suparShip at publish time.
+# Follows the suparship canonical HelmValues schema. Keys under
+# `components.web.*` and `routing.*` are set by suparship at publish time.
 
 app:
   name: ""
   env: ""
 
-# -- Platform metadata — injected by suparShip at publish time. Reference any
+# -- Platform metadata — injected by suparship at publish time. Reference any
 # field via .Values.platform.* in this chart. Never contains secrets.
 platform:
   org: ""
@@ -51,7 +51,7 @@ serviceAccount:
 # Set to "" to disable.
 reloader: "true"
 
-# envFrom hierarchy — populated by the suparShip publisher per app-env.
+# envFrom hierarchy — populated by the suparship publisher per app-env.
 # The chart suppresses the envFrom block when both lists are empty.
 suparship:
   envFromConfigMaps: []

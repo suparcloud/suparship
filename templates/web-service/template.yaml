@@ -1,4 +1,4 @@
-# suparShip Template: web-service
+# suparship Template: web-service
 #
 # A general-purpose template for creating containerized HTTP apps on
 # Kubernetes. Creates an app with a single web component (Deployment,

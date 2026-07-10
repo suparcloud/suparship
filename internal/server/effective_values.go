@@ -76,7 +76,7 @@ func computeEffectiveValues(chartVals, canonicalBase map[string]any, t *tpl.Temp
 		out = map[string]any{}
 	}
 	// canonicalBase is the platform↔chart contract (app/components/suparship/
-	// routing) suparShip publishes; Helm applies it on top of the chart's own
+	// routing) suparship publishes; Helm applies it on top of the chart's own
 	// values.yaml defaults at render. Layer it here so the app preview matches
 	// what deploys. nil for template-level previews (no concrete app).
 	if canonicalBase != nil {
@@ -235,7 +235,7 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, canonicalBase, available, t, ov, envName, "", appRaw, envRaw))
 }
 
-// canonicalBaseMap renders the canonical HelmValues base suparShip publishes for
+// canonicalBaseMap renders the canonical HelmValues base suparship publishes for
 // an app+env (app/components/suparship/routing) into a map, so the effective
 // preview reflects the platform↔chart contract Helm applies — not just chart
 // defaults + overlays. Routing host / cluster resolution is approximate here
@@ -256,7 +256,7 @@ func (ah *appHandler) canonicalBaseMap(ctx context.Context, app *domain.App, env
 	return CanonicalBaseMap(app, envName, envType, namespace, orgName)
 }
 
-// CanonicalBaseMap renders the canonical HelmValues base suparShip publishes for
+// CanonicalBaseMap renders the canonical HelmValues base suparship publishes for
 // an app+env (app/components/suparship/routing) into a map, so callers can layer
 // it under the chart defaults + overrides to match what Helm renders. Routing
 // host / cluster resolution is approximate (nil profiles, empty baseDomain); the

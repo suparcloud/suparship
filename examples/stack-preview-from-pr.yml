@@ -1,4 +1,4 @@
-# Example GitHub Actions workflow — suparShip STACK previews + label-driven pinning.
+# Example GitHub Actions workflow — suparship STACK previews + label-driven pinning.
 #
 # What it does, per pull request:
 #   • Preview (automatic): opens/updates a preview of the WHOLE stack in one call
@@ -94,7 +94,7 @@ jobs:
             -H "Authorization: Bearer $TOKEN" > /tmp/groups
           body=$(jq -r --arg n "$NAME" '
             (.previews[] | select(.name==$n)) as $g
-            | "### 🚀 suparShip preview `\($n)` — \($g.health)\n"
+            | "### 🚀 suparship preview `\($n)` — \($g.health)\n"
               + ( [ $g.apps[]
                     | "- **\(.appName)**: "
                       + (if (.urls|length) > 0
@@ -103,7 +103,7 @@ jobs:
                       + " — \(.status.phase)" ]
                   | join("\n") )
           ' /tmp/groups)
-          [ -n "$body" ] || body="### 🚀 suparShip preview \`$NAME\`\n_provisioning…_"
+          [ -n "$body" ] || body="### 🚀 suparship preview \`$NAME\`\n_provisioning…_"
           printf '%b\n\n<sub>suparship-preview-comment</sub>\n' "$body" > /tmp/body.md
           # Find an existing sticky comment by its marker and PATCH it, else POST.
           id=$(gh api "repos/$REPO/issues/$PR/comments" \

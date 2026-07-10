@@ -1,4 +1,4 @@
-# Upgrading suparShip
+# Upgrading suparship
 
 How to move a running install to a newer release safely, and the per-version
 migration notes. Read the notes for **every version between your current one
@@ -6,7 +6,7 @@ and the target** before upgrading.
 
 ## Versioning model
 
-suparShip carries three version numbers; `suparship version` prints all of them:
+suparship carries three version numbers; `suparship version` prints all of them:
 
 | Version | What it tracks | Bumps when |
 |---|---|---|
@@ -17,7 +17,7 @@ suparShip carries three version numbers; `suparship version` prints all of them:
 The config-schema version is stamped into the org ConfigMap on every save and
 **checked on startup**: the server logs an advisory when the stored schema is
 older (upgrade — review notes), unversioned (pre-`v1` install), or newer than
-the binary (you're running an older suparShip than wrote the config — a
+the binary (you're running an older suparship than wrote the config — a
 downgrade risk). It does not auto-migrate; it points you here.
 
 Generated manifests carry `…/generator-version` so you (or a migration tool)

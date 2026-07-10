@@ -1,4 +1,4 @@
-# Example suparShip Helm values — a realistic single-cluster install for "Acme".
+# Example suparship Helm values — a realistic single-cluster install for "Acme".
 #
 # Copy and edit, then:
 #   helm install suparship ./charts/suparship \
@@ -29,7 +29,7 @@ admin:
 server:
   cookieSecure: true
 
-# -- GitOps repository suparShip writes app/env manifests to (ArgoCD syncs it).
+# -- GitOps repository suparship writes app/env manifests to (ArgoCD syncs it).
 gitops:
   provider: github
   repoURL: https://github.com/acme/gitops.git

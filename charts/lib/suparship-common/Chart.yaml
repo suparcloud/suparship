@@ -1,7 +1,7 @@
 apiVersion: v2
 name: suparship-common
 description: >-
-  Shared Helm template helpers for suparShip app charts. Provides
+  Shared Helm template helpers for suparship app charts. Provides
   fullname, label, selector, resource-preset, envFrom-gating, and
   reloader-annotation helpers so individual templates do not duplicate
   ~50 lines of identical boilerplate per chart.

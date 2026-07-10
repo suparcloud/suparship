@@ -1,5 +1,5 @@
 // Package domain defines the MVP view types and storage interfaces for
-// suparShip.
+// suparship.
 //
 // All types in this package are plain Go structs with JSON tags — no
 // Kubernetes imports, no YAML tags, no external framework dependencies.
@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-// Org represents the single organization in a suparShip installation.
+// Org represents the single organization in a suparship installation.
 type Org struct {
 	Name        string    `json:"name"`
 	DisplayName string    `json:"displayName"`
@@ -96,8 +96,8 @@ func (e Environment) EffectiveClusterRef() string {
 	return ""
 }
 
-// Cluster represents a Kubernetes cluster registered with suparShip.
-// suparShip itself runs on a tooling cluster; registered clusters are the
+// Cluster represents a Kubernetes cluster registered with suparship.
+// suparship itself runs on a tooling cluster; registered clusters are the
 // workload targets where apps are deployed via ArgoCD.
 type Cluster struct {
 	// Name is the unique identifier for this cluster (DNS label).

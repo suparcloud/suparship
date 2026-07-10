@@ -6,7 +6,7 @@ import (
 )
 
 // StuckApp is one ArgoCD Application wedged in Terminating, surfaced so an
-// operator can unstick it from suparShip instead of hand-patching finalizers.
+// operator can unstick it from suparship instead of hand-patching finalizers.
 type StuckApp struct {
 	Name              string   `json:"name"`
 	Project           string   `json:"project,omitempty"`

@@ -28,7 +28,7 @@ We appreciate responsible disclosure and will credit reporters (unless you prefe
 
 ## Security Best Practices
 
-When using suparShip:
+When using suparship:
 
 - Never commit secrets to Git — use references only (`ref:secret-name.key`)
 - Pin component versions explicitly

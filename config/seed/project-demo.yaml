@@ -17,7 +17,7 @@ data:
       name: demo
     spec:
       displayName: Demo Project
-      description: Explore suparShip with a pre-seeded project.
+      description: Explore suparship with a pre-seeded project.
       # environments is intentionally empty — this project inherits the canonical
       # pipeline (staging → prod) from the org config. Add entries here only when
       # you need project-specific overrides or additional environments.

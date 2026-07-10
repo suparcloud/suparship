@@ -83,7 +83,7 @@ type ImageSubscription struct {
 
 // KargoStage is a minimal, serialisable representation of a Kargo Stage CR.
 // A Stage represents one deployment tier (e.g. staging, prod) in a promotion
-// pipeline. suparShip generates one Stage per stable AppEnvironment per app.
+// pipeline. suparship generates one Stage per stable AppEnvironment per app.
 //
 // Kargo docs: https://docs.kargo.io/concepts#stages
 type KargoStage struct {

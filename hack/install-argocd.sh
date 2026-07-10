@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hack/install-argocd.sh — install a minimal ArgoCD into the suparShip dev cluster.
+# hack/install-argocd.sh — install a minimal ArgoCD into the suparship dev cluster.
 #
 # Idempotent: uses `helm upgrade --install` so re-running is safe.
 # Requires the cluster and the `argocd` namespace to exist first:
@@ -44,7 +44,7 @@ die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — ArgoCD install  (dev profile, chart ${ARGOCD_CHART_VERSION})"
+echo "  suparship — ArgoCD install  (dev profile, chart ${ARGOCD_CHART_VERSION})"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

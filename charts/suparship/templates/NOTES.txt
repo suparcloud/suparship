@@ -1,5 +1,5 @@
 
-suparShip has been installed.
+suparship has been installed.
 
 {{- if .Values.ingress.enabled }}
 

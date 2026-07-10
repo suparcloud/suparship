@@ -1,10 +1,10 @@
 # Create a token-based kubeconfig for registering a cluster
 
-suparShip registers a workload cluster from a **kubeconfig** (Settings → Clusters
+suparship registers a workload cluster from a **kubeconfig** (Settings → Clusters
 → Register cluster). The most portable, long-lived credential is a
 **ServiceAccount token** — it works the same on every distribution and, unlike
 exec / cloud-IAM kubeconfigs (EKS `aws-iam-authenticator`, GKE `gcloud`), it can
-be stored and replayed by suparShip's hub and by ArgoCD.
+be stored and replayed by suparship's hub and by ArgoCD.
 
 > This is also the recommended path for EKS/GKE clusters that the
 > [Import from ArgoCD](install.md#6-register-at-least-one-workload-cluster) flow
@@ -16,8 +16,8 @@ Run all `kubectl` commands **against the workload cluster** you want to register
 
 ## 1. Create a ServiceAccount and grant it access
 
-suparShip's stored credential is used both by ArgoCD (to apply your app
-manifests) and by suparShip's hub (to read status/logs and fetch the
+suparship's stored credential is used both by ArgoCD (to apply your app
+manifests) and by suparship's hub (to read status/logs and fetch the
 sealed-secrets cert). ArgoCD applies arbitrary manifests, so `cluster-admin` is
 the simplest correct choice. You can scope it down later, but the role must cover
 everything your apps deploy plus cluster-wide read.
@@ -88,7 +88,7 @@ EOF
 The `token` is decoded to its plaintext form, which is what a kubeconfig expects.
 
 > If the API server is only reachable over a private endpoint (e.g. an AKS/EKS
-> privatelink address), make sure suparShip's hub can route to that `server`
+> privatelink address), make sure suparship's hub can route to that `server`
 > value. Use the address that is reachable from the hub.
 
 ## 4. Verify and register
@@ -99,12 +99,12 @@ Confirm the kubeconfig works before uploading it:
 kubectl --kubeconfig suparship-kubeconfig.yaml get nodes
 ```
 
-Then in suparShip: **Settings → Clusters → Register cluster**
+Then in suparship: **Settings → Clusters → Register cluster**
 
 - **API server URL** — paste `$SERVER` (no trailing space; it's validated).
 - **Kubeconfig** — upload `suparship-kubeconfig.yaml`.
 
-suparShip stores the kubeconfig in a Kubernetes Secret (never in Git), registers
+suparship stores the kubeconfig in a Kubernetes Secret (never in Git), registers
 the cluster with ArgoCD, and fetches the sealed-secrets cert in the background.
 The cluster should show **ready**.
 
@@ -114,4 +114,4 @@ The cluster should show **ready**.
   kubeconfig (step 3), and re-register the cluster (or use Refresh cert if only
   the CA changed).
 - **Revoke** — delete the ServiceAccount and its ClusterRoleBinding; the token is
-  immediately invalid. Remove the cluster from suparShip too.
+  immediately invalid. Remove the cluster from suparship too.

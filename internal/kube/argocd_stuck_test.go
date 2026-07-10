@@ -28,7 +28,7 @@ func newStuckReader(t *testing.T, objs ...*unstructured.Unstructured) *ArgoCDSta
 	return NewArgoCDStatusReaderFromDynamic(dyn, "argocd")
 }
 
-// appCR builds a suparShip-managed Application (it carries the suparship.io/project
+// appCR builds a suparship-managed Application (it carries the suparship.io/project
 // ownership label, as every ApplicationSet-generated Application does).
 func appCR(name, project string, terminating bool, finalizers []string) *unstructured.Unstructured {
 	app := foreignAppCR(name, project, terminating, finalizers)
@@ -78,7 +78,7 @@ func TestListStuckApplications(t *testing.T) {
 		// terminating + finalizer, project exists → stuck, generic reason
 		appCR("stuck-proj-ok", "test", true, []string{argoResourcesFinalizer}),
 		// foreign app (no suparship.io/* label) stuck Terminating → ignored,
-		// it belongs to the platform team's own ArgoCD, not suparShip
+		// it belongs to the platform team's own ArgoCD, not suparship
 		foreignAppCR("cert-manager-staging", "infra", true, []string{argoResourcesFinalizer}),
 		appProjectCR("test"),
 	)

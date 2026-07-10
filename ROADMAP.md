@@ -438,9 +438,9 @@ valkey instance with its connection details — no curl required.
 
 ## Architecture Decisions
 
-- **ExternalSecrets backend**: suparShip writes secret values to the external vault (1Password, Vault, AWS-SM) via the `VaultWriter` interface. ESO pulls them into the cluster via generated `ExternalSecret` CRs. Git never holds secret values — only `ClusterSecretStore` and `ExternalSecret` manifests. See [docs/secrets.md](docs/secrets.md).
+- **ExternalSecrets backend**: suparship writes secret values to the external vault (1Password, Vault, AWS-SM) via the `VaultWriter` interface. ESO pulls them into the cluster via generated `ExternalSecret` CRs. Git never holds secret values — only `ClusterSecretStore` and `ExternalSecret` manifests. See [docs/secrets.md](docs/secrets.md).
 - **Isolation modes**: `hard` = one `ClusterSecretStore` + token per environment (SOC2); `soft` = single store (demo/POC). Configurable via `suparship secrets backend set --isolation=hard|soft`.
-- **Vendor-neutral naming**: Resources outside `suparship-system` use configurable patterns (default: `{app}`) tracked by `app.kubernetes.io/managed-by: suparship` label rather than name prefix. Users can manage apps via plain GitOps without suparShip.
+- **Vendor-neutral naming**: Resources outside `suparship-system` use configurable patterns (default: `{app}`) tracked by `app.kubernetes.io/managed-by: suparship` label rather than name prefix. Users can manage apps via plain GitOps without suparship.
 - **Release train naming**: always `{app}-{env}-{train}` — deterministic, never includes timestamps.
 - **Traffic weight validation**: weights must sum to 100; enforced in the API before any GitOps write.
 - **Promotion scope**: a promotion moves a coherent `(app, train, image-tag)` tuple — never individual components.

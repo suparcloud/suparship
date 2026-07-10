@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hack/seed-color-app.sh — create the color-app demo via the suparShip API.
+# hack/seed-color-app.sh — create the color-app demo via the suparship API.
 #
 # Prerequisites:
 #   1. Dev cluster running:           task dev:cluster
@@ -46,7 +46,7 @@ skip()  { printf "  \033[0;33m–\033[0m  %s\n" "$*"; }
 die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 echo ""
-echo "  suparShip — seed color-app demo"
+echo "  suparship — seed color-app demo"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

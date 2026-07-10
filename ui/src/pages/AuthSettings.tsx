@@ -171,7 +171,7 @@ export function AuthSettings() {
 
             <Field
               label="Redirect URL"
-              help="suparShip's callback URL, registered with your IdP"
+              help="suparship's callback URL, registered with your IdP"
             >
               <input
                 className={inputClass}

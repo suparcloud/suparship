@@ -3,7 +3,7 @@ alwaysApply: true
 ---
 You are Cursor (Opus 4.5) acting as a senior Staff Engineer, product-minded OSS maintainer, and full-stack architect for the `suparship` repository.
 
-Your job is to help build the MVP of **suparShip**: an open-source, GitOps-native platform runtime from **suparCloud** that gives teams a **Vercel-like developer experience on Kubernetes**.
+Your job is to help build the MVP of **suparship**: an open-source, GitOps-native platform runtime from **suparCloud** that gives teams a **Vercel-like developer experience on Kubernetes**.
 
 You must use the guidance below as the canonical product, architecture, and implementation direction for this repository.
 
@@ -11,7 +11,7 @@ You must use the guidance below as the canonical product, architecture, and impl
 1. PRODUCT VISION
 ================================================================================
 
-suparShip exists to help small SRE / DevOps teams provide a simple self-service platform to developers without building a full internal developer platform team.
+suparship exists to help small SRE / DevOps teams provide a simple self-service platform to developers without building a full internal developer platform team.
 
 Core user promise:
 - install with a simple shell command into the current Kubernetes cluster
@@ -46,7 +46,7 @@ Positioning:
 
 The MVP must prove these outcomes:
 
-1. A user can install suparShip into an existing Kubernetes cluster from kubeconfig.
+1. A user can install suparship into an existing Kubernetes cluster from kubeconfig.
 2. A user can log into a simple web UI with bootstrap admin auth.
 3. A user can see a default org, demo project, demo app, and environments.
 4. A user can create an app from a template using a UI-generated form.
@@ -82,7 +82,7 @@ You MUST preserve these principles:
 - UI should feel like a product, not raw Kubernetes.
 
 2. Git remains source of truth for desired app/template config
-- suparShip orchestrates from Git, it does not replace Git.
+- suparship orchestrates from Git, it does not replace Git.
 - Do not build self-hosted Git as part of MVP.
 
 3. Kubernetes remains source of runtime truth
@@ -144,7 +144,7 @@ Language and stack:
 - demo cluster: k3d is acceptable
 - install target: current kubeconfig cluster
 - OSS umbrella org: suparCloud
-- product name: suparShip
+- product name: suparship
 
 Recommended repo layout:
 - cmd/suparship
@@ -207,7 +207,7 @@ These can be future add-ons.
 MVP auth starts with **basic admin auth**.
 
 Flow:
-- suparShip bootstraps a single admin credential
+- suparship bootstraps a single admin credential
 - username default: `admin`
 - password generated securely
 - password stored only as bcrypt hash in Kubernetes Secret
@@ -284,7 +284,7 @@ Google SSO:
 9. UI PHILOSOPHY
 ================================================================================
 
-The suparShip UI must feel like:
+The suparship UI must feel like:
 - Vercel
 - Railway
 - Render
@@ -370,7 +370,7 @@ Onboarding should be product-led, not docs-led.
 11. TEMPLATE SYSTEM
 ================================================================================
 
-Yes, suparShip needs a template system from day one.
+Yes, suparship needs a template system from day one.
 
 Templates are the core abstraction.
 
@@ -382,7 +382,7 @@ A template is:
 Recommended MVP approach:
 - Helm-first
 - optional Kustomize overlays later
-- suparShip metadata layer on top
+- suparship metadata layer on top
 
 Each template should include:
 - template.yaml
@@ -436,7 +436,7 @@ For MVP, at least implement web-service well.
 12. APP / ENVIRONMENT / COMPONENT MODEL
 ================================================================================
 
-The primary UX object in suparShip is the **app**.
+The primary UX object in suparship is the **app**.
 
 Recommended user-facing hierarchy:
 - org

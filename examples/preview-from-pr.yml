@@ -1,4 +1,4 @@
-# Example GitHub Actions workflow — launch a suparShip preview per pull request.
+# Example GitHub Actions workflow — launch a suparship preview per pull request.
 #
 # Creates an ephemeral preview environment when a PR is opened/updated and tears
 # it down when the PR closes. The preview clones the app's default base env
@@ -13,7 +13,7 @@
 #
 # Single-app shown here; for a monorepo, loop the create/delete over each app
 # (e.g. read an app list from a matrix) — the API call is per app. If those apps
-# form a suparShip stack, prefer stack-preview-from-pr.yml: one call previews the
+# form a suparship stack, prefer stack-preview-from-pr.yml: one call previews the
 # whole collection and membership changes need no workflow edit.
 
 name: suparship-preview

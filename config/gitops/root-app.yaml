@@ -1,4 +1,4 @@
-# ArgoCD root "App of Apps" — suparShip dev cluster (Model B — env/cluster-centric).
+# ArgoCD root "App of Apps" — suparship dev cluster (Model B — env/cluster-centric).
 #
 # This Application watches gitops-output/ in the Gitea gitops repo for:
 #

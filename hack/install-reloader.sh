@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# hack/install-reloader.sh — install Stakater Reloader into the suparShip
+# hack/install-reloader.sh — install Stakater Reloader into the suparship
 # dev cluster.
 #
 # Reloader watches ConfigMaps and Secrets and performs rolling restarts on
 # Deployments (and StatefulSets, DaemonSets) that reference them when a change
-# is detected. suparShip uses it to ensure pods automatically restart after
+# is detected. suparship uses it to ensure pods automatically restart after
 # ESO pulls updated secret values — preventing stale credentials without
 # manual rollouts.
 #
@@ -47,7 +47,7 @@ die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ─────────────────────────────────────────────────────────────────
 echo ""
-echo "  suparShip — Stakater Reloader install  (${RELOADER_APP_VERSION})"
+echo "  suparship — Stakater Reloader install  (${RELOADER_APP_VERSION})"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 

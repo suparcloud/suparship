@@ -10,7 +10,7 @@
 
 The initial MVP used **service** as the top-level deployable entity inside a project. This mirrored common DevOps terminology (`kubectl`, Helm, microservice language) and was a reasonable starting point.
 
-However, the product vision for suparShip is a **Vercel-like developer experience**. Products like Vercel, Railway, and Render orient the developer around an **app** — the thing you create, preview, and promote — not around a Kubernetes "service" or a Helm release.
+However, the product vision for suparship is a **Vercel-like developer experience**. Products like Vercel, Railway, and Render orient the developer around an **app** — the thing you create, preview, and promote — not around a Kubernetes "service" or a Helm release.
 
 Several problems emerged with the service-centric model:
 

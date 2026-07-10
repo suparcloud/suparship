@@ -337,7 +337,7 @@ export function GitOpsSettings() {
           GitOps Repository
         </h1>
         <p className="mt-1 text-sm text-gray-500">
-          Connect the Git repository where suparShip will store deployment
+          Connect the Git repository where suparship will store deployment
           manifests.
           {configured && (
             <span className="ml-2 inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
@@ -408,7 +408,7 @@ export function GitOpsSettings() {
           <Field
             label="Commit author name"
             optional
-            help="Git author for commits suparship makes to the repo (default: suparShip)"
+            help="Git author for commits suparship makes to the repo (default: suparship)"
           >
             <input
               className={inputClass}
@@ -416,7 +416,7 @@ export function GitOpsSettings() {
               onChange={(e) =>
                 update({ commitAuthorName: e.target.value || undefined })
               }
-              placeholder="suparShip"
+              placeholder="suparship"
             />
           </Field>
           <Field label="Commit author email" optional help="Default: suparship@suparcloud.io">
@@ -445,7 +445,7 @@ export function GitOpsSettings() {
           <Field
             label="Token Expiry"
             optional
-            help="When your access token expires — suparShip will warn you before it does"
+            help="When your access token expires — suparship will warn you before it does"
           >
             <input
               type="date"

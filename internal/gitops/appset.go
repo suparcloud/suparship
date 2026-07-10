@@ -95,7 +95,7 @@ func matrixOverClusters(gitGen ApplicationSetGenerator, clusters []ClusterTarget
 }
 
 // ApplicationSet is a minimal, serializable representation of an ArgoCD
-// ApplicationSet CRD. Only the fields required for suparShip's env/cluster-centric
+// ApplicationSet CRD. Only the fields required for suparship's env/cluster-centric
 // model are included.
 type ApplicationSet struct {
 	APIVersion string             `yaml:"apiVersion"`

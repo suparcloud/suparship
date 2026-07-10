@@ -16,10 +16,10 @@ import (
 var clusterCmd = &cobra.Command{
 	Use:   "cluster",
 	Short: "Manage registered workload clusters",
-	Long: `Manage the clusters that suparShip deploys apps to.
+	Long: `Manage the clusters that suparship deploys apps to.
 
-suparShip itself runs on a tooling cluster alongside ArgoCD. Workload
-clusters are registered here so ArgoCD can deploy to them and suparShip
+suparship itself runs on a tooling cluster alongside ArgoCD. Workload
+clusters are registered here so ArgoCD can deploy to them and suparship
 can stream pod logs directly.`,
 }
 
@@ -32,7 +32,7 @@ var clusterListCmd = &cobra.Command{
 var clusterAddCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Register a new workload cluster",
-	Long: `Register a Kubernetes cluster with suparShip.
+	Long: `Register a Kubernetes cluster with suparship.
 
 The cluster credentials are stored in a Secret in the suparship-system
 namespace. ArgoCD is notified automatically via a cluster Secret in the

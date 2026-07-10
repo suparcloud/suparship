@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This directory contains Architecture Decision Records (ADRs) for suparShip.
+This directory contains Architecture Decision Records (ADRs) for suparship.
 
 ADRs document significant decisions that shaped the system's design, API surface, and UX model. They are meant to be concise, implementation-oriented, and written at the time the decision is made.
 

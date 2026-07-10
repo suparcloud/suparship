@@ -1,28 +1,28 @@
-# suparShip – Licensing Notice
+# suparship – Licensing Notice
 
 Copyright © suparCloud
 
-suparShip is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+suparship is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
 ---
 
 ## What this means for you
 
 ### ✅ You CAN
-- Use suparShip for **personal, commercial, or internal company use**
-- Self-host suparShip on your own infrastructure
-- Modify suparShip to fit your needs
-- Use suparShip to deploy **any kind of application or workload**
+- Use suparship for **personal, commercial, or internal company use**
+- Self-host suparship on your own infrastructure
+- Modify suparship to fit your needs
+- Use suparship to deploy **any kind of application or workload**
 - Keep **your application code fully proprietary**
 
 ---
 
 ### ⚠️ You MUST
-- Share your modifications **to suparShip itself** if:
-  - You modify suparShip **and**
+- Share your modifications **to suparship itself** if:
+  - You modify suparship **and**
   - You offer it as a **networked service** to others
 
-This requirement applies **only to suparShip**, not to:
+This requirement applies **only to suparship**, not to:
 - Applications you deploy
 - Containers you build
 - CI/CD pipelines
@@ -36,17 +36,17 @@ This requirement applies **only to suparShip**, not to:
 AGPL **does NOT**:
 - Require you to open source your applications
 - “Infect” your code or workloads
-- Apply to Helm charts, manifests, or services deployed *using* suparShip
+- Apply to Helm charts, manifests, or services deployed *using* suparship
 - Restrict internal or private usage
 
-Only changes to the **suparShip platform code itself** are covered.
+Only changes to the **suparship platform code itself** are covered.
 
 ---
 
 ## Why we chose AGPL
 
 AGPL allows us to:
-- Keep suparShip truly open source
+- Keep suparship truly open source
 - Prevent large cloud providers from offering it as a closed service
 - Sustain long-term development of the project
 

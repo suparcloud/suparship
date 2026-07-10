@@ -53,7 +53,7 @@ hack/preflight.sh cluster
 
 # ── 1. Bootstrap cluster (idempotent) ────────────────────────────────────
 echo ""
-echo "  suparShip — cluster dev  (pre-flight)"
+echo "  suparship — cluster dev  (pre-flight)"
 echo "  ──────────────────────────────────────────────────────────────────"
 echo ""
 hack/bootstrap-cluster.sh
@@ -105,7 +105,7 @@ fi
 # ── 7. Banner ─────────────────────────────────────────────────────────────
 cat <<EOF
   ──────────────────────────────────────────────────────────────────
-  suparShip — cluster dev  (backend → ${KUBE_CONTEXT})
+  suparship — cluster dev  (backend → ${KUBE_CONTEXT})
   ──────────────────────────────────────────────────────────────────
   Backend   →  http://localhost:${BACKEND_PORT}
                local process, talks to kind cluster via KUBECONFIG

@@ -1,5 +1,5 @@
 // Package secrets provides a simple key/value secret management layer for
-// suparShip apps. Developers enter KEY=value pairs through the UI; the
+// suparship apps. Developers enter KEY=value pairs through the UI; the
 // platform writes them to a backend (Kubernetes Secrets, or 1Password) under
 // three scopes — global, env, cluster — that ESO pulls into app namespaces.
 //

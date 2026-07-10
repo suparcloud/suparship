@@ -1,4 +1,4 @@
-// Package platform interpolates suparShip platform metadata into user-supplied
+// Package platform interpolates suparship platform metadata into user-supplied
 // app configuration values (template inputs, raw Helm values, env-var values).
 //
 // Tokens are namespaced double-parenthesis: ((platform.<field>)) for

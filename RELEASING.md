@@ -1,4 +1,4 @@
-# Releasing suparShip
+# Releasing suparship
 
 Maintainer guide for cutting a release. The goal: every release ships with an
 upgrade path, so OSS operators never hit a silent breaking change.
