@@ -75,16 +75,22 @@ const (
 	ComponentWeb    ComponentType = "web"
 	ComponentWorker ComponentType = "worker"
 	ComponentCron   ComponentType = "cron"
+	// ComponentJob is a one-shot component that runs to completion (a Kubernetes
+	// Job) rather than a long-running Deployment — e.g. a database migration
+	// (`alembic upgrade head`). Its command/args come from ComponentSpec; its
+	// chart renders the Job as an ArgoCD PreSync hook so it runs before the
+	// long-running components roll out.
+	ComponentJob ComponentType = "job"
 )
 
 // ParseComponentType converts a raw string into a ComponentType,
 // returning an error if the value is not one of the known MVP values.
 func ParseComponentType(s string) (ComponentType, error) {
 	switch ComponentType(s) {
-	case ComponentWeb, ComponentWorker, ComponentCron:
+	case ComponentWeb, ComponentWorker, ComponentCron, ComponentJob:
 		return ComponentType(s), nil
 	default:
-		return "", fmt.Errorf("unknown component type %q: must be one of web, worker, cron", s)
+		return "", fmt.Errorf("unknown component type %q: must be one of web, worker, cron, job", s)
 	}
 }
 

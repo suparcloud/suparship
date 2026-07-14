@@ -75,6 +75,9 @@ const (
 	TemplateComponentWeb    TemplateComponentType = "web"
 	TemplateComponentWorker TemplateComponentType = "worker"
 	TemplateComponentCron   TemplateComponentType = "cron"
+	// TemplateComponentJob is a one-shot component (Kubernetes Job) — e.g. a DB
+	// migration run before the long-running components. Mirrors domain.ComponentJob.
+	TemplateComponentJob TemplateComponentType = "job"
 )
 
 // InputType enumerates the supported input value types.
@@ -466,6 +469,13 @@ func defaultCapabilities(t TemplateComponentType) ResolvedCapabilities {
 			Routing:   "none",
 			Resources: true,
 			Schedule:  true,
+		}
+	case TemplateComponentJob:
+		// A one-shot Job: no ingress, no replicas, no autoscaling, no schedule —
+		// it runs once to completion. Resources still apply to the pod.
+		return ResolvedCapabilities{
+			Routing:   "none",
+			Resources: true,
 		}
 	}
 	// Unknown type: permissive default so authors of new types aren't

@@ -64,6 +64,7 @@ func TestParseComponentType(t *testing.T) {
 		{input: "web", want: ComponentWeb},
 		{input: "worker", want: ComponentWorker},
 		{input: "cron", want: ComponentCron},
+		{input: "job", want: ComponentJob},
 		{input: "", wantErr: true},
 		{input: "gateway", wantErr: true},
 		{input: "WEB", wantErr: true},
@@ -92,8 +93,9 @@ func TestComponentTypeValid(t *testing.T) {
 		{ComponentWeb, true},
 		{ComponentWorker, true},
 		{ComponentCron, true},
+		{ComponentJob, true},
 		{"", false},
-		{"job", false},
+		{"gateway", false},
 		{"WEB", false},
 	}
 

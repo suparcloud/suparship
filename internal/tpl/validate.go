@@ -30,6 +30,7 @@ var validTemplateComponentTypes = map[TemplateComponentType]bool{
 	TemplateComponentWeb:    true,
 	TemplateComponentWorker: true,
 	TemplateComponentCron:   true,
+	TemplateComponentJob:    true,
 }
 
 // Validate checks the Template for structural correctness.
@@ -174,7 +175,7 @@ func validateTemplateComponent(c TemplateComponent, path string) error {
 		return fmt.Errorf("%s (%s): type is required", path, c.Name)
 	}
 	if !validTemplateComponentTypes[c.Type] {
-		return fmt.Errorf("%s (%s): unsupported type %q (must be one of web, worker, cron)",
+		return fmt.Errorf("%s (%s): unsupported type %q (must be one of web, worker, cron, job)",
 			path, c.Name, c.Type)
 	}
 	return nil

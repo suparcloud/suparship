@@ -1,0 +1,486 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": true,
+  "description": "Generated from internal/helmvalues/values.go. Validates the publisher-injected canonical shape. Chart-specific extension fields (autoscaling, pdb, gateway, etc.) are tolerated via additionalProperties.",
+  "properties": {
+    "addons": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "secretName": {
+            "type": "string"
+          },
+          "size": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "secretName",
+          "type"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "app": {
+      "additionalProperties": true,
+      "properties": {
+        "env": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "env",
+        "name"
+      ],
+      "type": "object"
+    },
+    "components": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "autoscaling": {
+            "additionalProperties": true,
+            "properties": {
+              "maxReplicaCount": {
+                "type": "integer"
+              },
+              "minReplicaCount": {
+                "type": "integer"
+              },
+              "triggers": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "metadata": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "type": "object"
+                    },
+                    "metricType": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "envFrom": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "configMapRef": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "optional": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "secretRef": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "optional": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "healthCheck": {
+            "additionalProperties": true,
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "image": {
+            "additionalProperties": true,
+            "properties": {
+              "repository": {
+                "type": "string"
+              },
+              "tag": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "repository",
+              "tag"
+            ],
+            "type": "object"
+          },
+          "ingress": {
+            "additionalProperties": true,
+            "properties": {
+              "className": {
+                "type": "string"
+              },
+              "clusterIssuer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "className"
+            ],
+            "type": "object"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "replicas": {
+            "type": "integer"
+          },
+          "resources": {
+            "additionalProperties": true,
+            "properties": {
+              "limits": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "requests": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "size": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "enabled",
+          "image",
+          "replicas"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "envLayers": {
+      "additionalProperties": true,
+      "properties": {
+        "app": {
+          "additionalProperties": true,
+          "properties": {
+            "secretRefs": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "envKey": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "envKey",
+                  "key",
+                  "name",
+                  "provider"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "vars": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "appEnv": {
+          "additionalProperties": true,
+          "properties": {
+            "secretRefs": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "envKey": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "envKey",
+                  "key",
+                  "name",
+                  "provider"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "vars": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "platform": {
+      "additionalProperties": true,
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "baseDomain": {
+          "type": "string"
+        },
+        "cluster": {
+          "type": "string"
+        },
+        "clusterIssuer": {
+          "type": "string"
+        },
+        "configMapName": {
+          "type": "string"
+        },
+        "env": {
+          "type": "string"
+        },
+        "envType": {
+          "type": "string"
+        },
+        "externalBaseDomain": {
+          "type": "string"
+        },
+        "externalClusterIssuer": {
+          "type": "string"
+        },
+        "externalGatewayName": {
+          "type": "string"
+        },
+        "externalGatewayNamespace": {
+          "type": "string"
+        },
+        "externalGatewaySectionName": {
+          "type": "string"
+        },
+        "externalIngressClassName": {
+          "type": "string"
+        },
+        "imageTag": {
+          "type": "string"
+        },
+        "ingressClassName": {
+          "type": "string"
+        },
+        "internalBaseDomain": {
+          "type": "string"
+        },
+        "internalClusterIssuer": {
+          "type": "string"
+        },
+        "internalGatewayName": {
+          "type": "string"
+        },
+        "internalGatewayNamespace": {
+          "type": "string"
+        },
+        "internalGatewaySectionName": {
+          "type": "string"
+        },
+        "internalIngressClassName": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "org": {
+          "type": "string"
+        },
+        "previewName": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "routingHost": {
+          "type": "string"
+        },
+        "secretName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "app",
+        "baseDomain",
+        "env",
+        "envType",
+        "namespace",
+        "org",
+        "project",
+        "routingHost"
+      ],
+      "type": "object"
+    },
+    "routing": {
+      "additionalProperties": true,
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "host"
+      ],
+      "type": "object"
+    },
+    "serviceClaims": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "addon": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "secretName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addon",
+          "secretName",
+          "type"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "suparship": {
+      "additionalProperties": true,
+      "properties": {
+        "envFromConfigMaps": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "envFromSecrets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "app",
+    "components",
+    "platform",
+    "routing",
+    "suparship"
+  ],
+  "title": "suparship canonical Helm values",
+  "type": "object",
+  "x-suparship-schema-version": "v1"
+}

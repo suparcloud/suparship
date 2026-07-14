@@ -1,0 +1,12 @@
+apiVersion: v2
+name: job
+description: A suparship template chart for one-shot Kubernetes Jobs (e.g. migrations)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+annotations:
+  suparship.io/values-schema-version: v1
+dependencies:
+  - name: suparship-common
+    version: "0.1.0"
+    repository: "file://../../../charts/lib/suparship-common"

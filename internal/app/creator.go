@@ -160,6 +160,8 @@ func templateComponentTypeToDomain(t tpl.TemplateComponentType) domain.Component
 		return domain.ComponentWorker
 	case tpl.TemplateComponentCron:
 		return domain.ComponentCron
+	case tpl.TemplateComponentJob:
+		return domain.ComponentJob
 	default:
 		return domain.ComponentWeb
 	}

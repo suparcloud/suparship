@@ -1,0 +1,81 @@
+# suparship Template: job
+#
+# A one-shot task that runs to completion as a Kubernetes Job — e.g. a
+# database migration (`alembic upgrade head`). The Job is wired as an ArgoCD
+# PreSync hook so it runs BEFORE the app's long-running components (web/worker)
+# roll out, gating the release: if the migration fails, the sync fails and the
+# Deployments are not updated.
+#
+# Designed to be used as one component of a COMPOSED app (api → web-service,
+# worker → worker, migrate → job), each component rendered by its own template.
+#
+# Engine: Helm
+# Chart:  ./chart
+
+apiVersion: suparship.io/v1alpha1
+kind: Template
+metadata:
+  name: job
+  version: "1.0.0"
+spec:
+  title: One-shot Job
+  description: >-
+    Run a one-shot task to completion as a Kubernetes Job — e.g. a database
+    migration. Wired as an ArgoCD PreSync hook so it runs before the app's
+    long-running components roll out. Set the component's command/args to the
+    task to run (e.g. alembic upgrade head).
+  category: job
+  engine:
+    type: helm
+    chart: ./chart
+
+  components:
+    - name: job
+      type: job
+      required: true
+      defaultEnabled: true
+      exposed: false
+      produces: [Job]
+      # A one-shot Job: no ingress, no replicas, no autoscaling.
+      capabilities: {}
+
+  inputs:
+    - name: service_name
+      title: Name
+      type: string
+      required: true
+      description: >-
+        Name for this job. Used in Kubernetes resource names, labels, and
+        selectors. Must be DNS-compatible.
+      pattern: "^[a-z][a-z0-9-]{0,61}[a-z0-9]$"
+
+    - name: image_repository
+      title: Image Repository
+      type: string
+      required: true
+      description: >-
+        Container image repository to run the task from, e.g. ghcr.io/org/app.
+
+    - name: image_tag
+      title: Image Tag
+      type: string
+      default: "latest"
+      description: >-
+        Container image tag. Pin to a specific version or SHA for production.
+
+    - name: size
+      title: Resource Size
+      type: enum
+      options:
+        - small
+        - medium
+        - large
+      default: small
+      description: >-
+        Resource profile for CPU and memory limits.
+
+  mappings:
+    fullnameOverride: "{{ .inputs.service_name }}"
+    image.repository: "{{ .inputs.image_repository }}"
+    image.tag: "{{ .inputs.image_tag }}"
+    size: "{{ .inputs.size }}"
