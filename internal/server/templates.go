@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 
 	"k8s.io/client-go/kubernetes"
 
@@ -413,20 +414,27 @@ func (th *templateHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	if th.kubeClient != nil {
 		overrides, _ = kube.ListTemplateOverrides(r.Context(), th.kubeClient)
 	}
-	list := make([]TemplateSummaryDTO, len(merged))
-	for i, t := range merged {
+	list := make([]TemplateSummaryDTO, 0, len(merged))
+	for _, t := range merged {
 		title, category, description := t.Spec.Title, t.Spec.Category, t.Spec.Description
 		if ov := overrides[t.Metadata.Name]; ov != nil {
 			title, category, description = applyMetadataOverride(title, category, description, ov.Metadata)
 		}
-		list[i] = TemplateSummaryDTO{
+		// A library chart (category "library") is a Helm helper chart, not a
+		// launchable app — never offer it in the gallery. New imports are
+		// rejected at chartimport.ToTemplate; this de-lists any previously-synced
+		// library template (e.g. suparship-common) without a re-sync.
+		if strings.EqualFold(strings.TrimSpace(category), "library") {
+			continue
+		}
+		list = append(list, TemplateSummaryDTO{
 			Name:        t.Metadata.Name,
 			Version:     t.Metadata.Version,
 			Title:       title,
 			Description: description,
 			Category:    category,
 			Engine:      t.Spec.Engine.Type,
-		}
+		})
 	}
 	writeJSON(w, http.StatusOK, TemplatesResponse{Templates: list})
 }

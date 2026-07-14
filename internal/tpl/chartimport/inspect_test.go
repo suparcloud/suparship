@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"strings"
 	"testing"
 
@@ -80,6 +81,30 @@ func TestParseArchive_RejectsTarSlip(t *testing.T) {
 	})
 	if _, err := chartimport.ParseArchive(data); err == nil {
 		t.Fatal("expected error for tar-slip path")
+	}
+}
+
+func TestToTemplate_RejectsLibraryChart(t *testing.T) {
+	// A Helm library chart (type: library, e.g. suparship-common) renders no
+	// workloads and must never become an app template.
+	data := buildTGZ(t, map[string]string{
+		"suparship-common/Chart.yaml": `apiVersion: v2
+name: suparship-common
+version: 0.1.0
+type: library
+description: Shared Helm template helpers
+`,
+	})
+	arc, err := chartimport.ParseArchive(data)
+	if err != nil {
+		t.Fatalf("ParseArchive: %v", err)
+	}
+	_, err = chartimport.ToTemplate(arc)
+	if err == nil {
+		t.Fatal("expected library chart to be rejected, got nil error")
+	}
+	if !errors.Is(err, chartimport.ErrLibraryChart) {
+		t.Errorf("error = %v, want ErrLibraryChart", err)
 	}
 }
 

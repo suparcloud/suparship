@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -234,12 +235,24 @@ func ParseArchive(data []byte) (*ChartArchive, error) {
 // At chart render time project.RenderHelmValues already expands dotted keys
 // into nested maps, so the generated mappings drop straight into the
 // existing render pipeline.
+// ErrLibraryChart signals that a chart is a Helm library chart (Chart.yaml
+// `type: library`) and therefore cannot be used as an app template — a library
+// chart ships only helper templates and renders no workloads. Registry sync
+// treats this as a skip (PartialError), and the BYO-upload path surfaces it as a
+// clear rejection.
+var ErrLibraryChart = errors.New("chart is a Helm library chart (type: library) and cannot be used as an app template")
+
 func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 	if arc == nil {
 		return nil, fmt.Errorf("nil archive")
 	}
 	if arc.Chart.Name == "" {
 		return nil, fmt.Errorf("chart name is empty")
+	}
+	// A library chart (e.g. suparship-common) has no deployable manifests — it
+	// must never become an app template, on any import/sync path.
+	if strings.EqualFold(strings.TrimSpace(arc.Chart.Type), "library") {
+		return nil, fmt.Errorf("%s: %w", arc.Chart.Name, ErrLibraryChart)
 	}
 
 	// Bundled-template mode: chart author shipped a template.yaml at
