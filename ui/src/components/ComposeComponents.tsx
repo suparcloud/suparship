@@ -1,8 +1,14 @@
-import type { ComponentCreate, TemplateSummary } from "../types";
+import { Suspense, lazy } from "react";
 
-// ComponentDraft is the UI-editable form of one composed-app component. Numeric
-// and list fields are kept as strings while editing and coerced to the wire
-// shape (ComponentCreate) by toComponentCreate on submit.
+import type { ComponentCreate, TemplateSummary } from "../types";
+import type { ConfigVariables } from "../lib/configVars";
+
+// CodeMirror is heavy; load it only when the compose canvas is shown.
+const ValuesEditor = lazy(() => import("./ValuesEditor"));
+
+// ComponentDraft is the UI-editable form of one composed-app component:
+// structural fields (name / template / type / expose) plus a per-component Helm
+// values overlay (the value-based config), kept as editor text + its parsed form.
 export interface ComponentDraft {
   name: string;
   /** template name (the component's own chart) */
@@ -11,12 +17,10 @@ export interface ComponentDraft {
   type: string;
   /** disabled | internal | external */
   exposeMode: string;
-  imageRepository: string;
-  imageTag: string;
-  /** container port, kept as a string while editing */
-  port: string;
-  /** entrypoint override, space-separated (e.g. "alembic upgrade head") */
-  command: string;
+  /** per-component values overlay — editor text, its parsed object, and a parse error */
+  valuesText: string;
+  values: Record<string, unknown>;
+  valuesError: string | null;
 }
 
 const COMPONENT_TYPES = ["web", "worker", "job"] as const;
@@ -48,28 +52,22 @@ export function newComponentDraft(
     template: tmpl.name,
     type,
     exposeMode: type === "web" ? "external" : "disabled",
-    imageRepository: "",
-    imageTag: "",
-    port: "",
-    command: "",
+    valuesText: "",
+    values: {},
+    valuesError: null,
   };
 }
 
 // toComponentCreate coerces a draft to the wire shape, dropping empty optional
 // fields so the request stays minimal.
 export function toComponentCreate(d: ComponentDraft): ComponentCreate {
-  const cmd = d.command.trim();
-  const repo = d.imageRepository.trim();
-  const tag = d.imageTag.trim();
   return {
     name: d.name.trim(),
     type: d.type,
     enabled: true,
     exposeMode: d.type === "web" ? d.exposeMode : undefined,
     template: { name: d.template },
-    image: repo || tag ? { repository: repo || undefined, tag: tag || undefined } : undefined,
-    port: d.port.trim() ? Number(d.port) : undefined,
-    command: cmd ? cmd.split(/\s+/) : undefined,
+    values: Object.keys(d.values).length > 0 ? d.values : undefined,
   };
 }
 
@@ -78,16 +76,18 @@ const inputCls =
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
 
 // ComposeComponents is the add-component canvas: a list of component rows, each
-// picking its own template and typed config, plus an "Add component" control. It
-// is a controlled component — the parent owns the ComponentDraft[] state.
+// picking its own template + a per-component values overlay, plus an "Add
+// component" control. Controlled — the parent owns the ComponentDraft[] state.
 export function ComposeComponents({
   templates,
   components,
   onChange,
+  configVars,
 }: {
   templates: TemplateSummary[];
   components: ComponentDraft[];
   onChange: (next: ComponentDraft[]) => void;
+  configVars?: ConfigVariables | null;
 }) {
   function update(i: number, patch: Partial<ComponentDraft>) {
     onChange(components.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -104,8 +104,7 @@ export function ComposeComponents({
     ]);
   }
 
-  // When the picked template changes, re-default the type/expose unless the user
-  // already diverged from the template's default type.
+  // When the picked template changes, re-default the type/expose.
   function onTemplateChange(i: number, name: string) {
     const tmpl = templates.find((t) => t.name === name);
     if (!tmpl) {
@@ -167,40 +166,8 @@ export function ComposeComponents({
                 ))}
               </select>
             </div>
-            <button
-              type="button"
-              onClick={() => remove(i)}
-              className="mb-0.5 rounded-md px-2 py-1.5 text-xs font-medium text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600"
-              aria-label={`Remove ${c.name || "component"}`}
-            >
-              Remove
-            </button>
-          </div>
-
-          {/* Row body: per-component typed config */}
-          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <div className="col-span-2">
-              <label className={labelCls}>Image repository</label>
-              <input
-                type="text"
-                className={inputCls}
-                placeholder="ghcr.io/org/app"
-                value={c.imageRepository}
-                onChange={(e) => update(i, { imageRepository: e.target.value })}
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Tag</label>
-              <input
-                type="text"
-                className={inputCls}
-                placeholder="latest"
-                value={c.imageTag}
-                onChange={(e) => update(i, { imageTag: e.target.value })}
-              />
-            </div>
-            {c.type === "web" ? (
-              <div>
+            {c.type === "web" && (
+              <div className="w-32">
                 <label className={labelCls}>Expose</label>
                 <select
                   className={inputCls}
@@ -214,47 +181,50 @@ export function ComposeComponents({
                   ))}
                 </select>
               </div>
-            ) : (
-              <div>
-                <label className={labelCls}>Port</label>
-                <input
-                  type="number"
-                  className={inputCls}
-                  placeholder="—"
-                  value={c.port}
-                  onChange={(e) => update(i, { port: e.target.value })}
-                />
-              </div>
             )}
-            {c.type === "web" && (
-              <div>
-                <label className={labelCls}>Port</label>
-                <input
-                  type="number"
-                  className={inputCls}
-                  placeholder="8080"
-                  value={c.port}
-                  onChange={(e) => update(i, { port: e.target.value })}
-                />
-              </div>
-            )}
-            {c.type === "job" && (
-              <div className="col-span-2 sm:col-span-4">
-                <label className={labelCls}>
-                  Command{" "}
-                  <span className="font-normal text-gray-400">
-                    (runs once before rollout — e.g. a migration)
-                  </span>
-                </label>
-                <input
-                  type="text"
-                  className={`${inputCls} font-mono`}
-                  placeholder="alembic upgrade head"
-                  value={c.command}
-                  onChange={(e) => update(i, { command: e.target.value })}
-                />
-              </div>
-            )}
+            <button
+              type="button"
+              onClick={() => remove(i)}
+              className="mb-0.5 rounded-md px-2 py-1.5 text-xs font-medium text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600"
+              aria-label={`Remove ${c.name || "component"}`}
+            >
+              Remove
+            </button>
+          </div>
+
+          {/* Per-component values overlay — deep-merged onto this component's
+              chart values, in the chart's own schema (canonical or BYO). */}
+          <div className="mt-3">
+            <label className={labelCls}>
+              Values{" "}
+              <span className="font-normal text-gray-400">
+                (overrides for this component's chart — e.g.{" "}
+                <code className="font-mono">components.web.image.tag</code>)
+              </span>
+            </label>
+            <Suspense
+              fallback={
+                <div className="rounded-lg border border-gray-200 p-3 text-xs text-gray-400">
+                  Loading editor…
+                </div>
+              }
+            >
+              <ValuesEditor
+                value={c.valuesText}
+                configVars={configVars ?? undefined}
+                height="12rem"
+                placeholder={
+                  "# e.g.\ncomponents:\n  web:\n    image:\n      repository: ghcr.io/org/app\n      tag: v1"
+                }
+                onChange={(text) => update(i, { valuesText: text })}
+                onValidChange={(parsed, err) =>
+                  update(i, {
+                    valuesError: err,
+                    ...(parsed ? { values: parsed } : {}),
+                  })
+                }
+              />
+            </Suspense>
           </div>
         </div>
       ))}

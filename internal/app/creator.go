@@ -54,31 +54,44 @@ func DefaultComponentsFromTemplate(tmpl *tpl.Template) []domain.ComponentSpec {
 //
 // The returned slice is sorted by component name for deterministic output.
 func ComponentsFromTemplate(tmpl *tpl.Template, toggles map[string]bool) []domain.ComponentSpec {
-	if len(tmpl.Spec.Components) == 0 {
+	var specs []domain.ComponentSpec
+	switch {
+	case len(tmpl.Spec.Components) == 0 && !tmpl.Spec.CanonicalValues():
 		// BYO/passthrough templates opt out of the canonical schema entirely; the
 		// chart defines its own workloads, so synthesizing a phantom "web"
 		// component (which maps to nothing the chart renders) would be misleading.
-		if !tmpl.Spec.CanonicalValues() {
-			return nil
-		}
+		// No components → single-source app rendered from AppSpec.Template.
+		return nil
+	case len(tmpl.Spec.Components) == 0:
 		// Legacy path: no explicit component declarations — derive from category.
-		return DefaultComponentsFromTemplate(tmpl)
+		specs = DefaultComponentsFromTemplate(tmpl)
+	default:
+		sorted := make([]tpl.TemplateComponent, len(tmpl.Spec.Components))
+		copy(sorted, tmpl.Spec.Components)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+		specs = make([]domain.ComponentSpec, 0, len(sorted))
+		for _, tc := range sorted {
+			spec := domain.ComponentSpec{
+				Name:       tc.Name,
+				Type:       templateComponentTypeToDomain(tc.Type),
+				Enabled:    resolveEnabled(tc, toggles),
+				ExposeMode: templateExposedToMode(tc.Exposed),
+			}
+			applyComponentDefaults(&spec, tc.Defaults)
+			specs = append(specs, spec)
+		}
 	}
 
-	sorted := make([]tpl.TemplateComponent, len(tmpl.Spec.Components))
-	copy(sorted, tmpl.Spec.Components)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-
-	specs := make([]domain.ComponentSpec, 0, len(sorted))
-	for _, tc := range sorted {
-		spec := domain.ComponentSpec{
-			Name:       tc.Name,
-			Type:       templateComponentTypeToDomain(tc.Type),
-			Enabled:    resolveEnabled(tc, toggles),
-			ExposeMode: templateExposedToMode(tc.Exposed),
+	// Unified model: every component carries its own Template (one template = one
+	// component). Stamp the base template on each so a single-template app is a
+	// uniform 1-component app — same schema as a multi-component one.
+	for i := range specs {
+		if specs[i].Template == nil {
+			specs[i].Template = &domain.AppTemplateRef{
+				Name:    tmpl.Metadata.Name,
+				Version: tmpl.Metadata.Version,
+			}
 		}
-		applyComponentDefaults(&spec, tc.Defaults)
-		specs = append(specs, spec)
 	}
 	return specs
 }

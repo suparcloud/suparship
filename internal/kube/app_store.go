@@ -295,6 +295,10 @@ func parseAppConfigMap(cm *corev1.ConfigMap) (*domain.App, error) {
 	if err := json.Unmarshal([]byte(raw), &app); err != nil {
 		return nil, fmt.Errorf("unmarshaling app from configmap %s: %w", cm.Name, err)
 	}
+	// Unified model: stamp any nil component Template from the app's primary
+	// template, so an app saved before the unified model loads with every
+	// component carrying a Template (idempotent).
+	app.Spec.BackfillComponentTemplates()
 	return &app, nil
 }
 

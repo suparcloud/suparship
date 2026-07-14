@@ -228,27 +228,13 @@ type ComponentSpec struct {
 	// AppSpec.Template (the single-chart behaviour). An app is in "composed mode"
 	// when at least one component sets this. See AppSpec.IsComposed.
 	Template *AppTemplateRef `json:"template,omitempty" yaml:"template,omitempty"`
-	// Command / Args override the component container's entrypoint — needed for a
-	// one-shot component like a migration (`alembic upgrade head`). Empty = the
-	// image's default entrypoint. Rendered by the component's chart.
-	Command []string `json:"command,omitempty" yaml:"command,omitempty"`
-	Args    []string `json:"args,omitempty" yaml:"args,omitempty"`
-	// Image overrides the container image for THIS component. In a composed app
-	// components can run different images (a monorepo's api/worker share one image
-	// while the frontend differs), so image can't stay app-level. nil = inherit
-	// the app-level image (AppSpec.Values image.repository/tag) — today's
-	// single-image behaviour, so legacy apps are unchanged.
-	Image *ComponentImage `json:"image,omitempty" yaml:"image,omitempty"`
-	// Port overrides the container port for THIS component (api on 8080, frontend
-	// on 80). Zero = inherit the app-level port / the chart default.
-	Port int32 `json:"port,omitempty" yaml:"port,omitempty"`
-}
-
-// ComponentImage is a per-component container image override (repository + tag).
-// Either field may be empty to inherit the app-level value for that part.
-type ComponentImage struct {
-	Repository string `json:"repository,omitempty" yaml:"repository,omitempty"`
-	Tag        string `json:"tag,omitempty" yaml:"tag,omitempty"`
+	// Values is this component's own Helm values overlay, deep-merged onto its
+	// chart's values at publish (the value-based, schema-agnostic config, mirroring
+	// the app-level RawValues). It is how a composed component sets its image, port,
+	// command, resources, etc. — in the shape ITS chart expects, so a bring-your-own
+	// chart works as naturally as a canonical one. Only meaningful for composed
+	// components (those with a Template); the publisher applies it per component.
+	Values map[string]any `json:"values,omitempty" yaml:"values,omitempty"`
 }
 
 // ComponentResources holds raw Kubernetes resource quantities for a component
@@ -529,19 +515,33 @@ type AppSpec struct {
 // values (no Kargo, no promotion). Empty DeliveryMode means pipeline.
 func (s AppSpec) IsDirect() bool { return s.DeliveryMode == DeliveryDirect }
 
-// IsComposed reports whether the app is a composition of components with their
-// own charts — true when at least one component sets ComponentSpec.Template. In
-// composed mode the publisher renders one multi-source ArgoCD Application with a
-// chart source per component; otherwise the app renders from its single
-// AppSpec.Template (legacy behaviour). Composed apps require every component to
-// carry a Template (enforced by validation).
+// IsComposed reports whether the app renders as a multi-source composition —
+// true when it has MORE THAN ONE component. In the unified model every component
+// carries its own Template (one template = one component), so the render choice
+// is by count: a 1-component app renders from its single chart via the
+// single-source path (AppSpec.Template, the primary mirror = Components[0].Template);
+// a ≥2-component app renders one multi-source ArgoCD Application with a chart
+// source per component. Two components using the same template (api + frontend
+// both web-service) are still two sources.
 func (s AppSpec) IsComposed() bool {
-	for _, c := range s.Components {
-		if c.Template != nil {
-			return true
+	return len(s.Components) > 1
+}
+
+// BackfillComponentTemplates stamps any component whose Template is nil (a legacy
+// single-template app saved before the unified model) with the app's primary
+// AppSpec.Template, so every component carries a Template uniformly. No-op when a
+// component already has its own Template or when AppSpec.Template is empty.
+// Idempotent — called on load (app stores) and safe to call repeatedly.
+func (s *AppSpec) BackfillComponentTemplates() {
+	if s.Template.Name == "" {
+		return
+	}
+	for i := range s.Components {
+		if s.Components[i].Template == nil {
+			t := s.Template
+			s.Components[i].Template = &t
 		}
 	}
-	return false
 }
 
 // ComposedComponents returns the app's components in deterministic (name-sorted)

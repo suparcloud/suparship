@@ -157,16 +157,11 @@ func ValidateSingleExposedComponent(components []ComponentSpec, allowMultiple bo
 func ValidateExposeModes(components []ComponentSpec, orgProfiles, envProfiles RoutingProfiles) error {
 	hasProfiles := len(orgProfiles) > 0 || len(envProfiles) > 0
 
-	// Composed apps (>=1 component carries its own Template) render one Ingress
-	// per component with a distinct host, so the single-HTTP-surface limit below
-	// does not apply to them.
-	composed := false
-	for _, c := range components {
-		if c.Template != nil {
-			composed = true
-			break
-		}
-	}
+	// Multi-component (composed) apps render one Ingress per component with a
+	// distinct {app}-{component} host, so the single-HTTP-surface limit below does
+	// not apply. In the unified model every component carries a Template, so the
+	// signal is component COUNT (mirrors AppSpec.IsComposed), not "has a Template".
+	composed := len(components) > 1
 
 	exposed := 0
 	for _, c := range components {

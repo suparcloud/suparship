@@ -225,11 +225,23 @@ func TestWriteComposedAppTree_RendersFiles(t *testing.T) {
 	}
 }
 
+// componentImageValues builds a per-component Values overlay setting the image
+// under the chart's canonical component key ("web").
+func componentImageValues(repo, tag string) map[string]any {
+	return map[string]any{
+		"components": map[string]any{
+			"web": map[string]any{
+				"image": map[string]any{"repository": repo, "tag": tag},
+			},
+		},
+	}
+}
+
 // TestCreateThenRender_ComposedPerComponentImage closes the loop: build a
 // composed app through the real app.Create ingest pipeline (two web-service
-// components with DIFFERENT images) and render it with the publisher. Each
-// component's values.yaml must carry its OWN image under the chart's canonical
-// key — proving per-component image flows create → render.
+// components with DIFFERENT images set via their Values overlay) and render it
+// with the publisher. Each component's values.yaml must carry its OWN image under
+// the chart's canonical key — proving per-component config flows create → render.
 func TestCreateThenRender_ComposedPerComponentImage(t *testing.T) {
 	res, err := domainapp.Create(domainapp.CreateRequest{
 		ProjectName: "demo",
@@ -238,10 +250,10 @@ func TestCreateThenRender_ComposedPerComponentImage(t *testing.T) {
 		ExplicitComponents: []domain.ComponentSpec{
 			{Name: "api", Type: domain.ComponentWeb, Enabled: true,
 				Template: &domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"},
-				Image:    &domain.ComponentImage{Repository: "ghcr.io/acme/api", Tag: "v1"}},
+				Values:   componentImageValues("ghcr.io/acme/api", "v1")},
 			{Name: "frontend", Type: domain.ComponentWeb, Enabled: true,
 				Template: &domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"},
-				Image:    &domain.ComponentImage{Repository: "ghcr.io/acme/frontend", Tag: "v2"}},
+				Values:   componentImageValues("ghcr.io/acme/frontend", "v2")},
 		},
 	})
 	if err != nil {
@@ -292,6 +304,55 @@ func TestCreateThenRender_ComposedPerComponentImage(t *testing.T) {
 		if got.Repository != tc.repo || got.Tag != tc.tag {
 			t.Errorf("%s: components.web.image = %s:%s, want %s:%s", tc.comp, got.Repository, got.Tag, tc.repo, tc.tag)
 		}
+	}
+}
+
+// TestSingleSourceAppliesComponentValues verifies the unified model's single-
+// source path: a 1-component app (not composed) still applies its component's
+// Values overlay onto the rendered values.yaml.
+func TestSingleSourceAppliesComponentValues(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					Values: map[string]any{
+						"components": map[string]any{
+							"web": map[string]any{"image": map[string]any{"tag": "v9"}},
+						},
+					}},
+			},
+		},
+	}
+	if app.Spec.IsComposed() {
+		t.Fatal("1-component app must not be composed")
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+	}}
+	p := newTestPublisher(t)
+	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishAppFilesForTest: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "hello", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read values.yaml: %v", err)
+	}
+	var v struct {
+		Components map[string]struct {
+			Image struct{ Tag string } `yaml:"image"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("unmarshal values.yaml: %v", err)
+	}
+	if got := v.Components["web"].Image.Tag; got != "v9" {
+		t.Errorf("components.web.image.tag = %q, want v9 (from the component Values overlay)", got)
 	}
 }
 

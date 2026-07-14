@@ -36,11 +36,6 @@ type ComponentSummaryDTO struct {
 	// app's components (each rendered by its own chart). Empty = the component
 	// inherits the app-level template (single-chart app).
 	Template string `json:"template,omitempty"`
-	// Image / Port are the per-component overrides a composed app carries, so the
-	// detail view can show each component's own image and port. Omitted when the
-	// component inherits the app-level image/port.
-	Image *ComponentImageDTO `json:"image,omitempty"`
-	Port  int32              `json:"port,omitempty"`
 }
 
 // AppReleaseRefDTO identifies the deployed release version for one environment
@@ -292,15 +287,11 @@ type ComponentCreateDTO struct {
 	// app is composed when EVERY component sets this (all-or-nothing, enforced by
 	// domain.ValidateComposedComponents).
 	Template *ComponentTemplateDTO `json:"template,omitempty"`
-	// Image overrides the container image for this component (a composed app runs
-	// different images per component). Omitted = inherit the app-level image.
-	Image *ComponentImageDTO `json:"image,omitempty"`
-	// Port overrides the container port for this component. Zero = inherit.
-	Port int32 `json:"port,omitempty"`
-	// Command / Args override the component container's entrypoint (e.g. a
-	// one-shot migration). Empty = the image's default entrypoint.
-	Command []string `json:"command,omitempty"`
-	Args    []string `json:"args,omitempty"`
+	// Values is this component's Helm values overlay, deep-merged onto its chart's
+	// values at publish (value-based, schema-agnostic config — image, port,
+	// command, resources, etc. in the shape THIS chart expects, so BYO charts work
+	// the same as canonical ones). Mirrors the app-level rawValues.
+	Values map[string]any `json:"values,omitempty"`
 }
 
 // ComponentTemplateDTO names a per-component template for a composed app. Version
@@ -308,13 +299,6 @@ type ComponentCreateDTO struct {
 type ComponentTemplateDTO struct {
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`
-}
-
-// ComponentImageDTO is a per-component image override. Either part may be empty
-// to inherit the app-level value for that part.
-type ComponentImageDTO struct {
-	Repository string `json:"repository,omitempty"`
-	Tag        string `json:"tag,omitempty"`
 }
 
 // createAppRequest is the JSON body for POST /api/v1/projects/{project}/apps.

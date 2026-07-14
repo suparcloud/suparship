@@ -212,12 +212,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			Type:       ct,
 			Enabled:    c.Enabled,
 			ExposeMode: mode,
-			Port:       c.Port,
-			Command:    c.Command,
-			Args:       c.Args,
-		}
-		if c.Image != nil {
-			cs.Image = &domain.ComponentImage{Repository: c.Image.Repository, Tag: c.Image.Tag}
+			Values:     c.Values,
 		}
 		if c.Template != nil && c.Template.Name != "" {
 			ctmpl, ok := ah.lookupTemplate(r.Context(), c.Template.Name)
@@ -3511,13 +3506,9 @@ func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 			Type:       string(c.Type),
 			Enabled:    c.Enabled,
 			ExposeMode: string(c.ExposeMode),
-			Port:       c.Port,
 		}
 		if c.Template != nil {
 			dto.Template = c.Template.Name
-		}
-		if c.Image != nil {
-			dto.Image = &ComponentImageDTO{Repository: c.Image.Repository, Tag: c.Image.Tag}
 		}
 		dtos = append(dtos, dto)
 	}

@@ -396,6 +396,10 @@ function ConfigureStep({
         setError("Add at least one component, or turn off compose mode.");
         return;
       }
+      if (components.some((c) => c.valuesError)) {
+        setError("Fix the component values YAML before creating the app.");
+        return;
+      }
       const names = new Set<string>();
       for (const c of components) {
         const nm = c.name.trim();
@@ -588,6 +592,7 @@ function ConfigureStep({
               templates={templates}
               components={components}
               onChange={setComponents}
+              configVars={configVars}
             />
           </div>
         )}

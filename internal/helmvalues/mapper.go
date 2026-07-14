@@ -517,23 +517,6 @@ func buildComponentValues(
 	if len(env) > 0 {
 		cv.Env = env
 	}
-	if len(c.Command) > 0 {
-		cv.Command = c.Command
-	}
-	if len(c.Args) > 0 {
-		cv.Args = c.Args
-	}
-	// Per-component image override wins over the app-level image, part by part
-	// (a composed app runs different images per component). Empty parts inherit
-	// the app-level value already set above.
-	if c.Image != nil {
-		if c.Image.Repository != "" {
-			cv.Image.Repository = c.Image.Repository
-		}
-		if c.Image.Tag != "" {
-			cv.Image.Tag = c.Image.Tag
-		}
-	}
 	switch {
 	case rawRes != nil && (len(rawRes.Requests) > 0 || len(rawRes.Limits) > 0):
 		cv.Resources = &ResourceValues{Requests: rawRes.Requests, Limits: rawRes.Limits}
@@ -550,11 +533,7 @@ func buildComponentValues(
 			MaxReplicaCount: scaling.MaxReplicas,
 		}
 	}
-	// Component's own port wins; else the app-level port (routing component only).
-	switch {
-	case c.Port > 0:
-		cv.Port = c.Port
-	case port > 0:
+	if port > 0 {
 		cv.Port = port
 	}
 	if healthPath != "" {

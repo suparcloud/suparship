@@ -765,15 +765,16 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 
 		// Per-component values: a single-component projection of the canonical
 		// values, so each component's own chart consumes exactly its
-		// components.<name> block. An empty overlay is passed (MVP: no app-level
-		// rawValues overlay per component — that would risk leaking a sibling's
-		// components.<other> keys into this file); env vars are still threaded so
-		// ((platform.*))/((vars.*)) tokens resolve.
+		// components.<name> block, with the component's own Values overlay
+		// (value-based config — image/port/command/etc. in its chart's own shape)
+		// deep-merged on top. The overlay is component-scoped (written only to this
+		// component's file), so a sibling's keys can't leak in; env vars are
+		// threaded so ((platform.*))/((vars.*)) tokens resolve.
 		componentValues := make(map[string]string, len(app.Spec.Components))
 		for _, c := range app.Spec.ComposedComponents() {
 			hv := helmvalues.MapComponentHelmValuesForEnv(app, c, componentKeys[c.Name], env.EnvName, env.EnvType, baseDomain, ns, target.Name, orgName,
 				p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
-			hvBytes, err := marshalValuesWithOverlay(hv, nil, env.EnvVars)
+			hvBytes, err := marshalValuesWithOverlay(hv, c.Values, env.EnvVars)
 			if err != nil {
 				return fmt.Errorf("marshal values.yaml for component %s env %s: %w", c.Name, env.EnvName, err)
 			}
@@ -1036,6 +1037,13 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			}
 			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
 			overlay := envOverlay(app, env, c.Name)
+			// Unified model: a single-component app renders single-source but still
+			// carries its component's own Values overlay (the value-based per-
+			// component config) — apply it on top of the app/env overlay. Empty for a
+			// plain single-template app, so no change there.
+			if len(app.Spec.Components) == 1 && len(app.Spec.Components[0].Values) > 0 {
+				overlay = deepMerge(overlay, deepCopyMap(app.Spec.Components[0].Values))
+			}
 			if preserveTag {
 				for _, tagKey := range tagKeys {
 					if tag := existingImageTag(outPath, tagKey); tag != "" {

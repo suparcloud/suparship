@@ -672,10 +672,10 @@ func TestCreate_ReturnsAppAndEnvironments(t *testing.T) {
 }
 
 // TestCreate_ComposedMultiTemplate verifies the create/ingest half of composed
-// apps: explicit components each carrying their own Template (+ per-component
-// image) produce a composed AppSpec (IsComposed true), with each ComponentSpec
-// keeping its template and image, and AppSpec.Template set to the app-level
-// "primary" the handler passes.
+// apps: explicit components each carrying their own Template (+ a per-component
+// Values overlay) produce a composed AppSpec (IsComposed true), with each
+// ComponentSpec keeping its template and values, and AppSpec.Template set to the
+// app-level "primary" the handler passes.
 func TestCreate_ComposedMultiTemplate(t *testing.T) {
 	result, err := Create(CreateRequest{
 		ProjectName: "demo",
@@ -685,10 +685,9 @@ func TestCreate_ComposedMultiTemplate(t *testing.T) {
 		ExplicitComponents: []domain.ComponentSpec{
 			{Name: "api", Type: domain.ComponentWeb, Enabled: true,
 				Template: &domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"},
-				Image:    &domain.ComponentImage{Repository: "ghcr.io/acme/mono", Tag: "v1"}},
+				Values:   map[string]any{"components": map[string]any{"web": map[string]any{"image": map[string]any{"tag": "v1"}}}}},
 			{Name: "worker", Type: domain.ComponentWorker, Enabled: true,
-				Template: &domain.AppTemplateRef{Name: "worker", Version: "1.0.0"},
-				Image:    &domain.ComponentImage{Repository: "ghcr.io/acme/mono", Tag: "v1"}},
+				Template: &domain.AppTemplateRef{Name: "worker", Version: "1.0.0"}},
 		},
 	})
 	if err != nil {
@@ -705,12 +704,41 @@ func TestCreate_ComposedMultiTemplate(t *testing.T) {
 		if c.Template == nil || c.Template.Name == "" {
 			t.Errorf("component %q missing per-component Template", c.Name)
 		}
-		if c.Image == nil || c.Image.Repository == "" {
-			t.Errorf("component %q lost its per-component Image", c.Name)
-		}
+	}
+	if app.Spec.Components[0].Values == nil {
+		t.Error("component api lost its per-component Values overlay")
 	}
 	if app.Spec.Template.Name != "web-service" {
 		t.Errorf("AppSpec.Template = %q, want primary web-service", app.Spec.Template.Name)
+	}
+}
+
+// TestCreate_SingleTemplateStampsComponent verifies the unified model: creating
+// from one template yields a 1-component app whose component carries that template
+// (so the schema matches a multi-component app), and the app is NOT composed
+// (single-source, count-based).
+func TestCreate_SingleTemplateStampsComponent(t *testing.T) {
+	result, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "hello",
+		Template:    webTemplate(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	app := result.App
+	if len(app.Spec.Components) != 1 {
+		t.Fatalf("Components = %d, want 1", len(app.Spec.Components))
+	}
+	c := app.Spec.Components[0]
+	if c.Template == nil || c.Template.Name != "web-service" || c.Template.Version != "1.0.0" {
+		t.Errorf("component template = %+v, want web-service@1.0.0", c.Template)
+	}
+	if app.Spec.Template.Name != "web-service" {
+		t.Errorf("AppSpec.Template (primary mirror) = %q, want web-service", app.Spec.Template.Name)
+	}
+	if app.Spec.IsComposed() {
+		t.Error("a 1-component app must be single-source (not composed)")
 	}
 }
 

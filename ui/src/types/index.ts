@@ -562,10 +562,6 @@ export interface ComponentSummary {
   exposeMode?: string;
   /** The component's own template — present only for a composed app's components. */
   template?: string;
-  /** Per-component image override (composed apps). */
-  image?: { repository?: string; tag?: string };
-  /** Per-component container port (composed apps). */
-  port?: number;
 }
 
 export interface AppReleaseRef {
@@ -857,13 +853,10 @@ export interface ComponentCreate {
   exposeMode?: string;
   /** The component's own template. Present on every component of a composed app. */
   template?: { name: string; version?: string };
-  /** Per-component image override (composed apps run different images per component). */
-  image?: { repository?: string; tag?: string };
-  /** Per-component container port. */
-  port?: number;
-  /** Override the container entrypoint (e.g. ["alembic","upgrade","head"]). */
-  command?: string[];
-  args?: string[];
+  /** Per-component Helm values overlay, deep-merged onto this component's chart
+   *  values at publish (value-based config — image/port/command/etc. in the shape
+   *  THIS chart expects, so BYO charts work like canonical ones). */
+  values?: Record<string, unknown>;
 }
 
 export interface CreateAppRequest {

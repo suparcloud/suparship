@@ -42,7 +42,7 @@ import "github.com/suparcloud/suparship/internal/domain"
 //     input values (those live in project.Service and are not needed for the
 //     read-only app views this adapter targets).
 func MapServiceToApp(svc *domain.Service) *domain.App {
-	return &domain.App{
+	app := &domain.App{
 		Name:        svc.Name,
 		ProjectName: svc.ProjectName,
 		Spec: domain.AppSpec{
@@ -66,6 +66,10 @@ func MapServiceToApp(svc *domain.Service) *domain.App {
 			PreviewsEnabled: true,
 		},
 	}
+	// Unified model: the component carries the app's template (one template = one
+	// component).
+	app.Spec.BackfillComponentTemplates()
+	return app
 }
 
 // MapServiceStatusToAppEnvironment maps a domain.ServiceStatus for one stable

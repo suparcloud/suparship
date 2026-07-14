@@ -4242,9 +4242,9 @@ function ComponentsTable({
   currentEnv: AppEnvironmentSummary | null;
 }) {
   const isMulti = components.length > 1;
-  // Composed = at least one component is rendered by its own template (a
-  // multi-source app), vs a single-chart app whose components share one chart.
-  const composed = components.some((c) => !!c.template);
+  // Composed = a multi-source app (more than one component). In the unified model
+  // every component carries a template, so the signal is component count.
+  const composed = components.length > 1;
   const [expanded, setExpanded] = useState(true);
 
   if (components.length === 0) return null;
@@ -4343,22 +4343,14 @@ function ComponentsTable({
                     </span>
                     {componentVisibilityBadge(comp)}
                   </div>
-                  {(comp.template || comp.image?.repository) && (
-                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-400">
-                      {comp.template && (
-                        <span className="truncate">
-                          template{" "}
-                          <span className="font-medium text-gray-500">
-                            {comp.template}
-                          </span>
+                  {comp.template && (
+                    <div className="flex min-w-0 items-center gap-x-2 text-xs text-gray-400">
+                      <span className="truncate">
+                        template{" "}
+                        <span className="font-medium text-gray-500">
+                          {comp.template}
                         </span>
-                      )}
-                      {comp.image?.repository && (
-                        <span className="truncate font-mono text-gray-500">
-                          {comp.image.repository}
-                          {comp.image.tag ? `:${comp.image.tag}` : ""}
-                        </span>
-                      )}
+                      </span>
                     </div>
                   )}
                 </div>

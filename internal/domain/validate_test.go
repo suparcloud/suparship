@@ -152,20 +152,56 @@ func TestValidateComposedComponents(t *testing.T) {
 }
 
 func TestAppSpec_IsComposedAndOrder(t *testing.T) {
-	legacy := AppSpec{Components: []ComponentSpec{{Name: "web"}}}
-	if legacy.IsComposed() {
-		t.Error("app with no templated components should not be composed")
+	// Unified model: IsComposed is count-based (multi-source when >1 component).
+	oneNoTemplate := AppSpec{Components: []ComponentSpec{{Name: "web"}}}
+	if oneNoTemplate.IsComposed() {
+		t.Error("single-component app should not be composed (single-source)")
+	}
+	// A single-component app that DOES carry a template is still single-source.
+	oneTemplated := AppSpec{Components: []ComponentSpec{
+		{Name: "web", Template: &AppTemplateRef{Name: "web-service"}},
+	}}
+	if oneTemplated.IsComposed() {
+		t.Error("single-component app is single-source even with a template stamped")
 	}
 	composed := AppSpec{Components: []ComponentSpec{
 		{Name: "worker", Template: &AppTemplateRef{Name: "worker"}},
 		{Name: "api", Template: &AppTemplateRef{Name: "web-service"}},
 	}}
 	if !composed.IsComposed() {
-		t.Fatal("app with a templated component should be composed")
+		t.Fatal("multi-component app should be composed (multi-source)")
 	}
 	got := composed.ComposedComponents()
 	if len(got) != 2 || got[0].Name != "api" || got[1].Name != "worker" {
 		t.Errorf("ComposedComponents not name-sorted: %+v", got)
+	}
+}
+
+func TestBackfillComponentTemplates(t *testing.T) {
+	// Legacy app: nil-Template components get the app's primary template.
+	legacy := AppSpec{
+		Template: AppTemplateRef{Name: "web-service", Version: "1.0.0"},
+		Components: []ComponentSpec{
+			{Name: "web"},
+			{Name: "worker", Template: &AppTemplateRef{Name: "worker"}}, // own template kept
+		},
+	}
+	legacy.BackfillComponentTemplates()
+	if legacy.Components[0].Template == nil || legacy.Components[0].Template.Name != "web-service" {
+		t.Errorf("web component not backfilled: %+v", legacy.Components[0].Template)
+	}
+	if legacy.Components[0].Template.Version != "1.0.0" {
+		t.Errorf("backfilled version = %q, want 1.0.0", legacy.Components[0].Template.Version)
+	}
+	if legacy.Components[1].Template.Name != "worker" {
+		t.Error("component with its own Template must not be overwritten")
+	}
+
+	// No primary template → no-op (BYO/passthrough app with no components).
+	empty := AppSpec{Components: []ComponentSpec{{Name: "web"}}}
+	empty.BackfillComponentTemplates()
+	if empty.Components[0].Template != nil {
+		t.Error("no primary template → nothing to backfill")
 	}
 }
 
@@ -722,13 +758,14 @@ func TestValidateExposeModes(t *testing.T) {
 			org: orgWithBoth,
 		},
 		{
-			name: "two non-disabled rejected",
+			// Unified model: a 2-component app is multi-source (each component its
+			// own chart + distinct host), so two exposed components are allowed.
+			name: "two non-disabled allowed (multi-source)",
 			components: []ComponentSpec{
 				{Name: "admin", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeInternal},
 				{Name: "api", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
 			},
-			org:     orgWithBoth,
-			wantErr: "at most one HTTP surface",
+			org: orgWithBoth,
 		},
 		{
 			name: "external mode without profile errors",
@@ -754,13 +791,13 @@ func TestValidateExposeModes(t *testing.T) {
 			// no orgProfiles, no envProfiles — legacy fall-through
 		},
 		{
-			name: "two external rejected",
+			// Two external components → multi-source, each with its own host → allowed.
+			name: "two external allowed (multi-source)",
 			components: []ComponentSpec{
 				{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
 				{Name: "api", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
 			},
-			org:     orgWithBoth,
-			wantErr: "at most one HTTP surface",
+			org: orgWithBoth,
 		},
 		{
 			name: "composed app: two exposed components allowed (per-component hosts)",
