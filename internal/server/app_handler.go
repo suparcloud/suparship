@@ -162,18 +162,6 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
-	if req.Template == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name is required"})
-		return
-	}
-
-	tmpl, ok := ah.lookupTemplate(r.Context(), req.Template)
-	if !ok {
-		writeJSON(w, http.StatusBadRequest, errorResponse{
-			Error: "template \"" + req.Template + "\" not found",
-		})
-		return
-	}
 
 	// Verify the project exists before attempting any writes.
 	if _, err := ah.projectStore.Get(r.Context(), projectName); err != nil {
@@ -197,9 +185,13 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		domainSecretRefs[i] = domain.AppSecretRef{Name: s.Name, SecretRef: s.SecretRef}
 	}
 
-	// Build explicit component specs when the caller provides them (legacy
-	// path). When absent, Create initialises components from the template.
+	// Build explicit component specs when the caller provides them. Each may
+	// carry its OWN template (composed apps): resolve every referenced template
+	// so an unknown one 400s here, and pin its version. When no component carries
+	// a template, this is the legacy single-template path. When absent entirely,
+	// Create initialises components from the app-level template.
 	var explicitComponents []domain.ComponentSpec
+	var firstComponentTemplate *tpl.Template
 	for i, c := range req.Components {
 		ct, err := domain.ParseComponentType(c.Type)
 		if err != nil {
@@ -215,18 +207,65 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		explicitComponents = append(explicitComponents, domain.ComponentSpec{
+		cs := domain.ComponentSpec{
 			Name:       c.Name,
 			Type:       ct,
 			Enabled:    c.Enabled,
 			ExposeMode: mode,
-		})
+			Port:       c.Port,
+			Command:    c.Command,
+			Args:       c.Args,
+		}
+		if c.Image != nil {
+			cs.Image = &domain.ComponentImage{Repository: c.Image.Repository, Tag: c.Image.Tag}
+		}
+		if c.Template != nil && c.Template.Name != "" {
+			ctmpl, ok := ah.lookupTemplate(r.Context(), c.Template.Name)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, errorResponse{
+					Error: "components[" + itoa(i) + "]: template \"" + c.Template.Name + "\" not found",
+				})
+				return
+			}
+			version := c.Template.Version
+			if version == "" {
+				version = ctmpl.Metadata.Version
+			}
+			cs.Template = &domain.AppTemplateRef{Name: ctmpl.Metadata.Name, Version: version}
+			if firstComponentTemplate == nil {
+				firstComponentTemplate = ctmpl
+			}
+		}
+		explicitComponents = append(explicitComponents, cs)
 	}
 	if len(explicitComponents) > 0 {
 		if err := domain.ValidateComponents(explicitComponents); err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 			return
 		}
+	}
+
+	// Resolve the app-level template: the caller's req.Template when given, else
+	// (a composed canvas app that names no app-level template) the first
+	// component's template as the app "primary". This keeps AppSpec.Template
+	// populated for readers while the publisher renders each component's own
+	// chart; the composed branch ignores AppSpec.Template at publish.
+	var tmpl *tpl.Template
+	switch {
+	case req.Template != "":
+		var ok bool
+		tmpl, ok = ah.lookupTemplate(r.Context(), req.Template)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, errorResponse{
+				Error: "template \"" + req.Template + "\" not found",
+			})
+			return
+		}
+	case firstComponentTemplate != nil:
+		tmpl = firstComponentTemplate
+	default:
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name is required"})
+		return
 	}
 
 	// Translate addon claim DTOs → domain spec. domain.ValidateAddons

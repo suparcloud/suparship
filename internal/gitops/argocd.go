@@ -130,8 +130,16 @@ type ObjectMeta struct {
 type ApplicationSpec struct {
 	// Project is the ArgoCD AppProject that scopes this Application.
 	// Defaults to the suparship project name.
-	Project     string                 `json:"project"     yaml:"project"`
-	Source      ApplicationSource      `json:"source"      yaml:"source"`
+	Project string `json:"project" yaml:"project"`
+	// Source is the single git/Helm source for a non-composed Application.
+	// Mutually exclusive with Sources: ArgoCD rejects an Application that sets
+	// both. omitempty (an all-zero ApplicationSource) lets a composed
+	// Application omit it entirely and use Sources instead — yaml.v3 omits a
+	// struct whose every field is zero.
+	Source ApplicationSource `json:"source,omitempty" yaml:"source,omitempty"`
+	// Sources is the multi-source list for a composed Application: a values-ref
+	// source plus one chart source per component. Mutually exclusive with Source.
+	Sources     []ApplicationSource    `json:"sources,omitempty" yaml:"sources,omitempty"`
 	Destination ApplicationDestination `json:"destination" yaml:"destination"`
 	// SyncPolicy is optional. When nil, sync must be triggered manually.
 	SyncPolicy *SyncPolicy `json:"syncPolicy,omitempty" yaml:"syncPolicy,omitempty"`

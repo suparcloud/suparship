@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/suparcloud/suparship/internal/envconfig"
 )
@@ -214,6 +215,34 @@ type ComponentSpec struct {
 	EnvFromConfigMaps []string `json:"envFromConfigMaps,omitempty" yaml:"envFromConfigMaps,omitempty"`
 	// Scaling holds per-component KEDA autoscaling (triggers + min/max).
 	Scaling *ComponentScaling `json:"scaling,omitempty" yaml:"scaling,omitempty"`
+	// Template, when set, gives this component its OWN chart — the app is then a
+	// composition of heterogeneous components, each rendered by its own template
+	// as a separate Helm source in one multi-source ArgoCD Application (e.g.
+	// api→web-service, worker→worker, migrate→job). nil = inherit the app's
+	// AppSpec.Template (the single-chart behaviour). An app is in "composed mode"
+	// when at least one component sets this. See AppSpec.IsComposed.
+	Template *AppTemplateRef `json:"template,omitempty" yaml:"template,omitempty"`
+	// Command / Args override the component container's entrypoint — needed for a
+	// one-shot component like a migration (`alembic upgrade head`). Empty = the
+	// image's default entrypoint. Rendered by the component's chart.
+	Command []string `json:"command,omitempty" yaml:"command,omitempty"`
+	Args    []string `json:"args,omitempty" yaml:"args,omitempty"`
+	// Image overrides the container image for THIS component. In a composed app
+	// components can run different images (a monorepo's api/worker share one image
+	// while the frontend differs), so image can't stay app-level. nil = inherit
+	// the app-level image (AppSpec.Values image.repository/tag) — today's
+	// single-image behaviour, so legacy apps are unchanged.
+	Image *ComponentImage `json:"image,omitempty" yaml:"image,omitempty"`
+	// Port overrides the container port for THIS component (api on 8080, frontend
+	// on 80). Zero = inherit the app-level port / the chart default.
+	Port int32 `json:"port,omitempty" yaml:"port,omitempty"`
+}
+
+// ComponentImage is a per-component container image override (repository + tag).
+// Either field may be empty to inherit the app-level value for that part.
+type ComponentImage struct {
+	Repository string `json:"repository,omitempty" yaml:"repository,omitempty"`
+	Tag        string `json:"tag,omitempty" yaml:"tag,omitempty"`
 }
 
 // ComponentResources holds raw Kubernetes resource quantities for a component
@@ -493,6 +522,29 @@ type AppSpec struct {
 // IsDirect reports whether the app deploys each environment directly from its
 // values (no Kargo, no promotion). Empty DeliveryMode means pipeline.
 func (s AppSpec) IsDirect() bool { return s.DeliveryMode == DeliveryDirect }
+
+// IsComposed reports whether the app is a composition of components with their
+// own charts — true when at least one component sets ComponentSpec.Template. In
+// composed mode the publisher renders one multi-source ArgoCD Application with a
+// chart source per component; otherwise the app renders from its single
+// AppSpec.Template (legacy behaviour). Composed apps require every component to
+// carry a Template (enforced by validation).
+func (s AppSpec) IsComposed() bool {
+	for _, c := range s.Components {
+		if c.Template != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// ComposedComponents returns the app's components in deterministic (name-sorted)
+// order for composed rendering. Only meaningful when IsComposed is true.
+func (s AppSpec) ComposedComponents() []ComponentSpec {
+	out := append([]ComponentSpec(nil), s.Components...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
 
 // DeploysToEnv reports whether a direct-delivery app should deploy (publish) to
 // the named environment. An explicit per-env Deploy override wins; otherwise the

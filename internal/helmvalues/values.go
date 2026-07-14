@@ -219,6 +219,12 @@ type ComponentValues struct {
 	// EnvFrom lists extra Secret/ConfigMap sources the component envFroms,
 	// beyond the platform hierarchy. Charts append these to their envFrom block.
 	EnvFrom []EnvFromSource `json:"envFrom,omitempty" yaml:"envFrom,omitempty"`
+	// Command / Args override the component container's entrypoint and
+	// arguments. Empty = the image's default entrypoint. Needed for a one-shot
+	// component such as a migration (`alembic upgrade head`); charts that render
+	// a workload read these into the container's command/args.
+	Command []string `json:"command,omitempty" yaml:"command,omitempty"`
+	Args    []string `json:"args,omitempty" yaml:"args,omitempty"`
 	// Resources is optional. The chart uses Size (preset) or the raw
 	// Requests/Limits when present.
 	Resources *ResourceValues `json:"resources,omitempty" yaml:"resources,omitempty"`

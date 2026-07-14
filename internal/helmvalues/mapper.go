@@ -247,6 +247,65 @@ func MapToHelmValuesForEnv(
 	}
 }
 
+// MapComponentHelmValuesForEnv renders the values document for a SINGLE
+// component of a composed app — the per-component values.yaml each component's
+// own chart consumes as its one multi-source Application source.
+//
+// It is a single-component projection of MapToHelmValuesForEnv: it shallow-copies
+// the app with Spec.Components narrowed to just this component, then delegates.
+// This reuses all of MapToHelmValuesForEnv's routing/envFrom/platform-token
+// derivation unchanged. The app-level envFrom hierarchy (<app>-config/<app>-secrets)
+// and addon bindings are shared across every component — deliberately, so all of
+// a composed app's workloads see the same env/secret surface in the one namespace.
+//
+// Two projections make the canonical values line up with an off-the-shelf
+// component chart:
+//
+//   - componentKey renames the projected component to the key the chart reads
+//     (a template's chart is authored against a fixed key — web-service reads
+//     components.web — declared as the template's first component name). Pass the
+//     component's own name when a chart reads components.<its-own-name>.
+//   - app.name is set to "{app}-{component}" so the chart's fullname helper names
+//     this component's resources "{app}-{component}-…", distinct from its
+//     siblings sharing the one namespace (fullname derives from .Values.app.name).
+func MapComponentHelmValuesForEnv(
+	app *domain.App,
+	comp domain.ComponentSpec,
+	componentKey string,
+	envName string,
+	envType domain.AppEnvironmentType,
+	baseDomain, namespace, cluster string,
+	orgName string,
+	orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles,
+	orgAddonProfiles, envAddonProfiles domain.AddonProfiles,
+) HelmValues {
+	instanceName := app.Name + "-" + comp.Name
+	if componentKey == "" {
+		componentKey = comp.Name
+	}
+	comp.Name = componentKey // emit under the chart's canonical component key
+
+	projected := *app
+	projected.Spec.Components = []domain.ComponentSpec{comp}
+	hv := MapToHelmValuesForEnv(
+		&projected, envName, envType, baseDomain, namespace, cluster, orgName,
+		orgProfiles, envProfiles, clusterProfiles, orgAddonProfiles, envAddonProfiles,
+	)
+	hv.App.Name = instanceName
+
+	// Per-component routing host: each component gets its OWN host derived from
+	// {app}-{component} (not the bare app name), so multiple exposed components in
+	// one composed app (api + frontend) resolve to distinct hostnames instead of
+	// colliding. Uses the resolved base domain MapToHelmValuesForEnv already baked
+	// into platform.BaseDomain (cluster → env → org tier precedence). The host is
+	// only consumed by the chart when the component is exposed; overriding it
+	// unconditionally keeps each component's values self-consistent.
+	host := stripScheme(domain.GenerateURLWithDomain(instanceName, envName, envType, hv.Platform.BaseDomain))
+	hv.Routing.Host = host
+	hv.Platform.RoutingHost = host
+	return hv
+}
+
 // addonSecretName returns the deterministic name of the connection
 // Secret an addon wrapper produces and the consumer app envFroms. The
 // pattern keeps the addon's contributing scope visible in the Secret
@@ -458,6 +517,23 @@ func buildComponentValues(
 	if len(env) > 0 {
 		cv.Env = env
 	}
+	if len(c.Command) > 0 {
+		cv.Command = c.Command
+	}
+	if len(c.Args) > 0 {
+		cv.Args = c.Args
+	}
+	// Per-component image override wins over the app-level image, part by part
+	// (a composed app runs different images per component). Empty parts inherit
+	// the app-level value already set above.
+	if c.Image != nil {
+		if c.Image.Repository != "" {
+			cv.Image.Repository = c.Image.Repository
+		}
+		if c.Image.Tag != "" {
+			cv.Image.Tag = c.Image.Tag
+		}
+	}
 	switch {
 	case rawRes != nil && (len(rawRes.Requests) > 0 || len(rawRes.Limits) > 0):
 		cv.Resources = &ResourceValues{Requests: rawRes.Requests, Limits: rawRes.Limits}
@@ -474,7 +550,11 @@ func buildComponentValues(
 			MaxReplicaCount: scaling.MaxReplicas,
 		}
 	}
-	if port > 0 {
+	// Component's own port wins; else the app-level port (routing component only).
+	switch {
+	case c.Port > 0:
+		cv.Port = c.Port
+	case port > 0:
 		cv.Port = port
 	}
 	if healthPath != "" {

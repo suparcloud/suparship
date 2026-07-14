@@ -81,6 +81,34 @@ func ValidateComponents(components []ComponentSpec) error {
 			)
 		}
 	}
+	return ValidateComposedComponents(components)
+}
+
+// ValidateComposedComponents enforces the composed-app contract: an app is
+// composed when at least one component sets its own Template (each component is
+// then a separate chart source in one multi-source Application). To keep
+// rendering unambiguous, either NO component carries a Template (legacy
+// single-chart app) or EVERY component does (fully composed) — a mix is
+// rejected. Each composed component's Template must name a chart.
+func ValidateComposedComponents(components []ComponentSpec) error {
+	withTmpl := 0
+	for _, c := range components {
+		if c.Template != nil {
+			withTmpl++
+		}
+	}
+	if withTmpl == 0 {
+		return nil // legacy single-chart app
+	}
+	if withTmpl != len(components) {
+		return fmt.Errorf("composed app: every component must set its own template (%d of %d do); a mix of templated and inherited components is not supported",
+			withTmpl, len(components))
+	}
+	for i, c := range components {
+		if c.Template.Name == "" {
+			return fmt.Errorf("components[%d] %q: template.name is required for a composed component", i, c.Name)
+		}
+	}
 	return nil
 }
 
@@ -115,11 +143,12 @@ func ValidateSingleExposedComponent(components []ComponentSpec, allowMultiple bo
 //  2. Each non-disabled mode resolves against the configured org/env
 //     RoutingProfiles. Unknown modes fail loudly here at app save time
 //     rather than silently dropping the ingress at gitops publish time.
-//  3. At most one component is non-disabled. The MVP single-routing-component
-//     invariant (mirrored by helmvalues.resolveRoutingComponent) precludes
-//     mixed-tier apps where one component is internal and another is
-//     external; lifting that requires per-component routing.host plumbing
-//     in the chart, which is out of scope for now.
+//  3. At most one component is non-disabled — UNLESS the app is composed. A
+//     single-chart app has one HTTP surface (one values.yaml → one routing.host),
+//     so two exposed components would collide. A composed app renders each
+//     component as its own Helm source with its own per-component values.yaml and
+//     its own {app}-{component} host (helmvalues.MapComponentHelmValuesForEnv),
+//     so multiple exposed components are fine and this limit is lifted.
 //
 // orgProfiles and envProfiles may both be nil — the validator treats them
 // as empty maps. When both are empty, profile-lookup errors are skipped so
@@ -127,6 +156,17 @@ func ValidateSingleExposedComponent(components []ComponentSpec, allowMultiple bo
 // components are all ExposeDisabled.
 func ValidateExposeModes(components []ComponentSpec, orgProfiles, envProfiles RoutingProfiles) error {
 	hasProfiles := len(orgProfiles) > 0 || len(envProfiles) > 0
+
+	// Composed apps (>=1 component carries its own Template) render one Ingress
+	// per component with a distinct host, so the single-HTTP-surface limit below
+	// does not apply to them.
+	composed := false
+	for _, c := range components {
+		if c.Template != nil {
+			composed = true
+			break
+		}
+	}
 
 	exposed := 0
 	for _, c := range components {
@@ -145,10 +185,10 @@ func ValidateExposeModes(components []ComponentSpec, orgProfiles, envProfiles Ro
 			}
 		}
 	}
-	if exposed > 1 {
+	if exposed > 1 && !composed {
 		return fmt.Errorf(
-			"app has %d components with a non-disabled exposeMode; an app may expose at most one HTTP surface — "+
-				"split additional exposed components into their own apps and group them in a stack",
+			"app has %d components with a non-disabled exposeMode; a single-chart app may expose at most one HTTP surface — "+
+				"give each component its own template (composed app) for multiple HTTP surfaces, or split them into separate apps grouped in a stack",
 			exposed,
 		)
 	}

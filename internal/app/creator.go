@@ -286,6 +286,13 @@ func Create(req CreateRequest) (*CreateResult, error) {
 	if len(comps) == 0 {
 		comps = ComponentsFromTemplate(req.Template, req.ComponentToggles)
 	}
+	// Enforce component invariants on BOTH the explicit and template-derived
+	// paths — including the composed all-or-nothing rule (either no component
+	// carries its own Template, or every one does). Legacy single-template apps
+	// have no templated components, so this passes trivially.
+	if err := domain.ValidateComponents(comps); err != nil {
+		return nil, fmt.Errorf("invalid components: %w", err)
+	}
 
 	app, envs := Build(
 		req.ProjectName,

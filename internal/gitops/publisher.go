@@ -603,6 +603,14 @@ func (p *Publisher) PublishApp(ctx context.Context, app *domain.App, envs []AppP
 // PublishApp so the batch publisher (PublishApps) can write many apps into one
 // clone and commit once.
 func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	// Composed apps (>=1 component carries its own Template) render as one
+	// multi-source Application per (app, cluster) — a separate tree with its own
+	// per-env App-of-Apps. Handled entirely by writeComposedAppTree; the
+	// single-chart path below is bypassed. MVP: no Kargo / addons wiring yet.
+	if app.Spec.IsComposed() {
+		return p.writeComposedAppTree(ctx, repoDir, app, envs)
+	}
+
 	// Pipeline apps deploy only the first stable env (+ previews) on create;
 	// prod waits for a promotion. Direct apps have no promotion, so every bound
 	// stable env deploys from its own values immediately.
@@ -648,6 +656,195 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 		}
 	} else if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
 		return fmt.Errorf("write kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
+	}
+	return nil
+}
+
+// writeComposedAppTree is the composed-app counterpart of writeAppTree: it syncs
+// each component's chart, writes one per-component values.yaml plus a fully
+// rendered multi-source Application manifest per (app, cluster), and the per-env
+// composed App-of-Apps. MVP scope: single target cluster, all-inline component
+// charts, no previews, no Kargo / addon wiring (later phases).
+func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	deployEnvs := firstDeployEnvs(envs)
+	if app.Spec.IsDirect() {
+		deployEnvs = enabledDeployEnvs(app, envs)
+	}
+
+	// Sync each component's chart into charts/{template}/{versionDir}/ so the
+	// rendered Application's chart sources resolve. syncChart dedups an
+	// already-present immutable version (dirNonEmpty), so two components sharing
+	// a template@version copy the bytes once. Resolve each component's canonical
+	// values key (the fixed key its chart reads, e.g. web-service→"web") once
+	// here, where the context is available, and pass the map down.
+	componentKeys := make(map[string]string, len(app.Spec.Components))
+	for _, c := range app.Spec.ComposedComponents() {
+		if err := p.syncChart(ctx, repoDir, c.Template.Name, c.Template.Version); err != nil {
+			return fmt.Errorf("sync chart for component %s (%s@%s): %w", c.Name, c.Template.Name, c.Template.Version, err)
+		}
+		componentKeys[c.Name] = p.resolveComponentKey(ctx, c.Template.Name, c.Name)
+	}
+
+	return p.publishComposedAppFiles(repoDir, app, deployEnvs, componentKeys)
+}
+
+// resolveComponentKey returns the values key a component template's chart reads
+// its config under — its first declared component name (web-service → "web").
+// Falls back to fallback (the component's own name) when no TemplateLoader is
+// configured or the template declares no components, so a chart authored to read
+// components.<its-own-name> works without a loader.
+func (p *Publisher) resolveComponentKey(ctx context.Context, templateName, fallback string) string {
+	if p.cfg.TemplateLoader == nil {
+		return fallback
+	}
+	tmpl, err := p.cfg.TemplateLoader.LoadTemplate(ctx, templateName)
+	if err != nil || tmpl == nil || len(tmpl.Spec.Components) == 0 {
+		return fallback
+	}
+	return tmpl.Spec.Components[0].Name
+}
+
+// composedAppDir builds a path under the manifest-only _composed-apps/{env} tree
+// where a composed app's rendered Application manifests live — disjoint from the
+// values tree (envs/) so the per-env composed App-of-Apps directory source
+// renders only Application manifests. Composed apps don't support previews yet,
+// so this is always the stable-env layout.
+func (p *Publisher) composedAppDir(repoDir string, env AppPublishEnv, parts ...string) string {
+	all := append([]string{composedAppsDir, env.EnvName}, parts...)
+	return p.outputDir(repoDir, all...)
+}
+
+// publishComposedAppFiles writes, for each deployable stable env: one
+// values.yaml per component (a single-component projection of the canonical
+// values), the rendered multi-source Application manifest for the env's active
+// cluster, the app's platform resources (ConfigMap + ExternalSecret), and the
+// per-env composed App-of-Apps into _infra/. Preview and unbound envs are
+// skipped with a warning.
+func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv, componentKeys map[string]string) error {
+	orgName := p.cfg.OrgName
+	if orgName == "" {
+		orgName = "default"
+	}
+	namePattern := p.cfg.ResourceNaming.EffectiveArgoAppName()
+
+	touchedEnvs := make(map[string]bool)
+	for _, env := range envs {
+		if !env.Bound {
+			slog.Warn("gitops: skipping composed publish for unbound env — assign a cluster via Settings > Environments",
+				"app", app.Name, "env", env.EnvName)
+			continue
+		}
+		if env.EnvType == domain.AppEnvPreview {
+			slog.Warn("gitops: composed apps do not support preview envs yet — skipping",
+				"app", app.Name, "env", env.EnvName)
+			continue
+		}
+
+		ns := env.Namespace
+		if ns == "" {
+			ns = app.Name + "-" + env.EnvName
+		}
+
+		// MVP: one target cluster (the env's active / sole cluster). Multi-cluster
+		// fan-out is deferred.
+		target := activeTarget(env)
+		baseDomain := env.BaseDomain
+		if target.BaseDomain != "" {
+			baseDomain = target.BaseDomain
+		}
+
+		// Prune stale composed trees for this app-env first, then rewrite — so a
+		// removed component's values.yaml / a de-selected cluster's manifest don't
+		// linger and generate a phantom resource.
+		if err := os.RemoveAll(p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components")); err != nil {
+			return fmt.Errorf("prune composed component values for env %s: %w", env.EnvName, err)
+		}
+		if err := os.RemoveAll(p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets")); err != nil {
+			return fmt.Errorf("prune composed manifests for env %s: %w", env.EnvName, err)
+		}
+
+		// Per-component values: a single-component projection of the canonical
+		// values, so each component's own chart consumes exactly its
+		// components.<name> block. An empty overlay is passed (MVP: no app-level
+		// rawValues overlay per component — that would risk leaking a sibling's
+		// components.<other> keys into this file); env vars are still threaded so
+		// ((platform.*))/((vars.*)) tokens resolve.
+		componentValues := make(map[string]string, len(app.Spec.Components))
+		for _, c := range app.Spec.ComposedComponents() {
+			hv := helmvalues.MapComponentHelmValuesForEnv(app, c, componentKeys[c.Name], env.EnvName, env.EnvType, baseDomain, ns, target.Name, orgName,
+				p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+			hvBytes, err := marshalValuesWithOverlay(hv, nil, env.EnvVars)
+			if err != nil {
+				return fmt.Errorf("marshal values.yaml for component %s env %s: %w", c.Name, env.EnvName, err)
+			}
+			valuesAbs := p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components", c.Name, "values.yaml")
+			if err := p.writeFile(valuesAbs, hvBytes); err != nil {
+				return err
+			}
+			componentValues[c.Name] = p.envAppRelPath(AppMetadataChartTypeInline, env, app.ProjectName, app.Name, "components", c.Name, "values.yaml")
+		}
+
+		// Rendered multi-source Application for this (app, cluster).
+		targetName := target.Name
+		if targetName == "" {
+			targetName = fallbackClusterName
+		}
+		server := target.Server
+		if server == "" {
+			server = defaultDestination
+		}
+		manifest := BuildComposedApplication(app, ComposedBuildOptions{
+			RepoURL:         p.cfg.ArgoCDRepoURL,
+			SubPath:         p.cfg.SubPath,
+			AppName:         RenderArgoAppName(namePattern, app.ProjectName, app.Name, env.EnvName, targetName),
+			EnvName:         env.EnvName,
+			ClusterName:     targetName,
+			ClusterServer:   server,
+			Namespace:       ns,
+			SyncAutomated:   p.cfg.SyncAutomated,
+			ComponentValues: componentValues,
+		})
+		manifestBytes, err := yaml.Marshal(manifest)
+		if err != nil {
+			return fmt.Errorf("marshal Application for env %s cluster %s: %w", env.EnvName, targetName, err)
+		}
+		manifestPath := p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets", targetName, "application.yaml")
+		if err := p.writeFile(manifestPath, manifestBytes); err != nil {
+			return err
+		}
+
+		// Platform-managed per-app resources (ConfigMap + ExternalSecret) — shared
+		// by every component (one env/secret surface in the one namespace), shipped
+		// by the platform ApplicationSet exactly as for a single-chart app.
+		envVars := env.EnvVars
+		if hasInterpToken(envVars) {
+			ic := p.platformVarsContext(app, env, orgName)
+			envVars = ic.InterpolateMap(envVars)
+		}
+		appDir := p.appEnvDir(repoDir, env, app.ProjectName, app.Name)
+		if err := p.writeAppPlatformResources(repoDir, appDir, app, ns, env, envVars); err != nil {
+			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
+		}
+
+		touchedEnvs[env.EnvName] = true
+		slog.Debug("gitops: wrote composed app files", "env", env.EnvName, "app", app.Name, "components", len(componentValues))
+	}
+
+	// Per-env composed App-of-Apps (idempotent): a directory source over
+	// _composed-apps/{env} that renders the child Application manifests. Written
+	// into _infra/ so the platform root App-of-Apps discovers it.
+	for envName := range touchedEnvs {
+		rootApp := BuildComposedRootApp(envName, p.cfg.ArgoCDRepoURL, AppSetOptions{
+			SyncAutomated: p.cfg.SyncAutomated,
+			SubPath:       p.cfg.SubPath,
+		})
+		rootBytes, err := yaml.Marshal(rootApp)
+		if err != nil {
+			return fmt.Errorf("marshal composed root app for env %s: %w", envName, err)
+		}
+		if err := p.writeFile(p.outputDir(repoDir, "_infra", envName+"-composed-appset.yaml"), rootBytes); err != nil {
+			return err
+		}
 	}
 	return nil
 }

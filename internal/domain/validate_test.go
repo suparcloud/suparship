@@ -121,6 +121,54 @@ func TestValidateComponentName(t *testing.T) {
 
 // ── ValidateComponents ────────────────────────────────────────────────────────
 
+func TestValidateComposedComponents(t *testing.T) {
+	tmpl := func(name string) *AppTemplateRef { return &AppTemplateRef{Name: name} }
+	cases := []struct {
+		name       string
+		components []ComponentSpec
+		wantErr    bool
+	}{
+		{"legacy: none templated", []ComponentSpec{{Name: "web"}, {Name: "worker"}}, false},
+		{"composed: all templated", []ComponentSpec{
+			{Name: "api", Template: tmpl("web-service")},
+			{Name: "worker", Template: tmpl("worker")},
+		}, false},
+		{"mixed: some templated → error", []ComponentSpec{
+			{Name: "api", Template: tmpl("web-service")},
+			{Name: "worker"},
+		}, true},
+		{"composed: empty template name → error", []ComponentSpec{
+			{Name: "api", Template: tmpl("")},
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateComposedComponents(tc.components)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateComposedComponents = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAppSpec_IsComposedAndOrder(t *testing.T) {
+	legacy := AppSpec{Components: []ComponentSpec{{Name: "web"}}}
+	if legacy.IsComposed() {
+		t.Error("app with no templated components should not be composed")
+	}
+	composed := AppSpec{Components: []ComponentSpec{
+		{Name: "worker", Template: &AppTemplateRef{Name: "worker"}},
+		{Name: "api", Template: &AppTemplateRef{Name: "web-service"}},
+	}}
+	if !composed.IsComposed() {
+		t.Fatal("app with a templated component should be composed")
+	}
+	got := composed.ComposedComponents()
+	if len(got) != 2 || got[0].Name != "api" || got[1].Name != "worker" {
+		t.Errorf("ComposedComponents not name-sorted: %+v", got)
+	}
+}
+
 func TestValidateComponents(t *testing.T) {
 	web := ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true}
 	worker := ComponentSpec{Name: "worker", Type: ComponentWorker, Enabled: true}
@@ -713,6 +761,28 @@ func TestValidateExposeModes(t *testing.T) {
 			},
 			org:     orgWithBoth,
 			wantErr: "at most one HTTP surface",
+		},
+		{
+			name: "composed app: two exposed components allowed (per-component hosts)",
+			components: []ComponentSpec{
+				{Name: "api", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal,
+					Template: &AppTemplateRef{Name: "web-service"}},
+				{Name: "frontend", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal,
+					Template: &AppTemplateRef{Name: "web-service"}},
+			},
+			org: orgWithBoth,
+			// composed → single-HTTP-surface limit lifted; no error expected.
+		},
+		{
+			name: "composed app still validates each mode's profile",
+			components: []ComponentSpec{
+				{Name: "api", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal,
+					Template: &AppTemplateRef{Name: "web-service"}},
+				{Name: "frontend", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal,
+					Template: &AppTemplateRef{Name: "web-service"}},
+			},
+			org:     orgInternalOnly, // no "external" profile
+			wantErr: "no profile named \"external\"",
 		},
 	}
 	for _, tt := range tests {

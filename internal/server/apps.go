@@ -277,6 +277,35 @@ type ComponentCreateDTO struct {
 	// the chart should use for this component. Empty is treated as
 	// "disabled" — the component runs without any ingress.
 	ExposeMode string `json:"exposeMode,omitempty"`
+	// Template, when set, gives this component its OWN chart — the app becomes a
+	// composition of components each rendered by its own template (api→web-service,
+	// worker→worker, migrate→job). Omitted = inherit the app-level template. An
+	// app is composed when EVERY component sets this (all-or-nothing, enforced by
+	// domain.ValidateComposedComponents).
+	Template *ComponentTemplateDTO `json:"template,omitempty"`
+	// Image overrides the container image for this component (a composed app runs
+	// different images per component). Omitted = inherit the app-level image.
+	Image *ComponentImageDTO `json:"image,omitempty"`
+	// Port overrides the container port for this component. Zero = inherit.
+	Port int32 `json:"port,omitempty"`
+	// Command / Args override the component container's entrypoint (e.g. a
+	// one-shot migration). Empty = the image's default entrypoint.
+	Command []string `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+}
+
+// ComponentTemplateDTO names a per-component template for a composed app. Version
+// is optional; when empty the handler pins it from the resolved template.
+type ComponentTemplateDTO struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+}
+
+// ComponentImageDTO is a per-component image override. Either part may be empty
+// to inherit the app-level value for that part.
+type ComponentImageDTO struct {
+	Repository string `json:"repository,omitempty"`
+	Tag        string `json:"tag,omitempty"`
 }
 
 // createAppRequest is the JSON body for POST /api/v1/projects/{project}/apps.

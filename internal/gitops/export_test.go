@@ -42,6 +42,13 @@ func (p *Publisher) PublishAppFilesForTest(repoDir string, app *domain.App, envs
 	return p.publishAppFiles(repoDir, app, envs)
 }
 
+// WriteComposedAppTreeForTest exposes writeComposedAppTree — the composed-app
+// rendering path (per-component values + rendered multi-source Application +
+// per-env App-of-Apps) — to white-box tests without git operations.
+func (p *Publisher) WriteComposedAppTreeForTest(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	return p.writeComposedAppTree(ctx, repoDir, app, envs)
+}
+
 // PublishAppEnvForTest exposes PublishAppEnv's inner publishAppFiles call for
 // white-box unit testing without git operations.
 func (p *Publisher) PublishAppEnvForTest(repoDir string, app *domain.App, env AppPublishEnv) error {

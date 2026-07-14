@@ -671,6 +671,70 @@ func TestCreate_ReturnsAppAndEnvironments(t *testing.T) {
 	}
 }
 
+// TestCreate_ComposedMultiTemplate verifies the create/ingest half of composed
+// apps: explicit components each carrying their own Template (+ per-component
+// image) produce a composed AppSpec (IsComposed true), with each ComponentSpec
+// keeping its template and image, and AppSpec.Template set to the app-level
+// "primary" the handler passes.
+func TestCreate_ComposedMultiTemplate(t *testing.T) {
+	result, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "bigly",
+		// Handler passes the first component's template as the app "primary".
+		Template: webTemplate(),
+		ExplicitComponents: []domain.ComponentSpec{
+			{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+				Template: &domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"},
+				Image:    &domain.ComponentImage{Repository: "ghcr.io/acme/mono", Tag: "v1"}},
+			{Name: "worker", Type: domain.ComponentWorker, Enabled: true,
+				Template: &domain.AppTemplateRef{Name: "worker", Version: "1.0.0"},
+				Image:    &domain.ComponentImage{Repository: "ghcr.io/acme/mono", Tag: "v1"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	app := result.App
+	if !app.Spec.IsComposed() {
+		t.Fatal("expected app to be composed (every component carries a Template)")
+	}
+	if len(app.Spec.Components) != 2 {
+		t.Fatalf("Components = %d, want 2", len(app.Spec.Components))
+	}
+	for _, c := range app.Spec.Components {
+		if c.Template == nil || c.Template.Name == "" {
+			t.Errorf("component %q missing per-component Template", c.Name)
+		}
+		if c.Image == nil || c.Image.Repository == "" {
+			t.Errorf("component %q lost its per-component Image", c.Name)
+		}
+	}
+	if app.Spec.Template.Name != "web-service" {
+		t.Errorf("AppSpec.Template = %q, want primary web-service", app.Spec.Template.Name)
+	}
+}
+
+// TestCreate_MixedTemplatesRejected verifies the composed all-or-nothing rule is
+// enforced inside Create: some-but-not-all components carrying a Template fails.
+func TestCreate_MixedTemplatesRejected(t *testing.T) {
+	_, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "bigly",
+		Template:    webTemplate(),
+		ExplicitComponents: []domain.ComponentSpec{
+			{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+				Template: &domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"}},
+			{Name: "worker", Type: domain.ComponentWorker, Enabled: true}, // no template
+		},
+	})
+	if err == nil {
+		t.Fatal("expected mixed templated/inherited components to be rejected")
+	}
+	if !strings.Contains(err.Error(), "mix") {
+		t.Errorf("error = %q, want it to mention the templated/inherited mix", err)
+	}
+}
+
 func TestCreate_ComponentConfigsAndEnvComponents(t *testing.T) {
 	min0, max2, max9 := int32(0), int32(2), int32(9)
 	result, err := Create(CreateRequest{
