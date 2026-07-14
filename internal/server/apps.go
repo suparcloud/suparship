@@ -32,6 +32,15 @@ type ComponentSummaryDTO struct {
 	Type       string `json:"type"`
 	Enabled    bool   `json:"enabled"`
 	ExposeMode string `json:"exposeMode,omitempty"`
+	// Template is the component's own template name — set only for a composed
+	// app's components (each rendered by its own chart). Empty = the component
+	// inherits the app-level template (single-chart app).
+	Template string `json:"template,omitempty"`
+	// Image / Port are the per-component overrides a composed app carries, so the
+	// detail view can show each component's own image and port. Omitted when the
+	// component inherits the app-level image/port.
+	Image *ComponentImageDTO `json:"image,omitempty"`
+	Port  int32              `json:"port,omitempty"`
 }
 
 // AppReleaseRefDTO identifies the deployed release version for one environment

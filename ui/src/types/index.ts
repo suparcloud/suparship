@@ -557,8 +557,15 @@ export interface AppSecretRef {
 
 export interface ComponentSummary {
   name: string;
-  type: "web" | "worker" | "cron";
+  type: "web" | "worker" | "cron" | "job";
   enabledInPreview: boolean;
+  exposeMode?: string;
+  /** The component's own template — present only for a composed app's components. */
+  template?: string;
+  /** Per-component image override (composed apps). */
+  image?: { repository?: string; tag?: string };
+  /** Per-component container port (composed apps). */
+  port?: number;
 }
 
 export interface AppReleaseRef {
@@ -837,11 +844,37 @@ export interface CreateServiceResponse {
 
 // --- App creation types ---
 
+// ComponentCreate declares one component of a COMPOSED app in the create
+// request. Each component carries its own template (so the app assembles from
+// multiple templates into one multi-source Application) plus per-component typed
+// config. Mirrors the backend ComponentCreateDTO.
+export interface ComponentCreate {
+  name: string;
+  /** web | worker | cron | job */
+  type: string;
+  enabled: boolean;
+  /** disabled | internal | external. Omit for non-exposed components. */
+  exposeMode?: string;
+  /** The component's own template. Present on every component of a composed app. */
+  template?: { name: string; version?: string };
+  /** Per-component image override (composed apps run different images per component). */
+  image?: { repository?: string; tag?: string };
+  /** Per-component container port. */
+  port?: number;
+  /** Override the container entrypoint (e.g. ["alembic","upgrade","head"]). */
+  command?: string[];
+  args?: string[];
+}
+
 export interface CreateAppRequest {
   name: string;
   displayName?: string;
   description?: string;
   template: string;
+  /** Components of a composed app, each with its own template + config. When set
+   *  (every component carries a template), the app renders as one multi-source
+   *  Application. Omit for a single-template app. */
+  components?: ComponentCreate[];
   values: Record<string, unknown>;
   secretRefs: SecretRefInput[];
   /** "app" (default) — dedicated namespace per app+env; "project" — share the project namespace */

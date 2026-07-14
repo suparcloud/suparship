@@ -4196,11 +4196,26 @@ function TrafficTab() {
  * Derives whether a component type exposes an inbound network surface.
  * web → exposed (receives traffic); worker / cron → internal (no inbound route).
  */
-function componentVisibilityBadge(type: ComponentSummary["type"]) {
-  if (type === "web") {
+function componentVisibilityBadge(comp: ComponentSummary) {
+  if (comp.type === "job") {
+    return (
+      <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-600">
+        one-shot
+      </span>
+    );
+  }
+  if (comp.type === "web") {
+    // A composed web component carries an explicit exposeMode; a legacy web
+    // component (no mode) is exposed by default.
+    const label =
+      comp.exposeMode === "internal"
+        ? "internal"
+        : comp.exposeMode === "disabled"
+          ? "not exposed"
+          : "external";
     return (
       <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600">
-        exposed
+        {label}
       </span>
     );
   }
@@ -4227,6 +4242,9 @@ function ComponentsTable({
   currentEnv: AppEnvironmentSummary | null;
 }) {
   const isMulti = components.length > 1;
+  // Composed = at least one component is rendered by its own template (a
+  // multi-source app), vs a single-chart app whose components share one chart.
+  const composed = components.some((c) => !!c.template);
   const [expanded, setExpanded] = useState(true);
 
   if (components.length === 0) return null;
@@ -4244,7 +4262,7 @@ function ComponentsTable({
   const singleScalable = scalableComponents.length === 1;
 
   function replicaLabel(comp: ComponentSummary): string {
-    if (comp.type === "cron") return "—";
+    if (comp.type === "cron" || comp.type === "job") return "—";
     if (singleScalable && totalReplicas > 0) {
       return `${availableReplicas}/${totalReplicas}`;
     }
@@ -4266,6 +4284,14 @@ function ComponentsTable({
           {headerTitle}
         </h2>
         <div className="flex items-center gap-2">
+          {composed && (
+            <span
+              className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600"
+              title="Each component is rendered by its own template as one multi-source deployment"
+            >
+              composed
+            </span>
+          )}
           {isMulti && totalReplicas > 0 && (
             <span
               className="text-xs text-gray-400"
@@ -4305,15 +4331,36 @@ function ComponentsTable({
                 key={comp.name}
                 className="flex items-center justify-between px-5 py-2.5"
               >
-                {/* Left: name + type + visibility */}
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="font-mono text-sm text-gray-900">
-                    {comp.name}
-                  </span>
-                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs capitalize text-gray-500">
-                    {comp.type}
-                  </span>
-                  {componentVisibilityBadge(comp.type)}
+                {/* Left: name + type + visibility, plus template/image for a
+                    composed app's components. */}
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="font-mono text-sm text-gray-900">
+                      {comp.name}
+                    </span>
+                    <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs capitalize text-gray-500">
+                      {comp.type}
+                    </span>
+                    {componentVisibilityBadge(comp)}
+                  </div>
+                  {(comp.template || comp.image?.repository) && (
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-400">
+                      {comp.template && (
+                        <span className="truncate">
+                          template{" "}
+                          <span className="font-medium text-gray-500">
+                            {comp.template}
+                          </span>
+                        </span>
+                      )}
+                      {comp.image?.repository && (
+                        <span className="truncate font-mono text-gray-500">
+                          {comp.image.repository}
+                          {comp.image.tag ? `:${comp.image.tag}` : ""}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Right: replicas + status + preview eligibility */}

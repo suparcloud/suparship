@@ -3506,12 +3506,20 @@ func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
 func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 	dtos := make([]ComponentSummaryDTO, 0, len(components))
 	for _, c := range components {
-		dtos = append(dtos, ComponentSummaryDTO{
+		dto := ComponentSummaryDTO{
 			Name:       c.Name,
 			Type:       string(c.Type),
 			Enabled:    c.Enabled,
 			ExposeMode: string(c.ExposeMode),
-		})
+			Port:       c.Port,
+		}
+		if c.Template != nil {
+			dto.Template = c.Template.Name
+		}
+		if c.Image != nil {
+			dto.Image = &ComponentImageDTO{Repository: c.Image.Repository, Tag: c.Image.Tag}
+		}
+		dtos = append(dtos, dto)
 	}
 	return dtos
 }

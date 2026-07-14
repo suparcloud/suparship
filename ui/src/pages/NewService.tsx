@@ -14,12 +14,19 @@ import {
   fetchTemplates,
 } from "../lib/templates";
 import { mergeOverlay, stringifyOverlay } from "../lib/yamlDoc";
+import {
+  ComposeComponents,
+  type ComponentDraft,
+  newComponentDraft,
+  toComponentCreate,
+} from "../components/ComposeComponents";
 import type {
   TemplateSummary,
   TemplateDetail,
   TemplateSecretInput,
   SecretRefInput,
   EffectiveValuesResponse,
+  ComponentCreate,
 } from "../types";
 
 // CodeMirror is heavy; only the create/detail flows need it.
@@ -129,6 +136,7 @@ export function NewService() {
         <ConfigureStep
           project={project}
           template={selectedTemplate}
+          templates={templates}
           stack={stack}
           onBack={() => setStep("template")}
           navigate={navigate}
@@ -279,12 +287,14 @@ function TemplateStep({
 function ConfigureStep({
   project,
   template,
+  templates,
   stack,
   onBack,
   navigate,
 }: {
   project: string;
   template: TemplateDetail;
+  templates: TemplateSummary[];
   stack?: string;
   onBack: () => void;
   navigate: ReturnType<typeof useNavigate>;
@@ -297,6 +307,11 @@ function ConfigureStep({
   );
   const [namespaceScope, setNamespaceScope] = useState<"app" | "project">("app");
   const [namespacePattern, setNamespacePattern] = useState("");
+  // Composed mode: the app assembles multiple components, each from its own
+  // template, into one multi-source Application. Off = today's single-template
+  // app. Toggling on seeds the first component from the picked template.
+  const [composed, setComposed] = useState(false);
+  const [components, setComponents] = useState<ComponentDraft[]>([]);
   const [cdManaged, setCdManaged] = useState(false);
   // Delivery mode, defaulted from the template (a valkey/redis/postgres template
   // declares "direct"); the user can override. "direct" skips Kargo/promotion.
@@ -376,6 +391,33 @@ function ConfigureStep({
       setError("Fix the values YAML before creating the app.");
       return;
     }
+    if (composed) {
+      if (components.length === 0) {
+        setError("Add at least one component, or turn off compose mode.");
+        return;
+      }
+      const names = new Set<string>();
+      for (const c of components) {
+        const nm = c.name.trim();
+        if (!nm) {
+          setError("Every component needs a name.");
+          return;
+        }
+        if (!/^[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(nm)) {
+          setError(`Component "${nm}" name must be lowercase letters, numbers, and hyphens (2-63 chars).`);
+          return;
+        }
+        if (names.has(nm)) {
+          setError(`Duplicate component name "${nm}".`);
+          return;
+        }
+        names.add(nm);
+        if (!c.template) {
+          setError(`Component "${nm}" needs a template.`);
+          return;
+        }
+      }
+    }
 
     setSubmitting(true);
     setError(null);
@@ -386,11 +428,23 @@ function ConfigureStep({
       if (ref) secretRefList.push({ name: si.name, secretRef: ref });
     }
 
+    // Composed app: send one ComponentCreate per row, and use the first
+    // component's template as the app-level "primary". Single-template app:
+    // no components, the picked template drives everything (today's path).
+    const componentsPayload: ComponentCreate[] | undefined = composed
+      ? components.map(toComponentCreate)
+      : undefined;
+    const templateName =
+      composed && components.length > 0
+        ? (components[0]?.template ?? template.name)
+        : template.name;
+
     try {
       const targetClusters = buildTargetClusters(orgEnvs, targetSel);
       await createApp(project, {
         name: appName,
-        template: template.name,
+        template: templateName,
+        components: componentsPayload,
         values: {},
         secretRefs: secretRefList,
         namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
@@ -496,6 +550,48 @@ function ConfigureStep({
         />
         {nameError && <p className="mt-1 text-xs text-red-600">{nameError}</p>}
       </div>
+
+      {/* Components — compose the app from multiple component templates */}
+      <FormSection title="Components">
+        <label className="flex items-start gap-2 text-sm text-gray-700">
+          <input
+            type="checkbox"
+            checked={composed}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setComposed(on);
+              // Seed the first component from the picked template on first enable.
+              if (on && components.length === 0) {
+                setComponents([
+                  newComponentDraft(
+                    { name: template.name, category: template.category },
+                    template.components?.[0]?.name ?? "component-1",
+                  ),
+                ]);
+              }
+            }}
+            className="mt-1 h-4 w-4 rounded border-gray-300"
+          />
+          <span>
+            <span className="font-medium">Compose from multiple components</span>
+            <span className="block text-xs text-gray-400">
+              Assemble the app from several components, each rendered by its own
+              template (e.g. api → web-service, worker → worker, migrate → job) as
+              one multi-source deployment. Leave off for a single-template app.
+            </span>
+          </span>
+        </label>
+
+        {composed && (
+          <div className="mt-4">
+            <ComposeComponents
+              templates={templates}
+              components={components}
+              onChange={setComponents}
+            />
+          </div>
+        )}
+      </FormSection>
 
       {/* Namespace settings */}
       <FormSection title="Namespace">
