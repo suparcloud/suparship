@@ -1,6 +1,12 @@
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 
-import type { ComponentCreate, TemplateSummary } from "../types";
+import { fetchTemplateEffectiveValues } from "../lib/templates";
+import { mergeOverlay, stringifyOverlay } from "../lib/yamlDoc";
+import type {
+  ComponentCreate,
+  EffectiveValuesResponse,
+  TemplateSummary,
+} from "../types";
 import type { ConfigVariables } from "../lib/configVars";
 
 // CodeMirror is heavy; load it only when the compose canvas is shown.
@@ -89,6 +95,23 @@ export function ComposeComponents({
   onChange: (next: ComponentDraft[]) => void;
   configVars?: ConfigVariables | null;
 }) {
+  // Effective-values base (chart + platform defaults) per template, for the
+  // read-only preview pane. Fetched once per distinct template and cached; two
+  // components on the same template share one fetch.
+  const [bases, setBases] = useState<Record<string, EffectiveValuesResponse | null>>({});
+  const fetched = useRef<Set<string>>(new Set());
+  const templateKey = components.map((c) => c.template).join(",");
+  useEffect(() => {
+    for (const name of new Set(components.map((c) => c.template).filter(Boolean))) {
+      if (fetched.current.has(name)) continue;
+      fetched.current.add(name);
+      fetchTemplateEffectiveValues(name)
+        .then((res) => setBases((prev) => ({ ...prev, [name]: res })))
+        .catch(() => setBases((prev) => ({ ...prev, [name]: null })));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templateKey]);
+
   function update(i: number, patch: Partial<ComponentDraft>) {
     onChange(components.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
   }
@@ -193,7 +216,8 @@ export function ComposeComponents({
           </div>
 
           {/* Per-component values overlay — deep-merged onto this component's
-              chart values, in the chart's own schema (canonical or BYO). */}
+              chart values, in the chart's own schema (canonical or BYO) — plus a
+              read-only effective preview (chart + platform defaults ⊕ overrides). */}
           <div className="mt-3">
             <label className={labelCls}>
               Values{" "}
@@ -209,21 +233,36 @@ export function ComposeComponents({
                 </div>
               }
             >
-              <ValuesEditor
-                value={c.valuesText}
-                configVars={configVars ?? undefined}
-                height="12rem"
-                placeholder={
-                  "# e.g.\ncomponents:\n  web:\n    image:\n      repository: ghcr.io/org/app\n      tag: v1"
-                }
-                onChange={(text) => update(i, { valuesText: text })}
-                onValidChange={(parsed, err) =>
-                  update(i, {
-                    valuesError: err,
-                    ...(parsed ? { values: parsed } : {}),
-                  })
-                }
-              />
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <ValuesEditor
+                  label="Your overrides"
+                  value={c.valuesText}
+                  configVars={configVars ?? undefined}
+                  height="14rem"
+                  placeholder={
+                    "# e.g.\ncomponents:\n  web:\n    image:\n      repository: ghcr.io/org/app\n      tag: v1"
+                  }
+                  onChange={(text) => update(i, { valuesText: text })}
+                  onValidChange={(parsed, err) =>
+                    update(i, {
+                      valuesError: err,
+                      ...(parsed ? { values: parsed } : {}),
+                    })
+                  }
+                />
+                <ValuesEditor
+                  label={
+                    bases[c.template]?.chartDefaultsAvailable
+                      ? "Effective (chart + platform ⊕ overrides)"
+                      : "Effective (platform ⊕ overrides)"
+                  }
+                  value={stringifyOverlay(
+                    mergeOverlay(bases[c.template]?.values ?? {}, c.values),
+                  )}
+                  height="14rem"
+                  readOnly
+                />
+              </div>
             </Suspense>
           </div>
         </div>

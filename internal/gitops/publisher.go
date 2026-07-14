@@ -1036,6 +1036,24 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 				baseDomain = c.BaseDomain
 			}
 			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+			// Unified model: a single-component app's component name is user-chosen
+			// (e.g. "api"), but its chart reads a fixed values key (web-service →
+			// components.web). Remap the one component's values onto the chart's
+			// canonical key so renaming the component never breaks rendering — the
+			// same projection the composed path does.
+			if len(app.Spec.Components) == 1 {
+				name := app.Spec.Components[0].Name
+				key := p.resolveComponentKey(context.Background(), app.Spec.Template.Name, name)
+				if key != name {
+					if cv, ok := hv.Components[name]; ok {
+						delete(hv.Components, name)
+						hv.Components[key] = cv
+					}
+					if hv.Routing.Component == name {
+						hv.Routing.Component = key
+					}
+				}
+			}
 			overlay := envOverlay(app, env, c.Name)
 			// Unified model: a single-component app renders single-source but still
 			// carries its component's own Values overlay (the value-based per-

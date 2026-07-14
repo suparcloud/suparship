@@ -968,35 +968,51 @@ export function AppDetail() {
             <StatusBadge status={overallStatus} size="lg" />
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-500">
-            <Link
-              to={`/templates/${data.template.name}`}
-              className="inline-flex items-center gap-1 font-mono text-gray-600 hover:text-gray-900"
-            >
-              {data.template.name}
-              {data.template.version && (
-                <span className="text-gray-400">
-                  v{data.template.version}
+            {(data.components?.length ?? 0) > 1 ? (
+              // Composed app: a single template link would be misleading (it's
+              // just the primary). Show the composed makeup; per-component
+              // templates are listed in the Components section below.
+              <span className="inline-flex items-center gap-2">
+                <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-600">
+                  composed
                 </span>
-              )}
-            </Link>
-            {(() => {
-              const latest = templateVersions[0]?.version;
-              if (!latest || !data.template.version) return null;
-              if (latest === data.template.version) return null;
-              return (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setUpgradeTarget(latest);
-                    setShowUpgradeDialog(true);
-                  }}
-                  className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
-                  title={`Upgrade available: v${latest}`}
+                <span className="text-gray-500">
+                  {data.components?.length} components
+                </span>
+              </span>
+            ) : (
+              <>
+                <Link
+                  to={`/templates/${data.template.name}`}
+                  className="inline-flex items-center gap-1 font-mono text-gray-600 hover:text-gray-900"
                 >
-                  upgrade → v{latest}
-                </button>
-              );
-            })()}
+                  {data.template.name}
+                  {data.template.version && (
+                    <span className="text-gray-400">
+                      v{data.template.version}
+                    </span>
+                  )}
+                </Link>
+                {(() => {
+                  const latest = templateVersions[0]?.version;
+                  if (!latest || !data.template.version) return null;
+                  if (latest === data.template.version) return null;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUpgradeTarget(latest);
+                        setShowUpgradeDialog(true);
+                      }}
+                      className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                      title={`Upgrade available: v${latest}`}
+                    >
+                      upgrade → v{latest}
+                    </button>
+                  );
+                })()}
+              </>
+            )}
             {data.description && (
               <span className="text-gray-400">{data.description}</span>
             )}
@@ -4269,7 +4285,7 @@ function ComponentsTable({
     return "—";
   }
 
-  const headerTitle = "Runtime components";
+  const headerTitle = "Components";
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
@@ -4327,53 +4343,81 @@ function ComponentsTable({
           {components.map((comp) => {
             const replicas = replicaLabel(comp);
             return (
-              <div
-                key={comp.name}
-                className="flex items-center justify-between px-5 py-2.5"
-              >
-                {/* Left: name + type + visibility, plus template/image for a
-                    composed app's components. */}
-                <div className="flex min-w-0 flex-col gap-0.5">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="font-mono text-sm text-gray-900">
-                      {comp.name}
-                    </span>
-                    <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs capitalize text-gray-500">
-                      {comp.type}
-                    </span>
-                    {componentVisibilityBadge(comp)}
-                  </div>
-                  {comp.template && (
-                    <div className="flex min-w-0 items-center gap-x-2 text-xs text-gray-400">
-                      <span className="truncate">
-                        template{" "}
-                        <span className="font-medium text-gray-500">
-                          {comp.template}
-                        </span>
+              <div key={comp.name} className="px-5 py-2.5">
+                <div className="flex items-center justify-between">
+                  {/* Left: name + type + visibility, plus the component's template. */}
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="font-mono text-sm text-gray-900">
+                        {comp.name}
                       </span>
+                      <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs capitalize text-gray-500">
+                        {comp.type}
+                      </span>
+                      {componentVisibilityBadge(comp)}
                     </div>
-                  )}
+                    {comp.template && (
+                      <div className="flex min-w-0 items-center gap-x-2 text-xs text-gray-400">
+                        <span className="truncate">
+                          template{" "}
+                          <span className="font-medium text-gray-500">
+                            {comp.template}
+                          </span>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right: replicas + status + preview eligibility */}
+                  <div className="ml-4 flex flex-shrink-0 items-center gap-3">
+                    {replicas !== "—" && (
+                      <span className="text-xs text-gray-400">
+                        {replicas}{" "}
+                        <span className="text-gray-300">replicas</span>
+                      </span>
+                    )}
+                    <StatusBadge status={phase} />
+                    {!comp.enabledInPreview && (
+                      <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">
+                        no preview
+                      </span>
+                    )}
+                  </div>
                 </div>
 
-                {/* Right: replicas + status + preview eligibility */}
-                <div className="ml-4 flex flex-shrink-0 items-center gap-3">
-                  {replicas !== "—" && (
-                    <span className="text-xs text-gray-400">
-                      {replicas}{" "}
-                      <span className="text-gray-300">replicas</span>
-                    </span>
-                  )}
-                  <StatusBadge status={phase} />
-                  {!comp.enabledInPreview && (
-                    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">
-                      no preview
-                    </span>
-                  )}
-                </div>
+                {comp.values && Object.keys(comp.values).length > 0 && (
+                  <ComponentValues values={comp.values} />
+                )}
               </div>
             );
           })}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ComponentValues is a read-only disclosure of a component's Helm values overlay
+// (its value-based config), shown under the component on the app detail page.
+function ComponentValues({ values }: { values: Record<string, unknown> }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1 text-xs font-medium text-gray-400 hover:text-gray-600"
+      >
+        <span className={`transition-transform ${open ? "rotate-90" : ""}`}>
+          ▸
+        </span>
+        values
+      </button>
+      {open && (
+        <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-gray-50 p-2.5 font-mono text-xs leading-relaxed text-gray-600">
+          {stringifyOverlay(values)}
+        </pre>
       )}
     </div>
   );

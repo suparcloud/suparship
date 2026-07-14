@@ -1,4 +1,4 @@
-import { type FormEvent, Suspense, lazy, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../lib/api";
@@ -8,12 +8,7 @@ import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
 import { listOrgEnvironments } from "../lib/settings";
 import type { OrgEnvironment } from "../lib/settings";
-import {
-  fetchTemplate,
-  fetchTemplateEffectiveValues,
-  fetchTemplates,
-} from "../lib/templates";
-import { mergeOverlay, stringifyOverlay } from "../lib/yamlDoc";
+import { fetchTemplate, fetchTemplates } from "../lib/templates";
 import {
   ComposeComponents,
   type ComponentDraft,
@@ -25,12 +20,8 @@ import type {
   TemplateDetail,
   TemplateSecretInput,
   SecretRefInput,
-  EffectiveValuesResponse,
   ComponentCreate,
 } from "../types";
-
-// CodeMirror is heavy; only the create/detail flows need it.
-const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 
 type Step = "template" | "configure";
 
@@ -84,6 +75,14 @@ export function NewService() {
     }
   }
 
+  // Start from a blank app: no base template, zero components. The user adds
+  // and configures components on the Configure step (each picks its own template).
+  function handleStartBlank() {
+    setSelectedTemplate(null);
+    setError(null);
+    setStep("configure");
+  }
+
   if (!project) {
     return (
       <div className="rounded-lg border border-red-200 bg-red-50 p-4">
@@ -129,10 +128,11 @@ export function NewService() {
           templates={templates}
           loading={loadingTemplates || loadingDetail}
           onSelect={handleSelectTemplate}
+          onSelectBlank={handleStartBlank}
         />
       )}
 
-      {step === "configure" && selectedTemplate && (
+      {step === "configure" && (
         <ConfigureStep
           project={project}
           template={selectedTemplate}
@@ -217,10 +217,12 @@ function TemplateStep({
   templates,
   loading,
   onSelect,
+  onSelectBlank,
 }: {
   templates: TemplateSummary[];
   loading: boolean;
   onSelect: (name: string) => void;
+  onSelectBlank: () => void;
 }) {
   if (loading) {
     return (
@@ -247,35 +249,47 @@ function TemplateStep({
   }
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {templates.map((t) => {
-        const catCls = categoryStyle[t.category] ?? "bg-gray-50 text-gray-500";
-        return (
-          <button
-            key={t.name}
-            type="button"
-            onClick={() => onSelect(t.name)}
-            className="group rounded-xl border border-gray-200 bg-white p-4 text-left transition-all hover:border-gray-300 hover:shadow-md"
-          >
-            <div className="flex items-center justify-between">
-              <span
-                className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${catCls}`}
-              >
-                {t.category}
-              </span>
-              <span className="text-xs text-gray-400">v{t.version}</span>
-            </div>
-            <h3 className="mt-2 text-sm font-semibold text-gray-900 group-hover:text-gray-700">
-              {t.title}
-            </h3>
-            {t.description && (
-              <p className="mt-1 text-xs leading-relaxed text-gray-500 line-clamp-2">
-                {t.description}
-              </p>
-            )}
-          </button>
-        );
-      })}
+    <div className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        {templates.map((t) => {
+          const catCls = categoryStyle[t.category] ?? "bg-gray-50 text-gray-500";
+          return (
+            <button
+              key={t.name}
+              type="button"
+              onClick={() => onSelect(t.name)}
+              className="group rounded-xl border border-gray-200 bg-white p-4 text-left transition-all hover:border-gray-300 hover:shadow-md"
+            >
+              <div className="flex items-center justify-between">
+                <span
+                  className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${catCls}`}
+                >
+                  {t.category}
+                </span>
+                <span className="text-xs text-gray-400">v{t.version}</span>
+              </div>
+              <h3 className="mt-2 text-sm font-semibold text-gray-900 group-hover:text-gray-700">
+                {t.title}
+              </h3>
+              {t.description && (
+                <p className="mt-1 text-xs leading-relaxed text-gray-500 line-clamp-2">
+                  {t.description}
+                </p>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Start blank: skip picking a base template and add components yourself. */}
+      <button
+        type="button"
+        onClick={onSelectBlank}
+        className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-gray-300 bg-white px-4 py-4 text-sm font-medium text-gray-500 transition-colors hover:border-gray-400 hover:bg-gray-50 hover:text-gray-700"
+      >
+        <span className="text-base leading-none">+</span>
+        Start from a blank app — add your own components
+      </button>
     </div>
   );
 }
@@ -293,7 +307,8 @@ function ConfigureStep({
   navigate,
 }: {
   project: string;
-  template: TemplateDetail;
+  /** The picked base template, or null for a blank app (add components yourself). */
+  template: TemplateDetail | null;
   templates: TemplateSummary[];
   stack?: string;
   onBack: () => void;
@@ -307,16 +322,24 @@ function ConfigureStep({
   );
   const [namespaceScope, setNamespaceScope] = useState<"app" | "project">("app");
   const [namespacePattern, setNamespacePattern] = useState("");
-  // Composed mode: the app assembles multiple components, each from its own
-  // template, into one multi-source Application. Off = today's single-template
-  // app. Toggling on seeds the first component from the picked template.
-  const [composed, setComposed] = useState(false);
-  const [components, setComponents] = useState<ComponentDraft[]>([]);
+  // An app is uniformly a list of components. A picked template seeds the first
+  // component; a blank app starts empty. The user can add more (each its own
+  // template → multi-source). A single-component app renders single-source.
+  const [components, setComponents] = useState<ComponentDraft[]>(() =>
+    template
+      ? [
+          newComponentDraft(
+            { name: template.name, category: template.category },
+            template.components?.[0]?.name ?? "app",
+          ),
+        ]
+      : [],
+  );
   const [cdManaged, setCdManaged] = useState(false);
   // Delivery mode, defaulted from the template (a valkey/redis/postgres template
   // declares "direct"); the user can override. "direct" skips Kargo/promotion.
   const [deliveryMode, setDeliveryMode] = useState<string>(
-    template.deliveryMode === "direct" ? "direct" : "pipeline",
+    template?.deliveryMode === "direct" ? "direct" : "pipeline",
   );
   const isDirect = deliveryMode === "direct";
   const [submitting, setSubmitting] = useState(false);
@@ -324,13 +347,6 @@ function ConfigureStep({
   const [nameError, setNameError] = useState<string | null>(null);
   const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
 
-  // The values editor holds ONLY the developer's app-level override layer
-  // (rawValues). Empty = inherit chart + platform defaults entirely.
-  const [overlayText, setOverlayText] = useState("");
-  const [overlay, setOverlay] = useState<Record<string, unknown>>({});
-  const [overlayError, setOverlayError] = useState<string | null>(null);
-  // Read-only effective base (chart ⊕ platform defaults) for the preview pane.
-  const [base, setBase] = useState<EffectiveValuesResponse | null>(null);
   // Org environments — drives the "Deployment targets" panel.
   const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
   // Per-env cluster selection (UI state: the checked cluster names). An env
@@ -351,28 +367,9 @@ function ConfigureStep({
       .catch(() => setOrgEnvs([]));
   }, [project]);
 
-  useEffect(() => {
-    let cancelled = false;
-    fetchTemplateEffectiveValues(template.name)
-      .then((res) => {
-        if (!cancelled) setBase(res);
-      })
-      .catch(() => {
-        if (!cancelled) setBase(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [template.name]);
-
   function updateSecretRef(name: string, ref: string) {
     setSecretRefs((prev) => ({ ...prev, [name]: ref }));
   }
-
-  // Effective preview = base (chart ⊕ platform defaults) ⊕ live overlay.
-  const effectivePreview = stringifyOverlay(
-    mergeOverlay(base?.values ?? {}, overlay),
-  );
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -387,39 +384,34 @@ function ConfigureStep({
       );
       return;
     }
-    if (overlayError) {
-      setError("Fix the values YAML before creating the app.");
+    // An app is always a list of components. Validate every row.
+    if (components.length === 0) {
+      setError("Add at least one component.");
       return;
     }
-    if (composed) {
-      if (components.length === 0) {
-        setError("Add at least one component, or turn off compose mode.");
+    if (components.some((c) => c.valuesError)) {
+      setError("Fix the component values YAML before creating the app.");
+      return;
+    }
+    const names = new Set<string>();
+    for (const c of components) {
+      const nm = c.name.trim();
+      if (!nm) {
+        setError("Every component needs a name.");
         return;
       }
-      if (components.some((c) => c.valuesError)) {
-        setError("Fix the component values YAML before creating the app.");
+      if (!/^[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(nm)) {
+        setError(`Component "${nm}" name must be lowercase letters, numbers, and hyphens (2-63 chars).`);
         return;
       }
-      const names = new Set<string>();
-      for (const c of components) {
-        const nm = c.name.trim();
-        if (!nm) {
-          setError("Every component needs a name.");
-          return;
-        }
-        if (!/^[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(nm)) {
-          setError(`Component "${nm}" name must be lowercase letters, numbers, and hyphens (2-63 chars).`);
-          return;
-        }
-        if (names.has(nm)) {
-          setError(`Duplicate component name "${nm}".`);
-          return;
-        }
-        names.add(nm);
-        if (!c.template) {
-          setError(`Component "${nm}" needs a template.`);
-          return;
-        }
+      if (names.has(nm)) {
+        setError(`Duplicate component name "${nm}".`);
+        return;
+      }
+      names.add(nm);
+      if (!c.template) {
+        setError(`Component "${nm}" needs a template.`);
+        return;
       }
     }
 
@@ -427,21 +419,16 @@ function ConfigureStep({
     setError(null);
 
     const secretRefList: SecretRefInput[] = [];
-    for (const si of template.secretInputs) {
+    for (const si of template?.secretInputs ?? []) {
       const ref = secretRefs[si.name]?.trim();
       if (ref) secretRefList.push({ name: si.name, secretRef: ref });
     }
 
-    // Composed app: send one ComponentCreate per row, and use the first
-    // component's template as the app-level "primary". Single-template app:
-    // no components, the picked template drives everything (today's path).
-    const componentsPayload: ComponentCreate[] | undefined = composed
-      ? components.map(toComponentCreate)
-      : undefined;
-    const templateName =
-      composed && components.length > 0
-        ? (components[0]?.template ?? template.name)
-        : template.name;
+    // Send one ComponentCreate per row; the first component's template is the
+    // app-level "primary". A 1-component app renders single-source. For a blank
+    // app there is no base template — the first component's template is used.
+    const componentsPayload: ComponentCreate[] = components.map(toComponentCreate);
+    const templateName = components[0]?.template ?? template?.name ?? "";
 
     try {
       const targetClusters = buildTargetClusters(orgEnvs, targetSel);
@@ -453,7 +440,6 @@ function ConfigureStep({
         secretRefs: secretRefList,
         namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
         namespacePattern: namespacePattern.trim() || undefined,
-        rawValues: Object.keys(overlay).length > 0 ? overlay : undefined,
         cd: !isDirect && cdManaged ? { managed: true } : undefined,
         deliveryMode,
         targetClusters:
@@ -484,17 +470,25 @@ function ConfigureStep({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-8">
-      {/* Template badge */}
+      {/* Template badge — the base template, or "Blank app" when starting empty. */}
       <div className="flex items-center gap-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
         <div className="flex-1">
           <p className="text-xs font-medium uppercase tracking-wider text-gray-400">
-            Template
+            {template ? "Base template" : "Blank app"}
           </p>
           <p className="text-sm font-semibold text-gray-900">
-            {template.title}{" "}
-            <span className="font-normal text-gray-400">
-              v{template.version}
-            </span>
+            {template ? (
+              <>
+                {template.title}{" "}
+                <span className="font-normal text-gray-400">
+                  v{template.version}
+                </span>
+              </>
+            ) : (
+              <span className="font-normal text-gray-500">
+                No base template — add your components below.
+              </span>
+            )}
           </p>
         </div>
         <button
@@ -502,7 +496,7 @@ function ConfigureStep({
           onClick={onBack}
           className="rounded-md px-3 py-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-700"
         >
-          Change
+          {template ? "Change" : "Pick a template"}
         </button>
       </div>
 
@@ -555,47 +549,22 @@ function ConfigureStep({
         {nameError && <p className="mt-1 text-xs text-red-600">{nameError}</p>}
       </div>
 
-      {/* Components — compose the app from multiple component templates */}
+      {/* Components — an app is a list of components, each its own template. The
+          picked template seeds the first; add more for a multi-source app. */}
       <FormSection title="Components">
-        <label className="flex items-start gap-2 text-sm text-gray-700">
-          <input
-            type="checkbox"
-            checked={composed}
-            onChange={(e) => {
-              const on = e.target.checked;
-              setComposed(on);
-              // Seed the first component from the picked template on first enable.
-              if (on && components.length === 0) {
-                setComponents([
-                  newComponentDraft(
-                    { name: template.name, category: template.category },
-                    template.components?.[0]?.name ?? "component-1",
-                  ),
-                ]);
-              }
-            }}
-            className="mt-1 h-4 w-4 rounded border-gray-300"
-          />
-          <span>
-            <span className="font-medium">Compose from multiple components</span>
-            <span className="block text-xs text-gray-400">
-              Assemble the app from several components, each rendered by its own
-              template (e.g. api → web-service, worker → worker, migrate → job) as
-              one multi-source deployment. Leave off for a single-template app.
-            </span>
-          </span>
-        </label>
-
-        {composed && (
-          <div className="mt-4">
-            <ComposeComponents
-              templates={templates}
-              components={components}
-              onChange={setComponents}
-              configVars={configVars}
-            />
-          </div>
-        )}
+        <p className="mb-3 text-xs text-gray-400">
+          Your app is built from components, each rendered by its own template.
+          The template you picked is the first component — add more (e.g. a{" "}
+          <span className="font-medium">worker</span> or a migration{" "}
+          <span className="font-medium">job</span>) to deploy them together as one
+          app. Configure each component's chart in its Values overlay.
+        </p>
+        <ComposeComponents
+          templates={templates}
+          components={components}
+          onChange={setComponents}
+          configVars={configVars}
+        />
       </FormSection>
 
       {/* Namespace settings */}
@@ -740,14 +709,14 @@ function ConfigureStep({
         )}
       </FormSection>
 
-      {/* Secret inputs */}
-      {template.secretInputs.length > 0 && (
+      {/* Secret inputs (from the base template, if any) */}
+      {(template?.secretInputs.length ?? 0) > 0 && (
         <FormSection title="Secrets">
           <p className="mb-4 text-xs text-gray-400">
             Reference existing Kubernetes Secrets. Values are never stored in Git.
           </p>
           <div className="space-y-5">
-            {template.secretInputs.map((si) => (
+            {template?.secretInputs.map((si) => (
               <SecretField
                 key={si.name}
                 input={si}
@@ -758,65 +727,6 @@ function ConfigureStep({
           </div>
         </FormSection>
       )}
-
-      {/* Values — the developer edits ONLY their override layer; the right pane
-          shows the effective document (chart + platform defaults ⊕ overrides). */}
-      <FormSection title="Values">
-        <p className="mb-3 text-xs text-gray-400">
-          Edit only what you want to override — leave empty to inherit the chart
-          and platform defaults entirely. Deep-merged on top of those at deploy.
-          Reference platform metadata / variables with{" "}
-          <code className="font-mono">{"((platform.*))"}</code> /{" "}
-          <code className="font-mono">{"((vars.*))"}</code> tokens. No secrets.
-        </p>
-        <Suspense
-          fallback={
-            <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
-              Loading editor…
-            </div>
-          }
-        >
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <ValuesEditor
-              label="Your overrides"
-              value={overlayText}
-              configVars={configVars}
-              height="26rem"
-              placeholder={
-                "# e.g.\nresources:\n  requests:\n    cpu: 200m\nenv:\n  LOG_LEVEL: debug"
-              }
-              onChange={setOverlayText}
-              onValidChange={(parsed, err) => {
-                setOverlayError(err);
-                if (parsed) setOverlay(parsed);
-              }}
-            />
-            <div>
-              <ValuesEditor
-                label={
-                  base?.chartDefaultsAvailable
-                    ? "Effective (chart + platform ⊕ overrides)"
-                    : "Effective (platform ⊕ overrides)"
-                }
-                value={effectivePreview}
-                height="26rem"
-                readOnly
-              />
-              {base && !base.chartDefaultsAvailable && (
-                <p className="mt-1 text-xs text-gray-400">
-                  Chart defaults aren't readable for this template; the preview
-                  shows platform defaults + your overrides only.
-                </p>
-              )}
-              <p className="mt-1 text-xs text-gray-400">
-                Preview omits per-env values and{" "}
-                <code className="font-mono">{"{…}"}</code> token resolution —
-                applied at deploy.
-              </p>
-            </div>
-          </div>
-        </Suspense>
-      </FormSection>
 
       {/* Error */}
       {error && (
@@ -836,7 +746,7 @@ function ConfigureStep({
         </button>
         <button
           type="submit"
-          disabled={submitting || overlayError !== null}
+          disabled={submitting}
           className="rounded-md bg-gray-900 px-6 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {submitting ? "Creating…" : "Create app"}
@@ -1095,9 +1005,11 @@ function FormSection({
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildDefaultSecretRefs(tmpl: TemplateDetail): Record<string, string> {
+function buildDefaultSecretRefs(
+  tmpl: TemplateDetail | null,
+): Record<string, string> {
   const refs: Record<string, string> = {};
-  for (const si of tmpl.secretInputs) {
+  for (const si of tmpl?.secretInputs ?? []) {
     refs[si.name] = si.secretRef;
   }
   return refs;

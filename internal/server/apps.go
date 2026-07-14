@@ -32,10 +32,12 @@ type ComponentSummaryDTO struct {
 	Type       string `json:"type"`
 	Enabled    bool   `json:"enabled"`
 	ExposeMode string `json:"exposeMode,omitempty"`
-	// Template is the component's own template name — set only for a composed
-	// app's components (each rendered by its own chart). Empty = the component
-	// inherits the app-level template (single-chart app).
+	// Template is the component's own template name (every component carries one
+	// in the unified model).
 	Template string `json:"template,omitempty"`
+	// Values is the component's Helm values overlay — its value-based config,
+	// shown read-only on the app detail page so the component's makeup is visible.
+	Values map[string]any `json:"values,omitempty"`
 }
 
 // AppReleaseRefDTO identifies the deployed release version for one environment

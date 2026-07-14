@@ -560,8 +560,10 @@ export interface ComponentSummary {
   type: "web" | "worker" | "cron" | "job";
   enabledInPreview: boolean;
   exposeMode?: string;
-  /** The component's own template — present only for a composed app's components. */
+  /** The component's own template. */
   template?: string;
+  /** The component's Helm values overlay (value-based config), shown read-only. */
+  values?: Record<string, unknown>;
 }
 
 export interface AppReleaseRef {

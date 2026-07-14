@@ -3506,6 +3506,7 @@ func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 			Type:       string(c.Type),
 			Enabled:    c.Enabled,
 			ExposeMode: string(c.ExposeMode),
+			Values:     c.Values,
 		}
 		if c.Template != nil {
 			dto.Template = c.Template.Name

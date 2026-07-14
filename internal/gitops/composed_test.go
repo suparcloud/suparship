@@ -356,6 +356,58 @@ func TestSingleSourceAppliesComponentValues(t *testing.T) {
 	}
 }
 
+// TestSingleSourceRemapsComponentKey verifies a 1-component app whose component
+// is named differently from the chart's canonical key still renders under the
+// canonical key (web-service reads components.web) — so renaming the sole
+// component never breaks single-source rendering.
+func TestSingleSourceRemapsComponentKey(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true, // renamed from "web"
+					Template: &domain.AppTemplateRef{Name: "web-service"}},
+			},
+		},
+	}
+	if app.Spec.IsComposed() {
+		t.Fatal("1-component app must not be composed")
+	}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		TemplateLoader: keyedTemplateLoader{"web-service": "web"},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+	}}
+	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishAppFilesForTest: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "hello", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read values.yaml: %v", err)
+	}
+	var v struct {
+		Components map[string]any `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := v.Components["web"]; !ok {
+		t.Errorf("values.components missing canonical key %q; got %v", "web", keysOf(v.Components))
+	}
+	if _, ok := v.Components["api"]; ok {
+		t.Error("values.components must not use the source component name 'api'")
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
