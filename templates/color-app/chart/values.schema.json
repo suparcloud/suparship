@@ -55,6 +55,12 @@
       "additionalProperties": {
         "additionalProperties": true,
         "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "autoscaling": {
             "additionalProperties": true,
             "properties": {
@@ -90,6 +96,12 @@
               }
             },
             "type": "object"
+          },
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "enabled": {
             "type": "boolean"
@@ -318,13 +330,55 @@
         "clusterIssuer": {
           "type": "string"
         },
+        "configMapName": {
+          "type": "string"
+        },
         "env": {
           "type": "string"
         },
         "envType": {
           "type": "string"
         },
+        "externalBaseDomain": {
+          "type": "string"
+        },
+        "externalClusterIssuer": {
+          "type": "string"
+        },
+        "externalGatewayName": {
+          "type": "string"
+        },
+        "externalGatewayNamespace": {
+          "type": "string"
+        },
+        "externalGatewaySectionName": {
+          "type": "string"
+        },
+        "externalIngressClassName": {
+          "type": "string"
+        },
+        "imageTag": {
+          "type": "string"
+        },
         "ingressClassName": {
+          "type": "string"
+        },
+        "internalBaseDomain": {
+          "type": "string"
+        },
+        "internalClusterIssuer": {
+          "type": "string"
+        },
+        "internalGatewayName": {
+          "type": "string"
+        },
+        "internalGatewayNamespace": {
+          "type": "string"
+        },
+        "internalGatewaySectionName": {
+          "type": "string"
+        },
+        "internalIngressClassName": {
           "type": "string"
         },
         "namespace": {
@@ -333,10 +387,16 @@
         "org": {
           "type": "string"
         },
+        "previewName": {
+          "type": "string"
+        },
         "project": {
           "type": "string"
         },
         "routingHost": {
+          "type": "string"
+        },
+        "secretName": {
           "type": "string"
         }
       },
