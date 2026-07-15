@@ -702,7 +702,22 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 		componentCanonical[c.Name] = p.resolveComponentCanonical(ctx, c.Template.Name)
 	}
 
-	return p.publishComposedAppFiles(repoDir, app, deployEnvs, componentKeys, componentCanonical)
+	if err := p.publishComposedAppFiles(repoDir, app, deployEnvs, componentKeys, componentCanonical); err != nil {
+		return err
+	}
+
+	// Kargo wiring (Phase 2): pipeline composed apps get a Warehouse (subscribing
+	// to every component image) + per-env Stages whose promotion writes each
+	// component's tag into its own components/<name>/values.yaml. Direct apps have
+	// no promotion — drop any Kargo CRs a pipeline→direct switch left behind.
+	if app.Spec.IsDirect() {
+		if err := p.cleanupKargoCRs(repoDir, app); err != nil {
+			return fmt.Errorf("cleanup kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
+		}
+	} else if err := p.publishKargoCRs(repoDir, app, envs); err != nil {
+		return fmt.Errorf("write kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
+	}
+	return nil
 }
 
 // resolveComponentKey returns the values key a component template's chart reads
@@ -739,10 +754,11 @@ func (p *Publisher) resolveComponentCanonical(ctx context.Context, templateName 
 }
 
 // pruneSingleSourceArtifacts removes the single-chart tree an app leaves behind
-// when it becomes composed: the per-env values.yaml/app.yaml (so the single-chart
-// ApplicationSet stops generating an orphaned Application) and any Kargo CRs
-// (composed apps have no Kargo wiring in the MVP). Safe to call unconditionally —
-// a no-op for an app that was never single.
+// when it becomes composed: the per-env values.yaml/app.yaml, so the single-chart
+// ApplicationSet stops generating an orphaned Application. Kargo CRs are NOT
+// pruned here — composed apps publish their own Warehouse/Stages under the same
+// filenames, so writeComposedAppTree's publishKargoCRs overwrites them. Safe to
+// call unconditionally — a no-op for an app that was never single.
 func (p *Publisher) pruneSingleSourceArtifacts(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	for _, env := range envs {
 		dir := p.appEnvDir(repoDir, env, app.ProjectName, app.Name)
@@ -752,7 +768,7 @@ func (p *Publisher) pruneSingleSourceArtifacts(repoDir string, app *domain.App, 
 			}
 		}
 	}
-	return p.cleanupKargoCRs(repoDir, app)
+	return nil
 }
 
 // pruneComposedArtifacts removes the composed tree an app leaves behind when it
@@ -926,6 +942,24 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		// Prune stale composed trees for this app-env first, then rewrite — so a
 		// removed component's values.yaml / a de-selected cluster's manifest don't
 		// linger and generate a phantom resource.
+		// CD.Managed: capture each component's Kargo-committed image tag(s) BEFORE
+		// the prune wipes the values files, so the republish re-applies the promoted
+		// tag instead of resetting it to the overlay seed (the composed analog of the
+		// single-source preserveTag). Keyed component → tagKey → tag.
+		preservedTags := map[string]map[string]string{}
+		if app.Spec.CD.Managed {
+			for _, c := range app.Spec.ComposedComponents() {
+				vp := p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components", c.Name, "values.yaml")
+				for _, img := range c.Images {
+					if tag := existingImageTag(vp, img.TagKey); tag != "" {
+						if preservedTags[c.Name] == nil {
+							preservedTags[c.Name] = map[string]string{}
+						}
+						preservedTags[c.Name][img.TagKey] = tag
+					}
+				}
+			}
+		}
 		if err := os.RemoveAll(p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components")); err != nil {
 			return fmt.Errorf("prune composed component values for env %s: %w", env.EnvName, err)
 		}
@@ -986,6 +1020,20 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && len(ov.ComponentValues[c.Name]) > 0 {
 				overlay = deepMerge(deepCopyMap(c.Values), deepCopyMap(ov.ComponentValues[c.Name]))
 			}
+			// Re-apply the Kargo-committed tag(s) captured above so a promoted tag
+			// survives republish (setStringAtPath on the overlay: for a passthrough
+			// component the overlay IS the values; for a canonical one it deep-merges
+			// over the generated doc, so the preserved tag wins).
+			if tags := preservedTags[c.Name]; len(tags) > 0 {
+				o := deepCopyMap(overlay)
+				if o == nil {
+					o = map[string]any{}
+				}
+				for k, v := range tags {
+					setStringAtPath(o, k, v)
+				}
+				overlay = o
+			}
 			// A BYO/passthrough component gets ONLY its own overlay (the chart's own
 			// values.yaml is the Helm base); platform.* is available via ((platform.*))
 			// tokens. suparship injects no canonical app/components/routing/image
@@ -1016,6 +1064,12 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		if server == "" {
 			server = defaultDestination
 		}
+		// Pipeline apps: authorize this env's Kargo Stage to sync the Application
+		// (argocd-update). Direct apps have no Kargo, so no annotation.
+		kargoStage := ""
+		if !app.Spec.IsDirect() {
+			kargoStage = KargoStageName(app.Name, env.EnvName)
+		}
 		manifest := BuildComposedApplication(app, ComposedBuildOptions{
 			RepoURL:         p.cfg.ArgoCDRepoURL,
 			SubPath:         p.cfg.SubPath,
@@ -1026,6 +1080,7 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			Namespace:       ns,
 			SyncAutomated:   p.cfg.SyncAutomated,
 			ComponentValues: componentValues,
+			KargoStage:      kargoStage,
 		})
 		manifestBytes, err := yaml.Marshal(manifest)
 		if err != nil {
@@ -1075,12 +1130,38 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 // the resulting git commit is a no-op (stagedIsEmpty check in commitAndPush).
 func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppPublishEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		if err := p.publishAppFiles(repoDir, app, []AppPublishEnv{env}); err != nil {
+		if app.Spec.IsComposed() {
+			// Composed: write just this env's component values + rendered
+			// Application (+ authorized-stage annotation) so the target env
+			// materializes on promotion. The Warehouse/Stages already exist from
+			// the full publish, so they're not rewritten here.
+			if err := p.publishComposedAppEnv(ctx, repoDir, app, env); err != nil {
+				return err
+			}
+		} else if err := p.publishAppFiles(repoDir, app, []AppPublishEnv{env}); err != nil {
 			return err
 		}
 		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s to %s\n\nPromoted by suparship.", app.ProjectName, app.Name, env.EnvName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// publishComposedAppEnv writes a single env's composed tree (per-component values
+// + rendered multi-source Application + per-env composed App-of-Apps), resolving
+// each component's values key/canonical mode and syncing its chart. It's
+// writeComposedAppTree scoped to one env and without the Kargo CR write — the
+// promotion path that materializes a higher env on promote.
+func (p *Publisher) publishComposedAppEnv(ctx context.Context, repoDir string, app *domain.App, env AppPublishEnv) error {
+	componentKeys := make(map[string]string, len(app.Spec.Components))
+	componentCanonical := make(map[string]bool, len(app.Spec.Components))
+	for _, c := range app.Spec.ComposedComponents() {
+		if err := p.syncChart(ctx, repoDir, c.Template.Name, c.Template.Version); err != nil {
+			return fmt.Errorf("sync chart for component %s (%s@%s): %w", c.Name, c.Template.Name, c.Template.Version, err)
+		}
+		componentKeys[c.Name] = p.resolveComponentKey(ctx, c.Template.Name, c.Name)
+		componentCanonical[c.Name] = p.resolveComponentCanonical(ctx, c.Template.Name)
+	}
+	return p.publishComposedAppFiles(repoDir, app, []AppPublishEnv{env}, componentKeys, componentCanonical)
 }
 
 // AppEnvPublish pairs an app with one resolved env to publish. It is the unit of
@@ -1992,6 +2073,27 @@ func resolveKargoImages(app *domain.App, images []KargoImage) []KargoImage {
 	return nil
 }
 
+// collectComponentImages flattens every composed component's declared image
+// bindings (ComponentSpec.Images) into KargoImage entries for the composed
+// Warehouse. Name carries the OWNING component so the promotion (Phase 2) can
+// target that component's own components/<name>/values.yaml, and TagKey is the
+// dotted path relative to that file. Deterministic (components in spec order).
+func collectComponentImages(app *domain.App) []KargoImage {
+	var out []KargoImage
+	for _, c := range app.Spec.Components {
+		for _, img := range c.Images {
+			out = append(out, KargoImage{
+				Name:              c.Name,
+				Repository:        img.Repository,
+				TagKey:            img.TagKey,
+				TagPattern:        img.TagPattern,
+				SelectionStrategy: img.SelectionStrategy,
+			})
+		}
+	}
+	return out
+}
+
 // SelectKargoImages resolves an app's CD image selection against the images
 // discovered in its effective Helm values. For each selected image (matched by
 // TagKey) it emits a KargoImage carrying the discovered Repository + TagKey, with
@@ -2117,20 +2219,27 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	slog.Debug("gitops: wrote kargo projectconfig", "namespace", projectNS, "policies", len(merged))
 
 	// ── Resolve the app's image sources ────────────────────────────────────────
-	// Prefer the template's per-service Images mapping (threaded via
-	// TemplateImages on each env — app-level, so any env carries the full set);
-	// otherwise fall back to a single legacy image from image_repository.
-	var tmplImages []KargoImage
-	if len(stableEnvs) > 0 {
-		tmplImages = stableEnvs[0].TemplateImages
+	// Composed apps: one image per component from its declared bindings, each
+	// carrying its owning component so the promotion writes into that component's
+	// values.yaml. Single-source: the template's per-service Images mapping (via
+	// TemplateImages) or the legacy image_repository fallback.
+	composed := app.Spec.IsComposed()
+	var images []KargoImage
+	if composed {
+		images = collectComponentImages(app)
+	} else {
+		var tmplImages []KargoImage
+		if len(stableEnvs) > 0 {
+			tmplImages = stableEnvs[0].TemplateImages
+		}
+		images = resolveKargoImages(app, tmplImages)
 	}
-	images := resolveKargoImages(app, tmplImages)
 	if len(images) == 0 {
-		// No template mapping and no image set — applyKargoDefaults will seed a
-		// ghcr.io/{project}/{app} placeholder that won't pull. Warn rather than
-		// fail silently so the operator knows to declare images in the template.
-		slog.Warn("gitops: app has no template image mapping or image_repository — Kargo Warehouse will use a placeholder that won't pull; declare images in the template settings",
-			"project", app.ProjectName, "app", app.Name,
+		// No image bindings — applyKargoDefaults will seed a ghcr.io/{project}/{app}
+		// placeholder that won't pull. Warn rather than fail silently so the operator
+		// knows to declare images (component image bindings, or template settings).
+		slog.Warn("gitops: app has no image bindings — Kargo Warehouse will use a placeholder that won't pull; declare component images (composed) or template images",
+			"project", app.ProjectName, "app", app.Name, "composed", composed,
 			"placeholder", DefaultImageRepoURL(app.ProjectName, app.Name))
 	}
 
@@ -2176,6 +2285,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			SubPath:               p.cfg.SubPath,
 			ArgoAppNamePattern:    p.cfg.ResourceNaming.EffectiveArgoAppName(),
 			Clusters:              env.Clusters,
+			Composed:              composed,
 		}
 		stage := BuildKargoStage(app, appEnv, upstreams, stageOpts)
 		stageBytes, err := yaml.Marshal(stage)

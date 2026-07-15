@@ -85,8 +85,29 @@ func ValidateComponents(components []ComponentSpec) error {
 				return fmt.Errorf("components[%d]: %w", i, err)
 			}
 		}
+		for _, img := range c.Images {
+			if err := validateComponentImage(c.Name, img); err != nil {
+				return fmt.Errorf("components[%d]: %w", i, err)
+			}
+		}
 	}
 	return ValidateComposedComponents(components)
+}
+
+// tagKeyRE matches a dotted Helm values path (e.g. "image.tag",
+// "controller.image.tag") — segments of identifier/number chars joined by dots.
+var tagKeyRE = regexp.MustCompile(`^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`)
+
+// validateComponentImage checks a component image binding: a repository and a
+// well-formed dotted tag-key path are both required.
+func validateComponentImage(comp string, img ComponentImage) error {
+	if strings.TrimSpace(img.Repository) == "" {
+		return fmt.Errorf("component %q: an image binding has no repository", comp)
+	}
+	if !tagKeyRE.MatchString(img.TagKey) {
+		return fmt.Errorf("component %q: image %q has an invalid tagKey %q (must be a dotted path like image.tag)", comp, img.Repository, img.TagKey)
+	}
+	return nil
 }
 
 // envVarNameRE matches a valid environment-variable name (C-identifier rules,

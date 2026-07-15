@@ -799,6 +799,262 @@ func TestComposedPerEnvComponentValues(t *testing.T) {
 	}
 }
 
+// TestComposedWarehouseSubscribesAllComponentImages verifies the Phase-1 image
+// foundation: each composed component's declared image binding is collected and a
+// single app Warehouse subscribes to every component's repository.
+func TestComposedWarehouseSubscribesAllComponentImages(t *testing.T) {
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web"},
+			Components: []domain.ComponentSpec{
+				{Name: "web-1", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web"},
+					Images:   []domain.ComponentImage{{Repository: "ghcr.io/bigly/web", TagKey: "image.tag"}}},
+				{Name: "web-2", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web"},
+					Images:   []domain.ComponentImage{{Repository: "ghcr.io/bigly/web2", TagKey: "image.tag"}}},
+			},
+		},
+	}
+	imgs := gitops.CollectComponentImagesForTest(app)
+	if len(imgs) != 2 {
+		t.Fatalf("collected %d images, want 2: %+v", len(imgs), imgs)
+	}
+	// Each image carries its owning component (for per-component promotion later).
+	if imgs[0].Name != "web-1" || imgs[1].Name != "web-2" {
+		t.Errorf("images must carry the owning component name, got %q/%q", imgs[0].Name, imgs[1].Name)
+	}
+
+	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{
+		Images:         imgs,
+		KargoNamespace: "kargo-demo",
+	})
+	if len(wh.Spec.Subscriptions) != 2 {
+		t.Fatalf("warehouse has %d subscriptions, want 2", len(wh.Spec.Subscriptions))
+	}
+	got := map[string]bool{}
+	for _, s := range wh.Spec.Subscriptions {
+		if s.Image != nil {
+			got[s.Image.RepoURL] = true
+		}
+	}
+	for _, repo := range []string{"ghcr.io/bigly/web", "ghcr.io/bigly/web2"} {
+		if !got[repo] {
+			t.Errorf("warehouse must subscribe to %q, got %v", repo, got)
+		}
+	}
+}
+
+// TestComposedPublishesKargoCRsAndAnnotation verifies Phase-2 wiring: a composed
+// pipeline app publishes a Kargo Warehouse + per-env Stage, and its rendered
+// Application carries the authorized-stage annotation so the Stage may sync it.
+func TestComposedPublishesKargoCRsAndAnnotation(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		ArgoCDRepoURL:  "https://git/repo.git",
+		TemplateLoader: canonicalityLoader{"byo-chart": false},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "byo-chart"},
+			Components: []domain.ComponentSpec{
+				{Name: "web-1", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart"},
+					Images:   []domain.ComponentImage{{Repository: "ghcr.io/bigly/web", TagKey: "image.tag"}}},
+				{Name: "web-2", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart"},
+					Images:   []domain.ComponentImage{{Repository: "ghcr.io/bigly/web2", TagKey: "image.tag"}}},
+			},
+		},
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+	}}
+	if err := p.WriteAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteAppTreeForTest: %v", err)
+	}
+
+	kargoDir := filepath.Join(dir, "_infra", "kargo")
+	if m, _ := filepath.Glob(filepath.Join(kargoDir, "*bigly-warehouse.yaml")); len(m) != 1 {
+		t.Errorf("expected a composed Kargo Warehouse, got %v", m)
+	}
+	if m, _ := filepath.Glob(filepath.Join(kargoDir, "*bigly-staging-stage.yaml")); len(m) != 1 {
+		t.Errorf("expected a staging Kargo Stage, got %v", m)
+	}
+
+	appManifest := filepath.Join(dir, "_composed-apps", "staging", "demo", "bigly", "_targets", "c1", "application.yaml")
+	raw, err := os.ReadFile(appManifest)
+	if err != nil {
+		t.Fatalf("read composed application: %v", err)
+	}
+	if !strings.Contains(string(raw), "kargo.akuity.io/authorized-stage") {
+		t.Errorf("composed Application must carry the authorized-stage annotation, got:\n%s", raw)
+	}
+}
+
+// TestComposedTagPreservedOnRepublish verifies per-component CD-tag preservation:
+// with CD.Managed, a Kargo-committed tag in a component's values.yaml survives a
+// republish instead of being reset to the overlay seed.
+func TestComposedTagPreservedOnRepublish(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		ArgoCDRepoURL:  "https://git/repo.git",
+		TemplateLoader: canonicalityLoader{"byo-chart": false},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "byo-chart"},
+			CD:       domain.CDConfig{Managed: true},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart"},
+					Values:   map[string]any{"image": map[string]any{"tag": "seed"}},
+					Images:   []domain.ComponentImage{{Repository: "ghcr.io/bigly/web", TagKey: "image.tag"}}},
+			},
+		},
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+	}}
+	vpath := filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", "web", "values.yaml")
+
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("initial publish: %v", err)
+	}
+	readTag := func() string {
+		raw, err := os.ReadFile(vpath)
+		if err != nil {
+			t.Fatalf("read values: %v", err)
+		}
+		var m map[string]any
+		if err := yaml.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		img, _ := m["image"].(map[string]any)
+		if img == nil {
+			return ""
+		}
+		s, _ := img["tag"].(string)
+		return s
+	}
+	if got := readTag(); got != "seed" {
+		t.Fatalf("initial image.tag = %q, want seed", got)
+	}
+
+	// Simulate a Kargo promotion committing a new tag into the values file.
+	if err := os.WriteFile(vpath, []byte("image:\n  tag: promoted-abc123\n"), 0o644); err != nil {
+		t.Fatalf("simulate promote: %v", err)
+	}
+
+	// Republish — the promoted tag must survive (not reset to the "seed" overlay).
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	if got := readTag(); got != "promoted-abc123" {
+		t.Errorf("republish reset the tag to %q, want promoted-abc123 preserved", got)
+	}
+}
+
+// TestComposedPromoteMaterializesEnv verifies the composed promote path writes a
+// target env's component values + rendered Application (so a higher env exists).
+func TestComposedPromoteMaterializesEnv(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		ArgoCDRepoURL:  "https://git/repo.git",
+		TemplateLoader: canonicalityLoader{"byo-chart": false},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "byo-chart"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart"},
+					Images:   []domain.ComponentImage{{Repository: "ghcr.io/bigly/web", TagKey: "image.tag"}}},
+			},
+		},
+	}
+	// Promote to prod (a non-base env that the initial pipeline publish skipped).
+	prod := gitops.AppPublishEnv{
+		EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true,
+		Namespace: "bigly-prod", BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c2", Server: "https://c2"}},
+	}
+	if err := p.PublishComposedAppEnvForTest(context.Background(), dir, app, prod); err != nil {
+		t.Fatalf("publish composed env: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "bigly", "components", "web", "values.yaml")); err != nil {
+		t.Errorf("expected prod component values: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "_composed-apps", "prod", "demo", "bigly", "_targets", "c2", "application.yaml")); err != nil {
+		t.Errorf("expected prod composed Application: %v", err)
+	}
+}
+
+// TestComposedPromotionTemplatePerComponentFiles verifies the composed promotion
+// template writes each component's promoted tag into its OWN
+// components/<name>/values.yaml — one yaml-update step per component.
+func TestComposedPromotionTemplatePerComponentFiles(t *testing.T) {
+	app := &domain.App{Name: "bigly", ProjectName: "demo"}
+	env := domain.AppEnvironment{AppName: "bigly", ProjectName: "demo", EnvName: "staging", EnvType: domain.AppEnvStaging}
+	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{
+		Composed:      true,
+		GitOpsRepoURL: "https://git/repo.git",
+		Images: []gitops.KargoImage{
+			{Name: "web-1", Repository: "ghcr.io/bigly/web", TagKey: "image.tag"},
+			{Name: "web-2", Repository: "ghcr.io/bigly/web2", TagKey: "image.tag"},
+		},
+	})
+	if stage.Spec.PromotionTemplate == nil {
+		t.Fatal("expected a promotion template")
+	}
+	// Collect yaml-update step paths.
+	paths := map[string]bool{}
+	for _, step := range stage.Spec.PromotionTemplate.Spec.Steps {
+		if step.Uses != "yaml-update" {
+			continue
+		}
+		if p, ok := step.Config["path"].(string); ok {
+			paths[p] = true
+		}
+	}
+	want := []string{
+		"./src/envs/staging/demo/bigly/components/web-1/values.yaml",
+		"./src/envs/staging/demo/bigly/components/web-2/values.yaml",
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("expected %d per-component yaml-update steps, got %d: %v", len(want), len(paths), paths)
+	}
+	for _, w := range want {
+		if !paths[w] {
+			t.Errorf("missing yaml-update for %s, got %v", w, paths)
+		}
+	}
+	// Base stage pulls direct from the Warehouse.
+	if !stage.Spec.RequestedFreight[0].Sources.Direct {
+		t.Error("base stage should pull direct from the warehouse")
+	}
+}
+
 // TestSingleToComposedTransitionPrunesTree verifies edit-to-composed cleanup: an
 // app first published single-source (one chart values.yaml/app.yaml) that gains a
 // second component becomes composed on republish, and the stale single-source

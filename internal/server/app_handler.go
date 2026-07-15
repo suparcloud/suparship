@@ -215,6 +215,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			ExposeMode:     mode,
 			Values:         c.Values,
 			InheritAppVars: c.InheritAppVars,
+			Images:         componentImagesFromDTO(c.Images),
 		}
 		for _, e := range c.EnvVars {
 			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
@@ -3619,6 +3620,7 @@ func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []Componen
 			ExposeMode:     mode,
 			Values:         c.Values,
 			InheritAppVars: c.InheritAppVars,
+			Images:         componentImagesFromDTO(c.Images),
 		}
 		for _, e := range c.EnvVars {
 			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
@@ -3690,9 +3692,37 @@ func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]dom
 				FromSecret: e.FromSecret,
 			})
 		}
+		for _, img := range c.Images {
+			dto.Images = append(dto.Images, ComponentImageDTO{
+				Repository:        img.Repository,
+				TagKey:            img.TagKey,
+				TagPattern:        img.TagPattern,
+				SelectionStrategy: img.SelectionStrategy,
+			})
+		}
 		dtos = append(dtos, dto)
 	}
 	return dtos
+}
+
+// componentImagesFromDTO converts wire image bindings to domain, trimming empties.
+func componentImagesFromDTO(dtos []ComponentImageDTO) []domain.ComponentImage {
+	if len(dtos) == 0 {
+		return nil
+	}
+	out := make([]domain.ComponentImage, 0, len(dtos))
+	for _, d := range dtos {
+		if d.Repository == "" && d.TagKey == "" {
+			continue
+		}
+		out = append(out, domain.ComponentImage{
+			Repository:        d.Repository,
+			TagKey:            d.TagKey,
+			TagPattern:        d.TagPattern,
+			SelectionStrategy: d.SelectionStrategy,
+		})
+	}
+	return out
 }
 
 func appPreviewToDTO(env *domain.AppEnvironment) AppPreviewSummaryDTO {

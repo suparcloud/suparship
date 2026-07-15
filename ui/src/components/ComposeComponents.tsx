@@ -5,6 +5,7 @@ import { mergeOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   ComponentCreate,
   ComponentEnvVar,
+  ComponentImage,
   ComponentSummary,
   EffectiveValuesResponse,
   TemplateSummary,
@@ -32,6 +33,8 @@ export interface ComponentDraft {
   /** env policy: inherit all app vars, or curate a subset */
   inheritAppVars: boolean;
   envVars: ComponentEnvVar[];
+  /** Kargo image bindings (repo + tag-key path in this component's overlay) */
+  images: ComponentImage[];
 }
 
 const COMPONENT_TYPES = ["web", "worker", "job"] as const;
@@ -68,6 +71,7 @@ export function newComponentDraft(
     valuesError: null,
     inheritAppVars: true,
     envVars: [],
+    images: [],
   };
 }
 
@@ -85,6 +89,7 @@ export function draftFromSummary(c: ComponentSummary): ComponentDraft {
     valuesError: null,
     inheritAppVars: c.inheritAppVars ?? true,
     envVars: c.envVars ?? [],
+    images: c.images ?? [],
   };
 }
 
@@ -103,6 +108,16 @@ export function toComponentCreate(d: ComponentDraft): ComponentCreate {
               ? { fromSecret: e.fromSecret.trim() }
               : { value: e.value ?? "" }),
         }));
+  const images = d.images
+    .filter((im) => im.repository.trim())
+    .map((im) => ({
+      repository: im.repository.trim(),
+      tagKey: (im.tagKey || "image.tag").trim(),
+      ...(im.tagPattern ? { tagPattern: im.tagPattern.trim() } : {}),
+      ...(im.selectionStrategy
+        ? { selectionStrategy: im.selectionStrategy.trim() }
+        : {}),
+    }));
   return {
     name: d.name.trim(),
     type: d.type,
@@ -113,6 +128,7 @@ export function toComponentCreate(d: ComponentDraft): ComponentCreate {
     // Only send when opting out — inherit (default) needs no field.
     inheritAppVars: d.inheritAppVars ? undefined : false,
     envVars: envVars.length > 0 ? envVars : undefined,
+    images: images.length > 0 ? images : undefined,
   };
 }
 
@@ -183,6 +199,25 @@ export function ComposeComponents({
     const c = components[i];
     if (!c) return;
     update(i, { envVars: [...c.envVars, { name: "", value: "" }] });
+  }
+  function updateImage(i: number, j: number, patch: Partial<ComponentImage>) {
+    const c = components[i];
+    if (!c) return;
+    update(i, {
+      images: c.images.map((im, idx) => (idx === j ? { ...im, ...patch } : im)),
+    });
+  }
+  function removeImage(i: number, j: number) {
+    const c = components[i];
+    if (!c) return;
+    update(i, { images: c.images.filter((_, idx) => idx !== j) });
+  }
+  function addImage(i: number) {
+    const c = components[i];
+    if (!c) return;
+    update(i, {
+      images: [...c.images, { repository: "", tagKey: "image.tag" }],
+    });
   }
 
   // When the picked template changes, re-default the type/expose.
@@ -428,6 +463,56 @@ export function ComposeComponents({
                 </button>
               </div>
             )}
+
+            {/* Kargo image bindings: the repository to watch + the tag-key path
+                in THIS component's overlay where the promoted tag is written.
+                Required for CD promotion of the component. */}
+            <div className="mt-3">
+              <label className={labelCls}>Images (Kargo CD)</label>
+              <div className="space-y-2">
+                {c.images.map((im, j) => (
+                  <div key={j} className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      className={`${inputCls} min-w-[12rem] flex-1 font-mono`}
+                      placeholder="ghcr.io/org/image"
+                      value={im.repository}
+                      onChange={(ev) =>
+                        updateImage(i, j, { repository: ev.target.value })
+                      }
+                    />
+                    <input
+                      type="text"
+                      className={`${inputCls} w-40 font-mono`}
+                      placeholder="image.tag"
+                      value={im.tagKey}
+                      onChange={(ev) =>
+                        updateImage(i, j, { tagKey: ev.target.value })
+                      }
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeImage(i, j)}
+                      className="rounded-md px-2 py-1 text-xs text-gray-400 hover:bg-red-50 hover:text-red-600"
+                      aria-label="Remove image"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => addImage(i)}
+                  className="text-xs font-medium text-indigo-600 hover:text-indigo-700"
+                >
+                  + Add image
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-gray-400">
+                Repository Kargo watches · tag-key path in this component's values
+                overlay (e.g. <code>image.tag</code>). Needed for promotion.
+              </p>
+            </div>
           </div>
         </div>
       ))}

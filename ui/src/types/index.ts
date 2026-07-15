@@ -570,6 +570,8 @@ export interface ComponentSummary {
   /** Env policy: inherit all app vars (default) or a curated subset. */
   inheritAppVars?: boolean;
   envVars?: ComponentEnvVar[];
+  /** Kargo image bindings (repo + tag-key). */
+  images?: ComponentImage[];
 }
 
 export interface AppReleaseRef {
@@ -879,6 +881,17 @@ export interface ComponentCreate {
   inheritAppVars?: boolean;
   /** Curated env vars when not inheriting all app vars. */
   envVars?: ComponentEnvVar[];
+  /** Kargo image bindings (repo + tag-key path in this component's overlay). */
+  images?: ComponentImage[];
+}
+
+// ComponentImage binds one of a composed component's container images for Kargo:
+// the repository to watch and the tag-key path in the component's own overlay.
+export interface ComponentImage {
+  repository: string;
+  tagKey: string;
+  tagPattern?: string;
+  selectionStrategy?: string;
 }
 
 export interface CreateAppRequest {

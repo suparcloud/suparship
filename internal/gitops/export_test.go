@@ -49,6 +49,18 @@ func (p *Publisher) WriteComposedAppTreeForTest(ctx context.Context, repoDir str
 	return p.writeComposedAppTree(ctx, repoDir, app, envs)
 }
 
+// PublishComposedAppEnvForTest exposes publishComposedAppEnv — the composed
+// promote path that materializes a single env's tree — to tests, without git.
+func (p *Publisher) PublishComposedAppEnvForTest(ctx context.Context, repoDir string, app *domain.App, env AppPublishEnv) error {
+	return p.publishComposedAppEnv(ctx, repoDir, app, env)
+}
+
+// CollectComponentImagesForTest exposes collectComponentImages — the composed
+// per-component Kargo image resolver — to white-box tests.
+func CollectComponentImagesForTest(app *domain.App) []KargoImage {
+	return collectComponentImages(app)
+}
+
 // WriteAppTreeForTest exposes writeAppTree — the mode-branching entry that picks
 // single vs composed and prunes the stale-mode tree on a transition — to tests.
 func (p *Publisher) WriteAppTreeForTest(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {

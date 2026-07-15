@@ -246,6 +246,31 @@ type ComponentSpec struct {
 	// <app>-config / <app>-secrets. Rendered by the chart as env[] (literals as
 	// value, selections as valueFrom.configMapKeyRef/secretKeyRef).
 	EnvVars []ComponentEnvVar `json:"envVars,omitempty" yaml:"envVars,omitempty"`
+	// Images binds this component's container image(s) for Kargo: the repository to
+	// watch and the tag-key path (in this component's own values overlay) where the
+	// promoted tag is written. Explicit because composed components are often BYO
+	// charts with no template-declared images to infer from. Empty = no CD tracking
+	// for this component.
+	Images []ComponentImage `json:"images,omitempty" yaml:"images,omitempty"`
+}
+
+// ComponentImage binds one of a composed component's container images to Kargo.
+// Unlike AppImageBinding (single-source, repo read from values), a component image
+// carries the repository explicitly since a BYO component's overlay may not expose
+// it in a discoverable place — and it's the component's chart, not suparship, that
+// defines the tag path.
+type ComponentImage struct {
+	// Repository is the container image repo Kargo's Warehouse subscribes to
+	// (e.g. "ghcr.io/bigly/web"). Required.
+	Repository string `json:"repository" yaml:"repository"`
+	// TagKey is the dotted Helm values path — RELATIVE to this component's own
+	// values.yaml overlay — where the promoted tag is written (e.g. "image.tag").
+	TagKey string `json:"tagKey" yaml:"tagKey"`
+	// TagPattern optionally overrides Kargo's tag allow-list (allowTags).
+	TagPattern string `json:"tagPattern,omitempty" yaml:"tagPattern,omitempty"`
+	// SelectionStrategy optionally overrides how Kargo picks the tag to promote
+	// ("NewestBuild", "SemVer", "Digest", "Lexical").
+	SelectionStrategy string `json:"selectionStrategy,omitempty" yaml:"selectionStrategy,omitempty"`
 }
 
 // ComponentEnvVar is one entry in a component's curated environment. Name is the

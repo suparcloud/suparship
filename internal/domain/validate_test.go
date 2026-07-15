@@ -247,6 +247,25 @@ func TestValidateComponents(t *testing.T) {
 			errFrag:    "duplicate component name",
 		},
 		{
+			name: "valid component image binding",
+			components: []ComponentSpec{{Name: "web", Type: ComponentWeb, Enabled: true,
+				Images: []ComponentImage{{Repository: "ghcr.io/org/web", TagKey: "image.tag"}}}},
+		},
+		{
+			name: "image binding missing repository",
+			components: []ComponentSpec{{Name: "web", Type: ComponentWeb, Enabled: true,
+				Images: []ComponentImage{{TagKey: "image.tag"}}}},
+			wantErr: true,
+			errFrag: "no repository",
+		},
+		{
+			name: "image binding invalid tagKey",
+			components: []ComponentSpec{{Name: "web", Type: ComponentWeb, Enabled: true,
+				Images: []ComponentImage{{Repository: "ghcr.io/org/web", TagKey: "image tag!"}}}},
+			wantErr: true,
+			errFrag: "invalid tagKey",
+		},
+		{
 			name:       "invalid component name - empty",
 			components: []ComponentSpec{{Name: "", Type: ComponentWeb}},
 			wantErr:    true,

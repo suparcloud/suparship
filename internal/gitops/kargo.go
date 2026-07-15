@@ -211,6 +211,12 @@ type KargoBuildOptions struct {
 	// one Application per cluster (per-cluster naming). Empty → a single in-cluster
 	// fallback, matching the AppSet builder.
 	Clusters []ClusterTarget
+	// Composed selects the composed promotion template: instead of one yaml-update
+	// on the env's single values.yaml, it emits one yaml-update per component,
+	// targeting envs/<env>/<proj>/<app>/components/<name>/values.yaml (grouped by
+	// each KargoImage's Name = owning component). The Warehouse still gets one
+	// subscription per image.
+	Composed bool
 }
 
 // ── Builders ─────────────────────────────────────────────────────────────────
@@ -296,9 +302,13 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 	// the repo root. Built via joinSubPath so it matches whatever
 	// PublisherConfig.SubPath the publisher used when writing the file. The
 	// git-clone step checks the repo out at ./src, so steps reference ./src/<path>.
-	valuesFilePath := joinSubPath(opts.SubPath, "envs", env.EnvName, app.ProjectName, app.Name, "values.yaml")
-
-	promoTemplate := buildPromotionTemplate(app, env, opts, valuesFilePath)
+	var promoTemplate *PromotionTemplate
+	if opts.Composed {
+		promoTemplate = buildComposedPromotionTemplate(app, env, opts)
+	} else {
+		valuesFilePath := joinSubPath(opts.SubPath, "envs", env.EnvName, app.ProjectName, app.Name, "values.yaml")
+		promoTemplate = buildPromotionTemplate(app, env, opts, valuesFilePath)
+	}
 
 	return &KargoStage{
 		APIVersion: kargoAPIVersion,
@@ -386,6 +396,75 @@ func buildPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts Kar
 		},
 	}
 
+	return &PromotionTemplate{Spec: PromotionTemplateSpec{Steps: steps}}
+}
+
+// buildComposedPromotionTemplate is the composed counterpart of
+// buildPromotionTemplate: each component is its own chart source reading its own
+// components/<name>/values.yaml, so the promoted tag for a component's image must
+// be written into THAT file. Kargo's yaml-update targets a single path, so this
+// emits one yaml-update step per component (images grouped by KargoImage.Name =
+// owning component), between the shared git-clone and git-commit/push/argocd-update.
+func buildComposedPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts KargoBuildOptions) *PromotionTemplate {
+	if opts.GitOpsRepoURL == "" {
+		return nil
+	}
+
+	// Group images by owning component, preserving first-seen order for determinism.
+	byComp := map[string][]KargoImage{}
+	var order []string
+	for _, img := range opts.Images {
+		if _, ok := byComp[img.Name]; !ok {
+			order = append(order, img.Name)
+		}
+		byComp[img.Name] = append(byComp[img.Name], img)
+	}
+
+	steps := []PromotionStep{
+		{
+			Uses: "git-clone",
+			Config: map[string]any{
+				"repoURL": opts.GitOpsRepoURL,
+				"checkout": []map[string]any{
+					{"branch": "main", "path": "./src"},
+				},
+			},
+		},
+	}
+	// One yaml-update per component values file.
+	for _, comp := range order {
+		updates := make([]map[string]any, 0, len(byComp[comp]))
+		for _, img := range byComp[comp] {
+			updates = append(updates, map[string]any{
+				"key":   img.TagKey,
+				"value": fmt.Sprintf("${{ imageFrom(%q).Tag }}", img.Repository),
+			})
+		}
+		path := joinSubPath(opts.SubPath, "envs", env.EnvName, app.ProjectName, app.Name, "components", comp, "values.yaml")
+		steps = append(steps, PromotionStep{
+			Uses: "yaml-update",
+			Config: map[string]any{
+				"path":    "./src/" + path,
+				"updates": updates,
+			},
+		})
+	}
+	steps = append(steps,
+		PromotionStep{
+			Uses: "git-commit",
+			Config: map[string]any{
+				"path":    "./src",
+				"message": fmt.Sprintf("promote %s/%s to %s", app.ProjectName, app.Name, env.EnvName),
+			},
+		},
+		PromotionStep{Uses: "git-push", Config: map[string]any{"path": "./src"}},
+		PromotionStep{
+			Uses: "argocd-update",
+			Config: map[string]any{
+				"apps": argoUpdateApps(opts.ArgoAppNamePattern, app.ProjectName, app.Name, env.EnvName, opts.Clusters),
+			},
+		},
+	)
 	return &PromotionTemplate{Spec: PromotionTemplateSpec{Steps: steps}}
 }
 

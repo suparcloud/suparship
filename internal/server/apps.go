@@ -47,6 +47,8 @@ type ComponentSummaryDTO struct {
 	// page (inherit all app vars, or a curated subset).
 	InheritAppVars *bool                `json:"inheritAppVars,omitempty"`
 	EnvVars        []ComponentEnvVarDTO `json:"envVars,omitempty"`
+	// Images exposes the component's Kargo image bindings (repo + tag-key).
+	Images []ComponentImageDTO `json:"images,omitempty"`
 }
 
 // AppReleaseRefDTO identifies the deployed release version for one environment
@@ -310,6 +312,9 @@ type ComponentCreateDTO struct {
 	// EnvVars is the component's curated env: each entry a literal value or a
 	// selected/renamed key of <app>-config (fromConfig) / <app>-secrets (fromSecret).
 	EnvVars []ComponentEnvVarDTO `json:"envVars,omitempty"`
+	// Images binds this component's container image(s) for Kargo CD: the repo to
+	// watch and the tag-key path in this component's own values overlay.
+	Images []ComponentImageDTO `json:"images,omitempty"`
 }
 
 // ComponentEnvVarDTO is one curated env entry (exactly one source set).
@@ -318,6 +323,14 @@ type ComponentEnvVarDTO struct {
 	Value      string `json:"value,omitempty"`
 	FromConfig string `json:"fromConfig,omitempty"`
 	FromSecret string `json:"fromSecret,omitempty"`
+}
+
+// ComponentImageDTO is one composed-component image binding for Kargo CD.
+type ComponentImageDTO struct {
+	Repository        string `json:"repository"`
+	TagKey            string `json:"tagKey"`
+	TagPattern        string `json:"tagPattern,omitempty"`
+	SelectionStrategy string `json:"selectionStrategy,omitempty"`
 }
 
 // ComponentTemplateDTO names a per-component template for a composed app. Version
