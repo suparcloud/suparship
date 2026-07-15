@@ -799,6 +799,86 @@ func TestComposedPerEnvComponentValues(t *testing.T) {
 	}
 }
 
+// TestComposedComponentIncludesPlatformOverrides verifies a composed component's
+// rendered values include its PE-authored template overlays (env.ComponentPlatform
+// Values: Default + Env[env] + Cluster[activeCluster]) layered BENEATH the
+// component's own Values (which win) and a per-env override.
+func TestComposedComponentIncludesPlatformOverrides(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		TemplateLoader: canonicalityLoader{"byo": false}, // passthrough → values.yaml IS the overlay
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "byo"},
+			Components: []domain.ComponentSpec{
+				// api overrides replicaCount → its own value wins over the platform layers.
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo"},
+					Values:   map[string]any{"replicaCount": 5}},
+				// worker has no override → the platform Env[staging] wins over Default.
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo"}},
+			},
+		},
+	}
+	// Platform overlays (as the server adapter would thread them from the template +
+	// org TemplateOverride) — same for both components here.
+	pv := gitops.ComponentPlatformValues{
+		Default: map[string]any{
+			"envConfigMapName": "((platform.configMapName))",
+			"replicaCount":     1,
+		},
+		Env:     map[string]any{"replicaCount": 3},
+		Cluster: map[string]map[string]any{"c1": {"nodeSelector": map[string]any{"zone": "scus"}}},
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+		ComponentPlatformValues: map[string]gitops.ComponentPlatformValues{
+			"api": pv, "worker": pv,
+		},
+	}}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
+	}
+	read := func(comp string) map[string]any {
+		raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", comp, "values.yaml"))
+		if err != nil {
+			t.Fatalf("read %s values: %v", comp, err)
+		}
+		var m map[string]any
+		if err := yaml.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal %s: %v", comp, err)
+		}
+		return m
+	}
+
+	api := read("api")
+	// Platform Default reaches the component (token resolved by the passthrough marshal).
+	if api["envConfigMapName"] == nil {
+		t.Errorf("api must include the platform override envConfigMapName, got %v", api)
+	}
+	// Per-cluster overlay for the active cluster is applied.
+	if ns, _ := api["nodeSelector"].(map[string]any); ns == nil || ns["zone"] != "scus" {
+		t.Errorf("api must include the per-cluster overlay, got %v", api["nodeSelector"])
+	}
+	// The component's own Values win over Default+Env.
+	if api["replicaCount"] != 5 {
+		t.Errorf("api replicaCount = %v, want 5 (component Values wins over platform layers)", api["replicaCount"])
+	}
+	worker := read("worker")
+	if worker["replicaCount"] != 3 {
+		t.Errorf("worker replicaCount = %v, want 3 (platform Env wins over Default when no component override)", worker["replicaCount"])
+	}
+}
+
 // TestStatefulComponentSeparateApplication verifies the addon/stateful primitive:
 // a stateful component is EXCLUDED from the composed multi-source Application and
 // rendered as its own prune-disabled Application (BuildComponentApplication).

@@ -1000,12 +1000,23 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 					}
 				}
 			}
-			// Component overlay: the base ComponentSpec.Values with any per-env
-			// override (EnvironmentDefaults[env].ComponentValues[name]) deep-merged on
-			// top (env wins), so a component can differ per environment.
-			overlay := c.Values
+			// Component overlay, layered low→high (each later layer wins):
+			//  1. the Platform-Engineer value overlays for THIS component's template —
+			//     the template's DefaultValues + EnvValues[env] AND the org-level
+			//     TemplateOverride (Default + Env[env] + Cluster[activeCluster]),
+			//     threaded from the server as env.ComponentPlatformValues[name];
+			//  2. the component's own ComponentSpec.Values;
+			//  3. the per-env override (EnvironmentDefaults[env].ComponentValues[name]).
+			overlay := map[string]any{}
+			if pv, ok := env.ComponentPlatformValues[c.Name]; ok {
+				overlay = deepMerge(deepCopyMap(pv.Default), deepCopyMap(pv.Env))
+				if target.Name != "" && pv.Cluster != nil {
+					overlay = deepMerge(overlay, deepCopyMap(pv.Cluster[target.Name]))
+				}
+			}
+			overlay = deepMerge(overlay, deepCopyMap(c.Values))
 			if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && len(ov.ComponentValues[c.Name]) > 0 {
-				overlay = deepMerge(deepCopyMap(c.Values), deepCopyMap(ov.ComponentValues[c.Name]))
+				overlay = deepMerge(overlay, deepCopyMap(ov.ComponentValues[c.Name]))
 			}
 			// Re-apply the Kargo-committed tag(s) captured above so a promoted tag
 			// survives republish (setStringAtPath on the overlay: for a passthrough
@@ -2376,6 +2387,17 @@ func (p *Publisher) writeKargoProjectConfig(kargoDir, projectName string, polici
 	return p.writeFile(p.kargoProjectConfigPath(kargoDir, KargoNamespaceForProject(projectName)), b)
 }
 
+// ComponentPlatformValues holds one composed component's template value overlays —
+// the template's DefaultValues/EnvValues plus the org-level TemplateOverride
+// (Default all-envs, Env this-env, Cluster per-cluster). Merged beneath the
+// component's own ComponentSpec.Values in the composed render. Mirrors the
+// single-source AppPublishEnv.Platform{Default,Env,Cluster}Values but per component.
+type ComponentPlatformValues struct {
+	Default map[string]any
+	Env     map[string]any
+	Cluster map[string]map[string]any
+}
+
 // AppPublishEnv carries per-environment publish context for PublishApp.
 type AppPublishEnv struct {
 	// AutoPromote opts this app's pipeline into auto-promotion to prod (the
@@ -2448,6 +2470,13 @@ type AppPublishEnv struct {
 	// values.yaml is applied (see envOverlay). Populated by the publish adapter
 	// from the org template override.
 	PlatformClusterValues map[string]map[string]any
+	// ComponentPlatformValues holds the PE-authored value overlays for EACH composed
+	// component's OWN template (keyed by component name) — the single-source
+	// Platform{Default,Env,Cluster}Values equivalent, but per component. Populated by
+	// the publish adapter only for composed apps (each component has its own template
+	// + org override). Merged beneath the component's own Values in the composed
+	// render, so the platform-engineer's template overrides reach each component.
+	ComponentPlatformValues map[string]ComponentPlatformValues
 	// StackRawValues / StackEnvRawValues are the app's stack's shared Helm values
 	// overlay (all envs / this env), layered above the platform values and below
 	// the developer RawValues. Empty when the app isn't in a stack. Populated by

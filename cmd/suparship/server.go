@@ -784,8 +784,22 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 	}
 	// BYO/passthrough templates opt out of the injected canonical values base.
 	pub.SkipCanonicalBase = !tmpl.Spec.CanonicalValues()
-	def := helmvalues.DeepCopyMap(tmpl.Spec.DefaultValues)
-	var env map[string]any
+	def, env, cluster := computePlatformOverlays(tmpl, ov, envName)
+	pub.PlatformDefaultValues = def
+	pub.PlatformEnvValues = env
+	pub.PlatformClusterValues = cluster
+}
+
+// computePlatformOverlays resolves a template's PE-authored value overlays for one
+// env: the template's own Default/Env values with the org-level TemplateOverride
+// (ov) merged ON TOP (org refines the template), plus the per-cluster override map.
+// Shared by the app's primary template (setPlatformOverlays) and per composed
+// component (setComponentPlatformOverlays).
+func computePlatformOverlays(tmpl *tpl.Template, ov *domain.TemplateOverride, envName string) (def, env map[string]any, cluster map[string]map[string]any) {
+	if tmpl == nil {
+		return nil, nil, nil
+	}
+	def = helmvalues.DeepCopyMap(tmpl.Spec.DefaultValues)
 	if tmpl.Spec.EnvValues != nil {
 		env = helmvalues.DeepCopyMap(tmpl.Spec.EnvValues[envName])
 	}
@@ -794,19 +808,38 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 		if ov.EnvValues != nil {
 			env = helmvalues.DeepMerge(env, helmvalues.DeepCopyMap(ov.EnvValues[envName]))
 		}
-		// Per-cluster org overlay (env-agnostic). Templates have no per-cluster
-		// layer, so this comes solely from the org override; the publisher applies
-		// only the block matching each written values.yaml's target cluster.
 		if len(ov.ClusterValues) > 0 {
-			cv := make(map[string]map[string]any, len(ov.ClusterValues))
+			cluster = make(map[string]map[string]any, len(ov.ClusterValues))
 			for k, v := range ov.ClusterValues {
-				cv[k] = helmvalues.DeepCopyMap(v)
+				cluster[k] = helmvalues.DeepCopyMap(v)
 			}
-			pub.PlatformClusterValues = cv
 		}
 	}
-	pub.PlatformDefaultValues = def
-	pub.PlatformEnvValues = env
+	return def, env, cluster
+}
+
+// setComponentPlatformOverlays threads the PE-authored value overlays for EACH
+// composed component's OWN template (+ its org override) onto the pub env, so the
+// publisher merges them beneath each component's Values. No-op for single-source
+// apps (their primary template's overlays are set by setPlatformOverlays).
+func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Context, pub *gitops.AppPublishEnv, app *domain.App, envName string) {
+	if !app.Spec.IsComposed() {
+		return
+	}
+	m := make(map[string]gitops.ComponentPlatformValues, len(app.Spec.Components))
+	for _, c := range app.Spec.Components {
+		if c.Template == nil {
+			continue
+		}
+		tmpl, err := a.resolveTemplate(ctx, c.Template.Name)
+		if err != nil || tmpl == nil {
+			continue
+		}
+		ov := a.loadOverride(ctx, c.Template.Name)
+		def, env, cluster := computePlatformOverlays(tmpl, ov, envName)
+		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster}
+	}
+	pub.ComponentPlatformValues = m
 }
 
 // orgNameOf returns the org's name, or "" when the org is unavailable.
@@ -1207,6 +1240,7 @@ func (a *gitOpsPublisherAdapter) buildAppBundle(ctx context.Context, app *domain
 		// pod will see — no chart-side multi-source merging.
 		pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
 		setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
+	a.setComponentPlatformOverlays(ctx, &pub, app, env.EnvName)
 		pub.TemplateImages = a.resolveCDImages(ctx, tmpl, ov, app, env, orgNameOf(org))
 		if tmpl != nil {
 			// Suspend is read per-env from the app spec by the publisher, but the
@@ -1706,6 +1740,7 @@ func (a *gitOpsPublisherAdapter) buildAppEnvPub(ctx context.Context, app *domain
 	}
 	pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
 	setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
+	a.setComponentPlatformOverlays(ctx, &pub, app, env.EnvName)
 	pub.TemplateImages = a.resolveCDImages(ctx, tmpl, ov, app, env, orgNameOf(org))
 	if tmpl != nil {
 		pub.SuspendKey = tmpl.Spec.SuspendKey()
