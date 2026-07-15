@@ -208,11 +208,20 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cs := domain.ComponentSpec{
-			Name:       c.Name,
-			Type:       ct,
-			Enabled:    c.Enabled,
-			ExposeMode: mode,
-			Values:     c.Values,
+			Name:           c.Name,
+			Type:           ct,
+			Enabled:        c.Enabled,
+			ExposeMode:     mode,
+			Values:         c.Values,
+			InheritAppVars: c.InheritAppVars,
+		}
+		for _, e := range c.EnvVars {
+			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
+				Name:       e.Name,
+				Value:      e.Value,
+				FromConfig: e.FromConfig,
+				FromSecret: e.FromSecret,
+			})
 		}
 		if c.Template != nil && c.Template.Name != "" {
 			ctmpl, ok := ah.lookupTemplate(r.Context(), c.Template.Name)
@@ -3502,14 +3511,23 @@ func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 	dtos := make([]ComponentSummaryDTO, 0, len(components))
 	for _, c := range components {
 		dto := ComponentSummaryDTO{
-			Name:       c.Name,
-			Type:       string(c.Type),
-			Enabled:    c.Enabled,
-			ExposeMode: string(c.ExposeMode),
-			Values:     c.Values,
+			Name:           c.Name,
+			Type:           string(c.Type),
+			Enabled:        c.Enabled,
+			ExposeMode:     string(c.ExposeMode),
+			Values:         c.Values,
+			InheritAppVars: c.InheritAppVars,
 		}
 		if c.Template != nil {
 			dto.Template = c.Template.Name
+		}
+		for _, e := range c.EnvVars {
+			dto.EnvVars = append(dto.EnvVars, ComponentEnvVarDTO{
+				Name:       e.Name,
+				Value:      e.Value,
+				FromConfig: e.FromConfig,
+				FromSecret: e.FromSecret,
+			})
 		}
 		dtos = append(dtos, dto)
 	}

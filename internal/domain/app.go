@@ -235,6 +235,48 @@ type ComponentSpec struct {
 	// chart works as naturally as a canonical one. Only meaningful for composed
 	// components (those with a Template); the publisher applies it per component.
 	Values map[string]any `json:"values,omitempty" yaml:"values,omitempty"`
+	// InheritAppVars controls whether this component blanket-envFroms the two
+	// app-wide objects <app>-config + <app>-secrets (getting EVERY app var). nil or
+	// true = inherit (today's behaviour); false = the component sees ONLY the vars
+	// in EnvVars (plus addon connection secrets and any EnvFrom* extras) — so a db
+	// component need not be exposed to every web var.
+	InheritAppVars *bool `json:"inheritAppVars,omitempty" yaml:"inheritAppVars,omitempty"`
+	// EnvVars is the component's curated environment: each entry either a literal
+	// value or a specific key selected (and optionally renamed) from the app's
+	// <app>-config / <app>-secrets. Rendered by the chart as env[] (literals as
+	// value, selections as valueFrom.configMapKeyRef/secretKeyRef).
+	EnvVars []ComponentEnvVar `json:"envVars,omitempty" yaml:"envVars,omitempty"`
+}
+
+// ComponentEnvVar is one entry in a component's curated environment. Name is the
+// env-var name the container sees. Exactly one source must be set:
+//   - Value      — a literal value.
+//   - FromConfig — a key of the app's <app>-config ConfigMap (selection + rename).
+//   - FromSecret — a key of the app's <app>-secrets Secret (selection + rename).
+type ComponentEnvVar struct {
+	Name       string `json:"name" yaml:"name"`
+	Value      string `json:"value,omitempty" yaml:"value,omitempty"`
+	FromConfig string `json:"fromConfig,omitempty" yaml:"fromConfig,omitempty"`
+	FromSecret string `json:"fromSecret,omitempty" yaml:"fromSecret,omitempty"`
+}
+
+// CuratesSecrets reports whether any component opts out of the app-wide vars and
+// selects a SUBSET of app secret keys (a FromSecret entry) into its own
+// <app>-<component>-secrets. The publish adapter uses this to decide whether to
+// pay for listing secret KEY NAMES per scope (needed only for the data[]
+// projection) — the app-wide secret uses whole-item dataFrom and needs no names.
+func (s AppSpec) CuratesSecrets() bool {
+	for _, c := range s.Components {
+		if c.InheritAppVars == nil || *c.InheritAppVars {
+			continue
+		}
+		for _, e := range c.EnvVars {
+			if e.FromSecret != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ComponentResources holds raw Kubernetes resource quantities for a component

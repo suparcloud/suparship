@@ -1359,6 +1359,14 @@ func (a *gitOpsPublisherAdapter) enrichPubEnvWithSecrets(ctx context.Context, or
 
 	pub.ScopeKeys = a.collectScopeKeys(ctx, app, envName, pub.ClusterRef)
 
+	// A component may curate a SUBSET of the app's secret keys (renamed) into its
+	// own <app>-<component>-secrets — a data[] projection that needs the actual key
+	// names per scope to resolve each selection. Collect them only then; the common
+	// case (whole-item dataFrom) needs no names, so skip the extra vault lists.
+	if app.Spec.CuratesSecrets() {
+		pub.ScopeSecretKeys = a.collectScopeSecretKeys(ctx, app, envName, pub.ClusterRef)
+	}
+
 	// Guarantee every app gets a <app>-secrets ExternalSecret (and thus a K8s
 	// Secret) even with no secrets configured: the chart's envFrom references it
 	// unconditionally, so without this the pod fails to resolve the ref. The
@@ -1496,6 +1504,56 @@ func (a *gitOpsPublisherAdapter) collectScopeKeys(ctx context.Context, app *doma
 		p.ClusterApp = has(c.WithProject(app.ProjectName), secrets.TierApp, app.Name)
 	}
 	return p
+}
+
+// collectScopeSecretKeys lists the actual secret KEY NAMES per (scope, tier) so
+// the per-component data[] projection can resolve a selected key to the item that
+// holds it (highest-precedence wins). Only called when the app curates secrets —
+// the app-wide secret uses whole-item dataFrom and needs no names, so paying for
+// these extra vault lists on every publish would be wasteful. Errors are swallowed
+// (best-effort, same contract as collectScopeKeys); the ordering must mirror
+// buildScopeItems so presence and key-name gating stay in sync.
+func (a *gitOpsPublisherAdapter) collectScopeSecretKeys(ctx context.Context, app *domain.App, envName, clusterRef string) gitops.ScopeSecretKeys {
+	var sk gitops.ScopeSecretKeys
+	if a.vault == nil {
+		return sk
+	}
+	keys := func(scope secrets.Scope, tier secrets.Tier, appName string) []string {
+		entries, err := a.vault.ListKeys(ctx, scope, tier, appName)
+		if err != nil || len(entries) == 0 {
+			return nil
+		}
+		out := make([]string, 0, len(entries))
+		for _, e := range entries {
+			out = append(out, e.Key)
+		}
+		return out
+	}
+
+	g := secrets.GlobalScope()
+	sk.GlobalShared = keys(g, secrets.TierShared, "")
+	sk.GlobalApp = keys(g.WithProject(app.ProjectName), secrets.TierApp, app.Name)
+
+	e := secrets.EnvScope(envName)
+	sk.EnvShared = keys(e, secrets.TierShared, "")
+	sk.EnvApp = keys(e.WithProject(app.ProjectName), secrets.TierApp, app.Name)
+
+	if clusterRef != "" {
+		c := secrets.ClusterScope(envName, clusterRef)
+		sk.ClusterShared = keys(c, secrets.TierShared, "")
+		sk.ClusterApp = keys(c.WithProject(app.ProjectName), secrets.TierApp, app.Name)
+	}
+
+	if app.ProjectName != "" {
+		sk.ProjectShared = keys(secrets.ProjectScope(app.ProjectName), secrets.TierShared, "")
+		sk.ProjectEnvShared = keys(secrets.ProjectEnvScope(app.ProjectName, envName), secrets.TierShared, "")
+	}
+
+	if app.Spec.Stack != "" && app.ProjectName != "" {
+		sk.StackShared = keys(secrets.StackScope(app.ProjectName, app.Spec.Stack), secrets.TierShared, "")
+		sk.StackEnvShared = keys(secrets.StackEnvScope(app.ProjectName, app.Spec.Stack, envName), secrets.TierShared, "")
+	}
+	return sk
 }
 
 // mergeAllEnvVars resolves env vars across the six-scope hierarchy and returns

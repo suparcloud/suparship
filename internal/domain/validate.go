@@ -80,8 +80,42 @@ func ValidateComponents(components []ComponentSpec) error {
 				i, c.Name, c.Type,
 			)
 		}
+		for _, e := range c.EnvVars {
+			if err := validateComponentEnvVar(c.Name, e); err != nil {
+				return fmt.Errorf("components[%d]: %w", i, err)
+			}
+		}
 	}
 	return ValidateComposedComponents(components)
+}
+
+// envVarNameRE matches a valid environment-variable name (C-identifier rules,
+// the same shape the env-config editor enforces).
+var envVarNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateComponentEnvVar checks one curated env entry: a valid name and at most
+// one source (fromConfig / fromSecret), mutually exclusive with a literal value.
+func validateComponentEnvVar(comp string, e ComponentEnvVar) error {
+	if e.Name == "" {
+		return fmt.Errorf("component %q: an env var has no name", comp)
+	}
+	if !envVarNameRE.MatchString(e.Name) {
+		return fmt.Errorf("component %q: invalid env var name %q (must match %s)", comp, e.Name, envVarNameRE.String())
+	}
+	sources := 0
+	if e.FromConfig != "" {
+		sources++
+	}
+	if e.FromSecret != "" {
+		sources++
+	}
+	if sources > 1 {
+		return fmt.Errorf("component %q env %q: set only one of fromConfig or fromSecret", comp, e.Name)
+	}
+	if sources == 1 && e.Value != "" {
+		return fmt.Errorf("component %q env %q: a literal value and a fromConfig/fromSecret source are mutually exclusive", comp, e.Name)
+	}
+	return nil
 }
 
 // ValidateComposedComponents enforces the composed-app contract: an app is

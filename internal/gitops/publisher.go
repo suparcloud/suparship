@@ -720,6 +720,87 @@ func (p *Publisher) composedAppDir(repoDir string, env AppPublishEnv, parts ...s
 // cluster, the app's platform resources (ConfigMap + ExternalSecret), and the
 // per-env composed App-of-Apps into _infra/. Preview and unbound envs are
 // skipped with a warning.
+// componentConfigProjection returns, for a component that opts OUT of the app-wide
+// vars (InheritAppVars=false), the name of its curated ConfigMap and the resolved
+// vars to put in it: each EnvVar is a literal Value or the value of the selected
+// app-config key (FromConfig). FromSecret is reserved for a future secret-subset
+// increment and is skipped here. Returns ("", nil) when the component inherits.
+func componentConfigProjection(appName string, c domain.ComponentSpec, appVars map[string]string) (string, map[string]string) {
+	if c.InheritAppVars == nil || *c.InheritAppVars {
+		return "", nil
+	}
+	name := secrets.AppComponentConfigMapName(appName, c.Name)
+	vars := make(map[string]string, len(c.EnvVars))
+	for _, e := range c.EnvVars {
+		switch {
+		case e.FromConfig != "":
+			if v, ok := appVars[e.FromConfig]; ok {
+				vars[e.Name] = v
+			}
+		case e.FromSecret != "":
+			// deferred (secret subset/rename) — see the plan.
+		default:
+			vars[e.Name] = e.Value
+		}
+	}
+	return name, vars
+}
+
+// writeComponentConfigMap writes a curated per-component ConfigMap (the object
+// behind that component's platform.configMapName) into the app's _app-resources
+// tree, alongside the app-wide env-configmap, so the platform ApplicationSet ships it.
+func (p *Publisher) writeComponentConfigMap(repoDir string, env AppPublishEnv, app *domain.App, component, name, namespace string, vars map[string]string) error {
+	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
+	content := BuildAppConfigMapYAML(name, namespace, vars, p.cfg.Branding)
+	return p.writeFile(filepath.Join(resDir, "component-"+component+"-configmap.yaml"), []byte(content))
+}
+
+// componentSecretRenames returns target-key → source-key for a component that
+// curates a SUBSET of the app's secret keys (opt-out + FromSecret entries), or nil.
+func componentSecretRenames(c domain.ComponentSpec) map[string]string {
+	if c.InheritAppVars == nil || *c.InheritAppVars {
+		return nil
+	}
+	m := make(map[string]string)
+	for _, e := range c.EnvVars {
+		if e.FromSecret != "" {
+			m[e.Name] = e.FromSecret
+		}
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// buildComponentExternalSecret builds the curated per-component ExternalSecret (the
+// object behind platform.secretName) that projects the selected+renamed app secret
+// keys, or nil when no requested key resolves in this env's scope.
+func (p *Publisher) buildComponentExternalSecret(env AppPublishEnv, app *domain.App, component, namespace string, renames map[string]string) *ESOExternalSecretConfig {
+	name := secrets.AppComponentSecretName(app.Name, component)
+	return BuildComponentExternalSecret(WorkloadExternalSecretParams{
+		App:             app.Name,
+		Namespace:       namespace,
+		Env:             env.EnvName,
+		Project:         app.ProjectName,
+		Stack:           app.Spec.Stack,
+		Cluster:         env.ClusterRef,
+		Presence:        env.ScopeKeys,
+		SecretKeys:      env.ScopeSecretKeys,
+		UnifiedStore:    p.usesUnifiedStore(),
+		Branding:        p.cfg.Branding,
+		RefreshInterval: p.externalSecretRefreshInterval(),
+	}, name, renames)
+}
+
+// writeComponentExternalSecret writes the given per-component ExternalSecret into
+// the app's platform-owned _app-resources tree.
+func (p *Publisher) writeComponentExternalSecret(repoDir string, env AppPublishEnv, app *domain.App, component string, esCfg *ESOExternalSecretConfig) error {
+	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
+	content := BuildExternalSecretYAML(*esCfg)
+	return p.writeFile(filepath.Join(resDir, "component-"+component+"-externalsecret.yaml"), []byte(content))
+}
+
 func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv, componentKeys map[string]string) error {
 	orgName := p.cfg.OrgName
 	if orgName == "" {
@@ -770,10 +851,39 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		// deep-merged on top. The overlay is component-scoped (written only to this
 		// component's file), so a sibling's keys can't leak in; env vars are
 		// threaded so ((platform.*))/((vars.*)) tokens resolve.
+		// Interpolate the merged app config once so both the app-wide ConfigMap and
+		// any per-component projection resolve ((platform.*))/((vars.*)) the same way.
+		resolvedVars := env.EnvVars
+		if hasInterpToken(resolvedVars) {
+			resolvedVars = p.platformVarsContext(app, env, orgName).InterpolateMap(resolvedVars)
+		}
+
 		componentValues := make(map[string]string, len(app.Spec.Components))
 		for _, c := range app.Spec.ComposedComponents() {
 			hv := helmvalues.MapComponentHelmValuesForEnv(app, c, componentKeys[c.Name], env.EnvName, env.EnvType, baseDomain, ns, target.Name, orgName,
 				p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+			// Per-component env scoping: a component that opts out of the app-wide
+			// vars points platform.configMapName at its own curated ConfigMap and
+			// gets no app secrets (platform.secretName=""); suparship renders the
+			// projection object. The chart just envFroms the two platform names.
+			if projName, projVars := componentConfigProjection(app.Name, c, resolvedVars); projName != "" {
+				hv.Platform.ConfigMapName = projName
+				hv.Platform.SecretName = ""
+				if err := p.writeComponentConfigMap(repoDir, env, app, c.Name, projName, ns, projVars); err != nil {
+					return fmt.Errorf("writing component config for %s env %s: %w", c.Name, env.EnvName, err)
+				}
+				// A component may curate a SUBSET of app secret keys (renamed) into
+				// its own <app>-<component>-secrets, which platform.secretName then
+				// points at; suparship renders the ExternalSecret data[] projection.
+				if renames := componentSecretRenames(c); renames != nil {
+					if esCfg := p.buildComponentExternalSecret(env, app, c.Name, ns, renames); esCfg != nil {
+						if err := p.writeComponentExternalSecret(repoDir, env, app, c.Name, esCfg); err != nil {
+							return fmt.Errorf("writing component secret for %s env %s: %w", c.Name, env.EnvName, err)
+						}
+						hv.Platform.SecretName = esCfg.Name
+					}
+				}
+			}
 			hvBytes, err := marshalValuesWithOverlay(hv, c.Values, env.EnvVars)
 			if err != nil {
 				return fmt.Errorf("marshal values.yaml for component %s env %s: %w", c.Name, env.EnvName, err)
@@ -814,16 +924,11 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			return err
 		}
 
-		// Platform-managed per-app resources (ConfigMap + ExternalSecret) — shared
-		// by every component (one env/secret surface in the one namespace), shipped
-		// by the platform ApplicationSet exactly as for a single-chart app.
-		envVars := env.EnvVars
-		if hasInterpToken(envVars) {
-			ic := p.platformVarsContext(app, env, orgName)
-			envVars = ic.InterpolateMap(envVars)
-		}
+		// Platform-managed per-app resources (the app-wide <app>-config +
+		// <app>-secrets — the default platform.configMapName/secretName), shipped by
+		// the platform ApplicationSet exactly as for a single-chart app.
 		appDir := p.appEnvDir(repoDir, env, app.ProjectName, app.Name)
-		if err := p.writeAppPlatformResources(repoDir, appDir, app, ns, env, envVars); err != nil {
+		if err := p.writeAppPlatformResources(repoDir, appDir, app, ns, env, resolvedVars); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
 		}
 
@@ -1028,6 +1133,22 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			tagKeys = append(tagKeys, img.TagKey)
 		}
 
+		// A single-component opt-out app may curate a secret subset into
+		// <app>-<component>-secrets. Build it once (per env, not per cluster) so
+		// marshalValues can point platform.secretName at it and the platform-
+		// resources write below emits the ExternalSecret. nil when the component
+		// inherits app secrets or no requested key resolves in this env's scope.
+		var componentSecretName string
+		var componentSecretCfg *ESOExternalSecretConfig
+		if len(app.Spec.Components) == 1 {
+			if renames := componentSecretRenames(app.Spec.Components[0]); renames != nil {
+				if esCfg := p.buildComponentExternalSecret(env, app, app.Spec.Components[0].Name, ns, renames); esCfg != nil {
+					componentSecretCfg = esCfg
+					componentSecretName = esCfg.Name
+				}
+			}
+		}
+
 		// outPath is the values.yaml the bytes will be written to; it doubles as
 		// the source to read back a CD-committed tag for preservation.
 		marshalValues := func(c ClusterTarget, outPath string) ([]byte, error) {
@@ -1052,6 +1173,16 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 					if hv.Routing.Component == name {
 						hv.Routing.Component = key
 					}
+				}
+				// Per-component env scoping: a single-component app that opts out of
+				// the app vars points platform.configMapName at its curated projection
+				// (written below) and gets no app secrets — same as the composed path.
+				if projName, _ := componentConfigProjection(app.Name, app.Spec.Components[0], nil); projName != "" {
+					hv.Platform.ConfigMapName = projName
+					// Opt-out: no app-wide secrets. If the component curates a
+					// secret subset, point platform.secretName at its projection
+					// (written with the platform resources); else "" (no secrets).
+					hv.Platform.SecretName = componentSecretName
 				}
 			}
 			overlay := envOverlay(app, env, c.Name)
@@ -1189,6 +1320,24 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		appDir := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name)
 		if err := p.writeAppPlatformResources(repoDir, appDir, app, ns, env, envVars); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
+		}
+
+		// Single-component opt-out: write its curated <app>-<component>-config
+		// projection (resolved from the interpolated env vars).
+		if len(app.Spec.Components) == 1 {
+			c0 := app.Spec.Components[0]
+			if projName, projVars := componentConfigProjection(app.Name, c0, envVars); projName != "" {
+				if err := p.writeComponentConfigMap(repoDir, env, app, c0.Name, projName, ns, projVars); err != nil {
+					return fmt.Errorf("writing component config for %s env %s: %w", c0.Name, env.EnvName, err)
+				}
+				// Curated secret subset (built up-front so values.yaml could point
+				// platform.secretName at it) — emit the ExternalSecret projection.
+				if componentSecretCfg != nil {
+					if err := p.writeComponentExternalSecret(repoDir, env, app, c0.Name, componentSecretCfg); err != nil {
+						return fmt.Errorf("writing component secret for %s env %s: %w", c0.Name, env.EnvName, err)
+					}
+				}
+			}
 		}
 
 		// Per-addon claim: parallel ArgoCD Application alongside the
@@ -2044,6 +2193,11 @@ type AppPublishEnv struct {
 	// publisher only emits ExternalSecrets/dataFrom entries that resolve.
 	// Populated by the adapter (cmd/suparship/server.go) at publish time.
 	ScopeKeys ScopePresence
+	// ScopeSecretKeys carries the actual secret key NAMES per (scope, tier) item —
+	// populated by the adapter only when an app has a component that curates
+	// secrets, so the per-component data[] projection can resolve each key to its
+	// item. Empty otherwise (the app-wide secret uses dataFrom, needing no names).
+	ScopeSecretKeys ScopeSecretKeys
 	// RoutingProfiles is a sparse override map for this env. Entries here
 	// replace the org-level profile (PublisherConfig.RoutingProfiles) of the
 	// same name; absent names inherit the org default. Populated by the

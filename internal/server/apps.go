@@ -38,6 +38,10 @@ type ComponentSummaryDTO struct {
 	// Values is the component's Helm values overlay — its value-based config,
 	// shown read-only on the app detail page so the component's makeup is visible.
 	Values map[string]any `json:"values,omitempty"`
+	// InheritAppVars / EnvVars expose the component's env policy for the detail
+	// page (inherit all app vars, or a curated subset).
+	InheritAppVars *bool                `json:"inheritAppVars,omitempty"`
+	EnvVars        []ComponentEnvVarDTO `json:"envVars,omitempty"`
 }
 
 // AppReleaseRefDTO identifies the deployed release version for one environment
@@ -294,6 +298,21 @@ type ComponentCreateDTO struct {
 	// command, resources, etc. in the shape THIS chart expects, so BYO charts work
 	// the same as canonical ones). Mirrors the app-level rawValues.
 	Values map[string]any `json:"values,omitempty"`
+	// InheritAppVars controls whether the component blanket-envFroms the app-wide
+	// <app>-config + <app>-secrets. nil/true = inherit (default); false = the
+	// component sees only its EnvVars (+ addon/extra sources).
+	InheritAppVars *bool `json:"inheritAppVars,omitempty"`
+	// EnvVars is the component's curated env: each entry a literal value or a
+	// selected/renamed key of <app>-config (fromConfig) / <app>-secrets (fromSecret).
+	EnvVars []ComponentEnvVarDTO `json:"envVars,omitempty"`
+}
+
+// ComponentEnvVarDTO is one curated env entry (exactly one source set).
+type ComponentEnvVarDTO struct {
+	Name       string `json:"name"`
+	Value      string `json:"value,omitempty"`
+	FromConfig string `json:"fromConfig,omitempty"`
+	FromSecret string `json:"fromSecret,omitempty"`
 }
 
 // ComponentTemplateDTO names a per-component template for a composed app. Version

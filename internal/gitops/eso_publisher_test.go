@@ -431,3 +431,108 @@ func TestBuildAppExternalSecret_StackItemsAfterProject(t *testing.T) {
 		}
 	}
 }
+
+// A component curating a subset renames each selected source key into its own
+// target and resolves the source to the item that holds it, emitting data[].
+func TestBuildComponentExternalSecret_SelectAndRename(t *testing.T) {
+	cfg := BuildComponentExternalSecret(WorkloadExternalSecretParams{
+		App: "web", Namespace: "acme-web-prod", Env: "prod", Project: "acme",
+		Presence:   ScopePresence{GlobalApp: true},
+		SecretKeys: ScopeSecretKeys{GlobalApp: []string{"DATABASE_URL", "REDIS_URL"}},
+	}, "web-db-secrets", map[string]string{"DB_URL": "DATABASE_URL"})
+	if cfg == nil {
+		t.Fatal("expected a config")
+	}
+	if cfg.Name != "web-db-secrets" {
+		t.Errorf("name = %q, want web-db-secrets", cfg.Name)
+	}
+	if len(cfg.Items) != 0 {
+		t.Errorf("component projection must use data[], not dataFrom: %+v", cfg.Items)
+	}
+	if len(cfg.Data) != 1 {
+		t.Fatalf("expected 1 data entry, got %d: %+v", len(cfg.Data), cfg.Data)
+	}
+	d := cfg.Data[0]
+	if d.SecretKey != "DB_URL" || d.Property != "DATABASE_URL" || d.ItemKey != "acme-web-global" {
+		t.Errorf("data[0] = %+v, want secretKey=DB_URL property=DATABASE_URL itemKey=acme-web-global", d)
+	}
+}
+
+// A key present in several bands must resolve to the highest-precedence item so
+// the projection selects the same value the merged <app>-secrets would.
+func TestBuildComponentExternalSecret_PrecedenceHighestWins(t *testing.T) {
+	cfg := BuildComponentExternalSecret(WorkloadExternalSecretParams{
+		App: "web", Namespace: "acme-web-prod", Env: "prod", Project: "acme",
+		Presence: ScopePresence{GlobalApp: true, EnvApp: true},
+		SecretKeys: ScopeSecretKeys{
+			GlobalApp: []string{"API_KEY"},
+			EnvApp:    []string{"API_KEY"},
+		},
+	}, "web-api-secrets", map[string]string{"API_KEY": "API_KEY"})
+	if cfg == nil || len(cfg.Data) != 1 {
+		t.Fatalf("expected 1 data entry, got %+v", cfg)
+	}
+	// env-app is more specific than global-app → it wins.
+	if cfg.Data[0].ItemKey != "acme-web-env-prod" {
+		t.Errorf("itemKey = %q, want acme-web-env-prod (env-app wins)", cfg.Data[0].ItemKey)
+	}
+	// Under k8s per-vault stores the env item extracts from the env store, which
+	// differs from the ExternalSecret default (global) → a sourceRef is rendered.
+	if cfg.Data[0].StoreName != "suparship-store-env-prod" {
+		t.Errorf("store = %q, want env store", cfg.Data[0].StoreName)
+	}
+	yaml := BuildExternalSecretYAML(*cfg)
+	if !strings.Contains(yaml, "  data:") {
+		t.Errorf("expected data: block, got:\n%s", yaml)
+	}
+	if !strings.Contains(yaml, "sourceRef:") || !strings.Contains(yaml, "suparship-store-env-prod") {
+		t.Errorf("expected per-entry sourceRef for the env store, got:\n%s", yaml)
+	}
+	if !strings.Contains(yaml, `property: "API_KEY"`) {
+		t.Errorf("expected property rename, got:\n%s", yaml)
+	}
+}
+
+// A requested source key that no present item holds is dropped; when nothing
+// resolves the whole projection is nil (no empty ExternalSecret written).
+func TestBuildComponentExternalSecret_UnresolvedKeysDropped(t *testing.T) {
+	p := WorkloadExternalSecretParams{
+		App: "web", Namespace: "ns", Env: "prod", Project: "acme",
+		Presence:   ScopePresence{GlobalApp: true},
+		SecretKeys: ScopeSecretKeys{GlobalApp: []string{"KNOWN"}},
+	}
+	cfg := BuildComponentExternalSecret(p, "web-x-secrets", map[string]string{
+		"A": "KNOWN",
+		"B": "MISSING",
+	})
+	if cfg == nil || len(cfg.Data) != 1 || cfg.Data[0].SecretKey != "A" {
+		t.Fatalf("expected only the resolvable key, got %+v", cfg)
+	}
+
+	if cfg := BuildComponentExternalSecret(p, "web-x-secrets", map[string]string{"B": "MISSING"}); cfg != nil {
+		t.Errorf("expected nil when no key resolves, got %+v", cfg)
+	}
+}
+
+// UnifiedStore (1Password) reads every item from the single per-cluster store, so
+// the data[] projection emits no per-entry sourceRef.
+func TestBuildComponentExternalSecret_UnifiedStoreNoSourceRef(t *testing.T) {
+	cfg := BuildComponentExternalSecret(WorkloadExternalSecretParams{
+		App: "web", Namespace: "acme-web-prod", Env: "prod", Project: "acme",
+		Presence:     ScopePresence{EnvApp: true},
+		SecretKeys:   ScopeSecretKeys{EnvApp: []string{"TOKEN"}},
+		UnifiedStore: true,
+	}, "web-w-secrets", map[string]string{"TOKEN": "TOKEN"})
+	if cfg == nil || len(cfg.Data) != 1 {
+		t.Fatalf("expected 1 data entry, got %+v", cfg)
+	}
+	if cfg.StoreName != secrets.UnifiedStoreName() {
+		t.Errorf("store = %q, want unified store", cfg.StoreName)
+	}
+	if cfg.Data[0].StoreName != secrets.UnifiedStoreName() {
+		t.Errorf("data store = %q, want unified store", cfg.Data[0].StoreName)
+	}
+	if yaml := BuildExternalSecretYAML(*cfg); strings.Contains(yaml, "sourceRef:") {
+		t.Errorf("unified store must not emit sourceRef, got:\n%s", yaml)
+	}
+}

@@ -156,6 +156,19 @@ func AppSecretName(app string) string { return app + "-secrets" }
 // the app's non-secret env vars.
 func AppConfigMapName(app string) string { return app + "-config" }
 
+// AppComponentConfigMapName returns the ConfigMap name for a component that opts
+// out of the app-wide config and gets a curated subset instead — the value behind
+// its platform.configMapName.
+func AppComponentConfigMapName(app, component string) string {
+	return app + "-" + component + "-config"
+}
+
+// AppComponentSecretName returns the Secret name for a component that curates a
+// subset of the app's secret keys — the value behind its platform.secretName.
+func AppComponentSecretName(app, component string) string {
+	return app + "-" + component + "-secrets"
+}
+
 // ── ConfigMap naming (resolved-namespace variants) ────────────────────────
 
 // SecretNameForNamespace returns the K8s Secret name for an app's secrets

@@ -161,33 +161,30 @@ func MapToHelmValuesForEnv(
 	}
 	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, effectiveBase))
 
-	// Resource names are deterministic so values.yaml lines up with the K8s
-	// resources the publisher creates: the per-app ConfigMap and the three
-	// per-scope ExternalSecret targets (<app>-global/-env/-cluster).
-	cms, secs := envFromLists(app.ProjectName, app.Name, envName, cluster)
-
-	// Addon connection Secrets append to the consumer's envFrom hierarchy
-	// after the standard scopes. Order is alphabetical by addon name so
-	// the merge result is deterministic; rely on the chart-side
-	// "later wins" envFrom semantics so addon vars override the
-	// generic env hierarchy when they collide.
+	// The app's base config + secret travel via the platform contract
+	// (platform.configMapName / platform.secretName) — the ONLY names a chart
+	// needs. suparship renders the objects behind them. The publisher overrides
+	// these per component for a curated / opt-out component (its own projection /
+	// "" for no secrets). The suparship.envFrom* lists carry ONLY addon connection
+	// secrets (+ component EnvFrom extras) — an explicit opt-in beyond the base.
 	addonSecs, claims := buildAddonBindings(app, envAddonProfiles, orgAddonProfiles)
-	secs = append(secs, addonSecs...)
 
 	// Platform metadata block: identity + resolved routing context. Ingress
 	// class/issuer come from the routing component's resolved profile (already
 	// computed into its ComponentValues.Ingress above).
 	platform := PlatformValues{
-		Org:         orgName,
-		Project:     app.ProjectName,
-		App:         app.Name,
-		Env:         envName,
-		EnvType:     string(envType),
-		Cluster:     cluster,
-		Namespace:   namespace,
-		BaseDomain:  effectiveBase,
-		RoutingHost: routingHost,
-		ImageTag:    imageTag,
+		Org:           orgName,
+		Project:       app.ProjectName,
+		App:           app.Name,
+		Env:           envName,
+		EnvType:       string(envType),
+		Cluster:       cluster,
+		Namespace:     namespace,
+		BaseDomain:    effectiveBase,
+		RoutingHost:   routingHost,
+		ImageTag:      imageTag,
+		ConfigMapName: secrets.AppConfigMapName(app.Name),
+		SecretName:    secrets.AppSecretName(app.Name),
 	}
 	if rc := components[routingComponent]; rc != nil && rc.Ingress != nil {
 		platform.IngressClassName = rc.Ingress.ClassName
@@ -240,8 +237,9 @@ func MapToHelmValuesForEnv(
 			AppEnv: envOverride.EnvConfig,
 		}),
 		Suparship: SuparshipValues{
-			EnvFromConfigMaps: cms,
-			EnvFromSecrets:    secs,
+			// App config/secret are the platform contract (platform.configMapName /
+			// secretName); suparship.envFrom* carries only addon connection secrets.
+			EnvFromSecrets: addonSecs,
 		},
 		ServiceClaims: claims,
 	}

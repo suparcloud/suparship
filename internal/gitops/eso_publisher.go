@@ -58,6 +58,17 @@ type ESOItemRef struct {
 	StoreName string
 }
 
+// ESODataRef is one data[] entry: a single key selected (and renamed) from a
+// vault item. SecretKey is the key in the target Secret; Property is the key
+// within the vault item ItemKey. StoreName is the item's ClusterSecretStore (a
+// per-entry sourceRef is emitted when it differs from the ExternalSecret default).
+type ESODataRef struct {
+	SecretKey string
+	ItemKey   string
+	Property  string
+	StoreName string
+}
+
 // ESOExternalSecretConfig captures the single ExternalSecret per app-env. It
 // materializes one merged Secret (<app>-secrets) by extracting every present
 // scope/tier item in precedence order (later overwrites earlier).
@@ -65,8 +76,11 @@ type ESOExternalSecretConfig struct {
 	Name      string // AppSecretName(app)
 	Namespace string // app namespace
 	StoreName string // default ClusterSecretStore (global store)
-	Items     []ESOItemRef
-	Branding  branding.Config
+	Items     []ESOItemRef // dataFrom (whole-item) mode — the app-wide secret
+	// Data is the data[] (per-key select/rename) mode — the per-component secret
+	// projection. Mutually exclusive with Items.
+	Data     []ESODataRef
+	Branding branding.Config
 	// RefreshInterval is the ExternalSecret spec.refreshInterval (org-configured).
 	// Empty falls back to secrets.DefaultRefreshInterval.
 	RefreshInterval string
@@ -172,9 +186,21 @@ spec:
   target:
     name: %s
     creationPolicy: Owner
-  dataFrom:
 `, cfg.Name, cfg.Namespace, branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), refreshInterval, cfg.StoreName, cfg.Name))
 
+	if len(cfg.Data) > 0 {
+		// Per-key select/rename (the per-component projection).
+		sb.WriteString("  data:\n")
+		for _, d := range cfg.Data {
+			sb.WriteString(fmt.Sprintf("  - secretKey: %q\n    remoteRef:\n      key: %q\n      property: %q\n", d.SecretKey, d.ItemKey, d.Property))
+			if d.StoreName != "" && d.StoreName != cfg.StoreName {
+				sb.WriteString(fmt.Sprintf("    sourceRef:\n      storeRef:\n        name: %s\n        kind: ClusterSecretStore\n", d.StoreName))
+			}
+		}
+		return sb.String()
+	}
+
+	sb.WriteString("  dataFrom:\n")
 	for _, item := range cfg.Items {
 		sb.WriteString(fmt.Sprintf("  - extract:\n      key: %q\n", item.Key))
 		// Per-entry storeRef overrides the top-level secretStoreRef. Only emit
@@ -238,6 +264,20 @@ type ScopePresence struct {
 	PreviewPRShared, PreviewPRApp bool
 }
 
+// ScopeSecretKeys mirrors ScopePresence but carries the actual key NAMES in each
+// (scope, tier) item, so a per-component data[] projection can resolve a selected
+// key to the right vault item. Populated only when a component curates secrets;
+// the plain <app>-secrets path leaves it zero (dataFrom needs no key names).
+type ScopeSecretKeys struct {
+	GlobalShared, GlobalApp         []string
+	EnvShared, EnvApp               []string
+	ClusterShared, ClusterApp       []string
+	ProjectShared, ProjectEnvShared []string
+	StackShared, StackEnvShared     []string
+	PreviewShared, PreviewApp       []string
+	PreviewPRShared, PreviewPRApp   []string
+}
+
 // WorkloadExternalSecretParams captures the per-app-env info for the single
 // merged ExternalSecret.
 type WorkloadExternalSecretParams struct {
@@ -274,6 +314,9 @@ type WorkloadExternalSecretParams struct {
 	// App, so a shared-namespace preview can give its Secret a preview-suffixed
 	// name while still reading the app's items.
 	SecretName string
+	// SecretKeys carries the key names per (scope, tier) item — only needed (and
+	// populated) for a per-component data[] secret projection.
+	SecretKeys ScopeSecretKeys
 }
 
 // BuildAppExternalSecret returns the single merged ExternalSecret config for an
@@ -289,90 +332,7 @@ type WorkloadExternalSecretParams struct {
 // otherwise (k8s) each item carries its scope's per-vault store and non-global
 // items emit a per-entry sourceRef.
 func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretConfig {
-	storeFor := func(scope secrets.Scope) string {
-		if p.UnifiedStore {
-			return secrets.UnifiedStoreName()
-		}
-		return secrets.StoreName(scope)
-	}
-	defaultStore := storeFor(secrets.GlobalScope())
-	var items []ESOItemRef
-
-	sharedItem := func(scope secrets.Scope) {
-		items = append(items, ESOItemRef{Key: secrets.SharedItemName(scope), StoreName: storeFor(scope)})
-	}
-	appItem := func(scope secrets.Scope) {
-		// App-tier items are project-qualified (WithProject) so a same-named app
-		// in another project never collides on the shared org/env vault. StoreName
-		// keys on Kind only, so the un-tagged scope still selects the right store.
-		items = append(items, ESOItemRef{Key: secrets.AppItemName(scope.WithProject(p.Project), p.App), StoreName: storeFor(scope)})
-	}
-	hasProject := p.Project != ""
-	hasStack := p.Stack != ""
-
-	// Global band: org-shared → project-global-shared → stack-global-shared → app.
-	if p.Presence.GlobalShared {
-		sharedItem(secrets.GlobalScope())
-	}
-	if hasProject && p.Presence.ProjectShared {
-		sharedItem(secrets.ProjectScope(p.Project))
-	}
-	if hasStack && p.Presence.StackShared {
-		sharedItem(secrets.StackScope(p.Project, p.Stack))
-	}
-	if p.Presence.GlobalApp {
-		appItem(secrets.GlobalScope())
-	}
-
-	// Env band: org-shared → project-env-shared → stack-env-shared → app.
-	if p.Presence.EnvShared {
-		sharedItem(secrets.EnvScope(p.Env))
-	}
-	if hasProject && p.Presence.ProjectEnvShared {
-		sharedItem(secrets.ProjectEnvScope(p.Project, p.Env))
-	}
-	if hasStack && p.Presence.StackEnvShared {
-		sharedItem(secrets.StackEnvScope(p.Project, p.Stack, p.Env))
-	}
-	if p.Presence.EnvApp {
-		appItem(secrets.EnvScope(p.Env))
-	}
-
-	// Cluster band: shared → app (highest precedence escape hatch).
-	if p.Cluster != "" {
-		cluster := secrets.ClusterScope(p.Env, p.Cluster)
-		if p.Presence.ClusterShared {
-			sharedItem(cluster)
-		}
-		if p.Presence.ClusterApp {
-			appItem(cluster)
-		}
-	}
-
-	// Preview bands: applied on top of the base env for previews only. The
-	// shared/app preview band (one per app) wins over the base env; a single
-	// preview's per-PR override wins over the band. All items live in the base
-	// env's vault (Env), so previews reuse the base env vault — no per-preview
-	// vault is ever created.
-	if p.IsPreview {
-		band := secrets.PreviewScope(p.Env)
-		if p.Presence.PreviewShared {
-			sharedItem(band)
-		}
-		if p.Presence.PreviewApp {
-			appItem(band)
-		}
-		if p.PreviewName != "" {
-			pr := secrets.PreviewPRScope(p.Env, p.PreviewName)
-			if p.Presence.PreviewPRShared {
-				sharedItem(pr)
-			}
-			if p.Presence.PreviewPRApp {
-				appItem(pr)
-			}
-		}
-	}
-
+	items := buildScopeItems(p)
 	if len(items) == 0 {
 		return nil
 	}
@@ -380,11 +340,154 @@ func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretCo
 	if esName == "" {
 		esName = secrets.AppSecretName(p.App)
 	}
+	refs := make([]ESOItemRef, len(items))
+	for i, it := range items {
+		refs[i] = it.ref
+	}
 	return &ESOExternalSecretConfig{
 		Name:            esName,
 		Namespace:       p.Namespace,
-		StoreName:       defaultStore,
-		Items:           items,
+		StoreName:       storeForScope(p, secrets.GlobalScope()),
+		Items:           refs,
+		Branding:        p.Branding,
+		RefreshInterval: p.RefreshInterval,
+	}
+}
+
+// scopeItem is one vault item in precedence order: its dataFrom ref plus the key
+// names it holds (populated from WorkloadExternalSecretParams.SecretKeys, used by
+// the per-component data[] projection to resolve a selected key to its item).
+type scopeItem struct {
+	ref  ESOItemRef
+	keys []string
+}
+
+func storeForScope(p WorkloadExternalSecretParams, scope secrets.Scope) string {
+	if p.UnifiedStore {
+		return secrets.UnifiedStoreName()
+	}
+	return secrets.StoreName(scope)
+}
+
+// buildScopeItems returns the present (scope, tier) vault items in precedence
+// order (low → high) — the single source of truth for the app ExternalSecret's
+// dataFrom order AND the per-component projection's key resolution.
+func buildScopeItems(p WorkloadExternalSecretParams) []scopeItem {
+	var items []scopeItem
+	sharedItem := func(scope secrets.Scope, keys []string) {
+		items = append(items, scopeItem{ref: ESOItemRef{Key: secrets.SharedItemName(scope), StoreName: storeForScope(p, scope)}, keys: keys})
+	}
+	appItem := func(scope secrets.Scope, keys []string) {
+		// App-tier items are project-qualified (WithProject) so a same-named app
+		// in another project never collides on the shared org/env vault. StoreName
+		// keys on Kind only, so the un-tagged scope still selects the right store.
+		items = append(items, scopeItem{ref: ESOItemRef{Key: secrets.AppItemName(scope.WithProject(p.Project), p.App), StoreName: storeForScope(p, scope)}, keys: keys})
+	}
+	hasProject := p.Project != ""
+	hasStack := p.Stack != ""
+	sk := p.SecretKeys
+
+	// Global band: org-shared → project-global-shared → stack-global-shared → app.
+	if p.Presence.GlobalShared {
+		sharedItem(secrets.GlobalScope(), sk.GlobalShared)
+	}
+	if hasProject && p.Presence.ProjectShared {
+		sharedItem(secrets.ProjectScope(p.Project), sk.ProjectShared)
+	}
+	if hasStack && p.Presence.StackShared {
+		sharedItem(secrets.StackScope(p.Project, p.Stack), sk.StackShared)
+	}
+	if p.Presence.GlobalApp {
+		appItem(secrets.GlobalScope(), sk.GlobalApp)
+	}
+
+	// Env band: org-shared → project-env-shared → stack-env-shared → app.
+	if p.Presence.EnvShared {
+		sharedItem(secrets.EnvScope(p.Env), sk.EnvShared)
+	}
+	if hasProject && p.Presence.ProjectEnvShared {
+		sharedItem(secrets.ProjectEnvScope(p.Project, p.Env), sk.ProjectEnvShared)
+	}
+	if hasStack && p.Presence.StackEnvShared {
+		sharedItem(secrets.StackEnvScope(p.Project, p.Stack, p.Env), sk.StackEnvShared)
+	}
+	if p.Presence.EnvApp {
+		appItem(secrets.EnvScope(p.Env), sk.EnvApp)
+	}
+
+	// Cluster band: shared → app (highest precedence escape hatch).
+	if p.Cluster != "" {
+		cluster := secrets.ClusterScope(p.Env, p.Cluster)
+		if p.Presence.ClusterShared {
+			sharedItem(cluster, sk.ClusterShared)
+		}
+		if p.Presence.ClusterApp {
+			appItem(cluster, sk.ClusterApp)
+		}
+	}
+
+	// Preview bands: applied on top of the base env for previews only.
+	if p.IsPreview {
+		band := secrets.PreviewScope(p.Env)
+		if p.Presence.PreviewShared {
+			sharedItem(band, sk.PreviewShared)
+		}
+		if p.Presence.PreviewApp {
+			appItem(band, sk.PreviewApp)
+		}
+		if p.PreviewName != "" {
+			pr := secrets.PreviewPRScope(p.Env, p.PreviewName)
+			if p.Presence.PreviewPRShared {
+				sharedItem(pr, sk.PreviewPRShared)
+			}
+			if p.Presence.PreviewPRApp {
+				appItem(pr, sk.PreviewPRApp)
+			}
+		}
+	}
+	return items
+}
+
+// BuildComponentExternalSecret returns the ExternalSecret for a component that
+// curates a SUBSET of the app's secret keys (renames maps target-key → source-key
+// in <app>-secrets). Each requested source key is resolved to the highest-
+// precedence vault item that holds it (matching the merged <app>-secrets value)
+// and emitted as a data[] entry with an optional per-item sourceRef. Returns nil
+// when no requested key resolves (so no empty ExternalSecret is written).
+func BuildComponentExternalSecret(p WorkloadExternalSecretParams, name string, renames map[string]string) *ESOExternalSecretConfig {
+	items := buildScopeItems(p)
+	// Resolve each key against items from highest precedence (last) to lowest.
+	resolve := func(sourceKey string) (ESOItemRef, bool) {
+		for i := len(items) - 1; i >= 0; i-- {
+			for _, k := range items[i].keys {
+				if k == sourceKey {
+					return items[i].ref, true
+				}
+			}
+		}
+		return ESOItemRef{}, false
+	}
+	// Deterministic order by target key.
+	targets := make([]string, 0, len(renames))
+	for t := range renames {
+		targets = append(targets, t)
+	}
+	sort.Strings(targets)
+	var data []ESODataRef
+	for _, target := range targets {
+		src := renames[target]
+		if ref, ok := resolve(src); ok {
+			data = append(data, ESODataRef{SecretKey: target, ItemKey: ref.Key, Property: src, StoreName: ref.StoreName})
+		}
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return &ESOExternalSecretConfig{
+		Name:            name,
+		Namespace:       p.Namespace,
+		StoreName:       storeForScope(p, secrets.GlobalScope()),
+		Data:            data,
 		Branding:        p.Branding,
 		RefreshInterval: p.RefreshInterval,
 	}

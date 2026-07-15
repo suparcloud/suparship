@@ -564,6 +564,9 @@ export interface ComponentSummary {
   template?: string;
   /** The component's Helm values overlay (value-based config), shown read-only. */
   values?: Record<string, unknown>;
+  /** Env policy: inherit all app vars (default) or a curated subset. */
+  inheritAppVars?: boolean;
+  envVars?: ComponentEnvVar[];
 }
 
 export interface AppReleaseRef {
@@ -846,6 +849,15 @@ export interface CreateServiceResponse {
 // request. Each component carries its own template (so the app assembles from
 // multiple templates into one multi-source Application) plus per-component typed
 // config. Mirrors the backend ComponentCreateDTO.
+// ComponentEnvVar is one curated env var: a literal value, or a selected/renamed
+// key of the app config (fromConfig) / app secret (fromSecret).
+export interface ComponentEnvVar {
+  name: string;
+  value?: string;
+  fromConfig?: string;
+  fromSecret?: string;
+}
+
 export interface ComponentCreate {
   name: string;
   /** web | worker | cron | job */
@@ -859,6 +871,11 @@ export interface ComponentCreate {
    *  values at publish (value-based config — image/port/command/etc. in the shape
    *  THIS chart expects, so BYO charts work like canonical ones). */
   values?: Record<string, unknown>;
+  /** Whether the component inherits ALL app vars (<app>-config + <app>-secrets).
+   *  Omit/true = inherit; false = only the curated envVars (no app secrets). */
+  inheritAppVars?: boolean;
+  /** Curated env vars when not inheriting all app vars. */
+  envVars?: ComponentEnvVar[];
 }
 
 export interface CreateAppRequest {

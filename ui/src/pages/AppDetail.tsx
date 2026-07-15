@@ -4357,13 +4357,30 @@ function ComponentsTable({
                       {componentVisibilityBadge(comp)}
                     </div>
                     {comp.template && (
-                      <div className="flex min-w-0 items-center gap-x-2 text-xs text-gray-400">
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-400">
                         <span className="truncate">
                           template{" "}
                           <span className="font-medium text-gray-500">
                             {comp.template}
                           </span>
                         </span>
+                        {comp.inheritAppVars === false && (
+                          <span
+                            className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700"
+                            title={
+                              (comp.envVars ?? []).length > 0
+                                ? `Scoped env: ${(comp.envVars ?? [])
+                                    .map((e) => e.name)
+                                    .join(", ")}`
+                                : "Does not inherit app vars"
+                            }
+                          >
+                            scoped env
+                            {(comp.envVars ?? []).length > 0
+                              ? ` (${comp.envVars?.length})`
+                              : ""}
+                          </span>
+                        )}
                       </div>
                     )}
                   </div>

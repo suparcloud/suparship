@@ -4,6 +4,7 @@ import { fetchTemplateEffectiveValues } from "../lib/templates";
 import { mergeOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   ComponentCreate,
+  ComponentEnvVar,
   EffectiveValuesResponse,
   TemplateSummary,
 } from "../types";
@@ -27,6 +28,9 @@ export interface ComponentDraft {
   valuesText: string;
   values: Record<string, unknown>;
   valuesError: string | null;
+  /** env policy: inherit all app vars, or curate a subset */
+  inheritAppVars: boolean;
+  envVars: ComponentEnvVar[];
 }
 
 const COMPONENT_TYPES = ["web", "worker", "job"] as const;
@@ -61,12 +65,26 @@ export function newComponentDraft(
     valuesText: "",
     values: {},
     valuesError: null,
+    inheritAppVars: true,
+    envVars: [],
   };
 }
 
 // toComponentCreate coerces a draft to the wire shape, dropping empty optional
 // fields so the request stays minimal.
 export function toComponentCreate(d: ComponentDraft): ComponentCreate {
+  const envVars = d.inheritAppVars
+    ? []
+    : d.envVars
+        .filter((e) => e.name.trim())
+        .map((e) => ({
+          name: e.name.trim(),
+          ...(e.fromConfig
+            ? { fromConfig: e.fromConfig.trim() }
+            : e.fromSecret
+              ? { fromSecret: e.fromSecret.trim() }
+              : { value: e.value ?? "" }),
+        }));
   return {
     name: d.name.trim(),
     type: d.type,
@@ -74,6 +92,9 @@ export function toComponentCreate(d: ComponentDraft): ComponentCreate {
     exposeMode: d.type === "web" ? d.exposeMode : undefined,
     template: { name: d.template },
     values: Object.keys(d.values).length > 0 ? d.values : undefined,
+    // Only send when opting out — inherit (default) needs no field.
+    inheritAppVars: d.inheritAppVars ? undefined : false,
+    envVars: envVars.length > 0 ? envVars : undefined,
   };
 }
 
@@ -125,6 +146,25 @@ export function ComposeComponents({
       ...components,
       newComponentDraft(first, `component-${components.length + 1}`),
     ]);
+  }
+
+  // Curated env-var editing (only when a component opts out of inheriting all app vars).
+  function updateEnv(i: number, j: number, patch: Partial<ComponentEnvVar>) {
+    const c = components[i];
+    if (!c) return;
+    update(i, {
+      envVars: c.envVars.map((e, idx) => (idx === j ? { ...e, ...patch } : e)),
+    });
+  }
+  function removeEnv(i: number, j: number) {
+    const c = components[i];
+    if (!c) return;
+    update(i, { envVars: c.envVars.filter((_, idx) => idx !== j) });
+  }
+  function addEnv(i: number) {
+    const c = components[i];
+    if (!c) return;
+    update(i, { envVars: [...c.envVars, { name: "", value: "" }] });
   }
 
   // When the picked template changes, re-default the type/expose.
@@ -264,6 +304,112 @@ export function ComposeComponents({
                 />
               </div>
             </Suspense>
+          </div>
+
+          {/* Environment: inherit all app vars, or curate a subset. */}
+          <div className="mt-3 border-t border-gray-100 pt-3">
+            <label className="flex items-center gap-2 text-xs font-medium text-gray-600">
+              <input
+                type="checkbox"
+                checked={c.inheritAppVars}
+                onChange={(e) => update(i, { inheritAppVars: e.target.checked })}
+                className="h-3.5 w-3.5 rounded border-gray-300"
+              />
+              Inherit all app vars (config + secrets)
+            </label>
+            {!c.inheritAppVars && (
+              <div className="mt-2 space-y-2">
+                <p className="text-xs text-gray-400">
+                  This component sees only the vars below — pick a literal, an app
+                  config key, or an app secret key (renamed into a per-component
+                  Secret). No blanket app secrets.
+                </p>
+                {c.envVars.map((e, j) => {
+                  const fromConfig = e.fromConfig !== undefined;
+                  const fromSecret = e.fromSecret !== undefined;
+                  const source = fromConfig
+                    ? "config"
+                    : fromSecret
+                      ? "secret"
+                      : "value";
+                  const keyed = fromConfig || fromSecret;
+                  return (
+                    <div key={j} className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        className={`${inputCls} w-40 font-mono`}
+                        placeholder="ENV_NAME"
+                        value={e.name}
+                        onChange={(ev) => updateEnv(i, j, { name: ev.target.value })}
+                      />
+                      <select
+                        className={`${inputCls} w-36`}
+                        value={source}
+                        onChange={(ev) =>
+                          updateEnv(
+                            i,
+                            j,
+                            ev.target.value === "config"
+                              ? { fromConfig: "", fromSecret: undefined, value: undefined }
+                              : ev.target.value === "secret"
+                                ? { fromSecret: "", fromConfig: undefined, value: undefined }
+                                : { value: "", fromConfig: undefined, fromSecret: undefined },
+                          )
+                        }
+                      >
+                        <option value="value">literal</option>
+                        <option value="config">app config key</option>
+                        <option value="secret">app secret key</option>
+                      </select>
+                      <input
+                        type="text"
+                        className={`${inputCls} min-w-[8rem] flex-1 ${keyed ? "font-mono" : ""}`}
+                        placeholder={
+                          fromConfig
+                            ? "APP_CONFIG_KEY"
+                            : fromSecret
+                              ? "APP_SECRET_KEY"
+                              : "value"
+                        }
+                        value={
+                          (fromConfig
+                            ? e.fromConfig
+                            : fromSecret
+                              ? e.fromSecret
+                              : e.value) ?? ""
+                        }
+                        onChange={(ev) =>
+                          updateEnv(
+                            i,
+                            j,
+                            fromConfig
+                              ? { fromConfig: ev.target.value }
+                              : fromSecret
+                                ? { fromSecret: ev.target.value }
+                                : { value: ev.target.value },
+                          )
+                        }
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeEnv(i, j)}
+                        className="rounded-md px-2 py-1 text-xs text-gray-400 hover:bg-red-50 hover:text-red-600"
+                        aria-label="Remove variable"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={() => addEnv(i)}
+                  className="text-xs font-medium text-indigo-600 hover:text-indigo-700"
+                >
+                  + Add variable
+                </button>
+              </div>
+            )}
           </div>
         </div>
       ))}

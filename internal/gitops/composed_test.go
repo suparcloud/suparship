@@ -408,6 +408,308 @@ func TestSingleSourceRemapsComponentKey(t *testing.T) {
 	}
 }
 
+// TestComposedPerComponentConfigProjection verifies per-component env scoping: a
+// component that opts out of app vars (InheritAppVars=false) points its
+// platform.configMapName at a curated <app>-<component>-config (built from its
+// EnvVars, selecting/renaming an app-config key), gets no app secrets
+// (platform.secretName ""), while an inheriting sibling keeps <app>-config/secrets.
+func TestComposedPerComponentConfigProjection(t *testing.T) {
+	dir := t.TempDir()
+	no := false
+	app := &domain.App{
+		Name:        "bigly",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"}},
+				{Name: "db", Type: domain.ComponentWorker, Enabled: true,
+					Template:       &domain.AppTemplateRef{Name: "web-service"},
+					InheritAppVars: &no,
+					EnvVars: []domain.ComponentEnvVar{
+						{Name: "DB_URL", FromConfig: "DATABASE_URL"},
+						{Name: "POOL", Value: "10"},
+					}},
+			},
+		},
+	}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		TemplateLoader: keyedTemplateLoader{"web-service": "web"},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+		EnvVars:  map[string]string{"DATABASE_URL": "postgres://x", "OTHER": "y"},
+	}}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
+	}
+
+	readPlatform := func(comp string) (cm, sec string) {
+		raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", comp, "values.yaml"))
+		if err != nil {
+			t.Fatalf("read %s values.yaml: %v", comp, err)
+		}
+		var v struct {
+			Platform struct {
+				ConfigMapName string `yaml:"configMapName"`
+				SecretName    string `yaml:"secretName"`
+			} `yaml:"platform"`
+		}
+		if err := yaml.Unmarshal(raw, &v); err != nil {
+			t.Fatalf("unmarshal %s: %v", comp, err)
+		}
+		return v.Platform.ConfigMapName, v.Platform.SecretName
+	}
+
+	// Inheriting component → app-wide objects.
+	if cm, sec := readPlatform("api"); cm != "bigly-config" || sec != "bigly-secrets" {
+		t.Errorf("api platform = %q/%q, want bigly-config/bigly-secrets", cm, sec)
+	}
+	// Opt-out component → its projection ConfigMap, no app secrets.
+	if cm, sec := readPlatform("db"); cm != "bigly-db-config" || sec != "" {
+		t.Errorf("db platform = %q/%q, want bigly-db-config/\"\"", cm, sec)
+	}
+	// The projection ConfigMap has the curated, resolved keys.
+	raw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-db-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("read component-db-configmap: %v", err)
+	}
+	var cm struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(raw, &cm); err != nil {
+		t.Fatalf("unmarshal db configmap: %v", err)
+	}
+	if cm.Data["DB_URL"] != "postgres://x" {
+		t.Errorf("db configmap DB_URL = %q, want postgres://x (renamed from DATABASE_URL)", cm.Data["DB_URL"])
+	}
+	if cm.Data["POOL"] != "10" {
+		t.Errorf("db configmap POOL = %q, want 10 (literal)", cm.Data["POOL"])
+	}
+	if _, leaked := cm.Data["OTHER"]; leaked {
+		t.Error("db configmap must not include unselected app var OTHER")
+	}
+}
+
+// TestComposedPerComponentSecretProjection verifies the secret subset/rename: an
+// opt-out component that selects app secret keys (FromSecret) points its
+// platform.secretName at a curated <app>-<component>-secrets ExternalSecret whose
+// data[] renames each selected key, resolved to the item that holds it.
+func TestComposedPerComponentSecretProjection(t *testing.T) {
+	dir := t.TempDir()
+	no := false
+	app := &domain.App{
+		Name:        "bigly",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"}},
+				{Name: "db", Type: domain.ComponentWorker, Enabled: true,
+					Template:       &domain.AppTemplateRef{Name: "web-service"},
+					InheritAppVars: &no,
+					EnvVars: []domain.ComponentEnvVar{
+						{Name: "DB_PASS", FromSecret: "DATABASE_PASSWORD"},
+					}},
+			},
+		},
+	}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		TemplateLoader: keyedTemplateLoader{"web-service": "web"},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters:        []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+		ScopeKeys:       gitops.ScopePresence{GlobalApp: true},
+		ScopeSecretKeys: gitops.ScopeSecretKeys{GlobalApp: []string{"DATABASE_PASSWORD", "OTHER_SECRET"}},
+	}}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
+	}
+
+	readSecretName := func(comp string) string {
+		raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", comp, "values.yaml"))
+		if err != nil {
+			t.Fatalf("read %s values.yaml: %v", comp, err)
+		}
+		var v struct {
+			Platform struct {
+				SecretName string `yaml:"secretName"`
+			} `yaml:"platform"`
+		}
+		if err := yaml.Unmarshal(raw, &v); err != nil {
+			t.Fatalf("unmarshal %s: %v", comp, err)
+		}
+		return v.Platform.SecretName
+	}
+
+	if sec := readSecretName("api"); sec != "bigly-secrets" {
+		t.Errorf("api platform.secretName = %q, want bigly-secrets", sec)
+	}
+	if sec := readSecretName("db"); sec != "bigly-db-secrets" {
+		t.Errorf("db platform.secretName = %q, want bigly-db-secrets", sec)
+	}
+
+	esRaw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-db-externalsecret.yaml"))
+	if err != nil {
+		t.Fatalf("read component-db-externalsecret: %v", err)
+	}
+	es := string(esRaw)
+	if !strings.Contains(es, "name: bigly-db-secrets") {
+		t.Errorf("ExternalSecret name mismatch:\n%s", es)
+	}
+	if !strings.Contains(es, "  data:") {
+		t.Errorf("expected data[] projection, got:\n%s", es)
+	}
+	if !strings.Contains(es, `secretKey: "DB_PASS"`) || !strings.Contains(es, `property: "DATABASE_PASSWORD"`) {
+		t.Errorf("expected DB_PASS←DATABASE_PASSWORD rename, got:\n%s", es)
+	}
+	if !strings.Contains(es, `key: "demo-bigly-global"`) {
+		t.Errorf("expected resolution to the app-global item, got:\n%s", es)
+	}
+	if strings.Contains(es, "OTHER_SECRET") {
+		t.Errorf("unselected key OTHER_SECRET must not appear, got:\n%s", es)
+	}
+}
+
+// TestSingleSourceOptOut verifies per-component env scoping on the single-source
+// path: a 1-component app that opts out of app vars points platform.configMapName
+// at its curated projection and gets no app secrets.
+func TestSingleSourceOptOut(t *testing.T) {
+	dir := t.TempDir()
+	no := false
+	app := &domain.App{
+		Name:        "solo",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template:       &domain.AppTemplateRef{Name: "web-service"},
+					InheritAppVars: &no,
+					EnvVars: []domain.ComponentEnvVar{
+						{Name: "DB_URL", FromConfig: "DATABASE_URL"},
+					}},
+			},
+		},
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+		EnvVars:  map[string]string{"DATABASE_URL": "postgres://x", "OTHER": "y"},
+	}}
+	p := newTestPublisher(t)
+	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishAppFilesForTest: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "solo", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read values.yaml: %v", err)
+	}
+	var v struct {
+		Platform struct {
+			ConfigMapName string `yaml:"configMapName"`
+			SecretName    string `yaml:"secretName"`
+		} `yaml:"platform"`
+	}
+	if err := yaml.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if v.Platform.ConfigMapName != "solo-web-config" || v.Platform.SecretName != "" {
+		t.Errorf("platform = %q/%q, want solo-web-config/\"\"", v.Platform.ConfigMapName, v.Platform.SecretName)
+	}
+	cmRaw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "solo", "component-web-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("read component config: %v", err)
+	}
+	var cm struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(cmRaw, &cm); err != nil {
+		t.Fatalf("unmarshal cm: %v", err)
+	}
+	if cm.Data["DB_URL"] != "postgres://x" {
+		t.Errorf("DB_URL = %q, want postgres://x", cm.Data["DB_URL"])
+	}
+	if _, leaked := cm.Data["OTHER"]; leaked {
+		t.Error("must not include unselected app var OTHER")
+	}
+}
+
+// TestSingleSourceSecretProjection verifies secret subset/rename on the
+// single-source path: a 1-component opt-out app that selects app secret keys
+// points platform.secretName at its curated <app>-<component>-secrets and writes
+// the data[] ExternalSecret.
+func TestSingleSourceSecretProjection(t *testing.T) {
+	dir := t.TempDir()
+	no := false
+	app := &domain.App{
+		Name:        "solo",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template:       &domain.AppTemplateRef{Name: "web-service"},
+					InheritAppVars: &no,
+					EnvVars: []domain.ComponentEnvVar{
+						{Name: "TOKEN", FromSecret: "API_TOKEN"},
+					}},
+			},
+		},
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost",
+		Clusters:        []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+		ScopeKeys:       gitops.ScopePresence{EnvApp: true},
+		ScopeSecretKeys: gitops.ScopeSecretKeys{EnvApp: []string{"API_TOKEN"}},
+	}}
+	p := newTestPublisher(t)
+	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishAppFilesForTest: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "solo", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read values.yaml: %v", err)
+	}
+	var v struct {
+		Platform struct {
+			SecretName string `yaml:"secretName"`
+		} `yaml:"platform"`
+	}
+	if err := yaml.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if v.Platform.SecretName != "solo-web-secrets" {
+		t.Errorf("platform.secretName = %q, want solo-web-secrets", v.Platform.SecretName)
+	}
+	esRaw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "solo", "component-web-externalsecret.yaml"))
+	if err != nil {
+		t.Fatalf("read component externalsecret: %v", err)
+	}
+	es := string(esRaw)
+	if !strings.Contains(es, "  data:") || !strings.Contains(es, `secretKey: "TOKEN"`) || !strings.Contains(es, `property: "API_TOKEN"`) {
+		t.Errorf("expected TOKEN←API_TOKEN data[] projection, got:\n%s", es)
+	}
+	// env-app item under project demo, app solo, env staging.
+	if !strings.Contains(es, `key: "demo-solo-env-staging"`) {
+		t.Errorf("expected resolution to the env-app item, got:\n%s", es)
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
