@@ -49,6 +49,12 @@ func (p *Publisher) WriteComposedAppTreeForTest(ctx context.Context, repoDir str
 	return p.writeComposedAppTree(ctx, repoDir, app, envs)
 }
 
+// WriteAppTreeForTest exposes writeAppTree — the mode-branching entry that picks
+// single vs composed and prunes the stale-mode tree on a transition — to tests.
+func (p *Publisher) WriteAppTreeForTest(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	return p.writeAppTree(ctx, repoDir, app, envs)
+}
+
 // PublishAppEnvForTest exposes PublishAppEnv's inner publishAppFiles call for
 // white-box unit testing without git operations.
 func (p *Publisher) PublishAppEnvForTest(repoDir string, app *domain.App, env AppPublishEnv) error {

@@ -10,8 +10,14 @@ import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 
 // CodeMirror is heavy; only the values editor needs it.
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
-import { listTemplateVersions, fetchTemplateEffectiveValues } from "../lib/templates";
-import type { TemplateVersionInfo, TemplateImage, AppImageBinding } from "../types";
+import { listTemplateVersions, fetchTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
+import type { TemplateVersionInfo, TemplateImage, AppImageBinding, TemplateSummary } from "../types";
+import {
+  ComposeComponents,
+  type ComponentDraft,
+  draftFromSummary,
+  toComponentCreate,
+} from "../components/ComposeComponents";
 import { createAppPreview, deleteAppPreview } from "../lib/previews";
 import {
   getAppEnvConfig,
@@ -3541,15 +3547,33 @@ function OverviewTab({
       )}
 
       {/* Runtime component summaries for the selected environment */}
-      <ComponentsTable components={data.components} currentEnv={currentEnv} />
-
-      {/* Values — edit the base + per-env override layers; preview effective. */}
-      <AppValuesEditor
-        data={data}
+      <ComponentsTable
+        components={data.components}
+        currentEnv={currentEnv}
         project={project}
-        currentEnvName={currentEnv?.envName ?? null}
+        appName={data.name}
+        envNames={data.environments
+          .filter((e) => e.envType !== "preview")
+          .map((e) => e.envName)}
         onSaved={onSaved}
       />
+
+      {/* Add / remove / retemplate components (edit-composed). */}
+      <ComponentsEditor data={data} project={project} onSaved={onSaved} />
+
+      {/* Values — edit the base + per-env override layers; preview effective.
+          Composed apps render one chart source per component with per-component
+          values, so app-level RawValues is not applied — edit each component's
+          values in the Components section above instead of showing an inert
+          editor here. */}
+      {data.components.length <= 1 && (
+        <AppValuesEditor
+          data={data}
+          project={project}
+          currentEnvName={currentEnv?.envName ?? null}
+          onSaved={onSaved}
+        />
+      )}
 
       {/* Legacy structured config (from the old form) — frozen, read-only. */}
       <LegacyConfigNotice data={data} />
@@ -4253,9 +4277,17 @@ function componentVisibilityBadge(comp: ComponentSummary) {
 function ComponentsTable({
   components,
   currentEnv,
+  project,
+  appName,
+  envNames,
+  onSaved,
 }: {
   components: ComponentSummary[];
   currentEnv: AppEnvironmentSummary | null;
+  project: string;
+  appName: string;
+  envNames: string[];
+  onSaved: () => Promise<void>;
 }) {
   const isMulti = components.length > 1;
   // Composed = a multi-source app (more than one component). In the unified model
@@ -4402,12 +4434,160 @@ function ComponentsTable({
                   </div>
                 </div>
 
-                {comp.values && Object.keys(comp.values).length > 0 && (
-                  <ComponentValues values={comp.values} />
+                {/* Composed apps: edit each component's own values overlay
+                    (base + per-env). Single-component apps use the app-level
+                    values editor, so keep a read-only disclosure here. */}
+                {composed ? (
+                  <ComponentValuesEditor
+                    comp={comp}
+                    project={project}
+                    appName={appName}
+                    envNames={envNames}
+                    onSaved={onSaved}
+                  />
+                ) : (
+                  comp.values &&
+                  Object.keys(comp.values).length > 0 && (
+                    <ComponentValues values={comp.values} />
+                  )
                 )}
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ComponentsEditor is the edit-composed surface: it opens the compose canvas
+// seeded from the app's current components so you can add, remove, or retemplate
+// them, then saves the whole list via updateApp({ components }). Turning an app
+// composed (≥2 components) or back to single re-publishes in the new mode (the
+// publisher prunes the stale-mode gitops tree). Available for every app so a
+// single app can be split into components.
+function ComponentsEditor({
+  data,
+  project,
+  onSaved,
+}: {
+  data: AppDetailType;
+  project: string;
+  onSaved: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [drafts, setDrafts] = useState<ComponentDraft[]>([]);
+  const [templates, setTemplates] = useState<TemplateSummary[]>([]);
+  const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function begin() {
+    setDrafts(data.components.map(draftFromSummary));
+    setError(null);
+    setOpen(true);
+    if (templates.length === 0) {
+      fetchTemplates()
+        .then((r) => setTemplates(r.templates))
+        .catch(() => {});
+    }
+    if (!configVars) {
+      listConfigVariables(project)
+        .then(setConfigVars)
+        .catch(() => setConfigVars({ platform: [], vars: [] }));
+    }
+  }
+
+  async function save() {
+    if (drafts.length === 0) {
+      setError("Add at least one component.");
+      return;
+    }
+    if (drafts.some((d) => d.valuesError)) {
+      setError("Fix the component values YAML before saving.");
+      return;
+    }
+    const names = new Set<string>();
+    for (const d of drafts) {
+      const nm = d.name.trim();
+      if (!nm) {
+        setError("Every component needs a name.");
+        return;
+      }
+      if (names.has(nm)) {
+        setError(`Duplicate component name "${nm}".`);
+        return;
+      }
+      names.add(nm);
+      if (!d.template) {
+        setError(`Component "${nm}" needs a template.`);
+        return;
+      }
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await updateApp(project, data.name, {
+        components: drafts.map(toComponentCreate),
+      });
+      toast.success("Components updated — re-publishing to GitOps.");
+      await onSaved();
+      setOpen(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save components");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white">
+      <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
+        <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+          Edit components
+        </h2>
+        {!open && (
+          <button
+            type="button"
+            onClick={begin}
+            className="rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
+          >
+            {data.components.length > 1 ? "Edit components" : "Add components"}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="space-y-4 p-5">
+          <p className="text-xs text-gray-400">
+            Add, remove, or retemplate components. Two or more components make this
+            a composed app (one chart source each); a single component renders as
+            one chart. Saving re-publishes to GitOps.
+          </p>
+          <ComposeComponents
+            templates={templates}
+            components={drafts}
+            onChange={setDrafts}
+            configVars={configVars}
+          />
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving}
+              className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save components"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              disabled={saving}
+              className="rounded-md px-4 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -4435,6 +4615,141 @@ function ComponentValues({ values }: { values: Record<string, unknown> }) {
         <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-gray-50 p-2.5 font-mono text-xs leading-relaxed text-gray-600">
           {stringifyOverlay(values)}
         </pre>
+      )}
+    </div>
+  );
+}
+
+// ComponentValuesEditor edits ONE composed component's Helm values overlay — its
+// base (all-envs) overlay plus a per-environment override for each env. The base
+// saves via componentValues; a per-env scope saves via envComponentValues, each
+// deep-merged over the base for that env at publish.
+const COMP_BASE_SCOPE = "__base__";
+
+function ComponentValuesEditor({
+  comp,
+  project,
+  appName,
+  envNames,
+  onSaved,
+}: {
+  comp: ComponentSummary;
+  project: string;
+  appName: string;
+  envNames: string[];
+  onSaved: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [scope, setScope] = useState(COMP_BASE_SCOPE);
+  const savedText = (s: string): string =>
+    stringifyOverlay(
+      s === COMP_BASE_SCOPE ? comp.values : comp.envValues?.[s],
+    );
+  const [texts, setTexts] = useState<Record<string, string>>(() => {
+    const m: Record<string, string> = { [COMP_BASE_SCOPE]: savedText(COMP_BASE_SCOPE) };
+    for (const e of envNames) m[e] = savedText(e);
+    return m;
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const text = texts[scope] ?? "";
+  const dirty = text !== savedText(scope);
+
+  async function save() {
+    const parsed = parseYamlOverlay(text);
+    if (parsed.error) {
+      setErr(parsed.error);
+      return;
+    }
+    setErr(null);
+    setSaving(true);
+    try {
+      const req: UpdateAppRequest =
+        scope === COMP_BASE_SCOPE
+          ? { componentValues: { [comp.name]: parsed.value ?? {} } }
+          : { envComponentValues: { [scope]: { [comp.name]: parsed.value ?? {} } } };
+      await updateApp(project, appName, req);
+      toast.success("Component values saved — re-publishing to GitOps.");
+      await onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to save values");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1 text-xs font-medium text-gray-400 hover:text-gray-600"
+      >
+        <span className={`transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
+        values
+      </button>
+      {open && (
+        <div className="mt-1.5 space-y-2">
+          {/* Scope: base (all envs) + one tab per environment. */}
+          {envNames.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {[COMP_BASE_SCOPE, ...envNames].map((s) => {
+                const active = scope === s;
+                const overridden =
+                  s !== COMP_BASE_SCOPE &&
+                  comp.envValues?.[s] &&
+                  Object.keys(comp.envValues[s]).length > 0;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setScope(s)}
+                    className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                      active
+                        ? "bg-gray-900 text-white"
+                        : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                    }`}
+                  >
+                    {s === COMP_BASE_SCOPE ? "all envs" : s}
+                    {overridden ? " ●" : ""}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <textarea
+            value={text}
+            onChange={(e) =>
+              setTexts((prev) => ({ ...prev, [scope]: e.target.value }))
+            }
+            spellCheck={false}
+            rows={8}
+            placeholder={
+              scope === COMP_BASE_SCOPE
+                ? "# values for this component (all envs)"
+                : `# ${scope} overrides — deep-merged over the base for ${scope}`
+            }
+            className="block w-full rounded-md border border-gray-300 bg-gray-50 p-2.5 font-mono text-xs leading-relaxed text-gray-700 focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+          />
+          {err && <p className="text-xs text-red-600">{err}</p>}
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || !dirty}
+              className="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            {scope !== COMP_BASE_SCOPE && (
+              <span className="text-[11px] text-gray-400">
+                overrides {scope} only · deep-merged over the base
+              </span>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

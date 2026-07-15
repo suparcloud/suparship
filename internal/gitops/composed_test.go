@@ -649,6 +649,223 @@ func TestSingleSourceOptOut(t *testing.T) {
 	}
 }
 
+// canonicalityLoader returns a template whose values mode is keyed by name:
+// true = canonical (suparship-common), false = BYO/passthrough. The component key
+// is the template name itself.
+type canonicalityLoader map[string]bool
+
+func (l canonicalityLoader) LoadTemplate(_ context.Context, name string) (*tpl.Template, error) {
+	canonical, ok := l[name]
+	if !ok {
+		return nil, nil
+	}
+	spec := tpl.TemplateSpec{Components: []tpl.TemplateComponent{{Name: name}}}
+	if !canonical {
+		no := false
+		spec.InjectCanonicalValues = &no
+	}
+	return &tpl.Template{Spec: spec}, nil
+}
+
+// TestComposedPassthroughComponentOmitsCanonicalSchema is the core BYO guarantee:
+// a composed component whose template is passthrough (InjectCanonicalValues:false)
+// gets ONLY its own overlay in values.yaml — with ((platform.*)) tokens resolved —
+// and NONE of the assumed canonical schema (app/components/routing/platform/
+// containerPort/envLayers/suparship). A canonical sibling still gets the full doc.
+func TestComposedPassthroughComponentOmitsCanonicalSchema(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"}},
+				{Name: "byo", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart"},
+					Values: map[string]any{
+						"image":  map[string]any{"repository": "nginx", "tag": "latest"},
+						"envCfg": "((platform.configMapName))",
+					}},
+			},
+		},
+	}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		TemplateLoader: canonicalityLoader{"web-service": true, "byo-chart": false},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+	}}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
+	}
+
+	read := func(comp string) string {
+		raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", comp, "values.yaml"))
+		if err != nil {
+			t.Fatalf("read %s values.yaml: %v", comp, err)
+		}
+		return string(raw)
+	}
+
+	// BYO component: ONLY its overlay, with the platform token resolved. No
+	// injected canonical/platform schema.
+	byo := read("byo")
+	var byoDoc map[string]any
+	if err := yaml.Unmarshal([]byte(byo), &byoDoc); err != nil {
+		t.Fatalf("unmarshal byo values: %v", err)
+	}
+	for _, k := range []string{"app", "components", "routing", "platform", "containerPort", "envLayers", "suparship"} {
+		if _, present := byoDoc[k]; present {
+			t.Errorf("BYO passthrough values must NOT contain %q, got:\n%s", k, byo)
+		}
+	}
+	if byoDoc["envCfg"] != "bigly-config" {
+		t.Errorf("expected ((platform.configMapName)) resolved to bigly-config, got %v", byoDoc["envCfg"])
+	}
+	if img, _ := byoDoc["image"].(map[string]any); img == nil || img["repository"] != "nginx" {
+		t.Errorf("expected the overlay image to survive, got:\n%s", byo)
+	}
+
+	// Canonical sibling still gets the full doc.
+	api := read("api")
+	if !strings.Contains(api, "components:") || !strings.Contains(api, "platform:") {
+		t.Errorf("canonical component should keep the full schema, got:\n%s", api)
+	}
+}
+
+// TestComposedPerEnvComponentValues verifies a component's base overlay is merged
+// with the per-env override (EnvironmentDefaults[env].ComponentValues[name]) — the
+// env override wins on key collisions and base keys survive.
+func TestComposedPerEnvComponentValues(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "byo-chart"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart"},
+					Values: map[string]any{
+						"replicaCount": 2,
+						"image":        map[string]any{"repository": "nginx", "tag": "latest"},
+					}},
+			},
+			// Override on the published (first) env so the merge is observable.
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"staging": {ComponentValues: map[string]map[string]any{
+					"web": {"replicaCount": 5},
+				}},
+			},
+		},
+	}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		TemplateLoader: canonicalityLoader{"byo-chart": false},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+			Namespace: "bigly-staging", BaseDomain: "localhost",
+			Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}}},
+	}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", "web", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read web values: %v", err)
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["replicaCount"] != 5 {
+		t.Errorf("replicaCount = %v, want 5 (per-env override wins over base 2)", m["replicaCount"])
+	}
+	// Base keys not overridden survive.
+	img, _ := m["image"].(map[string]any)
+	if img == nil || img["repository"] != "nginx" {
+		t.Errorf("base image must survive the merge, got %v", m["image"])
+	}
+}
+
+// TestSingleToComposedTransitionPrunesTree verifies edit-to-composed cleanup: an
+// app first published single-source (one chart values.yaml/app.yaml) that gains a
+// second component becomes composed on republish, and the stale single-source
+// files are pruned so ArgoCD drops the orphaned single-chart Application.
+func TestSingleToComposedTransitionPrunesTree(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		TemplateLoader: canonicalityLoader{"byo-chart": false},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+	}}
+
+	// 1) Single-source app (one component → single-chart render).
+	single := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "byo-chart", Version: "0.1.0"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart", Version: "0.1.0"}},
+			},
+		},
+	}
+	if err := p.WriteAppTreeForTest(context.Background(), dir, single, envs); err != nil {
+		t.Fatalf("publish single: %v", err)
+	}
+	valuesPath := filepath.Join(dir, "envs", "staging", "demo", "bigly", "values.yaml")
+	if _, err := os.Stat(valuesPath); err != nil {
+		t.Fatalf("expected single-source values.yaml after single publish: %v", err)
+	}
+
+	// 2) Add a second component → composed. Republish into the same dir.
+	composed := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "byo-chart", Version: "0.1.0"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart", Version: "0.1.0"}},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart", Version: "0.1.0"}},
+			},
+		},
+	}
+	if err := p.WriteAppTreeForTest(context.Background(), dir, composed, envs); err != nil {
+		t.Fatalf("publish composed: %v", err)
+	}
+	// Stale single-source values.yaml/app.yaml must be gone.
+	if _, err := os.Stat(valuesPath); !os.IsNotExist(err) {
+		t.Errorf("stale single-source values.yaml must be pruned after becoming composed (err=%v)", err)
+	}
+	// Composed per-component values now exist.
+	for _, comp := range []string{"web", "worker"} {
+		cp := filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", comp, "values.yaml")
+		if _, err := os.Stat(cp); err != nil {
+			t.Errorf("expected composed component values for %s: %v", comp, err)
+		}
+	}
+}
+
 // TestComposedProjectionPrunedOnRevert verifies that when a component reverts
 // from opt-out (curated config + secret projections) back to inheriting the app
 // vars, a republish removes the now-orphaned component-*-configmap.yaml /

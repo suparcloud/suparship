@@ -608,7 +608,19 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 	// per-env App-of-Apps. Handled entirely by writeComposedAppTree; the
 	// single-chart path below is bypassed. MVP: no Kargo / addons wiring yet.
 	if app.Spec.IsComposed() {
+		// The app may have just become composed (edit added components). Drop any
+		// single-chart leftovers so the single-chart ApplicationSet stops
+		// generating an orphaned Application and no stale Kargo stages linger.
+		if err := p.pruneSingleSourceArtifacts(repoDir, app, envs); err != nil {
+			return err
+		}
 		return p.writeComposedAppTree(ctx, repoDir, app, envs)
+	}
+
+	// The app may have just become single (edit removed components down to one).
+	// Drop any composed tree left behind so its multi-source Application is pruned.
+	if err := p.pruneComposedArtifacts(repoDir, app, envs); err != nil {
+		return err
 	}
 
 	// Pipeline apps deploy only the first stable env (+ previews) on create;
@@ -678,14 +690,19 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 	// values key (the fixed key its chart reads, e.g. web-service→"web") once
 	// here, where the context is available, and pass the map down.
 	componentKeys := make(map[string]string, len(app.Spec.Components))
+	// Per-component values mode: a canonical (suparship-common) component gets the
+	// full canonical doc; a BYO/passthrough component gets only its overlay +
+	// ((platform.*)) tokens — resolved here where the template loader is available.
+	componentCanonical := make(map[string]bool, len(app.Spec.Components))
 	for _, c := range app.Spec.ComposedComponents() {
 		if err := p.syncChart(ctx, repoDir, c.Template.Name, c.Template.Version); err != nil {
 			return fmt.Errorf("sync chart for component %s (%s@%s): %w", c.Name, c.Template.Name, c.Template.Version, err)
 		}
 		componentKeys[c.Name] = p.resolveComponentKey(ctx, c.Template.Name, c.Name)
+		componentCanonical[c.Name] = p.resolveComponentCanonical(ctx, c.Template.Name)
 	}
 
-	return p.publishComposedAppFiles(repoDir, app, deployEnvs, componentKeys)
+	return p.publishComposedAppFiles(repoDir, app, deployEnvs, componentKeys, componentCanonical)
 }
 
 // resolveComponentKey returns the values key a component template's chart reads
@@ -702,6 +719,56 @@ func (p *Publisher) resolveComponentKey(ctx context.Context, templateName, fallb
 		return fallback
 	}
 	return tmpl.Spec.Components[0].Name
+}
+
+// resolveComponentCanonical reports whether a composed component's template wants
+// the canonical suparship-common values injected (default), or is a BYO/passthrough
+// chart (InjectCanonicalValues:false) that gets ONLY its own overlay + ((platform.*))
+// tokens — mirroring the single-source path's AppPublishEnv.SkipCanonicalBase. When
+// no TemplateLoader is configured or the load fails, defaults to canonical (true) so
+// a canonical chart is never wrongly stripped of its values.
+func (p *Publisher) resolveComponentCanonical(ctx context.Context, templateName string) bool {
+	if p.cfg.TemplateLoader == nil {
+		return true
+	}
+	tmpl, err := p.cfg.TemplateLoader.LoadTemplate(ctx, templateName)
+	if err != nil || tmpl == nil {
+		return true
+	}
+	return tmpl.Spec.CanonicalValues()
+}
+
+// pruneSingleSourceArtifacts removes the single-chart tree an app leaves behind
+// when it becomes composed: the per-env values.yaml/app.yaml (so the single-chart
+// ApplicationSet stops generating an orphaned Application) and any Kargo CRs
+// (composed apps have no Kargo wiring in the MVP). Safe to call unconditionally —
+// a no-op for an app that was never single.
+func (p *Publisher) pruneSingleSourceArtifacts(repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	for _, env := range envs {
+		dir := p.appEnvDir(repoDir, env, app.ProjectName, app.Name)
+		for _, f := range []string{"values.yaml", "app.yaml"} {
+			if err := os.Remove(filepath.Join(dir, f)); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("prune single-source %s (env %s): %w", f, env.EnvName, err)
+			}
+		}
+	}
+	return p.cleanupKargoCRs(repoDir, app)
+}
+
+// pruneComposedArtifacts removes the composed tree an app leaves behind when it
+// becomes single: the per-env components/ values dir and the rendered multi-source
+// Application manifests under _composed-apps/. Safe to call unconditionally — a
+// no-op for an app that was never composed.
+func (p *Publisher) pruneComposedArtifacts(repoDir string, app *domain.App, envs []AppPublishEnv) error {
+	for _, env := range envs {
+		if err := os.RemoveAll(p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components")); err != nil {
+			return fmt.Errorf("prune composed components (env %s): %w", env.EnvName, err)
+		}
+		if err := os.RemoveAll(p.composedAppDir(repoDir, env, app.ProjectName, app.Name)); err != nil {
+			return fmt.Errorf("prune composed manifests (env %s): %w", env.EnvName, err)
+		}
+	}
+	return nil
 }
 
 // composedAppDir builds a path under the manifest-only _composed-apps/{env} tree
@@ -823,7 +890,7 @@ func (p *Publisher) pruneComponentProjections(repoDir string, env AppPublishEnv,
 	return nil
 }
 
-func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv, componentKeys map[string]string) error {
+func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv, componentKeys map[string]string, componentCanonical map[string]bool) error {
 	orgName := p.cfg.OrgName
 	if orgName == "" {
 		orgName = "default"
@@ -912,7 +979,24 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 					}
 				}
 			}
-			hvBytes, err := marshalValuesWithOverlay(hv, c.Values, env.EnvVars)
+			// Component overlay: the base ComponentSpec.Values with any per-env
+			// override (EnvironmentDefaults[env].ComponentValues[name]) deep-merged on
+			// top (env wins), so a component can differ per environment.
+			overlay := c.Values
+			if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && len(ov.ComponentValues[c.Name]) > 0 {
+				overlay = deepMerge(deepCopyMap(c.Values), deepCopyMap(ov.ComponentValues[c.Name]))
+			}
+			// A BYO/passthrough component gets ONLY its own overlay (the chart's own
+			// values.yaml is the Helm base); platform.* is available via ((platform.*))
+			// tokens. suparship injects no canonical app/components/routing/image
+			// schema. A canonical component gets the full suparship-common doc.
+			var hvBytes []byte
+			var err error
+			if componentCanonical[c.Name] {
+				hvBytes, err = marshalValuesWithOverlay(hv, overlay, env.EnvVars)
+			} else {
+				hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, env.EnvVars)
+			}
 			if err != nil {
 				return fmt.Errorf("marshal values.yaml for component %s env %s: %w", c.Name, env.EnvName, err)
 			}

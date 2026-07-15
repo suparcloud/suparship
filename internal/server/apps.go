@@ -35,9 +35,14 @@ type ComponentSummaryDTO struct {
 	// Template is the component's own template name (every component carries one
 	// in the unified model).
 	Template string `json:"template,omitempty"`
-	// Values is the component's Helm values overlay — its value-based config,
-	// shown read-only on the app detail page so the component's makeup is visible.
+	// Values is the component's base Helm values overlay (all environments) — its
+	// value-based config, editable on the app detail page (composed apps).
 	Values map[string]any `json:"values,omitempty"`
+	// EnvValues holds this component's per-environment overlay overrides keyed by
+	// env name (each deep-merged over Values for that env at publish). Populated
+	// from EnvironmentDefaults[env].ComponentValues[name] so the detail page can
+	// edit per-env component values.
+	EnvValues map[string]map[string]any `json:"envValues,omitempty"`
 	// InheritAppVars / EnvVars expose the component's env policy for the detail
 	// page (inherit all app vars, or a curated subset).
 	InheritAppVars *bool                `json:"inheritAppVars,omitempty"`
@@ -435,9 +440,24 @@ type updateAppRequest struct {
 	// overlays keyed by environment name. Each entry overrides (deep-merges over)
 	// the app-level RawValues at publish. Omit to leave existing overlays intact.
 	EnvRawValues map[string]map[string]any `json:"envRawValues,omitempty"`
+	// Components, when non-nil, REPLACES the app's component list (edit-composed:
+	// add / remove / retemplate). Each component's template is resolved+pinned and
+	// composed invariants validated, exactly as at create. Turning an app composed
+	// (≥2 components) or back to single flips the render mode; the publisher prunes
+	// the stale-mode tree. Omit to leave components unchanged.
+	Components []ComponentCreateDTO `json:"components,omitempty"`
 	// ComponentConfigs, when non-nil, replaces app-level per-component config
 	// (resources, envFrom, scaling, env) keyed by component name.
 	ComponentConfigs map[string]domain.ComponentConfig `json:"componentConfigs,omitempty"`
+	// ComponentValues, when non-nil, sets the base (all-env) Helm values overlay
+	// for the named composed components (keyed by component name). Only the named
+	// components are changed; others are left intact. Unknown names are rejected.
+	ComponentValues map[string]map[string]any `json:"componentValues,omitempty"`
+	// EnvComponentValues, when non-nil, sets per-(env, component) Helm values
+	// overlays keyed env → component → overlay, each deep-merged over the
+	// component's base Values for that env only. Only the named (env, component)
+	// pairs are changed; an empty overlay clears that pair's override.
+	EnvComponentValues map[string]map[string]map[string]any `json:"envComponentValues,omitempty"`
 	// EnvComponents, when non-nil, replaces per-(env, component) overrides keyed
 	// env → component. Each entry overrides the app-level component config for
 	// that environment only.

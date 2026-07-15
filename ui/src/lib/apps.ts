@@ -3,6 +3,7 @@ import type {
   AppImageBinding,
   CDConfig,
   ComponentConfig,
+  ComponentCreate,
   AppDeploymentHistoryResponse,
   AppDetailResponse,
   AppEnvironmentResponse,
@@ -98,8 +99,17 @@ export interface UpdateAppRequest {
   rawValues?: Record<string, unknown>;
   // envRawValues replaces per-environment overlays keyed by env name.
   envRawValues?: Record<string, Record<string, unknown>>;
+  // components REPLACES the app's component list (edit-composed: add / remove /
+  // retemplate). Each carries its own template; ≥2 makes the app composed.
+  components?: ComponentCreate[];
   // componentConfigs replaces app-level per-component config keyed by name.
   componentConfigs?: Record<string, ComponentConfig>;
+  // componentValues sets the base (all-env) Helm values overlay for the named
+  // composed components. Only the named components change; {} clears one.
+  componentValues?: Record<string, Record<string, unknown>>;
+  // envComponentValues sets per-(env, component) overlay overrides keyed
+  // env → component → overlay. Only the named pairs change; {} clears one.
+  envComponentValues?: Record<string, Record<string, Record<string, unknown>>>;
   // envComponents replaces per-(env, component) overrides keyed env → component.
   envComponents?: Record<string, Record<string, ComponentConfig>>;
   // cd replaces the app's continuous-delivery settings (external-CD tag

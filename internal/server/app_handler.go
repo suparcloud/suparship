@@ -574,6 +574,22 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if req.Description != nil {
 		app.Spec.Description = *req.Description
 	}
+	// Edit-composed: replace the component list (add / remove / retemplate).
+	// Applied FIRST so the per-component config/values blocks below operate on the
+	// new set. The publisher prunes the stale-mode tree if this flips composed↔single.
+	if req.Components != nil {
+		specs, primary, err := ah.resolveComponentSpecs(r.Context(), req.Components)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		app.Spec.Components = specs
+		// Keep AppSpec.Template (the "primary") in sync so single-component readers
+		// and the single-source render path resolve the right chart.
+		if primary != nil {
+			app.Spec.Template = domain.AppTemplateRef{Name: primary.Metadata.Name, Version: primary.Metadata.Version}
+		}
+	}
 	if req.ClusterOverrides != nil {
 		// Replace per-(env, cluster) value overrides. Fold each into the app's
 		// EnvironmentDefaults so they ride the existing per-env override record.
@@ -654,6 +670,61 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			}
 			applyComponentConfig(&app.Spec.Components[i], cfg)
 		}
+	}
+	// Set of valid component names, used to reject unknown names in the
+	// per-component values updates below.
+	compNames := make(map[string]bool, len(app.Spec.Components))
+	for _, c := range app.Spec.Components {
+		compNames[c.Name] = true
+	}
+	if req.ComponentValues != nil {
+		// Base (all-env) overlay per component. Only the named components change;
+		// an empty overlay clears that component's base Values.
+		for name, vals := range req.ComponentValues {
+			if !compNames[name] {
+				writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unknown component: " + name})
+				return
+			}
+			for i := range app.Spec.Components {
+				if app.Spec.Components[i].Name == name {
+					if len(vals) == 0 {
+						app.Spec.Components[i].Values = nil
+					} else {
+						app.Spec.Components[i].Values = vals
+					}
+				}
+			}
+		}
+	}
+	if req.EnvComponentValues != nil {
+		// Per-(env, component) overlay overrides. Only the named pairs change; an
+		// empty overlay clears that pair's override.
+		ed := app.Spec.EnvironmentDefaults
+		if ed == nil {
+			ed = map[string]domain.EnvironmentOverride{}
+		}
+		for envName, byComp := range req.EnvComponentValues {
+			ov := ed[envName]
+			for name, vals := range byComp {
+				if !compNames[name] {
+					writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unknown component: " + name})
+					return
+				}
+				if ov.ComponentValues == nil {
+					ov.ComponentValues = map[string]map[string]any{}
+				}
+				if len(vals) == 0 {
+					delete(ov.ComponentValues, name)
+				} else {
+					ov.ComponentValues[name] = vals
+				}
+			}
+			if len(ov.ComponentValues) == 0 {
+				ov.ComponentValues = nil
+			}
+			ed[envName] = ov
+		}
+		app.Spec.EnvironmentDefaults = ed
 	}
 	if req.EnvComponents != nil {
 		ed := app.Spec.EnvironmentDefaults
@@ -3165,7 +3236,7 @@ func appToSummaryDTO(app *domain.App, envs []*domain.AppEnvironment) AppSummaryD
 		},
 		URLs:         []string{},
 		Environments: envDTOs,
-		Components:   componentDTOs(app.Spec.Components),
+		Components:   componentDTOs(app.Spec.Components, app.Spec.EnvironmentDefaults),
 		Status:       AppStatusSummaryDTO{Phase: summaryPhase(envDTOs)},
 	}
 
@@ -3283,7 +3354,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		},
 		Values:           values,
 		SecretRefs:       secretRefs,
-		Components:       componentDTOs(app.Spec.Components),
+		Components:       componentDTOs(app.Spec.Components, app.Spec.EnvironmentDefaults),
 		Addons:           addonDTOs(app.Spec.Addons),
 		Environments:     envDTOs,
 		ClusterOverrides: clusterOverridesDTO(app.Spec.EnvironmentDefaults),
@@ -3524,7 +3595,79 @@ func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
 	return dto
 }
 
-func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
+// resolveComponentSpecs turns wire component DTOs into domain ComponentSpecs,
+// resolving+pinning each component's template (unknown → error) and returning the
+// first resolved template as the app "primary". Composed invariants are validated.
+// Used by the edit-composed update path; the create handler has its own inline
+// copy that maps errors to per-field HTTP statuses.
+func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []ComponentCreateDTO) ([]domain.ComponentSpec, *tpl.Template, error) {
+	var specs []domain.ComponentSpec
+	var primary *tpl.Template
+	for i, c := range dtos {
+		ct, err := domain.ParseComponentType(c.Type)
+		if err != nil {
+			return nil, nil, fmt.Errorf("components[%d]: %w", i, err)
+		}
+		mode, err := domain.ParseExposeMode(c.ExposeMode)
+		if err != nil {
+			return nil, nil, fmt.Errorf("components[%d]: %w", i, err)
+		}
+		cs := domain.ComponentSpec{
+			Name:           c.Name,
+			Type:           ct,
+			Enabled:        c.Enabled,
+			ExposeMode:     mode,
+			Values:         c.Values,
+			InheritAppVars: c.InheritAppVars,
+		}
+		for _, e := range c.EnvVars {
+			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
+				Name:       e.Name,
+				Value:      e.Value,
+				FromConfig: e.FromConfig,
+				FromSecret: e.FromSecret,
+			})
+		}
+		if c.Template != nil && c.Template.Name != "" {
+			ctmpl, ok := ah.lookupTemplate(ctx, c.Template.Name)
+			if !ok {
+				return nil, nil, fmt.Errorf("components[%d]: template %q not found", i, c.Template.Name)
+			}
+			version := c.Template.Version
+			if version == "" {
+				version = ctmpl.Metadata.Version
+			}
+			cs.Template = &domain.AppTemplateRef{Name: ctmpl.Metadata.Name, Version: version}
+			if primary == nil {
+				primary = ctmpl
+			}
+		}
+		specs = append(specs, cs)
+	}
+	if len(specs) > 0 {
+		if err := domain.ValidateComponents(specs); err != nil {
+			return nil, nil, err
+		}
+	}
+	return specs, primary, nil
+}
+
+func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]domain.EnvironmentOverride) []ComponentSummaryDTO {
+	// Invert EnvironmentDefaults[env].ComponentValues[name] into name → env →
+	// overlay so each component DTO carries its own per-env overrides.
+	envValsByComp := map[string]map[string]map[string]any{}
+	for envName, ov := range envDefaults {
+		for compName, vals := range ov.ComponentValues {
+			if len(vals) == 0 {
+				continue
+			}
+			if envValsByComp[compName] == nil {
+				envValsByComp[compName] = map[string]map[string]any{}
+			}
+			envValsByComp[compName][envName] = vals
+		}
+	}
+
 	dtos := make([]ComponentSummaryDTO, 0, len(components))
 	for _, c := range components {
 		dto := ComponentSummaryDTO{
@@ -3533,6 +3676,7 @@ func componentDTOs(components []domain.ComponentSpec) []ComponentSummaryDTO {
 			Enabled:        c.Enabled,
 			ExposeMode:     string(c.ExposeMode),
 			Values:         c.Values,
+			EnvValues:      envValsByComp[c.Name],
 			InheritAppVars: c.InheritAppVars,
 		}
 		if c.Template != nil {

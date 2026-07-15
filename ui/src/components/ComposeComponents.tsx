@@ -5,6 +5,7 @@ import { mergeOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   ComponentCreate,
   ComponentEnvVar,
+  ComponentSummary,
   EffectiveValuesResponse,
   TemplateSummary,
 } from "../types";
@@ -67,6 +68,23 @@ export function newComponentDraft(
     valuesError: null,
     inheritAppVars: true,
     envVars: [],
+  };
+}
+
+// draftFromSummary seeds an editable draft from an existing app component (the
+// edit-composed flow on the app detail page), preserving its template, expose
+// mode, values overlay, and env policy.
+export function draftFromSummary(c: ComponentSummary): ComponentDraft {
+  return {
+    name: c.name,
+    template: c.template ?? "",
+    type: c.type,
+    exposeMode: c.exposeMode || (c.type === "web" ? "external" : "disabled"),
+    valuesText: c.values ? stringifyOverlay(c.values) : "",
+    values: c.values ?? {},
+    valuesError: null,
+    inheritAppVars: c.inheritAppVars ?? true,
+    envVars: c.envVars ?? [],
   };
 }
 

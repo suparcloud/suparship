@@ -353,6 +353,12 @@ type EnvironmentOverride struct {
 	// component name — resources, envFrom, scaling, and env — overriding the
 	// app-level ComponentSpec values for this env only.
 	Components map[string]ComponentConfig `json:"components,omitempty" yaml:"components,omitempty"`
+	// ComponentValues holds per-component freeform Helm values overlays for this
+	// environment, keyed by component name — deep-merged on top of each composed
+	// component's base ComponentSpec.Values for this env only (env wins). String
+	// leaves may reference ((platform.*))/((vars.*)) tokens. No secrets. Only
+	// meaningful for composed apps (each component is its own chart source).
+	ComponentValues map[string]map[string]any `json:"componentValues,omitempty" yaml:"componentValues,omitempty"`
 	// ClusterOverrides holds per-cluster value overrides keyed by cluster name,
 	// applied on top of this env override for apps in a fan-out environment
 	// (deployMode "all"). Each cluster's published values.yaml is the env values

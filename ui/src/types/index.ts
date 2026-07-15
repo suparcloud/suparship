@@ -562,8 +562,11 @@ export interface ComponentSummary {
   exposeMode?: string;
   /** The component's own template. */
   template?: string;
-  /** The component's Helm values overlay (value-based config), shown read-only. */
+  /** The component's base Helm values overlay (all environments), editable. */
   values?: Record<string, unknown>;
+  /** Per-environment overlay overrides keyed by env name (deep-merged over
+   *  values for that env). Editable per (component, env). */
+  envValues?: Record<string, Record<string, unknown>>;
   /** Env policy: inherit all app vars (default) or a curated subset. */
   inheritAppVars?: boolean;
   envVars?: ComponentEnvVar[];
