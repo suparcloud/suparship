@@ -801,6 +801,28 @@ func (p *Publisher) writeComponentExternalSecret(repoDir string, env AppPublishE
 	return p.writeFile(filepath.Join(resDir, "component-"+component+"-externalsecret.yaml"), []byte(content))
 }
 
+// pruneComponentProjections removes every per-component projection object
+// (component-*-configmap.yaml / component-*-externalsecret.yaml) in an app-env's
+// _app-resources dir. Callers invoke it once per env publish BEFORE writing the
+// current set, so a component that reverts to inherit, is renamed, or is removed
+// leaves no orphaned ConfigMap/ExternalSecret behind (the app-wide env-configmap /
+// external-secret files use different names, so they're untouched).
+func (p *Publisher) pruneComponentProjections(repoDir string, env AppPublishEnv, app *domain.App) error {
+	resDir := p.outputDir(repoDir, "_app-resources", env.EnvName, app.ProjectName, app.Name)
+	for _, pat := range []string{"component-*-configmap.yaml", "component-*-externalsecret.yaml"} {
+		matches, err := filepath.Glob(filepath.Join(resDir, pat))
+		if err != nil {
+			return fmt.Errorf("glob component projections %s: %w", pat, err)
+		}
+		for _, m := range matches {
+			if err := os.Remove(m); err != nil {
+				return fmt.Errorf("prune component projection %s: %w", filepath.Base(m), err)
+			}
+		}
+	}
+	return nil
+}
+
 func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv, componentKeys map[string]string) error {
 	orgName := p.cfg.OrgName
 	if orgName == "" {
@@ -842,6 +864,12 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		}
 		if err := os.RemoveAll(p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets")); err != nil {
 			return fmt.Errorf("prune composed manifests for env %s: %w", env.EnvName, err)
+		}
+		// Also drop stale per-component config/secret projections in _app-resources
+		// so a component that reverted to inherit (or was renamed/removed) leaves no
+		// orphaned ConfigMap/ExternalSecret. The current opt-out set is rewritten below.
+		if err := p.pruneComponentProjections(repoDir, env, app); err != nil {
+			return fmt.Errorf("prune component projections for env %s: %w", env.EnvName, err)
 		}
 
 		// Per-component values: a single-component projection of the canonical
@@ -1320,6 +1348,13 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		appDir := p.envAppDir(chartMode, repoDir, env, app.ProjectName, app.Name)
 		if err := p.writeAppPlatformResources(repoDir, appDir, app, ns, env, envVars); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
+		}
+
+		// Drop stale per-component projections before (re)writing the current
+		// opt-out set, so reverting the component to inherit (or renaming it)
+		// leaves no orphaned ConfigMap/ExternalSecret in _app-resources.
+		if err := p.pruneComponentProjections(repoDir, env, app); err != nil {
+			return fmt.Errorf("prune component projections for env %s: %w", env.EnvName, err)
 		}
 
 		// Single-component opt-out: write its curated <app>-<component>-config

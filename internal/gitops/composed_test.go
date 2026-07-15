@@ -649,6 +649,213 @@ func TestSingleSourceOptOut(t *testing.T) {
 	}
 }
 
+// TestComposedProjectionPrunedOnRevert verifies that when a component reverts
+// from opt-out (curated config + secret projections) back to inheriting the app
+// vars, a republish removes the now-orphaned component-*-configmap.yaml /
+// component-*-externalsecret.yaml so no stale ConfigMap/ExternalSecret lingers.
+func TestComposedProjectionPrunedOnRevert(t *testing.T) {
+	dir := t.TempDir()
+	no := false
+	yes := true
+	mkApp := func(inherit bool) *domain.App {
+		db := domain.ComponentSpec{
+			Name: "db", Type: domain.ComponentWorker, Enabled: true,
+			Template: &domain.AppTemplateRef{Name: "web-service"},
+		}
+		if inherit {
+			db.InheritAppVars = &yes
+		} else {
+			db.InheritAppVars = &no
+			db.EnvVars = []domain.ComponentEnvVar{
+				{Name: "POOL", Value: "10"},
+				{Name: "DB_PASS", FromSecret: "DATABASE_PASSWORD"},
+			}
+		}
+		return &domain.App{
+			Name: "bigly", ProjectName: "demo",
+			Spec: domain.AppSpec{
+				Template: domain.AppTemplateRef{Name: "web-service"},
+				Components: []domain.ComponentSpec{
+					{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+						Template: &domain.AppTemplateRef{Name: "web-service"}},
+					db,
+				},
+			},
+		}
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters:        []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+		ScopeKeys:       gitops.ScopePresence{GlobalApp: true},
+		ScopeSecretKeys: gitops.ScopeSecretKeys{GlobalApp: []string{"DATABASE_PASSWORD"}},
+	}}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		TemplateLoader: keyedTemplateLoader{"web-service": "web"},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+
+	cm := filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-db-configmap.yaml")
+	es := filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-db-externalsecret.yaml")
+
+	// 1) Opt-out publish writes both projections.
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, mkApp(false), envs); err != nil {
+		t.Fatalf("publish opt-out: %v", err)
+	}
+	for _, f := range []string{cm, es} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("expected %s after opt-out publish: %v", filepath.Base(f), err)
+		}
+	}
+
+	// 2) Republish with the component reverted to inherit — projections must go.
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, mkApp(true), envs); err != nil {
+		t.Fatalf("publish inherit: %v", err)
+	}
+	for _, f := range []string{cm, es} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("expected %s pruned after revert to inherit (err=%v)", filepath.Base(f), err)
+		}
+	}
+	// The app-wide env-configmap must survive the prune.
+	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "env-configmap.yaml")); err != nil {
+		t.Errorf("app-wide env-configmap should survive prune: %v", err)
+	}
+}
+
+// TestPreviewOfOptOutAppIsAppLevel is the safety check for the deliberate
+// "previews are app-level, not per-component" decision: a preview of a component
+// that opts out of app vars in stable envs must still reference the APP-WIDE
+// config/secret (which the preview publish writes), never a per-component
+// projection object (which is not written in preview scope) — so the preview
+// self-resolves and can't dangle on a missing ConfigMap/Secret.
+func TestPreviewOfOptOutAppIsAppLevel(t *testing.T) {
+	dir := t.TempDir()
+	no := false
+	app := &domain.App{
+		Name: "hello", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template:       &domain.AppTemplateRef{Name: "web-service"},
+					InheritAppVars: &no,
+					EnvVars: []domain.ComponentEnvVar{
+						{Name: "DB_URL", FromConfig: "DATABASE_URL"},
+						{Name: "TOKEN", FromSecret: "API_TOKEN"},
+					}},
+			},
+		},
+	}
+	p := newTestPublisher(t)
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:   "pr-42",
+		BaseEnv:       "staging",
+		ClusterServer: "https://kubernetes.default.svc",
+		Namespace:     "demo-hello-preview-pr-42", // contains the preview name → resBase stays "hello"
+		BaseDomain:    "localhost",
+		ScopeKeys:     gitops.ScopePresence{PreviewApp: true},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+
+	// values.yaml points at the app-wide objects, NOT hello-web-config/secrets.
+	raw, err := os.ReadFile(filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read preview values.yaml: %v", err)
+	}
+	var v struct {
+		Platform struct {
+			ConfigMapName string `yaml:"configMapName"`
+			SecretName    string `yaml:"secretName"`
+		} `yaml:"platform"`
+	}
+	if err := yaml.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if v.Platform.ConfigMapName != "hello-config" || v.Platform.SecretName != "hello-secrets" {
+		t.Errorf("preview platform = %q/%q, want hello-config/hello-secrets (app-level, not the per-component projection)",
+			v.Platform.ConfigMapName, v.Platform.SecretName)
+	}
+
+	// The app-wide ConfigMap the preview references is actually written.
+	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "previews", "staging", "demo", "pr-42", "hello", "env-configmap.yaml")); err != nil {
+		t.Errorf("app-wide preview env-configmap missing (preview would dangle): %v", err)
+	}
+
+	// No per-component projection files leak into either preview tree.
+	for _, root := range []string{
+		filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello"),
+		filepath.Join(dir, "_app-resources", "previews", "staging", "demo", "pr-42", "hello"),
+	} {
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err == nil && info != nil && !info.IsDir() && strings.HasPrefix(info.Name(), "component-") {
+				t.Errorf("unexpected per-component projection in preview: %s", path)
+			}
+			return nil
+		})
+	}
+}
+
+// TestSingleSourceProjectionPrunedOnRevert is the single-source counterpart of
+// TestComposedProjectionPrunedOnRevert: a 1-component opt-out app writes its
+// projections, and reverting to inherit prunes them on republish.
+func TestSingleSourceProjectionPrunedOnRevert(t *testing.T) {
+	dir := t.TempDir()
+	no := false
+	yes := true
+	mkApp := func(inherit bool) *domain.App {
+		web := domain.ComponentSpec{
+			Name: "web", Type: domain.ComponentWeb, Enabled: true,
+			Template: &domain.AppTemplateRef{Name: "web-service"},
+		}
+		if inherit {
+			web.InheritAppVars = &yes
+		} else {
+			web.InheritAppVars = &no
+			web.EnvVars = []domain.ComponentEnvVar{{Name: "TOKEN", FromSecret: "API_TOKEN"}}
+		}
+		return &domain.App{
+			Name: "solo", ProjectName: "demo",
+			Spec: domain.AppSpec{
+				Template:   domain.AppTemplateRef{Name: "web-service"},
+				Components: []domain.ComponentSpec{web},
+			},
+		}
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost",
+		Clusters:        []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+		ScopeKeys:       gitops.ScopePresence{EnvApp: true},
+		ScopeSecretKeys: gitops.ScopeSecretKeys{EnvApp: []string{"API_TOKEN"}},
+	}}
+	p := newTestPublisher(t)
+
+	cm := filepath.Join(dir, "_app-resources", "staging", "demo", "solo", "component-web-configmap.yaml")
+	es := filepath.Join(dir, "_app-resources", "staging", "demo", "solo", "component-web-externalsecret.yaml")
+
+	if err := p.PublishAppFilesForTest(dir, mkApp(false), envs); err != nil {
+		t.Fatalf("publish opt-out: %v", err)
+	}
+	for _, f := range []string{cm, es} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("expected %s after opt-out publish: %v", filepath.Base(f), err)
+		}
+	}
+	if err := p.PublishAppFilesForTest(dir, mkApp(true), envs); err != nil {
+		t.Fatalf("publish inherit: %v", err)
+	}
+	for _, f := range []string{cm, es} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("expected %s pruned after revert (err=%v)", filepath.Base(f), err)
+		}
+	}
+}
+
 // TestSingleSourceSecretProjection verifies secret subset/rename on the
 // single-source path: a 1-component opt-out app that selects app secret keys
 // points platform.secretName at its curated <app>-<component>-secrets and writes
