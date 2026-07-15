@@ -10,6 +10,16 @@ import { listOrgEnvironments } from "../lib/settings";
 import type { OrgEnvironment } from "../lib/settings";
 import { fetchTemplate, fetchTemplates } from "../lib/templates";
 import {
+  getSecretsBackend,
+  upsertAppGlobalSecrets,
+  upsertAppEnvSecrets,
+} from "../lib/secrets";
+import {
+  SecretValueRows,
+  toEntries,
+  type SecretRow,
+} from "../components/SecretValueRows";
+import {
   ComposeComponents,
   type ComponentDraft,
   newComponentDraft,
@@ -320,6 +330,20 @@ function ConfigureStep({
   const [secretRefs, setSecretRefs] = useState<Record<string, string>>(() =>
     buildDefaultSecretRefs(template),
   );
+  // Optional secret VALUES seeded at create time. Held only in state and flushed
+  // to the vault via the /secrets API AFTER the app is created — never sent in
+  // the create request, so no plaintext ever reaches Git. app-global applies to
+  // every env; secretsByEnv[env] overrides it for that env. Shown only when a
+  // secret backend is configured (see secretBackendOn).
+  const [secretBackendOn, setSecretBackendOn] = useState(false);
+  const [secretsExpanded, setSecretsExpanded] = useState(false);
+  const [globalSecrets, setGlobalSecrets] = useState<SecretRow[]>([]);
+  const [secretsByEnv, setSecretsByEnv] = useState<Record<string, SecretRow[]>>(
+    {},
+  );
+  // A non-fatal warning when the app was created but some secret writes failed —
+  // the app still exists; the user finishes in its Secrets tab.
+  const [secretWarning, setSecretWarning] = useState<string | null>(null);
   const [namespaceScope, setNamespaceScope] = useState<"app" | "project">("app");
   const [namespacePattern, setNamespacePattern] = useState("");
   // An app is uniformly a list of components. A picked template seeds the first
@@ -365,14 +389,99 @@ function ConfigureStep({
         ),
       )
       .catch(() => setOrgEnvs([]));
+    // Only offer secret-value entry when a backend is provisioned to receive it —
+    // otherwise the post-create upsert would just fail. Mirrors AppDetail hiding
+    // the editor when there is no backend.
+    getSecretsBackend()
+      .then((cfg) => setSecretBackendOn(!!cfg.type && cfg.type !== "none"))
+      .catch(() => setSecretBackendOn(false));
   }, [project]);
 
   function updateSecretRef(name: string, ref: string) {
     setSecretRefs((prev) => ({ ...prev, [name]: ref }));
   }
 
+  // Set once createApp succeeds so a resubmit (e.g. after a partial secret-write
+  // failure) retries the secrets instead of trying to create the app again.
+  const [createdName, setCreatedName] = useState<string | null>(null);
+  // The scope labels whose secret write failed, so "Retry secrets" re-runs only
+  // those (against the current, possibly-edited row values).
+  const [failedScopes, setFailedScopes] = useState<string[]>([]);
+
+  function goToApp(name: string) {
+    navigate(
+      stack
+        ? `/projects/${project}/stacks/${encodeURIComponent(stack)}`
+        : `/projects/${project}/apps/${name}`,
+    );
+  }
+
+  // finishAndGo attaches the app to its stack (best-effort) then navigates — the
+  // shared tail of both a clean create and a successful secret retry.
+  async function finishAndGo(name: string) {
+    if (stack) {
+      try {
+        await setAppStack(project, name, stack);
+      } catch {
+        // Leave unattached; the user can add it from the stack page.
+      }
+    }
+    goToApp(name);
+  }
+
+  // flushSecrets writes the seeded values to the vault AFTER the app exists (its
+  // publish already ensured the vault items). When `only` is given, just those
+  // scope labels are (re)written. Returns the labels whose write failed — the app
+  // is created regardless, so failures are non-fatal.
+  async function flushSecrets(name: string, only?: Set<string>): Promise<string[]> {
+    const jobs: Array<{ label: string; run: () => Promise<void> }> = [];
+    const want = (label: string) => !only || only.has(label);
+    const g = toEntries(globalSecrets);
+    if (Object.keys(g).length > 0 && want("global")) {
+      jobs.push({ label: "global", run: () => upsertAppGlobalSecrets(project, name, g) });
+    }
+    for (const [env, rows] of Object.entries(secretsByEnv)) {
+      const e = toEntries(rows);
+      if (Object.keys(e).length > 0 && want(env)) {
+        jobs.push({ label: env, run: () => upsertAppEnvSecrets(project, name, env, e) });
+      }
+    }
+    const results = await Promise.allSettled(jobs.map((j) => j.run()));
+    return jobs
+      .filter((_, i) => results[i]?.status === "rejected")
+      .map((j) => j.label);
+  }
+
+  // runSecretFlush writes secrets (optionally only `only` scopes) and then either
+  // navigates to the app on full success, or records the still-failing scopes and
+  // stays on the page so the user can fix values and retry. Assumes submitting is
+  // already set; clears it only when staying on the page.
+  async function runSecretFlush(name: string, only?: Set<string>) {
+    const failed = await flushSecrets(name, only);
+    if (failed.length > 0) {
+      setFailedScopes(failed);
+      setSecretWarning(
+        `App "${name}" was created, but secrets for ${failed.join(", ")} couldn't be saved. Fix the values and press "Retry secrets".`,
+      );
+      setSubmitting(false);
+      return;
+    }
+    setFailedScopes([]);
+    setSecretWarning(null);
+    await finishAndGo(name);
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+
+    // App already created on a prior submit (partial secret failure) — don't
+    // re-create; retry the failing secret scopes against the current values.
+    if (createdName) {
+      setSubmitting(true);
+      setError(null);
+      await runSecretFlush(createdName, new Set(failedScopes));
+      return;
+    }
 
     if (!appName.trim()) {
       setNameError("App name is required.");
@@ -451,21 +560,15 @@ function ConfigureStep({
       return;
     }
 
-    // App created. If launched from a stack, attach it (best-effort so a
-    // membership hiccup doesn't strand the user on a form for an app that now
-    // exists), then return to the stack so the new member is visible.
-    if (stack) {
-      try {
-        await setAppStack(project, appName, stack);
-      } catch {
-        // Leave unattached; the user can add it from the stack page.
-      }
-    }
-    navigate(
-      stack
-        ? `/projects/${project}/stacks/${encodeURIComponent(stack)}`
-        : `/projects/${project}/apps/${appName}`,
-    );
+    // App exists now — record it so a resubmit retries secrets (or navigates)
+    // instead of re-creating.
+    setCreatedName(appName);
+
+    // Seed any secret values directly into the vault (never in the create
+    // request / Git), then navigate. A failure is non-fatal: the app is created,
+    // so runSecretFlush keeps the user here with a "Retry secrets" action rather
+    // than losing the app.
+    await runSecretFlush(appName);
   }
 
   return (
@@ -728,6 +831,64 @@ function ConfigureStep({
         </FormSection>
       )}
 
+      {/* Secret values (optional) — written straight to the vault after create,
+          never to the create request or Git. Shown only with a backend. */}
+      {secretBackendOn && (
+        <FormSection title="Secret values (optional)">
+          {!secretsExpanded ? (
+            <button
+              type="button"
+              onClick={() => setSecretsExpanded(true)}
+              className="rounded-md border border-dashed border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 hover:border-gray-400 hover:text-gray-900"
+            >
+              + Add secret values now
+            </button>
+          ) : (
+            <div className="space-y-6">
+              <p className="text-xs text-gray-400">
+                Values go straight to the secret vault after the app is created —
+                never into the create request or Git. You can also add or change
+                them later in the app's Secrets tab.
+              </p>
+              <div>
+                <p className="mb-2 text-sm font-medium text-gray-700">
+                  All environments
+                </p>
+                <SecretValueRows
+                  rows={globalSecrets}
+                  onChange={setGlobalSecrets}
+                />
+              </div>
+              {[...orgEnvs]
+                .sort((a, b) => a.order - b.order)
+                .map((env) => (
+                  <div key={env.name}>
+                    <p className="mb-2 text-sm font-medium text-gray-700">
+                      {env.displayName || env.name}{" "}
+                      <span className="text-xs font-normal text-gray-400">
+                        · overrides this env only
+                      </span>
+                    </p>
+                    <SecretValueRows
+                      rows={secretsByEnv[env.name] ?? []}
+                      onChange={(rows) =>
+                        setSecretsByEnv((prev) => ({ ...prev, [env.name]: rows }))
+                      }
+                    />
+                  </div>
+                ))}
+            </div>
+          )}
+        </FormSection>
+      )}
+
+      {/* Non-fatal: app was created but some secret writes failed. */}
+      {secretWarning && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-sm text-amber-800">{secretWarning}</p>
+        </div>
+      )}
+
       {/* Error */}
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3">
@@ -744,13 +905,33 @@ function ConfigureStep({
         >
           Back
         </button>
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-md bg-gray-900 px-6 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {submitting ? "Creating…" : "Create app"}
-        </button>
+        <div className="flex items-center gap-3">
+          {/* Escape hatch once the app exists: skip the failing secrets and go
+              finish them in the app's Secrets tab. */}
+          {createdName && (
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => finishAndGo(createdName)}
+              className="rounded-md px-4 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Go to app
+            </button>
+          )}
+          <button
+            type="submit"
+            disabled={submitting}
+            className="rounded-md bg-gray-900 px-6 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {createdName
+              ? submitting
+                ? "Retrying…"
+                : "Retry secrets"
+              : submitting
+                ? "Creating…"
+                : "Create app"}
+          </button>
+        </div>
       </div>
     </form>
   );
