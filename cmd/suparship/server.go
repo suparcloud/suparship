@@ -2053,7 +2053,7 @@ func publishInitialEnvInfra(
 	if orgName == "" {
 		orgName = "default"
 	}
-	pub.SetOrgConfig(orgName, org.ResourceNaming, &org.SecretBackend, org.Branding, org.RoutingProfiles, org.AddonProfiles)
+	pub.SetOrgConfig(orgName, org.ResourceNaming, &org.SecretBackend, org.Branding, org.RoutingProfiles)
 
 	// Build the appSetEnvs list with the SAME bound-only filter the
 	// per-app publish path (gitOpsPublisherAdapter.PublishApp) uses.

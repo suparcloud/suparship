@@ -264,7 +264,7 @@ func (ah *appHandler) canonicalBaseMap(ctx context.Context, app *domain.App, env
 // image discovery. Exported so the publish path discovers the same images the
 // preview shows.
 func CanonicalBaseMap(app *domain.App, envName string, envType domain.AppEnvironmentType, namespace, orgName string) map[string]any {
-	hv := helmvalues.MapToHelmValuesForEnv(app, envName, envType, "", namespace, "", orgName, nil, nil, nil, nil, nil)
+	hv := helmvalues.MapToHelmValuesForEnv(app, envName, envType, "", namespace, "", orgName, nil, nil, nil)
 	raw, err := yaml.Marshal(hv)
 	if err != nil {
 		return nil

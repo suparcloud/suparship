@@ -226,3 +226,21 @@ func TestResolveAppClusterTargets(t *testing.T) {
 		})
 	}
 }
+
+func TestStatefulComponents(t *testing.T) {
+	tmpl := &AppTemplateRef{Name: "t"}
+	spec := AppSpec{Components: []ComponentSpec{
+		{Name: "web", Template: tmpl},
+		{Name: "cache", Template: tmpl, Stateful: true},
+		{Name: "db", Template: tmpl, Stateful: true},
+		{Name: "no-tmpl", Stateful: true}, // no Template → excluded
+	}}
+	got := spec.StatefulComponents()
+	if len(got) != 2 {
+		t.Fatalf("StatefulComponents len = %d, want 2: %+v", len(got), got)
+	}
+	// Name-sorted: cache before db.
+	if got[0].Name != "cache" || got[1].Name != "db" {
+		t.Errorf("StatefulComponents = %q,%q, want cache,db (name-sorted)", got[0].Name, got[1].Name)
+	}
+}

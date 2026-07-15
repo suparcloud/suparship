@@ -1,7 +1,6 @@
 package helmvalues
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -90,7 +89,7 @@ func MapToHelmValues(app *domain.App, envName string, envType domain.AppEnvironm
 // that want strict validation should use MapToHelmValuesForEnv with real
 // profiles after running domain.ValidateExposeModes.
 func MapToHelmValuesWithDomain(app *domain.App, envName string, envType domain.AppEnvironmentType, baseDomain string) HelmValues {
-	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", "", nil, nil, nil, nil, nil)
+	return MapToHelmValuesForEnv(app, envName, envType, baseDomain, "", "", "", nil, nil, nil)
 }
 
 // MapToHelmValuesForEnv is the canonical mapper. The envFrom lists reference
@@ -113,7 +112,6 @@ func MapToHelmValuesForEnv(
 	baseDomain, namespace, cluster string,
 	orgName string,
 	orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles,
-	orgAddonProfiles, envAddonProfiles domain.AddonProfiles,
 ) HelmValues {
 	if baseDomain == "" {
 		baseDomain = "localhost"
@@ -165,9 +163,7 @@ func MapToHelmValuesForEnv(
 	// (platform.configMapName / platform.secretName) — the ONLY names a chart
 	// needs. suparship renders the objects behind them. The publisher overrides
 	// these per component for a curated / opt-out component (its own projection /
-	// "" for no secrets). The suparship.envFrom* lists carry ONLY addon connection
-	// secrets (+ component EnvFrom extras) — an explicit opt-in beyond the base.
-	addonSecs, claims := buildAddonBindings(app, envAddonProfiles, orgAddonProfiles)
+	// "" for no secrets).
 
 	// Platform metadata block: identity + resolved routing context. Ingress
 	// class/issuer come from the routing component's resolved profile (already
@@ -236,12 +232,9 @@ func MapToHelmValuesForEnv(
 			App:    app.Spec.EnvConfig,
 			AppEnv: envOverride.EnvConfig,
 		}),
-		Suparship: SuparshipValues{
-			// App config/secret are the platform contract (platform.configMapName /
-			// secretName); suparship.envFrom* carries only addon connection secrets.
-			EnvFromSecrets: addonSecs,
-		},
-		ServiceClaims: claims,
+		// App config/secret are the platform contract (platform.configMapName /
+		// secretName); per-component EnvFrom extras are applied per component.
+		Suparship: SuparshipValues{},
 	}
 }
 
@@ -252,9 +245,10 @@ func MapToHelmValuesForEnv(
 // It is a single-component projection of MapToHelmValuesForEnv: it shallow-copies
 // the app with Spec.Components narrowed to just this component, then delegates.
 // This reuses all of MapToHelmValuesForEnv's routing/envFrom/platform-token
-// derivation unchanged. The app-level envFrom hierarchy (<app>-config/<app>-secrets)
-// and addon bindings are shared across every component — deliberately, so all of
-// a composed app's workloads see the same env/secret surface in the one namespace.
+// derivation unchanged. The app-level platform contract (<app>-config/<app>-secrets
+// via platform.configMapName/secretName) is shared across every component by
+// default, so all of a composed app's workloads see the same env/secret surface in
+// the one namespace unless a component curates its own (InheritAppVars:false).
 //
 // Two projections make the canonical values line up with an off-the-shelf
 // component chart:
@@ -275,7 +269,6 @@ func MapComponentHelmValuesForEnv(
 	baseDomain, namespace, cluster string,
 	orgName string,
 	orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles,
-	orgAddonProfiles, envAddonProfiles domain.AddonProfiles,
 ) HelmValues {
 	instanceName := app.Name + "-" + comp.Name
 	if componentKey == "" {
@@ -287,7 +280,7 @@ func MapComponentHelmValuesForEnv(
 	projected.Spec.Components = []domain.ComponentSpec{comp}
 	hv := MapToHelmValuesForEnv(
 		&projected, envName, envType, baseDomain, namespace, cluster, orgName,
-		orgProfiles, envProfiles, clusterProfiles, orgAddonProfiles, envAddonProfiles,
+		orgProfiles, envProfiles, clusterProfiles,
 	)
 	hv.App.Name = instanceName
 
@@ -302,58 +295,6 @@ func MapComponentHelmValuesForEnv(
 	hv.Routing.Host = host
 	hv.Platform.RoutingHost = host
 	return hv
-}
-
-// addonSecretName returns the deterministic name of the connection
-// Secret an addon wrapper produces and the consumer app envFroms. The
-// pattern keeps the addon's contributing scope visible in the Secret
-// name itself ("foo-addon-cache-conn") so cluster operators can grep
-// for it without having to know the binding mechanism.
-func addonSecretName(appName, addonName string) string {
-	return fmt.Sprintf("%s-addon-%s-conn", appName, addonName)
-}
-
-// buildAddonBindings resolves each addon claim against the org/env
-// AddonProfiles catalog and returns:
-//
-//   - the list of connection-Secret names to append to the consumer's
-//     suparship.envFromSecrets[] (sorted by addon name).
-//   - the per-claim ServiceClaimValues, exposed in HelmValues for
-//     observability + future per-component scoping. Implicit fan-out
-//     today: every addon binds to every component, so Component is
-//     left empty in each entry.
-//
-// Claims whose type cannot be resolved are skipped silently so an
-// app save doesn't fail at render time when the org catalog hasn't
-// caught up with a new addon type — domain-level Validate enforces
-// the invariant earlier in the lifecycle.
-func buildAddonBindings(app *domain.App, envAddons, orgAddons domain.AddonProfiles) ([]string, []ServiceClaimValues) {
-	addons := app.Spec.Addons
-	if len(addons) == 0 {
-		return nil, nil
-	}
-	// Sort by name for determinism.
-	sorted := make([]domain.AddonSpec, len(addons))
-	copy(sorted, addons)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-
-	secs := make([]string, 0, len(sorted))
-	claims := make([]ServiceClaimValues, 0, len(sorted))
-	for _, a := range sorted {
-		if _, err := domain.ResolveAddonProfile(orgAddons, envAddons, a.Type); err != nil {
-			// Unresolvable claim — skip rather than fail. App-level
-			// Validate is the gate; the mapper is best-effort.
-			continue
-		}
-		name := addonSecretName(app.Name, a.Name)
-		secs = append(secs, name)
-		claims = append(claims, ServiceClaimValues{
-			Addon:      a.Name,
-			SecretName: name,
-			Type:       a.Type,
-		})
-	}
-	return secs, claims
 }
 
 // envFromLists returns the names the chart should envFrom for this app-env,
@@ -709,54 +650,3 @@ func stripScheme(url string) string {
 	return url
 }
 
-// MapAddonToHelmValuesForEnv returns the values shape passed to an
-// addon wrapper chart's Helm release for one (app, env, addon) tuple.
-//
-// Publisher calls this once per addon claim per env and writes the
-// result under <app>/<env>/addons/<name>/values.yaml; the existing
-// ApplicationSet generator picks it up as a parallel Application.
-//
-// Defaults from AddonProfile are merged with per-app overrides
-// (AppSpec.Addons[].Values wins on conflict). Returns an error when
-// the addon's type cannot be resolved through the org/env profile
-// catalog.
-func MapAddonToHelmValuesForEnv(
-	app *domain.App,
-	addon domain.AddonSpec,
-	envName string,
-	envType domain.AppEnvironmentType,
-	cluster string,
-	orgName string,
-	orgAddons, envAddons domain.AddonProfiles,
-) (AddonInstanceValues, error) {
-	if orgName == "" {
-		orgName = "default"
-	}
-	profile, err := domain.ResolveAddonProfile(orgAddons, envAddons, addon.Type)
-	if err != nil {
-		return AddonInstanceValues{}, fmt.Errorf("addon %q: %w", addon.Name, err)
-	}
-
-	// envFrom hierarchy is shared with the consumer app — the wrapper
-	// can opt into it but isn't required to.
-	cms, secs := envFromLists(app.ProjectName, app.Name, envName, cluster)
-
-	return AddonInstanceValues{
-		App: AppContext{
-			Name: app.Name,
-			Env:  envName,
-		},
-		Addon: AddonValues{
-			Enabled:    true,
-			Type:       addon.Type,
-			Provider:   profile.Provider,
-			Size:       addon.Size,
-			Version:    addon.Version,
-			SecretName: addonSecretName(app.Name, addon.Name),
-		},
-		Suparship: SuparshipValues{
-			EnvFromConfigMaps: cms,
-			EnvFromSecrets:    secs,
-		},
-	}, nil
-}

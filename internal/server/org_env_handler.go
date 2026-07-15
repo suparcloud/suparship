@@ -46,11 +46,6 @@ type OrgEnvironmentDTO struct {
 	// Entries here replace the org-level profile of the same name; absent
 	// names inherit the org-level profile.
 	RoutingProfiles domain.RoutingProfiles `json:"routingProfiles,omitempty"`
-	// AddonProfiles is a sparse override map keyed by addon type. Entries
-	// replace the org-level addon profile of the same type; absent types
-	// inherit the org default. Use this for per-env provider swaps
-	// (staging on valkey-operator, prod on Crossplane ElastiCache, …).
-	AddonProfiles domain.AddonProfiles `json:"addonProfiles,omitempty"`
 	// Warning is set on an update response only when the change relocates
 	// workloads (active cluster or namespace pattern moved) and was therefore
 	// saved but not auto-applied. Empty on list/get.
@@ -68,7 +63,6 @@ func orgEnvToDTO(e rbac.OrgEnvironment) OrgEnvironmentDTO {
 		BaseDomain:       e.BaseDomain,
 		NamespacePattern: e.NamespacePattern,
 		RoutingProfiles:  e.RoutingProfiles,
-		AddonProfiles:    e.AddonProfiles,
 	}
 }
 
@@ -112,12 +106,6 @@ type upsertOrgEnvRequest struct {
 	// name must be one of "internal" or "external" and IngressClassName is
 	// required — Org.Validate enforces both.
 	RoutingProfiles *domain.RoutingProfiles `json:"routingProfiles,omitempty"`
-	// AddonProfiles when non-nil replaces the stored sparse override map
-	// wholesale. Same nil/empty semantics as RoutingProfiles. Each entry's
-	// type must match a registered connection contract — the org-level
-	// PUT validates this; per-env entries are accepted as-is and resolved
-	// at publish time.
-	AddonProfiles *domain.AddonProfiles `json:"addonProfiles,omitempty"`
 }
 
 func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http.Request) {
@@ -169,9 +157,6 @@ func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http
 	}
 	if req.RoutingProfiles != nil {
 		newEnv.RoutingProfiles = *req.RoutingProfiles
-	}
-	if req.AddonProfiles != nil {
-		newEnv.AddonProfiles = *req.AddonProfiles
 	}
 	if err := validateActiveInRefs(newEnv); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -266,10 +251,6 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 			// RoutingProfiles is a pointer: nil = don't touch, {} = clear.
 			if req.RoutingProfiles != nil {
 				org.Environments[i].RoutingProfiles = *req.RoutingProfiles
-			}
-			// AddonProfiles is a pointer: nil = don't touch, {} = clear.
-			if req.AddonProfiles != nil {
-				org.Environments[i].AddonProfiles = *req.AddonProfiles
 			}
 			if req.Order > 0 {
 				org.Environments[i].Order = req.Order
@@ -420,6 +401,5 @@ func envDeployConfigChanged(a, b rbac.OrgEnvironment) bool {
 		a.Order != b.Order ||
 		a.EffectiveAppNamespacePattern() != b.EffectiveAppNamespacePattern() ||
 		a.EffectiveProjectNamespacePattern() != b.EffectiveProjectNamespacePattern() ||
-		!reflect.DeepEqual(a.RoutingProfiles, b.RoutingProfiles) ||
-		!reflect.DeepEqual(a.AddonProfiles, b.AddonProfiles)
+		!reflect.DeepEqual(a.RoutingProfiles, b.RoutingProfiles)
 }

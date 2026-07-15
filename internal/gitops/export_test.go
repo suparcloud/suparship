@@ -12,12 +12,6 @@ func (p *Publisher) SyncChartForTest(ctx context.Context, repoDir, templateName,
 	return p.syncChart(ctx, repoDir, templateName, version)
 }
 
-// SyncAddonChartsForTest exposes syncAddonCharts so tests can assert that an
-// app's addon wrapper charts are materialised under charts/<chart>/latest/.
-func (p *Publisher) SyncAddonChartsForTest(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
-	return p.syncAddonCharts(ctx, repoDir, app, envs)
-}
-
 // RemoveAppEnvFilesForTest exposes removeAppEnvFiles for white-box unit testing.
 func (p *Publisher) RemoveAppEnvFilesForTest(repoDir, projectName, appName, envName string) (bool, error) {
 	return p.removeAppEnvFiles(repoDir, projectName, appName, envName)

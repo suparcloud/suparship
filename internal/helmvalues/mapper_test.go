@@ -87,7 +87,7 @@ func TestMapToHelmValuesForEnv_PlatformBlock(t *testing.T) {
 	}
 	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd,
 		"acme.com", "hello-prod", "prod-eks", "acme",
-		orgProfiles, nil, nil, nil, nil)
+		orgProfiles, nil, nil)
 
 	p := hv.Platform
 	if p.Org != "acme" || p.Project != "demo" || p.App != "hello" {
@@ -131,7 +131,7 @@ func TestMapToHelmValuesForEnv_PerTierRoutingTokens(t *testing.T) {
 	}
 	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
 		"aws.example.com", "tts-staging", "eks-aws", "acme",
-		org, nil, cluster, nil, nil)
+		org, nil, cluster)
 	p := hv.Platform
 
 	// Bug fix: cluster base-domain override reaches BOTH tier base-domain tokens.
@@ -167,7 +167,7 @@ func TestMapToHelmValuesForEnv_TierBaseDomainProfileWins(t *testing.T) {
 	}
 	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd,
 		"acme.com", "tts-prod", "", "acme",
-		org, nil, nil, nil, nil)
+		org, nil, nil)
 	p := hv.Platform
 	if p.InternalBaseDomain != "svc.internal.acme" {
 		t.Errorf("internal base = %q, want svc.internal.acme (profile baseDomain wins)", p.InternalBaseDomain)
@@ -180,7 +180,7 @@ func TestMapToHelmValuesForEnv_TierBaseDomainProfileWins(t *testing.T) {
 func TestMapToHelmValuesForEnv_PlatformBlock_Preview(t *testing.T) {
 	app := webApp("hello", webComponent("web"))
 	hv := MapToHelmValuesForEnv(app, "pr-42", domain.AppEnvPreview,
-		"acme.com", "hello-pr-42", "", "acme", nil, nil, nil, nil, nil)
+		"acme.com", "hello-pr-42", "", "acme", nil, nil, nil)
 
 	if hv.Platform.EnvType != "preview" {
 		t.Errorf("EnvType = %q, want preview", hv.Platform.EnvType)
@@ -267,7 +267,7 @@ func TestBuildComponent_PerEnvOverrideWins(t *testing.T) {
 			},
 		}},
 	}
-	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "localhost", "", "", "", nil, nil, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "localhost", "", "", "", nil, nil, nil)
 	w := hv.Components["web"]
 	if w.Resources.Requests["cpu"] != "4" {
 		t.Errorf("per-env resources should win: %+v", w.Resources)
@@ -698,7 +698,7 @@ func TestResolveIngress_NeverAppliedToWorker(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil)
 
 	if hv.Components["worker"].Ingress != nil {
 		t.Errorf("worker should not have Ingress, got %+v", hv.Components["worker"].Ingress)
@@ -723,7 +723,7 @@ func TestResolveIngress_FromOrgProfile_NoTLS(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil)
 
 	got := hv.Components["web"].Ingress
 	if got == nil {
@@ -744,7 +744,7 @@ func TestResolveIngress_FromOrgProfile_WithTLS(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
 	}
-	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", "", "", org, nil, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", "", "", org, nil, nil)
 
 	got := hv.Components["web"].Ingress
 	if got == nil {
@@ -765,7 +765,7 @@ func TestResolveIngress_EnvProfileOverridesOrg(t *testing.T) {
 	env := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx-staging", ClusterIssuer: "letsencrypt-staging"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "staging.acme.com", "", "", "", org, env, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "staging.acme.com", "", "", "", org, env, nil)
 
 	got := hv.Components["web"].Ingress
 	if got == nil {
@@ -786,7 +786,7 @@ func TestResolveIngress_UnknownModeYieldsNoIngress(t *testing.T) {
 	org := domain.RoutingProfiles{
 		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil, nil, nil)
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil)
 
 	if hv.Components["web"].Ingress != nil {
 		t.Errorf("unknown mode should yield nil Ingress, got %+v", hv.Components["web"].Ingress)
@@ -844,7 +844,7 @@ func TestMapToHelmValuesForEnv_ClusterOverride(t *testing.T) {
 	}
 
 	replicasFor := func(cluster string) int32 {
-		hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", cluster, "", nil, nil, nil, nil, nil)
+		hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", cluster, "", nil, nil, nil)
 		return hv.Components["web"].Replicas
 	}
 
@@ -881,8 +881,8 @@ func TestMapToHelmValuesForEnv_ClusterRoutingOverride(t *testing.T) {
 		string(domain.ExposeExternal): {IngressClassName: "alb", ClusterIssuer: "le-aws", BaseDomain: "aws.example.com"},
 	}
 
-	hvAKS := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "aks", "", org, nil, aks, nil, nil)
-	hvEKS := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "eks", "", org, nil, eks, nil, nil)
+	hvAKS := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "aks", "", org, nil, aks)
+	hvEKS := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "eks", "", org, nil, eks)
 
 	if hvAKS.Routing.Host == hvEKS.Routing.Host {
 		t.Fatalf("hosts should differ per cluster, both = %q", hvAKS.Routing.Host)

@@ -113,13 +113,6 @@ type OrgEnvironment struct {
 	// per-env differences like "staging uses letsencrypt-staging, prod
 	// uses letsencrypt-prod".
 	RoutingProfiles domain.RoutingProfiles `yaml:"routingProfiles,omitempty"`
-	// AddonProfiles is a sparse override map keyed by addon type
-	// (e.g. "redis", "postgres"). Entries here replace the org-level
-	// addon profile of the same type for apps deployed to this
-	// environment; types not present inherit the org default. Use
-	// this for per-env provider swaps like "staging uses
-	// valkey-operator, prod uses Crossplane ElastiCache".
-	AddonProfiles domain.AddonProfiles `yaml:"addonProfiles,omitempty"`
 	// DeployMode controls how many of this env's clusters receive deploys:
 	//   "" / "active" → only the active cluster (EffectiveClusterRef).
 	//   "all"          → every cluster in ClusterRefs (fan-out).
@@ -226,12 +219,6 @@ type Org struct {
 	// to a legacy Expose=true → nginx shim so existing AppSpecs without
 	// ExposeMode keep rendering identically until they are migrated.
 	RoutingProfiles domain.RoutingProfiles `yaml:"routingProfiles,omitempty"`
-	// AddonProfiles maps addon types (redis, postgres, …) to the
-	// wrapper chart + provider that materialises the addon at publish
-	// time. App developers declare AppSpec.Addons[].Type only; ops
-	// pin the implementation here. Per-env overrides on
-	// OrgEnvironment.AddonProfiles replace entries by type sparsely.
-	AddonProfiles domain.AddonProfiles `yaml:"addonProfiles,omitempty"`
 	// Auth holds optional SSO configuration. When OIDC is enabled, developers
 	// log in via the org IdP and their group claims drive RBAC (see
 	// RoleBinding.Group). The local admin credential remains as break-glass.

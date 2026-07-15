@@ -27,7 +27,7 @@ func TestMapComponentHelmValuesForEnv_Projection(t *testing.T) {
 	// Project "api" onto the chart's canonical key "web".
 	hv := MapComponentHelmValuesForEnv(app, app.Spec.Components[0], "web",
 		"staging", domain.AppEnvStaging, "localhost", "bigly-staging", "", "",
-		nil, nil, nil, nil, nil)
+		nil, nil, nil)
 
 	if hv.App.Name != "bigly-api" {
 		t.Errorf("app.name = %q, want bigly-api (per-component fullname)", hv.App.Name)
@@ -67,7 +67,7 @@ func TestMapComponentHelmValuesForEnv_PerComponentHost(t *testing.T) {
 	for _, c := range app.Spec.Components {
 		hv := MapComponentHelmValuesForEnv(app, c, "web",
 			"staging", domain.AppEnvStaging, "acme.com", "bigly-staging", "", "",
-			nil, nil, nil, nil, nil)
+			nil, nil, nil)
 		hosts[c.Name] = hv.Routing.Host
 		if hv.Routing.Host != hv.Platform.RoutingHost {
 			t.Errorf("%s: routing.host %q != platform.routingHost %q", c.Name, hv.Routing.Host, hv.Platform.RoutingHost)
@@ -100,7 +100,7 @@ func TestMapComponentHelmValuesForEnv_EmptyKeyFallsBack(t *testing.T) {
 	}
 	hv := MapComponentHelmValuesForEnv(app, app.Spec.Components[0], "",
 		"staging", domain.AppEnvStaging, "localhost", "bigly-staging", "", "",
-		nil, nil, nil, nil, nil)
+		nil, nil, nil)
 
 	if _, ok := hv.Components["worker"]; !ok {
 		t.Errorf("empty key should fall back to component name %q; got %v", "worker", hv.Components)

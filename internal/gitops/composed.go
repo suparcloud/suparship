@@ -79,10 +79,15 @@ func BuildComposedApplication(app *domain.App, opts ComposedBuildOptions) *Appli
 		TargetRevision: tr,
 		Ref:            "appvalues",
 	})
-	// One chart source per component (name-sorted for deterministic output),
-	// each a distinct Helm release named {app}-{component} so component
-	// resources never collide in the shared namespace.
+	// One chart source per NON-stateful component (name-sorted for deterministic
+	// output), each a distinct Helm release named {app}-{component} so component
+	// resources never collide in the shared namespace. Stateful components (DBs)
+	// are excluded — they render as their own prune-disabled Application via
+	// BuildComponentApplication so a shared auto-sync can't prune their data.
 	for _, c := range app.Spec.ComposedComponents() {
+		if c.Stateful {
+			continue
+		}
 		valuesFile := "$appvalues/" + opts.ComponentValues[c.Name]
 		sources = append(sources, ApplicationSource{
 			RepoURL:        opts.RepoURL,
@@ -128,6 +133,76 @@ func BuildComposedApplication(app *domain.App, opts ComposedBuildOptions) *Appli
 			// Reuse the per-project AppProject the platform already writes
 			// (writeEnvInfra → BuildArgoAppProject, metadata.name = project),
 			// which authorizes every one of the project's env clusters.
+			Project:     app.ProjectName,
+			Sources:     sources,
+			Destination: ApplicationDestination{Server: server, Namespace: opts.Namespace},
+			SyncPolicy:  syncPolicy,
+		},
+	}
+}
+
+// BuildComponentApplication renders ONE composed component as its own ArgoCD
+// Application — used for stateful components (databases/caches) whose lifecycle
+// must be decoupled from the app's shared multi-source Application. It has two
+// sources (the $appvalues ref + the component's own chart source, with the same
+// release name and value file it would get inside the composed app) and prune
+// DISABLED, so a shared auto-sync can never prune the DB's resources on drift. No
+// Kargo annotation — stateful components carry no Images, so they're pinned/direct.
+// (Data survival on component REMOVAL still requires the chart to mark its PVC
+// helm.sh/resource-policy: keep.) Pure function — identical inputs, identical output.
+func BuildComponentApplication(app *domain.App, c domain.ComponentSpec, opts ComposedBuildOptions) *Application {
+	tr := opts.TargetRevision
+	if tr == "" {
+		tr = defaultTargetRevision
+	}
+	argoNS := opts.ArgoCDNamespace
+	if argoNS == "" {
+		argoNS = defaultArgoCDNS
+	}
+	server := opts.ClusterServer
+	if server == "" {
+		server = defaultDestination
+	}
+
+	sources := []ApplicationSource{
+		{RepoURL: opts.RepoURL, TargetRevision: tr, Ref: "appvalues"},
+		{
+			RepoURL:        opts.RepoURL,
+			Path:           joinSubPath(opts.SubPath, "charts", chartPathFor(c.Template.Name, c.Template.Version)),
+			TargetRevision: tr,
+			Helm: &HelmSource{
+				ReleaseName: app.Name + "-" + c.Name,
+				ValueFiles:  []string{"$appvalues/" + opts.ComponentValues[c.Name]},
+			},
+		},
+	}
+
+	var syncPolicy *SyncPolicy
+	if opts.SyncAutomated {
+		// Prune disabled: never remove the DB's resources on drift/sync. SelfHeal
+		// stays on so config drift is still corrected.
+		syncPolicy = &SyncPolicy{
+			Automated:   &AutomatedSyncPolicy{Prune: false, SelfHeal: true},
+			SyncOptions: []string{"CreateNamespace=true"},
+		}
+	} else {
+		syncPolicy = &SyncPolicy{SyncOptions: []string{"CreateNamespace=true"}}
+	}
+
+	return &Application{
+		APIVersion: argoAPIVersion,
+		Kind:       argoKind,
+		Metadata: ObjectMeta{
+			Name:      opts.AppName + "-" + c.Name,
+			Namespace: argoNS,
+			Labels: map[string]string{
+				labelApp:     app.Name,
+				labelProject: app.ProjectName,
+				labelEnv:     opts.EnvName,
+				labelCluster: opts.ClusterName,
+			},
+		},
+		Spec: ApplicationSpec{
 			Project:     app.ProjectName,
 			Sources:     sources,
 			Destination: ApplicationDestination{Server: server, Namespace: opts.Namespace},

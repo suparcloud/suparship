@@ -799,6 +799,116 @@ func TestComposedPerEnvComponentValues(t *testing.T) {
 	}
 }
 
+// TestStatefulComponentSeparateApplication verifies the addon/stateful primitive:
+// a stateful component is EXCLUDED from the composed multi-source Application and
+// rendered as its own prune-disabled Application (BuildComponentApplication).
+func TestStatefulComponentSeparateApplication(t *testing.T) {
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"}},
+				{Name: "db", Type: domain.ComponentWorker, Enabled: true, Stateful: true,
+					Template: &domain.AppTemplateRef{Name: "cnpg", Version: "0.1.0"}},
+			},
+		},
+	}
+	opts := gitops.ComposedBuildOptions{
+		RepoURL: "https://git/repo.git", AppName: "demo-bigly-staging",
+		EnvName: "staging", ClusterName: "c1", ClusterServer: "https://c1",
+		Namespace: "bigly-staging", SyncAutomated: true,
+		ComponentValues: map[string]string{
+			"web": "envs/staging/demo/bigly/components/web/values.yaml",
+			"db":  "envs/staging/demo/bigly/components/db/values.yaml",
+		},
+	}
+
+	// Composed app: only the non-stateful web source (+ appvalues ref), Prune:true.
+	composed := gitops.BuildComposedApplication(app, opts)
+	if got := len(composed.Spec.Sources); got != 2 {
+		t.Fatalf("composed Sources = %d, want 2 (appvalues + web only)", got)
+	}
+	for _, s := range composed.Spec.Sources {
+		if s.Helm != nil && s.Helm.ReleaseName == "bigly-db" {
+			t.Error("stateful db must NOT be a source in the composed Application")
+		}
+	}
+	if composed.Spec.SyncPolicy.Automated == nil || !composed.Spec.SyncPolicy.Automated.Prune {
+		t.Error("composed Application should keep Prune:true")
+	}
+
+	// Stateful db: its own Application, Prune:false, no Kargo annotation.
+	dbApp := gitops.BuildComponentApplication(app, app.Spec.StatefulComponents()[0], opts)
+	if dbApp.Metadata.Name != "demo-bigly-staging-db" {
+		t.Errorf("db Application name = %q, want demo-bigly-staging-db", dbApp.Metadata.Name)
+	}
+	if len(dbApp.Spec.Sources) != 2 {
+		t.Fatalf("db Application Sources = %d, want 2 (appvalues + chart)", len(dbApp.Spec.Sources))
+	}
+	if dbApp.Spec.SyncPolicy.Automated == nil || dbApp.Spec.SyncPolicy.Automated.Prune {
+		t.Error("stateful db Application must have Prune:false")
+	}
+	if _, ok := dbApp.Metadata.Annotations["kargo.akuity.io/authorized-stage"]; ok {
+		t.Error("stateful db Application must carry no Kargo annotation")
+	}
+}
+
+// TestComposedPublishesStatefulComponentManifest is the integration counterpart:
+// publishing a web+stateful-db app writes the composed application.yaml (web only)
+// and a separate db-application.yaml (Prune:false) under the same _targets dir.
+func TestComposedPublishesStatefulComponentManifest(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		ArgoCDRepoURL:  "https://git/repo.git",
+		SyncAutomated:  true,
+		TemplateLoader: canonicalityLoader{"byo-chart": false},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "byo-chart"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart"}},
+				{Name: "db", Type: domain.ComponentWorker, Enabled: true, Stateful: true,
+					Template: &domain.AppTemplateRef{Name: "byo-chart"}},
+			},
+		},
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+	}}
+	if err := p.WriteAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteAppTreeForTest: %v", err)
+	}
+	tdir := filepath.Join(dir, "_composed-apps", "staging", "demo", "bigly", "_targets", "c1")
+	main, err := os.ReadFile(filepath.Join(tdir, "application.yaml"))
+	if err != nil {
+		t.Fatalf("read composed application.yaml: %v", err)
+	}
+	if strings.Contains(string(main), "bigly-db") {
+		t.Error("composed application.yaml must not reference the stateful db release")
+	}
+	dbManifest, err := os.ReadFile(filepath.Join(tdir, "db-application.yaml"))
+	if err != nil {
+		t.Fatalf("read db-application.yaml: %v", err)
+	}
+	if !strings.Contains(string(dbManifest), "prune: false") {
+		t.Errorf("db Application must have prune: false, got:\n%s", dbManifest)
+	}
+	// The db still gets its per-component values file.
+	if _, err := os.Stat(filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", "db", "values.yaml")); err != nil {
+		t.Errorf("stateful db should still get its component values: %v", err)
+	}
+}
+
 // TestComposedWarehouseSubscribesAllComponentImages verifies the Phase-1 image
 // foundation: each composed component's declared image binding is collected and a
 // single app Warehouse subscribes to every component's repository.

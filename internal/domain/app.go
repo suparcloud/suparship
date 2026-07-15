@@ -252,6 +252,15 @@ type ComponentSpec struct {
 	// charts with no template-declared images to infer from. Empty = no CD tracking
 	// for this component.
 	Images []ComponentImage `json:"images,omitempty" yaml:"images,omitempty"`
+	// Stateful marks a component (a database/cache — an "addon") whose lifecycle
+	// must be decoupled from the app's shared auto-sync. Instead of a source in the
+	// composed multi-source Application (which has one Application-level Prune:true
+	// policy), it renders as its OWN ArgoCD Application with prune DISABLED. NOTE:
+	// this protects against sync-time prune/drift, NOT against Application deletion
+	// on component removal — surviving PVCs additionally require the chart to mark
+	// them helm.sh/resource-policy: keep. Typically paired with InheritAppVars:false
+	// and no Images (so it deploys pinned/direct, not Kargo-promoted).
+	Stateful bool `json:"stateful,omitempty" yaml:"stateful,omitempty"`
 }
 
 // ComponentImage binds one of a composed component's container images to Kargo.
@@ -520,15 +529,6 @@ type AppSpec struct {
 	// individual components are surfaced in advanced views. Hidden from top-level
 	// navigation. See docs/app-model.md — "Component — internal runtime unit".
 	Components []ComponentSpec `json:"components,omitempty" yaml:"components,omitempty"`
-	// Addons declares managed dependencies (databases, caches, queues)
-	// the app consumes. Each claim is bound at publish time to an
-	// AddonProfile from the org/env catalog; the resolved provider
-	// renders a wrapper chart that produces a connection Secret
-	// matching the type's contract. Connection details flow into
-	// every component via the existing suparship.envFromSecrets[]
-	// hierarchy. See internal/addons/contracts and
-	// docs/templates-components.md.
-	Addons []AddonSpec `json:"addons,omitempty" yaml:"addons,omitempty"`
 	// EnvironmentDefaults holds per-environment overrides keyed by environment
 	// name (e.g. "staging", "prod"). Only set fields override app-level values.
 	// The reserved key PreviewOverrideKey ("preview") holds the per-app preview
@@ -622,6 +622,19 @@ func (s *AppSpec) BackfillComponentTemplates() {
 func (s AppSpec) ComposedComponents() []ComponentSpec {
 	out := append([]ComponentSpec(nil), s.Components...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// StatefulComponents returns the composed components marked Stateful (name-sorted).
+// Each renders as its own prune-disabled ArgoCD Application rather than a source in
+// the shared multi-source Application.
+func (s AppSpec) StatefulComponents() []ComponentSpec {
+	var out []ComponentSpec
+	for _, c := range s.ComposedComponents() {
+		if c.Stateful && c.Template != nil {
+			out = append(out, c)
+		}
+	}
 	return out
 }
 

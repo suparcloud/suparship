@@ -103,11 +103,6 @@ type PublisherConfig struct {
 	// mapper falls back to the legacy Expose=true → nginx shim — useful for
 	// installs that haven't migrated to the routing-profile model yet.
 	RoutingProfiles domain.RoutingProfiles
-	// AddonProfiles holds the org-level addon catalog keyed by addon
-	// type (e.g. "redis", "postgres"). Each entry pins which wrapper
-	// chart and provider serves apps that claim that type. Per-env
-	// overrides ride on AppPublishEnv.AddonProfiles.
-	AddonProfiles domain.AddonProfiles
 	// SubPath is the optional sub-directory inside the gitops repo where
 	// platform-managed manifests land. Empty (default) means manifests
 	// land at the repo root (`<repo>/_infra/...`, `<repo>/{env}/...`,
@@ -185,17 +180,15 @@ func repoLockFor(dir string) *sync.Mutex {
 }
 
 // SetOrgConfig updates the publisher's org-scoped configuration (naming
-// patterns, backend config, org name, branding, routing profiles, and
-// addon profiles). Thread-safe for callers that rebuild the publisher
-// when org config changes; for concurrent use call this before handing
-// the publisher to goroutines.
-func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, backend *secrets.BackendConfig, brand branding.Config, routingProfiles domain.RoutingProfiles, addonProfiles domain.AddonProfiles) {
+// patterns, backend config, org name, branding, routing profiles).
+// Thread-safe for callers that rebuild the publisher when org config changes;
+// for concurrent use call this before handing the publisher to goroutines.
+func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, backend *secrets.BackendConfig, brand branding.Config, routingProfiles domain.RoutingProfiles) {
 	p.cfg.OrgName = orgName
 	p.cfg.ResourceNaming = naming
 	p.cfg.BackendConfig = backend
 	p.cfg.Branding = brand
 	p.cfg.RoutingProfiles = routingProfiles
-	p.cfg.AddonProfiles = addonProfiles
 }
 
 // usesUnifiedStore reports whether app ExternalSecrets should extract from the
@@ -651,12 +644,6 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 		}
 	}
 
-	// Addon wrapper charts are inline templates too (e.g. "valkey"); sync
-	// each so the addon Applications publishAppAddons emits can resolve
-	// their charts/<chart>/latest/ path.
-	if err := p.syncAddonCharts(ctx, repoDir, app, envs); err != nil {
-		return err
-	}
 
 	// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
 	// full promotion pipeline is wired from day one. Direct-delivery apps have
@@ -990,7 +977,7 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		componentValues := make(map[string]string, len(app.Spec.Components))
 		for _, c := range app.Spec.ComposedComponents() {
 			hv := helmvalues.MapComponentHelmValuesForEnv(app, c, componentKeys[c.Name], env.EnvName, env.EnvType, baseDomain, ns, target.Name, orgName,
-				p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+				p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
 			// Per-component env scoping: a component that opts out of the app-wide
 			// vars points platform.configMapName at its own curated ConfigMap and
 			// gets no app secrets (platform.secretName=""); suparship renders the
@@ -1070,7 +1057,7 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		if !app.Spec.IsDirect() {
 			kargoStage = KargoStageName(app.Name, env.EnvName)
 		}
-		manifest := BuildComposedApplication(app, ComposedBuildOptions{
+		composedOpts := ComposedBuildOptions{
 			RepoURL:         p.cfg.ArgoCDRepoURL,
 			SubPath:         p.cfg.SubPath,
 			AppName:         RenderArgoAppName(namePattern, app.ProjectName, app.Name, env.EnvName, targetName),
@@ -1081,14 +1068,32 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			SyncAutomated:   p.cfg.SyncAutomated,
 			ComponentValues: componentValues,
 			KargoStage:      kargoStage,
-		})
-		manifestBytes, err := yaml.Marshal(manifest)
-		if err != nil {
-			return fmt.Errorf("marshal Application for env %s cluster %s: %w", env.EnvName, targetName, err)
 		}
-		manifestPath := p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets", targetName, "application.yaml")
-		if err := p.writeFile(manifestPath, manifestBytes); err != nil {
-			return err
+		// Main multi-source Application — the non-stateful components. Skip writing
+		// it when the app is all-stateful (it would carry only the $appvalues ref
+		// source, no chart sources).
+		if manifest := BuildComposedApplication(app, composedOpts); len(manifest.Spec.Sources) > 1 {
+			manifestBytes, err := yaml.Marshal(manifest)
+			if err != nil {
+				return fmt.Errorf("marshal Application for env %s cluster %s: %w", env.EnvName, targetName, err)
+			}
+			manifestPath := p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets", targetName, "application.yaml")
+			if err := p.writeFile(manifestPath, manifestBytes); err != nil {
+				return err
+			}
+		}
+		// Each stateful component: its OWN prune-disabled Application, auto-discovered
+		// by the recurse composed root app. Written alongside the main manifest.
+		for _, c := range app.Spec.StatefulComponents() {
+			compManifest := BuildComponentApplication(app, c, composedOpts)
+			compBytes, err := yaml.Marshal(compManifest)
+			if err != nil {
+				return fmt.Errorf("marshal stateful component Application %s env %s: %w", c.Name, env.EnvName, err)
+			}
+			compPath := p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets", targetName, c.Name+"-application.yaml")
+			if err := p.writeFile(compPath, compBytes); err != nil {
+				return err
+			}
 		}
 
 		// Platform-managed per-app resources (the app-wide <app>-config +
@@ -1349,7 +1354,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			if c.BaseDomain != "" {
 				baseDomain = c.BaseDomain
 			}
-			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles)
 			// Unified model: a single-component app's component name is user-chosen
 			// (e.g. "api"), but its chart reads a fixed values key (web-service →
 			// components.web). Remap the one component's values onto the chart's
@@ -1540,14 +1545,6 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			}
 		}
 
-		// Per-addon claim: parallel ArgoCD Application alongside the
-		// main app. Each gets app.yaml + values.yaml under
-		// addons/<name>/. Existing ApplicationSet generators pick
-		// them up; no AppSet schema change.
-		if err := p.publishAppAddons(appDir, app, env, orgName); err != nil {
-			return fmt.Errorf("writing addon files for env %s: %w", env.EnvName, err)
-		}
-
 		slog.Debug("gitops: wrote app files", "env", env.EnvName, "app", app.Name)
 	}
 	return nil
@@ -1644,7 +1641,7 @@ func (p *Publisher) platformVarsContext(app *domain.App, env AppPublishEnv, orgN
 	if target.BaseDomain != "" {
 		baseDomain = target.BaseDomain
 	}
-	hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, target.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles, p.cfg.AddonProfiles, env.AddonProfiles)
+	hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, target.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
 	return platform.Context{Platform: hv.Platform, Vars: env.EnvVars}
 }
 
@@ -2432,12 +2429,6 @@ type AppPublishEnv struct {
 	// same name; absent names inherit the org default. Populated by the
 	// publish adapter from rbac.OrgEnvironment.RoutingProfiles when present.
 	RoutingProfiles domain.RoutingProfiles
-	// AddonProfiles is the sparse per-env override for the addon
-	// catalog. Entries replace the org-level profile of the same type
-	// (e.g. swap valkey-operator → crossplane-elasticache for prod).
-	// Populated by the publish adapter from
-	// rbac.OrgEnvironment.AddonProfiles when present.
-	AddonProfiles domain.AddonProfiles
 	// Clusters is the env's fan-out target set (deployMode "all"). When it has
 	// more than one entry the publisher writes a per-cluster values.yaml under
 	// envs/{env}/_clusters/{cluster}/... (each merged with that cluster's
@@ -2584,7 +2575,7 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 		clone.Spec.Values = vals
 		mapApp = &clone
 	}
-	hv := helmvalues.MapToHelmValuesForEnv(mapApp, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil, p.cfg.AddonProfiles, nil)
+	hv := helmvalues.MapToHelmValuesForEnv(mapApp, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil)
 	// Expose the per-PR tag as ((platform.imageTag)) for overlay/raw-values token
 	// interpolation, independent of the chart's image-mapping shape.
 	if preview.ImageTag != "" {
@@ -3654,113 +3645,3 @@ func marshalHelmValues(hv helmvalues.HelmValues) (string, error) {
 	return string(b), nil
 }
 
-// syncAddonCharts materialises each addon's wrapper chart (an inline template
-// such as "valkey") into charts/<chart>/latest/ so the addon Applications that
-// publishAppAddons emits resolve their chart path. Mirrors the app-template
-// sync in PublishApp. Addon profiles carry no version (AddonProfile has only
-// Chart + Provider), so addon charts are unpinned → the "latest" dir. Distinct
-// charts are synced once. External-mode addon charts are pulled by Argo from
-// the registry and need no local copy.
-func (p *Publisher) syncAddonCharts(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
-	if len(app.Spec.Addons) == 0 {
-		return nil
-	}
-	synced := map[string]bool{}
-	for _, env := range envs {
-		for _, claim := range app.Spec.Addons {
-			profile, err := domain.ResolveAddonProfile(p.cfg.AddonProfiles, env.AddonProfiles, claim.Type)
-			if err != nil || profile.Chart == "" || synced[profile.Chart] {
-				continue
-			}
-			if mode, _ := p.resolveTemplateChartMode(profile.Chart); mode != AppMetadataChartTypeInline {
-				continue // external addon chart — Argo pulls it, no local sync
-			}
-			if err := p.syncChart(ctx, repoDir, profile.Chart, ""); err != nil {
-				return fmt.Errorf("sync addon chart %q: %w", profile.Chart, err)
-			}
-			synced[profile.Chart] = true
-		}
-	}
-	return nil
-}
-
-// publishAppAddons writes one Application + values.yaml pair per
-// addon claim on app.Spec.Addons under
-// {appDir}/addons/<addon-name>/. Each pair is picked up by the same
-// ApplicationSet that publishes the main app, so no AppSet schema
-// change is needed — Argo just reconciles N+1 Applications instead
-// of 1 per app+env.
-//
-// Each addon's app.yaml uses Template = the resolved AddonProfile.Chart
-// so the ApplicationSet's Helm path resolves to the addon wrapper
-// chart under charts/<wrapper-template-name>/. values.yaml carries
-// the AddonInstanceValues shape (App, Addon, Suparship).
-//
-// Failure to resolve an addon's profile is logged and skipped — the
-// app save path runs Validate first; reaching publish with an
-// unresolved type is a configuration race we don't want to block on.
-func (p *Publisher) publishAppAddons(
-	appDir string,
-	app *domain.App,
-	env AppPublishEnv,
-	orgName string,
-) error {
-	if len(app.Spec.Addons) == 0 {
-		return nil
-	}
-	for _, claim := range app.Spec.Addons {
-		profile, err := domain.ResolveAddonProfile(p.cfg.AddonProfiles, env.AddonProfiles, claim.Type)
-		if err != nil {
-			slog.Warn("gitops: skipping addon — no AddonProfile configured",
-				"app", app.Name, "env", env.EnvName, "addon", claim.Name, "type", claim.Type, "err", err)
-			continue
-		}
-
-		hv, err := helmvalues.MapAddonToHelmValuesForEnv(
-			app, claim, env.EnvName, env.EnvType, env.ClusterRef,
-			orgName,
-			p.cfg.AddonProfiles, env.AddonProfiles,
-		)
-		if err != nil {
-			return fmt.Errorf("addon %q: %w", claim.Name, err)
-		}
-
-		// addon app.yaml — same shape as the main app.yaml so the
-		// existing ApplicationSet generator picks it up. Template
-		// points at the resolved wrapper chart name.
-		ns := env.Namespace
-		if ns == "" {
-			ns = app.Name + "-" + env.EnvName
-		}
-		meta := AppMetadata{
-			Name:     fmt.Sprintf("%s-addon-%s", app.Name, claim.Name),
-			Project:  app.ProjectName,
-			Template: profile.Chart,
-			// The shared ApplicationSet sources charts/{{chartPath}}; addon
-			// wrapper charts are unpinned inline templates, synced to
-			// charts/<chart>/latest/ by syncAddonCharts. Without this the
-			// addon Application resolves an empty chart path and never syncs.
-			ChartPath: chartPathFor(profile.Chart, ""),
-			Namespace: ns,
-		}
-		metaBytes, err := yaml.Marshal(meta)
-		if err != nil {
-			return fmt.Errorf("addon %q: marshal app.yaml: %w", claim.Name, err)
-		}
-		hvBytes, err := yaml.Marshal(hv)
-		if err != nil {
-			return fmt.Errorf("addon %q: marshal values.yaml: %w", claim.Name, err)
-		}
-
-		base := filepath.Join(appDir, "addons", claim.Name)
-		if err := p.writeFile(filepath.Join(base, "app.yaml"), metaBytes); err != nil {
-			return err
-		}
-		if err := p.writeFile(filepath.Join(base, "values.yaml"), hvBytes); err != nil {
-			return err
-		}
-		slog.Debug("gitops: wrote addon files",
-			"app", app.Name, "env", env.EnvName, "addon", claim.Name, "chart", profile.Chart)
-	}
-	return nil
-}

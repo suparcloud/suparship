@@ -572,6 +572,8 @@ export interface ComponentSummary {
   envVars?: ComponentEnvVar[];
   /** Kargo image bindings (repo + tag-key). */
   images?: ComponentImage[];
+  /** Stateful (a database/cache): its own prune-disabled Application. */
+  stateful?: boolean;
 }
 
 export interface AppReleaseRef {
@@ -883,6 +885,8 @@ export interface ComponentCreate {
   envVars?: ComponentEnvVar[];
   /** Kargo image bindings (repo + tag-key path in this component's overlay). */
   images?: ComponentImage[];
+  /** Stateful (a database/cache): renders as its own prune-disabled Application. */
+  stateful?: boolean;
 }
 
 // ComponentImage binds one of a composed component's container images for Kargo:

@@ -35,13 +35,16 @@ export interface ComponentDraft {
   envVars: ComponentEnvVar[];
   /** Kargo image bindings (repo + tag-key path in this component's overlay) */
   images: ComponentImage[];
+  /** stateful (database/cache) — renders as its own prune-disabled Application */
+  stateful: boolean;
 }
 
 const COMPONENT_TYPES = ["web", "worker", "job"] as const;
 const EXPOSE_MODES = ["disabled", "internal", "external"] as const;
 
 // categoryToType maps a template's category to a sensible default component
-// type. Falls back to "web" for anything unrecognised.
+// type. Addon (database/cache) templates default to "worker" (headless, non-
+// exposed). Falls back to "web" for anything unrecognised.
 export function categoryToType(category: string): string {
   switch (category) {
     case "worker":
@@ -49,6 +52,8 @@ export function categoryToType(category: string): string {
     case "job":
     case "cron":
       return "job";
+    case "addon":
+      return "worker";
     default:
       return "web";
   }
@@ -56,11 +61,14 @@ export function categoryToType(category: string): string {
 
 // newComponentDraft seeds a component row from a template, defaulting its type
 // from the template category and exposing web components externally by default.
+// An addon-category template (a database/cache) seeds as stateful — its own
+// prune-disabled Application, no app-var inheritance, no CD image, unexposed.
 export function newComponentDraft(
   tmpl: Pick<TemplateSummary, "name" | "category">,
   name: string,
 ): ComponentDraft {
   const type = categoryToType(tmpl.category);
+  const isAddon = tmpl.category === "addon";
   return {
     name,
     template: tmpl.name,
@@ -69,9 +77,10 @@ export function newComponentDraft(
     valuesText: "",
     values: {},
     valuesError: null,
-    inheritAppVars: true,
+    inheritAppVars: !isAddon,
     envVars: [],
     images: [],
+    stateful: isAddon,
   };
 }
 
@@ -90,6 +99,7 @@ export function draftFromSummary(c: ComponentSummary): ComponentDraft {
     inheritAppVars: c.inheritAppVars ?? true,
     envVars: c.envVars ?? [],
     images: c.images ?? [],
+    stateful: c.stateful ?? false,
   };
 }
 
@@ -129,6 +139,7 @@ export function toComponentCreate(d: ComponentDraft): ComponentCreate {
     inheritAppVars: d.inheritAppVars ? undefined : false,
     envVars: envVars.length > 0 ? envVars : undefined,
     images: images.length > 0 ? images : undefined,
+    stateful: d.stateful ? true : undefined,
   };
 }
 
@@ -463,6 +474,26 @@ export function ComposeComponents({
                 </button>
               </div>
             )}
+
+            {/* Stateful: render this component as its OWN prune-disabled ArgoCD
+                Application (a database/cache), so a shared auto-sync can't prune
+                its data. Auto-set for addon-category templates. */}
+            <div className="mt-3">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-gray-300"
+                  checked={c.stateful}
+                  onChange={(ev) => update(i, { stateful: ev.target.checked })}
+                />
+                Stateful (database/cache)
+              </label>
+              <p className="mt-1 text-xs text-gray-400">
+                Its own prune-disabled Application, decoupled from the app's
+                auto-sync. Data survival on removal needs the chart's PVC marked{" "}
+                <code>helm.sh/resource-policy: keep</code>.
+              </p>
+            </div>
 
             {/* Kargo image bindings: the repository to watch + the tag-key path
                 in THIS component's overlay where the promoted tag is written.
