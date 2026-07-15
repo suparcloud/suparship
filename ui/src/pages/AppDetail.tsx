@@ -2000,11 +2000,16 @@ function AppValuesEditor({
   project,
   currentEnvName,
   onSaved,
+  composed = false,
 }: {
   data: AppDetailType;
   project: string;
   currentEnvName: string | null;
   onSaved: () => Promise<void>;
+  // composed hides the app-level VALUES editor (inert for composed apps — each
+  // component has its own values), while keeping the delivery/CD/images/previews
+  // settings below it, which ARE app-level and apply to composed apps too.
+  composed?: boolean;
 }) {
   const envs = (data.environments ?? [])
     .filter((e) => e.envType !== "preview")
@@ -2473,56 +2478,58 @@ function AppValuesEditor({
     <div className="rounded-xl border border-gray-200 bg-white">
       <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
         <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
-          Values
+          {composed ? "Settings" : "Values"}
         </h2>
-        <div className="flex items-center gap-2">
-          {/* Edit (editable overrides) vs Layers (read-only precedence stack). */}
-          <div className="flex rounded-md border border-gray-200 p-0.5 text-xs">
-            {(["edit", "layers"] as const).map((v) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={`rounded px-2 py-0.5 font-medium capitalize ${
-                  view === v ? "bg-gray-900 text-white" : "text-gray-500 hover:text-gray-800"
-                }`}
-              >
-                {v}
-              </button>
-            ))}
+        {!composed && (
+          <div className="flex items-center gap-2">
+            {/* Edit (editable overrides) vs Layers (read-only precedence stack). */}
+            <div className="flex rounded-md border border-gray-200 p-0.5 text-xs">
+              {(["edit", "layers"] as const).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  className={`rounded px-2 py-0.5 font-medium capitalize ${
+                    view === v ? "bg-gray-900 text-white" : "text-gray-500 hover:text-gray-800"
+                  }`}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+            {view === "edit" && (
+              <>
+                <select
+                  value={scope}
+                  onChange={(e) => {
+                    setScope(e.target.value);
+                    setYamlError(null);
+                  }}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                >
+                  <option value={BASE_SCOPE}>Base (all environments)</option>
+                  {envs.map((env) => (
+                    <option key={env} value={env}>
+                      {env} overrides
+                    </option>
+                  ))}
+                  {previewsEnabled && (
+                    <option value={PREVIEW_SCOPE}>preview overrides (all previews)</option>
+                  )}
+                </select>
+                <button
+                  onClick={save}
+                  disabled={saving || yamlError !== null}
+                  className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+                >
+                  {saving ? "Saving…" : "Save"}
+                </button>
+              </>
+            )}
           </div>
-          {view === "edit" && (
-            <>
-              <select
-                value={scope}
-                onChange={(e) => {
-                  setScope(e.target.value);
-                  setYamlError(null);
-                }}
-                className="rounded-md border border-gray-300 px-2 py-1 text-xs"
-              >
-                <option value={BASE_SCOPE}>Base (all environments)</option>
-                {envs.map((env) => (
-                  <option key={env} value={env}>
-                    {env} overrides
-                  </option>
-                ))}
-                {previewsEnabled && (
-                  <option value={PREVIEW_SCOPE}>preview overrides (all previews)</option>
-                )}
-              </select>
-              <button
-                onClick={save}
-                disabled={saving || yamlError !== null}
-                className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-              >
-                {saving ? "Saving…" : "Save"}
-              </button>
-            </>
-          )}
-        </div>
+        )}
       </div>
       <div className="px-5 py-4">
-        {view === "layers" && (
+        {!composed && view === "layers" && (
           <ValuesLayers
             envLabel={currentEnvName ?? previewEnv}
             templateLayer={templateLayer}
@@ -2532,7 +2539,7 @@ function AppValuesEditor({
             effective={preview}
           />
         )}
-        {view === "edit" && (
+        {!composed && view === "edit" && (
         <>
         <p className="mb-3 text-xs text-gray-400">
           {scope === BASE_SCOPE
@@ -2595,7 +2602,7 @@ function AppValuesEditor({
         </>
         )}
 
-        <div className="mt-4 border-t border-gray-100 pt-4">
+        <div className={composed ? "" : "mt-4 border-t border-gray-100 pt-4"}>
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium text-gray-700">Delivery mode</p>
@@ -3561,19 +3568,17 @@ function OverviewTab({
       {/* Add / remove / retemplate components (edit-composed). */}
       <ComponentsEditor data={data} project={project} onSaved={onSaved} />
 
-      {/* Values — edit the base + per-env override layers; preview effective.
-          Composed apps render one chart source per component with per-component
-          values, so app-level RawValues is not applied — edit each component's
-          values in the Components section above instead of showing an inert
-          editor here. */}
-      {data.components.length <= 1 && (
-        <AppValuesEditor
-          data={data}
-          project={project}
-          currentEnvName={currentEnv?.envName ?? null}
-          onSaved={onSaved}
-        />
-      )}
+      {/* App-level settings panel: values editor (single-source only — composed
+          apps edit per-component values in the Components section above) PLUS the
+          delivery/environments/clusters/CD/images/previews settings, which are
+          app-level and apply to composed apps too. */}
+      <AppValuesEditor
+        data={data}
+        project={project}
+        currentEnvName={currentEnv?.envName ?? null}
+        onSaved={onSaved}
+        composed={data.components.length > 1}
+      />
 
       {/* Legacy structured config (from the old form) — frozen, read-only. */}
       <LegacyConfigNotice data={data} />

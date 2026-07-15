@@ -575,6 +575,50 @@ func TestGetAppFound(t *testing.T) {
 	}
 }
 
+// TestGetApp_ComposedComponentsNotSuppressedForBYOPrimary guards the regression
+// where a composed app whose PRIMARY template is BYO/passthrough had ALL its
+// components suppressed (the suppression is meant only for single BYO apps'
+// phantom "web" entry). A real composed app must still list its components.
+func TestGetApp_ComposedComponentsNotSuppressedForBYOPrimary(t *testing.T) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+	store := newMemAppStore()
+	no := false
+	byo := &tpl.Template{Metadata: tpl.Metadata{Name: "web"}, Spec: tpl.TemplateSpec{InjectCanonicalValues: &no}}
+	appH := newAppHandler(store, []*tpl.Template{byo}, nil, nil)
+	rh := &rbacHandler{auth: ah, orgStore: &staticOrgProvider{org: testRBACOrg()}, appHandler: appH}
+	rh.registerRoutes(mux)
+
+	store.addApp(&domain.App{
+		Name: "compo", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web"}, // BYO/passthrough primary
+			Components: []domain.ComponentSpec{
+				{Name: "backend", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web"}},
+				{Name: "frontend", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web"}},
+			},
+		},
+	})
+
+	rec := getAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "/api/v1/projects/demo/apps/compo")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp AppDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.App.Components) != 2 {
+		t.Errorf("composed app with a BYO primary must list its 2 components, got %d", len(resp.App.Components))
+	}
+}
+
 func TestGetAppNotFound(t *testing.T) {
 	mux, ah, _ := newTestAppMux()
 
