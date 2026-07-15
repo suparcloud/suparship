@@ -15,10 +15,10 @@ import {
   upsertAppEnvSecrets,
 } from "../lib/secrets";
 import {
-  SecretValueRows,
+  KeyValueRows,
   toEntries,
-  type SecretRow,
-} from "../components/SecretValueRows";
+  type KVRow,
+} from "../components/KeyValueRows";
 import {
   ComposeComponents,
   type ComponentDraft,
@@ -337,10 +337,14 @@ function ConfigureStep({
   // secret backend is configured (see secretBackendOn).
   const [secretBackendOn, setSecretBackendOn] = useState(false);
   const [secretsExpanded, setSecretsExpanded] = useState(false);
-  const [globalSecrets, setGlobalSecrets] = useState<SecretRow[]>([]);
-  const [secretsByEnv, setSecretsByEnv] = useState<Record<string, SecretRow[]>>(
-    {},
-  );
+  const [globalSecrets, setGlobalSecrets] = useState<KVRow[]>([]);
+  const [secretsByEnv, setSecretsByEnv] = useState<Record<string, KVRow[]>>({});
+  // Non-secret env vars (config vars). Unlike secrets these are committed to Git
+  // (the app's ConfigMap), so they ride along in the create request (one atomic
+  // publish) rather than a post-create write — no backend gating, always shown.
+  const [varsExpanded, setVarsExpanded] = useState(false);
+  const [globalVars, setGlobalVars] = useState<KVRow[]>([]);
+  const [varsByEnv, setVarsByEnv] = useState<Record<string, KVRow[]>>({});
   // A non-fatal warning when the app was created but some secret writes failed —
   // the app still exists; the user finishes in its Secrets tab.
   const [secretWarning, setSecretWarning] = useState<string | null>(null);
@@ -539,6 +543,17 @@ function ConfigureStep({
     const componentsPayload: ComponentCreate[] = components.map(toComponentCreate);
     const templateName = components[0]?.template ?? template?.name ?? "";
 
+    // Non-secret env vars ride along in the create request (committed to Git in
+    // the same publish). Only include non-empty scopes so the payload stays lean.
+    const globalVarsMap = toEntries(globalVars);
+    const envConfig =
+      Object.keys(globalVarsMap).length > 0 ? { vars: globalVarsMap } : undefined;
+    const envConfigByEnv: Record<string, { vars: Record<string, string> }> = {};
+    for (const [env, rows] of Object.entries(varsByEnv)) {
+      const vars = toEntries(rows);
+      if (Object.keys(vars).length > 0) envConfigByEnv[env] = { vars };
+    }
+
     try {
       const targetClusters = buildTargetClusters(orgEnvs, targetSel);
       await createApp(project, {
@@ -551,6 +566,9 @@ function ConfigureStep({
         namespacePattern: namespacePattern.trim() || undefined,
         cd: !isDirect && cdManaged ? { managed: true } : undefined,
         deliveryMode,
+        envConfig,
+        envConfigByEnv:
+          Object.keys(envConfigByEnv).length > 0 ? envConfigByEnv : undefined,
         targetClusters:
           Object.keys(targetClusters).length > 0 ? targetClusters : undefined,
       });
@@ -831,6 +849,60 @@ function ConfigureStep({
         </FormSection>
       )}
 
+      {/* Environment variables (optional) — non-secret config vars. Committed to
+          Git with the app (one atomic publish), so they go in the create request.
+          Always available; no secret backend needed. */}
+      <FormSection title="Environment variables (optional)">
+        {!varsExpanded ? (
+          <button
+            type="button"
+            onClick={() => setVarsExpanded(true)}
+            className="rounded-md border border-dashed border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 hover:border-gray-400 hover:text-gray-900"
+          >
+            + Add environment variables
+          </button>
+        ) : (
+          <div className="space-y-6">
+            <p className="text-xs text-gray-400">
+              Non-secret config values (the app's ConfigMap), committed to Git
+              with the app. You can add or change them later in the app's
+              Variables tab. For secrets, use the section below.
+            </p>
+            <div>
+              <p className="mb-2 text-sm font-medium text-gray-700">
+                All environments
+              </p>
+              <KeyValueRows
+                rows={globalVars}
+                onChange={setGlobalVars}
+                addLabel="Add variable"
+                keyPlaceholder="VAR_NAME"
+              />
+            </div>
+            {[...orgEnvs]
+              .sort((a, b) => a.order - b.order)
+              .map((env) => (
+                <div key={env.name}>
+                  <p className="mb-2 text-sm font-medium text-gray-700">
+                    {env.displayName || env.name}{" "}
+                    <span className="text-xs font-normal text-gray-400">
+                      · overrides this env only
+                    </span>
+                  </p>
+                  <KeyValueRows
+                    rows={varsByEnv[env.name] ?? []}
+                    onChange={(rows) =>
+                      setVarsByEnv((prev) => ({ ...prev, [env.name]: rows }))
+                    }
+                    addLabel="Add variable"
+                    keyPlaceholder="VAR_NAME"
+                  />
+                </div>
+              ))}
+          </div>
+        )}
+      </FormSection>
+
       {/* Secret values (optional) — written straight to the vault after create,
           never to the create request or Git. Shown only with a backend. */}
       {secretBackendOn && (
@@ -854,9 +926,12 @@ function ConfigureStep({
                 <p className="mb-2 text-sm font-medium text-gray-700">
                   All environments
                 </p>
-                <SecretValueRows
+                <KeyValueRows
                   rows={globalSecrets}
                   onChange={setGlobalSecrets}
+                  addLabel="Add secret"
+                  keyPlaceholder="SECRET_KEY"
+                  masked
                 />
               </div>
               {[...orgEnvs]
@@ -869,11 +944,14 @@ function ConfigureStep({
                         · overrides this env only
                       </span>
                     </p>
-                    <SecretValueRows
+                    <KeyValueRows
                       rows={secretsByEnv[env.name] ?? []}
                       onChange={(rows) =>
                         setSecretsByEnv((prev) => ({ ...prev, [env.name]: rows }))
                       }
+                      addLabel="Add secret"
+                      keyPlaceholder="SECRET_KEY"
+                      masked
                     />
                   </div>
                 ))}

@@ -388,6 +388,14 @@ type createAppRequest struct {
 	// DeliveryMode is "pipeline" (default) or "direct". Omit to inherit the
 	// template's declared default (else pipeline).
 	DeliveryMode string `json:"deliveryMode,omitempty"`
+	// EnvConfig holds app-level (all-environments) non-secret env vars set at
+	// creation (the create wizard's "Environment variables" section). Unlike
+	// secrets, these are committed to Git (the app's ConfigMap), so they ride
+	// along in the create request. SecretRefs may also be supplied here.
+	EnvConfig *EnvConfigDTO `json:"envConfig,omitempty"`
+	// EnvConfigByEnv holds per-environment config-var overrides keyed by env name,
+	// each winning over EnvConfig for that env.
+	EnvConfigByEnv map[string]EnvConfigDTO `json:"envConfigByEnv,omitempty"`
 }
 
 // createAppResponse is the JSON body returned on a successful app creation.

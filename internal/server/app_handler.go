@@ -17,6 +17,7 @@ import (
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/audit"
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
@@ -323,6 +324,20 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// discovery is live; validateCDImageSource still guards that selection on the
 	// edit path.
 
+	// Non-secret env vars set at creation (create wizard "Environment variables").
+	// Committed to Git, so they ride along in the create → single atomic publish.
+	var envConfig envconfig.EnvConfig
+	if req.EnvConfig != nil {
+		envConfig = fromEnvConfigDTO(*req.EnvConfig)
+	}
+	var envConfigByEnv map[string]envconfig.EnvConfig
+	if len(req.EnvConfigByEnv) > 0 {
+		envConfigByEnv = make(map[string]envconfig.EnvConfig, len(req.EnvConfigByEnv))
+		for env, dto := range req.EnvConfigByEnv {
+			envConfigByEnv[env] = fromEnvConfigDTO(dto)
+		}
+	}
+
 	result, err := domainapp.Create(domainapp.CreateRequest{
 		ProjectName:        projectName,
 		AppName:            req.Name,
@@ -339,6 +354,8 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		RawValues:          req.RawValues,
 		ComponentConfigs:   req.ComponentConfigs,
 		EnvComponents:      req.EnvComponents,
+		EnvConfig:          envConfig,
+		EnvConfigByEnv:     envConfigByEnv,
 		CD:                 cdConfigFromDTO(req.CD),
 		Images:             imageBindings,
 		DeliveryMode:       deliveryMode,

@@ -1,18 +1,17 @@
-// SecretValueRows is a buffer-only key/value editor for secret VALUES entered
-// before the target (app/env) exists — e.g. the create wizard. Unlike
-// SecretEditor (which fetches key names and upserts to a live vault via
-// callbacks), this holds rows purely in the parent's state; the parent flushes
-// them to the /secrets API AFTER the app is created. Values are masked and never
-// leave component state until that post-create flush.
+// KeyValueRows is a buffer-only key/value editor for values entered before the
+// target (app/env) exists — e.g. the create wizard. It holds rows purely in the
+// parent's state; the parent decides where they go (a config-var field in the
+// create request, or a post-create secret upsert). Set `masked` for secret
+// values (password inputs); leave it off for visible config vars.
 
-export interface SecretRow {
+export interface KVRow {
   key: string;
   value: string;
 }
 
-// toEntries coerces rows to the { KEY: value } map the upsert API takes, dropping
-// rows with a blank key (a blank value is allowed — an intentionally empty secret).
-export function toEntries(rows: SecretRow[]): Record<string, string> {
+// toEntries coerces rows to the { KEY: value } map the API takes, dropping rows
+// with a blank key (a blank value is allowed — an intentionally empty entry).
+export function toEntries(rows: KVRow[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const r of rows) {
     const k = r.key.trim();
@@ -21,16 +20,20 @@ export function toEntries(rows: SecretRow[]): Record<string, string> {
   return out;
 }
 
-export function SecretValueRows({
+export function KeyValueRows({
   rows,
   onChange,
-  addLabel = "Add secret",
+  addLabel = "Add",
+  masked = false,
+  keyPlaceholder = "KEY",
 }: {
-  rows: SecretRow[];
-  onChange: (rows: SecretRow[]) => void;
+  rows: KVRow[];
+  onChange: (rows: KVRow[]) => void;
   addLabel?: string;
+  masked?: boolean;
+  keyPlaceholder?: string;
 }) {
-  function update(i: number, patch: Partial<SecretRow>) {
+  function update(i: number, patch: Partial<KVRow>) {
     onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   }
   function remove(i: number) {
@@ -50,13 +53,13 @@ export function SecretValueRows({
           <input
             type="text"
             className={`${inputCls} w-56 font-mono`}
-            placeholder="SECRET_KEY"
+            placeholder={keyPlaceholder}
             value={r.key}
             onChange={(e) => update(i, { key: e.target.value })}
           />
           <input
-            type="password"
-            autoComplete="new-password"
+            type={masked ? "password" : "text"}
+            autoComplete={masked ? "new-password" : "off"}
             className={`${inputCls} min-w-[10rem] flex-1`}
             placeholder="value"
             value={r.value}
@@ -66,7 +69,7 @@ export function SecretValueRows({
             type="button"
             onClick={() => remove(i)}
             className="rounded-md px-2 py-1 text-xs text-gray-400 hover:bg-red-50 hover:text-red-600"
-            aria-label="Remove secret"
+            aria-label="Remove entry"
           >
             ✕
           </button>

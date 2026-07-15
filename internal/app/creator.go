@@ -13,6 +13,7 @@ import (
 	"sort"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/helmvalues"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/tpl"
@@ -237,6 +238,13 @@ type CreateRequest struct {
 	// EnvComponents holds per-(env, component) overrides keyed env → component,
 	// folded into the app's EnvironmentDefaults at creation. Optional.
 	EnvComponents map[string]map[string]domain.ComponentConfig
+	// EnvConfig holds app-level (all-environments) non-secret env vars + secret
+	// refs, set at creation — the create wizard's "Environment variables" section.
+	// Committed to Git (the app's ConfigMap). Optional.
+	EnvConfig envconfig.EnvConfig
+	// EnvConfigByEnv holds per-environment config overrides keyed by env name,
+	// folded into EnvironmentDefaults at creation (wins over EnvConfig). Optional.
+	EnvConfigByEnv map[string]envconfig.EnvConfig
 	// CD configures external-CD (Kargo) ownership of the deployed image tag.
 	// Zero value disables it (the platform owns the tag). Optional.
 	CD domain.CDConfig
@@ -349,6 +357,24 @@ func Create(req CreateRequest) (*CreateResult, error) {
 		if app.Spec.EnvironmentDefaults == nil {
 			app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
 		}
+		app.Spec.EnvironmentDefaults[envName] = ov
+	}
+
+	// App-level (all-env) non-secret env vars set at creation.
+	if len(req.EnvConfig.Vars) > 0 || len(req.EnvConfig.SecretRefs) > 0 {
+		app.Spec.EnvConfig = req.EnvConfig
+	}
+	// Per-env config overrides fold into EnvironmentDefaults[env].EnvConfig
+	// (alongside any Components override set above for the same env).
+	for envName, cfg := range req.EnvConfigByEnv {
+		if len(cfg.Vars) == 0 && len(cfg.SecretRefs) == 0 {
+			continue
+		}
+		if app.Spec.EnvironmentDefaults == nil {
+			app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+		}
+		ov := app.Spec.EnvironmentDefaults[envName]
+		ov.EnvConfig = cfg
 		app.Spec.EnvironmentDefaults[envName] = ov
 	}
 

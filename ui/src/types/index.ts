@@ -910,6 +910,10 @@ export interface CreateAppRequest {
    *  of that env's clusters (dynamic); explicit list = that subset; an omitted
    *  env (or empty array) = inherit the env default (active cluster). */
   targetClusters?: Record<string, string[]>;
+  /** App-level (all-environments) non-secret env vars, committed to Git. */
+  envConfig?: { vars?: Record<string, string> };
+  /** Per-env non-secret env-var overrides, keyed env name (wins over envConfig). */
+  envConfigByEnv?: Record<string, { vars?: Record<string, string> }>;
 }
 
 export interface CreateAppResponse {

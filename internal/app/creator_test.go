@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
@@ -668,6 +669,39 @@ func TestCreate_ReturnsAppAndEnvironments(t *testing.T) {
 	}
 	if len(result.Environments) != 2 {
 		t.Errorf("expected 2 environments, got %d", len(result.Environments))
+	}
+}
+
+// TestCreate_EnvConfigSetAtCreation verifies the create wizard's non-secret env
+// vars land on the app spec: app-global on AppSpec.EnvConfig and per-env on
+// EnvironmentDefaults[env].EnvConfig, so the initial publish commits them.
+func TestCreate_EnvConfigSetAtCreation(t *testing.T) {
+	result, err := Create(CreateRequest{
+		ProjectName: "demo",
+		AppName:     "my-app",
+		Template:    minimalTemplateWithComponents(),
+		Values:      map[string]any{"image": "ghcr.io/org/app:v1"},
+		EnvConfig:   envconfig.EnvConfig{Vars: map[string]string{"LOG_LEVEL": "info"}},
+		EnvConfigByEnv: map[string]envconfig.EnvConfig{
+			"prod":  {Vars: map[string]string{"LOG_LEVEL": "warn"}},
+			"empty": {}, // dropped
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := result.App.Spec.EnvConfig.Vars["LOG_LEVEL"]; got != "info" {
+		t.Errorf("app-global LOG_LEVEL = %q, want info", got)
+	}
+	prod, ok := result.App.Spec.EnvironmentDefaults["prod"]
+	if !ok {
+		t.Fatal("expected a prod EnvironmentDefaults override")
+	}
+	if got := prod.EnvConfig.Vars["LOG_LEVEL"]; got != "warn" {
+		t.Errorf("prod LOG_LEVEL = %q, want warn (per-env override)", got)
+	}
+	if _, exists := result.App.Spec.EnvironmentDefaults["empty"]; exists {
+		t.Error("empty per-env config must not create an EnvironmentDefaults entry")
 	}
 }
 
