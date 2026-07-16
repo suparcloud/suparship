@@ -1092,18 +1092,6 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	})
 
 	detail := appToDetailDTO(app, envs)
-	// A SINGLE-source BYO/passthrough app doesn't use the canonical component model
-	// — the chart owns its workloads — so a declared "components" entry is
-	// meaningless (older apps carried a phantom "web" one). Suppress it so the UI's
-	// Runtime-components panel disappears. A COMPOSED app (≥2 components), by
-	// contrast, has real per-component chart sources even when its primary template
-	// is BYO — those must NOT be suppressed, else the detail page hides its makeup.
-	if !app.Spec.IsComposed() {
-		if t, ok := ah.lookupTemplate(r.Context(), app.Spec.Template.Name); ok && !t.Spec.CanonicalValues() {
-			detail.Components = []ComponentSummaryDTO{} // empty (not nil) → JSON [], UI renders nothing
-		}
-	}
-
 	writeJSON(w, http.StatusOK, AppDetailResponse{App: detail})
 }
 
@@ -3306,7 +3294,7 @@ func appToSummaryDTO(app *domain.App, envs []*domain.AppEnvironment) AppSummaryD
 		},
 		URLs:         []string{},
 		Environments: envDTOs,
-		Components:   componentDTOs(app.Spec.Components, app.Spec.EnvironmentDefaults),
+		Components:   componentDTOs(app.EffectiveComponents(), app.Spec.EnvironmentDefaults),
 		Status:       AppStatusSummaryDTO{Phase: summaryPhase(envDTOs)},
 	}
 
@@ -3424,7 +3412,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		},
 		Values:           values,
 		SecretRefs:       secretRefs,
-		Components:       componentDTOs(app.Spec.Components, app.Spec.EnvironmentDefaults),
+		Components:       componentDTOs(app.EffectiveComponents(), app.Spec.EnvironmentDefaults),
 		Environments:     envDTOs,
 		ClusterOverrides: clusterOverridesDTO(app.Spec.EnvironmentDefaults),
 		TargetClusters:   targetClustersDTO(app.Spec.EnvironmentDefaults),

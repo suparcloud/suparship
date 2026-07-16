@@ -168,11 +168,16 @@ export function ComposeComponents({
   components,
   onChange,
   configVars,
+  structuralOnly = false,
 }: {
   templates: TemplateSummary[];
   components: ComponentDraft[];
   onChange: (next: ComponentDraft[]) => void;
   configVars?: ConfigVariables | null;
+  // structuralOnly hides the per-component values editor (name/template/type/
+  // expose/env/stateful only). Used on the app detail page, where values are
+  // edited inline in each component's card instead.
+  structuralOnly?: boolean;
 }) {
   // Effective-values base (chart + platform defaults) per template, for the
   // read-only preview pane. Fetched once per distinct template and cached; two
@@ -380,7 +385,9 @@ export function ComposeComponents({
 
           {/* Per-component values overlay — deep-merged onto this component's
               chart values, in the chart's own schema (canonical or BYO) — plus a
-              read-only effective preview (chart + platform defaults ⊕ overrides). */}
+              read-only effective preview (chart + platform defaults ⊕ overrides).
+              Hidden in structuralOnly mode (values edited inline in the card). */}
+          {!structuralOnly && (
           <div className="mt-3">
             <label className={labelCls}>
               Values{" "}
@@ -428,6 +435,7 @@ export function ComposeComponents({
               </div>
             </Suspense>
           </div>
+          )}
 
           {/* Environment: inherit all app vars, or curate a subset. */}
           <div className="mt-3 border-t border-gray-100 pt-3">

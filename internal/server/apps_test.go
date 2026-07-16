@@ -619,6 +619,80 @@ func TestGetApp_ComposedComponentsNotSuppressedForBYOPrimary(t *testing.T) {
 	}
 }
 
+// TestGetApp_SingleSourceBYOComponentSurfaced verifies a SINGLE-source BYO/
+// passthrough app now surfaces its component (previously suppressed) so the
+// unified component-based detail page can render + edit it.
+func TestGetApp_SingleSourceBYOComponentSurfaced(t *testing.T) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+	store := newMemAppStore()
+	no := false
+	byo := &tpl.Template{Metadata: tpl.Metadata{Name: "gw"}, Spec: tpl.TemplateSpec{InjectCanonicalValues: &no}}
+	appH := newAppHandler(store, []*tpl.Template{byo}, nil, nil)
+	rh := &rbacHandler{auth: ah, orgStore: &staticOrgProvider{org: testRBACOrg()}, appHandler: appH}
+	rh.registerRoutes(mux)
+
+	store.addApp(&domain.App{
+		Name: "tts", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "gw"}, // BYO/passthrough, single-source
+			Components: []domain.ComponentSpec{
+				{Name: "backend", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "gw"}},
+			},
+		},
+	})
+
+	rec := getAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "/api/v1/projects/demo/apps/tts")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp AppDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.App.Components) != 1 || resp.App.Components[0].Name != "backend" {
+		t.Errorf("single-source BYO app must surface its component, got %+v", resp.App.Components)
+	}
+}
+
+// TestGetApp_EmptyComponentsSynthesizesPrimary verifies a legacy single-source app
+// with NO stored components gets one synthesized primary, so the component-based
+// detail page always has a row.
+func TestGetApp_EmptyComponentsSynthesizesPrimary(t *testing.T) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+	store := newMemAppStore()
+	appH := newAppHandler(store, []*tpl.Template{{Metadata: tpl.Metadata{Name: "web"}}}, nil, nil)
+	rh := &rbacHandler{auth: ah, orgStore: &staticOrgProvider{org: testRBACOrg()}, appHandler: appH}
+	rh.registerRoutes(mux)
+
+	store.addApp(&domain.App{
+		Name: "legacy", ProjectName: "demo",
+		Spec: domain.AppSpec{Template: domain.AppTemplateRef{Name: "web"}}, // no Components
+	})
+
+	rec := getAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "/api/v1/projects/demo/apps/legacy")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp AppDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.App.Components) != 1 || resp.App.Components[0].Name != "legacy" {
+		t.Errorf("legacy empty-components app must synthesize a primary, got %+v", resp.App.Components)
+	}
+}
+
 func TestGetAppNotFound(t *testing.T) {
 	mux, ah, _ := newTestAppMux()
 

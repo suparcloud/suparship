@@ -288,3 +288,34 @@ func TestWorkloadInstances(t *testing.T) {
 		t.Errorf("InstanceForComponent(nope) = %q, want empty", composed.InstanceForComponent("nope"))
 	}
 }
+
+// TestEffectiveComponents verifies the unified-model component surfacing: an app
+// with stored components returns them; a legacy single-source app with none gets
+// one synthesized primary from its template (so the component-based UI has a row).
+func TestEffectiveComponents(t *testing.T) {
+	// Stored components are returned as-is.
+	withComps := &App{Name: "bigly", Spec: AppSpec{
+		Template: AppTemplateRef{Name: "web"},
+		Components: []ComponentSpec{
+			{Name: "api", Type: ComponentWeb, Enabled: true, Template: &AppTemplateRef{Name: "web"}},
+		},
+	}}
+	if got := withComps.EffectiveComponents(); len(got) != 1 || got[0].Name != "api" {
+		t.Errorf("stored components should pass through, got %+v", got)
+	}
+
+	// Empty components + a template → one synthesized primary named after the app.
+	legacy := &App{Name: "gateway", Spec: AppSpec{Template: AppTemplateRef{Name: "byo-gw"}}}
+	got := legacy.EffectiveComponents()
+	if len(got) != 1 {
+		t.Fatalf("legacy single-source app should synthesize 1 component, got %d", len(got))
+	}
+	if got[0].Name != "gateway" || got[0].Template == nil || got[0].Template.Name != "byo-gw" || !got[0].Enabled {
+		t.Errorf("synthesized primary = %+v, want name=gateway template=byo-gw enabled", got[0])
+	}
+
+	// No template and no components → nothing to synthesize.
+	if got := (&App{Name: "empty"}).EffectiveComponents(); got != nil {
+		t.Errorf("no template + no components → nil, got %+v", got)
+	}
+}

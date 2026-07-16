@@ -623,6 +623,28 @@ func (s *AppSpec) BackfillComponentTemplates() {
 	}
 }
 
+// EffectiveComponents returns the app's components for display and per-component
+// editing. In the unified model every app is a list of components; a legacy
+// single-source app that has no stored components yields ONE synthesized primary
+// component from AppSpec.Template, so the component-based UI always has a row to
+// render (its overlay is the app-level rawValues, edited app-level). Apps that
+// already carry components — composed or modern single-source — return them as-is.
+func (a *App) EffectiveComponents() []ComponentSpec {
+	if len(a.Spec.Components) > 0 {
+		return a.Spec.Components
+	}
+	if a.Spec.Template.Name == "" {
+		return nil
+	}
+	t := a.Spec.Template
+	return []ComponentSpec{{
+		Name:     a.Name,
+		Type:     ComponentWeb,
+		Enabled:  true,
+		Template: &t,
+	}}
+}
+
 // ComposedComponents returns the app's components in deterministic (name-sorted)
 // order for composed rendering. Only meaningful when IsComposed is true.
 func (s AppSpec) ComposedComponents() []ComponentSpec {
