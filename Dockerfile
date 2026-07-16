@@ -25,8 +25,19 @@ ARG TARGETPLATFORM
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
-RUN apk add --no-cache clang lld
-RUN xx-apk add --no-cache musl-dev gcc
+# Retry apk installs: the Alpine CDN (dl-cdn.alpinelinux.org) intermittently
+# fails the APKINDEX TLS handshake on CI runners, which surfaces as a spurious
+# "no such package" for clang/lld (both live in Alpine main). A short backoff
+# loop turns those transient fetch failures into a successful build instead of a
+# red pipeline.
+RUN for i in 1 2 3 4 5; do \
+      apk add --no-cache clang lld && exit 0; \
+      echo "apk add failed (attempt $i/5), retrying in 5s…" >&2; sleep 5; \
+    done; echo "apk add clang lld: exhausted retries" >&2; exit 1
+RUN for i in 1 2 3 4 5; do \
+      xx-apk add --no-cache musl-dev gcc && exit 0; \
+      echo "xx-apk add failed (attempt $i/5), retrying in 5s…" >&2; sleep 5; \
+    done; echo "xx-apk add musl-dev gcc: exhausted retries" >&2; exit 1
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
