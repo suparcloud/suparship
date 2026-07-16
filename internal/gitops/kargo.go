@@ -431,7 +431,19 @@ func buildComposedPromotionTemplate(app *domain.App, env domain.AppEnvironment, 
 			},
 		},
 	}
-	// One yaml-update per component values file.
+	// Target clusters mirror the publisher's fan-out: with several clusters each
+	// component's values live per-cluster under _clusters/<cluster>/…, so the
+	// promoted tag must be written into every cluster's file; a single target uses
+	// the shared components/<name>/values.yaml path.
+	clusters := opts.Clusters
+	fanOut := len(clusters) > 1
+	compValuePath := func(cluster, comp string) string {
+		if fanOut {
+			return joinSubPath(opts.SubPath, "envs", env.EnvName, "_clusters", cluster, app.ProjectName, app.Name, "components", comp, "values.yaml")
+		}
+		return joinSubPath(opts.SubPath, "envs", env.EnvName, app.ProjectName, app.Name, "components", comp, "values.yaml")
+	}
+	// One yaml-update per (cluster, component) values file.
 	for _, comp := range order {
 		updates := make([]map[string]any, 0, len(byComp[comp]))
 		for _, img := range byComp[comp] {
@@ -440,14 +452,25 @@ func buildComposedPromotionTemplate(app *domain.App, env domain.AppEnvironment, 
 				"value": fmt.Sprintf("${{ imageFrom(%q).Tag }}", img.Repository),
 			})
 		}
-		path := joinSubPath(opts.SubPath, "envs", env.EnvName, app.ProjectName, app.Name, "components", comp, "values.yaml")
-		steps = append(steps, PromotionStep{
-			Uses: "yaml-update",
-			Config: map[string]any{
-				"path":    "./src/" + path,
-				"updates": updates,
-			},
-		})
+		if !fanOut {
+			steps = append(steps, PromotionStep{
+				Uses: "yaml-update",
+				Config: map[string]any{
+					"path":    "./src/" + compValuePath("", comp),
+					"updates": updates,
+				},
+			})
+			continue
+		}
+		for _, cl := range clusters {
+			steps = append(steps, PromotionStep{
+				Uses: "yaml-update",
+				Config: map[string]any{
+					"path":    "./src/" + compValuePath(cl.Name, comp),
+					"updates": updates,
+				},
+			})
+		}
 	}
 	steps = append(steps,
 		PromotionStep{

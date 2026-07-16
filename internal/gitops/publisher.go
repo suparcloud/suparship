@@ -918,37 +918,64 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			ns = app.Name + "-" + env.EnvName
 		}
 
-		// MVP: one target cluster (the env's active / sole cluster). Multi-cluster
-		// fan-out is deferred.
-		target := activeTarget(env)
-		baseDomain := env.BaseDomain
-		if target.BaseDomain != "" {
-			baseDomain = target.BaseDomain
+		// Target clusters for this env: the app's resolved selection (fan-out to
+		// several, or a single / non-active cluster), mirroring the single-source
+		// path. Fallback to the env's active/sole cluster ref when unset.
+		targets := env.Clusters
+		if len(targets) == 0 {
+			targets = []ClusterTarget{{Name: env.ClusterRef, Server: activeTarget(env).Server, BaseDomain: env.BaseDomain}}
+		}
+		fanOut := len(targets) > 1
+		// Per-component values path: shared under {project}/{app}/components/ for a
+		// single target, or fanned out under _clusters/{cluster}/… so each cluster
+		// carries its own component values (its own routing host, cluster overlay,
+		// and Kargo-committed tag).
+		compValueParts := func(cluster, comp string) []string {
+			if fanOut {
+				return []string{"_clusters", cluster, app.ProjectName, app.Name, "components", comp, "values.yaml"}
+			}
+			return []string{app.ProjectName, app.Name, "components", comp, "values.yaml"}
 		}
 
 		// Prune stale composed trees for this app-env first, then rewrite — so a
 		// removed component's values.yaml / a de-selected cluster's manifest don't
 		// linger and generate a phantom resource.
-		// CD.Managed: capture each component's Kargo-committed image tag(s) BEFORE
-		// the prune wipes the values files, so the republish re-applies the promoted
-		// tag instead of resetting it to the overlay seed (the composed analog of the
-		// single-source preserveTag). Keyed component → tagKey → tag.
-		preservedTags := map[string]map[string]string{}
+		// CD.Managed: capture each component's Kargo-committed image tag(s) per
+		// target cluster BEFORE the prune wipes the values files, so the republish
+		// re-applies the promoted tag instead of resetting it to the overlay seed
+		// (the composed analog of the single-source preserveTag). Keyed
+		// cluster → component → tagKey → tag.
+		preservedTags := map[string]map[string]map[string]string{}
 		if app.Spec.CD.Managed {
-			for _, c := range app.Spec.ComposedComponents() {
-				vp := p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components", c.Name, "values.yaml")
-				for _, img := range c.Images {
-					if tag := existingImageTag(vp, img.TagKey); tag != "" {
-						if preservedTags[c.Name] == nil {
-							preservedTags[c.Name] = map[string]string{}
+			for _, target := range targets {
+				for _, c := range app.Spec.ComposedComponents() {
+					vp := p.appEnvDir(repoDir, env, compValueParts(target.Name, c.Name)...)
+					for _, img := range c.Images {
+						if tag := existingImageTag(vp, img.TagKey); tag != "" {
+							if preservedTags[target.Name] == nil {
+								preservedTags[target.Name] = map[string]map[string]string{}
+							}
+							if preservedTags[target.Name][c.Name] == nil {
+								preservedTags[target.Name][c.Name] = map[string]string{}
+							}
+							preservedTags[target.Name][c.Name][img.TagKey] = tag
 						}
-						preservedTags[c.Name][img.TagKey] = tag
 					}
 				}
 			}
 		}
 		if err := os.RemoveAll(p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components")); err != nil {
 			return fmt.Errorf("prune composed component values for env %s: %w", env.EnvName, err)
+		}
+		// Drop every per-cluster component-values tree for this app (all clusters,
+		// selected or not) so a de-selected cluster leaves no orphaned values; the
+		// selected clusters are rewritten below.
+		if matches, _ := filepath.Glob(p.appEnvDir(repoDir, env, "_clusters", "*", app.ProjectName, app.Name, "components")); len(matches) > 0 {
+			for _, m := range matches {
+				if err := os.RemoveAll(m); err != nil {
+					return fmt.Errorf("prune per-cluster composed values for env %s: %w", env.EnvName, err)
+				}
+			}
 		}
 		if err := os.RemoveAll(p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets")); err != nil {
 			return fmt.Errorf("prune composed manifests for env %s: %w", env.EnvName, err)
@@ -960,13 +987,6 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			return fmt.Errorf("prune component projections for env %s: %w", env.EnvName, err)
 		}
 
-		// Per-component values: a single-component projection of the canonical
-		// values, so each component's own chart consumes exactly its
-		// components.<name> block, with the component's own Values overlay
-		// (value-based config — image/port/command/etc. in its chart's own shape)
-		// deep-merged on top. The overlay is component-scoped (written only to this
-		// component's file), so a sibling's keys can't leak in; env vars are
-		// threaded so ((platform.*))/((vars.*)) tokens resolve.
 		// Interpolate the merged app config once so both the app-wide ConfigMap and
 		// any per-component projection resolve ((platform.*))/((vars.*)) the same way.
 		resolvedVars := env.EnvVars
@@ -974,149 +994,177 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			resolvedVars = p.platformVarsContext(app, env, orgName).InterpolateMap(resolvedVars)
 		}
 
-		componentValues := make(map[string]string, len(app.Spec.Components))
+		// Env-level per-component config/secret projections (one object per env,
+		// shared across the env's target clusters). A component that opts out of the
+		// app-wide vars points platform.configMapName at its own curated ConfigMap
+		// and gets no app secrets (platform.secretName="") unless it curates a
+		// renamed subset. suparship renders the projection objects here once; the
+		// per-cluster loop below only sets the two platform names on each cluster's hv.
+		type componentProjection struct{ configName, secretName string }
+		projections := map[string]componentProjection{}
 		for _, c := range app.Spec.ComposedComponents() {
-			hv := helmvalues.MapComponentHelmValuesForEnv(app, c, componentKeys[c.Name], env.EnvName, env.EnvType, baseDomain, ns, target.Name, orgName,
-				p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
-			// Per-component env scoping: a component that opts out of the app-wide
-			// vars points platform.configMapName at its own curated ConfigMap and
-			// gets no app secrets (platform.secretName=""); suparship renders the
-			// projection object. The chart just envFroms the two platform names.
-			if projName, projVars := componentConfigProjection(app.Name, c, resolvedVars); projName != "" {
-				hv.Platform.ConfigMapName = projName
-				hv.Platform.SecretName = ""
-				if err := p.writeComponentConfigMap(repoDir, env, app, c.Name, projName, ns, projVars); err != nil {
-					return fmt.Errorf("writing component config for %s env %s: %w", c.Name, env.EnvName, err)
-				}
-				// A component may curate a SUBSET of app secret keys (renamed) into
-				// its own <app>-<component>-secrets, which platform.secretName then
-				// points at; suparship renders the ExternalSecret data[] projection.
-				if renames := componentSecretRenames(c); renames != nil {
-					if esCfg := p.buildComponentExternalSecret(env, app, c.Name, ns, renames); esCfg != nil {
-						if err := p.writeComponentExternalSecret(repoDir, env, app, c.Name, esCfg); err != nil {
-							return fmt.Errorf("writing component secret for %s env %s: %w", c.Name, env.EnvName, err)
-						}
-						hv.Platform.SecretName = esCfg.Name
+			projName, projVars := componentConfigProjection(app.Name, c, resolvedVars)
+			if projName == "" {
+				continue // inherits the app-wide config/secret — hv keeps the mapper defaults
+			}
+			proj := componentProjection{configName: projName, secretName: ""}
+			if err := p.writeComponentConfigMap(repoDir, env, app, c.Name, projName, ns, projVars); err != nil {
+				return fmt.Errorf("writing component config for %s env %s: %w", c.Name, env.EnvName, err)
+			}
+			// A component may curate a SUBSET of app secret keys (renamed) into its
+			// own <app>-<component>-secrets, which platform.secretName then points at;
+			// suparship renders the ExternalSecret data[] projection.
+			if renames := componentSecretRenames(c); renames != nil {
+				if esCfg := p.buildComponentExternalSecret(env, app, c.Name, ns, renames); esCfg != nil {
+					if err := p.writeComponentExternalSecret(repoDir, env, app, c.Name, esCfg); err != nil {
+						return fmt.Errorf("writing component secret for %s env %s: %w", c.Name, env.EnvName, err)
 					}
+					proj.secretName = esCfg.Name
 				}
 			}
-			// Component overlay, layered low→high (each later layer wins):
-			//  1. the Platform-Engineer value overlays for THIS component's template —
-			//     the template's DefaultValues + EnvValues[env] AND the org-level
-			//     TemplateOverride (Default + Env[env] + Cluster[activeCluster]),
-			//     threaded from the server as env.ComponentPlatformValues[name];
-			//  2. the component's own ComponentSpec.Values;
-			//  3. the per-env override (EnvironmentDefaults[env].ComponentValues[name]).
-			overlay := map[string]any{}
-			if pv, ok := env.ComponentPlatformValues[c.Name]; ok {
-				overlay = deepMerge(deepCopyMap(pv.Default), deepCopyMap(pv.Env))
-				if target.Name != "" && pv.Cluster != nil {
-					overlay = deepMerge(overlay, deepCopyMap(pv.Cluster[target.Name]))
-				}
-			}
-			overlay = deepMerge(overlay, deepCopyMap(c.Values))
-			if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && len(ov.ComponentValues[c.Name]) > 0 {
-				overlay = deepMerge(overlay, deepCopyMap(ov.ComponentValues[c.Name]))
-			}
-			// Re-apply the Kargo-committed tag(s) captured above so a promoted tag
-			// survives republish (setStringAtPath on the overlay: for a passthrough
-			// component the overlay IS the values; for a canonical one it deep-merges
-			// over the generated doc, so the preserved tag wins).
-			if tags := preservedTags[c.Name]; len(tags) > 0 {
-				o := deepCopyMap(overlay)
-				if o == nil {
-					o = map[string]any{}
-				}
-				for k, v := range tags {
-					setStringAtPath(o, k, v)
-				}
-				overlay = o
-			}
-			// A BYO/passthrough component gets ONLY its own overlay (the chart's own
-			// values.yaml is the Helm base); platform.* is available via ((platform.*))
-			// tokens. suparship injects no canonical app/components/routing/image
-			// schema. A canonical component gets the full suparship-common doc.
-			var hvBytes []byte
-			var err error
-			if componentCanonical[c.Name] {
-				hvBytes, err = marshalValuesWithOverlay(hv, overlay, env.EnvVars)
-			} else {
-				hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, env.EnvVars)
-			}
-			if err != nil {
-				return fmt.Errorf("marshal values.yaml for component %s env %s: %w", c.Name, env.EnvName, err)
-			}
-			valuesAbs := p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components", c.Name, "values.yaml")
-			if err := p.writeFile(valuesAbs, hvBytes); err != nil {
-				return err
-			}
-			componentValues[c.Name] = p.envAppRelPath(AppMetadataChartTypeInline, env, app.ProjectName, app.Name, "components", c.Name, "values.yaml")
+			projections[c.Name] = proj
 		}
 
-		// Rendered multi-source Application for this (app, cluster).
-		targetName := target.Name
-		if targetName == "" {
-			targetName = fallbackClusterName
-		}
-		server := target.Server
-		if server == "" {
-			server = defaultDestination
-		}
 		// Pipeline apps: authorize this env's Kargo Stage to sync the Application
 		// (argocd-update). Direct apps have no Kargo, so no annotation.
 		kargoStage := ""
 		if !app.Spec.IsDirect() {
 			kargoStage = KargoStageName(app.Name, env.EnvName)
 		}
-		composedOpts := ComposedBuildOptions{
-			RepoURL:         p.cfg.ArgoCDRepoURL,
-			SubPath:         p.cfg.SubPath,
-			AppName:         RenderArgoAppName(namePattern, app.ProjectName, app.Name, env.EnvName, targetName),
-			EnvName:         env.EnvName,
-			ClusterName:     targetName,
-			ClusterServer:   server,
-			Namespace:       ns,
-			SyncAutomated:   p.cfg.SyncAutomated,
-			ComponentValues: componentValues,
-			KargoStage:      kargoStage,
-		}
-		// Main multi-source Application — the non-stateful components. Skip writing
-		// it when the app is all-stateful (it would carry only the $appvalues ref
-		// source, no chart sources).
-		if manifest := BuildComposedApplication(app, composedOpts); len(manifest.Spec.Sources) > 1 {
-			manifestBytes, err := yaml.Marshal(manifest)
-			if err != nil {
-				return fmt.Errorf("marshal Application for env %s cluster %s: %w", env.EnvName, targetName, err)
+
+		// Fan out over the env's target clusters: each writes its own per-component
+		// values (single-component projection of the canonical values, with the
+		// component's own Values overlay + this cluster's platform-value overlay +
+		// preserved tag) and its own rendered multi-source Application manifest.
+		for _, target := range targets {
+			baseDomain := env.BaseDomain
+			if target.BaseDomain != "" {
+				baseDomain = target.BaseDomain
 			}
-			manifestPath := p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets", targetName, "application.yaml")
-			if err := p.writeFile(manifestPath, manifestBytes); err != nil {
-				return err
+			targetName := target.Name
+			if targetName == "" {
+				targetName = fallbackClusterName
 			}
-		}
-		// Each stateful component: its OWN prune-disabled Application, auto-discovered
-		// by the recurse composed root app. Written alongside the main manifest.
-		for _, c := range app.Spec.StatefulComponents() {
-			compManifest := BuildComponentApplication(app, c, composedOpts)
-			compBytes, err := yaml.Marshal(compManifest)
-			if err != nil {
-				return fmt.Errorf("marshal stateful component Application %s env %s: %w", c.Name, env.EnvName, err)
+			server := target.Server
+			if server == "" {
+				server = defaultDestination
 			}
-			compPath := p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets", targetName, c.Name+"-application.yaml")
-			if err := p.writeFile(compPath, compBytes); err != nil {
-				return err
+
+			componentValues := make(map[string]string, len(app.Spec.Components))
+			for _, c := range app.Spec.ComposedComponents() {
+				hv := helmvalues.MapComponentHelmValuesForEnv(app, c, componentKeys[c.Name], env.EnvName, env.EnvType, baseDomain, ns, target.Name, orgName,
+					p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
+				// Curated component: point the two platform names at the env-level
+				// projection objects rendered above. The chart just envFroms them.
+				if proj, ok := projections[c.Name]; ok {
+					hv.Platform.ConfigMapName = proj.configName
+					hv.Platform.SecretName = proj.secretName
+				}
+				// Component overlay, layered low→high (each later layer wins):
+				//  1. the Platform-Engineer value overlays for THIS component's template —
+				//     the template's DefaultValues + EnvValues[env] AND the org-level
+				//     TemplateOverride (Default + Env[env] + Cluster[thisCluster]),
+				//     threaded from the server as env.ComponentPlatformValues[name];
+				//  2. the component's own ComponentSpec.Values;
+				//  3. the per-env override (EnvironmentDefaults[env].ComponentValues[name]).
+				overlay := map[string]any{}
+				if pv, ok := env.ComponentPlatformValues[c.Name]; ok {
+					overlay = deepMerge(deepCopyMap(pv.Default), deepCopyMap(pv.Env))
+					if target.Name != "" && pv.Cluster != nil {
+						overlay = deepMerge(overlay, deepCopyMap(pv.Cluster[target.Name]))
+					}
+				}
+				overlay = deepMerge(overlay, deepCopyMap(c.Values))
+				if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && len(ov.ComponentValues[c.Name]) > 0 {
+					overlay = deepMerge(overlay, deepCopyMap(ov.ComponentValues[c.Name]))
+				}
+				// Re-apply this cluster's Kargo-committed tag(s) captured above so a
+				// promoted tag survives republish (setStringAtPath on the overlay: for
+				// a passthrough component the overlay IS the values; for a canonical
+				// one it deep-merges over the generated doc, so the preserved tag wins).
+				if tags := preservedTags[target.Name][c.Name]; len(tags) > 0 {
+					o := deepCopyMap(overlay)
+					if o == nil {
+						o = map[string]any{}
+					}
+					for k, v := range tags {
+						setStringAtPath(o, k, v)
+					}
+					overlay = o
+				}
+				// A BYO/passthrough component gets ONLY its own overlay (the chart's own
+				// values.yaml is the Helm base); platform.* is available via ((platform.*))
+				// tokens. suparship injects no canonical app/components/routing/image
+				// schema. A canonical component gets the full suparship-common doc.
+				var hvBytes []byte
+				var err error
+				if componentCanonical[c.Name] {
+					hvBytes, err = marshalValuesWithOverlay(hv, overlay, env.EnvVars)
+				} else {
+					hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, env.EnvVars)
+				}
+				if err != nil {
+					return fmt.Errorf("marshal values.yaml for component %s env %s cluster %s: %w", c.Name, env.EnvName, targetName, err)
+				}
+				valuesAbs := p.appEnvDir(repoDir, env, compValueParts(target.Name, c.Name)...)
+				if err := p.writeFile(valuesAbs, hvBytes); err != nil {
+					return err
+				}
+				componentValues[c.Name] = p.envAppRelPath(AppMetadataChartTypeInline, env, compValueParts(target.Name, c.Name)...)
+			}
+
+			composedOpts := ComposedBuildOptions{
+				RepoURL:         p.cfg.ArgoCDRepoURL,
+				SubPath:         p.cfg.SubPath,
+				AppName:         RenderArgoAppName(namePattern, app.ProjectName, app.Name, env.EnvName, targetName),
+				EnvName:         env.EnvName,
+				ClusterName:     targetName,
+				ClusterServer:   server,
+				Namespace:       ns,
+				SyncAutomated:   p.cfg.SyncAutomated,
+				ComponentValues: componentValues,
+				KargoStage:      kargoStage,
+			}
+			// Main multi-source Application — the non-stateful components. Skip writing
+			// it when the app is all-stateful (it would carry only the $appvalues ref
+			// source, no chart sources).
+			if manifest := BuildComposedApplication(app, composedOpts); len(manifest.Spec.Sources) > 1 {
+				manifestBytes, err := yaml.Marshal(manifest)
+				if err != nil {
+					return fmt.Errorf("marshal Application for env %s cluster %s: %w", env.EnvName, targetName, err)
+				}
+				manifestPath := p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets", targetName, "application.yaml")
+				if err := p.writeFile(manifestPath, manifestBytes); err != nil {
+					return err
+				}
+			}
+			// Each stateful component: its OWN prune-disabled Application, auto-discovered
+			// by the recurse composed root app. Written alongside the main manifest.
+			for _, c := range app.Spec.StatefulComponents() {
+				compManifest := BuildComponentApplication(app, c, composedOpts)
+				compBytes, err := yaml.Marshal(compManifest)
+				if err != nil {
+					return fmt.Errorf("marshal stateful component Application %s env %s: %w", c.Name, env.EnvName, err)
+				}
+				compPath := p.composedAppDir(repoDir, env, app.ProjectName, app.Name, "_targets", targetName, c.Name+"-application.yaml")
+				if err := p.writeFile(compPath, compBytes); err != nil {
+					return err
+				}
 			}
 		}
 
 		// Platform-managed per-app resources (the app-wide <app>-config +
 		// <app>-secrets — the default platform.configMapName/secretName), shipped by
-		// the platform ApplicationSet exactly as for a single-chart app.
+		// the platform ApplicationSet exactly as for a single-chart app. Env-level:
+		// one set of objects per env, shared across the env's target clusters.
 		appDir := p.appEnvDir(repoDir, env, app.ProjectName, app.Name)
 		if err := p.writeAppPlatformResources(repoDir, appDir, app, ns, env, resolvedVars); err != nil {
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
 		}
 
 		touchedEnvs[env.EnvName] = true
-		slog.Debug("gitops: wrote composed app files", "env", env.EnvName, "app", app.Name, "components", len(componentValues))
+		slog.Debug("gitops: wrote composed app files", "env", env.EnvName, "app", app.Name,
+			"components", len(app.Spec.ComposedComponents()), "clusters", len(targets))
 	}
 
 	// Per-env composed App-of-Apps (idempotent): a directory source over

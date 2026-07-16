@@ -225,6 +225,111 @@ func TestWriteComposedAppTree_RendersFiles(t *testing.T) {
 	}
 }
 
+// TestWriteComposedAppTree_FanOut asserts a composed app deploying to MULTIPLE
+// clusters in one env fans out: each cluster gets its own per-component values
+// tree under _clusters/<cluster>/… (with that cluster's routing host and platform
+// overlay) and its own rendered Application manifest under _targets/<cluster>/,
+// mirroring the single-source fan-out. No shared components/ tree is written.
+func TestWriteComposedAppTree_FanOut(t *testing.T) {
+	dir := t.TempDir()
+	app := composedApp()
+
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:       "https://git/repo.git",
+		SyncAutomated: true,
+		TemplateLoader: keyedTemplateLoader{
+			"web-service": "web",
+			"worker":      "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+
+	// Two clusters, each with its own base domain, so the per-cluster routing host
+	// must differ. A cluster-scoped platform overlay on "api" proves the right
+	// cluster's overlay lands in the right file.
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "example.com",
+		Clusters: []gitops.ClusterTarget{
+			{Name: "c1", Server: "https://c1", BaseDomain: "c1.example.com"},
+			{Name: "c2", Server: "https://c2", BaseDomain: "c2.example.com"},
+		},
+		ComponentPlatformValues: map[string]gitops.ComponentPlatformValues{
+			"api": {Cluster: map[string]map[string]any{
+				"c1": {"components": map[string]any{"web": map[string]any{"replicaCount": 3}}},
+			}},
+		},
+	}}
+
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
+	}
+
+	// No shared (non-fan-out) component values tree.
+	shared := filepath.Join(dir, "envs", "staging", "demo", "bigly", "components")
+	if _, err := os.Stat(shared); !os.IsNotExist(err) {
+		t.Errorf("shared components/ tree must not exist in fan-out mode: %v", err)
+	}
+
+	type wantHost struct{ cluster, host string }
+	for _, w := range []wantHost{
+		{"c1", "bigly-api.staging.c1.example.com"},
+		{"c2", "bigly-api.staging.c2.example.com"},
+	} {
+		vpath := filepath.Join(dir, "envs", "staging", "_clusters", w.cluster, "demo", "bigly", "components", "api", "values.yaml")
+		raw, err := os.ReadFile(vpath)
+		if err != nil {
+			t.Fatalf("read %s api values.yaml: %v", w.cluster, err)
+		}
+		var v struct {
+			Routing    struct{ Host string } `yaml:"routing"`
+			Components map[string]struct {
+				ReplicaCount int `yaml:"replicaCount"`
+			} `yaml:"components"`
+		}
+		if err := yaml.Unmarshal(raw, &v); err != nil {
+			t.Fatalf("unmarshal %s api values.yaml: %v", w.cluster, err)
+		}
+		if v.Routing.Host != w.host {
+			t.Errorf("%s: routing.host = %q, want %q", w.cluster, v.Routing.Host, w.host)
+		}
+		// The cluster-scoped platform overlay (replicaCount:3) lands ONLY on c1.
+		got := v.Components["web"].ReplicaCount
+		wantReplicas := 0
+		if w.cluster == "c1" {
+			wantReplicas = 3
+		}
+		if got != wantReplicas {
+			t.Errorf("%s: web.replicaCount = %d, want %d (cluster-scoped overlay)", w.cluster, got, wantReplicas)
+		}
+
+		// Worker component values also fan out per cluster.
+		wp := filepath.Join(dir, "envs", "staging", "_clusters", w.cluster, "demo", "bigly", "components", "worker", "values.yaml")
+		if _, err := os.Stat(wp); err != nil {
+			t.Errorf("%s: worker values.yaml missing: %v", w.cluster, err)
+		}
+
+		// Per-cluster Application manifest, referencing this cluster's values tree.
+		mpath := filepath.Join(dir, "_composed-apps", "staging", "demo", "bigly", "_targets", w.cluster, "application.yaml")
+		mraw, err := os.ReadFile(mpath)
+		if err != nil {
+			t.Fatalf("read %s application.yaml: %v", w.cluster, err)
+		}
+		if !strings.Contains(string(mraw), "_clusters/"+w.cluster+"/demo/bigly/components/") {
+			t.Errorf("%s: manifest must reference its own _clusters/%s values tree\n%s", w.cluster, w.cluster, mraw)
+		}
+		other := "c1"
+		if w.cluster == "c1" {
+			other = "c2"
+		}
+		if strings.Contains(string(mraw), "_clusters/"+other+"/") {
+			t.Errorf("%s: manifest must not reference the other cluster %s\n%s", w.cluster, other, mraw)
+		}
+	}
+}
+
 // componentImageValues builds a per-component Values overlay setting the image
 // under the chart's canonical component key ("web").
 func componentImageValues(repo, tag string) map[string]any {
@@ -1242,6 +1347,54 @@ func TestComposedPromotionTemplatePerComponentFiles(t *testing.T) {
 	// Base stage pulls direct from the Warehouse.
 	if !stage.Spec.RequestedFreight[0].Sources.Direct {
 		t.Error("base stage should pull direct from the warehouse")
+	}
+}
+
+// TestComposedPromotionTemplateFanOut verifies that when a composed app fans out
+// to several clusters, the promotion writes each component's tag into EVERY
+// cluster's per-cluster values file (_clusters/<cluster>/…), matching where the
+// publisher wrote them — so a promoted tag reaches all target clusters.
+func TestComposedPromotionTemplateFanOut(t *testing.T) {
+	app := &domain.App{Name: "bigly", ProjectName: "demo"}
+	env := domain.AppEnvironment{AppName: "bigly", ProjectName: "demo", EnvName: "staging", EnvType: domain.AppEnvStaging}
+	stage := gitops.BuildKargoStage(app, env, nil, gitops.KargoBuildOptions{
+		Composed:      true,
+		GitOpsRepoURL: "https://git/repo.git",
+		Clusters: []gitops.ClusterTarget{
+			{Name: "c1", Server: "https://c1"},
+			{Name: "c2", Server: "https://c2"},
+		},
+		Images: []gitops.KargoImage{
+			{Name: "api", Repository: "ghcr.io/bigly/api", TagKey: "image.tag"},
+			{Name: "worker", Repository: "ghcr.io/bigly/worker", TagKey: "image.tag"},
+		},
+	})
+	if stage.Spec.PromotionTemplate == nil {
+		t.Fatal("expected a promotion template")
+	}
+	paths := map[string]bool{}
+	for _, step := range stage.Spec.PromotionTemplate.Spec.Steps {
+		if step.Uses != "yaml-update" {
+			continue
+		}
+		if p, ok := step.Config["path"].(string); ok {
+			paths[p] = true
+		}
+	}
+	// One yaml-update per (cluster, component) = 2 × 2 = 4 steps.
+	want := []string{
+		"./src/envs/staging/_clusters/c1/demo/bigly/components/api/values.yaml",
+		"./src/envs/staging/_clusters/c1/demo/bigly/components/worker/values.yaml",
+		"./src/envs/staging/_clusters/c2/demo/bigly/components/api/values.yaml",
+		"./src/envs/staging/_clusters/c2/demo/bigly/components/worker/values.yaml",
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("expected %d per-cluster×component yaml-update steps, got %d: %v", len(want), len(paths), paths)
+	}
+	for _, w := range want {
+		if !paths[w] {
+			t.Errorf("missing yaml-update for %s, got %v", w, paths)
+		}
 	}
 }
 
