@@ -291,3 +291,17 @@ func DiscoverAppImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Temp
 	values := computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, "", appRaw, envRaw)
 	return chartimport.DetectImageMappings(values)
 }
+
+// DiscoverComponentImages returns the container images present in ONE composed
+// component's effective Helm values: its template's chart defaults ⊕ the
+// template/org value overlays ⊕ the component's own Values overlay. No canonical
+// base is layered — for a composed component the platform base carries no image
+// (each component's repository lives in its own overlay), so chart defaults ⊕
+// overlay is the exact discovery surface, and it needs no app/env cluster context.
+// This is the per-component counterpart of DiscoverAppImages, powering both the
+// publish-time Warehouse resolution and the UI's per-component image checklist.
+func DiscoverComponentImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Template, ov *domain.TemplateOverride, envName string, overlay map[string]any) []tpl.TemplateImage {
+	chartVals, _ := chartDefaults(ctx, kc, t)
+	values := computeEffectiveValues(chartVals, nil, t, ov, envName, "", overlay, nil)
+	return chartimport.DetectImageMappings(values)
+}

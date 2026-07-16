@@ -315,10 +315,13 @@ type ComponentEnvVarDTO struct {
 	FromSecret string `json:"fromSecret,omitempty"`
 }
 
-// ComponentImageDTO is one composed-component image binding for Kargo CD.
+// ComponentImageDTO is one composed-component image selection for Kargo CD. The
+// repository is discovered from the component's values (keyed by TagKey); it is
+// carried here only as a legacy/BYO fallback.
 type ComponentImageDTO struct {
-	Repository        string `json:"repository"`
+	Name              string `json:"name,omitempty"`
 	TagKey            string `json:"tagKey"`
+	Repository        string `json:"repository,omitempty"`
 	TagPattern        string `json:"tagPattern,omitempty"`
 	SelectionStrategy string `json:"selectionStrategy,omitempty"`
 }

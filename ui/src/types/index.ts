@@ -889,11 +889,15 @@ export interface ComponentCreate {
   stateful?: boolean;
 }
 
-// ComponentImage binds one of a composed component's container images for Kargo:
-// the repository to watch and the tag-key path in the component's own overlay.
+// ComponentImage marks one of a composed component's discovered images as managed
+// by Kargo, keyed by its tag-key path. The repository is discovered from the
+// component's values (not stored) except as a legacy/BYO fallback.
 export interface ComponentImage {
-  repository: string;
+  /** discovered image slot name (display only; tagKey is the match key) */
+  name?: string;
   tagKey: string;
+  /** derived from discovery; present only for legacy/BYO fallback selections */
+  repository?: string;
   tagPattern?: string;
   selectionStrategy?: string;
 }

@@ -820,13 +820,19 @@ func computePlatformOverlays(tmpl *tpl.Template, ov *domain.TemplateOverride, en
 
 // setComponentPlatformOverlays threads the PE-authored value overlays for EACH
 // composed component's OWN template (+ its org override) onto the pub env, so the
-// publisher merges them beneath each component's Values. No-op for single-source
-// apps (their primary template's overlays are set by setPlatformOverlays).
+// publisher merges them beneath each component's Values. It also DISCOVERS each
+// component's CD images from that same effective-values context (chart defaults ⊕
+// template/org overlays ⊕ the component's Values overlay) and resolves the
+// component's ComponentSpec.Images selection against them — so a component image is
+// auto-identified from values, mirroring the single-source resolveCDImages. No-op
+// for single-source apps (their primary template's overlays are set by
+// setPlatformOverlays).
 func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Context, pub *gitops.AppPublishEnv, app *domain.App, envName string) {
 	if !app.Spec.IsComposed() {
 		return
 	}
 	m := make(map[string]gitops.ComponentPlatformValues, len(app.Spec.Components))
+	imgs := make(map[string][]gitops.KargoImage, len(app.Spec.Components))
 	for _, c := range app.Spec.Components {
 		if c.Template == nil {
 			continue
@@ -838,8 +844,39 @@ func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Contex
 		ov := a.loadOverride(ctx, c.Template.Name)
 		def, env, cluster := computePlatformOverlays(tmpl, ov, envName)
 		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster}
+
+		if len(c.Images) == 0 {
+			continue
+		}
+		discovered := server.DiscoverComponentImages(ctx, a.kubeClient, tmpl, ov, envName, c.Values)
+		resolved := gitops.SelectKargoImages(discovered, componentImageBindings(c.Images))
+		// SelectKargoImages names each image after the DISCOVERED slot; re-stamp the
+		// owning component so the promotion targets that component's values file.
+		for i := range resolved {
+			resolved[i].Name = c.Name
+		}
+		if len(resolved) > 0 {
+			imgs[c.Name] = resolved
+		}
 	}
 	pub.ComponentPlatformValues = m
+	pub.ComponentTemplateImages = imgs
+}
+
+// componentImageBindings adapts a component's image SELECTIONS to the shared
+// AppImageBinding shape SelectKargoImages consumes (both are tag-key-keyed
+// selections; the repository is discovered, not carried here).
+func componentImageBindings(images []domain.ComponentImage) []domain.AppImageBinding {
+	out := make([]domain.AppImageBinding, len(images))
+	for i, img := range images {
+		out[i] = domain.AppImageBinding{
+			Name:              img.Name,
+			TagKey:            img.TagKey,
+			TagPattern:        img.TagPattern,
+			SelectionStrategy: img.SelectionStrategy,
+		}
+	}
+	return out
 }
 
 // orgNameOf returns the org's name, or "" when the org is unavailable.

@@ -3650,6 +3650,7 @@ func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]dom
 		}
 		for _, img := range c.Images {
 			dto.Images = append(dto.Images, ComponentImageDTO{
+				Name:              img.Name,
 				Repository:        img.Repository,
 				TagKey:            img.TagKey,
 				TagPattern:        img.TagPattern,
@@ -3668,10 +3669,13 @@ func componentImagesFromDTO(dtos []ComponentImageDTO) []domain.ComponentImage {
 	}
 	out := make([]domain.ComponentImage, 0, len(dtos))
 	for _, d := range dtos {
-		if d.Repository == "" && d.TagKey == "" {
+		// TagKey is the selection identity; skip empty rows. Repository is optional
+		// (discovered from values), so it no longer gates inclusion.
+		if d.TagKey == "" {
 			continue
 		}
 		out = append(out, domain.ComponentImage{
+			Name:              d.Name,
 			Repository:        d.Repository,
 			TagKey:            d.TagKey,
 			TagPattern:        d.TagPattern,

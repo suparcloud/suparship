@@ -1112,7 +1112,8 @@ func TestComposedWarehouseSubscribesAllComponentImages(t *testing.T) {
 			},
 		},
 	}
-	imgs := gitops.CollectComponentImagesForTest(app)
+	// resolved=nil → the explicit-repository legacy fallback path emits each image.
+	imgs := gitops.CollectComponentImagesForTest(app, nil)
 	if len(imgs) != 2 {
 		t.Fatalf("collected %d images, want 2: %+v", len(imgs), imgs)
 	}
@@ -1138,6 +1139,46 @@ func TestComposedWarehouseSubscribesAllComponentImages(t *testing.T) {
 		if !got[repo] {
 			t.Errorf("warehouse must subscribe to %q, got %v", repo, got)
 		}
+	}
+}
+
+// TestCollectComponentImages_DiscoveredAndFallback verifies the two resolution
+// paths: a component whose selection was resolved from discovery (repository
+// derived, in the env map) is emitted as-is; a component with an explicit legacy
+// repository that discovery did NOT resolve falls back to watching that repo
+// directly (with default tag pattern/strategy).
+func TestCollectComponentImages_DiscoveredAndFallback(t *testing.T) {
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web"},
+					Images:   []domain.ComponentImage{{TagKey: "components.web.image.tag"}}},
+				{Name: "legacy", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web"},
+					Images:   []domain.ComponentImage{{Repository: "ghcr.io/bigly/legacy", TagKey: "image.tag"}}},
+			},
+		},
+	}
+	// Only "api" was resolved from discovery; "legacy" has no resolved entry.
+	resolved := map[string][]gitops.KargoImage{
+		"api": {{Name: "api", Repository: "acr.io/api", TagKey: "components.web.image.tag",
+			TagPattern: "^[0-9a-f]{7}$", SelectionStrategy: "NewestBuild"}},
+	}
+	got := gitops.CollectComponentImagesForTest(app, resolved)
+	if len(got) != 2 {
+		t.Fatalf("got %d images, want 2: %+v", len(got), got)
+	}
+	if got[0].Name != "api" || got[0].Repository != "acr.io/api" {
+		t.Errorf("discovered image = %+v, want api/acr.io/api", got[0])
+	}
+	// Fallback: explicit legacy repo, defaults applied.
+	if got[1].Name != "legacy" || got[1].Repository != "ghcr.io/bigly/legacy" {
+		t.Errorf("fallback image = %+v, want legacy/ghcr.io/bigly/legacy", got[1])
+	}
+	if got[1].TagPattern != gitops.DefaultImageTagPattern || got[1].SelectionStrategy != gitops.DefaultImageSelectionStrategy {
+		t.Errorf("fallback image defaults = %q/%q, want %q/%q", got[1].TagPattern, got[1].SelectionStrategy, gitops.DefaultImageTagPattern, gitops.DefaultImageSelectionStrategy)
 	}
 }
 

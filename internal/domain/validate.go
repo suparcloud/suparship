@@ -98,14 +98,13 @@ func ValidateComponents(components []ComponentSpec) error {
 // "controller.image.tag") — segments of identifier/number chars joined by dots.
 var tagKeyRE = regexp.MustCompile(`^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`)
 
-// validateComponentImage checks a component image binding: a repository and a
-// well-formed dotted tag-key path are both required.
+// validateComponentImage checks a component image selection: only a well-formed
+// dotted tag-key path is required. The repository is normally derived from the
+// component's discovered values (empty here); it may still be present as a legacy
+// fallback, but it is no longer required.
 func validateComponentImage(comp string, img ComponentImage) error {
-	if strings.TrimSpace(img.Repository) == "" {
-		return fmt.Errorf("component %q: an image binding has no repository", comp)
-	}
 	if !tagKeyRE.MatchString(img.TagKey) {
-		return fmt.Errorf("component %q: image %q has an invalid tagKey %q (must be a dotted path like image.tag)", comp, img.Repository, img.TagKey)
+		return fmt.Errorf("component %q: an image selection has an invalid tagKey %q (must be a dotted path like components.web.image.tag)", comp, img.TagKey)
 	}
 	return nil
 }

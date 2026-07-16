@@ -1,6 +1,9 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 
-import { fetchTemplateEffectiveValues } from "../lib/templates";
+import {
+  fetchTemplateEffectiveValues,
+  previewTemplateEffectiveValues,
+} from "../lib/templates";
 import { mergeOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   ComponentCreate,
@@ -8,6 +11,7 @@ import type {
   ComponentImage,
   ComponentSummary,
   EffectiveValuesResponse,
+  TemplateImage,
   TemplateSummary,
 } from "../types";
 import type { ConfigVariables } from "../lib/configVars";
@@ -119,10 +123,12 @@ export function toComponentCreate(d: ComponentDraft): ComponentCreate {
               : { value: e.value ?? "" }),
         }));
   const images = d.images
-    .filter((im) => im.repository.trim())
+    .filter((im) => im.tagKey.trim())
     .map((im) => ({
-      repository: im.repository.trim(),
-      tagKey: (im.tagKey || "image.tag").trim(),
+      tagKey: im.tagKey.trim(),
+      ...(im.name ? { name: im.name } : {}),
+      // Repository is derived from discovery; carried only for legacy fallback.
+      ...(im.repository ? { repository: im.repository.trim() } : {}),
       ...(im.tagPattern ? { tagPattern: im.tagPattern.trim() } : {}),
       ...(im.selectionStrategy
         ? { selectionStrategy: im.selectionStrategy.trim() }
@@ -146,6 +152,13 @@ export function toComponentCreate(d: ComponentDraft): ComponentCreate {
 const inputCls =
   "w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
+
+// Kargo image-selection defaults — kept in sync with gitops.DefaultImageTagPattern
+// / DefaultImageSelectionStrategy (server applies these when a component image
+// leaves tagPattern/selectionStrategy blank).
+const DEFAULT_TAG_PATTERN = "^[0-9a-f]{7}$";
+const DEFAULT_SELECTION_STRATEGY = "NewestBuild";
+const SELECTION_STRATEGIES = ["NewestBuild", "SemVer", "Digest", "Lexical"];
 
 // ComposeComponents is the add-component canvas: a list of component rows, each
 // picking its own template + a per-component values overlay, plus an "Add
@@ -177,6 +190,37 @@ export function ComposeComponents({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateKey]);
+
+  // Per-component image discovery: each component's images are found in its own
+  // effective values (chart defaults ⊕ its overlay), so the user selects from a
+  // checklist instead of hand-typing repositories. Keyed by (template + overlay)
+  // content so identical rows share one fetch; debounced as the overlay is edited.
+  const [discovered, setDiscovered] = useState<Record<string, TemplateImage[]>>({});
+  const discFetched = useRef<Set<string>>(new Set());
+  const imageKeyFor = (c: ComponentDraft) =>
+    `${c.template}::${JSON.stringify(c.values)}`;
+  const discoveryKey = components.map(imageKeyFor).join("|");
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      for (const c of components) {
+        if (!c.template) continue;
+        const key = imageKeyFor(c);
+        if (discFetched.current.has(key)) continue;
+        discFetched.current.add(key);
+        // The component's overlay is layered highest (as defaultValues) so its
+        // image wins; DiscoveredImages come back scanned from the merged doc.
+        previewTemplateEffectiveValues(c.template, "", "", {
+          defaultValues: c.values,
+        })
+          .then((res) =>
+            setDiscovered((prev) => ({ ...prev, [key]: res.discoveredImages ?? [] })),
+          )
+          .catch(() => setDiscovered((prev) => ({ ...prev, [key]: [] })));
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discoveryKey]);
 
   function update(i: number, patch: Partial<ComponentDraft>) {
     onChange(components.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -211,24 +255,39 @@ export function ComposeComponents({
     if (!c) return;
     update(i, { envVars: [...c.envVars, { name: "", value: "" }] });
   }
-  function updateImage(i: number, j: number, patch: Partial<ComponentImage>) {
+  // Image selection is keyed by tagKey (the discovered image's identity).
+  function isImageSelected(c: ComponentDraft, tagKey: string): boolean {
+    return c.images.some((im) => im.tagKey === tagKey);
+  }
+  function toggleImage(i: number, img: TemplateImage, checked: boolean) {
+    const c = components[i];
+    if (!c) return;
+    if (checked) {
+      if (isImageSelected(c, img.tagKey)) return;
+      update(i, {
+        images: [...c.images, { name: img.name, tagKey: img.tagKey }],
+      });
+    } else {
+      update(i, { images: c.images.filter((im) => im.tagKey !== img.tagKey) });
+    }
+  }
+  function updateImageByTagKey(
+    i: number,
+    tagKey: string,
+    patch: Partial<ComponentImage>,
+  ) {
     const c = components[i];
     if (!c) return;
     update(i, {
-      images: c.images.map((im, idx) => (idx === j ? { ...im, ...patch } : im)),
+      images: c.images.map((im) =>
+        im.tagKey === tagKey ? { ...im, ...patch } : im,
+      ),
     });
   }
-  function removeImage(i: number, j: number) {
+  function removeImageByTagKey(i: number, tagKey: string) {
     const c = components[i];
     if (!c) return;
-    update(i, { images: c.images.filter((_, idx) => idx !== j) });
-  }
-  function addImage(i: number) {
-    const c = components[i];
-    if (!c) return;
-    update(i, {
-      images: [...c.images, { repository: "", tagKey: "image.tag" }],
-    });
+    update(i, { images: c.images.filter((im) => im.tagKey !== tagKey) });
   }
 
   // When the picked template changes, re-default the type/expose.
@@ -495,55 +554,141 @@ export function ComposeComponents({
               </p>
             </div>
 
-            {/* Kargo image bindings: the repository to watch + the tag-key path
-                in THIS component's overlay where the promoted tag is written.
-                Required for CD promotion of the component. */}
-            <div className="mt-3">
-              <label className={labelCls}>Images (Kargo CD)</label>
-              <div className="space-y-2">
-                {c.images.map((im, j) => (
-                  <div key={j} className="flex flex-wrap items-center gap-2">
-                    <input
-                      type="text"
-                      className={`${inputCls} min-w-[12rem] flex-1 font-mono`}
-                      placeholder="ghcr.io/org/image"
-                      value={im.repository}
-                      onChange={(ev) =>
-                        updateImage(i, j, { repository: ev.target.value })
-                      }
-                    />
-                    <input
-                      type="text"
-                      className={`${inputCls} w-40 font-mono`}
-                      placeholder="image.tag"
-                      value={im.tagKey}
-                      onChange={(ev) =>
-                        updateImage(i, j, { tagKey: ev.target.value })
-                      }
-                    />
-                    <button
-                      type="button"
-                      onClick={() => removeImage(i, j)}
-                      className="rounded-md px-2 py-1 text-xs text-gray-400 hover:bg-red-50 hover:text-red-600"
-                      aria-label="Remove image"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => addImage(i)}
-                  className="text-xs font-medium text-indigo-600 hover:text-indigo-700"
-                >
-                  + Add image
-                </button>
+            {/* Kargo image CD: images are auto-discovered from THIS component's
+                effective values (chart defaults ⊕ its overlay). Check the ones
+                Kargo should watch + promote; the repository and tag-key come from
+                values, not hand-typed. Mirrors the single-source Images panel. */}
+            {!c.stateful && (
+              <div className="mt-3">
+                <label className={labelCls}>Images (Kargo CD)</label>
+                {(() => {
+                  const imgs = discovered[imageKeyFor(c)];
+                  const discoveredKeys = new Set((imgs ?? []).map((d) => d.tagKey));
+                  // Legacy selections whose tagKey discovery didn't surface (BYO
+                  // repo not in values, or a pre-discovery config): keep them
+                  // visible so they can be reviewed/removed.
+                  const legacy = c.images.filter(
+                    (im) => !discoveredKeys.has(im.tagKey),
+                  );
+                  if (imgs === undefined) {
+                    return (
+                      <p className="text-xs text-gray-400">Scanning values…</p>
+                    );
+                  }
+                  if (imgs.length === 0 && legacy.length === 0) {
+                    return (
+                      <p className="text-xs text-gray-400">
+                        No images found in this component's values. Set an image
+                        (e.g. <code>image.repository</code>) in the overlay above,
+                        then it appears here to manage.
+                      </p>
+                    );
+                  }
+                  const controls = (tagKey: string) => {
+                    const sel = c.images.find((im) => im.tagKey === tagKey);
+                    return (
+                      <div className="mt-1 ml-6 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+                        <label className="flex items-center gap-1">
+                          <span className="text-gray-500">Tag regex</span>
+                          <input
+                            type="text"
+                            className="w-48 rounded-md border border-gray-300 px-2 py-1 font-mono"
+                            placeholder={DEFAULT_TAG_PATTERN}
+                            value={sel?.tagPattern ?? ""}
+                            onChange={(ev) =>
+                              updateImageByTagKey(i, tagKey, {
+                                tagPattern: ev.target.value,
+                              })
+                            }
+                          />
+                        </label>
+                        <label className="flex items-center gap-1">
+                          <span className="text-gray-500">Strategy</span>
+                          <select
+                            className="rounded-md border border-gray-300 px-2 py-1"
+                            value={sel?.selectionStrategy || DEFAULT_SELECTION_STRATEGY}
+                            onChange={(ev) =>
+                              updateImageByTagKey(i, tagKey, {
+                                selectionStrategy: ev.target.value,
+                              })
+                            }
+                          >
+                            {SELECTION_STRATEGIES.map((s) => (
+                              <option key={s} value={s}>
+                                {s}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    );
+                  };
+                  return (
+                    <div className="space-y-2">
+                      {imgs.map((d) => {
+                        const checked = isImageSelected(c, d.tagKey);
+                        return (
+                          <div key={d.tagKey}>
+                            <label className="flex items-start gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                className="mt-0.5 h-4 w-4 rounded border-gray-300"
+                                checked={checked}
+                                onChange={(ev) =>
+                                  toggleImage(i, d, ev.target.checked)
+                                }
+                              />
+                              <span className="min-w-0">
+                                <span className="font-medium">{d.name}</span>{" "}
+                                <span className="font-mono text-gray-500">
+                                  {d.repository}
+                                </span>
+                                <span className="ml-2 font-mono text-gray-400">
+                                  {d.tagKey}
+                                </span>
+                              </span>
+                            </label>
+                            {checked && controls(d.tagKey)}
+                          </div>
+                        );
+                      })}
+                      {legacy.map((im) => (
+                        <div key={im.tagKey}>
+                          <div className="flex items-start gap-2 text-xs">
+                            <span className="min-w-0">
+                              <span className="font-mono text-gray-500">
+                                {im.repository || "(repository from values)"}
+                              </span>
+                              <span className="ml-2 font-mono text-gray-400">
+                                {im.tagKey}
+                              </span>
+                              <span className="ml-2 rounded bg-amber-50 px-1 text-amber-700">
+                                not in values
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => removeImageByTagKey(i, im.tagKey)}
+                              className="rounded-md px-2 py-0.5 text-gray-400 hover:bg-red-50 hover:text-red-600"
+                              aria-label="Remove image"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                          {controls(im.tagKey)}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+                <p className="mt-1 text-xs text-gray-400">
+                  Defaults: tag regex{" "}
+                  <code className="font-mono">{DEFAULT_TAG_PATTERN}</code> (7-char
+                  commit SHA), strategy{" "}
+                  <code className="font-mono">{DEFAULT_SELECTION_STRATEGY}</code>.
+                </p>
               </div>
-              <p className="mt-1 text-xs text-gray-400">
-                Repository Kargo watches · tag-key path in this component's values
-                overlay (e.g. <code>image.tag</code>). Needed for promotion.
-              </p>
-            </div>
+            )}
           </div>
         </div>
       ))}

@@ -2129,21 +2129,40 @@ func resolveKargoImages(app *domain.App, images []KargoImage) []KargoImage {
 	return nil
 }
 
-// collectComponentImages flattens every composed component's declared image
-// bindings (ComponentSpec.Images) into KargoImage entries for the composed
-// Warehouse. Name carries the OWNING component so the promotion (Phase 2) can
-// target that component's own components/<name>/values.yaml, and TagKey is the
-// dotted path relative to that file. Deterministic (components in spec order).
-func collectComponentImages(app *domain.App) []KargoImage {
+// collectComponentImages returns the composed Warehouse's image sources: the
+// per-component RESOLVED images the publish adapter discovered from each
+// component's own values (env.ComponentTemplateImages), in component spec order.
+// Each KargoImage.Name is the owning component so the promotion targets that
+// component's values file. A component whose stored ComponentSpec.Images selection
+// carries an explicit legacy Repository that discovery didn't resolve falls back
+// to watching that repository directly, so pre-discovery configs keep working.
+func collectComponentImages(app *domain.App, resolved map[string][]KargoImage) []KargoImage {
 	var out []KargoImage
 	for _, c := range app.Spec.Components {
+		byKey := make(map[string]bool, len(resolved[c.Name]))
+		for _, img := range resolved[c.Name] {
+			byKey[img.TagKey] = true
+			out = append(out, img)
+		}
+		// Legacy fallback: an explicit-repository selection discovery couldn't match.
 		for _, img := range c.Images {
+			if img.Repository == "" || byKey[img.TagKey] {
+				continue
+			}
+			tagPattern := img.TagPattern
+			if tagPattern == "" {
+				tagPattern = DefaultImageTagPattern
+			}
+			strategy := img.SelectionStrategy
+			if strategy == "" {
+				strategy = DefaultImageSelectionStrategy
+			}
 			out = append(out, KargoImage{
 				Name:              c.Name,
 				Repository:        img.Repository,
 				TagKey:            img.TagKey,
-				TagPattern:        img.TagPattern,
-				SelectionStrategy: img.SelectionStrategy,
+				TagPattern:        tagPattern,
+				SelectionStrategy: strategy,
 			})
 		}
 	}
@@ -2282,7 +2301,11 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	composed := app.Spec.IsComposed()
 	var images []KargoImage
 	if composed {
-		images = collectComponentImages(app)
+		var resolved map[string][]KargoImage
+		if len(stableEnvs) > 0 {
+			resolved = stableEnvs[0].ComponentTemplateImages
+		}
+		images = collectComponentImages(app, resolved)
 	} else {
 		var tmplImages []KargoImage
 		if len(stableEnvs) > 0 {
@@ -2525,6 +2548,14 @@ type AppPublishEnv struct {
 	// + org override). Merged beneath the component's own Values in the composed
 	// render, so the platform-engineer's template overrides reach each component.
 	ComponentPlatformValues map[string]ComponentPlatformValues
+	// ComponentTemplateImages holds each composed component's RESOLVED Kargo image
+	// sources (keyed by component name), the per-component analog of TemplateImages.
+	// The publish adapter discovers each component's images from its own effective
+	// values (chart defaults ⊕ its Values overlay) and matches them against the
+	// component's ComponentSpec.Images selection — so a component image is auto-
+	// identified from values, not hand-typed. Each entry's KargoImage.Name is the
+	// OWNING component (so the promotion targets that component's values file).
+	ComponentTemplateImages map[string][]KargoImage
 	// StackRawValues / StackEnvRawValues are the app's stack's shared Helm values
 	// overlay (all envs / this env), layered above the platform values and below
 	// the developer RawValues. Empty when the app isn't in a stack. Populated by

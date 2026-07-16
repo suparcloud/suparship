@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 // DiscoverAppImages finds image blocks in the app's effective values. With no
@@ -58,5 +59,36 @@ func TestDiscoverAppImages_SkipsRepolessImage(t *testing.T) {
 		if img.TagKey == "image.tag" {
 			t.Fatalf("repository-less image must not be discovered: %+v", img)
 		}
+	}
+}
+
+// DiscoverComponentImages finds the image a composed component sets in its OWN
+// Values overlay (canonical layout components.<key>.image), returning the fully
+// qualified tagKey the promotion writes into — proving a component image is
+// auto-identified from values, not hand-typed.
+func TestDiscoverComponentImages_FromOverlay(t *testing.T) {
+	overlay := map[string]any{
+		"components": map[string]any{
+			"web": map[string]any{
+				"image": map[string]any{
+					"repository": "acr.azurecr.io/telephony-frontend",
+					"tag":        "abc1234",
+				},
+			},
+		},
+	}
+	got := DiscoverComponentImages(context.Background(), nil, &tpl.Template{}, nil, "staging", overlay)
+
+	var found bool
+	for _, img := range got {
+		if img.TagKey == "components.web.image.tag" {
+			found = true
+			if img.Repository != "acr.azurecr.io/telephony-frontend" {
+				t.Errorf("repository = %q, want acr.azurecr.io/telephony-frontend", img.Repository)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected to discover components.web.image, got %+v", got)
 	}
 }

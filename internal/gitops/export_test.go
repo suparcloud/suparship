@@ -51,8 +51,8 @@ func (p *Publisher) PublishComposedAppEnvForTest(ctx context.Context, repoDir st
 
 // CollectComponentImagesForTest exposes collectComponentImages — the composed
 // per-component Kargo image resolver — to white-box tests.
-func CollectComponentImagesForTest(app *domain.App) []KargoImage {
-	return collectComponentImages(app)
+func CollectComponentImagesForTest(app *domain.App, resolved map[string][]KargoImage) []KargoImage {
+	return collectComponentImages(app, resolved)
 }
 
 // WriteAppTreeForTest exposes writeAppTree — the mode-branching entry that picks

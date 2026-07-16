@@ -263,18 +263,24 @@ type ComponentSpec struct {
 	Stateful bool `json:"stateful,omitempty" yaml:"stateful,omitempty"`
 }
 
-// ComponentImage binds one of a composed component's container images to Kargo.
-// Unlike AppImageBinding (single-source, repo read from values), a component image
-// carries the repository explicitly since a BYO component's overlay may not expose
-// it in a discoverable place — and it's the component's chart, not suparship, that
-// defines the tag path.
+// ComponentImage marks one of a composed component's container images as managed
+// by external CD (Kargo). Like AppImageBinding it is a SELECTION keyed by TagKey:
+// the repository is discovered from the component's effective values (chart
+// defaults ⊕ its Values overlay) at publish, so the user picks images from a
+// checklist rather than hand-typing repositories.
 type ComponentImage struct {
-	// Repository is the container image repo Kargo's Warehouse subscribes to
-	// (e.g. "ghcr.io/bigly/web"). Required.
-	Repository string `json:"repository" yaml:"repository"`
-	// TagKey is the dotted Helm values path — RELATIVE to this component's own
-	// values.yaml overlay — where the promoted tag is written (e.g. "image.tag").
+	// Name is the discovered image's logical slot (display only; the match key is
+	// TagKey). Optional.
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+	// TagKey is the dotted Helm values path — in this component's own values.yaml —
+	// where the promoted tag is written (e.g. "components.web.image.tag"). This is
+	// the selection key matched against the discovered images.
 	TagKey string `json:"tagKey" yaml:"tagKey"`
+	// Repository is normally derived from discovery. It is retained only as a
+	// legacy/BYO fallback: when a stored image's TagKey no longer matches any
+	// discovered image, the publisher watches this repository directly. Empty for
+	// discovery-selected images. Optional.
+	Repository string `json:"repository,omitempty" yaml:"repository,omitempty"`
 	// TagPattern optionally overrides Kargo's tag allow-list (allowTags).
 	TagPattern string `json:"tagPattern,omitempty" yaml:"tagPattern,omitempty"`
 	// SelectionStrategy optionally overrides how Kargo picks the tag to promote
