@@ -598,6 +598,15 @@ export interface AppStatusSummary {
   available: number;
   lastDeployed?: string;
   diagnostics?: Diagnostic[];
+  /** per-component live health of a composed app (empty for single-component) */
+  components?: ComponentRuntimeStatus[];
+}
+
+export interface ComponentRuntimeStatus {
+  component: string;
+  phase: string;
+  replicas: number;
+  available: number;
 }
 
 export interface PreviewMeta {

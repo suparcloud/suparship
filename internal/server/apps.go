@@ -72,6 +72,18 @@ type AppStatusSummaryDTO struct {
 	Available    int32           `json:"available"`
 	LastDeployed string          `json:"lastDeployed,omitempty"`
 	Diagnostics  []DiagnosticDTO `json:"diagnostics,omitempty"`
+	// Components is the per-component live health of a composed app (keyed by
+	// component name). Empty for single-component apps. Lets the UI show which
+	// component of a composed app is degraded.
+	Components []ComponentRuntimeStatusDTO `json:"components,omitempty"`
+}
+
+// ComponentRuntimeStatusDTO is one composed component's live health.
+type ComponentRuntimeStatusDTO struct {
+	Component string `json:"component"`
+	Phase     string `json:"phase"`
+	Replicas  int32  `json:"replicas"`
+	Available int32  `json:"available"`
 }
 
 // DiagnosticDTO is one human-readable problem report surfaced from the

@@ -741,6 +741,77 @@ type AppRuntimeStatus struct {
 	// status). Empty when everything is healthy. Surfaced so an operator can
 	// understand a stuck/"not deployed" env without leaving suparship.
 	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
+	// Components is the per-component live health of a composed app (each
+	// component's own workloads, keyed by component name). Empty for single-
+	// component apps, where the env-level fields above already describe the sole
+	// workload. Lets the UI show which component of a composed app is degraded.
+	Components []ComponentRuntimeStatus `json:"components,omitempty"`
+}
+
+// ComponentRuntimeStatus is one composed component's live health — the same
+// coarse phase + replica counts as the env-level status, but scoped to that one
+// component's workloads (selected by its app.kubernetes.io/instance label).
+type ComponentRuntimeStatus struct {
+	// Component is the suparship component name (ComponentSpec.Name).
+	Component string `json:"component"`
+	// Phase is a coarse health indicator. One of the domain Status* constants.
+	Phase string `json:"phase"`
+	// Replicas is the total number of desired pod replicas for this component.
+	Replicas int32 `json:"replicas"`
+	// Available is the number of ready replicas for this component.
+	Available int32 `json:"available"`
+}
+
+// WorkloadInstance identifies one component's running workloads for live-status
+// and log queries: the component name plus the app.kubernetes.io/instance label
+// its pods carry (the Helm release name suparship uses for that component).
+type WorkloadInstance struct {
+	// Component is the suparship component name (ComponentSpec.Name).
+	Component string
+	// Instance is the app.kubernetes.io/instance label value (the Helm release
+	// name) selecting this component's pods.
+	Instance string
+}
+
+// WorkloadInstances returns each enabled component's workload identity. A
+// single-source app (one component) uses the app name as its Helm release, so its
+// sole workload is labelled instance={app}. A composed app gives each component
+// its own release {app}-{component} — matching the publisher's per-component
+// ReleaseName — so each is labelled instance={app}-{component}. This is the stable
+// handle status/log queries select on (composed workloads are NOT labelled
+// instance={app}).
+func (a *App) WorkloadInstances() []WorkloadInstance {
+	enabled := make([]ComponentSpec, 0, len(a.Spec.Components))
+	for _, c := range a.Spec.Components {
+		if c.Enabled {
+			enabled = append(enabled, c)
+		}
+	}
+	if !a.Spec.IsComposed() {
+		comp := ""
+		if len(enabled) > 0 {
+			comp = enabled[0].Name
+		} else if len(a.Spec.Components) > 0 {
+			comp = a.Spec.Components[0].Name
+		}
+		return []WorkloadInstance{{Component: comp, Instance: a.Name}}
+	}
+	out := make([]WorkloadInstance, 0, len(enabled))
+	for _, c := range enabled {
+		out = append(out, WorkloadInstance{Component: c.Name, Instance: a.Name + "-" + c.Name})
+	}
+	return out
+}
+
+// InstanceForComponent returns the instance label for a named component, or ""
+// when the component isn't one of the app's enabled components.
+func (a *App) InstanceForComponent(component string) string {
+	for _, wi := range a.WorkloadInstances() {
+		if wi.Component == component {
+			return wi.Instance
+		}
+	}
+	return ""
 }
 
 // DiagnosticLevel classifies a Diagnostic by severity.

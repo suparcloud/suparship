@@ -2891,14 +2891,13 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	}
 	clients, unreachable, routed := ah.workloadClustersForEnv(ctx, env.ProjectName, appName, routeEnv)
 
-	// instance is the Helm release name suparship sets on every app
-	// Application/ApplicationSet (ReleaseName: app.Name), which Helm stamps as
-	// the app.kubernetes.io/instance label on every rendered resource. It's the
-	// handle the label-based discovery selects on, so BYO charts (whose
-	// Deployments are named by their own fullname template, not the app name)
-	// still report real status. NOTE: this is the app name, NOT the ArgoCD
-	// Application name {project}-{app}-{env}.
-	instance := appName
+	// instances are each component's workload identity: the app.kubernetes.io/
+	// instance label (Helm release name) its pods carry. Single-source → the sole
+	// workload labelled {app}; composed → one per component labelled
+	// {app}-{component}. Querying per instance is what makes a COMPOSED app report
+	// real status: its component workloads are NOT labelled instance={app}, so the
+	// old single instance={app} query read every composed app as "not deployed".
+	instances := ah.appWorkloadInstances(ctx, env.ProjectName, appName)
 
 	// No remote routing (single-cluster / fake mode): query the local provider.
 	if !routed {
@@ -2908,9 +2907,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 		// Prefer label-based app-native discovery when the provider is a real
 		// K8s provider; fakes/tests only implement the name-based interface.
 		if kp, ok := ah.runtimeProvider.(*runtime.K8sProvider); ok {
-			if info, err := kp.GetAppRuntime(ctx, env.Namespace, instance, appName); err == nil {
-				ah.applyRuntimeInfo(env, info)
-			}
+			ah.applyComponentRuntimes(env, instances, runtimeByComponent(ctx, kp, env.Namespace, instances))
 			return
 		}
 		if info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName); err == nil {
@@ -2934,43 +2931,40 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	}
 
 	// Query every reachable cluster concurrently (a fan-out "all" env otherwise
-	// serializes one full GetAppRuntime per cluster), then aggregate in cluster
-	// order so the worst-of phase, summed replicas, and per-cluster diagnostics
-	// are deterministic regardless of completion order.
-	infos := make([]*runtime.RuntimeInfo, len(clients))
+	// serializes one full read per cluster); each returns per-component infos we
+	// then merge across clusters in cluster order so the worst-of phase, summed
+	// replicas, and per-cluster diagnostics are deterministic.
+	perCluster := make([]map[string]*runtime.RuntimeInfo, len(clients))
 	runBounded(len(clients), appEnrichConcurrency, func(i int) {
 		nc := clients[i]
-		if info, err := runtime.NewK8sProvider(nc.client, nc.dyn).GetAppRuntime(ctx, env.Namespace, instance, appName); err == nil {
-			infos[i] = info
-		}
+		perCluster[i] = runtimeByComponent(ctx, runtime.NewK8sProvider(nc.client, nc.dyn), env.Namespace, instances)
 	})
 
-	agg := &runtime.RuntimeInfo{Status: runtime.StatusHealthy}
+	// compAgg: component name → RuntimeInfo aggregated across all reachable clusters.
+	compAgg := map[string]*runtime.RuntimeInfo{}
 	got := false
 	for i, nc := range clients {
-		info := infos[i]
-		if info == nil {
+		byComp := perCluster[i]
+		if len(byComp) == 0 {
 			continue
 		}
 		got = true
-		if runtimeStatusRank[info.Status] >= runtimeStatusRank[agg.Status] {
-			agg.Status = info.Status
+		clusterAgg := &runtime.RuntimeInfo{Status: runtime.StatusHealthy}
+		for comp, info := range byComp {
+			cur := compAgg[comp]
+			if cur == nil {
+				cur = &runtime.RuntimeInfo{Status: runtime.StatusHealthy}
+				compAgg[comp] = cur
+			}
+			mergeRuntime(cur, info)
+			mergeRuntime(clusterAgg, info)
 		}
-		agg.Replicas += info.Replicas
-		agg.Available += info.Available
-		if info.LastDeployed > agg.LastDeployed {
-			agg.LastDeployed = info.LastDeployed
-		}
-		if agg.Image == "" {
-			agg.Image = info.Image
-		}
-		agg.IngressURLs = append(agg.IngressURLs, info.IngressURLs...)
 		if len(clients) > 1 {
 			env.Status.Diagnostics = append(env.Status.Diagnostics, domain.Diagnostic{
 				Source:  "runtime",
 				Level:   domain.DiagnosticInfo,
-				Title:   fmt.Sprintf("Cluster %s: %s", nc.name, info.Status),
-				Detail:  fmt.Sprintf("%d/%d replicas available", info.Available, info.Replicas),
+				Title:   fmt.Sprintf("Cluster %s: %s", nc.name, clusterAgg.Status),
+				Detail:  fmt.Sprintf("%d/%d replicas available", clusterAgg.Available, clusterAgg.Replicas),
 				Cluster: nc.name,
 			})
 		}
@@ -2978,7 +2972,104 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	if !got {
 		return
 	}
+	ah.applyComponentRuntimes(env, instances, compAgg)
+}
+
+// appWorkloadInstances resolves the app's per-component workload identities,
+// falling back to a single instance={app} handle when the app record can't be
+// read (so status still degrades gracefully to the pre-composed behaviour).
+func (ah *appHandler) appWorkloadInstances(ctx context.Context, project, appName string) []domain.WorkloadInstance {
+	if ah.appStore != nil {
+		if app, err := ah.appStore.GetApp(ctx, project, appName); err == nil && app != nil {
+			if wis := app.WorkloadInstances(); len(wis) > 0 {
+				return wis
+			}
+		}
+	}
+	return []domain.WorkloadInstance{{Instance: appName}}
+}
+
+// appStatefulComponents returns the names of a COMPOSED app's stateful components
+// (each of which renders as its own {argoAppName}-{component} ArgoCD Application).
+// Nil for single-source apps or when the app record can't be read.
+func (ah *appHandler) appStatefulComponents(ctx context.Context, project, appName string) []string {
+	if ah.appStore == nil {
+		return nil
+	}
+	app, err := ah.appStore.GetApp(ctx, project, appName)
+	if err != nil || app == nil || !app.Spec.IsComposed() {
+		return nil
+	}
+	var names []string
+	for _, c := range app.Spec.StatefulComponents() {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+// runtimeByComponent queries each component's workload instance on one cluster's
+// provider, returning component-name → live RuntimeInfo for the components a read
+// succeeded for. The fallback name is the instance itself: a composed component's
+// workload fullname IS {app}-{component}, so the name-based fallback still resolves.
+func runtimeByComponent(ctx context.Context, kp *runtime.K8sProvider, namespace string, instances []domain.WorkloadInstance) map[string]*runtime.RuntimeInfo {
+	out := make(map[string]*runtime.RuntimeInfo, len(instances))
+	for _, wi := range instances {
+		if info, err := kp.GetAppRuntime(ctx, namespace, wi.Instance, wi.Instance); err == nil {
+			out[wi.Component] = info
+		}
+	}
+	return out
+}
+
+// mergeRuntime folds src into dst: worst-of phase, summed replicas, union of
+// ingress URLs, latest deploy timestamp, first non-empty image. dst must be non-nil.
+func mergeRuntime(dst, src *runtime.RuntimeInfo) {
+	if src == nil {
+		return
+	}
+	if runtimeStatusRank[src.Status] >= runtimeStatusRank[dst.Status] {
+		dst.Status = src.Status
+	}
+	dst.Replicas += src.Replicas
+	dst.Available += src.Available
+	if src.LastDeployed > dst.LastDeployed {
+		dst.LastDeployed = src.LastDeployed
+	}
+	if dst.Image == "" {
+		dst.Image = src.Image
+	}
+	dst.IngressURLs = append(dst.IngressURLs, src.IngressURLs...)
+}
+
+// applyComponentRuntimes aggregates per-component infos into the env-level status
+// (worst-of phase, summed replicas) and, for a composed app (>1 component),
+// records the per-component breakdown on env.Status.Components. No-op when no
+// component read succeeded, so a fully-not-deployed app keeps its stored status.
+func (ah *appHandler) applyComponentRuntimes(env *domain.AppEnvironment, instances []domain.WorkloadInstance, byComp map[string]*runtime.RuntimeInfo) {
+	agg := &runtime.RuntimeInfo{Status: runtime.StatusHealthy}
+	got := false
+	var comps []domain.ComponentRuntimeStatus
+	for _, wi := range instances { // deterministic order
+		info := byComp[wi.Component]
+		if info == nil {
+			continue
+		}
+		got = true
+		mergeRuntime(agg, info)
+		if len(instances) > 1 {
+			comps = append(comps, domain.ComponentRuntimeStatus{
+				Component: wi.Component,
+				Phase:     info.Status,
+				Replicas:  info.Replicas,
+				Available: info.Available,
+			})
+		}
+	}
+	if !got {
+		return
+	}
 	ah.applyRuntimeInfo(env, agg)
+	env.Status.Components = comps
 }
 
 // argoClusterApp pairs a destination cluster with the app's ArgoCD Application
@@ -3046,6 +3137,11 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 		return
 	}
 	apps := ah.argoAppNamesForEnv(ctx, env.ProjectName, appName, env.EnvName)
+	// A composed app's stateful components each render as their OWN ArgoCD
+	// Application named {argoAppName}-{component} (BuildComponentApplication), so a
+	// failed/degraded database sync would otherwise produce no diagnostic. Read
+	// each alongside the main app + platform companion.
+	statefulComps := ah.appStatefulComponents(ctx, env.ProjectName, appName)
 	// Only tag diagnostics with a cluster when the env actually fans out, to keep
 	// single-cluster output unchanged.
 	multi := len(apps) > 1
@@ -3057,10 +3153,14 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 		if multi {
 			cluster = ca.cluster
 		}
-		for _, t := range []struct{ app, source string }{
+		targets := []struct{ app, source string }{
 			{ca.name, "argocd"},
 			{ca.name + "-platform", "external-secrets"},
-		} {
+		}
+		for _, comp := range statefulComps {
+			targets = append(targets, struct{ app, source string }{ca.name + "-" + comp, "argocd"})
+		}
+		for _, t := range targets {
 			var diags []domain.Diagnostic
 			if useSnapshot {
 				diags = lookup(t.app, t.source)
@@ -3545,6 +3645,14 @@ func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
 			Detail:  d.Detail,
 			Hint:    d.Hint,
 			Cluster: d.Cluster,
+		})
+	}
+	for _, c := range s.Components {
+		dto.Components = append(dto.Components, ComponentRuntimeStatusDTO{
+			Component: c.Component,
+			Phase:     c.Phase,
+			Replicas:  c.Replicas,
+			Available: c.Available,
 		})
 	}
 	return dto

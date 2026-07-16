@@ -44,7 +44,8 @@ func (ah *appHandler) handleGetAppLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
+	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{
 			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
 		})
@@ -102,18 +103,42 @@ func (ah *appHandler) handleGetAppLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Pod == "" {
-		// When a component is named, use it as the workload selector so that
-		// only pods belonging to that component are considered. Otherwise fall
-		// back to the app name which matches the default single-component case.
-		workload := component
-		if workload == "" {
-			workload = appName
+		// Resolve the workload instance label(s) to select pods on. A composed
+		// component's pods are labelled app.kubernetes.io/instance={app}-{component}
+		// (not {app}), so the raw component name won't match — map it to the
+		// component's release name. With no component, union every component's pods
+		// (single-source → just {app}).
+		var instances []string
+		if component != "" {
+			if inst := app.InstanceForComponent(component); inst != "" {
+				instances = []string{inst}
+			} else {
+				instances = []string{component} // BYO/unknown component: try it verbatim
+			}
+		} else {
+			for _, wi := range app.WorkloadInstances() {
+				instances = append(instances, wi.Instance)
+			}
+			if len(instances) == 0 {
+				instances = []string{appName}
+			}
 		}
 
-		pods, err := logsProvider.ListPods(r.Context(), namespace, workload)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list pods"})
-			return
+		var pods []runtime.PodInfo
+		seen := map[string]bool{}
+		for _, inst := range instances {
+			ps, err := logsProvider.ListPods(r.Context(), namespace, inst)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list pods"})
+				return
+			}
+			for _, p := range ps {
+				if seen[p.Name] {
+					continue
+				}
+				seen[p.Name] = true
+				pods = append(pods, p)
+			}
 		}
 		if len(pods) == 0 {
 			writeJSON(w, http.StatusNotFound, errorResponse{

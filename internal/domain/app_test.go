@@ -244,3 +244,47 @@ func TestStatefulComponents(t *testing.T) {
 		t.Errorf("StatefulComponents = %q,%q, want cache,db (name-sorted)", got[0].Name, got[1].Name)
 	}
 }
+
+// TestWorkloadInstances verifies the app.kubernetes.io/instance label derivation
+// that live-status and log queries select on: a single-source app's sole workload
+// is labelled {app}; a composed app's components are each labelled {app}-{comp}.
+func TestWorkloadInstances(t *testing.T) {
+	// Single-source: one component, instance = app name.
+	single := &App{Name: "bigly", ProjectName: "demo", Spec: AppSpec{
+		Components: []ComponentSpec{
+			{Name: "web", Type: ComponentWeb, Enabled: true, Template: &AppTemplateRef{Name: "web"}},
+		},
+	}}
+	got := single.WorkloadInstances()
+	if len(got) != 1 || got[0].Instance != "bigly" {
+		t.Fatalf("single-source WorkloadInstances = %+v, want [{web bigly}]", got)
+	}
+	if single.InstanceForComponent("web") != "bigly" {
+		t.Errorf("InstanceForComponent(web) = %q, want bigly", single.InstanceForComponent("web"))
+	}
+
+	// Composed: each component instance = {app}-{component}; a disabled one is skipped.
+	composed := &App{Name: "bigly", ProjectName: "demo", Spec: AppSpec{
+		Components: []ComponentSpec{
+			{Name: "api", Type: ComponentWeb, Enabled: true, Template: &AppTemplateRef{Name: "web"}},
+			{Name: "worker", Type: ComponentType("worker"), Enabled: true, Template: &AppTemplateRef{Name: "worker"}},
+			{Name: "off", Type: ComponentWeb, Enabled: false, Template: &AppTemplateRef{Name: "web"}},
+		},
+	}}
+	gc := composed.WorkloadInstances()
+	if len(gc) != 2 {
+		t.Fatalf("composed WorkloadInstances = %+v, want 2 (disabled skipped)", gc)
+	}
+	want := map[string]string{"api": "bigly-api", "worker": "bigly-worker"}
+	for _, wi := range gc {
+		if want[wi.Component] != wi.Instance {
+			t.Errorf("component %q instance = %q, want %q", wi.Component, wi.Instance, want[wi.Component])
+		}
+	}
+	if composed.InstanceForComponent("worker") != "bigly-worker" {
+		t.Errorf("InstanceForComponent(worker) = %q, want bigly-worker", composed.InstanceForComponent("worker"))
+	}
+	if composed.InstanceForComponent("nope") != "" {
+		t.Errorf("InstanceForComponent(nope) = %q, want empty", composed.InstanceForComponent("nope"))
+	}
+}

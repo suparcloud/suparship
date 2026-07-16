@@ -4306,9 +4306,16 @@ function ComponentsTable({
   const totalReplicas = currentEnv?.status.replicas ?? 0;
   const availableReplicas = currentEnv?.status.available ?? 0;
 
-  // Replica attribution: only unambiguous when exactly one scalable component
-  // (web / worker) exists. For multi-component apps we surface the aggregate
-  // in the section header and show "—" per row to avoid misleading fractions.
+  // Per-component live health (composed apps): the server reports each
+  // component's own phase + replicas, keyed by component name. Empty for
+  // single-component apps, where the env aggregate describes the sole workload.
+  const componentStatus = new Map(
+    (currentEnv?.status.components ?? []).map((c) => [c.component, c]),
+  );
+
+  // Replica attribution fallback for apps WITHOUT per-component status (older
+  // server or single-component): only unambiguous when exactly one scalable
+  // component exists; otherwise show "—" to avoid misleading fractions.
   const scalableComponents = components.filter(
     (c) => c.type === "web" || c.type === "worker",
   );
@@ -4378,7 +4385,16 @@ function ComponentsTable({
       {expanded && (
         <div className="divide-y divide-gray-50">
           {components.map((comp) => {
-            const replicas = replicaLabel(comp);
+            const cs = componentStatus.get(comp.name);
+            // Prefer the component's own live status; fall back to the app-level
+            // phase + the aggregate replica heuristic when it isn't reported.
+            const compPhase = cs?.phase ?? phase;
+            const replicas =
+              comp.type === "cron" || comp.type === "job"
+                ? "—"
+                : cs
+                  ? `${cs.available}/${cs.replicas}`
+                  : replicaLabel(comp);
             return (
               <div key={comp.name} className="px-5 py-2.5">
                 <div className="flex items-center justify-between">
@@ -4430,7 +4446,7 @@ function ComponentsTable({
                         <span className="text-gray-300">replicas</span>
                       </span>
                     )}
-                    <StatusBadge status={phase} />
+                    <StatusBadge status={compPhase} />
                     {!comp.enabledInPreview && (
                       <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">
                         no preview
