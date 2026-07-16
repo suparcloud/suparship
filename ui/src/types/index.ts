@@ -197,6 +197,9 @@ export interface TemplateImage {
   tagKey: string;
   tagPattern?: string;
   selectionStrategy?: string;
+  /** owning composed component (set only for a composed app's per-component
+   *  discovered images); routes the selection to that component's values. */
+  component?: string;
 }
 
 // AppImageBinding marks one discovered chart image (identified by its tagKey) as

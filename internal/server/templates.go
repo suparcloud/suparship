@@ -73,13 +73,16 @@ type TemplateDetailDTO struct {
 	Source   *TemplateSourceDTO `json:"source,omitempty"`
 }
 
-// TemplateImageDTO mirrors tpl.TemplateImage on the wire.
+// TemplateImageDTO mirrors tpl.TemplateImage on the wire. Component is set only
+// for a composed app's per-component discovered images (which suparship component
+// owns the image), so the single app-level Images panel can group + route them.
 type TemplateImageDTO struct {
 	Name              string `json:"name"`
 	Repository        string `json:"repository"`
 	TagKey            string `json:"tagKey"`
 	TagPattern        string `json:"tagPattern,omitempty"`
 	SelectionStrategy string `json:"selectionStrategy,omitempty"`
+	Component         string `json:"component,omitempty"`
 }
 
 // TemplateSourceDTO describes where a template came from, for the UI's edit gating.

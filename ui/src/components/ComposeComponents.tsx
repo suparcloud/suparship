@@ -1,9 +1,6 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 
-import {
-  fetchTemplateEffectiveValues,
-  previewTemplateEffectiveValues,
-} from "../lib/templates";
+import { fetchTemplateEffectiveValues } from "../lib/templates";
 import { mergeOverlay, stringifyOverlay } from "../lib/yamlDoc";
 import type {
   ComponentCreate,
@@ -11,7 +8,6 @@ import type {
   ComponentImage,
   ComponentSummary,
   EffectiveValuesResponse,
-  TemplateImage,
   TemplateSummary,
 } from "../types";
 import type { ConfigVariables } from "../lib/configVars";
@@ -153,13 +149,6 @@ const inputCls =
   "w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500";
 const labelCls = "mb-1 block text-xs font-medium text-gray-500";
 
-// Kargo image-selection defaults — kept in sync with gitops.DefaultImageTagPattern
-// / DefaultImageSelectionStrategy (server applies these when a component image
-// leaves tagPattern/selectionStrategy blank).
-const DEFAULT_TAG_PATTERN = "^[0-9a-f]{7}$";
-const DEFAULT_SELECTION_STRATEGY = "NewestBuild";
-const SELECTION_STRATEGIES = ["NewestBuild", "SemVer", "Digest", "Lexical"];
-
 // ComposeComponents is the add-component canvas: a list of component rows, each
 // picking its own template + a per-component values overlay, plus an "Add
 // component" control. Controlled — the parent owns the ComponentDraft[] state.
@@ -168,22 +157,19 @@ export function ComposeComponents({
   components,
   onChange,
   configVars,
-  structuralOnly = false,
 }: {
   templates: TemplateSummary[];
   components: ComponentDraft[];
   onChange: (next: ComponentDraft[]) => void;
   configVars?: ConfigVariables | null;
-  // structuralOnly hides the per-component values editor (name/template/type/
-  // expose/env/stateful only). Used on the app detail page, where values are
-  // edited inline in each component's card instead.
-  structuralOnly?: boolean;
 }) {
   // Effective-values base (chart + platform defaults) per template, for the
   // read-only preview pane. Fetched once per distinct template and cached; two
   // components on the same template share one fetch.
   const [bases, setBases] = useState<Record<string, EffectiveValuesResponse | null>>({});
   const fetched = useRef<Set<string>>(new Set());
+  // Which component rows have their (on-demand) values editor expanded, by index.
+  const [valuesOpen, setValuesOpen] = useState<Record<number, boolean>>({});
   const templateKey = components.map((c) => c.template).join(",");
   useEffect(() => {
     for (const name of new Set(components.map((c) => c.template).filter(Boolean))) {
@@ -195,37 +181,6 @@ export function ComposeComponents({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateKey]);
-
-  // Per-component image discovery: each component's images are found in its own
-  // effective values (chart defaults ⊕ its overlay), so the user selects from a
-  // checklist instead of hand-typing repositories. Keyed by (template + overlay)
-  // content so identical rows share one fetch; debounced as the overlay is edited.
-  const [discovered, setDiscovered] = useState<Record<string, TemplateImage[]>>({});
-  const discFetched = useRef<Set<string>>(new Set());
-  const imageKeyFor = (c: ComponentDraft) =>
-    `${c.template}::${JSON.stringify(c.values)}`;
-  const discoveryKey = components.map(imageKeyFor).join("|");
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      for (const c of components) {
-        if (!c.template) continue;
-        const key = imageKeyFor(c);
-        if (discFetched.current.has(key)) continue;
-        discFetched.current.add(key);
-        // The component's overlay is layered highest (as defaultValues) so its
-        // image wins; DiscoveredImages come back scanned from the merged doc.
-        previewTemplateEffectiveValues(c.template, "", "", {
-          defaultValues: c.values,
-        })
-          .then((res) =>
-            setDiscovered((prev) => ({ ...prev, [key]: res.discoveredImages ?? [] })),
-          )
-          .catch(() => setDiscovered((prev) => ({ ...prev, [key]: [] })));
-      }
-    }, 400);
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [discoveryKey]);
 
   function update(i: number, patch: Partial<ComponentDraft>) {
     onChange(components.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -260,41 +215,6 @@ export function ComposeComponents({
     if (!c) return;
     update(i, { envVars: [...c.envVars, { name: "", value: "" }] });
   }
-  // Image selection is keyed by tagKey (the discovered image's identity).
-  function isImageSelected(c: ComponentDraft, tagKey: string): boolean {
-    return c.images.some((im) => im.tagKey === tagKey);
-  }
-  function toggleImage(i: number, img: TemplateImage, checked: boolean) {
-    const c = components[i];
-    if (!c) return;
-    if (checked) {
-      if (isImageSelected(c, img.tagKey)) return;
-      update(i, {
-        images: [...c.images, { name: img.name, tagKey: img.tagKey }],
-      });
-    } else {
-      update(i, { images: c.images.filter((im) => im.tagKey !== img.tagKey) });
-    }
-  }
-  function updateImageByTagKey(
-    i: number,
-    tagKey: string,
-    patch: Partial<ComponentImage>,
-  ) {
-    const c = components[i];
-    if (!c) return;
-    update(i, {
-      images: c.images.map((im) =>
-        im.tagKey === tagKey ? { ...im, ...patch } : im,
-      ),
-    });
-  }
-  function removeImageByTagKey(i: number, tagKey: string) {
-    const c = components[i];
-    if (!c) return;
-    update(i, { images: c.images.filter((im) => im.tagKey !== tagKey) });
-  }
-
   // When the picked template changes, re-default the type/expose.
   function onTemplateChange(i: number, name: string) {
     const tmpl = templates.find((t) => t.name === name);
@@ -386,56 +306,69 @@ export function ComposeComponents({
           {/* Per-component values overlay — deep-merged onto this component's
               chart values, in the chart's own schema (canonical or BYO) — plus a
               read-only effective preview (chart + platform defaults ⊕ overrides).
-              Hidden in structuralOnly mode (values edited inline in the card). */}
-          {!structuralOnly && (
+              On-demand (collapsed) so adding several components isn't cluttered,
+              but available while adding/editing — set a new component's values
+              before it exists as a card. */}
           <div className="mt-3">
-            <label className={labelCls}>
-              Values{" "}
-              <span className="font-normal text-gray-400">
-                (overrides for this component's chart — e.g.{" "}
-                <code className="font-mono">components.web.image.tag</code>)
-              </span>
-            </label>
-            <Suspense
-              fallback={
-                <div className="rounded-lg border border-gray-200 p-3 text-xs text-gray-400">
-                  Loading editor…
-                </div>
+            <button
+              type="button"
+              onClick={() =>
+                setValuesOpen((o) => ({ ...o, [i]: !o[i] }))
               }
+              aria-expanded={!!valuesOpen[i]}
+              className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
             >
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <ValuesEditor
-                  label="Your overrides"
-                  value={c.valuesText}
-                  configVars={configVars ?? undefined}
-                  height="14rem"
-                  placeholder={
-                    "# e.g.\ncomponents:\n  web:\n    image:\n      repository: ghcr.io/org/app\n      tag: v1"
-                  }
-                  onChange={(text) => update(i, { valuesText: text })}
-                  onValidChange={(parsed, err) =>
-                    update(i, {
-                      valuesError: err,
-                      ...(parsed ? { values: parsed } : {}),
-                    })
-                  }
-                />
-                <ValuesEditor
-                  label={
-                    bases[c.template]?.chartDefaultsAvailable
-                      ? "Effective (chart + platform ⊕ overrides)"
-                      : "Effective (platform ⊕ overrides)"
-                  }
-                  value={stringifyOverlay(
-                    mergeOverlay(bases[c.template]?.values ?? {}, c.values),
-                  )}
-                  height="14rem"
-                  readOnly
-                />
-              </div>
-            </Suspense>
+              <span className={`transition-transform ${valuesOpen[i] ? "rotate-90" : ""}`}>
+                ▸
+              </span>
+              values
+              {c.valuesText.trim() !== "" && !valuesOpen[i] && (
+                <span className="ml-1 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-600">
+                  set
+                </span>
+              )}
+            </button>
+            {valuesOpen[i] && (
+              <Suspense
+                fallback={
+                  <div className="mt-2 rounded-lg border border-gray-200 p-3 text-xs text-gray-400">
+                    Loading editor…
+                  </div>
+                }
+              >
+                <div className="mt-2 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <ValuesEditor
+                    label="Your overrides"
+                    value={c.valuesText}
+                    configVars={configVars ?? undefined}
+                    height="14rem"
+                    placeholder={
+                      "# e.g.\ncomponents:\n  web:\n    image:\n      repository: ghcr.io/org/app\n      tag: v1"
+                    }
+                    onChange={(text) => update(i, { valuesText: text })}
+                    onValidChange={(parsed, err) =>
+                      update(i, {
+                        valuesError: err,
+                        ...(parsed ? { values: parsed } : {}),
+                      })
+                    }
+                  />
+                  <ValuesEditor
+                    label={
+                      bases[c.template]?.chartDefaultsAvailable
+                        ? "Effective (chart + platform ⊕ overrides)"
+                        : "Effective (platform ⊕ overrides)"
+                    }
+                    value={stringifyOverlay(
+                      mergeOverlay(bases[c.template]?.values ?? {}, c.values),
+                    )}
+                    height="14rem"
+                    readOnly
+                  />
+                </div>
+              </Suspense>
+            )}
           </div>
-          )}
 
           {/* Environment: inherit all app vars, or curate a subset. */}
           <div className="mt-3 border-t border-gray-100 pt-3">
@@ -562,141 +495,6 @@ export function ComposeComponents({
               </p>
             </div>
 
-            {/* Kargo image CD: images are auto-discovered from THIS component's
-                effective values (chart defaults ⊕ its overlay). Check the ones
-                Kargo should watch + promote; the repository and tag-key come from
-                values, not hand-typed. Mirrors the single-source Images panel. */}
-            {!c.stateful && (
-              <div className="mt-3">
-                <label className={labelCls}>Images (Kargo CD)</label>
-                {(() => {
-                  const imgs = discovered[imageKeyFor(c)];
-                  const discoveredKeys = new Set((imgs ?? []).map((d) => d.tagKey));
-                  // Legacy selections whose tagKey discovery didn't surface (BYO
-                  // repo not in values, or a pre-discovery config): keep them
-                  // visible so they can be reviewed/removed.
-                  const legacy = c.images.filter(
-                    (im) => !discoveredKeys.has(im.tagKey),
-                  );
-                  if (imgs === undefined) {
-                    return (
-                      <p className="text-xs text-gray-400">Scanning values…</p>
-                    );
-                  }
-                  if (imgs.length === 0 && legacy.length === 0) {
-                    return (
-                      <p className="text-xs text-gray-400">
-                        No images found in this component's values. Set an image
-                        (e.g. <code>image.repository</code>) in the overlay above,
-                        then it appears here to manage.
-                      </p>
-                    );
-                  }
-                  const controls = (tagKey: string) => {
-                    const sel = c.images.find((im) => im.tagKey === tagKey);
-                    return (
-                      <div className="mt-1 ml-6 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
-                        <label className="flex items-center gap-1">
-                          <span className="text-gray-500">Tag regex</span>
-                          <input
-                            type="text"
-                            className="w-48 rounded-md border border-gray-300 px-2 py-1 font-mono"
-                            placeholder={DEFAULT_TAG_PATTERN}
-                            value={sel?.tagPattern ?? ""}
-                            onChange={(ev) =>
-                              updateImageByTagKey(i, tagKey, {
-                                tagPattern: ev.target.value,
-                              })
-                            }
-                          />
-                        </label>
-                        <label className="flex items-center gap-1">
-                          <span className="text-gray-500">Strategy</span>
-                          <select
-                            className="rounded-md border border-gray-300 px-2 py-1"
-                            value={sel?.selectionStrategy || DEFAULT_SELECTION_STRATEGY}
-                            onChange={(ev) =>
-                              updateImageByTagKey(i, tagKey, {
-                                selectionStrategy: ev.target.value,
-                              })
-                            }
-                          >
-                            {SELECTION_STRATEGIES.map((s) => (
-                              <option key={s} value={s}>
-                                {s}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      </div>
-                    );
-                  };
-                  return (
-                    <div className="space-y-2">
-                      {imgs.map((d) => {
-                        const checked = isImageSelected(c, d.tagKey);
-                        return (
-                          <div key={d.tagKey}>
-                            <label className="flex items-start gap-2 text-xs">
-                              <input
-                                type="checkbox"
-                                className="mt-0.5 h-4 w-4 rounded border-gray-300"
-                                checked={checked}
-                                onChange={(ev) =>
-                                  toggleImage(i, d, ev.target.checked)
-                                }
-                              />
-                              <span className="min-w-0">
-                                <span className="font-medium">{d.name}</span>{" "}
-                                <span className="font-mono text-gray-500">
-                                  {d.repository}
-                                </span>
-                                <span className="ml-2 font-mono text-gray-400">
-                                  {d.tagKey}
-                                </span>
-                              </span>
-                            </label>
-                            {checked && controls(d.tagKey)}
-                          </div>
-                        );
-                      })}
-                      {legacy.map((im) => (
-                        <div key={im.tagKey}>
-                          <div className="flex items-start gap-2 text-xs">
-                            <span className="min-w-0">
-                              <span className="font-mono text-gray-500">
-                                {im.repository || "(repository from values)"}
-                              </span>
-                              <span className="ml-2 font-mono text-gray-400">
-                                {im.tagKey}
-                              </span>
-                              <span className="ml-2 rounded bg-amber-50 px-1 text-amber-700">
-                                not in values
-                              </span>
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => removeImageByTagKey(i, im.tagKey)}
-                              className="rounded-md px-2 py-0.5 text-gray-400 hover:bg-red-50 hover:text-red-600"
-                              aria-label="Remove image"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                          {controls(im.tagKey)}
-                        </div>
-                      ))}
-                    </div>
-                  );
-                })()}
-                <p className="mt-1 text-xs text-gray-400">
-                  Defaults: tag regex{" "}
-                  <code className="font-mono">{DEFAULT_TAG_PATTERN}</code> (7-char
-                  commit SHA), strategy{" "}
-                  <code className="font-mono">{DEFAULT_SELECTION_STRATEGY}</code>.
-                </p>
-              </div>
-            )}
           </div>
         </div>
       ))}

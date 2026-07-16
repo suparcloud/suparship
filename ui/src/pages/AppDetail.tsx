@@ -11,7 +11,7 @@ import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 // CodeMirror is heavy; only the values editor needs it.
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 import { listTemplateVersions, fetchTemplateEffectiveValues, previewTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
-import type { TemplateVersionInfo, TemplateImage, AppImageBinding, TemplateSummary } from "../types";
+import type { TemplateVersionInfo, TemplateImage, AppImageBinding, ComponentImage, TemplateSummary } from "../types";
 import {
   ComposeComponents,
   type ComponentDraft,
@@ -1995,6 +1995,12 @@ const SELECTION_STRATEGIES = ["NewestBuild", "SemVer", "Digest", "Lexical"];
 
 type ImageSel = { tagPattern: string; selectionStrategy: string };
 
+// imageKey identifies a discovered image in the app-level Images selection. It
+// includes the owning component (empty for single-source / app-level images) so
+// two composed components sharing a tagKey (e.g. both "image.tag") don't collide.
+const imageKey = (component: string | undefined, tagKey: string) =>
+  `${component ?? ""}::${tagKey}`;
+
 function AppValuesEditor({
   data,
   project,
@@ -2110,11 +2116,22 @@ function AppValuesEditor({
     }
     setDeployEnvs(de);
     const sel: Record<string, ImageSel> = {};
+    // App-level (single-source) selection.
     for (const b of data.images ?? []) {
-      sel[b.tagKey] = {
+      sel[imageKey(undefined, b.tagKey)] = {
         tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
         selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
       };
+    }
+    // Composed apps store the selection per component — seed those too so the one
+    // app-level panel reflects them.
+    for (const c of data.components ?? []) {
+      for (const b of c.images ?? []) {
+        sel[imageKey(c.name, b.tagKey)] = {
+          tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
+          selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
+        };
+      }
     }
     setSelectedImages(sel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2387,29 +2404,25 @@ function AppValuesEditor({
     }
   }
 
-  // Build the CD selection from the checked discovered images, carrying each
-  // image's (possibly customized) tag pattern + selection strategy.
-  function buildImageBindings(): AppImageBinding[] {
-    const out: AppImageBinding[] = [];
-    for (const img of discoveredImages) {
-      const s = selectedImages[img.tagKey];
-      if (!s) continue;
-      out.push({
-        name: img.name,
-        tagKey: img.tagKey,
-        tagPattern: s.tagPattern,
-        selectionStrategy: s.selectionStrategy,
-      });
-    }
-    return out;
-  }
+  // Composed apps store the selection per component; single-source at the app
+  // level. Split the checked discovered images accordingly on save.
+  const composedApp = (data.components?.length ?? 0) > 1;
 
+  // Saved selection (persisted), keyed by imageKey, for dirty tracking.
   const savedImages: Record<string, ImageSel> = {};
   for (const b of data.images ?? []) {
-    savedImages[b.tagKey] = {
+    savedImages[imageKey(undefined, b.tagKey)] = {
       tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
       selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
     };
+  }
+  for (const c of data.components ?? []) {
+    for (const b of c.images ?? []) {
+      savedImages[imageKey(c.name, b.tagKey)] = {
+        tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
+        selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
+      };
+    }
   }
   const selectedKeys = Object.keys(selectedImages);
   const imagesDirty =
@@ -2425,12 +2438,12 @@ function AppValuesEditor({
       );
     });
 
-  function toggleImage(tagKey: string) {
+  function toggleImage(key: string) {
     setSelectedImages((cur) => {
       const next = { ...cur };
-      if (next[tagKey]) delete next[tagKey];
+      if (next[key]) delete next[key];
       else
-        next[tagKey] = {
+        next[key] = {
           tagPattern: DEFAULT_TAG_PATTERN,
           selectionStrategy: DEFAULT_SELECTION_STRATEGY,
         };
@@ -2438,16 +2451,45 @@ function AppValuesEditor({
     });
   }
 
-  function updateImageSel(tagKey: string, patch: Partial<ImageSel>) {
+  function updateImageSel(key: string, patch: Partial<ImageSel>) {
     setSelectedImages((cur) =>
-      cur[tagKey] ? { ...cur, [tagKey]: { ...cur[tagKey], ...patch } } : cur,
+      cur[key] ? { ...cur, [key]: { ...cur[key], ...patch } } : cur,
     );
   }
 
   async function saveImages() {
     setImagesSaving(true);
     try {
-      await updateApp(project, data.name, { images: buildImageBindings() });
+      if (composedApp) {
+        // Route each checked image to its owning component; send every component
+        // so unchecking clears one that had a selection.
+        const byComp: Record<string, ComponentImage[]> = {};
+        for (const c of data.components ?? []) byComp[c.name] = [];
+        for (const img of discoveredImages) {
+          const s = selectedImages[imageKey(img.component, img.tagKey)];
+          if (!s || !img.component) continue;
+          (byComp[img.component] ??= []).push({
+            name: img.name,
+            tagKey: img.tagKey,
+            tagPattern: s.tagPattern,
+            selectionStrategy: s.selectionStrategy,
+          });
+        }
+        await updateApp(project, data.name, { componentImages: byComp });
+      } else {
+        const out: AppImageBinding[] = [];
+        for (const img of discoveredImages) {
+          const s = selectedImages[imageKey(img.component, img.tagKey)];
+          if (!s) continue;
+          out.push({
+            name: img.name,
+            tagKey: img.tagKey,
+            tagPattern: s.tagPattern,
+            selectionStrategy: s.selectionStrategy,
+          });
+        }
+        await updateApp(project, data.name, { images: out });
+      }
       toast.success("CD images saved — re-publishing to GitOps.");
       await onSaved();
     } catch (err) {
@@ -2894,17 +2936,23 @@ function AppValuesEditor({
                 </p>
                 <div className="mt-3 space-y-3">
                   {discoveredImages.map((img) => {
-                    const sel = selectedImages[img.tagKey];
+                    const key = imageKey(img.component, img.tagKey);
+                    const sel = selectedImages[key];
                     return (
-                      <div key={img.tagKey} className="text-xs text-gray-600">
+                      <div key={key} className="text-xs text-gray-600">
                         <label className="flex items-start gap-2">
                           <input
                             type="checkbox"
                             checked={!!sel}
-                            onChange={() => toggleImage(img.tagKey)}
+                            onChange={() => toggleImage(key)}
                             className="mt-0.5 h-4 w-4 rounded border-gray-300"
                           />
                           <span className="min-w-0">
+                            {img.component && (
+                              <span className="mr-1 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
+                                {img.component}
+                              </span>
+                            )}
                             <span className="font-medium">{img.name}</span>{" "}
                             <span className="font-mono text-gray-500">
                               {img.repository}
@@ -2922,7 +2970,7 @@ function AppValuesEditor({
                                 type="text"
                                 value={sel.tagPattern}
                                 onChange={(e) =>
-                                  updateImageSel(img.tagKey, {
+                                  updateImageSel(key, {
                                     tagPattern: e.target.value,
                                   })
                                 }
@@ -2935,7 +2983,7 @@ function AppValuesEditor({
                               <select
                                 value={sel.selectionStrategy}
                                 onChange={(e) =>
-                                  updateImageSel(img.tagKey, {
+                                  updateImageSel(key, {
                                     selectionStrategy: e.target.value,
                                   })
                                 }
@@ -4453,15 +4501,15 @@ function ComponentsTable({
         <div className="space-y-4 p-5">
           <p className="text-xs text-gray-400">
             Add, remove, or retemplate components. Two or more make this a composed
-            app (one chart source each). Edit each component's values inline in its
-            card (available after saving). Saving re-publishes to GitOps.
+            app (one chart source each). Expand a component's <em>values</em> to set
+            its base overrides here, or edit them later in its card. Saving
+            re-publishes to GitOps.
           </p>
           <ComposeComponents
             templates={templates}
             components={drafts}
             onChange={setDrafts}
             configVars={manageConfigVars}
-            structuralOnly
           />
           {manageError && <p className="text-sm text-red-600">{manageError}</p>}
           <div className="flex items-center gap-2">

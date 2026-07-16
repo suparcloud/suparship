@@ -4,6 +4,7 @@ import type {
   CDConfig,
   ComponentConfig,
   ComponentCreate,
+  ComponentImage,
   AppDeploymentHistoryResponse,
   AppDetailResponse,
   AppEnvironmentResponse,
@@ -118,6 +119,11 @@ export interface UpdateAppRequest {
   // images replaces the app's per-slot image repository bindings (keyed by
   // template slot name). Send [] to clear; omit to leave unchanged.
   images?: AppImageBinding[];
+  // componentImages replaces the Kargo image selection of the named composed
+  // components (component name → its images), so the single app-level Images
+  // panel can manage a composed app's per-component images. Omit to leave
+  // unchanged; a component mapped to [] clears it.
+  componentImages?: Record<string, ComponentImage[]>;
   // deliveryMode switches the app's delivery mode ("pipeline" or "direct").
   // Omit to leave unchanged.
   deliveryMode?: string;

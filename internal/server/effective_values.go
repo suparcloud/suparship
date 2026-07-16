@@ -232,7 +232,41 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 	if t == nil || t.Spec.CanonicalValues() {
 		canonicalBase = ah.canonicalBaseMap(r.Context(), app, envName)
 	}
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, canonicalBase, available, t, ov, envName, "", appRaw, envRaw))
+	dto := effectiveValuesDTO(chartVals, canonicalBase, available, t, ov, envName, "", appRaw, envRaw)
+	// Composed app: the primary-template discovery above misses each component's
+	// own chart+overlay, so REPLACE the discovered images with the union of every
+	// component's images (each tagged with its owning component) — the app-level
+	// Images panel is the single place they're managed.
+	if app.Spec.IsComposed() {
+		dto.DiscoveredImages = ah.componentDiscoveredImages(r.Context(), app, envName)
+	}
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// componentDiscoveredImages returns the union of a composed app's per-component
+// discovered images (each tagged with its owning component), so the single
+// app-level Images panel can list and route them to the right component's values.
+func (ah *appHandler) componentDiscoveredImages(ctx context.Context, app *domain.App, envName string) []TemplateImageDTO {
+	var out []TemplateImageDTO
+	for _, c := range app.Spec.Components {
+		if c.Template == nil {
+			continue
+		}
+		t, ok := ah.lookupTemplate(ctx, c.Template.Name)
+		if !ok || t == nil {
+			continue
+		}
+		ov := loadOverride(ctx, ah.kubeClient, c.Template.Name)
+		for _, img := range DiscoverComponentImages(ctx, ah.kubeClient, t, ov, envName, c.Values) {
+			out = append(out, TemplateImageDTO{
+				Name:       img.Name,
+				Repository: img.Repository,
+				TagKey:     img.TagKey,
+				Component:  c.Name,
+			})
+		}
+	}
+	return out
 }
 
 // canonicalBaseMap renders the canonical HelmValues base suparship publishes for

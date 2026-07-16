@@ -596,6 +596,14 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		}
 		app.Spec.Images = bindings
 	}
+	// Per-component image selections from the app-level Images panel (composed apps).
+	if req.ComponentImages != nil {
+		for i := range app.Spec.Components {
+			if imgs, ok := req.ComponentImages[app.Spec.Components[i].Name]; ok {
+				app.Spec.Components[i].Images = componentImagesFromDTO(imgs)
+			}
+		}
+	}
 	if req.CD != nil {
 		cd := cdConfigFromDTO(req.CD)
 		// Enabling CD-managed tag ownership requires a watchable image source (a

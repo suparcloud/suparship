@@ -481,6 +481,11 @@ type updateAppRequest struct {
 	// bindings (keyed by slot Name). Send an empty array to clear them; omit to
 	// leave unchanged.
 	Images *[]AppImageBindingDTO `json:"images,omitempty"`
+	// ComponentImages, when non-nil, replaces the Kargo image selection of the named
+	// composed components (keyed by component name → its image selections). Lets the
+	// single app-level Images panel manage a composed app's per-component images.
+	// Omit to leave unchanged; a component mapped to an empty array clears it.
+	ComponentImages map[string][]ComponentImageDTO `json:"componentImages,omitempty"`
 	// DeliveryMode, when non-empty, switches the app's delivery mode ("pipeline"
 	// or "direct"). Omit to leave unchanged.
 	DeliveryMode string `json:"deliveryMode,omitempty"`
