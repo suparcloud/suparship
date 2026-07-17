@@ -644,7 +644,6 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 		}
 	}
 
-
 	// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
 	// full promotion pipeline is wired from day one. Direct-delivery apps have
 	// no pipeline — remove any Kargo CRs the app may have had (e.g. it was
@@ -3741,15 +3740,3 @@ func (p *Publisher) git(ctx context.Context, dir string, args ...string) error {
 	}
 	return nil
 }
-
-// marshalHelmValues serializes a HelmValues struct to a YAML string suitable
-// for use as inline Helm values inside an ArgoCD Application spec.
-// Kept for backward compatibility with tests that use BuildArgoApplication directly.
-func marshalHelmValues(hv helmvalues.HelmValues) (string, error) {
-	b, err := yaml.Marshal(hv)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
-

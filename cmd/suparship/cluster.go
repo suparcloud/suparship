@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"text/tabwriter"
@@ -160,14 +159,4 @@ func clusterStoreFromFlags(cmd *cobra.Command) (*kube.K8sClusterStore, error) {
 		return nil, fmt.Errorf("connecting to Kubernetes: %w", err)
 	}
 	return kube.NewK8sClusterStore(client), nil
-}
-
-// decodeBase64Kubeconfig decodes a base64-encoded kubeconfig for use in API requests.
-// Used by the API handler layer; re-exported here for CLI test convenience.
-func decodeBase64Kubeconfig(encoded string) ([]byte, error) {
-	b, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("decoding kubeconfig: %w", err)
-	}
-	return b, nil
 }

@@ -6,12 +6,7 @@ import (
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
-	"github.com/suparcloud/suparship/internal/secrets"
 )
-
-// noNaming returns the zero-value ResourceNaming used by tests that don't
-// care about envFrom names (the focus is the routing-profile output).
-func noNaming() secrets.ResourceNaming { return secrets.ResourceNaming{} }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

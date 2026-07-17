@@ -94,9 +94,10 @@ func TestProvisioner_Provision_Idempotent(t *testing.T) {
 		t.Error("expected new token ID on rotation")
 	}
 
-	// Wait for grace period to expire and old token to be revoked.
+	// Wait for grace period to expire and old token to be revoked. Read through
+	// the thread-safe accessor — the revoke runs in a background goroutine.
 	time.Sleep(2 * time.Second)
-	if _, ok := client.ConnectTokens[r1.TokenID]; ok {
+	if client.HasConnectToken(r1.TokenID) {
 		t.Error("expected old token to be revoked after grace period")
 	}
 }
@@ -184,7 +185,7 @@ func TestProvisioner_Revoke(t *testing.T) {
 	}
 
 	// Token should be gone.
-	if _, ok := client.ConnectTokens[r.TokenID]; ok {
+	if client.HasConnectToken(r.TokenID) {
 		t.Error("expected token to be removed after revoke")
 	}
 

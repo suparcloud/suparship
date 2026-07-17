@@ -302,16 +302,6 @@ func MapComponentHelmValuesForEnv(
 // namespace — <app>-global, <app>-env, <app>-cluster — each merging the
 // org-admin shared item and the app's own item for that scope.
 //
-// One ConfigMap (<app>-config) and one Secret (<app>-secrets) per app-env. The
-// platform merges all scopes (global/env/cluster) into each, so the chart
-// envFroms exactly these two names. Both are optional:true so the pod starts
-// before ESO populates the Secret.
-func envFromLists(_ /*project*/, app, _ /*envName*/, _ /*cluster*/ string) ([]string, []string) {
-	cms := []string{secrets.AppConfigMapName(app)}
-	secs := []string{secrets.AppSecretName(app)}
-	return cms, secs
-}
-
 // extractImage pulls the image repository and tag from an AppSpec Values map.
 // Returns empty strings when the keys are absent or not string-typed.
 func extractImage(values map[string]any) (repository, tag string) {
@@ -649,4 +639,3 @@ func stripScheme(url string) string {
 	}
 	return url
 }
-

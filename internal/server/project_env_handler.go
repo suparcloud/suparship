@@ -360,14 +360,6 @@ func envToDTO(projectName string, e project.Environment) EnvironmentDTO {
 	}
 }
 
-func projectEnvsToDTO(proj *project.Project) []EnvironmentDTO {
-	envs := make([]EnvironmentDTO, len(proj.Spec.Environments))
-	for i, e := range proj.Spec.Environments {
-		envs[i] = envToDTO(proj.Metadata.Name, e)
-	}
-	return envs
-}
-
 func sortEnvs(envs []project.Environment) {
 	sort.Slice(envs, func(i, j int) bool {
 		if envs[i].Order != envs[j].Order {

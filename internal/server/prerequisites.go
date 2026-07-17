@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +30,6 @@ type PrerequisitesResponse struct {
 type prerequisitesHandler struct {
 	client    kubernetes.Interface
 	dynClient dynamic.Interface
-	logger    *slog.Logger
 }
 
 func (h *prerequisitesHandler) registerRoutes(mux *http.ServeMux) {

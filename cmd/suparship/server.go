@@ -292,7 +292,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// org is configured for 1Password and an SA token is available.
 		vaultStore = secrets.NewK8sVaultStore(client)
 
-		if orgProvider != nil {
+		// orgProvider is set unconditionally above; a bare block scopes the
+		// 1Password wiring's locals without a redundant (always-true) nil guard.
+		{
 			if org, orgErr := orgProvider.GetOrg(cmd.Context()); orgErr == nil && org != nil {
 				if org.SecretBackend.Effective() == secrets.Backend1Password && org.SecretBackend.OnePassword != nil {
 					saTokenRaw, tokenErr := func() (string, error) {
@@ -1277,7 +1279,7 @@ func (a *gitOpsPublisherAdapter) buildAppBundle(ctx context.Context, app *domain
 		// pod will see — no chart-side multi-source merging.
 		pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
 		setPlatformOverlays(&pub, tmpl, ov, env.EnvName)
-	a.setComponentPlatformOverlays(ctx, &pub, app, env.EnvName)
+		a.setComponentPlatformOverlays(ctx, &pub, app, env.EnvName)
 		pub.TemplateImages = a.resolveCDImages(ctx, tmpl, ov, app, env, orgNameOf(org))
 		if tmpl != nil {
 			// Suspend is read per-env from the app spec by the publisher, but the

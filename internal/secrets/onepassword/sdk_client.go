@@ -9,10 +9,20 @@ import (
 	onepasswordsdk "github.com/1password/onepassword-sdk-go"
 )
 
+// sdkInvokeMu serializes EVERY call into the 1Password Go SDK across the whole
+// process. The SDK runs on a shared Extism/wazero WASM core; concurrent
+// invocations corrupt its linear memory ("wasm error: out of bounds memory
+// access" in extism load_input). A per-SDKClient mutex is not enough because
+// suparship builds more than one SDKClient (the shared vault store's client for
+// reads + a fresh client per token validate/register), and they all drive the
+// same underlying runtime. This package-level lock guarantees one WASM call at a
+// time regardless of how many clients exist. Client construction
+// (onepasswordsdk.NewClient) also touches the runtime, so it is serialized too.
+var sdkInvokeMu sync.Mutex
+
 // SDKClient implements SAClient using the official 1Password Go SDK.
 // It is backed by a single Service Account token.
 type SDKClient struct {
-	mu     sync.Mutex
 	client *onepasswordsdk.Client
 	token  string
 }
@@ -24,11 +34,13 @@ func NewSDKClient(ctx context.Context, token string) (*SDKClient, error) {
 		return nil, ErrTokenInvalid
 	}
 
+	sdkInvokeMu.Lock()
 	client, err := onepasswordsdk.NewClient(
 		ctx,
 		onepasswordsdk.WithServiceAccountToken(token),
 		onepasswordsdk.WithIntegrationInfo("suparship", "0.1.0"),
 	)
+	sdkInvokeMu.Unlock()
 	if err != nil {
 		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "expired") {
 			return nil, ErrTokenInvalid
@@ -48,8 +60,8 @@ func (c *SDKClient) Probe(ctx context.Context) (int, error) {
 }
 
 func (c *SDKClient) CreateVault(ctx context.Context, title, description string) (VaultInfo, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	desc := &description
 	result, err := c.client.Vaults().Create(ctx, onepasswordsdk.VaultCreateParams{
@@ -68,8 +80,8 @@ func (c *SDKClient) CreateVault(ctx context.Context, title, description string) 
 }
 
 func (c *SDKClient) ListVaults(ctx context.Context) ([]VaultInfo, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	overviews, err := c.client.Vaults().List(ctx)
 	if err != nil {
@@ -87,8 +99,8 @@ func (c *SDKClient) ListVaults(ctx context.Context) ([]VaultInfo, error) {
 }
 
 func (c *SDKClient) GetVault(ctx context.Context, vaultID string) (VaultInfo, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	v, err := c.client.Vaults().Get(ctx, vaultID, onepasswordsdk.VaultGetParams{})
 	if err != nil {
@@ -106,8 +118,8 @@ func (c *SDKClient) GetVault(ctx context.Context, vaultID string) (VaultInfo, er
 }
 
 func (c *SDKClient) DeleteVault(ctx context.Context, vaultID string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	if err := c.client.Vaults().Delete(ctx, vaultID); err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -119,8 +131,8 @@ func (c *SDKClient) DeleteVault(ctx context.Context, vaultID string) error {
 }
 
 func (c *SDKClient) GrantGroupAccess(ctx context.Context, vaultID, groupID string, perms Permission) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	err := c.client.Vaults().GrantGroupPermissions(ctx, vaultID, []onepasswordsdk.GroupAccess{
 		{
@@ -135,8 +147,8 @@ func (c *SDKClient) GrantGroupAccess(ctx context.Context, vaultID, groupID strin
 }
 
 func (c *SDKClient) RevokeGroupAccess(ctx context.Context, vaultID, groupID string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	err := c.client.Vaults().RevokeGroupPermissions(ctx, vaultID, groupID)
 	if err != nil {
@@ -160,8 +172,8 @@ func (c *SDKClient) RevokeConnectToken(_ context.Context, _ string) error {
 }
 
 func (c *SDKClient) UpsertItem(ctx context.Context, vaultID, title string, fields []ItemField) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	existing, err := c.findItemByTitle(ctx, vaultID, title)
 	if err != nil {
@@ -214,8 +226,8 @@ func (c *SDKClient) UpsertItem(ctx context.Context, vaultID, title string, field
 }
 
 func (c *SDKClient) GetItem(ctx context.Context, vaultID, itemID string) (Item, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	item, err := c.client.Items().Get(ctx, vaultID, itemID)
 	if err != nil {
@@ -247,8 +259,8 @@ func (c *SDKClient) GetItem(ctx context.Context, vaultID, itemID string) (Item, 
 }
 
 func (c *SDKClient) ListItems(ctx context.Context, vaultID string) ([]ItemOverview, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	items, err := c.client.Items().List(ctx, vaultID, activeItemsFilter())
 	if err != nil {
@@ -267,8 +279,8 @@ func (c *SDKClient) ListItems(ctx context.Context, vaultID string) ([]ItemOvervi
 }
 
 func (c *SDKClient) DeleteItem(ctx context.Context, vaultID, itemID string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	sdkInvokeMu.Lock()
+	defer sdkInvokeMu.Unlock()
 
 	if err := c.client.Items().Delete(ctx, vaultID, itemID); err != nil {
 		if strings.Contains(err.Error(), "not found") {

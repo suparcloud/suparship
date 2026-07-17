@@ -149,6 +149,16 @@ func (f *FakeClient) IssueConnectToken(_ context.Context, serverName string, vau
 	return tok, nil
 }
 
+// HasConnectToken reports whether a connect token exists. Thread-safe: the
+// provisioner revokes rotated tokens from a background goroutine, so tests must
+// not read the ConnectTokens map directly (that races the revoke).
+func (f *FakeClient) HasConnectToken(tokenID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.ConnectTokens[tokenID]
+	return ok
+}
+
 func (f *FakeClient) RevokeConnectToken(_ context.Context, tokenID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

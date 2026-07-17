@@ -1,0 +1,33 @@
+# golangci-lint v2 configuration.
+#
+# Pins the linter behaviour so CI stays stable across the v1 → v2 upgrade (the
+# v1 binary can no longer lint a go1.25 module). v2 changed several defaults, so
+# we scope things back to the bug-focused set that was effectively enforced.
+version: "2"
+
+linters:
+  # Default set: errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  settings:
+    staticcheck:
+      # v2 folds stylecheck (ST*), quickfix (QF*), and gosimple (S1*) into
+      # staticcheck and runs them by default; scope to the bug checks (SA*).
+      # SA1019 (use of deprecated symbols) is excluded: this codebase keeps a
+      # compat/migration layer that intentionally uses its own deprecated types
+      # while callers migrate (see docs/migration-app-model.md), plus the
+      # knowing use of tar.TypeRegA for old archives.
+      checks:
+        - SA*
+        - -SA1019
+  exclusions:
+    # Restore v1's default exclusions (v1 ran with exclude-use-default: true).
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Tests intentionally ignore errors on setup helpers (fixture Create, etc.).
+      - path: _test\.go
+        linters:
+          - errcheck

@@ -47,7 +47,6 @@ func NewClientset(kubeconfig, kubecontext string) (kubernetes.Interface, error) 
 			inClusterCfg, inErr := rest.InClusterConfig()
 			if inErr == nil {
 				restConfig = inClusterCfg
-				err = nil
 			} else {
 				return nil, fmt.Errorf(
 					"no kubeconfig found (%v) and in-cluster config unavailable (%v)",

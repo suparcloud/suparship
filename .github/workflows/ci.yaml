@@ -39,10 +39,12 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          # Pin to a specific version so the lint rules don't shift unexpectedly.
-          version: v1.64.8
+          # golangci-lint v2 — the v1 line (last v1.64.8) is built with go1.24 and
+          # refuses to lint a go1.25 module (k8s.io/api v0.35 requires go1.25).
+          # Pinned so the lint rules don't shift unexpectedly.
+          version: v2.12.2
           args: --timeout=5m
 
   # ── Secret scan ────────────────────────────────────────────────────────────
