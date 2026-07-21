@@ -289,6 +289,38 @@ func TestWorkloadInstances(t *testing.T) {
 	}
 }
 
+// TestWorkloadInstances_OneShot verifies job/cron components are flagged OneShot
+// so live status excludes them (a one-shot has no running pods and must not read
+// as "not deployed" nor drag the composed app's aggregate down).
+func TestWorkloadInstances_OneShot(t *testing.T) {
+	app := &App{Name: "telephony", ProjectName: "voiceai", Spec: AppSpec{
+		Components: []ComponentSpec{
+			{Name: "backend", Type: ComponentWeb, Enabled: true, Template: &AppTemplateRef{Name: "web"}},
+			{Name: "migration", Type: ComponentJob, Enabled: true, Template: &AppTemplateRef{Name: "job"}},
+			{Name: "nightly", Type: ComponentCron, Enabled: true, Template: &AppTemplateRef{Name: "cronjob"}},
+		},
+	}}
+	oneShot := map[string]bool{}
+	for _, wi := range app.WorkloadInstances() {
+		oneShot[wi.Component] = wi.OneShot
+	}
+	if oneShot["backend"] {
+		t.Error("web component must not be OneShot")
+	}
+	if !oneShot["migration"] {
+		t.Error("job component must be OneShot")
+	}
+	if !oneShot["nightly"] {
+		t.Error("cron component must be OneShot")
+	}
+	if !ComponentJob.OneShot() || !ComponentCron.OneShot() {
+		t.Error("ComponentJob/ComponentCron must report OneShot")
+	}
+	if ComponentWeb.OneShot() || ComponentWorker.OneShot() {
+		t.Error("web/worker must not report OneShot")
+	}
+}
+
 // TestEffectiveComponents verifies the unified-model component surfacing: an app
 // with stored components returns them; a legacy single-source app with none gets
 // one synthesized primary from its template (so the component-based UI has a row).

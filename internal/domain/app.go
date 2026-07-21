@@ -100,6 +100,14 @@ func (t ComponentType) Valid() bool {
 	return err == nil
 }
 
+// OneShot reports whether t is a run-to-completion / scheduled workload (job or
+// cron) rather than a long-running one (web/worker). One-shot components have no
+// steady-state running pods, so live status must not read their absence as
+// "not deployed".
+func (t ComponentType) OneShot() bool {
+	return t == ComponentJob || t == ComponentCron
+}
+
 // AppTemplateRef identifies the golden-path template an app was created from.
 type AppTemplateRef struct {
 	// Name is the template identifier (e.g. "web-service").
@@ -793,6 +801,11 @@ type WorkloadInstance struct {
 	// Instance is the app.kubernetes.io/instance label value (the Helm release
 	// name) selecting this component's pods.
 	Instance string
+	// OneShot marks a job/cron component that has no long-running workload — after
+	// a Job runs to completion (or between CronJob fires) there are no pods, so a
+	// running-replica query yields zero. Such a component must NOT be read as
+	// "not deployed" nor drag a composed app's aggregate health down.
+	OneShot bool
 }
 
 // WorkloadInstances returns each enabled component's workload identity. A
@@ -811,16 +824,19 @@ func (a *App) WorkloadInstances() []WorkloadInstance {
 	}
 	if !a.Spec.IsComposed() {
 		comp := ""
+		oneShot := false
 		if len(enabled) > 0 {
 			comp = enabled[0].Name
+			oneShot = enabled[0].Type.OneShot()
 		} else if len(a.Spec.Components) > 0 {
 			comp = a.Spec.Components[0].Name
+			oneShot = a.Spec.Components[0].Type.OneShot()
 		}
-		return []WorkloadInstance{{Component: comp, Instance: a.Name}}
+		return []WorkloadInstance{{Component: comp, Instance: a.Name, OneShot: oneShot}}
 	}
 	out := make([]WorkloadInstance, 0, len(enabled))
 	for _, c := range enabled {
-		out = append(out, WorkloadInstance{Component: c.Name, Instance: a.Name + "-" + c.Name})
+		out = append(out, WorkloadInstance{Component: c.Name, Instance: a.Name + "-" + c.Name, OneShot: c.Type.OneShot()})
 	}
 	return out
 }

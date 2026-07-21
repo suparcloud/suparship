@@ -3007,9 +3007,19 @@ func (ah *appHandler) appStatefulComponents(ctx context.Context, project, appNam
 // provider, returning component-name → live RuntimeInfo for the components a read
 // succeeded for. The fallback name is the instance itself: a composed component's
 // workload fullname IS {app}-{component}, so the name-based fallback still resolves.
+//
+// One-shot components (job/cron) are skipped entirely: they have no steady-state
+// running pods, so a running-replica read would report "not deployed" — dragging
+// the composed app's worst-of aggregate down and showing the component itself as
+// undeployed. Omitting them keeps them out of the aggregate and the per-component
+// list, so the UI renders their row at the app's phase with "—" replicas. A
+// failed migration still surfaces via the app's ArgoCD sync diagnostics.
 func runtimeByComponent(ctx context.Context, kp *runtime.K8sProvider, namespace string, instances []domain.WorkloadInstance) map[string]*runtime.RuntimeInfo {
 	out := make(map[string]*runtime.RuntimeInfo, len(instances))
 	for _, wi := range instances {
+		if wi.OneShot {
+			continue
+		}
 		if info, err := kp.GetAppRuntime(ctx, namespace, wi.Instance, wi.Instance); err == nil {
 			out[wi.Component] = info
 		}
