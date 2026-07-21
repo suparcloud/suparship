@@ -232,8 +232,20 @@ type KargoBuildOptions struct {
 func BuildKargoWarehouse(app *domain.App, opts KargoBuildOptions) *KargoWarehouse {
 	opts = applyKargoDefaults(opts, app)
 
+	// One subscription per UNIQUE image repo. A composed app whose components
+	// share an image (e.g. two components both running biglysales-voiceai-livekit)
+	// yields several KargoImage entries with the same Repository; emitting a
+	// subscription each makes Kargo's freight admission webhook reject every
+	// Freight with "multiple artifacts found for subscription <repo>". Dedupe by
+	// repoURL — imageFrom(<repo>) in the promotion keys on the repo alone, so the
+	// promoted tag still reaches every component's tag key from the one artifact.
 	subs := make([]WarehouseSubscription, 0, len(opts.Images))
+	seen := make(map[string]bool, len(opts.Images))
 	for _, img := range opts.Images {
+		if seen[img.Repository] {
+			continue
+		}
+		seen[img.Repository] = true
 		subs = append(subs, WarehouseSubscription{
 			Image: &ImageSubscription{
 				RepoURL:                img.Repository,

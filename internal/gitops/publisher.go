@@ -1025,10 +1025,15 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		}
 
 		// Pipeline apps: authorize this env's Kargo Stage to sync the Application
-		// (argocd-update). Direct apps have no Kargo, so no annotation.
+		// (argocd-update). The kargo.akuity.io/authorized-stage annotation must be
+		// the PROJECT-QUALIFIED stage reference "<kargo-project>:<stage>" (e.g.
+		// "kargo-voiceai:voiceai-lk-sh-staging"); an unqualified stage name makes
+		// Kargo reject the argocd-update with "…is not authorized". This mirrors the
+		// single-source AppSet ("kargo-{{project}}:{{name}}-{env}"). Direct apps have
+		// no Kargo, so no annotation.
 		kargoStage := ""
 		if !app.Spec.IsDirect() {
-			kargoStage = KargoStageName(app.Name, env.EnvName)
+			kargoStage = KargoNamespaceForProject(app.ProjectName) + ":" + KargoStageName(app.Name, env.EnvName)
 		}
 
 		// Fan out over the env's target clusters: each writes its own per-component

@@ -35,9 +35,12 @@ type ComposedBuildOptions struct {
 	// Namespace is the destination workload namespace (all component sources
 	// deploy into the one namespace).
 	Namespace string
-	// KargoStage, when non-empty, is written as the kargo.akuity.io/authorized-stage
-	// annotation so a Kargo Stage may trigger syncs. Empty = no annotation (MVP:
-	// composed apps have no Kargo wiring yet).
+	// KargoStage, when non-empty, is written verbatim as the
+	// kargo.akuity.io/authorized-stage annotation so a Kargo Stage may trigger
+	// syncs. It MUST be the project-qualified stage reference
+	// "<kargo-project>:<stage>" (e.g. "kargo-voiceai:voiceai-lk-sh-staging") —
+	// Kargo rejects an argocd-update whose target Application carries an
+	// unqualified stage name. Empty = no annotation (direct apps).
 	KargoStage string
 	// SyncAutomated enables prune + selfHeal on the rendered Application.
 	SyncAutomated bool

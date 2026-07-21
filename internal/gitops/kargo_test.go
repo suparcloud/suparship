@@ -89,6 +89,27 @@ func TestBuildKargoWarehouse_MultipleImages(t *testing.T) {
 	}
 }
 
+// TestBuildKargoWarehouse_DedupesSharedImage covers a composed app whose
+// components share an image: several KargoImage entries carry the same Repository
+// (each owning a different component's tag key). The Warehouse must emit ONE
+// subscription per repo — duplicate subscriptions make Kargo's freight admission
+// webhook reject every Freight with "multiple artifacts found for subscription".
+func TestBuildKargoWarehouse_DedupesSharedImage(t *testing.T) {
+	app := &domain.App{Name: "voiceai-lk-sh", ProjectName: "voiceai"}
+	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{
+		Images: []gitops.KargoImage{
+			{Name: "server", Repository: "acr.example.com/livekit", TagKey: "components.server.image.tag", TagPattern: "^[0-9a-f]{8}$"},
+			{Name: "worker", Repository: "acr.example.com/livekit", TagKey: "components.worker.image.tag", TagPattern: "^[0-9a-f]{8}$"},
+		},
+	})
+	if len(wh.Spec.Subscriptions) != 1 {
+		t.Fatalf("Subscriptions: got %d want 1 (deduped by repo): %+v", len(wh.Spec.Subscriptions), wh.Spec.Subscriptions)
+	}
+	if wh.Spec.Subscriptions[0].Image.RepoURL != "acr.example.com/livekit" {
+		t.Errorf("subscription repo = %q, want acr.example.com/livekit", wh.Spec.Subscriptions[0].Image.RepoURL)
+	}
+}
+
 func TestBuildKargoWarehouse_Deterministic(t *testing.T) {
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
 	opts := gitops.KargoBuildOptions{}

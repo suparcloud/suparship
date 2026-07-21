@@ -1234,6 +1234,13 @@ func TestComposedPublishesKargoCRsAndAnnotation(t *testing.T) {
 	if !strings.Contains(string(raw), "kargo.akuity.io/authorized-stage") {
 		t.Errorf("composed Application must carry the authorized-stage annotation, got:\n%s", raw)
 	}
+	// The annotation MUST be the project-qualified stage reference
+	// "<kargo-project>:<stage>"; an unqualified stage name makes Kargo reject the
+	// argocd-update with "…is not authorized".
+	wantStage := "kargo-demo:bigly-staging"
+	if !strings.Contains(string(raw), wantStage) {
+		t.Errorf("composed Application authorized-stage must be project-qualified %q, got:\n%s", wantStage, raw)
+	}
 }
 
 // TestComposedTagPreservedOnRepublish verifies per-component CD-tag preservation:
