@@ -899,6 +899,9 @@ export interface ComponentCreate {
   images?: ComponentImage[];
   /** Stateful (a database/cache): renders as its own prune-disabled Application. */
   stateful?: boolean;
+  /** Override preview inclusion. Omit for the type default (web/worker on;
+   *  stateful + job/cron off). */
+  previewEnabled?: boolean;
 }
 
 // ComponentImage marks one of a composed component's discovered images as managed

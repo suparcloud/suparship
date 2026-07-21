@@ -78,10 +78,14 @@ export function previewTemplateEffectiveValues(
   env: string,
   cluster: string,
   override: TemplateOverride,
+  // preview layers the template's preview defaults + the preview override
+  // (sent as override.envValues.preview) on top of the base-env effective.
+  preview = false,
 ): Promise<EffectiveValuesResponse> {
   const params = new URLSearchParams();
   if (env) params.set("env", env);
   if (cluster) params.set("cluster", cluster);
+  if (preview) params.set("preview", "true");
   const q = params.toString();
   return api.post<EffectiveValuesResponse>(
     `/templates/${encodeURIComponent(name)}/effective-values${q ? `?${q}` : ""}`,

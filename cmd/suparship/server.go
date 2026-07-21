@@ -845,7 +845,13 @@ func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Contex
 		}
 		ov := a.loadOverride(ctx, c.Template.Name)
 		def, env, cluster := computePlatformOverlays(tmpl, ov, envName)
-		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster}
+		// Component template preview defaults (spec ⊕ org override), threaded so a
+		// composed preview applies each component's own template preview overlay.
+		preview := helmvalues.DeepCopyMap(tmpl.Spec.PreviewDefaultValues)
+		if ov != nil && len(ov.PreviewDefaultValues) > 0 {
+			preview = helmvalues.DeepMerge(preview, helmvalues.DeepCopyMap(ov.PreviewDefaultValues))
+		}
+		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster, Preview: preview}
 
 		if len(c.Images) == 0 {
 			continue
@@ -1955,6 +1961,10 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 	tmplOv := a.loadOverride(ctx, app.Spec.Template.Name)
 	setPlatformOverlays(&basePub, tmpl, tmplOv, baseEnv)
 	a.setStackOverlays(ctx, &basePub, app, baseEnv)
+	// Composed apps: resolve each component's own template/org overlays for the
+	// base env so a composed preview renders per-component values with the same PE
+	// overrides the base env deploys (no-op for single-source apps).
+	a.setComponentPlatformOverlays(ctx, &basePub, app, baseEnv)
 
 	// Template-level default preview overlay: the template spec's default merged
 	// with the operator's sync-safe override (override wins), applied to every
@@ -1968,22 +1978,23 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 	}
 
 	spec := gitops.PreviewPublishSpec{
-		PreviewName:           preview.EnvName,
-		BaseEnv:               baseEnv,
-		ClusterServer:         res.clusterServer,
-		Cluster:               clusterRef,
-		Namespace:             preview.Namespace,
-		BaseDomain:            res.baseDomain,
-		EnvVars:               envVars,
-		ScopeKeys:             scopeKeys,
-		ImageTag:              imageTag,
-		SkipCanonicalBase:     !tmpl.Spec.CanonicalValues(),
-		PlatformDefaultValues: basePub.PlatformDefaultValues,
-		PlatformEnvValues:     basePub.PlatformEnvValues,
-		PlatformClusterValues: basePub.PlatformClusterValues,
-		StackRawValues:        basePub.StackRawValues,
-		StackEnvRawValues:     basePub.StackEnvRawValues,
-		TemplatePreviewValues: templatePreviewValues,
+		PreviewName:             preview.EnvName,
+		BaseEnv:                 baseEnv,
+		ClusterServer:           res.clusterServer,
+		Cluster:                 clusterRef,
+		Namespace:               preview.Namespace,
+		BaseDomain:              res.baseDomain,
+		EnvVars:                 envVars,
+		ScopeKeys:               scopeKeys,
+		ImageTag:                imageTag,
+		SkipCanonicalBase:       !tmpl.Spec.CanonicalValues(),
+		PlatformDefaultValues:   basePub.PlatformDefaultValues,
+		PlatformEnvValues:       basePub.PlatformEnvValues,
+		PlatformClusterValues:   basePub.PlatformClusterValues,
+		StackRawValues:          basePub.StackRawValues,
+		StackEnvRawValues:       basePub.StackEnvRawValues,
+		TemplatePreviewValues:   templatePreviewValues,
+		ComponentPlatformValues: basePub.ComponentPlatformValues,
 	}
 	return spec, nil
 }

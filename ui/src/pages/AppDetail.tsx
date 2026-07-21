@@ -4659,12 +4659,18 @@ function ComponentValuesPanel({
   const stableEnvs = (data.environments ?? [])
     .filter((e) => e.envType !== "preview")
     .map((e) => e.envName);
-  // Scopes: base (all envs) + each stable env. A single-component app also gets
-  // the shared preview band (single-source stores it under envRawValues.preview).
+  // Scopes: base (all envs) + each stable env + the shared preview band. The
+  // preview scope shows when the app supports previews — for a composed component
+  // only when that component is actually rendered into previews (enabledInPreview).
+  // Single-source stores the band under envRawValues.preview; a composed component
+  // under EnvironmentDefaults.preview.ComponentValues (surfaced as envValues.preview).
+  const showPreview =
+    data.previewsEnabled !== false &&
+    (appLevel || comp.enabledInPreview);
   const scopes = [
     COMP_BASE_SCOPE,
     ...stableEnvs,
-    ...(appLevel ? [PREVIEW_SCOPE] : []),
+    ...(showPreview ? [PREVIEW_SCOPE] : []),
   ];
 
   const savedText = (s: string): string => {
@@ -4733,21 +4739,37 @@ function ComponentValuesPanel({
         : stableEnvs[0] ?? "";
 
   // Debounced effective-values preview, reflecting unsaved edits to both layers.
+  const isPreviewScope = scope === PREVIEW_SCOPE;
   useEffect(() => {
     if (!previewEnv) return;
     const baseParsed = parseYamlOverlay(texts[COMP_BASE_SCOPE] ?? "");
+    const previewParsed = parseYamlOverlay(texts[PREVIEW_SCOPE] ?? "");
     const envParsed = parseYamlOverlay(texts[previewEnv] ?? "");
-    if (baseParsed.error || envParsed.error) return; // keep last good preview
+    if (baseParsed.error || envParsed.error || previewParsed.error) return; // keep last good preview
     const handle = setTimeout(() => {
-      const req = appLevel
-        ? previewAppValues(project, data.name, previewEnv, {
-            rawValues: baseParsed.value ?? {},
-            envRawValues: { [previewEnv]: envParsed.value ?? {} },
-          })
-        : previewTemplateEffectiveValues(templateName, previewEnv, "", {
-            defaultValues: baseParsed.value ?? {},
-            envValues: { [previewEnv]: envParsed.value ?? {} },
-          });
+      // Composed component on the preview scope: preview the base env's effective
+      // with the template's preview defaults + the preview override on top.
+      const req =
+        !appLevel && isPreviewScope
+          ? previewTemplateEffectiveValues(
+              templateName,
+              previewEnv,
+              "",
+              {
+                defaultValues: baseParsed.value ?? {},
+                envValues: { preview: previewParsed.value ?? {} },
+              },
+              true,
+            )
+          : appLevel
+            ? previewAppValues(project, data.name, previewEnv, {
+                rawValues: baseParsed.value ?? {},
+                envRawValues: { [previewEnv]: envParsed.value ?? {} },
+              })
+            : previewTemplateEffectiveValues(templateName, previewEnv, "", {
+                defaultValues: baseParsed.value ?? {},
+                envValues: { [previewEnv]: envParsed.value ?? {} },
+              });
       req
         .then((res) => {
           setPreview(stringifyOverlay(res.values));
@@ -4759,7 +4781,7 @@ function ComponentValuesPanel({
     }, 400);
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, data.name, previewEnv, texts, appLevel, templateName]);
+  }, [project, data.name, previewEnv, texts, appLevel, templateName, isPreviewScope]);
 
   // Template & platform layer (read-only) for the Layers view.
   useEffect(() => {
@@ -4935,9 +4957,11 @@ function ComponentValuesPanel({
               <div>
                 <ValuesEditor
                   label={
-                    previewEnv
-                      ? `Effective — ${previewEnv} (as deployed)`
-                      : "Effective (as deployed)"
+                    isPreviewScope
+                      ? "Effective — preview (as deployed)"
+                      : previewEnv
+                        ? `Effective — ${previewEnv} (as deployed)`
+                        : "Effective (as deployed)"
                   }
                   value={preview}
                   readOnly

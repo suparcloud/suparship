@@ -217,6 +217,7 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			InheritAppVars: c.InheritAppVars,
 			Images:         componentImagesFromDTO(c.Images),
 			Stateful:       c.Stateful,
+			PreviewEnabled: c.PreviewEnabled,
 		}
 		for _, e := range c.EnvVars {
 			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
@@ -3690,6 +3691,7 @@ func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []Componen
 			InheritAppVars: c.InheritAppVars,
 			Images:         componentImagesFromDTO(c.Images),
 			Stateful:       c.Stateful,
+			PreviewEnabled: c.PreviewEnabled,
 		}
 		for _, e := range c.EnvVars {
 			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
@@ -3742,14 +3744,16 @@ func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]dom
 	dtos := make([]ComponentSummaryDTO, 0, len(components))
 	for _, c := range components {
 		dto := ComponentSummaryDTO{
-			Name:           c.Name,
-			Type:           string(c.Type),
-			Enabled:        c.Enabled,
-			ExposeMode:     string(c.ExposeMode),
-			Values:         c.Values,
-			EnvValues:      envValsByComp[c.Name],
-			InheritAppVars: c.InheritAppVars,
-			Stateful:       c.Stateful,
+			Name:             c.Name,
+			Type:             string(c.Type),
+			Enabled:          c.Enabled,
+			ExposeMode:       string(c.ExposeMode),
+			Values:           c.Values,
+			EnvValues:        envValsByComp[c.Name],
+			InheritAppVars:   c.InheritAppVars,
+			Stateful:         c.Stateful,
+			EnabledInPreview: c.EnabledInPreview(),
+			PreviewEnabled:   c.PreviewEnabled,
 		}
 		if c.Template != nil {
 			dto.Template = c.Template.Name

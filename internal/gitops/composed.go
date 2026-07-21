@@ -11,6 +11,14 @@ import (
 // no values.yaml, so no include-glob is needed.
 const composedAppsDir = "_composed-apps"
 
+// composedPreviewsSubdir is the subtree under composedAppsDir that holds composed
+// PREVIEW Application manifests (one per app per preview). A leading underscore
+// keeps it disjoint from any stable env name (DNS labels can't start with "_"),
+// so the per-stable-env composed root apps (which recurse _composed-apps/{env})
+// never pick up preview manifests, and ONE static preview root app recurses this
+// whole subtree. Layout: _composed-apps/_previews/{baseEnv}/{project}/{preview}/{app}/.
+const composedPreviewsSubdir = "_previews"
+
 // ComposedBuildOptions carries everything BuildComposedApplication needs beyond
 // the app and its components to render one concrete, fully-resolved ArgoCD
 // Application manifest for a single (app, cluster) target of a composed app.
@@ -248,6 +256,48 @@ func BuildComposedRootApp(envName, repoURL string, opts AppSetOptions) *Applicat
 			Source: ApplicationSource{
 				RepoURL:        repoURL,
 				Path:           joinSubPath(opts.SubPath, composedAppsDir, envName),
+				TargetRevision: tr,
+				Directory:      &DirectorySource{Recurse: true},
+			},
+			Destination: ApplicationDestination{Server: defaultDestination, Namespace: argoNS},
+			SyncPolicy:  syncPolicy,
+		},
+	}
+}
+
+// BuildComposedPreviewRootApp is the single, static App-of-Apps that discovers
+// EVERY composed app's preview Application manifests: a recurse directory source
+// over _composed-apps/_previews. It parallels the single-source `previews`
+// ApplicationSet — written once (idempotent) into _infra/, discovered by the
+// platform root App-of-Apps, and it auto-prunes a preview's Application when that
+// preview's manifest subtree is removed on teardown.
+func BuildComposedPreviewRootApp(repoURL string, opts AppSetOptions) *Application {
+	tr := opts.TargetRevision
+	if tr == "" {
+		tr = defaultTargetRevision
+	}
+	argoNS := opts.ArgoCDNamespace
+	if argoNS == "" {
+		argoNS = defaultArgoCDNS
+	}
+
+	var syncPolicy *SyncPolicy
+	if opts.SyncAutomated {
+		syncPolicy = &SyncPolicy{Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true}}
+	}
+
+	return &Application{
+		APIVersion: argoAPIVersion,
+		Kind:       argoKind,
+		Metadata: ObjectMeta{
+			Name:      "previews-composed",
+			Namespace: argoNS,
+		},
+		Spec: ApplicationSpec{
+			Project: suparshipSystemProject,
+			Source: ApplicationSource{
+				RepoURL:        repoURL,
+				Path:           joinSubPath(opts.SubPath, composedAppsDir, composedPreviewsSubdir),
 				TargetRevision: tr,
 				Directory:      &DirectorySource{Recurse: true},
 			},

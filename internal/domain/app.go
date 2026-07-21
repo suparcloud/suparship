@@ -269,6 +269,24 @@ type ComponentSpec struct {
 	// them helm.sh/resource-policy: keep. Typically paired with InheritAppVars:false
 	// and no Images (so it deploys pinned/direct, not Kargo-promoted).
 	Stateful bool `json:"stateful,omitempty" yaml:"stateful,omitempty"`
+	// PreviewEnabled controls whether this component is included when a preview
+	// (ephemeral PR) environment is created for the app. nil = the type default
+	// (see EnabledInPreview): web/worker preview by default; stateful (DB/cache)
+	// and one-shot job/cron components don't (no throwaway DBs or re-run migrations
+	// per PR). Set explicitly to override. Only meaningful when the app supports
+	// previews (AppSpec.PreviewsEnabled) and is composed.
+	PreviewEnabled *bool `json:"previewEnabled,omitempty" yaml:"previewEnabled,omitempty"`
+}
+
+// EnabledInPreview reports whether this component is rendered into a preview env.
+// An explicit PreviewEnabled wins; otherwise the type default applies — long-
+// running services (web/worker) preview by default, one-shot (job/cron) and
+// stateful (database/cache) components do not.
+func (c ComponentSpec) EnabledInPreview() bool {
+	if c.PreviewEnabled != nil {
+		return *c.PreviewEnabled
+	}
+	return !c.Type.OneShot() && !c.Stateful
 }
 
 // ComponentImage marks one of a composed component's container images as managed

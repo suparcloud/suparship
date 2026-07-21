@@ -196,6 +196,45 @@ func TestHandlePostEffectiveValues_ReflectsUnsavedOverride(t *testing.T) {
 	}
 }
 
+// TestHandlePostEffectiveValues_PreviewLayersTemplateDefaults verifies the
+// preview scope: with ?preview=true, the template's PreviewDefaultValues layer in
+// and the app's preview override (envValues.preview) sits on top — so the
+// effective pane shows what a composed preview actually deploys.
+func TestHandlePostEffectiveValues_PreviewLayersTemplateDefaults(t *testing.T) {
+	tmpl := valuesTemplate()
+	tmpl.Spec.PreviewDefaultValues = map[string]any{
+		"previewOnly":  "yes",
+		"replicaCount": 1,
+	}
+	th := &templateHandler{builtin: []*tpl.Template{tmpl}}
+
+	body, _ := json.Marshal(TemplateOverrideDTO{
+		DefaultValues: map[string]any{"base": "b"}, // component base overlay
+		EnvValues:     map[string]map[string]any{"preview": {"replicaCount": 9}},
+	})
+	req := httptest.NewRequest("POST", "/api/v1/templates/voiceai-agent/effective-values?env=staging&preview=true", bytes.NewReader(body))
+	req.SetPathValue("name", "voiceai-agent")
+	rec := httptest.NewRecorder()
+	th.handlePostEffectiveValues(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp EffectiveValuesDTO
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	// Template preview default appears.
+	if resp.Values["previewOnly"] != "yes" {
+		t.Errorf("previewOnly = %v, want yes (template preview default not applied)", resp.Values["previewOnly"])
+	}
+	// The component base overlay is present.
+	if resp.Values["base"] != "b" {
+		t.Errorf("base = %v, want b (component base overlay)", resp.Values["base"])
+	}
+	// The preview override wins over the template preview default.
+	if resp.Values["replicaCount"] != float64(9) {
+		t.Errorf("replicaCount = %v, want 9 (preview override on top)", resp.Values["replicaCount"])
+	}
+}
+
 func TestHandleEffectiveValues_OverlayWithoutChartBundle(t *testing.T) {
 	// kubeClient nil → no chart bundle; the preview is the platform/env overlay.
 	th := &templateHandler{builtin: []*tpl.Template{valuesTemplate()}}

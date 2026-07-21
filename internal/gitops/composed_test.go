@@ -1788,3 +1788,114 @@ func keysOf(m map[string]any) []string {
 	}
 	return out
 }
+
+// TestComposedPreview_OnlyEnabledComponents verifies composed preview publishing:
+// only components with preview enabled (web/worker by default; stateful + job/cron
+// off) render into the preview — their per-component values + the multi-source
+// Application manifest — while disabled components (a stateful DB, a migration job)
+// are omitted entirely.
+func TestComposedPreview_OnlyEnabledComponents(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:       "https://git/repo.git",
+		ArgoCDRepoURL: "https://git/repo.git",
+		SyncAutomated: true,
+		TemplateLoader: keyedTemplateLoader{
+			"web-service": "web",
+			"worker":      "worker",
+			"valkey":      "valkey",
+			"job":         "job",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+
+	app := &domain.App{
+		Name: "telephony", ProjectName: "voiceai",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "backend", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"}},
+				{Name: "worker", Type: domain.ComponentType("worker"), Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "worker"}},
+				{Name: "cache", Type: domain.ComponentWeb, Enabled: true, Stateful: true,
+					Template: &domain.AppTemplateRef{Name: "valkey"}},
+				{Name: "migration", Type: domain.ComponentJob, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "job"}},
+			},
+		},
+	}
+
+	spec := gitops.PreviewPublishSpec{
+		PreviewName:   "pr-42",
+		BaseEnv:       "staging",
+		ClusterServer: "https://kubernetes.default.svc",
+		Namespace:     "voiceai-telephony-preview-pr-42",
+		BaseDomain:    "localhost",
+		ImageTag:      "abc1234",
+		ScopeKeys:     gitops.ScopePresence{PreviewApp: true},
+		// The worker component's template carries a preview-defaults overlay (set by
+		// a platform engineer) that must land in the component's rendered preview.
+		ComponentPlatformValues: map[string]gitops.ComponentPlatformValues{
+			"worker": {Preview: map[string]any{"previewFlag": "on"}},
+		},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish composed preview: %v", err)
+	}
+
+	compDir := filepath.Join(dir, "previews", "staging", "voiceai", "pr-42", "telephony", "components")
+	// Enabled (web/worker) rendered.
+	for _, c := range []string{"backend", "worker"} {
+		if _, err := os.Stat(filepath.Join(compDir, c, "values.yaml")); err != nil {
+			t.Errorf("enabled component %q must render preview values: %v", c, err)
+		}
+	}
+	// The component template's preview-defaults overlay is applied to the worker.
+	workerRaw, err := os.ReadFile(filepath.Join(compDir, "worker", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read worker preview values: %v", err)
+	}
+	if !strings.Contains(string(workerRaw), "previewFlag:") {
+		t.Errorf("worker preview values must include the template preview default (previewFlag):\n%s", workerRaw)
+	}
+	// Disabled-by-default (stateful cache, one-shot migration) omitted.
+	for _, c := range []string{"cache", "migration"} {
+		if _, err := os.Stat(filepath.Join(compDir, c, "values.yaml")); !os.IsNotExist(err) {
+			t.Errorf("component %q must NOT render in preview (default off): err=%v", c, err)
+		}
+	}
+
+	// The composed preview Application manifest exists with sources only for the
+	// enabled components (appvalues ref + backend + worker = 3).
+	manifestPath := filepath.Join(dir, "_composed-apps", "_previews", "staging", "voiceai", "pr-42", "telephony", "application.yaml")
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read composed preview Application: %v", err)
+	}
+	var manifest gitops.Application
+	if err := yaml.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("unmarshal Application: %v", err)
+	}
+	if len(manifest.Spec.Sources) != 3 {
+		t.Errorf("preview Application Sources = %d, want 3 (appvalues + backend + worker)", len(manifest.Spec.Sources))
+	}
+	if manifest.Spec.Destination.Namespace != "voiceai-telephony-preview-pr-42" {
+		t.Errorf("preview destination namespace = %q, want the preview ns", manifest.Spec.Destination.Namespace)
+	}
+	// No Kargo authorized-stage annotation (previews are pinned, not promoted).
+	if _, ok := manifest.Metadata.Annotations["kargo.akuity.io/authorized-stage"]; ok {
+		t.Error("preview Application must NOT carry a Kargo authorized-stage annotation")
+	}
+
+	// The static previews-composed root app is written for discovery.
+	if _, err := os.Stat(filepath.Join(dir, "_infra", "previews-composed-appset.yaml")); err != nil {
+		t.Errorf("previews-composed root app missing: %v", err)
+	}
+	// App-wide preview platform ConfigMap is written (shared by components).
+	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "previews", "staging", "voiceai", "pr-42", "telephony", "env-configmap.yaml")); err != nil {
+		t.Errorf("app-wide preview env-configmap missing: %v", err)
+	}
+}

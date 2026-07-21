@@ -2471,6 +2471,11 @@ type ComponentPlatformValues struct {
 	Default map[string]any
 	Env     map[string]any
 	Cluster map[string]map[string]any
+	// Preview is the component template's merged PreviewDefaultValues (TemplateSpec
+	// + org TemplateOverride), applied to every preview of an app using this
+	// component's template — the composed analog of PreviewPublishSpec.
+	// TemplatePreviewValues. Only used on the composed preview path.
+	Preview map[string]any
 }
 
 // AppPublishEnv carries per-environment publish context for PublishApp.
@@ -2600,12 +2605,23 @@ type AppPublishEnv struct {
 // PublishPreview is idempotent; it only creates a commit when content changes.
 func (p *Publisher) PublishPreview(ctx context.Context, app *domain.App, preview PreviewPublishSpec) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		if err := p.publishPreviewFiles(repoDir, app, preview); err != nil {
+		if err := p.publishOnePreview(ctx, repoDir, app, preview); err != nil {
 			return err
 		}
 		commitMsg := fmt.Sprintf("feat(previews): create preview %s/%s\n\nCreated by suparship.", app.ProjectName, preview.PreviewName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// publishOnePreview dispatches a single preview to the composed or single-source
+// renderer. A composed app (≥2 components) renders each preview-enabled component
+// as its own chart source; a single-source app keeps the mature single-chart
+// preview path.
+func (p *Publisher) publishOnePreview(ctx context.Context, repoDir string, app *domain.App, preview PreviewPublishSpec) error {
+	if app.Spec.IsComposed() {
+		return p.publishComposedPreviewFiles(ctx, repoDir, app, preview)
+	}
+	return p.publishPreviewFiles(repoDir, app, preview)
 }
 
 // PreviewPublishBundle is one member of a batched preview publish: an app plus
@@ -2627,7 +2643,7 @@ func (p *Publisher) PublishPreviews(ctx context.Context, bundles []PreviewPublis
 	}
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		for _, b := range bundles {
-			if err := p.publishPreviewFiles(repoDir, b.App, b.Preview); err != nil {
+			if err := p.publishOnePreview(ctx, repoDir, b.App, b.Preview); err != nil {
 				return err
 			}
 		}
@@ -2764,6 +2780,193 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	return nil
 }
 
+// publishComposedPreviewFiles renders a preview for a COMPOSED app: it writes
+// per-component preview values for only the components with preview enabled
+// (ComponentSpec.EnabledInPreview — web/worker by default; stateful DBs and
+// one-shot job/cron off unless explicitly on), one multi-source Application
+// scoped to the ephemeral preview namespace (pinned image tag, NO Kargo), each
+// enabled stateful component as its own prune-disabled Application, plus the
+// app-wide preview ConfigMap/ExternalSecret (reused from the single-source
+// preview platform tree). Discovery is the static previews-composed root app.
+func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir string, app *domain.App, preview PreviewPublishSpec) error {
+	previewOrgName := p.cfg.OrgName
+	if previewOrgName == "" {
+		previewOrgName = "default"
+	}
+	ns := preview.Namespace
+
+	// App-wide preview config/secret names — suffixed for shared-namespace previews
+	// (namespace omits the preview name) so previews of the same app don't collide.
+	resBase := app.Name
+	if !strings.Contains(preview.Namespace, preview.PreviewName) {
+		resBase = app.Name + "-" + preview.PreviewName
+	}
+	configMapName := secrets.AppConfigMapName(resBase)
+	secretName := secrets.AppSecretName(resBase)
+
+	// Prune this app's existing preview trees first so a component that was
+	// disabled-in-preview (or removed) leaves no orphan values/manifest.
+	compValuesRoot := p.outputDir(repoDir, "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name, "components")
+	if err := os.RemoveAll(compValuesRoot); err != nil {
+		return fmt.Errorf("prune composed preview values: %w", err)
+	}
+	manifestDir := p.outputDir(repoDir, composedAppsDir, composedPreviewsSubdir, preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name)
+	if err := os.RemoveAll(manifestDir); err != nil {
+		return fmt.Errorf("prune composed preview manifests: %w", err)
+	}
+
+	// Only the components opted into previews.
+	var included []domain.ComponentSpec
+	for _, c := range app.Spec.ComposedComponents() {
+		if c.Template != nil && c.EnabledInPreview() {
+			included = append(included, c)
+		}
+	}
+	previewBand := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]
+
+	componentValues := make(map[string]string, len(included))
+	var appPlatform helmvalues.PlatformValues
+	for i, c := range included {
+		key := p.resolveComponentKey(ctx, c.Template.Name, c.Name)
+		canonical := p.resolveComponentCanonical(ctx, c.Template.Name)
+		hv := helmvalues.MapComponentHelmValuesForEnv(app, c, key, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, ns, "", previewOrgName,
+			p.cfg.RoutingProfiles, nil, nil)
+		hv.Platform.PreviewName = preview.PreviewName
+		hv.Platform.ConfigMapName = configMapName
+		hv.Platform.SecretName = secretName
+		if preview.ImageTag != "" {
+			hv.Platform.ImageTag = preview.ImageTag
+		}
+		if i == 0 {
+			appPlatform = hv.Platform // app-wide identity for env-var interpolation
+		}
+
+		// Overlay, low→high: PE component-template base-env overlays (Default+Env; no
+		// cluster for previews) ⊕ the component's own Values ⊕ the component
+		// template's PREVIEW defaults ⊕ the app's per-component preview band. Mirrors
+		// the single-source order (previewRawValuesOverlay): template preview defaults
+		// sit above the developer base overlay and below the app's own preview band.
+		pv := preview.ComponentPlatformValues[c.Name]
+		overlay := deepMerge(deepCopyMap(pv.Default), deepCopyMap(pv.Env))
+		overlay = deepMerge(overlay, deepCopyMap(c.Values))
+		overlay = deepMerge(overlay, deepCopyMap(pv.Preview))
+		if len(previewBand.ComponentValues[c.Name]) > 0 {
+			overlay = deepMerge(overlay, deepCopyMap(previewBand.ComponentValues[c.Name]))
+		}
+		// Pin the per-PR image tag: a canonical component folds it into
+		// components.<key>.image.tag; a passthrough component relies on the
+		// ((platform.imageTag)) token in its own overlay.
+		if preview.ImageTag != "" && canonical {
+			o := deepCopyMap(overlay)
+			if o == nil {
+				o = map[string]any{}
+			}
+			setStringAtPath(o, "components."+key+".image.tag", preview.ImageTag)
+			overlay = o
+		}
+
+		var hvBytes []byte
+		var err error
+		if canonical {
+			hvBytes, err = marshalValuesWithOverlay(hv, overlay, preview.EnvVars)
+		} else {
+			hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, preview.EnvVars)
+		}
+		if err != nil {
+			return fmt.Errorf("marshal preview values for component %s: %w", c.Name, err)
+		}
+		valuesAbs := p.outputDir(repoDir, "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name, "components", c.Name, "values.yaml")
+		if err := p.writeFile(valuesAbs, hvBytes); err != nil {
+			return err
+		}
+		componentValues[c.Name] = p.relativeOutputPath("previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name, "components", c.Name, "values.yaml")
+	}
+
+	// Rendered Application(s), scoped to the preview namespace — a clone carrying
+	// only the included components so BuildComposedApplication references exactly
+	// the values we wrote. No KargoStage: previews are pinned, never promoted.
+	if len(included) > 0 {
+		previewApp := *app
+		previewApp.Spec.Components = included
+		composedOpts := ComposedBuildOptions{
+			RepoURL:         p.cfg.ArgoCDRepoURL,
+			SubPath:         p.cfg.SubPath,
+			AppName:         app.Name + "-" + preview.PreviewName,
+			EnvName:         preview.PreviewName,
+			ClusterServer:   preview.ClusterServer,
+			Namespace:       ns,
+			SyncAutomated:   p.cfg.SyncAutomated,
+			ComponentValues: componentValues,
+		}
+		if manifest := BuildComposedApplication(&previewApp, composedOpts); len(manifest.Spec.Sources) > 1 {
+			manifestBytes, err := yaml.Marshal(manifest)
+			if err != nil {
+				return fmt.Errorf("marshal composed preview Application: %w", err)
+			}
+			if err := p.writeFile(filepath.Join(manifestDir, "application.yaml"), manifestBytes); err != nil {
+				return err
+			}
+		}
+		for _, c := range previewApp.Spec.StatefulComponents() {
+			compManifest := BuildComponentApplication(&previewApp, c, composedOpts)
+			compBytes, err := yaml.Marshal(compManifest)
+			if err != nil {
+				return fmt.Errorf("marshal stateful preview component %s: %w", c.Name, err)
+			}
+			if err := p.writeFile(filepath.Join(manifestDir, c.Name+"-application.yaml"), compBytes); err != nil {
+				return err
+			}
+		}
+	}
+
+	// App-wide preview platform resources (ConfigMap + ExternalSecret) — identical
+	// to the single-source preview path; one set per app, shared by all components.
+	previewEnvVars := preview.EnvVars
+	if hasInterpToken(previewEnvVars) {
+		previewEnvVars = platform.Context{Platform: appPlatform, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
+	}
+	resDir := p.outputDir(repoDir, "_app-resources", "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name)
+	esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
+		App:             app.Name,
+		SecretName:      secretName,
+		Namespace:       ns,
+		Env:             preview.BaseEnv,
+		Project:         app.ProjectName,
+		Stack:           app.Spec.Stack,
+		Presence:        preview.ScopeKeys,
+		IsPreview:       true,
+		PreviewName:     preview.PreviewName,
+		UnifiedStore:    p.usesUnifiedStore(),
+		Branding:        p.cfg.Branding,
+		RefreshInterval: p.externalSecretRefreshInterval(),
+	})
+	meta := PlatformAppMeta{
+		Name:          preview.PreviewName,
+		AppName:       app.Name,
+		BaseEnv:       preview.BaseEnv,
+		Project:       app.ProjectName,
+		Namespace:     ns,
+		ClusterServer: preview.ClusterServer,
+	}
+	if err := p.writePlatformDir(resDir, configMapName, ns, previewEnvVars, esCfg, meta); err != nil {
+		return fmt.Errorf("writing composed preview platform resources: %w", err)
+	}
+
+	// Static root app that discovers every composed preview (idempotent).
+	rootApp := BuildComposedPreviewRootApp(p.cfg.ArgoCDRepoURL, AppSetOptions{
+		SyncAutomated: p.cfg.SyncAutomated,
+		SubPath:       p.cfg.SubPath,
+	})
+	rootBytes, err := yaml.Marshal(rootApp)
+	if err != nil {
+		return fmt.Errorf("marshal composed previews root app: %w", err)
+	}
+	if err := p.writeFile(p.outputDir(repoDir, "_infra", "previews-composed-appset.yaml"), rootBytes); err != nil {
+		return err
+	}
+	return nil
+}
+
 // PreviewPublishSpec carries the parameters for publishing a preview environment.
 type PreviewPublishSpec struct {
 	// PreviewName is the sanitized preview identifier (e.g. "pr-42").
@@ -2817,6 +3020,12 @@ type PreviewPublishSpec struct {
 	// + TemplateOverride PreviewDefaultValues, merged), applied to every preview of
 	// the template's apps below the app's own preview band.
 	TemplatePreviewValues map[string]any
+	// ComponentPlatformValues holds the PE-authored value overlays for EACH composed
+	// component's own template (keyed by component name), the composed analog of
+	// Platform{Default,Env}Values. Populated by the publish adapter only for
+	// composed apps; merged beneath each component's Values in a composed preview.
+	// nil for single-source previews. Cluster overlays don't apply to previews.
+	ComponentPlatformValues map[string]ComponentPlatformValues
 }
 
 // DeletePreview removes one app's preview GitOps files and commits. It deletes
@@ -2849,6 +3058,11 @@ func (p *Publisher) deletePreviewFiles(repoDir, projectName, previewName, appNam
 		return false, err
 	}
 	if err := u.rm(p.outputDir(repoDir, "_app-resources", "previews", baseEnv, projectName, previewName, appName)); err != nil {
+		return false, err
+	}
+	// Composed apps also render a preview Application manifest tree, pruned by the
+	// previews-composed root app once removed.
+	if err := u.rm(p.outputDir(repoDir, composedAppsDir, composedPreviewsSubdir, baseEnv, projectName, previewName, appName)); err != nil {
 		return false, err
 	}
 	return u.removed, nil

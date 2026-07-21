@@ -68,9 +68,10 @@ func (p *Publisher) PublishAppEnvForTest(repoDir string, app *domain.App, env Ap
 }
 
 // PublishPreviewForTest exposes PublishPreview's inner file generation for
-// white-box unit testing without git operations.
+// white-box unit testing without git operations. Dispatches composed vs
+// single-source, mirroring PublishPreview.
 func (p *Publisher) PublishPreviewForTest(repoDir string, app *domain.App, preview PreviewPublishSpec) error {
-	return p.publishPreviewFiles(repoDir, app, preview)
+	return p.publishOnePreview(context.Background(), repoDir, app, preview)
 }
 
 // DeletePreviewForTest exposes DeletePreview's inner file removal for white-box

@@ -52,6 +52,12 @@ type ComponentSummaryDTO struct {
 	// Stateful reports whether this component renders as its own prune-disabled
 	// Application (a database/cache).
 	Stateful bool `json:"stateful,omitempty"`
+	// EnabledInPreview reports the EFFECTIVE preview inclusion for this component
+	// (explicit PreviewEnabled, else the type default). The detail page shows a
+	// "no preview" badge when false. PreviewEnabled carries the raw stored override
+	// (nil when defaulting) so the editor can distinguish default from explicit.
+	EnabledInPreview bool  `json:"enabledInPreview"`
+	PreviewEnabled   *bool `json:"previewEnabled,omitempty"`
 }
 
 // AppReleaseRefDTO identifies the deployed release version for one environment
@@ -317,6 +323,9 @@ type ComponentCreateDTO struct {
 	// Stateful marks a database/cache component: it renders as its own prune-
 	// disabled ArgoCD Application (lifecycle decoupled from the app's auto-sync).
 	Stateful bool `json:"stateful,omitempty"`
+	// PreviewEnabled overrides whether this component is included in preview envs.
+	// Omit (nil) for the type default (web/worker on; stateful + job/cron off).
+	PreviewEnabled *bool `json:"previewEnabled,omitempty"`
 }
 
 // ComponentEnvVarDTO is one curated env entry (exactly one source set).

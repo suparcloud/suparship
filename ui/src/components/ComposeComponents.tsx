@@ -37,10 +37,20 @@ export interface ComponentDraft {
   images: ComponentImage[];
   /** stateful (database/cache) — renders as its own prune-disabled Application */
   stateful: boolean;
+  /** effective preview inclusion — whether this component renders in preview envs */
+  previewEnabled: boolean;
 }
 
 const COMPONENT_TYPES = ["web", "worker", "job"] as const;
 const EXPOSE_MODES = ["disabled", "internal", "external"] as const;
+
+// defaultPreview is the type default for preview inclusion, mirroring the backend
+// ComponentSpec.EnabledInPreview: web/worker preview by default; stateful
+// (database/cache) and one-shot (job/cron) components do not.
+function defaultPreview(type: string, stateful: boolean): boolean {
+  if (stateful) return false;
+  return type !== "job" && type !== "cron";
+}
 
 // categoryToType maps a template's category to a sensible default component
 // type. Addon (database/cache) templates default to "worker" (headless, non-
@@ -81,6 +91,7 @@ export function newComponentDraft(
     envVars: [],
     images: [],
     stateful: isAddon,
+    previewEnabled: defaultPreview(type, isAddon),
   };
 }
 
@@ -100,6 +111,8 @@ export function draftFromSummary(c: ComponentSummary): ComponentDraft {
     envVars: c.envVars ?? [],
     images: c.images ?? [],
     stateful: c.stateful ?? false,
+    // Effective preview inclusion from the backend (explicit override or type default).
+    previewEnabled: c.enabledInPreview,
   };
 }
 
@@ -142,6 +155,12 @@ export function toComponentCreate(d: ComponentDraft): ComponentCreate {
     envVars: envVars.length > 0 ? envVars : undefined,
     images: images.length > 0 ? images : undefined,
     stateful: d.stateful ? true : undefined,
+    // Send an explicit preview override only when it differs from the type default,
+    // so a component left at its default keeps nil (default) semantics server-side.
+    previewEnabled:
+      d.previewEnabled === defaultPreview(d.type, d.stateful)
+        ? undefined
+        : d.previewEnabled,
   };
 }
 
@@ -492,6 +511,27 @@ export function ComposeComponents({
                 Its own prune-disabled Application, decoupled from the app's
                 auto-sync. Data survival on removal needs the chart's PVC marked{" "}
                 <code>helm.sh/resource-policy: keep</code>.
+              </p>
+            </div>
+
+            {/* Preview inclusion: when the app creates a preview (PR) env, only
+                components with this on are rendered into it. Defaults by type
+                (web/worker on; stateful + job/cron off). */}
+            <div className="mt-3">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-gray-300"
+                  checked={c.previewEnabled}
+                  onChange={(ev) =>
+                    update(i, { previewEnabled: ev.target.checked })
+                  }
+                />
+                Include in previews
+              </label>
+              <p className="mt-1 text-xs text-gray-400">
+                Rendered into ephemeral PR preview envs when on. Defaults:
+                web/worker on; databases and one-shot job/cron off.
               </p>
             </div>
 
