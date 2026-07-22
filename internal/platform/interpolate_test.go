@@ -112,10 +112,27 @@ func TestInterpolate_PreviewName(t *testing.T) {
 	if got := c.Interpolate("[[platform.app]]-[[platform.previewName]]"); got != "hello-pr-42" {
 		t.Errorf("got %q, want hello-pr-42", got)
 	}
-	// Stable env: no preview name → token left literal.
+	// A preview host with a suffix pattern resolves to a valid per-PR hostname.
+	if got := c.Interpolate("foo-((platform.previewName)).acme.com"); got != "foo-pr-42.acme.com" {
+		t.Errorf("preview host = %q, want foo-pr-42.acme.com", got)
+	}
+
+	// Stable env: no preview name. The token must NOT survive literal (an
+	// unresolved "((...))" is an invalid hostname/label); it resolves to empty and
+	// collapses its adjacent separator so the result stays a VALID name.
 	stable := Context{Platform: helmvalues.PlatformValues{App: "hello"}}
-	if got := stable.Interpolate("[[platform.previewName]]"); got != "[[platform.previewName]]" {
-		t.Errorf("stable previewName should be literal, got %q", got)
+	cases := map[string]string{
+		"((platform.previewName))":                "",
+		"foo-((platform.previewName))":            "foo",
+		"foo-((platform.previewName)).acme.com":   "foo.acme.com",
+		"((platform.previewName)).acme.com":       "acme.com",
+		"foo.((platform.previewName))":            "foo",
+		"[[platform.previewName]]-foo":            "foo",
+	}
+	for in, want := range cases {
+		if got := stable.Interpolate(in); got != want {
+			t.Errorf("stable %q → %q, want %q", in, got, want)
+		}
 	}
 }
 

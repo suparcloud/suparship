@@ -161,20 +161,36 @@ func (c Context) replacer() *strings.Replacer {
 	// the canonical chart defaults it to .Chart.AppVersion (see suparship-common
 	// _labels.tpl), and CD overwrites the real tag on its first promotion.
 	named = append(named, "platform.imageTag", p.ImageTag)
-	// Preview name — exposed only for previews so a shared-namespace preview can
-	// suffix workload resource names per PR. Left literal for stable envs.
-	if p.PreviewName != "" {
-		named = append(named, "platform.previewName", p.PreviewName)
-	}
 	for k, v := range c.Vars {
 		named = append(named, "vars."+k, v)
 	}
 	// Expand each name into both the preferred (( )) delimiter and the legacy
 	// [[ ]] alias so old and new configs both resolve in a single pass.
-	pairs := make([]string, 0, len(named)*2)
+	pairs := make([]string, 0, len(named)*2+16)
 	for i := 0; i < len(named); i += 2 {
 		name, val := named[i], named[i+1]
 		pairs = append(pairs, "(("+name+"))", val, "[["+name+"]]", val)
+	}
+	// Preview name — ALWAYS resolved, never left literal: like ((platform.imageTag)),
+	// an unresolved "((...))" is an invalid hostname/label value that k8s rejects on
+	// apply. In previews it is the PR name; in stable envs it is empty, and an
+	// adjacent '-'/'.' separator is collapsed too so a suffix/subdomain pattern such
+	// as "foo-((platform.previewName))" or "((platform.previewName)).foo" renders as
+	// a VALID "foo" (not the invalid "foo-" / ".foo"). The combined separator
+	// patterns are listed before the bare token so they win at their start position.
+	for _, d := range []struct{ l, r string }{{"((", "))"}, {"[[", "]]"}} {
+		tok := d.l + "platform.previewName" + d.r
+		if p.PreviewName != "" {
+			pairs = append(pairs, tok, p.PreviewName)
+			continue
+		}
+		pairs = append(pairs,
+			"-"+tok, "",
+			tok+"-", "",
+			"."+tok, "",
+			tok+".", "",
+			tok, "",
+		)
 	}
 	return strings.NewReplacer(pairs...)
 }
