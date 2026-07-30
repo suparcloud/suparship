@@ -1380,6 +1380,21 @@ func TestComposedPromotionTemplatePerComponentFiles(t *testing.T) {
 			paths[p] = true
 		}
 	}
+	// Each per-component tag value must be quote()-wrapped so a numeric-looking
+	// tag is written as a string, not an int/float (akuity/kargo #3743).
+	for _, step := range stage.Spec.PromotionTemplate.Spec.Steps {
+		if step.Uses != "yaml-update" {
+			continue
+		}
+		ups, _ := step.Config["updates"].([]map[string]any)
+		for _, u := range ups {
+			got, _ := u["value"].(string)
+			if got != `${{ quote(imageFrom("ghcr.io/bigly/web").Tag) }}` &&
+				got != `${{ quote(imageFrom("ghcr.io/bigly/web2").Tag) }}` {
+				t.Errorf("composed yaml-update value not quote()-wrapped: %v", got)
+			}
+		}
+	}
 	want := []string{
 		"./src/envs/staging/demo/bigly/components/web-1/values.yaml",
 		"./src/envs/staging/demo/bigly/components/web-2/values.yaml",

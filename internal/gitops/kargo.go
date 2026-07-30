@@ -356,6 +356,19 @@ func BuildKargoStage(app *domain.App, env domain.AppEnvironment, upstreamStages 
 // imageFrom() expression, commit, push, then sync the app's ArgoCD Application.
 // Returns nil when no gitops repo URL is configured (the Stage then has no
 // promotion logic — same as the old "no gitRepoUpdates" path).
+// kargoImageTagValue is the Kargo expression written into a yaml-update
+// updates[].value for an image tag. It wraps imageFrom(repo).Tag in quote() so a
+// numeric-looking tag (e.g. "42118849", or a float-looking "1.35") is written as
+// a QUOTED YAML string. Without quote(), yaml-update emits image.tag: 42118849
+// unquoted → YAML parses it as an int/float → Helm rejects it
+// (image.tag: Invalid type. Expected: string, given: integer). See akuity/kargo
+// #3743; quote() itself was fixed to not double-quote in v1.3.4 (PR #3794), so
+// this requires Kargo >= v1.3.4. Both promotion-template builders use this so the
+// two yaml-update sites can't drift.
+func kargoImageTagValue(repository string) string {
+	return fmt.Sprintf("${{ quote(imageFrom(%q).Tag) }}", repository)
+}
+
 func buildPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts KargoBuildOptions, valuesFilePath string) *PromotionTemplate {
 	if opts.GitOpsRepoURL == "" {
 		return nil
@@ -368,7 +381,7 @@ func buildPromotionTemplate(app *domain.App, env domain.AppEnvironment, opts Kar
 	for _, img := range opts.Images {
 		updates = append(updates, map[string]any{
 			"key":   img.TagKey,
-			"value": fmt.Sprintf("${{ imageFrom(%q).Tag }}", img.Repository),
+			"value": kargoImageTagValue(img.Repository),
 		})
 	}
 
@@ -461,7 +474,7 @@ func buildComposedPromotionTemplate(app *domain.App, env domain.AppEnvironment, 
 		for _, img := range byComp[comp] {
 			updates = append(updates, map[string]any{
 				"key":   img.TagKey,
-				"value": fmt.Sprintf("${{ imageFrom(%q).Tag }}", img.Repository),
+				"value": kargoImageTagValue(img.Repository),
 			})
 		}
 		if !fanOut {

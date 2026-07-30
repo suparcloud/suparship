@@ -262,7 +262,8 @@ func TestBuildKargoStage_PromotionStepsUpdateValues(t *testing.T) {
 		t.Errorf("git-clone repoURL: got %v", clone.Config["repoURL"])
 	}
 
-	// yaml-update writes the env values.yaml under ./src with the imageFrom expr
+	// yaml-update writes the env values.yaml under ./src; the tag value is wrapped
+	// in quote() so a numeric-looking tag stays a string (akuity/kargo #3743).
 	yu := findStep(t, steps, "yaml-update")
 	if yu.Config["path"] != "./src/envs/staging/demo/color-app/values.yaml" {
 		t.Errorf("yaml-update path: got %v", yu.Config["path"])
@@ -271,7 +272,7 @@ func TestBuildKargoStage_PromotionStepsUpdateValues(t *testing.T) {
 	if len(updates) != 1 || updates[0]["key"] != "components.web.image.tag" {
 		t.Fatalf("yaml-update updates: got %+v", updates)
 	}
-	if got := updates[0]["value"]; got != `${{ imageFrom("kind-registry:5000/demo/color-app").Tag }}` {
+	if got := updates[0]["value"]; got != `${{ quote(imageFrom("kind-registry:5000/demo/color-app").Tag) }}` {
 		t.Errorf("yaml-update value: got %v", got)
 	}
 
