@@ -14,6 +14,8 @@
 // dependency surface small and the types easy to audit.
 package gitops
 
+import "sort"
+
 // AppProject is a minimal, serializable representation of an ArgoCD
 // AppProject CRD. Only the fields needed by suparship are included.
 type AppProject struct {
@@ -127,13 +129,30 @@ func BuildArgoAppProject(projectName string, opts AppProjectOptions) *AppProject
 
 	var destinations []AppProjectDestination
 	if len(opts.Destinations) > 0 {
-		// Fill in NamespaceGlob for any destination that has no namespace set.
+		// Fill in NamespaceGlob for any destination that has no namespace set,
+		// then dedup and sort so the output is canonical regardless of the
+		// caller's iteration order. Callers assemble destinations by appending in
+		// k8s-list order (per-app sync) or config-file order (startup infra
+		// republish); without this those two writers emit the same file with
+		// different orderings — reorder-only churn commits — and a cluster shared
+		// across environments would appear twice.
+		seen := make(map[AppProjectDestination]bool, len(opts.Destinations))
 		for _, d := range opts.Destinations {
 			if d.Namespace == "" {
 				d.Namespace = opts.NamespaceGlob
 			}
+			if seen[d] {
+				continue
+			}
+			seen[d] = true
 			destinations = append(destinations, d)
 		}
+		sort.Slice(destinations, func(i, j int) bool {
+			if destinations[i].Server != destinations[j].Server {
+				return destinations[i].Server < destinations[j].Server
+			}
+			return destinations[i].Namespace < destinations[j].Namespace
+		})
 	} else {
 		if opts.DestinationServer == "" {
 			opts.DestinationServer = defaultDestination
