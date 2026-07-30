@@ -5,9 +5,7 @@ import (
 	"net/http"
 
 	"github.com/suparcloud/suparship/internal/domain"
-	"github.com/suparcloud/suparship/internal/helmvalues"
 	"github.com/suparcloud/suparship/internal/kube"
-	"github.com/suparcloud/suparship/internal/tpl/chartimport"
 )
 
 // TemplateOverrideDTO is the wire shape for a template's org-level platform
@@ -118,21 +116,19 @@ func (th *templateHandler) handlePostEffectiveValues(w http.ResponseWriter, r *h
 	env := r.URL.Query().Get("env")
 	cluster := r.URL.Query().Get("cluster")
 	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
-	// Template-level preview: no concrete app, so no canonical base.
-	resp := effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, nil, nil)
 	// Preview scope: layer the template's PREVIEW defaults (spec ⊕ stored org
 	// override) above the base-env composition, then the app's preview override
 	// (sent as envValues["preview"]) on top — mirroring the publish order so the
 	// effective pane shows what a preview actually deploys, not just the base env.
+	// The same previewLayer path the app values-preview endpoint uses.
+	var pv *previewLayer
 	if r.URL.Query().Get("preview") == "true" {
-		previewDefaults := helmvalues.DeepCopyMap(t.Spec.PreviewDefaultValues)
-		if stored := loadOverride(r.Context(), th.kubeClient, name); stored != nil && len(stored.PreviewDefaultValues) > 0 {
-			previewDefaults = helmvalues.DeepMerge(previewDefaults, helmvalues.DeepCopyMap(stored.PreviewDefaultValues))
+		pv = &previewLayer{
+			templateDefaults: mergedPreviewDefaults(t, loadOverride(r.Context(), th.kubeClient, name)),
+			appOverride:      dto.EnvValues["preview"],
 		}
-		values := helmvalues.DeepMerge(resp.Values, previewDefaults)
-		values = helmvalues.DeepMerge(values, helmvalues.DeepCopyMap(dto.EnvValues["preview"]))
-		resp.Values = values
-		resp.DiscoveredImages = imagesToDTO(chartimport.DetectImageMappings(values))
 	}
+	// Template-level preview: no concrete app, so no canonical base.
+	resp := effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, nil, nil, pv)
 	writeJSON(w, http.StatusOK, resp)
 }

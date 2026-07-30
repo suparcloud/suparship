@@ -102,7 +102,32 @@ func computeEffectiveValues(chartVals, canonicalBase map[string]any, t *tpl.Temp
 	return out
 }
 
-func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any) EffectiveValuesDTO {
+// previewLayer, when non-nil, layers the preview band on top of the base-env
+// composition — mirroring the publisher's previewRawValuesOverlay order: the
+// template+org PreviewDefaultValues (templateDefaults) then the app's own
+// preview override (appOverride). It is what makes the effective-preview pane
+// show what a preview actually deploys (not just its base env), identically for
+// composed and single-component apps.
+type previewLayer struct {
+	templateDefaults map[string]any
+	appOverride      map[string]any
+}
+
+// mergedPreviewDefaults returns the template's PreviewDefaultValues (chart
+// author) merged with the org override's PreviewDefaultValues (PE/SRE), the
+// combined "preview defaults" band. Either may be empty.
+func mergedPreviewDefaults(t *tpl.Template, ov *domain.TemplateOverride) map[string]any {
+	out := map[string]any{}
+	if t != nil {
+		out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(t.Spec.PreviewDefaultValues))
+	}
+	if ov != nil {
+		out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(ov.PreviewDefaultValues))
+	}
+	return out
+}
+
+func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any, pv *previewLayer) EffectiveValuesDTO {
 	layers := []string{}
 	if available {
 		layers = append(layers, "chart defaults")
@@ -131,7 +156,18 @@ func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool,
 	if len(envRaw) > 0 {
 		layers = append(layers, envName+" overrides")
 	}
+	if pv != nil && len(pv.templateDefaults) > 0 {
+		layers = append(layers, "preview defaults")
+	}
+	if pv != nil && len(pv.appOverride) > 0 {
+		layers = append(layers, "preview overrides")
+	}
 	values := computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, cluster, appRaw, envRaw)
+	// Preview band sits above the base-env composition (see previewLayer).
+	if pv != nil {
+		values = helmvalues.DeepMerge(values, helmvalues.DeepCopyMap(pv.templateDefaults))
+		values = helmvalues.DeepMerge(values, helmvalues.DeepCopyMap(pv.appOverride))
+	}
 	return EffectiveValuesDTO{
 		Values:                 values,
 		ChartDefaultsAvailable: available,
@@ -162,7 +198,7 @@ func (th *templateHandler) handleEffectiveValues(w http.ResponseWriter, r *http.
 	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
 	ov := loadOverride(r.Context(), th.kubeClient, name)
 	// Template-level preview: no concrete app, so no canonical base.
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, nil, nil))
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, nil, nil, nil))
 }
 
 // loadOverride best-effort reads a template's org-level platform override.
@@ -232,7 +268,24 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 	if t == nil || t.Spec.CanonicalValues() {
 		canonicalBase = ah.canonicalBaseMap(r.Context(), app, envName)
 	}
-	dto := effectiveValuesDTO(chartVals, canonicalBase, available, t, ov, envName, "", appRaw, envRaw)
+	// Resolve envName's workload cluster so cluster-scoped template overrides
+	// (org ClusterValues[cluster]) show in the preview, exactly as they deploy.
+	cluster := ah.envCluster(r.Context(), envName)
+	// Preview scope (?preview=true): envName is the base env the preview clones;
+	// layer the template+org preview defaults and the app's preview override on
+	// top so composed and single-component apps show the same effective preview
+	// (mirrors the publisher's previewRawValuesOverlay).
+	var pv *previewLayer
+	if r.URL.Query().Get("preview") == "true" {
+		override := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey].RawValues
+		if req.EnvRawValues != nil {
+			if v, ok := req.EnvRawValues[domain.PreviewOverrideKey]; ok {
+				override = v // unsaved edits from the editor win
+			}
+		}
+		pv = &previewLayer{templateDefaults: mergedPreviewDefaults(t, ov), appOverride: override}
+	}
+	dto := effectiveValuesDTO(chartVals, canonicalBase, available, t, ov, envName, cluster, appRaw, envRaw, pv)
 	// Composed app: the primary-template discovery above misses each component's
 	// own chart+overlay, so REPLACE the discovered images with the union of every
 	// component's images (each tagged with its owning component) — the app-level
@@ -241,6 +294,26 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 		dto.DiscoveredImages = ah.componentDiscoveredImages(r.Context(), app, envName)
 	}
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// envCluster resolves envName's workload cluster via the org Environment's
+// EffectiveClusterRef, so cluster-scoped template overrides layer into the
+// effective preview the same way they do at publish. Returns "" when there is no
+// org provider, the org can't be read, the env is unknown, or it's unbound.
+func (ah *appHandler) envCluster(ctx context.Context, envName string) string {
+	if ah.orgProvider == nil {
+		return ""
+	}
+	org, err := ah.orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		return ""
+	}
+	for _, e := range org.Environments {
+		if e.Name == envName {
+			return e.EffectiveClusterRef()
+		}
+	}
+	return ""
 }
 
 // componentDiscoveredImages returns the union of a composed app's per-component

@@ -1945,7 +1945,7 @@ function ValuesLayers({
         How the values compose for{" "}
         <span className="font-medium">{envLabel || "the selected environment"}</span>,
         lowest → highest precedence. Read-only.{" "}
-        <code className="font-mono">{"{…}"}</code> tokens resolve at deploy.
+        <code className="font-mono">{"((…))"}</code> tokens resolve at deploy.
       </p>
       <div className="space-y-2">
         {layers.map((l) => (
@@ -2632,7 +2632,7 @@ function AppValuesEditor({
               )}
               <p className="mt-1 text-xs text-gray-400">
                 Chart defaults ⊕ platform base ⊕ overrides. Routing/cluster
-                resolution and <code className="font-mono">{"{…}"}</code> tokens
+                resolution and <code className="font-mono">{"((…))"}</code> tokens
                 are resolved at deploy.
               </p>
             </div>
@@ -4762,10 +4762,24 @@ function ComponentValuesPanel({
               true,
             )
           : appLevel
-            ? previewAppValues(project, data.name, previewEnv, {
-                rawValues: baseParsed.value ?? {},
-                envRawValues: { [previewEnv]: envParsed.value ?? {} },
-              })
+            ? isPreviewScope
+              ? // Single-component app on the preview scope: same as composed —
+                // layer the template's preview defaults + the preview override
+                // (sent under the reserved "preview" key) on the base env.
+                previewAppValues(
+                  project,
+                  data.name,
+                  previewEnv,
+                  {
+                    rawValues: baseParsed.value ?? {},
+                    envRawValues: { preview: previewParsed.value ?? {} },
+                  },
+                  true,
+                )
+              : previewAppValues(project, data.name, previewEnv, {
+                  rawValues: baseParsed.value ?? {},
+                  envRawValues: { [previewEnv]: envParsed.value ?? {} },
+                })
             : previewTemplateEffectiveValues(templateName, previewEnv, "", {
                 defaultValues: baseParsed.value ?? {},
                 envValues: { [previewEnv]: envParsed.value ?? {} },
@@ -4974,7 +4988,7 @@ function ComponentValuesPanel({
                 )}
                 <p className="mt-1 text-xs text-gray-400">
                   Chart defaults ⊕ platform base ⊕ overrides. Routing/cluster
-                  resolution and <code className="font-mono">{"{…}"}</code> tokens
+                  resolution and <code className="font-mono">{"((…))"}</code> tokens
                   are resolved at deploy.
                 </p>
               </div>

@@ -494,7 +494,7 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
               )}
               <p className="mt-1 text-xs text-gray-400">
                 Preview omits per-app overrides and{" "}
-                <code className="font-mono">{"{…}"}</code> token resolution —
+                <code className="font-mono">{"((…))"}</code> token resolution —
                 applied at deploy.
               </p>
             </div>

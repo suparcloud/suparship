@@ -158,9 +158,14 @@ export function previewAppValues(
     rawValues?: Record<string, unknown>;
     envRawValues?: Record<string, Record<string, unknown>>;
   },
+  // preview=true layers the template+org preview defaults and the app's preview
+  // override (sent as envRawValues.preview) on top of the base env `env` — so the
+  // preview scope shows what actually deploys, matching composed apps.
+  preview = false,
 ): Promise<EffectiveValuesResponse> {
+  const q = preview ? "?preview=true" : "";
   return api.post<EffectiveValuesResponse>(
-    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/values/preview`,
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/values/preview${q}`,
     body,
   );
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/kube"
+	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
@@ -387,5 +390,119 @@ func TestHandleAppValuesPreview_UnknownApp404(t *testing.T) {
 	ah.handleAppValuesPreview(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+// Fix 1: the app values-preview resolves the env's workload cluster and layers
+// the org override's ClusterValues[cluster]. Previously the cluster was hard-
+// coded "", so cluster-scoped template overrides never appeared in the preview
+// even though they deploy.
+func TestHandleAppValuesPreview_MergesClusterOverride(t *testing.T) {
+	store := newMemAppStore()
+	store.addApp(&domain.App{
+		Name:        "agent",
+		ProjectName: "demo",
+		Spec:        domain.AppSpec{Template: domain.AppTemplateRef{Name: "voiceai-agent"}},
+	})
+	store.addEnv(&domain.AppEnvironment{
+		AppName: "agent", ProjectName: "demo", EnvName: "prod",
+		EnvType: domain.AppEnvProd, Namespace: "demo-agent-prod",
+	})
+
+	passthrough := false
+	tmpl := valuesTemplate()
+	tmpl.Metadata.Name = "voiceai-agent"
+	tmpl.Spec.InjectCanonicalValues = &passthrough // effective = chart+overlays only
+
+	client := fake.NewSimpleClientset()
+	if err := kube.SaveTemplateOverride(context.Background(), client, "voiceai-agent", &domain.TemplateOverride{
+		ClusterValues: map[string]map[string]any{"c1": {"clusterKey": "fromcluster"}},
+	}); err != nil {
+		t.Fatalf("seed override: %v", err)
+	}
+
+	ah := &appHandler{
+		appStore:    store,
+		builtin:     []*tpl.Template{tmpl},
+		kubeClient:  client,
+		orgProvider: &staticOrgProvider{org: &rbac.Org{Environments: []rbac.OrgEnvironment{
+			{Name: "prod", ClusterRefs: []string{"c1"}, ActiveClusterRef: "c1"},
+		}}},
+		statusCache: newStatusCache(statusCacheTTL),
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/projects/demo/apps/agent/envs/prod/values/preview", nil)
+	req.SetPathValue("project", "demo")
+	req.SetPathValue("app", "agent")
+	req.SetPathValue("env", "prod")
+	rec := httptest.NewRecorder()
+	ah.handleAppValuesPreview(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp EffectiveValuesDTO
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Values["clusterKey"] != "fromcluster" {
+		t.Errorf("clusterKey = %v, want fromcluster (cluster-scoped override must merge)", resp.Values["clusterKey"])
+	}
+}
+
+// Fix 2: with ?preview=true the app values-preview layers the template's
+// PreviewDefaultValues and the app's own preview override on top of the base
+// env — so single-component apps show the same effective preview as composed
+// ones. Without the flag the preview band must NOT apply.
+func TestHandleAppValuesPreview_PreviewScopeLayersDefaults(t *testing.T) {
+	store := newMemAppStore()
+	store.addApp(&domain.App{
+		Name:        "agent",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "voiceai-agent"},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				domain.PreviewOverrideKey: {RawValues: map[string]any{"replicaCount": 9}},
+			},
+		},
+	})
+	store.addEnv(&domain.AppEnvironment{
+		AppName: "agent", ProjectName: "demo", EnvName: "staging",
+		EnvType: domain.AppEnvStaging, Namespace: "demo-agent-staging",
+	})
+
+	passthrough := false
+	tmpl := valuesTemplate()
+	tmpl.Metadata.Name = "voiceai-agent"
+	tmpl.Spec.InjectCanonicalValues = &passthrough
+	tmpl.Spec.PreviewDefaultValues = map[string]any{"previewOnly": "yes", "replicaCount": 1}
+
+	ah := &appHandler{appStore: store, builtin: []*tpl.Template{tmpl}, statusCache: newStatusCache(statusCacheTTL)}
+
+	decode := func(url string) EffectiveValuesDTO {
+		req := httptest.NewRequest("POST", url, nil)
+		req.SetPathValue("project", "demo")
+		req.SetPathValue("app", "agent")
+		req.SetPathValue("env", "staging")
+		rec := httptest.NewRecorder()
+		ah.handleAppValuesPreview(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp EffectiveValuesDTO
+		_ = json.NewDecoder(rec.Body).Decode(&resp)
+		return resp
+	}
+
+	// preview=true → template preview default + app preview override apply.
+	prev := decode("/api/v1/projects/demo/apps/agent/envs/staging/values/preview?preview=true")
+	if prev.Values["previewOnly"] != "yes" {
+		t.Errorf("previewOnly = %v, want yes (template preview default must merge)", prev.Values["previewOnly"])
+	}
+	if prev.Values["replicaCount"] != float64(9) {
+		t.Errorf("replicaCount = %v, want 9 (app preview override on top)", prev.Values["replicaCount"])
+	}
+
+	// no flag → the preview band must not apply.
+	base := decode("/api/v1/projects/demo/apps/agent/envs/staging/values/preview")
+	if _, present := base.Values["previewOnly"]; present {
+		t.Errorf("previewOnly must NOT appear outside preview scope: %v", base.Values)
 	}
 }
