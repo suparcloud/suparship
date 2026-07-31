@@ -1,4 +1,5 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -6,11 +7,11 @@ import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKa
 import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
-import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 
 // CodeMirror is heavy; only the values editor needs it.
-const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
-import { listTemplateVersions, fetchTemplateEffectiveValues, previewTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
+const ScopedValuesEditor = lazy(() => import("../components/ScopedValuesEditor"));
+import type { ScopeBase, ValuesScope } from "../components/ScopedValuesEditor";
+import { listTemplateVersions, previewTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
 import type { TemplateVersionInfo, TemplateImage, AppImageBinding, ComponentImage, TemplateSummary } from "../types";
 import {
   ComposeComponents,
@@ -1889,102 +1890,10 @@ function LegacyConfigNotice({ data }: { data: AppDetailType }) {
   );
 }
 
-// AppValuesEditor edits the developer's override layers — the app-level base
-// (rawValues, all envs) and per-environment overrides (envRawValues[env]) — and
-// shows a read-only effective preview (chart ⊕ platform/env ⊕ overrides) computed
-// by the backend, reflecting unsaved edits.
-const BASE_SCOPE = "__base__";
-// Reserved EnvironmentDefaults key for the preview band (values applied to every
-// preview on top of its base env). Mirrors the backend's domain.PreviewOverrideKey.
+// PREVIEW_SCOPE is the reserved EnvironmentDefaults key for the preview band
+// (values applied to every preview on top of its base env). Mirrors the backend's
+// domain.PreviewOverrideKey.
 const PREVIEW_SCOPE = "preview";
-
-// ValuesLayers shows, read-only, the override layers that compose the effective
-// values for the selected env in precedence order (low → high), each collapsible.
-// Empty layers render a muted "inherits" note. The chart/canonical/stack
-// sub-layers are folded into the template-effective and effective maps.
-function ValuesLayers({
-  envLabel,
-  templateLayer,
-  appBase,
-  envOverride,
-  envOverrideLabel,
-  effective,
-}: {
-  envLabel: string;
-  templateLayer: string;
-  appBase: string;
-  envOverride: string;
-  envOverrideLabel: string;
-  effective: string;
-}) {
-  const layers = [
-    {
-      n: 1,
-      title: "Template & platform defaults",
-      note: "read-only — chart defaults ⊕ template defaults ⊕ operator override",
-      body: templateLayer,
-    },
-    { n: 2, title: "App base overrides", note: "all environments", body: appBase },
-    {
-      n: 3,
-      title: `${envOverrideLabel} overrides`,
-      note: "this environment, on top of the base",
-      body: envOverride,
-    },
-    {
-      n: 4,
-      title: `Effective — ${envLabel || "selected env"} (as deployed)`,
-      note: "everything merged, low → high",
-      body: effective,
-      open: true,
-    },
-  ];
-  return (
-    <div>
-      <p className="mb-3 text-xs text-gray-400">
-        How the values compose for{" "}
-        <span className="font-medium">{envLabel || "the selected environment"}</span>,
-        lowest → highest precedence. Read-only.{" "}
-        <code className="font-mono">{"((…))"}</code> tokens resolve at deploy.
-      </p>
-      <div className="space-y-2">
-        {layers.map((l) => (
-          <details
-            key={l.n}
-            open={l.open}
-            className="group rounded-lg border border-gray-200 bg-white"
-          >
-            <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm">
-              <svg
-                className="h-3.5 w-3.5 text-gray-400 transition-transform group-open:rotate-90"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-              </svg>
-              <span className="flex h-5 w-5 items-center justify-center rounded bg-gray-100 text-xs font-medium text-gray-500">
-                {l.n}
-              </span>
-              <span className="font-medium text-gray-800">{l.title}</span>
-              <span className="text-xs text-gray-400">{l.note}</span>
-            </summary>
-            <div className="border-t border-gray-100 p-3">
-              {l.body && l.body.trim() ? (
-                <pre className="overflow-x-auto rounded bg-gray-50 p-3 font-mono text-xs text-gray-700">
-                  {l.body}
-                </pre>
-              ) : (
-                <p className="text-xs text-gray-400">— inherits (no overrides at this layer)</p>
-              )}
-            </div>
-          </details>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 // Defaults for a CD-managed image's Kargo tag selection (mirror the backend's
 // gitops.DefaultImageTagPattern / DefaultImageSelectionStrategy): match a 7-char
@@ -2021,18 +1930,6 @@ function AppValuesEditor({
     .filter((e) => e.envType !== "preview")
     .map((e) => e.envName);
 
-  const [scope, setScope] = useState<string>(BASE_SCOPE);
-  const [baseText, setBaseText] = useState("");
-  const [envTexts, setEnvTexts] = useState<Record<string, string>>({});
-  const [yamlError, setYamlError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
-  const [preview, setPreview] = useState<string>("");
-  const [chartAvailable, setChartAvailable] = useState(true);
-  // Read-only "Layers" view: the override layers that compose the effective values
-  // for the selected env, lowest→highest precedence.
-  const [view, setView] = useState<"edit" | "layers">("edit");
-  const [templateLayer, setTemplateLayer] = useState<string>("");
   const [cdManaged, setCdManaged] = useState(false);
   const [autoPromote, setAutoPromote] = useState(false);
   const [cdSaving, setCdSaving] = useState(false);
@@ -2055,37 +1952,6 @@ function AppValuesEditor({
   );
   const [targetClustersSaving, setTargetClustersSaving] = useState(false);
 
-  // Keep the values scope in step with the environment selected above: a preview
-  // selects the shared preview band, a stable env selects its own overrides. So
-  // the editor (and effective pane) reflect what you're looking at.
-  useEffect(() => {
-    if (!currentEnvName) return;
-    const env = (data.environments ?? []).find((e) => e.envName === currentEnvName);
-    if (env?.envType === "preview") setScope(PREVIEW_SCOPE);
-    else if (env && envs.includes(env.envName)) setScope(env.envName);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentEnvName]);
-
-  // Template & platform layer (read-only) for the Layers view — chart defaults ⊕
-  // template defaults/env ⊕ operator override, scoped to the selected env (a
-  // preview uses its base env, since it inherits that env's template values).
-  useEffect(() => {
-    if (view !== "layers" || !currentEnvName) return;
-    const env = (data.environments ?? []).find((e) => e.envName === currentEnvName);
-    const tEnv = env?.envType === "preview" ? env.preview?.baseEnv : currentEnvName;
-    let cancelled = false;
-    fetchTemplateEffectiveValues(data.template.name, tEnv || undefined)
-      .then((res) => {
-        if (!cancelled) setTemplateLayer(stringifyOverlay(res.values));
-      })
-      .catch(() => {
-        if (!cancelled) setTemplateLayer("");
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, currentEnvName, data.template.name]);
   // Images discovered in the effective values (from the values preview below);
   // the user checks which ones Kargo manages.
   const [discoveredImages, setDiscoveredImages] = useState<TemplateImage[]>([]);
@@ -2098,14 +1964,6 @@ function AppValuesEditor({
 
   // Seed editors from the persisted overlays whenever the app data changes.
   useEffect(() => {
-    setBaseText(stringifyOverlay(data.rawValues));
-    const next: Record<string, string> = {};
-    for (const env of envs) {
-      next[env] = stringifyOverlay(data.envRawValues?.[env]);
-    }
-    // The preview band is keyed under the reserved "preview" env name.
-    next[PREVIEW_SCOPE] = stringifyOverlay(data.envRawValues?.[PREVIEW_SCOPE]);
-    setEnvTexts(next);
     setCdManaged(data.cd?.managed ?? false);
     setAutoPromote(data.cd?.autoPromote ?? false);
     setPreviewsEnabled(data.previewsEnabled ?? true);
@@ -2138,12 +1996,6 @@ function AppValuesEditor({
   }, [data]);
 
   useEffect(() => {
-    listConfigVariables(project)
-      .then(setConfigVars)
-      .catch(() => setConfigVars({ platform: [], vars: [] }));
-  }, [project]);
-
-  useEffect(() => {
     let cancelled = false;
     listOrgEnvironments()
       .then((res) => {
@@ -2157,61 +2009,24 @@ function AppValuesEditor({
     };
   }, []);
 
-  const activeText = scope === BASE_SCOPE ? baseText : (envTexts[scope] ?? "");
-  function setActiveText(text: string) {
-    if (scope === BASE_SCOPE) setBaseText(text);
-    else setEnvTexts((cur) => ({ ...cur, [scope]: text }));
-  }
-
-  // The env whose effective values we preview: the selected scope env, else the
-  // currently-viewed env, else the first env.
-  const previewEnv =
-    scope !== BASE_SCOPE ? scope : (currentEnvName ?? envs[0] ?? "");
-
-  // Debounced effective-values preview, reflecting unsaved edits to both layers.
+  // Discover the images in this app/env's effective values so the CD image-selection
+  // panel below can list them. Per-component values editing lives in the Components
+  // section (ComponentValuesPanel); this panel is app-level settings only.
+  const discoverEnv = currentEnvName ?? envs[0] ?? "";
   useEffect(() => {
-    if (!previewEnv) return;
-    const baseParsed = parseYamlOverlay(baseText);
-    const envParsed = parseYamlOverlay(envTexts[previewEnv] ?? "");
-    if (baseParsed.error || envParsed.error) return; // keep last good preview
-    const handle = setTimeout(() => {
-      previewAppValues(project, data.name, previewEnv, {
-        rawValues: baseParsed.value ?? {},
-        envRawValues: { [previewEnv]: envParsed.value ?? {} },
+    if (!discoverEnv) return;
+    let cancelled = false;
+    previewAppValues(project, data.name, discoverEnv, {})
+      .then((res) => {
+        if (!cancelled) setDiscoveredImages(res.discoveredImages ?? []);
       })
-        .then((res) => {
-          setPreview(stringifyOverlay(res.values));
-          setChartAvailable(res.chartDefaultsAvailable);
-          setDiscoveredImages(res.discoveredImages ?? []);
-        })
-        .catch(() => {
-          /* leave last good preview */
-        });
-    }, 400);
-    return () => clearTimeout(handle);
-  }, [project, data.name, previewEnv, baseText, envTexts]);
-
-  async function save() {
-    const parsed = parseYamlOverlay(activeText);
-    if (parsed.error) {
-      setYamlError(parsed.error);
-      return;
-    }
-    setSaving(true);
-    try {
-      const req: UpdateAppRequest =
-        scope === BASE_SCOPE
-          ? { rawValues: parsed.value ?? {} }
-          : { envRawValues: { [scope]: parsed.value ?? {} } };
-      await updateApp(project, data.name, req);
-      toast.success("Values saved — re-publishing to GitOps.");
-      await onSaved();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save values");
-    } finally {
-      setSaving(false);
-    }
-  }
+      .catch(() => {
+        /* leave last good discovery */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, data.name, discoverEnv]);
 
   const cdDirty =
     cdManaged !== (data.cd?.managed ?? false) ||
@@ -2520,130 +2335,10 @@ function AppValuesEditor({
     <div className="rounded-xl border border-gray-200 bg-white">
       <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
         <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
-          {composed ? "Settings" : "Values"}
+          Settings
         </h2>
-        {!composed && (
-          <div className="flex items-center gap-2">
-            {/* Edit (editable overrides) vs Layers (read-only precedence stack). */}
-            <div className="flex rounded-md border border-gray-200 p-0.5 text-xs">
-              {(["edit", "layers"] as const).map((v) => (
-                <button
-                  key={v}
-                  onClick={() => setView(v)}
-                  className={`rounded px-2 py-0.5 font-medium capitalize ${
-                    view === v ? "bg-gray-900 text-white" : "text-gray-500 hover:text-gray-800"
-                  }`}
-                >
-                  {v}
-                </button>
-              ))}
-            </div>
-            {view === "edit" && (
-              <>
-                <select
-                  value={scope}
-                  onChange={(e) => {
-                    setScope(e.target.value);
-                    setYamlError(null);
-                  }}
-                  className="rounded-md border border-gray-300 px-2 py-1 text-xs"
-                >
-                  <option value={BASE_SCOPE}>Base (all environments)</option>
-                  {envs.map((env) => (
-                    <option key={env} value={env}>
-                      {env} overrides
-                    </option>
-                  ))}
-                  {previewsEnabled && (
-                    <option value={PREVIEW_SCOPE}>preview overrides (all previews)</option>
-                  )}
-                </select>
-                <button
-                  onClick={save}
-                  disabled={saving || yamlError !== null}
-                  className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-                >
-                  {saving ? "Saving…" : "Save"}
-                </button>
-              </>
-            )}
-          </div>
-        )}
       </div>
       <div className="px-5 py-4">
-        {!composed && view === "layers" && (
-          <ValuesLayers
-            envLabel={currentEnvName ?? previewEnv}
-            templateLayer={templateLayer}
-            appBase={stringifyOverlay(data.rawValues)}
-            envOverride={activeText}
-            envOverrideLabel={scope === PREVIEW_SCOPE ? "preview" : (currentEnvName ?? scope)}
-            effective={preview}
-          />
-        )}
-        {!composed && view === "edit" && (
-        <>
-        <p className="mb-3 text-xs text-gray-400">
-          {scope === BASE_SCOPE
-            ? "App-level overrides applied to every environment."
-            : scope === PREVIEW_SCOPE
-              ? "Overrides applied to every preview, layered on top of its base env."
-              : `Overrides for ${scope}, layered on top of the base.`}{" "}
-          Edit only what you override — empty inherits the chart and platform
-          defaults. Reference{" "}
-          <code className="font-mono">{"((platform.*))"}</code> /{" "}
-          <code className="font-mono">{"((vars.*))"}</code> tokens.
-        </p>
-        <Suspense
-          fallback={
-            <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
-              Loading editor…
-            </div>
-          }
-        >
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <ValuesEditor
-              label={scope === BASE_SCOPE ? "Base overrides" : `${scope} overrides`}
-              value={activeText}
-              configVars={configVars}
-              placeholder={
-                "# e.g.\nresources:\n  requests:\n    cpu: 200m"
-              }
-              onChange={setActiveText}
-              onValidChange={(_, err) => setYamlError(err)}
-            />
-            <div>
-              <ValuesEditor
-                label={
-                  scope === PREVIEW_SCOPE
-                    ? "Effective — preview (computed)"
-                    : previewEnv
-                      ? `Effective — ${previewEnv} (as deployed)`
-                      : "Effective (as deployed)"
-                }
-                value={preview}
-                readOnly
-              />
-              {!chartAvailable && (
-                <p className="mt-1 text-xs text-gray-400">
-                  Chart defaults aren't readable for this template; preview shows
-                  the platform base + overrides only.
-                </p>
-              )}
-              <p className="mt-1 text-xs text-gray-400">
-                Chart defaults ⊕ platform base ⊕ overrides. Routing/cluster
-                resolution and <code className="font-mono">{"((…))"}</code> tokens
-                are resolved at deploy.
-              </p>
-            </div>
-          </div>
-        </Suspense>
-        {yamlError && (
-          <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
-        )}
-        </>
-        )}
-
         <div className={composed ? "" : "mt-4 border-t border-gray-100 pt-4"}>
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0 flex-1">
@@ -4659,204 +4354,129 @@ function ComponentValuesPanel({
   const stableEnvs = (data.environments ?? [])
     .filter((e) => e.envType !== "preview")
     .map((e) => e.envName);
-  // Scopes: base (all envs) + each stable env + the shared preview band. The
-  // preview scope shows when the app supports previews — for a composed component
-  // only when that component is actually rendered into previews (enabledInPreview).
-  // Single-source stores the band under envRawValues.preview; a composed component
-  // under EnvironmentDefaults.preview.ComponentValues (surfaced as envValues.preview).
+  // Preview scope shows when the app supports previews — for a composed component
+  // only when it's actually rendered into previews (enabledInPreview).
   const showPreview =
-    data.previewsEnabled !== false &&
-    (appLevel || comp.enabledInPreview);
-  const scopes = [
-    COMP_BASE_SCOPE,
-    ...stableEnvs,
-    ...(showPreview ? [PREVIEW_SCOPE] : []),
-  ];
-
-  const savedText = (s: string): string => {
-    if (appLevel) {
-      return stringifyOverlay(
-        s === COMP_BASE_SCOPE ? data.rawValues : data.envRawValues?.[s],
-      );
-    }
-    return stringifyOverlay(
-      s === COMP_BASE_SCOPE ? comp.values : comp.envValues?.[s],
-    );
-  };
-
-  const [open, setOpen] = useState(false);
-  const [scope, setScope] = useState(COMP_BASE_SCOPE);
-  const [texts, setTexts] = useState<Record<string, string>>(() => {
-    const m: Record<string, string> = {};
-    for (const s of scopes) m[s] = savedText(s);
-    return m;
-  });
-  const [view, setView] = useState<"edit" | "layers">("edit");
-  const [yamlError, setYamlError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [preview, setPreview] = useState("");
-  const [chartAvailable, setChartAvailable] = useState(true);
-  const [templateLayer, setTemplateLayer] = useState("");
-  const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
-
+    data.previewsEnabled !== false && (appLevel || comp.enabledInPreview);
   const templateName = appLevel ? data.template.name : comp.template ?? "";
 
-  // Re-seed the editors whenever the persisted overlays change.
-  useEffect(() => {
-    const m: Record<string, string> = {};
-    for (const s of scopes) m[s] = savedText(s);
-    setTexts(m);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, comp]);
-
-  // Keep the scope in step with the environment selected in the page header.
-  useEffect(() => {
-    if (!currentEnvName) return;
-    const env = (data.environments ?? []).find((e) => e.envName === currentEnvName);
-    if (appLevel && env?.envType === "preview") setScope(PREVIEW_SCOPE);
-    else if (env && stableEnvs.includes(env.envName)) setScope(env.envName);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentEnvName]);
-
+  const [open, setOpen] = useState(false);
+  const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
   useEffect(() => {
     listConfigVariables(project)
       .then(setConfigVars)
       .catch(() => setConfigVars({ platform: [], vars: [] }));
   }, [project]);
 
-  const activeText = texts[scope] ?? "";
-  const setActiveText = (t: string) =>
-    setTexts((cur) => ({ ...cur, [scope]: t }));
-  const dirty = activeText !== savedText(scope);
-
-  // The env whose effective values we preview: the selected env scope, else the
-  // currently-viewed env, else the first stable env.
-  const previewEnv =
-    scope !== COMP_BASE_SCOPE && scope !== PREVIEW_SCOPE
-      ? scope
-      : currentEnvName && stableEnvs.includes(currentEnvName)
-        ? currentEnvName
-        : stableEnvs[0] ?? "";
-
-  // Debounced effective-values preview, reflecting unsaved edits to both layers.
-  const isPreviewScope = scope === PREVIEW_SCOPE;
-  useEffect(() => {
-    if (!previewEnv) return;
-    const baseParsed = parseYamlOverlay(texts[COMP_BASE_SCOPE] ?? "");
-    const previewParsed = parseYamlOverlay(texts[PREVIEW_SCOPE] ?? "");
-    const envParsed = parseYamlOverlay(texts[previewEnv] ?? "");
-    if (baseParsed.error || envParsed.error || previewParsed.error) return; // keep last good preview
-    const handle = setTimeout(() => {
-      // Composed component on the preview scope: preview the base env's effective
-      // with the template's preview defaults + the preview override on top.
-      const req =
-        !appLevel && isPreviewScope
-          ? previewTemplateEffectiveValues(
-              templateName,
-              previewEnv,
-              "",
-              {
-                defaultValues: baseParsed.value ?? {},
-                envValues: { preview: previewParsed.value ?? {} },
-              },
-              true,
-            )
-          : appLevel
-            ? isPreviewScope
-              ? // Single-component app on the preview scope: same as composed —
-                // layer the template's preview defaults + the preview override
-                // (sent under the reserved "preview" key) on the base env.
-                previewAppValues(
-                  project,
-                  data.name,
-                  previewEnv,
-                  {
-                    rawValues: baseParsed.value ?? {},
-                    envRawValues: { preview: previewParsed.value ?? {} },
-                  },
-                  true,
-                )
-              : previewAppValues(project, data.name, previewEnv, {
-                  rawValues: baseParsed.value ?? {},
-                  envRawValues: { [previewEnv]: envParsed.value ?? {} },
-                })
-            : previewTemplateEffectiveValues(templateName, previewEnv, "", {
-                defaultValues: baseParsed.value ?? {},
-                envValues: { [previewEnv]: envParsed.value ?? {} },
-              });
-      req
-        .then((res) => {
-          setPreview(stringifyOverlay(res.values));
-          setChartAvailable(res.chartDefaultsAvailable);
-        })
-        .catch(() => {
-          /* leave last good preview */
-        });
-    }, 400);
-    return () => clearTimeout(handle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, data.name, previewEnv, texts, appLevel, templateName, isPreviewScope]);
-
-  // Template & platform layer (read-only) for the Layers view.
-  useEffect(() => {
-    if (view !== "layers" || !previewEnv || !templateName) return;
-    let cancelled = false;
-    fetchTemplateEffectiveValues(templateName, previewEnv || undefined)
-      .then((res) => {
-        if (!cancelled) setTemplateLayer(stringifyOverlay(res.values));
-      })
-      .catch(() => {
-        if (!cancelled) setTemplateLayer("");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [view, previewEnv, templateName]);
-
-  async function save() {
-    const parsed = parseYamlOverlay(activeText);
-    if (parsed.error) {
-      setYamlError(parsed.error);
-      return;
-    }
-    setYamlError(null);
-    setSaving(true);
-    try {
-      let req: UpdateAppRequest;
+  // The persisted override (diff) stored for a scope. Single-component apps store
+  // the app-level rawValues/envRawValues; a composed component stores its own
+  // values/envValues (the reserved "preview" key carries the preview band).
+  const storedFor = useCallback(
+    (id: string): Record<string, unknown> | undefined => {
       if (appLevel) {
-        req =
-          scope === COMP_BASE_SCOPE
-            ? { rawValues: parsed.value ?? {} }
-            : { envRawValues: { [scope]: parsed.value ?? {} } };
-      } else {
-        req =
-          scope === COMP_BASE_SCOPE
-            ? { componentValues: { [comp.name]: parsed.value ?? {} } }
-            : { envComponentValues: { [scope]: { [comp.name]: parsed.value ?? {} } } };
+        return id === COMP_BASE_SCOPE ? data.rawValues : data.envRawValues?.[id];
       }
-      await updateApp(project, data.name, req);
-      toast.success("Values saved — re-publishing to GitOps.");
-      await onSaved();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to save values");
-    } finally {
-      setSaving(false);
-    }
-  }
+      return id === COMP_BASE_SCOPE ? comp.values : comp.envValues?.[id];
+    },
+    [appLevel, data, comp],
+  );
 
-  const scopeLabel = (s: string) =>
-    s === COMP_BASE_SCOPE ? "all envs" : s === PREVIEW_SCOPE ? "preview" : s;
-  const overridden = (s: string): boolean => {
-    if (s === COMP_BASE_SCOPE) return false;
-    const src = appLevel ? data.envRawValues?.[s] : comp.envValues?.[s];
-    return !!src && Object.keys(src).length > 0;
-  };
+  const scopes: ValuesScope[] = useMemo(() => {
+    const nonEmpty = (id: string) => {
+      const v = storedFor(id);
+      return !!v && Object.keys(v).length > 0;
+    };
+    return [
+      { id: COMP_BASE_SCOPE, label: "all envs", hasOverride: nonEmpty(COMP_BASE_SCOPE) },
+      ...stableEnvs.map((e) => ({ id: e, label: e, hasOverride: nonEmpty(e) })),
+      ...(showPreview
+        ? [{ id: PREVIEW_SCOPE, label: "preview", hasOverride: nonEmpty(PREVIEW_SCOPE) }]
+        : []),
+    ];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stableEnvs.join(","), showPreview, storedFor]);
 
-  // Whether any overlay (base or per-env) has content — surfaced on the collapsed
-  // toggle so a component with overrides is discoverable without expanding.
-  const hasOverrides =
-    savedText(COMP_BASE_SCOPE).trim() !== "" ||
-    scopes.some((s) => s !== COMP_BASE_SCOPE && overridden(s));
+  // The env we resolve a scope against: the env scope itself, else the header env,
+  // else the first stable env (base/preview scopes are sampled on a stable env).
+  const previewEnvFor = useCallback(
+    (id: string) =>
+      id !== COMP_BASE_SCOPE && id !== PREVIEW_SCOPE
+        ? id
+        : currentEnvName && stableEnvs.includes(currentEnvName)
+          ? currentEnvName
+          : stableEnvs[0] ?? "",
+    [currentEnvName, stableEnvs],
+  );
+
+  // Resolve a scope's base = the values that deploy with THIS scope's own override
+  // emptied. Lower scopes (the all-envs diff) are layered in so an env/preview base
+  // matches publish precedence.
+  const getBase = useCallback(
+    async (
+      scopeId: string,
+      diffs: Record<string, Record<string, unknown>>,
+    ): Promise<ScopeBase> => {
+      const env = previewEnvFor(scopeId);
+      const baseDiff = diffs[COMP_BASE_SCOPE] ?? {};
+      const isPrev = scopeId === PREVIEW_SCOPE;
+      let res;
+      if (appLevel) {
+        const body =
+          scopeId === COMP_BASE_SCOPE
+            ? { rawValues: {}, envRawValues: {} }
+            : isPrev
+              ? { rawValues: baseDiff, envRawValues: { preview: {} } }
+              : { rawValues: baseDiff, envRawValues: { [scopeId]: {} } };
+        res = await previewAppValues(project, data.name, env, body, isPrev);
+      } else {
+        const override =
+          scopeId === COMP_BASE_SCOPE
+            ? { defaultValues: {} }
+            : isPrev
+              ? { defaultValues: baseDiff, envValues: { preview: {} } }
+              : { defaultValues: baseDiff, envValues: { [scopeId]: {} } };
+        res = await previewTemplateEffectiveValues(templateName, env, "", override, isPrev);
+      }
+      return { values: res.values, chartDefaultsAvailable: res.chartDefaultsAvailable };
+    },
+    [appLevel, project, data.name, templateName, previewEnvFor],
+  );
+
+  const saveOverride = useCallback(
+    async (scopeId: string, diff: Record<string, unknown>) => {
+      const req: UpdateAppRequest = appLevel
+        ? scopeId === COMP_BASE_SCOPE
+          ? { rawValues: diff }
+          : { envRawValues: { [scopeId]: diff } }
+        : scopeId === COMP_BASE_SCOPE
+          ? { componentValues: { [comp.name]: diff } }
+          : { envComponentValues: { [scopeId]: { [comp.name]: diff } } };
+      try {
+        await updateApp(project, data.name, req);
+        toast.success("Values saved — re-publishing to GitOps.");
+        await onSaved();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Failed to save values");
+      }
+    },
+    [appLevel, project, data.name, comp.name, onSaved],
+  );
+
+  const scopeHelp = (id: string): ReactNode =>
+    id === COMP_BASE_SCOPE
+      ? "Applied to every environment."
+      : id === PREVIEW_SCOPE
+        ? "Applied to every preview, on top of its base env."
+        : `Overrides for ${id}, on top of the all-envs base.`;
+
+  const initialScopeId = (() => {
+    const env = (data.environments ?? []).find((e) => e.envName === currentEnvName);
+    if (appLevel && env?.envType === "preview" && showPreview) return PREVIEW_SCOPE;
+    if (env && stableEnvs.includes(env.envName)) return env.envName;
+    return COMP_BASE_SCOPE;
+  })();
+
+  const hasOverrides = scopes.some((s) => s.hasOverride);
 
   return (
     <div className="mt-3">
@@ -4877,81 +4497,7 @@ function ComponentValuesPanel({
         )}
       </button>
       {open && (
-      <div className="mt-2">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        {/* Scope tabs: base (all envs) + one per env (+ preview for single). */}
-        <div className="flex flex-wrap gap-1">
-          {scopes.map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => {
-                setScope(s);
-                setYamlError(null);
-              }}
-              className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                scope === s
-                  ? "bg-gray-900 text-white"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-              }`}
-            >
-              {scopeLabel(s)}
-              {overridden(s) ? " ●" : ""}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="flex rounded-md border border-gray-200 p-0.5 text-xs">
-            {(["edit", "layers"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => setView(v)}
-                className={`rounded px-2 py-0.5 font-medium capitalize ${
-                  view === v
-                    ? "bg-gray-900 text-white"
-                    : "text-gray-500 hover:text-gray-800"
-                }`}
-              >
-                {v}
-              </button>
-            ))}
-          </div>
-          {view === "edit" && (
-            <button
-              type="button"
-              onClick={save}
-              disabled={saving || !dirty || yamlError !== null}
-              className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {view === "layers" ? (
-        <ValuesLayers
-          envLabel={previewEnv}
-          templateLayer={templateLayer}
-          appBase={savedText(COMP_BASE_SCOPE)}
-          envOverride={activeText}
-          envOverrideLabel={scopeLabel(scope)}
-          effective={preview}
-        />
-      ) : (
-        <>
-          <p className="mb-2 text-xs text-gray-400">
-            {scope === COMP_BASE_SCOPE
-              ? "Overrides applied to every environment."
-              : scope === PREVIEW_SCOPE
-                ? "Overrides applied to every preview, on top of its base env."
-                : `Overrides for ${scope}, layered on top of the base.`}{" "}
-            Edit only what you override — empty inherits the chart and platform
-            defaults. Reference{" "}
-            <code className="font-mono">{"((platform.*))"}</code> /{" "}
-            <code className="font-mono">{"((vars.*))"}</code> tokens.
-          </p>
+        <div className="mt-2">
           <Suspense
             fallback={
               <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
@@ -4959,47 +4505,17 @@ function ComponentValuesPanel({
               </div>
             }
           >
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <ValuesEditor
-                label={scope === COMP_BASE_SCOPE ? "Base overrides" : `${scopeLabel(scope)} overrides`}
-                value={activeText}
-                configVars={configVars}
-                placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 200m"}
-                onChange={setActiveText}
-                onValidChange={(_, err) => setYamlError(err)}
-              />
-              <div>
-                <ValuesEditor
-                  label={
-                    isPreviewScope
-                      ? "Effective — preview (as deployed)"
-                      : previewEnv
-                        ? `Effective — ${previewEnv} (as deployed)`
-                        : "Effective (as deployed)"
-                  }
-                  value={preview}
-                  readOnly
-                />
-                {!chartAvailable && (
-                  <p className="mt-1 text-xs text-gray-400">
-                    Chart defaults aren't readable for this template; preview shows
-                    the platform base + overrides only.
-                  </p>
-                )}
-                <p className="mt-1 text-xs text-gray-400">
-                  Chart defaults ⊕ platform base ⊕ overrides. Routing/cluster
-                  resolution and <code className="font-mono">{"((…))"}</code> tokens
-                  are resolved at deploy.
-                </p>
-              </div>
-            </div>
+            <ScopedValuesEditor
+              scopes={scopes}
+              initialScopeId={initialScopeId}
+              configVars={configVars}
+              getBase={getBase}
+              getStoredOverride={storedFor}
+              saveOverride={saveOverride}
+              scopeHelp={scopeHelp}
+            />
           </Suspense>
-          {yamlError && (
-            <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
-          )}
-        </>
-      )}
-      </div>
+        </div>
       )}
     </div>
   );
