@@ -22,6 +22,7 @@ import {
 import {
   ComposeComponents,
   type ComponentDraft,
+  draftsToEnvComponentValues,
   newComponentDraft,
   toComponentCreate,
 } from "../components/ComposeComponents";
@@ -381,6 +382,11 @@ function ConfigureStep({
   // absent here inherits its DeployMode default; see buildTargetClusters for the
   // wire mapping. Only meaningful for envs with more than one bound cluster.
   const [targetSel, setTargetSel] = useState<Record<string, string[]>>({});
+  // The base deploy env: a new app deploys only here (the lowest-order stable env),
+  // so the component canvas edits values for this env; other envs are tuned later
+  // in each component's card. Component values are per-env only (no all-envs base).
+  const baseEnv =
+    [...orgEnvs].sort((a, b) => a.order - b.order)[0]?.name ?? "";
 
   useEffect(() => {
     listConfigVariables(project)
@@ -502,7 +508,9 @@ function ConfigureStep({
       setError("Add at least one component.");
       return;
     }
-    if (components.some((c) => c.valuesError)) {
+    if (
+      components.some((c) => Object.values(c.envValuesError).some(Boolean))
+    ) {
       setError("Fix the component values YAML before creating the app.");
       return;
     }
@@ -571,6 +579,14 @@ function ConfigureStep({
           Object.keys(envConfigByEnv).length > 0 ? envConfigByEnv : undefined,
         targetClusters:
           Object.keys(targetClusters).length > 0 ? targetClusters : undefined,
+        // Per-env component values for the base deploy env (the only env a new app
+        // deploys to). Other envs are set later via each component's card.
+        envComponentValues: (() => {
+          const v = baseEnv
+            ? draftsToEnvComponentValues(components, [baseEnv])
+            : {};
+          return Object.keys(v).length > 0 ? v : undefined;
+        })(),
       });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not reach the server.");
@@ -685,6 +701,7 @@ function ConfigureStep({
           components={components}
           onChange={setComponents}
           configVars={configVars}
+          environments={baseEnv ? [baseEnv] : []}
         />
       </FormSection>
 

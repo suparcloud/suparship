@@ -366,6 +366,42 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		result.App.Spec.EnvironmentDefaults = foldTargetClusters(result.App.Spec.EnvironmentDefaults, req.TargetClusters)
 	}
 
+	// Fold per-(env, component) values overlays set at creation into
+	// EnvironmentDefaults[env].ComponentValues — component values are per-env only
+	// (no all-envs base at creation). Mirrors the update path; unknown component
+	// names are rejected, empty overlays are skipped.
+	if len(req.EnvComponentValues) > 0 {
+		compNames := make(map[string]bool, len(result.App.Spec.Components))
+		for _, c := range result.App.Spec.Components {
+			compNames[c.Name] = true
+		}
+		ed := result.App.Spec.EnvironmentDefaults
+		if ed == nil {
+			ed = map[string]domain.EnvironmentOverride{}
+		}
+		for envName, byComp := range req.EnvComponentValues {
+			ov := ed[envName]
+			for name, vals := range byComp {
+				if !compNames[name] {
+					writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unknown component: " + name})
+					return
+				}
+				if len(vals) == 0 {
+					continue
+				}
+				if ov.ComponentValues == nil {
+					ov.ComponentValues = map[string]map[string]any{}
+				}
+				ov.ComponentValues[name] = vals
+			}
+			if len(ov.ComponentValues) == 0 {
+				ov.ComponentValues = nil
+			}
+			ed[envName] = ov
+		}
+		result.App.Spec.EnvironmentDefaults = ed
+	}
+
 	// Verify at least one environment is registered in the org before creating
 	// the app. Deploying to unregistered environments silently would produce
 	// orphaned GitOps manifests pointing at clusters that don't exist.

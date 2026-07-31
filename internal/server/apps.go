@@ -422,6 +422,13 @@ type createAppRequest struct {
 	// EnvConfigByEnv holds per-environment config-var overrides keyed by env name,
 	// each winning over EnvConfig for that env.
 	EnvConfigByEnv map[string]EnvConfigDTO `json:"envConfigByEnv,omitempty"`
+	// EnvComponentValues holds per-(env, component) Helm values overlays set at
+	// creation, keyed env → component → overlay. A new app deploys to its base env
+	// only, so the create wizard populates just that env; other envs are tuned later
+	// via the per-component editor. Folded into EnvironmentDefaults[env].ComponentValues
+	// after Create (mirrors the update path). Component-level values are per-env only —
+	// there is no all-envs component base set at creation.
+	EnvComponentValues map[string]map[string]map[string]any `json:"envComponentValues,omitempty"`
 }
 
 // createAppResponse is the JSON body returned on a successful app creation.
