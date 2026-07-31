@@ -261,6 +261,20 @@ export function ComposeComponents({
   const [activeEnv, setActiveEnv] = useState<Record<number, string>>({});
   const baseKey = (template: string, env: string) => `${template} ${env}`;
 
+  // The seed base for a (component, env): the concise PLATFORM base for that env
+  // (shared per template+env) with the component's legacy all-envs base overlay
+  // folded in — matching the per-component card. So an existing base shows as
+  // un-highlighted context and the per-env diff is minimal relative to platform ⊕
+  // base. undefined until the platform base has loaded.
+  const seedBaseFor = (
+    c: ComponentDraft,
+    env: string,
+  ): Record<string, unknown> | undefined => {
+    const platform = conciseBases[baseKey(c.template, env)];
+    if (platform === undefined) return undefined;
+    return mergeOverlay(platform, c.values);
+  };
+
   const templateKey = components.map((c) => c.template).join(",");
   const envKey = envs.join(",");
   useEffect(() => {
@@ -300,7 +314,7 @@ export function ComposeComponents({
       let text = c.envValuesText;
       let mutated = false;
       for (const env of envs) {
-        const base = conciseBases[baseKey(c.template, env)];
+        const base = seedBaseFor(c, env);
         if (!base) continue;
         const stored = c.envValues[env] ?? {};
         const cur = text[env] ?? "";
@@ -449,7 +463,7 @@ export function ComposeComponents({
               (collapsed) so adding several components isn't cluttered. */}
           {(() => {
             const env = activeEnv[i] ?? envs[0] ?? "staging";
-            const base = conciseBases[baseKey(c.template, env)];
+            const base = seedBaseFor(c, env);
             const hasOverride = Object.values(c.envValues).some(
               (v) => v && Object.keys(v).length > 0,
             );
@@ -581,7 +595,10 @@ export function ComposeComponents({
                             }
                             value={stringifyOverlay(
                               mergeOverlay(
-                                bases[c.template]?.values ?? {},
+                                mergeOverlay(
+                                  bases[c.template]?.values ?? {},
+                                  c.values,
+                                ),
                                 c.envValues[env] ?? {},
                               ),
                             )}
