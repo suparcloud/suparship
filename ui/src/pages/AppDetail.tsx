@@ -13,7 +13,16 @@ const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 import { EffectiveValuesView } from "../components/EffectiveValuesView";
 import { leafPaths, setAtPath, deleteAtPath } from "../lib/valuesTree";
 import { listTemplateVersions, fetchTemplateEffectiveValues, previewTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
-import type { TemplateVersionInfo, TemplateImage, AppImageBinding, ComponentImage, TemplateSummary } from "../types";
+import type { TemplateVersionInfo, TemplateImage, TemplateSummary } from "../types";
+import { ImagePullRules } from "../components/ImagePullRules";
+import {
+  imageRulesToAppImages,
+  imageRulesToComponentImages,
+  savedByTagKeyFromApp,
+  savedByTagKeyFromComponents,
+  seedImageRules,
+  type ImageRules,
+} from "../lib/imageRules";
 import {
   ComposeComponents,
   type ComponentDraft,
@@ -2001,20 +2010,6 @@ function ValuesLayers({
   );
 }
 
-// Defaults for a CD-managed image's Kargo tag selection (mirror the backend's
-// gitops.DefaultImageTagPattern / DefaultImageSelectionStrategy): match a 7-char
-// git commit SHA and promote the newest build. Editable per image.
-const DEFAULT_TAG_PATTERN = "^[0-9a-f]{7}$";
-const DEFAULT_SELECTION_STRATEGY = "NewestBuild";
-const SELECTION_STRATEGIES = ["NewestBuild", "SemVer", "Digest", "Lexical"];
-
-type ImageSel = { tagPattern: string; selectionStrategy: string };
-
-// imageKey identifies a discovered image in the app-level Images selection. It
-// includes the owning component (empty for single-source / app-level images) so
-// two composed components sharing a tagKey (e.g. both "image.tag") don't collide.
-const imageKey = (component: string | undefined, tagKey: string) =>
-  `${component ?? ""}::${tagKey}`;
 
 function AppValuesEditor({
   data,
@@ -2104,11 +2099,11 @@ function AppValuesEditor({
   // Images discovered in the effective values (from the values preview below);
   // the user checks which ones Kargo manages.
   const [discoveredImages, setDiscoveredImages] = useState<TemplateImage[]>([]);
-  // Images selected for CD, keyed by tag key → per-image Kargo settings. Presence
-  // means selected. Seeded from the app's saved selection.
-  const [selectedImages, setSelectedImages] = useState<Record<string, ImageSel>>(
-    {},
-  );
+  // CD pull rules keyed by UNIQUE image repository (how Kargo watches). Seeded from
+  // the app's saved bindings (or inherit-from-template declared defaults) and merged
+  // with newly-discovered repos; see the seed effect below.
+  const [imageRules, setImageRules] = useState<ImageRules>({});
+  const seededDataRef = useRef<string>("");
   const [imagesSaving, setImagesSaving] = useState(false);
 
   // Seed editors from the persisted overlays whenever the app data changes.
@@ -2130,27 +2125,37 @@ function AppValuesEditor({
       if (e.envType !== "preview") de[e.envName] = e.deploy;
     }
     setDeployEnvs(de);
-    const sel: Record<string, ImageSel> = {};
-    // App-level (single-source) selection.
-    for (const b of data.images ?? []) {
-      sel[imageKey(undefined, b.tagKey)] = {
-        tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
-        selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
-      };
-    }
-    // Composed apps store the selection per component — seed those too so the one
-    // app-level panel reflects them.
-    for (const c of data.components ?? []) {
-      for (const b of c.images ?? []) {
-        sel[imageKey(c.name, b.tagKey)] = {
-          tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
-          selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
-        };
-      }
-    }
-    setSelectedImages(sel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
+
+  // Seed the per-unique-image CD rules from the app's saved bindings (or
+  // inherit-from-template declared defaults when none), grouped by repository. On a
+  // saved-bindings change (after a save reloads the app) re-seed fully; on a
+  // discovery-only change (values edited) just add newly-discovered repos so the
+  // developer's in-progress rule edits aren't clobbered.
+  const composedApp = (data.components?.length ?? 0) > 1;
+  useEffect(() => {
+    const savedTK = composedApp
+      ? savedByTagKeyFromComponents(data.components ?? [])
+      : savedByTagKeyFromApp(data.images);
+    const seeded = seedImageRules(discoveredImages, savedTK);
+    const dataId = JSON.stringify([
+      data.images ?? null,
+      (data.components ?? []).map((c) => c.images ?? null),
+    ]);
+    setImageRules((cur) => {
+      if (seededDataRef.current !== dataId) {
+        seededDataRef.current = dataId;
+        return seeded; // saved bindings changed → full re-seed
+      }
+      const next = { ...cur }; // discovered changed → add new repos, keep edits
+      for (const repo of Object.keys(seeded)) {
+        if (!(repo in next)) next[repo] = seeded[repo]!;
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, discoveredImages, composedApp]);
 
   useEffect(() => {
     listConfigVariables(project)
@@ -2419,91 +2424,33 @@ function AppValuesEditor({
     }
   }
 
-  // Composed apps store the selection per component; single-source at the app
-  // level. Split the checked discovered images accordingly on save.
-  const composedApp = (data.components?.length ?? 0) > 1;
-
-  // Saved selection (persisted), keyed by imageKey, for dirty tracking.
-  const savedImages: Record<string, ImageSel> = {};
-  for (const b of data.images ?? []) {
-    savedImages[imageKey(undefined, b.tagKey)] = {
-      tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
-      selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
-    };
-  }
-  for (const c of data.components ?? []) {
-    for (const b of c.images ?? []) {
-      savedImages[imageKey(c.name, b.tagKey)] = {
-        tagPattern: b.tagPattern ?? DEFAULT_TAG_PATTERN,
-        selectionStrategy: b.selectionStrategy ?? DEFAULT_SELECTION_STRATEGY,
-      };
-    }
-  }
-  const selectedKeys = Object.keys(selectedImages);
-  const imagesDirty =
-    selectedKeys.length !== Object.keys(savedImages).length ||
-    selectedKeys.some((k) => {
-      const cur = selectedImages[k];
-      const prev = savedImages[k];
-      if (!cur) return false;
-      return (
-        !prev ||
-        prev.tagPattern !== cur.tagPattern ||
-        prev.selectionStrategy !== cur.selectionStrategy
-      );
-    });
-
-  function toggleImage(key: string) {
-    setSelectedImages((cur) => {
-      const next = { ...cur };
-      if (next[key]) delete next[key];
-      else
-        next[key] = {
-          tagPattern: DEFAULT_TAG_PATTERN,
-          selectionStrategy: DEFAULT_SELECTION_STRATEGY,
-        };
-      return next;
-    });
-  }
-
-  function updateImageSel(key: string, patch: Partial<ImageSel>) {
-    setSelectedImages((cur) =>
-      cur[key] ? { ...cur, [key]: { ...cur[key], ...patch } } : cur,
+  // Dirty = the edited rules differ from the saved baseline (re-seeded from the
+  // persisted bindings), so Save enables only on an actual change.
+  const imagesDirty = (() => {
+    const savedTK = composedApp
+      ? savedByTagKeyFromComponents(data.components ?? [])
+      : savedByTagKeyFromApp(data.images);
+    return (
+      JSON.stringify(imageRules) !==
+      JSON.stringify(seedImageRules(discoveredImages, savedTK))
     );
-  }
+  })();
 
   async function saveImages() {
     setImagesSaving(true);
     try {
       if (composedApp) {
-        // Route each checked image to its owning component; send every component
-        // so unchecking clears one that had a selection.
-        const byComp: Record<string, ComponentImage[]> = {};
-        for (const c of data.components ?? []) byComp[c.name] = [];
-        for (const img of discoveredImages) {
-          const s = selectedImages[imageKey(img.component, img.tagKey)];
-          if (!s || !img.component) continue;
-          (byComp[img.component] ??= []).push({
-            name: img.name,
-            tagKey: img.tagKey,
-            tagPattern: s.tagPattern,
-            selectionStrategy: s.selectionStrategy,
-          });
-        }
-        await updateApp(project, data.name, { componentImages: byComp });
+        await updateApp(project, data.name, {
+          componentImages: imageRulesToComponentImages(
+            discoveredImages,
+            imageRules,
+            (data.components ?? []).map((c) => c.name),
+          ),
+        });
       } else {
-        const out: AppImageBinding[] = [];
-        for (const img of discoveredImages) {
-          const s = selectedImages[imageKey(img.component, img.tagKey)];
-          if (!s) continue;
-          out.push({
-            name: img.name,
-            tagKey: img.tagKey,
-            tagPattern: s.tagPattern,
-            selectionStrategy: s.selectionStrategy,
-          });
-        }
-        await updateApp(project, data.name, { images: out });
+        await updateApp(project, data.name, {
+          images: imageRulesToAppImages(discoveredImages, imageRules),
+        });
       }
       toast.success("CD images saved — re-publishing to GitOps.");
       await onSaved();
@@ -2938,92 +2885,23 @@ function AppValuesEditor({
           </div>
         )}
 
-        {!isDirect && discoveredImages.length > 0 && (
+        {!isDirect && (
           <div className="mt-4 border-t border-gray-100 pt-4">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-gray-700">Images</p>
-                <p className="mt-1 text-xs text-gray-400">
-                  These images were found in this app's effective values. Check the
-                  ones Kargo should watch and promote — leave out images you don't
-                  want under CD (e.g. sidecars). The repository is read from the
-                  values at deploy.
+                <p className="text-sm font-medium text-gray-700">
+                  Images (CD pull)
                 </p>
-                <div className="mt-3 space-y-3">
-                  {discoveredImages.map((img) => {
-                    const key = imageKey(img.component, img.tagKey);
-                    const sel = selectedImages[key];
-                    return (
-                      <div key={key} className="text-xs text-gray-600">
-                        <label className="flex items-start gap-2">
-                          <input
-                            type="checkbox"
-                            checked={!!sel}
-                            onChange={() => toggleImage(key)}
-                            className="mt-0.5 h-4 w-4 rounded border-gray-300"
-                          />
-                          <span className="min-w-0">
-                            {img.component && (
-                              <span className="mr-1 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
-                                {img.component}
-                              </span>
-                            )}
-                            <span className="font-medium">{img.name}</span>{" "}
-                            <span className="font-mono text-gray-500">
-                              {img.repository}
-                            </span>
-                            <span className="ml-2 font-mono text-gray-400">
-                              {img.tagKey}
-                            </span>
-                          </span>
-                        </label>
-                        {sel && (
-                          <div className="mt-2 ml-6 flex flex-wrap items-center gap-x-4 gap-y-2">
-                            <label className="flex items-center gap-1">
-                              <span className="text-gray-500">Tag regex</span>
-                              <input
-                                type="text"
-                                value={sel.tagPattern}
-                                onChange={(e) =>
-                                  updateImageSel(key, {
-                                    tagPattern: e.target.value,
-                                  })
-                                }
-                                placeholder={DEFAULT_TAG_PATTERN}
-                                className="w-48 rounded-md border border-gray-300 px-2 py-1 font-mono"
-                              />
-                            </label>
-                            <label className="flex items-center gap-1">
-                              <span className="text-gray-500">Strategy</span>
-                              <select
-                                value={sel.selectionStrategy}
-                                onChange={(e) =>
-                                  updateImageSel(key, {
-                                    selectionStrategy: e.target.value,
-                                  })
-                                }
-                                className="rounded-md border border-gray-300 px-2 py-1"
-                              >
-                                {SELECTION_STRATEGIES.map((s) => (
-                                  <option key={s} value={s}>
-                                    {s}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                <p className="mt-2 text-xs text-gray-400">
-                  Defaults: tag regex{" "}
-                  <code className="font-mono">{DEFAULT_TAG_PATTERN}</code>{" "}
-                  (7-char commit SHA), strategy{" "}
-                  <code className="font-mono">{DEFAULT_SELECTION_STRATEGY}</code>.
-                  Override per image above.
+                <p className="mb-3 mt-1 text-xs text-gray-400">
+                  Detected from this app's effective values. One rule per unique
+                  image — pick which Kargo watches and how it selects tags.
                 </p>
+                <ImagePullRules
+                  discovered={discoveredImages}
+                  rules={imageRules}
+                  onChange={setImageRules}
+                  loading={preview === ""}
+                />
               </div>
               <button
                 onClick={saveImages}
