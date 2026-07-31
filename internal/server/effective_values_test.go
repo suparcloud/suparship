@@ -1,7 +1,9 @@
 package server
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -176,6 +178,150 @@ func TestHandleTemplateOverride_PutGetRoundTrip(t *testing.T) {
 	_ = json.NewDecoder(gr.Body).Decode(&dto)
 	if dto.DefaultValues["replicaCount"] != float64(3) {
 		t.Fatalf("round-trip replicaCount = %v, want 3", dto.DefaultValues["replicaCount"])
+	}
+}
+
+// A composed component's effective preview (asComponentOverlay=true) must merge the
+// STORED platform override's env values UNDER the component's own overlay — else the
+// effective misses env-scoped platform overrides that DO deploy (preview ≠ deploy).
+// Without the flag, the body IS the override (the Platform-overrides page), so the
+// stored override must not be loaded.
+func TestHandlePostEffectiveValues_ComponentOverlayMergesStoredEnvOverride(t *testing.T) {
+	tmpl := valuesTemplate()
+	tmpl.Metadata.Name = "voiceai-agent"
+	client := fake.NewSimpleClientset()
+	th := &templateHandler{builtin: []*tpl.Template{tmpl}, kubeClient: client}
+
+	// Seed a stored platform override: staging sets platformStaging.
+	putBody, _ := json.Marshal(TemplateOverrideDTO{
+		EnvValues: map[string]map[string]any{"staging": {"platformStaging": "yes"}},
+	})
+	put := httptest.NewRequest("PUT", "/api/v1/templates/voiceai-agent/overrides", bytes.NewReader(putBody))
+	put.SetPathValue("name", "voiceai-agent")
+	th.handlePutTemplateOverride(httptest.NewRecorder(), put)
+
+	body, _ := json.Marshal(TemplateOverrideDTO{
+		DefaultValues: map[string]any{"componentBase": "b"},
+		EnvValues:     map[string]map[string]any{"staging": {"componentStaging": "c"}},
+	})
+
+	decode := func(url string) EffectiveValuesDTO {
+		req := httptest.NewRequest("POST", url, bytes.NewReader(body))
+		req.SetPathValue("name", "voiceai-agent")
+		rec := httptest.NewRecorder()
+		th.handlePostEffectiveValues(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp EffectiveValuesDTO
+		_ = json.NewDecoder(rec.Body).Decode(&resp)
+		return resp
+	}
+
+	// asComponentOverlay=true → stored platform env override merges, under the
+	// component's own base + staging overlays.
+	comp := decode("/api/v1/templates/voiceai-agent/effective-values?env=staging&asComponentOverlay=true")
+	if comp.Values["platformStaging"] != "yes" {
+		t.Errorf("platformStaging = %v, want yes (stored platform env override must merge)", comp.Values["platformStaging"])
+	}
+	if comp.Values["componentBase"] != "b" || comp.Values["componentStaging"] != "c" {
+		t.Errorf("component overlays lost: base=%v staging=%v", comp.Values["componentBase"], comp.Values["componentStaging"])
+	}
+
+	// No flag → body is the override itself; stored override NOT loaded.
+	page := decode("/api/v1/templates/voiceai-agent/effective-values?env=staging")
+	if _, present := page.Values["platformStaging"]; present {
+		t.Errorf("platformStaging must NOT appear without asComponentOverlay: %v", page.Values)
+	}
+	if page.Values["componentStaging"] != "c" {
+		t.Errorf("body-as-override staging value lost: %v", page.Values["componentStaging"])
+	}
+}
+
+// tinyChartTGZ builds an in-memory Helm chart tarball with the given values.yaml
+// so chartDefaults can decode a real chart layer in tests.
+func tinyChartTGZ(t *testing.T, valuesYAML string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	files := map[string]string{
+		"voiceai-agent/Chart.yaml":  "apiVersion: v2\nname: voiceai-agent\nversion: 1.0.0\n",
+		"voiceai-agent/values.yaml": valuesYAML,
+	}
+	for name, content := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatalf("WriteHeader %s: %v", name, err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatalf("Write %s: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tw.Close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gz.Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestHandlePostEffectiveValues_SkipChartDropsChartLayer verifies ?skipChart=true
+// returns the CONCISE platform base (template ⊕ stored org overrides) for the env
+// WITHOUT the chart's own default keys — the seed the component editor pre-fills.
+func TestHandlePostEffectiveValues_SkipChartDropsChartLayer(t *testing.T) {
+	tmpl := valuesTemplate()
+	tmpl.Metadata.Name = "voiceai-agent"
+	tmpl.Spec.Category = "web"
+	client := fake.NewSimpleClientset()
+	if err := kube.SaveTemplate(context.Background(), client, tmpl, tinyChartTGZ(t, "chartOnlyKey: fromChart\nreplicaCount: 1\n")); err != nil {
+		t.Fatalf("SaveTemplate: %v", err)
+	}
+	th := &templateHandler{builtin: []*tpl.Template{tmpl}, kubeClient: client}
+
+	// Stored platform override: staging sets platformStaging.
+	putBody, _ := json.Marshal(TemplateOverrideDTO{
+		EnvValues: map[string]map[string]any{"staging": {"platformStaging": "yes"}},
+	})
+	put := httptest.NewRequest("PUT", "/api/v1/templates/voiceai-agent/overrides", bytes.NewReader(putBody))
+	put.SetPathValue("name", "voiceai-agent")
+	th.handlePutTemplateOverride(httptest.NewRecorder(), put)
+
+	// Empty developer overlay — we want just the platform base.
+	body, _ := json.Marshal(TemplateOverrideDTO{})
+	decode := func(url string) EffectiveValuesDTO {
+		req := httptest.NewRequest("POST", url, bytes.NewReader(body))
+		req.SetPathValue("name", "voiceai-agent")
+		rec := httptest.NewRecorder()
+		th.handlePostEffectiveValues(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp EffectiveValuesDTO
+		_ = json.NewDecoder(rec.Body).Decode(&resp)
+		return resp
+	}
+
+	// Sanity: without skipChart the chart layer IS present.
+	full := decode("/api/v1/templates/voiceai-agent/effective-values?env=staging&asComponentOverlay=true")
+	if full.Values["chartOnlyKey"] != "fromChart" || !full.ChartDefaultsAvailable {
+		t.Fatalf("baseline should include chart layer: chartOnlyKey=%v available=%v", full.Values["chartOnlyKey"], full.ChartDefaultsAvailable)
+	}
+
+	// skipChart drops the chart layer but keeps template defaults + the stored
+	// platform env override.
+	base := decode("/api/v1/templates/voiceai-agent/effective-values?env=staging&asComponentOverlay=true&skipChart=true")
+	if _, present := base.Values["chartOnlyKey"]; present {
+		t.Errorf("chartOnlyKey must be absent with skipChart: %v", base.Values)
+	}
+	if base.ChartDefaultsAvailable {
+		t.Errorf("ChartDefaultsAvailable must be false with skipChart")
+	}
+	if base.Values["platformStaging"] != "yes" {
+		t.Errorf("platformStaging = %v, want yes (stored platform env override must remain)", base.Values["platformStaging"])
+	}
+	if base.Values["replicaCount"] != float64(1) {
+		t.Errorf("replicaCount = %v, want 1 (template default must remain)", base.Values["replicaCount"])
 	}
 }
 
@@ -422,9 +568,9 @@ func TestHandleAppValuesPreview_MergesClusterOverride(t *testing.T) {
 	}
 
 	ah := &appHandler{
-		appStore:    store,
-		builtin:     []*tpl.Template{tmpl},
-		kubeClient:  client,
+		appStore:   store,
+		builtin:    []*tpl.Template{tmpl},
+		kubeClient: client,
 		orgProvider: &staticOrgProvider{org: &rbac.Org{Environments: []rbac.OrgEnvironment{
 			{Name: "prod", ClusterRefs: []string{"c1"}, ActiveClusterRef: "c1"},
 		}}},

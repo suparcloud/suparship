@@ -112,23 +112,56 @@ func (th *templateHandler) handlePostEffectiveValues(w http.ResponseWriter, r *h
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&dto)
 	}
-	ov := &domain.TemplateOverride{DefaultValues: dto.DefaultValues, EnvValues: dto.EnvValues, ClusterValues: dto.ClusterValues}
 	env := r.URL.Query().Get("env")
 	cluster := r.URL.Query().Get("cluster")
-	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
-	// Preview scope: layer the template's PREVIEW defaults (spec ⊕ stored org
-	// override) above the base-env composition, then the app's preview override
-	// (sent as envValues["preview"]) on top — mirroring the publish order so the
-	// effective pane shows what a preview actually deploys, not just the base env.
-	// The same previewLayer path the app values-preview endpoint uses.
-	var pv *previewLayer
-	if r.URL.Query().Get("preview") == "true" {
-		pv = &previewLayer{
-			templateDefaults: mergedPreviewDefaults(t, loadOverride(r.Context(), th.kubeClient, name)),
-			appOverride:      dto.EnvValues["preview"],
+	isPreview := r.URL.Query().Get("preview") == "true"
+	// skipChart drops the chart-default layer so the response is only the CONCISE
+	// platform base (template ⊕ org overrides) for the env — the seed the component
+	// editor pre-fills with, without the chart's hundreds of default keys.
+	var (
+		chartVals map[string]any
+		available bool
+	)
+	if r.URL.Query().Get("skipChart") != "true" {
+		chartVals, available = chartDefaults(r.Context(), th.kubeClient, t)
+	}
+
+	// The endpoint serves two callers with OPPOSITE meaning for the POSTed body:
+	//   - the template Platform-overrides page previews its own UNSAVED org override
+	//     → the body IS the platform layer (ov); nothing else is loaded.
+	//   - a composed component (?asComponentOverlay=true) previews its OWN overlay
+	//     layered ON TOP of the STORED platform override → load the stored override
+	//     as the platform layer (so its EnvValues[env]/ClusterValues[cluster] apply)
+	//     and route the body to the developer slot (appRaw/envRaw), mirroring
+	//     handleAppValuesPreview so the component's effective matches what deploys.
+	var (
+		ov             *domain.TemplateOverride
+		appRaw, envRaw map[string]any
+		pv             *previewLayer
+	)
+	if r.URL.Query().Get("asComponentOverlay") == "true" {
+		stored := loadOverride(r.Context(), th.kubeClient, name)
+		ov = stored
+		appRaw = dto.DefaultValues
+		if env != "" {
+			envRaw = dto.EnvValues[env]
+		}
+		if isPreview {
+			pv = &previewLayer{
+				templateDefaults: mergedPreviewDefaults(t, stored),
+				appOverride:      dto.EnvValues["preview"],
+			}
+		}
+	} else {
+		ov = &domain.TemplateOverride{DefaultValues: dto.DefaultValues, EnvValues: dto.EnvValues, ClusterValues: dto.ClusterValues}
+		if isPreview {
+			pv = &previewLayer{
+				templateDefaults: mergedPreviewDefaults(t, loadOverride(r.Context(), th.kubeClient, name)),
+				appOverride:      dto.EnvValues["preview"],
+			}
 		}
 	}
 	// Template-level preview: no concrete app, so no canonical base.
-	resp := effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, nil, nil, pv)
+	resp := effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, appRaw, envRaw, pv)
 	writeJSON(w, http.StatusOK, resp)
 }

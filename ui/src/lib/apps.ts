@@ -162,10 +162,17 @@ export function previewAppValues(
   // override (sent as envRawValues.preview) on top of the base env `env` — so the
   // preview scope shows what actually deploys, matching composed apps.
   preview = false,
+  // skipChart drops the chart defaults AND the canonical struct base so the
+  // response is the CONCISE platform base (template ⊕ org overrides) for the env —
+  // used to seed the single-component editor without the chart's default keys.
+  skipChart = false,
 ): Promise<EffectiveValuesResponse> {
-  const q = preview ? "?preview=true" : "";
+  const params = new URLSearchParams();
+  if (preview) params.set("preview", "true");
+  if (skipChart) params.set("skipChart", "true");
+  const q = params.toString();
   return api.post<EffectiveValuesResponse>(
-    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/values/preview${q}`,
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/values/preview${q ? `?${q}` : ""}`,
     body,
   );
 }
