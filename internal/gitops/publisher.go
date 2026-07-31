@@ -973,6 +973,12 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 				}
 			}
 		}
+		// A pinned stable env freezes every component's image tag to the pinned tag
+		// (a promoted preview build). Applied per component below AFTER the preserved
+		// tag so the pin wins and holds until unpinned — the composed analog of the
+		// single-source pinnedTag. Preview envs are skipped above, so this is a stable
+		// env's pin.
+		pinnedTag := app.Spec.EnvironmentDefaults[env.EnvName].PinnedImageTag
 		if err := os.RemoveAll(p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components")); err != nil {
 			return fmt.Errorf("prune composed component values for env %s: %w", env.EnvName, err)
 		}
@@ -1106,6 +1112,14 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 					}
 					overlay = o
 				}
+				// Pin wins over the preserved/promoted tag: freeze each of this
+				// component's image tag key(s) to the pinned tag so a republish (or a
+				// newer promoted image) can't override the pin until it's cleared.
+				if pinnedTag != "" && len(c.Images) > 0 {
+					for _, img := range c.Images {
+						setStringAtPath(overlay, img.TagKey, pinnedTag)
+					}
+				}
 				// A BYO/passthrough component gets ONLY its own overlay (the chart's own
 				// values.yaml is the Helm base); platform.* is available via ((platform.*))
 				// tokens. suparship injects no canonical app/components/routing/image
@@ -1208,15 +1222,12 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 // the resulting git commit is a no-op (stagedIsEmpty check in commitAndPush).
 func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppPublishEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		if app.Spec.IsComposed() {
-			// Composed: write just this env's component values + rendered
-			// Application (+ authorized-stage annotation) so the target env
-			// materializes on promotion. The Warehouse/Stages already exist from
-			// the full publish, so they're not rewritten here.
-			if err := p.publishComposedAppEnv(ctx, repoDir, app, env); err != nil {
-				return err
-			}
-		} else if err := p.publishAppFiles(repoDir, app, []AppPublishEnv{env}); err != nil {
+		// Composed: write just this env's component values + rendered Application
+		// (+ authorized-stage annotation) so the target env materializes on
+		// promotion. Single-source: the flat app.yaml + values.yaml. The
+		// Warehouse/Stages already exist from the full publish, so they're not
+		// rewritten here.
+		if err := p.publishEnvFiles(ctx, repoDir, app, env); err != nil {
 			return err
 		}
 		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s to %s\n\nPromoted by suparship.", app.ProjectName, app.Name, env.EnvName)
@@ -1242,6 +1253,20 @@ func (p *Publisher) publishComposedAppEnv(ctx context.Context, repoDir string, a
 	return p.publishComposedAppFiles(repoDir, app, []AppPublishEnv{env}, componentKeys, componentCanonical)
 }
 
+// publishEnvFiles writes ONE env's tree for an app into an already-cloned repo,
+// routing a COMPOSED app to its per-component / multi-source writer and a
+// single-source app to the flat writer. It is the shared per-env body behind
+// PublishAppEnv and the batched focus-env loops (PublishApps / PublishAppsEnv), so a
+// pinned / suspended / promoted env of a composed app materializes as composed —
+// not as an orphaned single-source app.yaml + values.yaml (using the app's
+// "primary" template), which is what broke pin-to-env for app-component apps.
+func (p *Publisher) publishEnvFiles(ctx context.Context, repoDir string, app *domain.App, env AppPublishEnv) error {
+	if app.Spec.IsComposed() {
+		return p.publishComposedAppEnv(ctx, repoDir, app, env)
+	}
+	return p.publishAppFiles(repoDir, app, []AppPublishEnv{env})
+}
+
 // AppEnvPublish pairs an app with one resolved env to publish. It is the unit of
 // PublishAppsEnv, the batched form of PublishAppEnv.
 type AppEnvPublish struct {
@@ -1260,7 +1285,7 @@ func (p *Publisher) PublishAppsEnv(ctx context.Context, items []AppEnvPublish) e
 	}
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		for _, it := range items {
-			if err := p.publishAppFiles(repoDir, it.App, []AppPublishEnv{it.Env}); err != nil {
+			if err := p.publishEnvFiles(ctx, repoDir, it.App, it.Env); err != nil {
 				return err
 			}
 		}
@@ -1303,7 +1328,7 @@ func (p *Publisher) PublishApps(ctx context.Context, bundles []AppPublishBundle)
 				return err
 			}
 			for i := range b.FocusEnvs {
-				if err := p.publishAppFiles(repoDir, b.App, []AppPublishEnv{b.FocusEnvs[i]}); err != nil {
+				if err := p.publishEnvFiles(ctx, repoDir, b.App, b.FocusEnvs[i]); err != nil {
 					return err
 				}
 			}
