@@ -740,9 +740,12 @@ func (p *Publisher) resolveComponentCanonical(ctx context.Context, templateName 
 }
 
 // pruneSingleSourceArtifacts removes the single-chart tree an app leaves behind
-// when it becomes composed: the per-env values.yaml/app.yaml, so the single-chart
-// ApplicationSet stops generating an orphaned Application. Kargo CRs are NOT
-// pruned here — composed apps publish their own Warehouse/Stages under the same
+// when it becomes composed: the per-env values.yaml/app.yaml AND the per-cluster
+// _targets/<cluster>/app.yaml files, so the single-chart ApplicationSet stops
+// generating an orphaned Application. Removing the flat values.yaml without also
+// removing _targets/ leaves a phantom single Application whose ValuesPath points at
+// the deleted values.yaml → "no such file or directory" at render. Kargo CRs are
+// NOT pruned here — composed apps publish their own Warehouse/Stages under the same
 // filenames, so writeComposedAppTree's publishKargoCRs overwrites them. Safe to
 // call unconditionally — a no-op for an app that was never single.
 func (p *Publisher) pruneSingleSourceArtifacts(repoDir string, app *domain.App, envs []AppPublishEnv) error {
@@ -752,6 +755,13 @@ func (p *Publisher) pruneSingleSourceArtifacts(repoDir string, app *domain.App, 
 			if err := os.Remove(filepath.Join(dir, f)); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("prune single-source %s (env %s): %w", f, env.EnvName, err)
 			}
+		}
+		// The stable-env layout writes each target's app.yaml under
+		// _targets/<cluster>/ (and fan-out values under _clusters/). Remove the whole
+		// _targets dir so no per-cluster app.yaml lingers to generate a phantom
+		// single-source Application after the switch to composed.
+		if err := os.RemoveAll(filepath.Join(dir, "_targets")); err != nil {
+			return fmt.Errorf("prune single-source _targets (env %s): %w", env.EnvName, err)
 		}
 	}
 	return nil

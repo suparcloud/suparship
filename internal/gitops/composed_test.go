@@ -174,7 +174,7 @@ func TestWriteComposedAppTree_RendersFiles(t *testing.T) {
 		}
 		var v struct {
 			App        struct{ Name string } `yaml:"app"`
-			Components map[string]any         `yaml:"components"`
+			Components map[string]any        `yaml:"components"`
 		}
 		if err := yaml.Unmarshal(raw, &v); err != nil {
 			t.Fatalf("unmarshal %s values.yaml: %v", c.comp, err)
@@ -1518,6 +1518,14 @@ func TestSingleToComposedTransitionPrunesTree(t *testing.T) {
 	// Stale single-source values.yaml/app.yaml must be gone.
 	if _, err := os.Stat(valuesPath); !os.IsNotExist(err) {
 		t.Errorf("stale single-source values.yaml must be pruned after becoming composed (err=%v)", err)
+	}
+	// The per-cluster _targets/ tree must be gone too — otherwise the single-source
+	// ApplicationSet (glob envs/*/*/*/_targets/*/app.yaml) keeps generating a phantom
+	// Application whose ValuesPath points at the now-deleted values.yaml → render
+	// fails with "no such file or directory".
+	targetsDir := filepath.Join(dir, "envs", "staging", "demo", "bigly", "_targets")
+	if _, err := os.Stat(targetsDir); !os.IsNotExist(err) {
+		t.Errorf("stale single-source _targets/ must be pruned after becoming composed (err=%v)", err)
 	}
 	// Composed per-component values now exist.
 	for _, comp := range []string{"web", "worker"} {
