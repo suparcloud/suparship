@@ -10,6 +10,8 @@ import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 
 // CodeMirror is heavy; only the values editor needs it.
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
+import { EffectiveValuesView } from "../components/EffectiveValuesView";
+import { leafPaths, setAtPath, deleteAtPath } from "../lib/valuesTree";
 import { listTemplateVersions, fetchTemplateEffectiveValues, previewTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
 import type { TemplateVersionInfo, TemplateImage, AppImageBinding, ComponentImage, TemplateSummary } from "../types";
 import {
@@ -71,12 +73,13 @@ import type {
 // Tab types
 // ---------------------------------------------------------------------------
 
-type TabId = "overview" | "deployments" | "previews" | "logs" | "traffic" | "envvars";
+type TabId = "overview" | "deployments" | "previews" | "settings" | "logs" | "traffic" | "envvars";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "deployments", label: "Deployments" },
   { id: "previews", label: "Previews" },
+  { id: "settings", label: "Settings" },
   { id: "logs", label: "Logs" },
   { id: "traffic", label: "Traffic" },
   { id: "envvars", label: "Variables" },
@@ -1714,6 +1717,17 @@ export function AppDetail() {
           previewEnvs={visiblePreviewEnvs}
           baseEnv={currentBaseEnv}
           onDeletePreview={handleDeletePreview}
+        />
+      )}
+      {activeTab === "settings" && (
+        <SettingsTab
+          data={data}
+          currentEnv={currentEnv}
+          project={data.project}
+          onSaved={async () => {
+            const refreshed = await getApp(data.project, data.name);
+            setData(refreshed.app);
+          }}
         />
       )}
       {activeTab === "logs" && (
@@ -3611,25 +3625,8 @@ function OverviewTab({
         onSaved={onSaved}
       />
 
-      {/* App-level settings panel: delivery/environments/clusters/CD/images/
-          previews. Values editing now lives per-component in the Components
-          section above (uniform for every app), so the values editor here is
-          always hidden — this panel is settings-only. */}
-      <AppValuesEditor
-        data={data}
-        project={project}
-        currentEnvName={currentEnv?.envName ?? null}
-        onSaved={onSaved}
-        composed={true}
-      />
-
-      {/* Legacy structured config (from the old form) — frozen, read-only. */}
-      <LegacyConfigNotice data={data} />
-
-      {/* Per-cluster overrides — only for fan-out environments. Advanced. */}
-      <Disclosure title="Per-cluster overrides (advanced)">
-        <ClusterOverridesEditor data={data} project={project} onSaved={onSaved} />
-      </Disclosure>
+      {/* App-wide settings (delivery / CD-images / previews / clusters) live on
+          the Settings tab now — Overview is the app's components + their values. */}
 
       {/* Secrets */}
       {data.secretRefs.length > 0 && (
@@ -3655,6 +3652,41 @@ function OverviewTab({
           </dl>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: Settings — app-wide delivery / CD-images / previews / clusters. Values
+// editing lives per component on the Overview tab, so this tab is settings-only.
+// ---------------------------------------------------------------------------
+
+function SettingsTab({
+  data,
+  currentEnv,
+  project,
+  onSaved,
+}: {
+  data: AppDetailType;
+  currentEnv: AppEnvironmentSummary | null;
+  project: string;
+  onSaved: () => Promise<void>;
+}) {
+  return (
+    <div className="space-y-6">
+      <AppValuesEditor
+        data={data}
+        project={project}
+        currentEnvName={currentEnv?.envName ?? null}
+        onSaved={onSaved}
+        composed={true}
+      />
+      {/* Legacy structured config (from the old form) — frozen, read-only. */}
+      <LegacyConfigNotice data={data} />
+      {/* Per-cluster overrides — only for fan-out environments. Advanced. */}
+      <Disclosure title="Per-cluster overrides (advanced)">
+        <ClusterOverridesEditor data={data} project={project} onSaved={onSaved} />
+      </Disclosure>
     </div>
   );
 }
@@ -4691,12 +4723,10 @@ function ComponentValuesPanel({
     for (const s of scopes) m[s] = savedText(s);
     return m;
   });
-  const [view, setView] = useState<"edit" | "layers">("edit");
   const [yamlError, setYamlError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [preview, setPreview] = useState("");
+  const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [chartAvailable, setChartAvailable] = useState(true);
-  const [templateLayer, setTemplateLayer] = useState("");
   const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
 
   const templateName = appLevel ? data.template.name : comp.template ?? "";
@@ -4786,7 +4816,7 @@ function ComponentValuesPanel({
               });
       req
         .then((res) => {
-          setPreview(stringifyOverlay(res.values));
+          setPreview((res.values as Record<string, unknown>) ?? {});
           setChartAvailable(res.chartDefaultsAvailable);
         })
         .catch(() => {
@@ -4796,22 +4826,6 @@ function ComponentValuesPanel({
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, data.name, previewEnv, texts, appLevel, templateName, isPreviewScope]);
-
-  // Template & platform layer (read-only) for the Layers view.
-  useEffect(() => {
-    if (view !== "layers" || !previewEnv || !templateName) return;
-    let cancelled = false;
-    fetchTemplateEffectiveValues(templateName, previewEnv || undefined)
-      .then((res) => {
-        if (!cancelled) setTemplateLayer(stringifyOverlay(res.values));
-      })
-      .catch(() => {
-        if (!cancelled) setTemplateLayer("");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [view, previewEnv, templateName]);
 
   async function save() {
     const parsed = parseYamlOverlay(activeText);
@@ -4858,6 +4872,27 @@ function ComponentValuesPanel({
     savedText(COMP_BASE_SCOPE).trim() !== "" ||
     scopes.some((s) => s !== COMP_BASE_SCOPE && overridden(s));
 
+  // Origin-tint inputs for the Effective view: the leaf paths this scope's override
+  // sets ("your {scope}") and the all-envs override sets ("your all-envs", empty when
+  // the current scope IS all-envs). Derived live from the editor buffers.
+  const scopePaths = leafPaths(parseYamlOverlay(activeText).value);
+  const basePaths =
+    scope === COMP_BASE_SCOPE
+      ? new Set<string>()
+      : leafPaths(parseYamlOverlay(texts[COMP_BASE_SCOPE] ?? "").value);
+
+  // Click-to-override / reset: mutate the CURRENT scope's overlay buffer (marks it
+  // dirty; the debounced preview + tints refresh automatically). Uses Helm-safe
+  // set/delete (arrays whole; empty ancestors pruned).
+  const editScope = (fn: (o: Record<string, unknown>) => Record<string, unknown>) => {
+    const cur = parseYamlOverlay(texts[scope] ?? "").value ?? {};
+    setTexts((c) => ({ ...c, [scope]: stringifyOverlay(fn(cur)) }));
+    setYamlError(null);
+  };
+  const onOverride = (path: string[], value: unknown) =>
+    editScope((o) => setAtPath(o, path, value));
+  const onReset = (path: string[]) => editScope((o) => deleteAtPath(o, path));
+
   return (
     <div className="mt-3">
       {/* Values are on-demand: collapsed by default so a page of components isn't
@@ -4900,104 +4935,76 @@ function ComponentValuesPanel({
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
-          <div className="flex rounded-md border border-gray-200 p-0.5 text-xs">
-            {(["edit", "layers"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => setView(v)}
-                className={`rounded px-2 py-0.5 font-medium capitalize ${
-                  view === v
-                    ? "bg-gray-900 text-white"
-                    : "text-gray-500 hover:text-gray-800"
-                }`}
-              >
-                {v}
-              </button>
-            ))}
-          </div>
-          {view === "edit" && (
-            <button
-              type="button"
-              onClick={save}
-              disabled={saving || !dirty || yamlError !== null}
-              className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-          )}
-        </div>
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving || !dirty || yamlError !== null}
+          className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
       </div>
 
-      {view === "layers" ? (
-        <ValuesLayers
-          envLabel={previewEnv}
-          templateLayer={templateLayer}
-          appBase={savedText(COMP_BASE_SCOPE)}
-          envOverride={activeText}
-          envOverrideLabel={scopeLabel(scope)}
-          effective={preview}
-        />
-      ) : (
-        <>
-          <p className="mb-2 text-xs text-gray-400">
-            {scope === COMP_BASE_SCOPE
-              ? "Overrides applied to every environment."
-              : scope === PREVIEW_SCOPE
-                ? "Overrides applied to every preview, on top of its base env."
-                : `Overrides for ${scope}, layered on top of the base.`}{" "}
-            Edit only what you override — empty inherits the chart and platform
-            defaults. Reference{" "}
-            <code className="font-mono">{"((platform.*))"}</code> /{" "}
-            <code className="font-mono">{"((vars.*))"}</code> tokens.
-          </p>
-          <Suspense
-            fallback={
-              <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
-                Loading editor…
-              </div>
-            }
-          >
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <ValuesEditor
-                label={scope === COMP_BASE_SCOPE ? "Base overrides" : `${scopeLabel(scope)} overrides`}
-                value={activeText}
-                configVars={configVars}
-                placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 200m"}
-                onChange={setActiveText}
-                onValidChange={(_, err) => setYamlError(err)}
-              />
-              <div>
-                <ValuesEditor
-                  label={
-                    isPreviewScope
-                      ? "Effective — preview (as deployed)"
-                      : previewEnv
-                        ? `Effective — ${previewEnv} (as deployed)`
-                        : "Effective (as deployed)"
-                  }
-                  value={preview}
-                  readOnly
-                />
-                {!chartAvailable && (
-                  <p className="mt-1 text-xs text-gray-400">
-                    Chart defaults aren't readable for this template; preview shows
-                    the platform base + overrides only.
-                  </p>
-                )}
-                <p className="mt-1 text-xs text-gray-400">
-                  Chart defaults ⊕ platform base ⊕ overrides. Routing/cluster
-                  resolution and <code className="font-mono">{"((…))"}</code> tokens
-                  are resolved at deploy.
-                </p>
-              </div>
-            </div>
-          </Suspense>
-          {yamlError && (
-            <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
-          )}
-        </>
+      <p className="mb-2 text-xs text-gray-400">
+        {scope === COMP_BASE_SCOPE
+          ? "Overrides applied to every environment."
+          : scope === PREVIEW_SCOPE
+            ? "Overrides applied to every preview, on top of its base env."
+            : `Overrides for ${scope}, on top of the all-envs base.`}{" "}
+        Layered on chart ⊕ template ⊕ platform defaults — empty inherits. Edit here,
+        or hover a value on the right to <span className="font-medium">override</span>
+        {" "}or <span className="font-medium">reset</span> it. Reference{" "}
+        <code className="font-mono">{"((platform.*))"}</code> /{" "}
+        <code className="font-mono">{"((vars.*))"}</code> tokens.
+      </p>
+      <Suspense
+        fallback={
+          <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
+            Loading editor…
+          </div>
+        }
+      >
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <ValuesEditor
+            label={`Your override — ${scopeLabel(scope)}`}
+            value={activeText}
+            configVars={configVars}
+            placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 200m"}
+            onChange={setActiveText}
+            onValidChange={(_, err) => setYamlError(err)}
+          />
+          <div>
+            <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500">
+              {isPreviewScope
+                ? "Effective — preview (as deployed)"
+                : previewEnv
+                  ? `Effective — ${previewEnv} (as deployed)`
+                  : "Effective (as deployed)"}
+            </span>
+            <EffectiveValuesView
+              effective={preview}
+              scopePaths={scopePaths}
+              basePaths={basePaths}
+              scopeLabel={scopeLabel(scope)}
+              onOverride={onOverride}
+              onReset={onReset}
+            />
+            {!chartAvailable && (
+              <p className="mt-1 text-xs text-gray-400">
+                Chart defaults aren't readable for this template; effective shows
+                the platform base + overrides only.
+              </p>
+            )}
+            <p className="mt-1 text-xs text-gray-400">
+              Routing/cluster resolution and{" "}
+              <code className="font-mono">{"((…))"}</code> tokens are resolved at
+              deploy.
+            </p>
+          </div>
+        </div>
+      </Suspense>
+      {yamlError && (
+        <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
       )}
       </div>
       )}
