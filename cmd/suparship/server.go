@@ -853,11 +853,19 @@ func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Contex
 		}
 		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster, Preview: preview}
 
-		if len(c.Images) == 0 {
+		// Skip discovery entirely for a component with no bindings AND whose template
+		// declares no image slots — nothing to watch, so avoid the chart read.
+		if len(c.Images) == 0 && len(server.EffectiveTemplateImageSlots(tmpl, ov)) == 0 {
 			continue
 		}
 		discovered := server.DiscoverComponentImages(ctx, a.kubeClient, tmpl, ov, envName, c.Values)
-		resolved := gitops.SelectKargoImages(discovered, componentImageBindings(c.Images))
+		var resolved []gitops.KargoImage
+		if len(c.Images) == 0 {
+			// No explicit selection: inherit the template-DECLARED images (auto-bind).
+			resolved = gitops.SelectDeclaredKargoImages(discovered)
+		} else {
+			resolved = gitops.SelectKargoImages(discovered, componentImageBindings(c.Images))
+		}
 		// SelectKargoImages names each image after the DISCOVERED slot; re-stamp the
 		// owning component so the promotion targets that component's values file.
 		for i := range resolved {
@@ -902,7 +910,10 @@ func orgNameOf(org *rbac.Org) string {
 // whose image no longer appears in the values is skipped with a warning. Empty
 // selection → nil, letting the publisher fall back to the legacy single image.
 func (a *gitOpsPublisherAdapter) resolveCDImages(ctx context.Context, tmpl *tpl.Template, ov *domain.TemplateOverride, app *domain.App, env *domain.AppEnvironment, orgName string) []gitops.KargoImage {
-	if len(app.Spec.Images) == 0 {
+	// Skip discovery entirely when there's no explicit selection AND the template
+	// declares no image slots — nothing to watch (resolveKargoImages still applies
+	// the legacy image_repository fallback downstream).
+	if len(app.Spec.Images) == 0 && len(server.EffectiveTemplateImageSlots(tmpl, ov)) == 0 {
 		return nil
 	}
 	var envRaw map[string]any
@@ -910,6 +921,11 @@ func (a *gitOpsPublisherAdapter) resolveCDImages(ctx context.Context, tmpl *tpl.
 		envRaw = ovr.RawValues
 	}
 	discovered := server.DiscoverAppImages(ctx, a.kubeClient, tmpl, ov, app, env.EnvName, env.EnvType, env.Namespace, orgName, app.Spec.RawValues, envRaw)
+	if len(app.Spec.Images) == 0 {
+		// No explicit selection: inherit the template-DECLARED images (auto-bind) so
+		// the Warehouse is healthy with zero config.
+		return gitops.SelectDeclaredKargoImages(discovered)
+	}
 	return gitops.SelectKargoImages(discovered, app.Spec.Images)
 }
 

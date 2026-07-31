@@ -173,7 +173,7 @@ func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool,
 		ChartDefaultsAvailable: available,
 		Interpolated:           false,
 		Layers:                 layers,
-		DiscoveredImages:       imagesToDTO(chartimport.DetectImageMappings(values)),
+		DiscoveredImages:       imagesToDTO(annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))),
 	}
 }
 
@@ -343,10 +343,13 @@ func (ah *appHandler) componentDiscoveredImages(ctx context.Context, app *domain
 		ov := loadOverride(ctx, ah.kubeClient, c.Template.Name)
 		for _, img := range DiscoverComponentImages(ctx, ah.kubeClient, t, ov, envName, c.Values) {
 			out = append(out, TemplateImageDTO{
-				Name:       img.Name,
-				Repository: img.Repository,
-				TagKey:     img.TagKey,
-				Component:  c.Name,
+				Name:              img.Name,
+				Repository:        img.Repository,
+				TagKey:            img.TagKey,
+				TagPattern:        img.TagPattern,
+				SelectionStrategy: img.SelectionStrategy,
+				Component:         c.Name,
+				Declared:          img.Declared,
 			})
 		}
 	}
@@ -407,7 +410,60 @@ func DiscoverAppImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Temp
 		canonicalBase = CanonicalBaseMap(app, envName, envType, namespace, orgName)
 	}
 	values := computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, "", appRaw, envRaw)
-	return chartimport.DetectImageMappings(values)
+	return annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))
+}
+
+// effectiveTemplateImageSlots returns the template's DECLARED image pull rules — the
+// org override's Images when set (it REPLACES the template's own mapping), else the
+// template's Spec.Images. These are the slots an app inherits (repo + tag rule per
+// service).
+func effectiveTemplateImageSlots(t *tpl.Template, ov *domain.TemplateOverride) []tpl.TemplateImage {
+	if ov != nil && len(ov.Images) > 0 {
+		out := make([]tpl.TemplateImage, len(ov.Images))
+		for i, im := range ov.Images {
+			out[i] = tpl.TemplateImage{
+				Name:              im.Name,
+				Repository:        im.Repository,
+				TagKey:            im.TagKey,
+				TagPattern:        im.TagPattern,
+				SelectionStrategy: im.SelectionStrategy,
+			}
+		}
+		return out
+	}
+	if t != nil {
+		return t.Spec.Images
+	}
+	return nil
+}
+
+// annotateDeclaredImages marks each discovered image that matches a declared template
+// slot (by TagKey) as Declared and fills its inherited tag rule (TagPattern /
+// SelectionStrategy) from the slot where discovery left them unset. Discovered images
+// with no matching slot (sidecars, undeclared) keep Declared=false and no rule — the
+// UI shows them off by default. Mutates and returns the slice.
+func annotateDeclaredImages(discovered, slots []tpl.TemplateImage) []tpl.TemplateImage {
+	if len(discovered) == 0 || len(slots) == 0 {
+		return discovered
+	}
+	byKey := make(map[string]tpl.TemplateImage, len(slots))
+	for _, s := range slots {
+		byKey[s.TagKey] = s
+	}
+	for i := range discovered {
+		s, ok := byKey[discovered[i].TagKey]
+		if !ok {
+			continue
+		}
+		discovered[i].Declared = true
+		if discovered[i].TagPattern == "" {
+			discovered[i].TagPattern = s.TagPattern
+		}
+		if discovered[i].SelectionStrategy == "" {
+			discovered[i].SelectionStrategy = s.SelectionStrategy
+		}
+	}
+	return discovered
 }
 
 // DiscoverComponentImages returns the container images present in ONE composed
@@ -421,5 +477,12 @@ func DiscoverAppImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Temp
 func DiscoverComponentImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Template, ov *domain.TemplateOverride, envName string, overlay map[string]any) []tpl.TemplateImage {
 	chartVals, _ := chartDefaults(ctx, kc, t)
 	values := computeEffectiveValues(chartVals, nil, t, ov, envName, "", overlay, nil)
-	return chartimport.DetectImageMappings(values)
+	return annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))
+}
+
+// EffectiveTemplateImageSlots exposes effectiveTemplateImageSlots to the publish
+// adapter so it can cheaply check whether a template declares any image pull rules
+// (to skip discovery entirely for a BYO component with no bindings and no slots).
+func EffectiveTemplateImageSlots(t *tpl.Template, ov *domain.TemplateOverride) []tpl.TemplateImage {
+	return effectiveTemplateImageSlots(t, ov)
 }

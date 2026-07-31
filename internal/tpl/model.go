@@ -114,12 +114,12 @@ type TemplateSpec struct {
 	// When absent, the platform derives a single default component from
 	// Category (backwards-compatible behaviour). When present, each entry
 	// defines defaults that the user can override at app-creation time.
-	Components []TemplateComponent `yaml:"components,omitempty"`
-	Inputs         []Input           `yaml:"inputs,omitempty"`
-	AdvancedInputs []Input           `yaml:"advancedInputs,omitempty"`
-	SecretInputs   []SecretInput     `yaml:"secretInputs,omitempty"`
-	Mappings       map[string]string `yaml:"mappings,omitempty"`
-	Presets        []Preset          `yaml:"presets,omitempty"`
+	Components     []TemplateComponent `yaml:"components,omitempty"`
+	Inputs         []Input             `yaml:"inputs,omitempty"`
+	AdvancedInputs []Input             `yaml:"advancedInputs,omitempty"`
+	SecretInputs   []SecretInput       `yaml:"secretInputs,omitempty"`
+	Mappings       map[string]string   `yaml:"mappings,omitempty"`
+	Presets        []Preset            `yaml:"presets,omitempty"`
 	// DefaultValues is a Platform-Engineer-authored Helm values overlay applied
 	// to EVERY environment, layered on top of the chart's own default values
 	// (and below per-env EnvValues and developer overrides). Arbitrary Helm
@@ -179,6 +179,12 @@ type TemplateImage struct {
 	// "NewestBuild", "SemVer", "Digest", "Lexical". Empty defaults to "SemVer"
 	// (Kargo's own default).
 	SelectionStrategy string `yaml:"selectionStrategy,omitempty"`
+	// Declared is a TRANSIENT discovery annotation (never persisted — yaml:"-"): set
+	// on a DISCOVERED image when it matches one of the template's declared image
+	// slots by TagKey, i.e. the template defines a pull rule for it. Drives the
+	// "inherit from template" default (auto-watch declared images; sidecars/undeclared
+	// images default off).
+	Declared bool `yaml:"-"`
 }
 
 // CanonicalValues reports whether the canonical suparship-common values base is
