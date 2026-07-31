@@ -4660,15 +4660,19 @@ function ComponentsTable({
   );
 }
 
-// ComponentValuesPanel is the ONE rich per-component values editor used for every
-// component (single-source or composed): scope tabs (all envs + per-env), a
-// CodeMirror editor with a live "effective (as deployed)" preview, and a read-only
-// Layers view showing precedence. For a single-component app the sole component IS
-// the app, so it edits the app-level rawValues/envRawValues and previews the whole
-// app (previewAppValues); a composed component edits componentValues/
-// envComponentValues and previews its own chart⊕template⊕overlay
-// (previewTemplateEffectiveValues). This is what makes the app detail page a single
-// component-based experience regardless of component count.
+// ComponentValuesPanel is the ONE per-component values editor used for every
+// component (single-source or composed). The developer edits a minimal per-env
+// (or preview) override; the full "Effective (as deployed)" is hidden behind a
+// disclosure and, when shown, tints each value by origin (your env / your all-envs
+// / inherited) with hover click-to-override/reset. There is no "all envs" tab — the
+// template/platform layer owns cross-env defaults, merged into each env's base. A
+// single-component app's sole component IS the app, so it edits app-level
+// envRawValues and previews via previewAppValues; a composed component edits
+// envComponentValues and previews via previewTemplateEffectiveValues
+// (asComponentOverlay, so the stored platform overrides are included).
+//
+// COMP_BASE_SCOPE is tracked read-only (the developer's existing all-envs overlay)
+// to feed the preview base and the "your all-envs" tint; it is not an editable tab.
 const COMP_BASE_SCOPE = "__base__";
 
 function ComponentValuesPanel({
@@ -4699,11 +4703,13 @@ function ComponentValuesPanel({
   const showPreview =
     data.previewsEnabled !== false &&
     (appLevel || comp.enabledInPreview);
-  const scopes = [
-    COMP_BASE_SCOPE,
-    ...stableEnvs,
-    ...(showPreview ? [PREVIEW_SCOPE] : []),
-  ];
+  // Editable scopes (tabs): each stable env + the preview band. The component
+  // "all envs" scope is dropped — the template/platform layer owns cross-env
+  // defaults (already merged into each env's base). `scopes` still tracks
+  // COMP_BASE_SCOPE read-only (the developer's existing all-envs overlay) so it
+  // keeps feeding the preview base and tints as "your all-envs".
+  const tabScopes = [...stableEnvs, ...(showPreview ? [PREVIEW_SCOPE] : [])];
+  const scopes = [COMP_BASE_SCOPE, ...tabScopes];
 
   const savedText = (s: string): string => {
     if (appLevel) {
@@ -4717,7 +4723,8 @@ function ComponentValuesPanel({
   };
 
   const [open, setOpen] = useState(false);
-  const [scope, setScope] = useState(COMP_BASE_SCOPE);
+  const [scope, setScope] = useState<string>(() => tabScopes[0] ?? COMP_BASE_SCOPE);
+  const [showEffective, setShowEffective] = useState(false);
   const [texts, setTexts] = useState<Record<string, string>>(() => {
     const m: Record<string, string> = {};
     for (const s of scopes) m[s] = savedText(s);
@@ -4771,7 +4778,10 @@ function ComponentValuesPanel({
   // Debounced effective-values preview, reflecting unsaved edits to both layers.
   const isPreviewScope = scope === PREVIEW_SCOPE;
   useEffect(() => {
-    if (!previewEnv) return;
+    // Only fetch the effective when it's actually on screen (panel open + the
+    // hidden-by-default effective expanded) — a page of components would otherwise
+    // fire a preview per component on mount.
+    if (!open || !showEffective || !previewEnv) return;
     const baseParsed = parseYamlOverlay(texts[COMP_BASE_SCOPE] ?? "");
     const previewParsed = parseYamlOverlay(texts[PREVIEW_SCOPE] ?? "");
     const envParsed = parseYamlOverlay(texts[previewEnv] ?? "");
@@ -4833,7 +4843,7 @@ function ComponentValuesPanel({
     }, 400);
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, data.name, previewEnv, texts, appLevel, templateName, isPreviewScope]);
+  }, [open, showEffective, project, data.name, previewEnv, texts, appLevel, templateName, isPreviewScope]);
 
   async function save() {
     const parsed = parseYamlOverlay(activeText);
@@ -4844,18 +4854,10 @@ function ComponentValuesPanel({
     setYamlError(null);
     setSaving(true);
     try {
-      let req: UpdateAppRequest;
-      if (appLevel) {
-        req =
-          scope === COMP_BASE_SCOPE
-            ? { rawValues: parsed.value ?? {} }
-            : { envRawValues: { [scope]: parsed.value ?? {} } };
-      } else {
-        req =
-          scope === COMP_BASE_SCOPE
-            ? { componentValues: { [comp.name]: parsed.value ?? {} } }
-            : { envComponentValues: { [scope]: { [comp.name]: parsed.value ?? {} } } };
-      }
+      // scope is always a stable env or the preview band (no "all envs" tab).
+      const req: UpdateAppRequest = appLevel
+        ? { envRawValues: { [scope]: parsed.value ?? {} } }
+        : { envComponentValues: { [scope]: { [comp.name]: parsed.value ?? {} } } };
       await updateApp(project, data.name, req);
       toast.success("Values saved — re-publishing to GitOps.");
       await onSaved();
@@ -4880,14 +4882,11 @@ function ComponentValuesPanel({
     savedText(COMP_BASE_SCOPE).trim() !== "" ||
     scopes.some((s) => s !== COMP_BASE_SCOPE && overridden(s));
 
-  // Origin-tint inputs for the Effective view: the leaf paths this scope's override
-  // sets ("your {scope}") and the all-envs override sets ("your all-envs", empty when
-  // the current scope IS all-envs). Derived live from the editor buffers.
+  // Origin-tint inputs for the Effective view: the leaf paths this env's override
+  // sets ("your {env}") and the developer's read-only all-envs overlay sets
+  // ("your all-envs"). Derived live from the editor buffers.
   const scopePaths = leafPaths(parseYamlOverlay(activeText).value);
-  const basePaths =
-    scope === COMP_BASE_SCOPE
-      ? new Set<string>()
-      : leafPaths(parseYamlOverlay(texts[COMP_BASE_SCOPE] ?? "").value);
+  const basePaths = leafPaths(parseYamlOverlay(texts[COMP_BASE_SCOPE] ?? "").value);
 
   // Click-to-override / reset: mutate the CURRENT scope's overlay buffer (marks it
   // dirty; the debounced preview + tints refresh automatically). Uses Helm-safe
@@ -4922,9 +4921,9 @@ function ComponentValuesPanel({
       {open && (
       <div className="mt-2">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        {/* Scope tabs: base (all envs) + one per env (+ preview for single). */}
+        {/* Scope tabs: one per stable env (+ preview). No "all envs" tab. */}
         <div className="flex flex-wrap gap-1">
-          {scopes.map((s) => (
+          {tabScopes.map((s) => (
             <button
               key={s}
               type="button"
@@ -4954,14 +4953,11 @@ function ComponentValuesPanel({
       </div>
 
       <p className="mb-2 text-xs text-gray-400">
-        {scope === COMP_BASE_SCOPE
-          ? "Overrides applied to every environment."
-          : scope === PREVIEW_SCOPE
-            ? "Overrides applied to every preview, on top of its base env."
-            : `Overrides for ${scope}, on top of the all-envs base.`}{" "}
-        Layered on chart ⊕ template ⊕ platform defaults — empty inherits. Edit here,
-        or hover a value on the right to <span className="font-medium">override</span>
-        {" "}or <span className="font-medium">reset</span> it. Reference{" "}
+        {isPreviewScope
+          ? "Overrides applied to every preview, on top of its base env."
+          : `Overrides for ${scope}, on top of the platform base for ${scope}.`}{" "}
+        Empty inherits. Expand the effective below to see the full as-deployed values
+        and hover any to override. Reference{" "}
         <code className="font-mono">{"((platform.*))"}</code> /{" "}
         <code className="font-mono">{"((vars.*))"}</code> tokens.
       </p>
@@ -4972,47 +4968,54 @@ function ComponentValuesPanel({
           </div>
         }
       >
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <ValuesEditor
-            label={`Your override — ${scopeLabel(scope)}`}
-            value={activeText}
-            configVars={configVars}
-            placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 200m"}
-            onChange={setActiveText}
-            onValidChange={(_, err) => setYamlError(err)}
-          />
-          <div>
-            <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500">
-              {isPreviewScope
-                ? "Effective — preview (as deployed)"
-                : previewEnv
-                  ? `Effective — ${previewEnv} (as deployed)`
-                  : "Effective (as deployed)"}
-            </span>
-            <EffectiveValuesView
-              effective={preview}
-              scopePaths={scopePaths}
-              basePaths={basePaths}
-              scopeLabel={scopeLabel(scope)}
-              onOverride={onOverride}
-              onReset={onReset}
-            />
-            {!chartAvailable && (
-              <p className="mt-1 text-xs text-gray-400">
-                Chart defaults aren't readable for this template; effective shows
-                the platform base + overrides only.
-              </p>
-            )}
-            <p className="mt-1 text-xs text-gray-400">
-              Routing/cluster resolution and{" "}
-              <code className="font-mono">{"((…))"}</code> tokens are resolved at
-              deploy.
-            </p>
-          </div>
-        </div>
+        <ValuesEditor
+          label={`Your override — ${scopeLabel(scope)}`}
+          value={activeText}
+          configVars={configVars}
+          placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 200m"}
+          onChange={setActiveText}
+          onValidChange={(_, err) => setYamlError(err)}
+        />
       </Suspense>
       {yamlError && (
         <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
+      )}
+
+      {/* Effective (as deployed) — reference/advanced, hidden by default. */}
+      <button
+        type="button"
+        onClick={() => setShowEffective((v) => !v)}
+        aria-expanded={showEffective}
+        className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
+      >
+        <span className={`transition-transform ${showEffective ? "rotate-90" : ""}`}>
+          ▸
+        </span>
+        {showEffective ? "Hide" : "Show"} effective —{" "}
+        {isPreviewScope ? "preview" : previewEnv || "env"} (as deployed)
+      </button>
+      {showEffective && (
+        <div className="mt-2">
+          <EffectiveValuesView
+            effective={preview}
+            scopePaths={scopePaths}
+            basePaths={basePaths}
+            scopeLabel={scopeLabel(scope)}
+            onOverride={onOverride}
+            onReset={onReset}
+          />
+          {!chartAvailable && (
+            <p className="mt-1 text-xs text-gray-400">
+              Chart defaults aren't readable for this template; effective shows the
+              platform base + overrides only.
+            </p>
+          )}
+          <p className="mt-1 text-xs text-gray-400">
+            Routing/cluster resolution and{" "}
+            <code className="font-mono">{"((…))"}</code> tokens are resolved at
+            deploy.
+          </p>
+        </div>
       )}
       </div>
       )}
