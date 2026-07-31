@@ -115,7 +115,16 @@ func (th *templateHandler) handlePostEffectiveValues(w http.ResponseWriter, r *h
 	env := r.URL.Query().Get("env")
 	cluster := r.URL.Query().Get("cluster")
 	isPreview := r.URL.Query().Get("preview") == "true"
-	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
+	// skipChart drops the chart-default layer so the response is only the CONCISE
+	// platform base (template ⊕ org overrides) for the env — the seed the component
+	// editor pre-fills with, without the chart's hundreds of default keys.
+	var (
+		chartVals map[string]any
+		available bool
+	)
+	if r.URL.Query().Get("skipChart") != "true" {
+		chartVals, available = chartDefaults(r.Context(), th.kubeClient, t)
+	}
 
 	// The endpoint serves two callers with OPPOSITE meaning for the POSTed body:
 	//   - the template Platform-overrides page previews its own UNSAVED org override

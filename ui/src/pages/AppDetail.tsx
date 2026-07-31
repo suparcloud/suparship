@@ -6,7 +6,7 @@ import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKa
 import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
-import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
+import { diffOverlay, mergeOverlay, parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
 
 // CodeMirror is heavy; only the values editor needs it.
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
@@ -4711,20 +4711,32 @@ function ComponentValuesPanel({
   const tabScopes = [...stableEnvs, ...(showPreview ? [PREVIEW_SCOPE] : [])];
   const scopes = [COMP_BASE_SCOPE, ...tabScopes];
 
-  const savedText = (s: string): string => {
-    if (appLevel) {
-      return stringifyOverlay(
-        s === COMP_BASE_SCOPE ? data.rawValues : data.envRawValues?.[s],
-      );
-    }
-    return stringifyOverlay(
-      s === COMP_BASE_SCOPE ? comp.values : comp.envValues?.[s],
-    );
+  // devAllEnvs is the developer's legacy shared (all-envs) overlay. There's no
+  // "all envs" tab anymore, but any existing one keeps deploying — folded into every
+  // env's base below so per-env diffs stay minimal, and tinted "your all-envs".
+  const devAllEnvs = (appLevel ? data.rawValues : comp.values) ?? {};
+  // storedOverride is the developer's persisted overlay for a scope — the minimal
+  // diff we save and diff the editor against.
+  const storedOverride = (s: string): Record<string, unknown> => {
+    if (s === COMP_BASE_SCOPE) return devAllEnvs;
+    return (appLevel ? data.envRawValues?.[s] : comp.envValues?.[s]) ?? {};
   };
+  const savedText = (s: string): string => stringifyOverlay(storedOverride(s));
 
   const [open, setOpen] = useState(false);
   const [scope, setScope] = useState<string>(() => tabScopes[0] ?? COMP_BASE_SCOPE);
   const [showEffective, setShowEffective] = useState(false);
+  // baseByScope caches the CONCISE platform base per scope (template ⊕ platform ⊕
+  // shared dev overlay for the env, WITHOUT chart defaults) — fetched lazily to seed
+  // the editor. See the fetch effect below.
+  const [baseByScope, setBaseByScope] = useState<
+    Record<string, Record<string, unknown>>
+  >({});
+  // seedText is what the editor shows: the platform base for the scope with the
+  // developer's stored override merged on top. Before the base loads it is just the
+  // stored override (base = {}), so the same buffer round-trips unchanged.
+  const seedText = (s: string): string =>
+    stringifyOverlay(mergeOverlay(baseByScope[s] ?? {}, storedOverride(s)));
   const [texts, setTexts] = useState<Record<string, string>>(() => {
     const m: Record<string, string> = {};
     for (const s of scopes) m[s] = savedText(s);
@@ -4738,10 +4750,11 @@ function ComponentValuesPanel({
 
   const templateName = appLevel ? data.template.name : comp.template ?? "";
 
-  // Re-seed the editors whenever the persisted overlays change.
+  // Re-seed the editors whenever the persisted overlays change (e.g. after a save
+  // reloads the app) — back to base ⊕ the new stored override.
   useEffect(() => {
     const m: Record<string, string> = {};
-    for (const s of scopes) m[s] = savedText(s);
+    for (const s of scopes) m[s] = seedText(s);
     setTexts(m);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, comp]);
@@ -4764,7 +4777,7 @@ function ComponentValuesPanel({
   const activeText = texts[scope] ?? "";
   const setActiveText = (t: string) =>
     setTexts((cur) => ({ ...cur, [scope]: t }));
-  const dirty = activeText !== savedText(scope);
+  const dirty = activeText !== seedText(scope);
 
   // The env whose effective values we preview: the selected env scope, else the
   // currently-viewed env, else the first stable env.
@@ -4775,8 +4788,69 @@ function ComponentValuesPanel({
         ? currentEnvName
         : stableEnvs[0] ?? "";
 
-  // Debounced effective-values preview, reflecting unsaved edits to both layers.
   const isPreviewScope = scope === PREVIEW_SCOPE;
+
+  // Lazily fetch the CONCISE platform base for the active scope (template ⊕ platform
+  // ⊕ the shared dev overlay for the env, WITHOUT the chart's default keys) so the
+  // editor can be pre-filled with the platform-curated values instead of a blank
+  // box. skipChart keeps it to the opinionated surface; asComponentOverlay merges
+  // the stored platform override for the env.
+  useEffect(() => {
+    if (!open) return;
+    const targetEnv = isPreviewScope ? previewEnv : scope;
+    if (!targetEnv || scope === COMP_BASE_SCOPE || baseByScope[scope] !== undefined)
+      return;
+    let cancelled = false;
+    const req = appLevel
+      ? previewAppValues(
+          project,
+          data.name,
+          targetEnv,
+          { rawValues: devAllEnvs, envRawValues: {} },
+          isPreviewScope,
+          true, // skipChart
+        )
+      : previewTemplateEffectiveValues(
+          templateName,
+          targetEnv,
+          "",
+          { defaultValues: devAllEnvs, envValues: {} },
+          isPreviewScope,
+          true, // asComponentOverlay
+          true, // skipChart
+        );
+    req
+      .then((res) => {
+        if (!cancelled)
+          setBaseByScope((c) => ({
+            ...c,
+            [scope]: (res.values as Record<string, unknown>) ?? {},
+          }));
+      })
+      .catch(() => {
+        if (!cancelled) setBaseByScope((c) => ({ ...c, [scope]: {} }));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, scope, previewEnv, isPreviewScope, appLevel, project, data.name, templateName]);
+
+  // Once the base arrives, seed the editor with base ⊕ stored override — but only if
+  // the developer hasn't already started editing (buffer still the stored-only text).
+  useEffect(() => {
+    const base = baseByScope[scope];
+    if (base === undefined) return;
+    setTexts((cur) => {
+      const buf = cur[scope] ?? "";
+      if (buf !== stringifyOverlay(storedOverride(scope))) return cur;
+      const seeded = stringifyOverlay(mergeOverlay(base, storedOverride(scope)));
+      return buf === seeded ? cur : { ...cur, [scope]: seeded };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseByScope, scope]);
+
+  // Debounced effective-values preview, reflecting unsaved edits to both layers.
   useEffect(() => {
     // Only fetch the effective when it's actually on screen (panel open + the
     // hidden-by-default effective expanded) — a page of components would otherwise
@@ -4786,6 +4860,15 @@ function ComponentValuesPanel({
     const previewParsed = parseYamlOverlay(texts[PREVIEW_SCOPE] ?? "");
     const envParsed = parseYamlOverlay(texts[previewEnv] ?? "");
     if (baseParsed.error || envParsed.error || previewParsed.error) return; // keep last good preview
+    // The editor buffers hold base ⊕ the developer's diff; send only the DIFF as the
+    // per-env / preview overlay so the effective is layered exactly like it deploys
+    // (the platform base is already included server-side, not re-sent as a raw
+    // overlay). devAllEnvs (COMP_BASE) is the shared overlay and goes in verbatim.
+    const envDiff = diffOverlay(baseByScope[previewEnv] ?? {}, envParsed.value ?? {});
+    const previewDiff = diffOverlay(
+      baseByScope[PREVIEW_SCOPE] ?? {},
+      previewParsed.value ?? {},
+    );
     const handle = setTimeout(() => {
       // Composed component on the preview scope: preview the base env's effective
       // with the template's preview defaults + the preview override on top.
@@ -4797,7 +4880,7 @@ function ComponentValuesPanel({
               "",
               {
                 defaultValues: baseParsed.value ?? {},
-                envValues: { preview: previewParsed.value ?? {} },
+                envValues: { preview: previewDiff },
               },
               true,
               true, // asComponentOverlay: merge the stored platform override
@@ -4813,13 +4896,13 @@ function ComponentValuesPanel({
                   previewEnv,
                   {
                     rawValues: baseParsed.value ?? {},
-                    envRawValues: { preview: previewParsed.value ?? {} },
+                    envRawValues: { preview: previewDiff },
                   },
                   true,
                 )
               : previewAppValues(project, data.name, previewEnv, {
                   rawValues: baseParsed.value ?? {},
-                  envRawValues: { [previewEnv]: envParsed.value ?? {} },
+                  envRawValues: { [previewEnv]: envDiff },
                 })
             : previewTemplateEffectiveValues(
                 templateName,
@@ -4827,7 +4910,7 @@ function ComponentValuesPanel({
                 "",
                 {
                   defaultValues: baseParsed.value ?? {},
-                  envValues: { [previewEnv]: envParsed.value ?? {} },
+                  envValues: { [previewEnv]: envDiff },
                 },
                 false,
                 true, // asComponentOverlay: merge the stored platform override
@@ -4854,10 +4937,13 @@ function ComponentValuesPanel({
     setYamlError(null);
     setSaving(true);
     try {
-      // scope is always a stable env or the preview band (no "all envs" tab).
+      // The editor holds base ⊕ the developer's changes; persist only the DIFF vs
+      // the platform base — the minimal per-env (or preview) override. scope is
+      // always a stable env or the preview band (no "all envs" tab).
+      const overlay = diffOverlay(baseByScope[scope] ?? {}, parsed.value ?? {});
       const req: UpdateAppRequest = appLevel
-        ? { envRawValues: { [scope]: parsed.value ?? {} } }
-        : { envComponentValues: { [scope]: { [comp.name]: parsed.value ?? {} } } };
+        ? { envRawValues: { [scope]: overlay } }
+        : { envComponentValues: { [scope]: { [comp.name]: overlay } } };
       await updateApp(project, data.name, req);
       toast.success("Values saved — re-publishing to GitOps.");
       await onSaved();
@@ -4883,10 +4969,12 @@ function ComponentValuesPanel({
     scopes.some((s) => s !== COMP_BASE_SCOPE && overridden(s));
 
   // Origin-tint inputs for the Effective view: the leaf paths this env's override
-  // sets ("your {env}") and the developer's read-only all-envs overlay sets
-  // ("your all-envs"). Derived live from the editor buffers.
-  const scopePaths = leafPaths(parseYamlOverlay(activeText).value);
-  const basePaths = leafPaths(parseYamlOverlay(texts[COMP_BASE_SCOPE] ?? "").value);
+  // sets ("your {env}") — the DIFF of the editor vs the platform base — and the
+  // developer's read-only all-envs overlay ("your all-envs").
+  const scopePaths = leafPaths(
+    diffOverlay(baseByScope[scope] ?? {}, parseYamlOverlay(activeText).value ?? {}),
+  );
+  const basePaths = leafPaths(devAllEnvs);
 
   // Click-to-override / reset: mutate the CURRENT scope's overlay buffer (marks it
   // dirty; the debounced preview + tints refresh automatically). Uses Helm-safe
@@ -4953,11 +5041,13 @@ function ComponentValuesPanel({
       </div>
 
       <p className="mb-2 text-xs text-gray-400">
-        {isPreviewScope
-          ? "Overrides applied to every preview, on top of its base env."
-          : `Overrides for ${scope}, on top of the platform base for ${scope}.`}{" "}
-        Empty inherits. Expand the effective below to see the full as-deployed values
-        and hover any to override. Reference{" "}
+        Pre-filled with the platform base for{" "}
+        {isPreviewScope ? "previews" : scope} (template ⊕ platform defaults).{" "}
+        <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+          Your changes
+        </span>{" "}
+        are highlighted; only the difference is saved. Expand the effective below for
+        the full as-deployed values. Reference{" "}
         <code className="font-mono">{"((platform.*))"}</code> /{" "}
         <code className="font-mono">{"((vars.*))"}</code> tokens.
       </p>
@@ -4972,6 +5062,7 @@ function ComponentValuesPanel({
           label={`Your override — ${scopeLabel(scope)}`}
           value={activeText}
           configVars={configVars}
+          highlightBase={baseByScope[scope]}
           placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 200m"}
           onChange={setActiveText}
           onValidChange={(_, err) => setYamlError(err)}

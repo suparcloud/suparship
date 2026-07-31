@@ -259,13 +259,24 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 	}
 
 	t, _ := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
-	chartVals, available := chartDefaults(r.Context(), ah.kubeClient, t)
+	// skipChart drops the chart defaults AND the canonical struct base so the
+	// response is only the CONCISE platform base (template ⊕ org overrides) for the
+	// env — the seed the single-component editor pre-fills with, without the chart's
+	// hundreds of default keys or the structural app/components/suparship scaffolding.
+	skipChart := r.URL.Query().Get("skipChart") == "true"
+	var (
+		chartVals map[string]any
+		available bool
+	)
+	if !skipChart {
+		chartVals, available = chartDefaults(r.Context(), ah.kubeClient, t)
+	}
 	ov := loadOverride(r.Context(), ah.kubeClient, app.Spec.Template.Name)
 	// Include the canonical platform↔chart base (app/components/suparship/routing)
 	// so the preview matches what Helm renders — but only for canonical templates.
 	// BYO/passthrough templates emit only their own values + overrides + tokens.
 	var canonicalBase map[string]any
-	if t == nil || t.Spec.CanonicalValues() {
+	if !skipChart && (t == nil || t.Spec.CanonicalValues()) {
 		canonicalBase = ah.canonicalBaseMap(r.Context(), app, envName)
 	}
 	// Resolve envName's workload cluster so cluster-scoped template overrides

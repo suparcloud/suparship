@@ -86,12 +86,17 @@ export function previewTemplateEffectiveValues(
   // effective includes env/cluster-scoped platform overrides, matching deploy.
   // The Platform-overrides page leaves this false (its body IS the override).
   asComponentOverlay = false,
+  // skipChart drops the chart-default layer so the response is the CONCISE platform
+  // base (template ⊕ org overrides) for the env — used to seed the component
+  // editor without the chart's hundreds of default keys.
+  skipChart = false,
 ): Promise<EffectiveValuesResponse> {
   const params = new URLSearchParams();
   if (env) params.set("env", env);
   if (cluster) params.set("cluster", cluster);
   if (preview) params.set("preview", "true");
   if (asComponentOverlay) params.set("asComponentOverlay", "true");
+  if (skipChart) params.set("skipChart", "true");
   const q = params.toString();
   return api.post<EffectiveValuesResponse>(
     `/templates/${encodeURIComponent(name)}/effective-values${q ? `?${q}` : ""}`,

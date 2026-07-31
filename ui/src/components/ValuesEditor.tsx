@@ -2,11 +2,19 @@ import { useCallback, useMemo, useRef } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml } from "@codemirror/lang-yaml";
 import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
-import type { EditorView } from "@codemirror/view";
+import {
+  Decoration,
+  EditorView,
+  ViewPlugin,
+  type DecorationSet,
+  type ViewUpdate,
+} from "@codemirror/view";
+import { RangeSetBuilder } from "@codemirror/state";
 import { parse } from "yaml";
 
 import type { ConfigVariables } from "../lib/configVars";
-import { parseYamlOverlay } from "../lib/yamlDoc";
+import { diffOverlay, parseYamlOverlay } from "../lib/yamlDoc";
+import { leafPaths, linePathsOfText, pathKey } from "../lib/valuesTree";
 import { VariablePicker } from "./VariablePicker";
 
 interface ValuesEditorProps {
@@ -30,6 +38,12 @@ interface ValuesEditorProps {
   label?: string;
   /** Extra header controls (e.g. a "Load chart defaults" button). */
   toolbar?: React.ReactNode;
+  /**
+   * When set, the editor is seeded with this platform base and highlights each
+   * line whose value the developer has changed away from it (their override). Pass
+   * a stable reference (memoize) — it rebuilds the highlighter on identity change.
+   */
+  highlightBase?: Record<string, unknown> | null;
 }
 
 // yamlLinter parses the buffer with the `yaml` package and surfaces parse errors
@@ -56,6 +70,52 @@ const yamlLinter = linter((view): Diagnostic[] => {
   }
 });
 
+// overrideHighlightTheme tints lines the developer has changed away from the
+// seeded platform base — matching EffectiveValuesView's "your scope" indigo.
+const overrideHighlightTheme = EditorView.theme({
+  ".cm-your-override": { backgroundColor: "rgba(99, 102, 241, 0.10)" },
+});
+
+// overrideHighlighter highlights each editor line whose value differs from the
+// seeded `base` (the platform base for the scope). The diff is recomputed against
+// the live buffer on every change, so a value reverts to un-highlighted the moment
+// it matches the base again. Rebuilt only when `base` identity changes (scope
+// switch), never per keystroke. Invalid mid-edit YAML → no highlight.
+function overrideHighlighter(base: Record<string, unknown> | null) {
+  const lineDeco = Decoration.line({ attributes: { class: "cm-your-override" } });
+  const build = (view: EditorView): DecorationSet => {
+    const { value: parsed } = parseYamlOverlay(view.state.doc.toString());
+    if (!parsed) return Decoration.none;
+    const overridden = leafPaths(diffOverlay(base, parsed));
+    if (overridden.size === 0) return Decoration.none;
+    const rows = linePathsOfText(view.state.doc.toString());
+    const builder = new RangeSetBuilder<Decoration>();
+    const lines = view.state.doc.lines;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r?.path || (r.kind !== "leaf" && r.kind !== "arrayKey")) continue;
+      if (!overridden.has(pathKey(r.path))) continue;
+      const lineNo = i + 1;
+      if (lineNo > lines) break;
+      const from = view.state.doc.line(lineNo).from;
+      builder.add(from, from, lineDeco);
+    }
+    return builder.finish();
+  };
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = build(view);
+      }
+      update(u: ViewUpdate) {
+        if (u.docChanged) this.decorations = build(u.view);
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
+}
+
 // ValuesEditor is a CodeMirror-backed YAML editor for Helm values overlays. The
 // developer edits ONLY their override layer; a sibling read-only instance is used
 // for the effective-values preview. VariablePicker inserts ((platform.*))/((vars.*))
@@ -70,13 +130,21 @@ export function ValuesEditor({
   onValidChange,
   label,
   toolbar,
+  highlightBase,
 }: ValuesEditorProps) {
   const viewRef = useRef<EditorView | null>(null);
 
-  const extensions = useMemo(
-    () => (readOnly ? [yaml()] : [yaml(), lintGutter(), yamlLinter]),
-    [readOnly],
-  );
+  const extensions = useMemo(() => {
+    if (readOnly) return [yaml()];
+    const base = [yaml(), lintGutter(), yamlLinter];
+    if (highlightBase !== undefined) {
+      base.push(
+        overrideHighlighter(highlightBase ?? {}),
+        overrideHighlightTheme,
+      );
+    }
+    return base;
+  }, [readOnly, highlightBase]);
 
   const handleChange = useCallback(
     (text: string) => {
