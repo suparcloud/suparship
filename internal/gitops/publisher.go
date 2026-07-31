@@ -2258,6 +2258,36 @@ func SelectKargoImages(discovered []tpl.TemplateImage, selection []domain.AppIma
 	return out
 }
 
+// SelectDeclaredKargoImages builds the CD image set from the DECLARED discovered
+// images (those the template declares a pull rule for — Declared=true), used as the
+// default when the user has bound no images. So a template that declares its image
+// pull config yields a healthy Warehouse with zero config ("inherit from template").
+// Undeclared discovered images (sidecars) are ignored. Rules fall back to the
+// platform defaults (7-char SHA / NewestBuild) when the slot leaves them unset.
+func SelectDeclaredKargoImages(discovered []tpl.TemplateImage) []KargoImage {
+	var out []KargoImage
+	for _, d := range discovered {
+		if !d.Declared || d.Repository == "" {
+			continue
+		}
+		img := KargoImage{
+			Name:              d.Name,
+			Repository:        d.Repository,
+			TagKey:            d.TagKey,
+			TagPattern:        d.TagPattern,
+			SelectionStrategy: d.SelectionStrategy,
+		}
+		if img.TagPattern == "" {
+			img.TagPattern = DefaultImageTagPattern
+		}
+		if img.SelectionStrategy == "" {
+			img.SelectionStrategy = DefaultImageSelectionStrategy
+		}
+		out = append(out, img)
+	}
+	return out
+}
+
 func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	projectNS := KargoNamespaceForProject(app.ProjectName)
 	kargoDir := p.outputDir(repoDir, "_infra", "kargo")
@@ -2352,32 +2382,37 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		}
 		images = resolveKargoImages(app, tmplImages)
 	}
-	if len(images) == 0 {
-		// No image bindings — applyKargoDefaults will seed a ghcr.io/{project}/{app}
-		// placeholder that won't pull. Warn rather than fail silently so the operator
-		// knows to declare images (component image bindings, or template settings).
-		slog.Warn("gitops: app has no image bindings — Kargo Warehouse will use a placeholder that won't pull; declare component images (composed) or template images",
-			"project", app.ProjectName, "app", app.Name, "composed", composed,
-			"placeholder", DefaultImageRepoURL(app.ProjectName, app.Name))
-	}
-
 	// ── Warehouse ──────────────────────────────────────────────────────────────
-	whOpts := KargoBuildOptions{
-		Images:                images,
-		InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
-		Branding:              p.cfg.Branding,
-		SubPath:               p.cfg.SubPath,
-	}
-	warehouse := BuildKargoWarehouse(app, whOpts)
-	whBytes, err := yaml.Marshal(warehouse)
-	if err != nil {
-		return fmt.Errorf("marshal kargo warehouse for %s: %w", app.Name, err)
-	}
 	whPath := filepath.Join(kargoDir, projectNS+"-"+app.Name+"-warehouse.yaml")
-	if err := p.writeFile(whPath, whBytes); err != nil {
-		return err
+	if len(images) == 0 {
+		// No image source — no user bindings, no template-declared images, and no
+		// image_repository. Do NOT write a placeholder Warehouse: an unreachable
+		// ghcr.io/{project}/{app} subscription just thrashes Kargo in a failing
+		// refresh loop. Prune any stale Warehouse and skip; the Stages still publish,
+		// and the Warehouse materializes healthy once an image is detected/bound
+		// (auto-inherited from the template, or set via the image editor).
+		if err := os.Remove(whPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("prune stale kargo warehouse for %s: %w", app.Name, err)
+		}
+		slog.Warn("gitops: no image source for CD — skipping Kargo Warehouse (promotions paused until an image is set)",
+			"project", app.ProjectName, "app", app.Name, "composed", composed)
+	} else {
+		whOpts := KargoBuildOptions{
+			Images:                images,
+			InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
+			Branding:              p.cfg.Branding,
+			SubPath:               p.cfg.SubPath,
+		}
+		warehouse := BuildKargoWarehouse(app, whOpts)
+		whBytes, err := yaml.Marshal(warehouse)
+		if err != nil {
+			return fmt.Errorf("marshal kargo warehouse for %s: %w", app.Name, err)
+		}
+		if err := p.writeFile(whPath, whBytes); err != nil {
+			return err
+		}
+		slog.Debug("gitops: wrote kargo warehouse", "app", app.Name)
 	}
-	slog.Debug("gitops: wrote kargo warehouse", "app", app.Name)
 
 	// ── Stages ─────────────────────────────────────────────────────────────────
 	// Build a linear chain: stableEnvs[0] pulls from Warehouse, each subsequent

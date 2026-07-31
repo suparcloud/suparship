@@ -21,8 +21,13 @@ func TestCleanupKargoCRs_RemovesAppKargoArtifacts(t *testing.T) {
 		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
 		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
 	}
-	valkey := &domain.App{Name: "valkey", ProjectName: "demo"}
-	api := &domain.App{Name: "api", ProjectName: "demo"} // sibling pipeline app
+	// Real image sources so each app produces a Warehouse (no placeholder).
+	valkey := &domain.App{Name: "valkey", ProjectName: "demo", Spec: domain.AppSpec{
+		Values: map[string]any{"image_repository": "ghcr.io/demo/valkey"},
+	}}
+	api := &domain.App{Name: "api", ProjectName: "demo", Spec: domain.AppSpec{ // sibling pipeline app
+		Values: map[string]any{"image_repository": "ghcr.io/demo/api"},
+	}}
 
 	if err := p.PublishKargoCRsForTest(dir, valkey, envs); err != nil {
 		t.Fatalf("publish valkey kargo: %v", err)

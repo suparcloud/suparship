@@ -83,6 +83,10 @@ type TemplateImageDTO struct {
 	TagPattern        string `json:"tagPattern,omitempty"`
 	SelectionStrategy string `json:"selectionStrategy,omitempty"`
 	Component         string `json:"component,omitempty"`
+	// Declared marks a discovered image the template declares a pull rule for (its
+	// TagPattern/SelectionStrategy are the inherited rule). The UI watches declared
+	// images by default; undeclared ones (sidecars) default off.
+	Declared bool `json:"declared,omitempty"`
 }
 
 // TemplateSourceDTO describes where a template came from, for the UI's edit gating.
@@ -554,6 +558,7 @@ func imagesToDTO(images []tpl.TemplateImage) []TemplateImageDTO {
 			TagKey:            im.TagKey,
 			TagPattern:        im.TagPattern,
 			SelectionStrategy: im.SelectionStrategy,
+			Declared:          im.Declared,
 		}
 	}
 	return out
