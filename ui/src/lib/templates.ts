@@ -81,11 +81,17 @@ export function previewTemplateEffectiveValues(
   // preview layers the template's preview defaults + the preview override
   // (sent as override.envValues.preview) on top of the base-env effective.
   preview = false,
+  // asComponentOverlay treats the body as a developer/component overlay ON TOP of
+  // the STORED platform override (loaded server-side) — so a composed component's
+  // effective includes env/cluster-scoped platform overrides, matching deploy.
+  // The Platform-overrides page leaves this false (its body IS the override).
+  asComponentOverlay = false,
 ): Promise<EffectiveValuesResponse> {
   const params = new URLSearchParams();
   if (env) params.set("env", env);
   if (cluster) params.set("cluster", cluster);
   if (preview) params.set("preview", "true");
+  if (asComponentOverlay) params.set("asComponentOverlay", "true");
   const q = params.toString();
   return api.post<EffectiveValuesResponse>(
     `/templates/${encodeURIComponent(name)}/effective-values${q ? `?${q}` : ""}`,

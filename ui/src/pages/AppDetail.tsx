@@ -4790,6 +4790,7 @@ function ComponentValuesPanel({
                 envValues: { preview: previewParsed.value ?? {} },
               },
               true,
+              true, // asComponentOverlay: merge the stored platform override
             )
           : appLevel
             ? isPreviewScope
@@ -4810,10 +4811,17 @@ function ComponentValuesPanel({
                   rawValues: baseParsed.value ?? {},
                   envRawValues: { [previewEnv]: envParsed.value ?? {} },
                 })
-            : previewTemplateEffectiveValues(templateName, previewEnv, "", {
-                defaultValues: baseParsed.value ?? {},
-                envValues: { [previewEnv]: envParsed.value ?? {} },
-              });
+            : previewTemplateEffectiveValues(
+                templateName,
+                previewEnv,
+                "",
+                {
+                  defaultValues: baseParsed.value ?? {},
+                  envValues: { [previewEnv]: envParsed.value ?? {} },
+                },
+                false,
+                true, // asComponentOverlay: merge the stored platform override
+              );
       req
         .then((res) => {
           setPreview((res.values as Record<string, unknown>) ?? {});

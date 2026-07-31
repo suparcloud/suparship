@@ -179,6 +179,63 @@ func TestHandleTemplateOverride_PutGetRoundTrip(t *testing.T) {
 	}
 }
 
+// A composed component's effective preview (asComponentOverlay=true) must merge the
+// STORED platform override's env values UNDER the component's own overlay — else the
+// effective misses env-scoped platform overrides that DO deploy (preview ≠ deploy).
+// Without the flag, the body IS the override (the Platform-overrides page), so the
+// stored override must not be loaded.
+func TestHandlePostEffectiveValues_ComponentOverlayMergesStoredEnvOverride(t *testing.T) {
+	tmpl := valuesTemplate()
+	tmpl.Metadata.Name = "voiceai-agent"
+	client := fake.NewSimpleClientset()
+	th := &templateHandler{builtin: []*tpl.Template{tmpl}, kubeClient: client}
+
+	// Seed a stored platform override: staging sets platformStaging.
+	putBody, _ := json.Marshal(TemplateOverrideDTO{
+		EnvValues: map[string]map[string]any{"staging": {"platformStaging": "yes"}},
+	})
+	put := httptest.NewRequest("PUT", "/api/v1/templates/voiceai-agent/overrides", bytes.NewReader(putBody))
+	put.SetPathValue("name", "voiceai-agent")
+	th.handlePutTemplateOverride(httptest.NewRecorder(), put)
+
+	body, _ := json.Marshal(TemplateOverrideDTO{
+		DefaultValues: map[string]any{"componentBase": "b"},
+		EnvValues:     map[string]map[string]any{"staging": {"componentStaging": "c"}},
+	})
+
+	decode := func(url string) EffectiveValuesDTO {
+		req := httptest.NewRequest("POST", url, bytes.NewReader(body))
+		req.SetPathValue("name", "voiceai-agent")
+		rec := httptest.NewRecorder()
+		th.handlePostEffectiveValues(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp EffectiveValuesDTO
+		_ = json.NewDecoder(rec.Body).Decode(&resp)
+		return resp
+	}
+
+	// asComponentOverlay=true → stored platform env override merges, under the
+	// component's own base + staging overlays.
+	comp := decode("/api/v1/templates/voiceai-agent/effective-values?env=staging&asComponentOverlay=true")
+	if comp.Values["platformStaging"] != "yes" {
+		t.Errorf("platformStaging = %v, want yes (stored platform env override must merge)", comp.Values["platformStaging"])
+	}
+	if comp.Values["componentBase"] != "b" || comp.Values["componentStaging"] != "c" {
+		t.Errorf("component overlays lost: base=%v staging=%v", comp.Values["componentBase"], comp.Values["componentStaging"])
+	}
+
+	// No flag → body is the override itself; stored override NOT loaded.
+	page := decode("/api/v1/templates/voiceai-agent/effective-values?env=staging")
+	if _, present := page.Values["platformStaging"]; present {
+		t.Errorf("platformStaging must NOT appear without asComponentOverlay: %v", page.Values)
+	}
+	if page.Values["componentStaging"] != "c" {
+		t.Errorf("body-as-override staging value lost: %v", page.Values["componentStaging"])
+	}
+}
+
 func TestHandlePostEffectiveValues_ReflectsUnsavedOverride(t *testing.T) {
 	th := &templateHandler{builtin: []*tpl.Template{valuesTemplate()}}
 
