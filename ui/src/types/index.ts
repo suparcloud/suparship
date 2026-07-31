@@ -953,6 +953,14 @@ export interface CreateAppRequest {
   envConfig?: { vars?: Record<string, string> };
   /** Per-env non-secret env-var overrides, keyed env name (wins over envConfig). */
   envConfigByEnv?: Record<string, { vars?: Record<string, string> }>;
+  /** Per-(env, component) Helm values overlays set at creation, keyed
+   *  env → component → overlay. A new app deploys to its base env only, so the
+   *  create wizard populates just that env; component values are per-env only
+   *  (no all-envs base at creation). */
+  envComponentValues?: Record<
+    string,
+    Record<string, Record<string, unknown>>
+  >;
 }
 
 export interface CreateAppResponse {

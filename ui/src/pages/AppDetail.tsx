@@ -18,6 +18,7 @@ import {
   ComposeComponents,
   type ComponentDraft,
   draftFromSummary,
+  draftsToEnvComponentValues,
   toComponentCreate,
 } from "../components/ComposeComponents";
 import { createAppPreview, deleteAppPreview } from "../lib/previews";
@@ -4383,6 +4384,15 @@ function ComponentsTable({
   );
   const [manageSaving, setManageSaving] = useState(false);
   const [manageError, setManageError] = useState<string | null>(null);
+  // Stable envs the manage canvas edits per-component values for. Preview values are
+  // tuned in the card (which handles the preview scope). Deduped by name.
+  const manageEnvs = [
+    ...new Set(
+      (data.environments ?? [])
+        .filter((e) => e.envType !== "preview")
+        .map((e) => e.envName),
+    ),
+  ];
 
   function beginManage() {
     setDrafts(data.components.map(draftFromSummary));
@@ -4422,11 +4432,25 @@ function ComponentsTable({
         return;
       }
     }
+    if (drafts.some((d) => Object.values(d.envValuesError).some(Boolean))) {
+      setManageError("Fix the component values YAML before saving.");
+      return;
+    }
     setManageSaving(true);
     setManageError(null);
     try {
+      // Send the component list (structure + preserved legacy base values) plus the
+      // per-env component overlays edited in the canvas. envComponentValues covers
+      // every stable env the canvas offered so cleared overlays are pruned server-
+      // side; preview values are left untouched (edited in the card).
+      const envComponentValues = draftsToEnvComponentValues(
+        drafts,
+        manageEnvs,
+        true, // send cleared overlays as {} so the server prunes them
+      );
       await updateApp(project, data.name, {
         components: drafts.map(toComponentCreate),
+        envComponentValues,
       });
       toast.success("Components updated — re-publishing to GitOps.");
       await onSaved();
@@ -4534,7 +4558,7 @@ function ComponentsTable({
           <p className="text-xs text-gray-400">
             Add, remove, or retemplate components. Two or more make this a composed
             app (one chart source each). Expand a component's <em>values</em> to set
-            its base overrides here, or edit them later in its card. Saving
+            its per-env overrides here, or edit them later in its card. Saving
             re-publishes to GitOps.
           </p>
           <ComposeComponents
@@ -4542,6 +4566,7 @@ function ComponentsTable({
             components={drafts}
             onChange={setDrafts}
             configVars={manageConfigVars}
+            environments={manageEnvs}
           />
           {manageError && <p className="text-sm text-red-600">{manageError}</p>}
           <div className="flex items-center gap-2">

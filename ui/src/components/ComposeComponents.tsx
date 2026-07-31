@@ -19,8 +19,10 @@ import type { ConfigVariables } from "../lib/configVars";
 const ValuesEditor = lazy(() => import("./ValuesEditor"));
 
 // ComponentDraft is the UI-editable form of one composed-app component:
-// structural fields (name / template / type / expose) plus a per-component Helm
-// values overlay (the value-based config), kept as editor text + its parsed form.
+// structural fields (name / template / type / expose) plus PER-ENV Helm values
+// overlays (the value-based config). Component values are per-env only — there is
+// no all-envs component base edited here; each env's overlay is kept as editor text
+// (seeded with the platform base for that env) + its parsed diff + a parse error.
 export interface ComponentDraft {
   name: string;
   /** template name (the component's own chart) */
@@ -29,10 +31,15 @@ export interface ComponentDraft {
   type: string;
   /** disabled | internal | external */
   exposeMode: string;
-  /** per-component values overlay — editor text, its parsed object, and a parse error */
-  valuesText: string;
+  /** legacy all-envs base overlay — PRESERVED unchanged (existing components keep
+   *  deploying it), not edited here. New components have {}. */
   values: Record<string, unknown>;
-  valuesError: string | null;
+  /** per-env values overlay diff, keyed env name (the editable per-env override) */
+  envValues: Record<string, Record<string, unknown>>;
+  /** per-env editor text, keyed env — seeded with the platform base ⊕ envValues[env] */
+  envValuesText: Record<string, string>;
+  /** per-env YAML parse error, keyed env */
+  envValuesError: Record<string, string | null>;
   /** env policy: inherit all app vars, or curate a subset */
   inheritAppVars: boolean;
   envVars: ComponentEnvVar[];
@@ -42,6 +49,45 @@ export interface ComponentDraft {
   stateful: boolean;
   /** effective preview inclusion — whether this component renders in preview envs */
   previewEnabled: boolean;
+}
+
+// envTextsFromValues seeds the per-env editor text map from stored per-env overlays,
+// so the "untouched" check in the seed effect (text === stringify(stored)) holds
+// before the platform base arrives.
+function envTextsFromValues(
+  envValues: Record<string, Record<string, unknown>>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [env, ov] of Object.entries(envValues)) {
+    out[env] = stringifyOverlay(ov);
+  }
+  return out;
+}
+
+// draftsToEnvComponentValues collects the per-(env, component) overlays a set of
+// drafts carry, for the create/update request's `envComponentValues`, over the
+// listed envs. By default only non-empty overlays are included (create — nothing to
+// clear). Pass includeEmpty=true on the update path so a CLEARED overlay is sent as
+// {} and the server deletes that (env, component) pair rather than leaving the stale
+// value; every existing overlay is loaded into the drafts, so this never wipes an
+// untouched value.
+export function draftsToEnvComponentValues(
+  drafts: ComponentDraft[],
+  environments: string[],
+  includeEmpty = false,
+): Record<string, Record<string, Record<string, unknown>>> {
+  const out: Record<string, Record<string, Record<string, unknown>>> = {};
+  for (const env of environments) {
+    for (const d of drafts) {
+      const ov = d.envValues[env] ?? {};
+      const name = d.name.trim();
+      if (!name) continue;
+      if (Object.keys(ov).length > 0 || includeEmpty) {
+        (out[env] ??= {})[name] = ov;
+      }
+    }
+  }
+  return out;
 }
 
 const COMPONENT_TYPES = ["web", "worker", "job"] as const;
@@ -87,9 +133,10 @@ export function newComponentDraft(
     template: tmpl.name,
     type,
     exposeMode: type === "web" ? "external" : "disabled",
-    valuesText: "",
     values: {},
-    valuesError: null,
+    envValues: {},
+    envValuesText: {},
+    envValuesError: {},
     inheritAppVars: !isAddon,
     envVars: [],
     images: [],
@@ -100,16 +147,19 @@ export function newComponentDraft(
 
 // draftFromSummary seeds an editable draft from an existing app component (the
 // edit-composed flow on the app detail page), preserving its template, expose
-// mode, values overlay, and env policy.
+// mode, per-env value overlays, and env policy. The legacy all-envs base `values`
+// is preserved as-is (not edited) so saving structure never wipes it.
 export function draftFromSummary(c: ComponentSummary): ComponentDraft {
+  const envValues = c.envValues ?? {};
   return {
     name: c.name,
     template: c.template ?? "",
     type: c.type,
     exposeMode: c.exposeMode || (c.type === "web" ? "external" : "disabled"),
-    valuesText: c.values ? stringifyOverlay(c.values) : "",
     values: c.values ?? {},
-    valuesError: null,
+    envValues,
+    envValuesText: envTextsFromValues(envValues),
+    envValuesError: {},
     inheritAppVars: c.inheritAppVars ?? true,
     envVars: c.envVars ?? [],
     images: c.images ?? [],
@@ -179,69 +229,97 @@ export function ComposeComponents({
   components,
   onChange,
   configVars,
+  environments,
 }: {
   templates: TemplateSummary[];
   components: ComponentDraft[];
   onChange: (next: ComponentDraft[]) => void;
   configVars?: ConfigVariables | null;
+  // The env scopes to edit values for. Create passes just the base deploy env
+  // (e.g. ["staging"]); manage passes the app's stable envs. Values are per-env.
+  environments: string[];
 }) {
-  // Two bases per distinct template, fetched once and cached (components sharing a
-  // template share the fetch):
-  //   - bases: chart + platform defaults, for the expandable "effective" reference.
-  //   - conciseBases: the CONCISE platform base (template ⊕ platform overrides, NO
-  //     chart defaults) used to SEED the editor and highlight the developer's diff —
-  //     identical to the app-detail per-component editor.
+  const envs = environments.length > 0 ? environments : ["staging"];
+  // Per-(template, env) bases, fetched once each and cached (components sharing a
+  // template+env share the fetch):
+  //   - bases: chart + platform defaults, env-agnostic, for the expandable
+  //     "effective" reference.
+  //   - conciseBases: the CONCISE platform base for that env (template ⊕ platform
+  //     overrides, NO chart defaults) used to SEED the editor and highlight the diff
+  //     — identical to the app-detail per-component editor.
   const [bases, setBases] = useState<Record<string, EffectiveValuesResponse | null>>({});
   const [conciseBases, setConciseBases] = useState<
     Record<string, Record<string, unknown>>
   >({});
-  const fetched = useRef<Set<string>>(new Set());
+  const fetchedChart = useRef<Set<string>>(new Set());
+  const fetchedBase = useRef<Set<string>>(new Set());
   // Which component rows have their (on-demand) values editor expanded, by index.
   const [valuesOpen, setValuesOpen] = useState<Record<number, boolean>>({});
   // Which rows have their expandable "effective (as deployed)" reference open.
   const [effectiveOpen, setEffectiveOpen] = useState<Record<number, boolean>>({});
+  // The env tab selected per component row (defaults to the first env).
+  const [activeEnv, setActiveEnv] = useState<Record<number, string>>({});
+  const baseKey = (template: string, env: string) => `${template} ${env}`;
+
   const templateKey = components.map((c) => c.template).join(",");
+  const envKey = envs.join(",");
   useEffect(() => {
     for (const name of new Set(components.map((c) => c.template).filter(Boolean))) {
-      if (fetched.current.has(name)) continue;
-      fetched.current.add(name);
-      fetchTemplateEffectiveValues(name)
-        .then((res) => setBases((prev) => ({ ...prev, [name]: res })))
-        .catch(() => setBases((prev) => ({ ...prev, [name]: null })));
-      // The seed base: empty dev overlay + asComponentOverlay (merge the stored
-      // platform override) + skipChart. env "" → the component's all-envs base.
-      previewTemplateEffectiveValues(name, "", "", {}, false, true, true)
-        .then((res) =>
-          setConciseBases((prev) => ({
-            ...prev,
-            [name]: (res.values as Record<string, unknown>) ?? {},
-          })),
-        )
-        .catch(() =>
-          setConciseBases((prev) => ({ ...prev, [name]: {} })),
-        );
+      // Env-agnostic chart base — one per template, for the effective reference.
+      if (!fetchedChart.current.has(name)) {
+        fetchedChart.current.add(name);
+        fetchTemplateEffectiveValues(name)
+          .then((res) => setBases((prev) => ({ ...prev, [name]: res })))
+          .catch(() => setBases((prev) => ({ ...prev, [name]: null })));
+      }
+      // Concise seed base — one per (template, env): empty dev overlay +
+      // asComponentOverlay (merge the stored platform override) + skipChart.
+      for (const env of envs) {
+        const k = baseKey(name, env);
+        if (fetchedBase.current.has(k)) continue;
+        fetchedBase.current.add(k);
+        previewTemplateEffectiveValues(name, env, "", {}, false, true, true)
+          .then((res) =>
+            setConciseBases((prev) => ({
+              ...prev,
+              [k]: (res.values as Record<string, unknown>) ?? {},
+            })),
+          )
+          .catch(() => setConciseBases((prev) => ({ ...prev, [k]: {} })));
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [templateKey]);
+  }, [templateKey, envKey]);
 
-  // Once a template's concise base arrives, seed each row on that template with
-  // base ⊕ its stored overlay — but only rows the developer hasn't touched yet
-  // (valuesText still the bare overlay). Converges after one pass: seeded rows no
-  // longer match the "untouched" check, so they aren't re-seeded.
+  // Once a (template, env) base arrives, seed each row's editor text for that env
+  // with base ⊕ its stored per-env overlay — but only where the developer hasn't
+  // edited (text still the bare overlay). Converges after one pass.
   useEffect(() => {
     let changed = false;
     const next = components.map((c) => {
-      const base = conciseBases[c.template];
-      if (!base) return c;
-      if (c.valuesText !== stringifyOverlay(c.values)) return c; // edited or seeded
-      const seeded = stringifyOverlay(mergeOverlay(base, c.values));
-      if (seeded === c.valuesText) return c;
+      let text = c.envValuesText;
+      let mutated = false;
+      for (const env of envs) {
+        const base = conciseBases[baseKey(c.template, env)];
+        if (!base) continue;
+        const stored = c.envValues[env] ?? {};
+        const cur = text[env] ?? "";
+        if (cur !== stringifyOverlay(stored)) continue; // edited or seeded
+        const seeded = stringifyOverlay(mergeOverlay(base, stored));
+        if (seeded === cur) continue;
+        if (!mutated) {
+          text = { ...text };
+          mutated = true;
+        }
+        text[env] = seeded;
+      }
+      if (!mutated) return c;
       changed = true;
-      return { ...c, valuesText: seeded };
+      return { ...c, envValuesText: text };
     });
     if (changed) onChange(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conciseBases, components]);
+  }, [conciseBases, components, envKey]);
 
   function update(i: number, patch: Partial<ComponentDraft>) {
     onChange(components.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -364,117 +442,160 @@ export function ComposeComponents({
             </button>
           </div>
 
-          {/* Per-component base values — the editor is pre-filled with the concise
-              platform base (template ⊕ platform defaults) for this component; the
-              developer's changes are highlighted and only the diff is saved as the
-              component's base overlay. Same surface as the app-detail per-component
-              editor. On-demand (collapsed) so adding several components isn't
-              cluttered. */}
-          <div className="mt-3">
-            <button
-              type="button"
-              onClick={() =>
-                setValuesOpen((o) => ({ ...o, [i]: !o[i] }))
-              }
-              aria-expanded={!!valuesOpen[i]}
-              className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
-            >
-              <span className={`transition-transform ${valuesOpen[i] ? "rotate-90" : ""}`}>
-                ▸
-              </span>
-              values
-              {Object.keys(c.values).length > 0 && !valuesOpen[i] && (
-                <span className="ml-1 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-600">
-                  overridden
-                </span>
-              )}
-            </button>
-            {valuesOpen[i] && (
-              <Suspense
-                fallback={
-                  <div className="mt-2 rounded-lg border border-gray-200 p-3 text-xs text-gray-400">
-                    Loading editor…
-                  </div>
-                }
-              >
-                <div className="mt-2">
-                  <p className="mb-2 text-xs text-gray-400">
-                    Pre-filled with the platform base (template ⊕ platform
-                    defaults).{" "}
-                    <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
-                      Your changes
-                    </span>{" "}
-                    are highlighted; only the difference is saved as this component's
-                    base overlay. Reference{" "}
-                    <code className="font-mono">{"((platform.*))"}</code> /{" "}
-                    <code className="font-mono">{"((vars.*))"}</code> tokens.
-                  </p>
-                  <ValuesEditor
-                    label="Your override — base"
-                    value={c.valuesText}
-                    configVars={configVars ?? undefined}
-                    highlightBase={conciseBases[c.template]}
-                    height="16rem"
-                    placeholder={
-                      "# e.g.\nimage:\n  repository: ghcr.io/org/app\n  tag: v1"
-                    }
-                    onChange={(text) => update(i, { valuesText: text })}
-                    onValidChange={(parsed, err) =>
-                      update(i, {
-                        valuesError: err,
-                        ...(parsed
-                          ? {
-                              values: diffOverlay(
-                                conciseBases[c.template] ?? {},
-                                parsed,
-                              ),
-                            }
-                          : {}),
-                      })
-                    }
-                  />
-                  {c.valuesError && (
-                    <p className="mt-2 text-xs text-red-600">
-                      Invalid YAML: {c.valuesError}
-                    </p>
-                  )}
-                  {/* Effective (chart + platform ⊕ overrides) — advanced reference,
-                      hidden by default, mirroring the app-detail editor. */}
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setEffectiveOpen((o) => ({ ...o, [i]: !o[i] }))
-                    }
-                    aria-expanded={!!effectiveOpen[i]}
-                    className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
+          {/* Per-component PER-ENV values — one editor per env tab, pre-filled with
+              the concise platform base for that env; the developer's changes are
+              highlighted and only the diff is saved as that env's component overlay.
+              Same surface as the app-detail per-component card. On-demand
+              (collapsed) so adding several components isn't cluttered. */}
+          {(() => {
+            const env = activeEnv[i] ?? envs[0] ?? "staging";
+            const base = conciseBases[baseKey(c.template, env)];
+            const hasOverride = Object.values(c.envValues).some(
+              (v) => v && Object.keys(v).length > 0,
+            );
+            return (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={() => setValuesOpen((o) => ({ ...o, [i]: !o[i] }))}
+                  aria-expanded={!!valuesOpen[i]}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
+                >
+                  <span
+                    className={`transition-transform ${valuesOpen[i] ? "rotate-90" : ""}`}
                   >
-                    <span
-                      className={`transition-transform ${effectiveOpen[i] ? "rotate-90" : ""}`}
-                    >
-                      ▸
+                    ▸
+                  </span>
+                  values
+                  {hasOverride && !valuesOpen[i] && (
+                    <span className="ml-1 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-600">
+                      overridden
                     </span>
-                    {effectiveOpen[i] ? "Hide" : "Show"} effective (as deployed)
-                  </button>
-                  {effectiveOpen[i] && (
-                    <div className="mt-2">
-                      <ValuesEditor
-                        label={
-                          bases[c.template]?.chartDefaultsAvailable
-                            ? "Effective (chart + platform ⊕ overrides)"
-                            : "Effective (platform ⊕ overrides)"
-                        }
-                        value={stringifyOverlay(
-                          mergeOverlay(bases[c.template]?.values ?? {}, c.values),
-                        )}
-                        height="16rem"
-                        readOnly
-                      />
-                    </div>
                   )}
-                </div>
-              </Suspense>
-            )}
-          </div>
+                </button>
+                {valuesOpen[i] && (
+                  <Suspense
+                    fallback={
+                      <div className="mt-2 rounded-lg border border-gray-200 p-3 text-xs text-gray-400">
+                        Loading editor…
+                      </div>
+                    }
+                  >
+                    <div className="mt-2">
+                      {/* Env tabs (only when more than one env is offered). */}
+                      {envs.length > 1 && (
+                        <div className="mb-2 flex flex-wrap gap-1">
+                          {envs.map((e) => {
+                            const dirty =
+                              (c.envValues[e] &&
+                                Object.keys(c.envValues[e]!).length > 0) ||
+                              false;
+                            return (
+                              <button
+                                key={e}
+                                type="button"
+                                onClick={() =>
+                                  setActiveEnv((m) => ({ ...m, [i]: e }))
+                                }
+                                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                                  env === e
+                                    ? "bg-gray-900 text-white"
+                                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                                }`}
+                              >
+                                {e}
+                                {dirty ? " ●" : ""}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <p className="mb-2 text-xs text-gray-400">
+                        Pre-filled with the platform base for {env} (template ⊕
+                        platform defaults).{" "}
+                        <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+                          Your changes
+                        </span>{" "}
+                        are highlighted; only the difference is saved for {env}.
+                        Reference{" "}
+                        <code className="font-mono">{"((platform.*))"}</code> /{" "}
+                        <code className="font-mono">{"((vars.*))"}</code> tokens.
+                      </p>
+                      <ValuesEditor
+                        label={`Your override — ${env}`}
+                        value={c.envValuesText[env] ?? ""}
+                        configVars={configVars ?? undefined}
+                        highlightBase={base}
+                        height="16rem"
+                        placeholder={
+                          "# e.g.\nresources:\n  requests:\n    cpu: 200m"
+                        }
+                        onChange={(text) =>
+                          update(i, {
+                            envValuesText: { ...c.envValuesText, [env]: text },
+                          })
+                        }
+                        onValidChange={(parsed, err) =>
+                          update(i, {
+                            envValuesError: { ...c.envValuesError, [env]: err },
+                            ...(parsed
+                              ? {
+                                  envValues: {
+                                    ...c.envValues,
+                                    [env]: diffOverlay(base ?? {}, parsed),
+                                  },
+                                }
+                              : {}),
+                          })
+                        }
+                      />
+                      {c.envValuesError[env] && (
+                        <p className="mt-2 text-xs text-red-600">
+                          Invalid YAML: {c.envValuesError[env]}
+                        </p>
+                      )}
+                      {/* Effective (chart + platform ⊕ overrides) — advanced
+                          reference, hidden by default, mirroring the card. */}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEffectiveOpen((o) => ({ ...o, [i]: !o[i] }))
+                        }
+                        aria-expanded={!!effectiveOpen[i]}
+                        className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
+                      >
+                        <span
+                          className={`transition-transform ${effectiveOpen[i] ? "rotate-90" : ""}`}
+                        >
+                          ▸
+                        </span>
+                        {effectiveOpen[i] ? "Hide" : "Show"} effective — {env}
+                      </button>
+                      {effectiveOpen[i] && (
+                        <div className="mt-2">
+                          <ValuesEditor
+                            label={
+                              bases[c.template]?.chartDefaultsAvailable
+                                ? "Effective (chart + platform ⊕ overrides)"
+                                : "Effective (platform ⊕ overrides)"
+                            }
+                            value={stringifyOverlay(
+                              mergeOverlay(
+                                bases[c.template]?.values ?? {},
+                                c.envValues[env] ?? {},
+                              ),
+                            )}
+                            height="16rem"
+                            readOnly
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </Suspense>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Environment: inherit all app vars, or curate a subset. */}
           <div className="mt-3 border-t border-gray-100 pt-3">
