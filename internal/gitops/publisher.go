@@ -3160,100 +3160,136 @@ func (u *unpublishHelper) rm(path string) error {
 //   - envs/{env}/{project}/{app}/            — app Application + values
 //   - _app-resources/{env}/{project}/{app}/  — platform ConfigMap/ExternalSecret
 //   - _infra/kargo/{ns}-{app}-*.yaml         — Kargo Warehouse + Stage CRs
+//   - previews/*/{project}/*/{app}/          — open preview chart trees (all PRs)
+//   - _app-resources/previews/*/{project}/*/{app}/     — preview platform resources
+//   - _composed-apps/_previews/*/{project}/*/{app}/    — composed preview manifests
 //   - {env}/{project}/{app}/                 — legacy pre-envs/ layout
 //
-// Preview trees (previews/{baseEnv}/{project}/{preview}/{app}) are removed by the
-// per-app preview-delete flow, not here. No-op if nothing found.
+// No-op if nothing found.
 func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		var u unpublishHelper
-
-		// envs/{env}/{project}/{app} and _app-resources/{env}/{project}/{app}.
-		for _, base := range []string{"envs", "_app-resources"} {
-			baseDir := p.outputDir(repoDir, base)
-			entries, err := os.ReadDir(baseDir)
-			if err != nil {
-				continue // tree absent — nothing to remove
-			}
-			for _, e := range entries {
-				if !e.IsDir() || e.Name() == "previews" {
-					continue
-				}
-				if err := u.rm(filepath.Join(baseDir, e.Name(), projectName, appName)); err != nil {
-					return err
-				}
-				// Per-cluster fan-out values: envs/{env}/_clusters/{cluster}/{project}/{app}.
-				clustersDir := filepath.Join(baseDir, e.Name(), "_clusters")
-				if cents, cerr := os.ReadDir(clustersDir); cerr == nil {
-					for _, c := range cents {
-						if !c.IsDir() {
-							continue
-						}
-						if err := u.rm(filepath.Join(clustersDir, c.Name(), projectName, appName)); err != nil {
-							return err
-						}
-					}
-				}
-			}
+		removed, err := p.unpublishAppFiles(repoDir, projectName, appName)
+		if err != nil {
+			return err
 		}
-
-		// Kargo Warehouse + Stage CRs for this app. Match on BOTH the stamped
-		// suparship.io/project and suparship.io/app labels rather than the filename
-		// prefix: the flat _infra/kargo/ dir holds every project's CRs, so two
-		// projects can own an app with the same name, and a sibling app whose name
-		// extends this one (e.g. "web-admin" vs "web") shares the filename prefix —
-		// either would be wrongly pruned by a name match alone. The project's
-		// Project/ProjectConfig CRs carry no app label, so they are never matched here.
-		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
-		if entries, err := os.ReadDir(kargoDir); err == nil {
-			for _, e := range entries {
-				if e.IsDir() {
-					continue
-				}
-				path := filepath.Join(kargoDir, e.Name())
-				if kargoManifestLabel(path, labelApp) != appName || kargoManifestLabel(path, labelProject) != projectName {
-					continue
-				}
-				if err := u.rm(path); err != nil {
-					return err
-				}
-			}
-		}
-
-		// Drop this app's promotion policies from the project's ProjectConfig
-		// (other apps in the project keep theirs).
-		projectNS := KargoNamespaceForProject(projectName)
-		if existing, perr := p.readKargoPromotionPolicies(kargoDir, projectNS); perr != nil {
-			return perr
-		} else if merged := MergeKargoPromotionPolicies(existing, appName, nil); len(merged) != len(existing) {
-			if werr := p.writeKargoProjectConfig(kargoDir, projectName, merged); werr != nil {
-				return werr
-			}
-			u.removed = true
-		}
-
-		// Legacy pre-envs/ layout: top-level {env}/{project}/{app}.
-		outputDir := p.outputDir(repoDir)
-		if entries, err := os.ReadDir(outputDir); err == nil {
-			for _, e := range entries {
-				if !e.IsDir() || isReservedTopLevelDir(e.Name()) {
-					continue
-				}
-				if err := u.rm(filepath.Join(outputDir, e.Name(), projectName, appName)); err != nil {
-					return err
-				}
-			}
-		}
-
-		if !u.removed {
+		if !removed {
 			slog.Debug("gitops: no app files found — nothing to delete",
 				"project", projectName, "app", appName)
 			return nil
 		}
-
 		commitMsg := fmt.Sprintf("feat(apps): delete app %s/%s\n\nDeleted by suparship.", projectName, appName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// unpublishAppFiles removes all of an app's GitOps files from an already-cloned repo
+// (no git), reporting whether anything was removed. Covers the same layouts listed
+// on UnpublishApp, including preview trees across all open preview names. Extracted
+// for white-box testing without git.
+func (p *Publisher) unpublishAppFiles(repoDir, projectName, appName string) (bool, error) {
+	var u unpublishHelper
+
+	// envs/{env}/{project}/{app} and _app-resources/{env}/{project}/{app}.
+	for _, base := range []string{"envs", "_app-resources"} {
+		baseDir := p.outputDir(repoDir, base)
+		entries, err := os.ReadDir(baseDir)
+		if err != nil {
+			continue // tree absent — nothing to remove
+		}
+		for _, e := range entries {
+			if !e.IsDir() || e.Name() == "previews" {
+				continue
+			}
+			if err := u.rm(filepath.Join(baseDir, e.Name(), projectName, appName)); err != nil {
+				return u.removed, err
+			}
+			// Per-cluster fan-out values: envs/{env}/_clusters/{cluster}/{project}/{app}.
+			clustersDir := filepath.Join(baseDir, e.Name(), "_clusters")
+			if cents, cerr := os.ReadDir(clustersDir); cerr == nil {
+				for _, c := range cents {
+					if !c.IsDir() {
+						continue
+					}
+					if err := u.rm(filepath.Join(clustersDir, c.Name(), projectName, appName)); err != nil {
+						return u.removed, err
+					}
+				}
+			}
+		}
+	}
+
+	// Kargo Warehouse + Stage CRs for this app. Match on BOTH the stamped
+	// suparship.io/project and suparship.io/app labels rather than the filename
+	// prefix: the flat _infra/kargo/ dir holds every project's CRs, so two
+	// projects can own an app with the same name, and a sibling app whose name
+	// extends this one (e.g. "web-admin" vs "web") shares the filename prefix —
+	// either would be wrongly pruned by a name match alone. The project's
+	// Project/ProjectConfig CRs carry no app label, so they are never matched here.
+	kargoDir := p.outputDir(repoDir, "_infra", "kargo")
+	if entries, err := os.ReadDir(kargoDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			path := filepath.Join(kargoDir, e.Name())
+			if kargoManifestLabel(path, labelApp) != appName || kargoManifestLabel(path, labelProject) != projectName {
+				continue
+			}
+			if err := u.rm(path); err != nil {
+				return u.removed, err
+			}
+		}
+	}
+
+	// Drop this app's promotion policies from the project's ProjectConfig
+	// (other apps in the project keep theirs).
+	projectNS := KargoNamespaceForProject(projectName)
+	if existing, perr := p.readKargoPromotionPolicies(kargoDir, projectNS); perr != nil {
+		return u.removed, perr
+	} else if merged := MergeKargoPromotionPolicies(existing, appName, nil); len(merged) != len(existing) {
+		if werr := p.writeKargoProjectConfig(kargoDir, projectName, merged); werr != nil {
+			return u.removed, werr
+		}
+		u.removed = true
+	}
+
+	// Preview trees for this app across ALL open preview names. Critical for
+	// consolidation: when per-component apps (e.g. lk-sh-web, lk-sh-express-caller)
+	// are merged into a composed app (voiceai-lk-sh), unpublishing each old app must
+	// drop its single-source preview chart, platform, and composed-manifest trees —
+	// otherwise they linger under every open PR and keep rendering as phantom preview
+	// Applications. Layout: {root}/{baseEnv}/{project}/{preview}/{app}.
+	for _, root := range [][]string{
+		{"previews"},
+		{"_app-resources", "previews"},
+		{composedAppsDir, composedPreviewsSubdir},
+	} {
+		pattern := filepath.Join(p.outputDir(repoDir, root...), "*", projectName, "*", appName)
+		matches, gerr := filepath.Glob(pattern)
+		if gerr != nil {
+			return u.removed, fmt.Errorf("glob preview trees %s: %w", pattern, gerr)
+		}
+		for _, m := range matches {
+			if err := u.rm(m); err != nil {
+				return u.removed, err
+			}
+		}
+	}
+
+	// Legacy pre-envs/ layout: top-level {env}/{project}/{app}.
+	outputDir := p.outputDir(repoDir)
+	if entries, err := os.ReadDir(outputDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || isReservedTopLevelDir(e.Name()) {
+				continue
+			}
+			if err := u.rm(filepath.Join(outputDir, e.Name(), projectName, appName)); err != nil {
+				return u.removed, err
+			}
+		}
+	}
+
+	return u.removed, nil
 }
 
 // RemoveAppEnv removes a SINGLE environment's GitOps manifests for an app —

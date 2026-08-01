@@ -56,6 +56,12 @@ func (p *Publisher) PublishEnvFilesForTest(ctx context.Context, repoDir string, 
 	return p.publishEnvFiles(ctx, repoDir, app, env)
 }
 
+// UnpublishAppFilesForTest exposes UnpublishApp's file-removal (including preview
+// trees across all open preview names) to white-box tests, without git.
+func (p *Publisher) UnpublishAppFilesForTest(repoDir, projectName, appName string) (bool, error) {
+	return p.unpublishAppFiles(repoDir, projectName, appName)
+}
+
 // CollectComponentImagesForTest exposes collectComponentImages — the composed
 // per-component Kargo image resolver — to white-box tests.
 func CollectComponentImagesForTest(app *domain.App, resolved map[string][]KargoImage) []KargoImage {
