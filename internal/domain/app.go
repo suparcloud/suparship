@@ -745,6 +745,15 @@ type CDConfig struct {
 	// Kargo auto-promotes it down the chain to prod without a manual click.
 	// Only meaningful for pipeline delivery; ignored for direct apps (no Kargo).
 	AutoPromote bool `json:"autoPromote,omitempty" yaml:"autoPromote,omitempty"`
+	// ImagesConfigured records that the user has explicitly reviewed and saved the
+	// CD image selection (the Images panel). Once true, an EMPTY image selection —
+	// AppSpec.Images for a single-source app, or a component's ComponentSpec.Images —
+	// means "watch nothing": disabling CD for a template-declared image PERSISTS
+	// instead of reverting to the auto-bound template default. While false (never
+	// configured), an empty selection auto-binds the template-declared images so the
+	// Warehouse is healthy with zero config. Set by the API whenever an image
+	// selection is submitted; preserved across CD-only edits.
+	ImagesConfigured bool `json:"imagesConfigured,omitempty" yaml:"imagesConfigured,omitempty"`
 }
 
 // App is a deployable unit owned by a project. It combines identity metadata

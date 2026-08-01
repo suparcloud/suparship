@@ -177,7 +177,7 @@ type AppSummaryDTO struct {
 	// Environments is the per-environment status in promotion order (stable envs
 	// by Order, previews last). Mirrors AppDetailDTO.Environments.
 	Environments []AppEnvironmentSummaryDTO `json:"environments"`
-	Components    []ComponentSummaryDTO     `json:"components"`
+	Components   []ComponentSummaryDTO      `json:"components"`
 }
 
 // --- App detail (single-app view) ---
@@ -241,6 +241,12 @@ type CDConfigDTO struct {
 	// AutoPromote opts a pipeline app into automatic promotion to prod once
 	// staging is healthy (see domain.CDConfig.AutoPromote).
 	AutoPromote bool `json:"autoPromote"`
+	// ImagesConfigured reports that the user has saved a CD image selection at
+	// least once (see domain.CDConfig.ImagesConfigured). Read-only from the UI's
+	// standpoint — the server sets it whenever an image selection is submitted; it
+	// tells the Images panel that an empty selection means "watch nothing" rather
+	// than the template-inherited default.
+	ImagesConfigured bool `json:"imagesConfigured"`
 }
 
 // AppImageBindingDTO mirrors domain.AppImageBinding on the wire: a chart image

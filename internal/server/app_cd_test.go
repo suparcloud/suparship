@@ -109,6 +109,61 @@ func TestCreateApp_CDWithoutImageSourceAllowed(t *testing.T) {
 	}
 }
 
+// TestUpdateApp_ImageSelectionMarksConfigured verifies that submitting an image
+// selection — even an EMPTY one (the user disabled CD for every image) — flips
+// cd.imagesConfigured, both persisted and echoed in the DTO. That is what makes a
+// disable stick: a later publish then treats the empty selection as "watch nothing"
+// instead of auto-binding the template's declared images.
+func TestUpdateApp_ImageSelectionMarksConfigured(t *testing.T) {
+	pub := &updatePublisher{}
+	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)
+	store.addApp(promoteTestApp(testProject))
+
+	rec := patchAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		updateAppRequest{Images: &[]AppImageBindingDTO{}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp updateAppResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.App.CD.ImagesConfigured {
+		t.Errorf("response cd.imagesConfigured = false, want true")
+	}
+	got, _ := store.GetApp(context.Background(), testProject, "my-app")
+	if !got.Spec.CD.ImagesConfigured {
+		t.Errorf("persisted cd.imagesConfigured = false; empty selection must mark configured")
+	}
+}
+
+// TestUpdateApp_CDOnlyEditPreservesImagesConfigured verifies a CD-only edit
+// (toggling managed/autoPromote) does NOT reset the image-config intent. The CD DTO
+// carries no imagesConfigured, so a bare replacement would otherwise silently clear
+// it and re-enable the template auto-bind, undoing the user's disable.
+func TestUpdateApp_CDOnlyEditPreservesImagesConfigured(t *testing.T) {
+	pub := &updatePublisher{}
+	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)
+	app := promoteTestApp(testProject)
+	// Watchable source so enabling cd.managed passes validation.
+	app.Spec.Values = map[string]any{"image_repository": "ghcr.io/acme/my-app"}
+	app.Spec.CD.ImagesConfigured = true // user already configured images earlier
+	store.addApp(app)
+
+	rec := patchAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		updateAppRequest{CD: &CDConfigDTO{Managed: true}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := store.GetApp(context.Background(), testProject, "my-app")
+	if !got.Spec.CD.ImagesConfigured {
+		t.Errorf("CD-only edit reset imagesConfigured; want it preserved")
+	}
+	if !got.Spec.CD.Managed {
+		t.Errorf("cd.managed = false, want true")
+	}
+}
+
 // TestUpdateApp_CDWithoutImageSourceRejected is the update-path counterpart:
 // turning on cd.managed for an app with no watchable image must be rejected.
 func TestUpdateApp_CDWithoutImageSourceRejected(t *testing.T) {

@@ -78,11 +78,18 @@ export function groupByRepo(discovered: TemplateImage[]): RepoGroup[] {
 // (watched = repo has a saved tagKey; rule = the saved rule). When there are NO saved
 // bindings, default to inherit-from-template: declared repos are watched with their
 // inherited rule (mirrors the backend auto-bind); undeclared repos default off.
+//
+// `configured` is the app's cd.imagesConfigured — once the user has saved an image
+// selection, an EMPTY set of saved bindings is authoritative ("watch nothing"), not a
+// signal to fall back to the template defaults. So a configured app with no saved
+// binding for a declared repo shows it UNWATCHED (the user disabled it), matching the
+// backend, instead of reverting the disable on reload.
 export function seedImageRules(
   discovered: TemplateImage[],
   savedByTagKey: Record<string, { tagPattern?: string; selectionStrategy?: string }>,
+  configured = false,
 ): ImageRules {
-  const hasSaved = Object.keys(savedByTagKey).length > 0;
+  const hasSaved = configured || Object.keys(savedByTagKey).length > 0;
   const out: ImageRules = {};
   for (const g of groupByRepo(discovered)) {
     const savedImg = g.images.find((i) => savedByTagKey[i.tagKey]);

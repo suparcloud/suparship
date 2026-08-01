@@ -650,6 +650,10 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CD != nil {
 		cd := cdConfigFromDTO(req.CD)
+		// Preserve the image-config intent across a CD-only edit (managed/autoPromote
+		// toggle) — the DTO doesn't carry it, so a bare replacement would silently
+		// reset it and re-enable template auto-bind.
+		cd.ImagesConfigured = app.Spec.CD.ImagesConfigured
 		// Enabling CD-managed tag ownership requires a watchable image source (a
 		// selected image or an app image_repository); reject otherwise so we never
 		// publish a Warehouse that silently never promotes. Validate before mutating
@@ -661,6 +665,13 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		app.Spec.CD = cd
+	}
+	// A submitted image selection (either shape) means the user has explicitly
+	// reviewed CD image selection: from now on an empty selection means "watch
+	// nothing", not "auto-bind the template defaults". Set after the CD block so it
+	// survives a same-request CD replacement.
+	if req.Images != nil || req.ComponentImages != nil {
+		app.Spec.CD.ImagesConfigured = true
 	}
 	if dm := domain.DeliveryMode(strings.TrimSpace(req.DeliveryMode)); dm != "" {
 		app.Spec.DeliveryMode = dm
@@ -3523,7 +3534,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		EnvRawValues:     envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
 		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
-		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote},
+		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured},
 		Images:           appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:     string(app.Spec.DeliveryMode),
 		PreviewsEnabled:  app.Spec.PreviewsEnabled,

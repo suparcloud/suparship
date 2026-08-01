@@ -706,6 +706,12 @@ export interface CDConfig {
   managed?: boolean;
   /** Auto-promote this pipeline app to prod once staging is healthy. */
   autoPromote?: boolean;
+  /**
+   * The user has saved a CD image selection at least once (server-set, read-only
+   * here). When true, an empty selection means "watch nothing" — disabling CD for
+   * a template-declared image persists instead of reverting to the template default.
+   */
+  imagesConfigured?: boolean;
 }
 
 // ComponentResources holds raw k8s resource quantities (cpu/memory/…).

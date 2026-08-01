@@ -2138,7 +2138,11 @@ function AppValuesEditor({
     const savedTK = composedApp
       ? savedByTagKeyFromComponents(data.components ?? [])
       : savedByTagKeyFromApp(data.images);
-    const seeded = seedImageRules(discoveredImages, savedTK);
+    const seeded = seedImageRules(
+      discoveredImages,
+      savedTK,
+      data.cd?.imagesConfigured,
+    );
     const dataId = JSON.stringify([
       data.images ?? null,
       (data.components ?? []).map((c) => c.images ?? null),
@@ -2432,7 +2436,9 @@ function AppValuesEditor({
       : savedByTagKeyFromApp(data.images);
     return (
       JSON.stringify(imageRules) !==
-      JSON.stringify(seedImageRules(discoveredImages, savedTK))
+      JSON.stringify(
+        seedImageRules(discoveredImages, savedTK, data.cd?.imagesConfigured),
+      )
     );
   })();
 
