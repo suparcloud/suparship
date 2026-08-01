@@ -135,6 +135,31 @@ export function savedByTagKeyFromApp(
   return out;
 }
 
+// resolvedRuleFn returns a lookup that, for a WATCHED repo, gives its CONCRETE pull
+// rule — the user's value, else the template-inherited rule, else the platform
+// default — NEVER empty. Persisting the concrete rule makes the saved binding
+// self-contained: publish uses it verbatim (no re-derivation, so it never falls back
+// to the platform default {7} for an image whose template rule failed to re-annotate
+// at publish), and reload shows the stored rule instead of reverting to the template.
+// Returns null for an unwatched repo.
+function resolvedRuleFn(
+  discovered: TemplateImage[],
+  rules: ImageRules,
+): (repo: string) => { tagPattern: string; selectionStrategy: string } | null {
+  const inherited: Record<string, RepoGroup["inherited"]> = {};
+  for (const g of groupByRepo(discovered)) inherited[g.repository] = g.inherited;
+  return (repo) => {
+    const r = rules[repo];
+    if (!r?.watched) return null;
+    const inh = inherited[repo];
+    return {
+      tagPattern: r.tagPattern || inh?.tagPattern || DEFAULT_TAG_PATTERN,
+      selectionStrategy:
+        r.selectionStrategy || inh?.selectionStrategy || DEFAULT_SELECTION_STRATEGY,
+    };
+  };
+}
+
 // imageRulesToComponentImages fans the per-repo rules out to per-component bindings
 // (composed apps). Every component in allComponents is present (empty when nothing
 // of its is watched) so unchecking clears a prior selection. Only watched repos emit
@@ -144,13 +169,14 @@ export function imageRulesToComponentImages(
   rules: ImageRules,
   allComponents: string[],
 ): Record<string, ComponentImage[]> {
+  const resolve = resolvedRuleFn(discovered, rules);
   const out: Record<string, ComponentImage[]> = {};
   for (const name of allComponents) out[name] = [];
   for (const img of discovered) {
     const repo = img.repository?.trim();
     if (!repo || !img.component) continue;
-    const r = rules[repo];
-    if (!r?.watched) continue;
+    const r = resolve(repo);
+    if (!r) continue;
     (out[img.component] ??= []).push({
       name: img.name,
       tagKey: img.tagKey,
@@ -167,13 +193,14 @@ export function imageRulesToAppImages(
   discovered: TemplateImage[],
   rules: ImageRules,
 ): AppImageBinding[] {
+  const resolve = resolvedRuleFn(discovered, rules);
   const out: AppImageBinding[] = [];
   const seen = new Set<string>();
   for (const img of discovered) {
     const repo = img.repository?.trim();
     if (!repo) continue;
-    const r = rules[repo];
-    if (!r?.watched || seen.has(img.tagKey)) continue;
+    const r = resolve(repo);
+    if (!r || seen.has(img.tagKey)) continue;
     seen.add(img.tagKey);
     out.push({
       name: img.name,
