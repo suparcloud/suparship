@@ -870,8 +870,13 @@ func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Contex
 		discovered := server.DiscoverComponentImages(ctx, a.kubeClient, tmpl, ov, envName, c.Values, envOverlay)
 		var resolved []gitops.KargoImage
 		if len(c.Images) == 0 {
-			// No explicit selection: inherit the template-DECLARED images (auto-bind).
-			resolved = gitops.SelectDeclaredKargoImages(discovered)
+			// No explicit selection. Auto-bind the template-DECLARED images ONLY while
+			// the user hasn't configured CD — once they have, an empty selection is an
+			// explicit "watch nothing" (they disabled CD for this component's images),
+			// so leave resolved nil instead of re-binding the template defaults.
+			if !app.Spec.CD.ImagesConfigured {
+				resolved = gitops.SelectDeclaredKargoImages(discovered)
+			}
 		} else {
 			resolved = gitops.SelectKargoImages(discovered, componentImageBindings(c.Images))
 		}
@@ -931,8 +936,13 @@ func (a *gitOpsPublisherAdapter) resolveCDImages(ctx context.Context, tmpl *tpl.
 	}
 	discovered := server.DiscoverAppImages(ctx, a.kubeClient, tmpl, ov, app, env.EnvName, env.EnvType, env.Namespace, orgName, app.Spec.RawValues, envRaw)
 	if len(app.Spec.Images) == 0 {
-		// No explicit selection: inherit the template-DECLARED images (auto-bind) so
-		// the Warehouse is healthy with zero config.
+		// No explicit selection. Auto-bind the template-DECLARED images (so the
+		// Warehouse is healthy with zero config) ONLY while the user hasn't configured
+		// CD — once configured, an empty selection is an explicit "watch nothing"
+		// (they disabled CD), so return nil instead of re-binding the template defaults.
+		if app.Spec.CD.ImagesConfigured {
+			return nil
+		}
 		return gitops.SelectDeclaredKargoImages(discovered)
 	}
 	return gitops.SelectKargoImages(discovered, app.Spec.Images)
