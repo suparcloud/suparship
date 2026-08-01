@@ -182,6 +182,13 @@ func MapToHelmValuesForEnv(
 		ConfigMapName: secrets.AppConfigMapName(app.Name),
 		SecretName:    secrets.AppSecretName(app.Name),
 	}
+	// A single-component app IS its component, so ((platform.component)) resolves to
+	// that component's name — in its values AND its env vars (this app-level map backs
+	// platformVarsContext). A multi-component app-level map has no single component,
+	// so Component stays empty (the composed path sets it per component instead).
+	if len(app.Spec.Components) == 1 {
+		platform.Component = app.Spec.Components[0].Name
+	}
 	if rc := components[routingComponent]; rc != nil && rc.Ingress != nil {
 		platform.IngressClassName = rc.Ingress.ClassName
 		platform.ClusterIssuer = rc.Ingress.ClusterIssuer
@@ -270,6 +277,7 @@ func MapComponentHelmValuesForEnv(
 	orgName string,
 	orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles,
 ) HelmValues {
+	componentName := comp.Name // user-facing name, before the chart-key reassignment
 	instanceName := app.Name + "-" + comp.Name
 	if componentKey == "" {
 		componentKey = comp.Name
@@ -294,6 +302,10 @@ func MapComponentHelmValuesForEnv(
 	host := stripScheme(domain.GenerateURLWithDomain(instanceName, envName, envType, hv.Platform.BaseDomain))
 	hv.Routing.Host = host
 	hv.Platform.RoutingHost = host
+	// The component's own name, for ((platform.component)). Set last so it's the
+	// user-facing name (express-caller), overriding the chart-key value the projected
+	// single-component map above stamped in.
+	hv.Platform.Component = componentName
 	return hv
 }
 
