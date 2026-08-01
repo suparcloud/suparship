@@ -102,6 +102,12 @@ type PlatformValues struct {
 	Project string `json:"project" yaml:"project"`
 	// App is the app name.
 	App string `json:"app" yaml:"app"`
+	// Component is the component's user-facing name (e.g. "express-caller") for a
+	// composed app's per-component values, or the sole component of a single-component
+	// app. Empty for app-level contexts (a multi-component app has no single
+	// component). Exposed as ((platform.component)) so a component's chart values can
+	// reference its own name.
+	Component string `json:"component,omitempty" yaml:"component,omitempty"`
 	// Env is the environment name (e.g. "staging", "prod", "pr-42").
 	Env string `json:"env" yaml:"env"`
 	// EnvType is the environment classification ("staging", "prod", "preview").
@@ -302,4 +308,3 @@ type RoutingValues struct {
 	// Must match a key in HelmValues.Components.
 	Component string `json:"component" yaml:"component"`
 }
-

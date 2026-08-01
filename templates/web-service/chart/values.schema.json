@@ -3,38 +3,6 @@
   "additionalProperties": true,
   "description": "Generated from internal/helmvalues/values.go. Validates the publisher-injected canonical shape. Chart-specific extension fields (autoscaling, pdb, gateway, etc.) are tolerated via additionalProperties.",
   "properties": {
-    "addons": {
-      "additionalProperties": {
-        "additionalProperties": true,
-        "properties": {
-          "enabled": {
-            "type": "boolean"
-          },
-          "provider": {
-            "type": "string"
-          },
-          "secretName": {
-            "type": "string"
-          },
-          "size": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          },
-          "version": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "enabled",
-          "secretName",
-          "type"
-        ],
-        "type": "object"
-      },
-      "type": "object"
-    },
     "app": {
       "additionalProperties": true,
       "properties": {
@@ -330,6 +298,9 @@
         "clusterIssuer": {
           "type": "string"
         },
+        "component": {
+          "type": "string"
+        },
         "configMapName": {
           "type": "string"
         },
@@ -427,32 +398,6 @@
         "host"
       ],
       "type": "object"
-    },
-    "serviceClaims": {
-      "items": {
-        "additionalProperties": true,
-        "properties": {
-          "addon": {
-            "type": "string"
-          },
-          "component": {
-            "type": "string"
-          },
-          "secretName": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "addon",
-          "secretName",
-          "type"
-        ],
-        "type": "object"
-      },
-      "type": "array"
     },
     "suparship": {
       "additionalProperties": true,
