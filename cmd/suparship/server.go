@@ -851,7 +851,7 @@ func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Contex
 		if ov != nil && len(ov.PreviewDefaultValues) > 0 {
 			preview = helmvalues.DeepMerge(preview, helmvalues.DeepCopyMap(ov.PreviewDefaultValues))
 		}
-		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster, Preview: preview}
+		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster, Preview: preview, SuspendKey: tmpl.Spec.SuspendKey()}
 
 		// The component's per-env values overlay — an image repository is commonly
 		// set here (a BYO chart whose template declares no slot and whose base leaves

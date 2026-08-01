@@ -979,6 +979,15 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		// single-source pinnedTag. Preview envs are skipped above, so this is a stable
 		// env's pin.
 		pinnedTag := app.Spec.EnvironmentDefaults[env.EnvName].PinnedImageTag
+		// suspended writes each component's suspend toggle (its template's SuspendKey)
+		// to true so every workload scales down while the env stays published (no data
+		// loss, unlike undeploy). Resume clears the override, so nothing is written and
+		// the chart default (running) applies on the next republish. The composed analog
+		// of the single-source suspend in publishAppFiles.
+		suspended := false
+		if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && ov.Suspend != nil {
+			suspended = *ov.Suspend
+		}
 		if err := os.RemoveAll(p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components")); err != nil {
 			return fmt.Errorf("prune composed component values for env %s: %w", env.EnvName, err)
 		}
@@ -1118,6 +1127,19 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 				if pinnedTag != "" && len(c.Images) > 0 {
 					for _, img := range c.Images {
 						setStringAtPath(overlay, img.TagKey, pinnedTag)
+					}
+				}
+				// Suspend: toggle this component's suspend key on. Only written when
+				// suspended, so resume drops back to the chart default (running). Use the
+				// component template's own SuspendKey; fall back to the app-level key
+				// (the primary template's, defaulting to "suspend") if unset.
+				if suspended {
+					suspendKey := env.ComponentPlatformValues[c.Name].SuspendKey
+					if suspendKey == "" {
+						suspendKey = env.SuspendKey
+					}
+					if suspendKey != "" {
+						setValueAtPath(overlay, suspendKey, true)
 					}
 				}
 				// A BYO/passthrough component gets ONLY its own overlay (the chart's own
@@ -2546,6 +2568,12 @@ type ComponentPlatformValues struct {
 	// component's template — the composed analog of PreviewPublishSpec.
 	// TemplatePreviewValues. Only used on the composed preview path.
 	Preview map[string]any
+	// SuspendKey is the dotted Helm values key that toggles suspend for THIS
+	// component's chart (the component template's declared key, or the "suspend"
+	// convention default). When the env override sets Suspend=true, the composed
+	// publisher writes true here in the component's values.yaml so the workload
+	// scales down. The composed analog of AppPublishEnv.SuspendKey.
+	SuspendKey string
 }
 
 // AppPublishEnv carries per-environment publish context for PublishApp.
