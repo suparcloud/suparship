@@ -77,7 +77,7 @@ func TestDiscoverComponentImages_FromOverlay(t *testing.T) {
 			},
 		},
 	}
-	got := DiscoverComponentImages(context.Background(), nil, &tpl.Template{}, nil, "staging", overlay)
+	got := DiscoverComponentImages(context.Background(), nil, &tpl.Template{}, nil, "staging", overlay, nil)
 
 	var found bool
 	for _, img := range got {
@@ -90,5 +90,43 @@ func TestDiscoverComponentImages_FromOverlay(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected to discover components.web.image, got %+v", got)
+	}
+}
+
+// A component whose template declares no image slot and whose BASE overlay leaves
+// image.repository empty must still have its image discovered when the repository is
+// set only in the component's PER-ENV override (envOverlay) — otherwise the image is
+// dropped by DetectImageMappings and never wired to Kargo. Regression for a `web`
+// component pointing image at its own repo via its staging values.
+func TestDiscoverComponentImages_FromPerEnvOverlay(t *testing.T) {
+	base := map[string]any{
+		"components": map[string]any{
+			"web": map[string]any{
+				"image": map[string]any{"tag": "abc1234"},
+			},
+		},
+	}
+	envOverlay := map[string]any{
+		"components": map[string]any{
+			"web": map[string]any{
+				"image": map[string]any{
+					"repository": "acr.azurecr.io/biglysales-voiceai-livekit",
+				},
+			},
+		},
+	}
+	got := DiscoverComponentImages(context.Background(), nil, &tpl.Template{}, nil, "staging", base, envOverlay)
+
+	var found bool
+	for _, img := range got {
+		if img.TagKey == "components.web.image.tag" {
+			found = true
+			if img.Repository != "acr.azurecr.io/biglysales-voiceai-livekit" {
+				t.Errorf("repository = %q, want acr.azurecr.io/biglysales-voiceai-livekit", img.Repository)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("per-env image repository must be discovered, got %+v", got)
 	}
 }
