@@ -110,6 +110,14 @@ func RenderArgoAppNameTemplate(pattern, envName string) string {
 		pattern = secrets.DefaultArgoAppName
 	}
 	r := strings.NewReplacer(
+		// ArgoCD's git-file generator uses fasttemplate (plain {{param}} substitution,
+		// no conditionals), so it can't prefix-strip. {projectApp} expands to the
+		// non-deduped {{project}}-{{name}} here — this path only names the per-env
+		// "-platform" ApplicationSet (a background Application managing the app's
+		// ConfigMap/Secret); the workload Application name IS deduped (RenderArgoAppName,
+		// Go-rendered into app.yaml's {{appName}}). Nothing derives the platform name by
+		// the workload-name convention, so a longer platform name is only cosmetic.
+		"{projectApp}", "{{project}}-{{name}}",
 		"{project}", "{{project}}",
 		"{app}", "{{name}}",
 		"{cluster}", "{{clusterName}}",
