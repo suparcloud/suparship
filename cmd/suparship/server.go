@@ -853,12 +853,21 @@ func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Contex
 		}
 		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster, Preview: preview}
 
-		// Skip discovery entirely for a component with no bindings AND whose template
-		// declares no image slots — nothing to watch, so avoid the chart read.
-		if len(c.Images) == 0 && len(server.EffectiveTemplateImageSlots(tmpl, ov)) == 0 {
+		// The component's per-env values overlay — an image repository is commonly
+		// set here (a BYO chart whose template declares no slot and whose base leaves
+		// image.repository empty), so it must feed discovery or that image is never
+		// wired to Kargo.
+		envOverlay := app.Spec.EnvironmentDefaults[envName].ComponentValues[c.Name]
+		// Skip discovery only when there is genuinely nothing that could carry an
+		// image: no bindings, no template-declared slots, AND no component values
+		// (base or per-env) that could set image.repository. Skipping on the first two
+		// alone dropped value-defined images (e.g. a `web` component pointing image at
+		// its own repo via its per-env values).
+		if len(c.Images) == 0 && len(server.EffectiveTemplateImageSlots(tmpl, ov)) == 0 &&
+			len(c.Values) == 0 && len(envOverlay) == 0 {
 			continue
 		}
-		discovered := server.DiscoverComponentImages(ctx, a.kubeClient, tmpl, ov, envName, c.Values)
+		discovered := server.DiscoverComponentImages(ctx, a.kubeClient, tmpl, ov, envName, c.Values, envOverlay)
 		var resolved []gitops.KargoImage
 		if len(c.Images) == 0 {
 			// No explicit selection: inherit the template-DECLARED images (auto-bind).

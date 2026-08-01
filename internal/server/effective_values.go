@@ -341,7 +341,8 @@ func (ah *appHandler) componentDiscoveredImages(ctx context.Context, app *domain
 			continue
 		}
 		ov := loadOverride(ctx, ah.kubeClient, c.Template.Name)
-		for _, img := range DiscoverComponentImages(ctx, ah.kubeClient, t, ov, envName, c.Values) {
+		envOverlay := app.Spec.EnvironmentDefaults[envName].ComponentValues[c.Name]
+		for _, img := range DiscoverComponentImages(ctx, ah.kubeClient, t, ov, envName, c.Values, envOverlay) {
 			out = append(out, TemplateImageDTO{
 				Name:              img.Name,
 				Repository:        img.Repository,
@@ -468,15 +469,19 @@ func annotateDeclaredImages(discovered, slots []tpl.TemplateImage) []tpl.Templat
 
 // DiscoverComponentImages returns the container images present in ONE composed
 // component's effective Helm values: its template's chart defaults ⊕ the
-// template/org value overlays ⊕ the component's own Values overlay. No canonical
-// base is layered — for a composed component the platform base carries no image
-// (each component's repository lives in its own overlay), so chart defaults ⊕
-// overlay is the exact discovery surface, and it needs no app/env cluster context.
-// This is the per-component counterpart of DiscoverAppImages, powering both the
-// publish-time Warehouse resolution and the UI's per-component image checklist.
-func DiscoverComponentImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Template, ov *domain.TemplateOverride, envName string, overlay map[string]any) []tpl.TemplateImage {
+// template/org value overlays ⊕ the component's base Values overlay ⊕ its per-env
+// override (envOverlay). No canonical base is layered — for a composed component the
+// platform base carries no image (each component's repository lives in its own
+// overlay), so chart defaults ⊕ overlays is the exact discovery surface. The per-env
+// overlay MUST be included: a component whose image repository is set per env (the
+// common case for a BYO chart whose template declares no image slot and whose base
+// leaves image.repository empty) would otherwise discover a repository-less image and
+// be dropped by DetectImageMappings — so it never gets wired to Kargo. This is the
+// per-component counterpart of DiscoverAppImages, powering both the publish-time
+// Warehouse resolution and the UI's per-component image checklist.
+func DiscoverComponentImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Template, ov *domain.TemplateOverride, envName string, overlay, envOverlay map[string]any) []tpl.TemplateImage {
 	chartVals, _ := chartDefaults(ctx, kc, t)
-	values := computeEffectiveValues(chartVals, nil, t, ov, envName, "", overlay, nil)
+	values := computeEffectiveValues(chartVals, nil, t, ov, envName, "", overlay, envOverlay)
 	return annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))
 }
 
