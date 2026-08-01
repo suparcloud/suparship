@@ -368,11 +368,22 @@ export function ComposeComponents({
     if (!c) return;
     update(i, { envVars: [...c.envVars, { name: "", value: "" }] });
   }
-  // When the picked template changes, re-default the type/expose.
+  // When the picked template changes, re-default the type/expose AND reset the
+  // component's values/image state: the previous chart's per-env overrides, base
+  // overlay, and image bindings targeted a different schema, so clearing them lets
+  // the editor re-seed from the NEW template's platform base (otherwise the seed
+  // effect's "untouched" guard keeps the buffer stuck on the first template's base).
   function onTemplateChange(i: number, name: string) {
+    const reset: Partial<ComponentDraft> = {
+      values: {},
+      envValues: {},
+      envValuesText: {},
+      envValuesError: {},
+      images: [],
+    };
     const tmpl = templates.find((t) => t.name === name);
     if (!tmpl) {
-      update(i, { template: name });
+      update(i, { template: name, ...reset });
       return;
     }
     const type = categoryToType(tmpl.category);
@@ -380,6 +391,7 @@ export function ComposeComponents({
       template: name,
       type,
       exposeMode: type === "web" ? components[i]?.exposeMode || "external" : "disabled",
+      ...reset,
     });
   }
 
