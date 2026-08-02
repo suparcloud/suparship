@@ -79,10 +79,37 @@ helm_resource(
     flags=['--create-namespace', '--version=2.37.6', '--wait'],
     resource_deps=['argo'], labels=['prereq'],
 )
+# Kargo dev profile: a usable UI.
+#
+# The chart defaults to TLS-on + no admin account, which locally gives you a
+# self-signed cert warning followed by a login screen you cannot get past.
+# suparship itself is unaffected either way — it drives Kargo through the
+# Kubernetes API (CRDs via the dynamic client), never Kargo's REST API — so
+# these two settings only govern whether a human can use the UI.
+#
+#   api.tls.enabled=false      plain HTTP over the port-forward, no cert warning.
+#                              cert-manager is still required and still used:
+#                              Kargo's webhook servers keep their Certificates.
+#   api.adminAccount.*         login admin / devpass. The hash is a FIXED dev
+#                              bcrypt of "devpass" — hardcoded on purpose, since
+#                              generating one per Tiltfile load would change the
+#                              Helm value every reload and churn the release.
+#                              htpasswd emits $2y$, which Go's bcrypt rejects, so
+#                              this is stored rewritten to the byte-compatible
+#                              $2a$ (same fix as hack/dev/admin-secret.sh).
+#
+# Dev-only credentials, never reachable off localhost. Override the password by
+# regenerating the hash:
+#   htpasswd -nbBC 10 "" <pw> | cut -d: -f2 | sed 's/^\$2y\$/\$2a\$/'
+KARGO_ADMIN_PASSWORD_HASH = '$2a$10$6NDmBYvv6UZvUOERfebonupDuqNVUr8Y5Tj6pgYwODQcaXsYttaJq'
 helm_resource(
     'kargo', 'oci://ghcr.io/akuity/kargo-charts/kargo', namespace='kargo',
     flags=['--create-namespace', '--version=1.9.5',
-           '--set=api.adminAccount.enabled=false', '--wait', '--timeout=10m0s'],
+           '--set=api.tls.enabled=false',
+           '--set=api.adminAccount.enabled=true',
+           '--set=api.adminAccount.passwordHash=' + KARGO_ADMIN_PASSWORD_HASH,
+           '--set=api.adminAccount.tokenSigningKey=suparship-dev-only-kargo-signing-key',
+           '--wait', '--timeout=10m0s'],
     resource_deps=['cert-manager', 'argo-rollouts'],
     labels=['prereq'],
 )
@@ -97,13 +124,22 @@ helm_resource(
 # even though every Deployment is 1/1.
 #
 # Forward the API Deployment explicitly instead of relying on pod discovery.
-# The pod serves TLS on 8080 despite the container port being named `h2c`, so
-# the URL is https and the cert is self-signed.
+# Plain http because api.tls.enabled=false above; the container port is named
+# `h2c`, which is accurate once TLS is off (with TLS on it still served https,
+# which is a trap worth knowing if you ever re-enable it).
+#
+# Wrapped in a retry loop on purpose: `kubectl port-forward` binds to one pod
+# and exits the moment that pod goes away — which happens on every `helm
+# upgrade` of the kargo release, i.e. every time you touch its flags above.
+# Without the loop the resource lands in `error` and 8083 simply stops
+# listening until you notice and re-trigger it by hand.
 local_resource(
     'kargo-api-forward',
-    serve_cmd='kubectl --context %s -n kargo port-forward deploy/kargo-api 8083:8080' % EXPECTED_CONTEXT,
+    serve_cmd=('while true; do ' +
+               'kubectl --context %s -n kargo port-forward deploy/kargo-api 8083:8080; ' % EXPECTED_CONTEXT +
+               'echo "port-forward dropped (pod replaced?) — reconnecting in 2s"; sleep 2; done'),
     resource_deps=['kargo'],
-    links=[link('https://localhost:8083', 'Kargo UI (self-signed cert)')],
+    links=[link('http://localhost:8083', 'Kargo UI (admin / devpass)')],
     labels=['prereq'],
 )
 

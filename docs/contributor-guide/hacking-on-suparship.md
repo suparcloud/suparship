@@ -56,7 +56,7 @@ When everything is green:
 | Tilt UI | <http://localhost:10350> | — |
 | ArgoCD | <http://localhost:8081> | `admin` / (see below) |
 | Gitea | <http://localhost:3000> | `gitops` / `gitops-dev-only` |
-| Kargo API | <https://localhost:8083> | — |
+| Kargo UI / API | <http://localhost:8083> | `admin` / `devpass` |
 
 > ArgoCD admin password:
 > `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`
