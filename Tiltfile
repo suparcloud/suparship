@@ -296,8 +296,11 @@ k8s_resource(
 )
 
 # ── Seed demo data (org / project / preview + demo AppProject) ─────────────
+# SUPARSHIP_MULTI tells the seed to skip the placeholder cluster records, so no
+# app is ever published against a cluster that is about to be deleted — see the
+# note in hack/seed.sh.
 local_resource(
-    'seed', cmd='hack/seed.sh',
+    'seed', cmd='SUPARSHIP_MULTI=%s hack/seed.sh' % ('1' if MULTI else '0'),
     resource_deps=['namespaces', 'argocd'], labels=['app'],
 )
 
