@@ -58,6 +58,10 @@ tasks:
       - hack/preflight.sh tilt
       - ctlptl apply -f hack/dev/cluster.yaml
       - ctlptl apply -f hack/dev/clusters-workload.yaml
+      # ctlptl points the current context at whatever it created LAST, which
+      # here is a workload cluster — and the Tiltfile refuses to load unless the
+      # context is the tooling cluster. Switch back explicitly.
+      - kubectl config use-context kind-suparship-dev
       - tilt up -- --multi
 
   down:
