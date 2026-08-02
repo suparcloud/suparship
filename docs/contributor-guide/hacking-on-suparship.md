@@ -147,11 +147,55 @@ task charts:lint  # helm lint the library + template charts
   Re-trigger the resource.
 - **`exec format error` in the suparship pod** — the dev image was built for the
   wrong arch. It builds natively for the kind node; don't override `GOARCH`.
-- **Can't log in** — the dev admin Secret is created by the `suparship-admin-secret`
-  resource (`admin` / `devpass`, or `$SUPARSHIP_DEV_PASSWORD`). Re-trigger it if needed.
+- **Can't log in to suparShip** — cluster mode is `admin` / `devpass`, *not* the
+  `admin@local` / `admin123` pair sitting in your `.env`. Those two env vars are
+  read only in fake mode; against a real cluster the server authenticates
+  against the Secret `suparship-system/suparship-admin-auth`, created by the
+  `suparship-admin-secret` resource (override with `$SUPARSHIP_DEV_PASSWORD`).
+  See [config/dev/README.md](../../config/dev/README.md).
+- **Can't log in to Kargo** — <http://localhost:8083>, `admin` / `devpass`. Note
+  it is **http**: the Tiltfile sets `api.tls.enabled=false` so there's no
+  self-signed cert prompt. If you re-enable TLS, be aware the container port is
+  named `h2c` but serves https.
 - **Frontend can't reach the API** — make sure the `suparship` resource is green
   (its port-forward on `:8080` is what Vite proxies to).
+- **A resource is green but its port is dead** — a Tilt resource binds to the
+  *newest* pod matching the release, so a `Completed` Job/CronJob pod can
+  silently take over a resource that also owns long-running Deployments. Tilt
+  keeps reporting it healthy (the job did succeed) while its port-forward points
+  at a dead pod: the port accepts connections and proxies nowhere, so every
+  request fails at the transport layer rather than returning an HTTP error.
+  Check what Tilt actually attached to:
+
+  ```bash
+  tilt get uiresource <name> -o json | jq '.status.k8sResourceInfo | {podName, podStatus}'
+  ```
+
+  If `podStatus` is `Completed` **and that resource owns a port**, that's the
+  bug — forward the Deployment explicitly instead of relying on pod discovery
+  (see `kargo-api-forward` in the `Tiltfile` for the pattern, including the
+  retry loop that survives the pod being replaced by a `helm upgrade`).
+
+  Expect the `kargo` resource itself to keep reporting `Completed` — its hourly
+  garbage-collector CronJob wins pod attribution and always will. That is
+  harmless now precisely *because* the port lives on `kargo-api-forward`
+  instead. Nothing to fix there.
 - **Start over** — `task down && task cluster:delete && task up`.
+
+### Safety: this loop cannot touch a real cluster
+
+Contributors often carry production contexts in their kubeconfig, so the dev
+loop is pinned in two independent places:
+
+- The `Tiltfile` refuses to load unless `k8s_context()` is `kind-suparship-dev`,
+  and aborts with a non-zero exit.
+- Tilt cannot police the shell scripts it invokes via `local_resource`, so those
+  source [`hack/dev/lib.sh`](../../hack/dev/lib.sh), which shadows `kubectl` and
+  `helm` with functions that always pass `--context kind-suparship-dev`, and
+  fails fast if that context is missing. Override with `DEV_KUBE_CONTEXT`.
+
+`tilt up` may leave your *current* context set to `kind-suparship-dev`. Check
+before running ad-hoc `kubectl` against something you assume is elsewhere.
 
 ---
 
@@ -161,7 +205,7 @@ task charts:lint  # helm lint the library + template charts
 task up
  └─ ctlptl ──────────► kind cluster "suparship-dev" + registry localhost:5001
  └─ tilt up ─► Tiltfile
-      ├─ helm_resource: cert-manager → argo-rollouts → kargo
+      ├─ helm_resource: cert-manager → argo-rollouts → kargo → kargo-api-forward
       ├─ helm_resource: external-secrets → eso-reader (RBAC + ClusterSecretStore)
       ├─ helm_resource: kubernetes-replicator, reloader
       ├─ helm_resource: argocd, gitea → init-gitops (repo skeleton + root App-of-Apps)
@@ -174,3 +218,22 @@ task up
 Chart/version pins live in the `Tiltfile`; the dev image is `Dockerfile.dev`;
 cluster + registry are `hack/dev/cluster.yaml`; dev chart overrides are
 `hack/dev/values-dev.yaml`.
+
+### Why prerequisites are `helm_resource` blocks, not a Helm umbrella chart
+
+The obvious alternative — one chart that installs suparShip *and* its
+dependencies — was tried and rejected. Two Helm limitations rule it out:
+
+1. **Subcharts get no namespace of their own.** Everything lands in the release
+   namespace, and Kargo and Gitea expose no `namespaceOverride` (argo-cd does).
+2. **Kargo creates cert-manager `Certificate`/`Issuer` CRs at install time**,
+   which need cert-manager's webhook *running* to be admitted. Helm does not
+   wait mid-release, so a single umbrella release races and fails
+   intermittently. Kargo's own docs install cert-manager beforehand.
+
+`resource_deps` expresses exactly what Helm cannot — the parsed graph shows
+`kargo deps=[cert-manager, argo-rollouts]`. So `charts/suparship` stays an
+app-only chart (its `Chart.yaml` records the same reasoning), and each
+prerequisite is declared once in the `Tiltfile` with its own namespace, a pinned
+version and explicit ordering. To bump a version, edit the `Tiltfile` — there is
+no second place to keep in sync.
