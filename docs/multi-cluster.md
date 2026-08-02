@@ -93,19 +93,21 @@ cluster. One cluster can serve multiple environments (shared cluster), or each
 environment can have its own dedicated cluster.
 
 ```yaml
-# config/seed/project-demo.yaml
+# config/seed/org.yaml — environments are org-level; projects inherit them
 environments:
   - name: staging
     displayName: Staging
     order: 1
-    clusterRef: staging-cluster    # registered cluster name
+    clusterRefs: [staging-cluster]  # registered cluster name(s)
+    activeClusterRef: staging-cluster  # which one receives deploys
     baseDomain: staging.acme.com   # ingress base domain for this env
     namespacePattern: "{app}"      # see Namespace Patterns below
 
   - name: prod
     displayName: Production
     order: 2
-    clusterRef: prod-cluster
+    clusterRefs: [prod-cluster]
+    activeClusterRef: prod-cluster
     baseDomain: prod.acme.com
     namespacePattern: "{app}"
 ```

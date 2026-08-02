@@ -30,10 +30,15 @@ if k8s_context() != EXPECTED_CONTEXT:
           "Create/select the dev cluster first:  ctlptl apply -f hack/dev/cluster.yaml  (or run `task up`).")
          % (k8s_context(), EXPECTED_CONTEXT))
 
-# ── Config: optional ingress + *.localhost routing ─────────────────────────
+# ── Config: optional ingress + *.localhost routing, optional workload clusters ─
 config.define_bool('ingress')
+config.define_bool('multi')
 cfg = config.parse()
 INGRESS = cfg.get('ingress', False) or os.getenv('SUPARSHIP_INGRESS') == '1'
+# MULTI adds two kind WORKLOAD clusters (kind-staging, kind-prod) and rebinds the
+# seeded environments onto them, so the tooling/workload split is real. Off by
+# default: it costs a couple of GiB, and nothing about UI or API work needs it.
+MULTI = cfg.get('multi', False) or os.getenv('SUPARSHIP_MULTI') == '1'
 
 # Host-reachable Gitea URL the init script clones from.
 GITEA_HOST_URL = 'http://gitea.localhost:8880' if INGRESS else 'http://localhost:3000'
@@ -254,6 +259,26 @@ local_resource(
     'seed', cmd='hack/seed.sh',
     resource_deps=['namespaces', 'argocd'], labels=['app'],
 )
+
+# ── Optional: real workload clusters (`task up:multi`) ─────────────────────
+# Makes the tooling/workload split genuine. Each workload cluster gets ESO +
+# sealed-secrets and is registered with suparship, which writes its kubeconfig
+# Secret AND its ArgoCD cluster Secret — the pieces a single-cluster loop can
+# never exercise. Registration needs the API up, hence the dep on `suparship`;
+# `seed` must land first so seed-multi rewrites the org rather than racing it.
+if MULTI:
+    for wl in [('staging', 'Staging'), ('prod', 'Production')]:
+        local_resource(
+            'workload-%s' % wl[0],
+            cmd='hack/dev/workload-cluster.sh %s %s' % (wl[0], wl[1]),
+            resource_deps=['suparship', 'seed'],
+            labels=['cluster'],
+        )
+    local_resource(
+        'seed-multi', cmd='hack/dev/seed-multi.sh',
+        resource_deps=['workload-staging', 'workload-prod'],
+        labels=['cluster'],
+    )
 
 # ── Frontend ───────────────────────────────────────────────────────────────
 # Primary loop: host Vite HMR proxying /api -> port-forwarded pod :8080.

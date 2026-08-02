@@ -373,12 +373,14 @@ environments:
   - name: staging
     displayName: Staging
     order: 1
-    clusterRef: in-cluster        # registered cluster name
+    clusterRefs: [in-cluster]     # registered cluster name(s)
+    activeClusterRef: in-cluster  # which one receives deploys
     baseDomain: staging.example.com
   - name: prod
     displayName: Production
     order: 2
-    clusterRef: prod-cluster      # empty = not yet bound to a cluster
+    clusterRefs: [prod-cluster]   # empty/omitted = env is UNBOUND, nothing deploys
+    activeClusterRef: prod-cluster
     baseDomain: prod.example.com
 teams:
   - name: admins
