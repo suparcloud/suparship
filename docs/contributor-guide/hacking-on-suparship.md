@@ -110,6 +110,54 @@ needs `*.localhost` to resolve to `127.0.0.1` — see [docs/local-dns.md](../loc
 
 ---
 
+## Optional: real multi-cluster (`task up:multi`)
+
+By default everything runs on one kind cluster wearing three hats — tooling,
+staging and prod. `config/seed/clusters.yaml` registers two cluster records that
+both point at `https://kubernetes.default.svc`. That is fine for most work, but
+it is fiction, and some behaviour genuinely cannot be exercised that way.
+
+```bash
+task up:multi     # tooling cluster + kind-staging + kind-prod
+```
+
+This adds two **workload** clusters running only External Secrets and
+sealed-secrets, registers each with suparship (writing its kubeconfig Secret and
+its ArgoCD cluster Secret), and rebinds the seeded environments onto them. The
+tooling cluster keeps suparship, ArgoCD, Kargo, Gitea and the registry — the
+split [docs/install.md](../install.md) prescribes. Measured cost is about
+**+2 GiB** of RAM — roughly 1 GiB per workload cluster, against ~2.5 GiB for the
+tooling cluster — which is why it is opt-in; plain `task up` is unchanged.
+
+Namespaces switch from `{app}-{env}` to `{app}` in this mode, because the cluster
+boundary now provides the isolation the `-{env}` suffix was compensating for.
+
+**What this unlocks that one cluster cannot reach:**
+
+- kubeconfig registration and the `suparship-cluster-kubeconfig-*` Secret
+- ArgoCD remote cluster Secrets and a non-in-cluster `destination.server`
+- `deployMode: all` fan-out producing one Application per cluster, with
+  per-cluster values under `_clusters/<cluster>/`
+- cross-cluster pod-log streaming through `internal/k8s/cluster_pool.go`, which
+  has no kubeconfig to work with in single-cluster mode
+- the acceptance scenarios in [docs/acceptance.md](../acceptance.md), which
+  require "at least one **remote** workload cluster … not in-cluster"
+
+**What it does *not* change: promotion.** Kargo promotion is a git operation —
+`git-clone → yaml-update → git-commit → git-push → argocd-update`. It never
+touches a workload cluster, so it is already fully testable on one cluster. What
+differs here is only where the resulting Application lands.
+
+> **Known gap.** The `k8s` secret backend is hub-only: `_infra/secret-stores/`
+> syncs to the tooling cluster, so a remote workload cluster never receives its
+> `suparship-store-*` and app ExternalSecrets there will dangle. The 1Password
+> backend does publish per-cluster stores. Surfacing this is part of the point of
+> running multi-cluster locally.
+
+Tear-down removes all three: `task cluster:delete`.
+
+---
+
 ## No-cluster fast mode
 
 For UI/API work that doesn't need a real cluster, the in-memory **fake mode**

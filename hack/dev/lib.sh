@@ -27,7 +27,16 @@ helm() { command helm --kube-context "$DEV_KUBE_CONTEXT" "$@"; }
 # require_dev_context fails fast with an actionable message when the dev
 # cluster is missing, rather than letting kubectl emit a raw context error.
 require_dev_context() {
-  if ! command kubectl config get-contexts -o name 2>/dev/null | grep -qx "$DEV_KUBE_CONTEXT"; then
+  # Capture first, then match. Piping into `grep -q` under `set -o pipefail` is
+  # racy: grep exits on the first match and closes the pipe, and if kubectl has
+  # not finished writing it dies of SIGPIPE — so pipefail reports the pipeline as
+  # FAILED even though the context matched. Whether it happens depends on how
+  # much fits in the pipe buffer, i.e. on how many contexts you have and where
+  # the match falls, which makes it an intermittent "context not found" on an
+  # otherwise healthy machine.
+  local contexts
+  contexts="$(command kubectl config get-contexts -o name 2>/dev/null || true)"
+  if ! grep -qx "$DEV_KUBE_CONTEXT" <<<"$contexts"; then
     printf "  \033[0;31mERROR:\033[0m kube context %s not found.\n" "$DEV_KUBE_CONTEXT" >&2
     printf "         Create the dev cluster first:  task up   (or: ctlptl apply -f hack/dev/cluster.yaml)\n" >&2
     exit 1

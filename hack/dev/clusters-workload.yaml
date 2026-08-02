@@ -1,0 +1,40 @@
+# ctlptl workload clusters for the OPT-IN multi-cluster dev loop (`task up:multi`).
+#
+# `hack/dev/cluster.yaml` defines the TOOLING cluster (suparship, ArgoCD, Kargo,
+# Gitea, the registry). These two are workload clusters: they run only External
+# Secrets + sealed-secrets, and receive apps from ArgoCD on the tooling cluster.
+# That is the split docs/install.md prescribes.
+#
+# Why bother, given promotion already works on one cluster: Kargo promotion is a
+# git operation, so it never needed a second cluster. What does need real
+# clusters is everything that depends on a distinct API endpoint — kubeconfig
+# registration, ArgoCD remote destinations, per-cluster value overrides,
+# deployMode:all fan-out, cross-cluster pod-log streaming, and the `{app}`
+# namespace pattern that only makes sense when a cluster boundary isolates.
+#
+# Apply:   ctlptl apply  -f hack/dev/clusters-workload.yaml   (via `task up:multi`)
+# Delete:  ctlptl delete -f hack/dev/clusters-workload.yaml   (`task cluster:delete`)
+#
+# Cluster "staging" -> context "kind-staging"; "prod" -> "kind-prod".
+---
+apiVersion: ctlptl.dev/v1alpha1
+kind: Cluster
+product: kind
+# Same registry as the tooling cluster. REQUIRED, not cosmetic: app images are
+# built and pushed to localhost:5001, and these are the nodes that pull them.
+registry: kind-registry
+kindV1Alpha4Cluster:
+  name: staging
+  nodes:
+    # No extraPortMappings — host ports 8880/8443 belong to the tooling cluster.
+    # Reach workload services with a port-forward.
+    - role: control-plane
+---
+apiVersion: ctlptl.dev/v1alpha1
+kind: Cluster
+product: kind
+registry: kind-registry
+kindV1Alpha4Cluster:
+  name: prod
+  nodes:
+    - role: control-plane
