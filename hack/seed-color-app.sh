@@ -2,9 +2,9 @@
 # hack/seed-color-app.sh — create the color-app demo via the suparship API.
 #
 # Prerequisites:
-#   1. Dev cluster running:           task dev:cluster
+#   1. Dev cluster running:           task up
 #   2. color-app image pushed:        task demo:color-app:push VERSION=0.1.0
-#   3. suparship server running:      task dev:cluster:serve   (in another terminal)
+#   3. suparship server running:      task up   (in another terminal)
 #
 # Admin credentials are auto-bootstrapped if not already present. The
 # generated password is persisted to .env.cluster for subsequent runs.
@@ -15,7 +15,7 @@
 #
 # Usage:
 #   ./hack/seed-color-app.sh         # run directly
-#   task dev:cluster:seed-color-app   # preferred: via Taskfile
+#   task demo:color-app:seed   # preferred: via Taskfile
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
