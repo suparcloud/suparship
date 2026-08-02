@@ -23,17 +23,13 @@ set -euo pipefail
 
 NAME="${1:?usage: workload-cluster.sh <name> [displayName]}"
 DISPLAY="${2:-$NAME}"
-CTX="kind-${NAME}"
-
-# Pin the TOOLING-cluster kubectl to the dev context — see hack/dev/lib.sh.
-# Calls against the workload cluster pass --context "$CTX" explicitly.
+# Pin kubectl/helm to the TOOLING cluster — see hack/dev/lib.sh. Calls against
+# the WORKLOAD cluster go through its own kubeconfig instead (built below).
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 require_dev_context
 
-# NOTE: `command helm`, not the shadowed helm() from lib.sh. That function injects
-# --kube-context for the TOOLING cluster; adding our own would pass the flag twice
-# and leave which cluster we hit up to the flag parser. These calls target the
-# WORKLOAD cluster, so bypass the shadow and be explicit.
+# `command helm` bypasses the helm() shadow from lib.sh, which would inject the
+# tooling cluster's --kube-context alongside our --kubeconfig.
 # Versions: ESO matches the tooling cluster's pin in the Tiltfile.
 ESO_VERSION="2.2.0"
 SEALED_SECRETS_VERSION="2.18.6"
@@ -46,24 +42,36 @@ info() { printf "  \033[0;36m%s\033[0m\n" "$*"; }
 ok()   { printf "  \033[0;32m✓\033[0m  %s\n" "$*"; }
 die()  { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
-# Capture before matching — see the note in lib.sh: `| grep -q` under pipefail
-# intermittently reports a match as a failure via SIGPIPE.
-CONTEXTS="$(command kubectl config get-contexts -o name 2>/dev/null || true)"
-grep -qx "$CTX" <<<"$CONTEXTS" \
-  || die "context $CTX not found. Run: task up:multi"
+# Talk to the workload cluster through a STANDALONE kubeconfig from kind, not
+# through a context in the ambient one.
+#
+# Tilt hands each local_resource a minimal kubeconfig containing only its own
+# context (kind-suparship-dev) — a sensible guardrail, but it means the workload
+# contexts are invisible here even though they exist in your shell. Looking them
+# up by context name works when you run this script by hand and fails every time
+# under Tilt, which is exactly the sort of gap a from-scratch run exposes.
+#
+# kind is the source of truth for a kind cluster's credentials, so ask it.
+kind get clusters 2>/dev/null | grep -qx "$NAME" \
+  || die "kind cluster $NAME not found. Run: task up:multi"
+
+WORKLOAD_KUBECONFIG="$(mktemp -t suparship-wl-XXXXXX)"
+trap 'rm -f "$WORKLOAD_KUBECONFIG"' EXIT
+kind get kubeconfig --name "$NAME" > "$WORKLOAD_KUBECONFIG" 2>/dev/null
+[ -s "$WORKLOAD_KUBECONFIG" ] || die "could not export kubeconfig for kind cluster $NAME"
 
 # ── 1. Workload-cluster prerequisites ─────────────────────────────────────
 info "[$NAME] installing External Secrets + sealed-secrets"
-command helm --kube-context "$CTX" repo add eso https://charts.external-secrets.io >/dev/null 2>&1 || true
-command helm --kube-context "$CTX" repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets >/dev/null 2>&1 || true
-command helm --kube-context "$CTX" repo update eso sealed-secrets >/dev/null 2>&1 || true
+command helm --kubeconfig "$WORKLOAD_KUBECONFIG" repo add eso https://charts.external-secrets.io >/dev/null 2>&1 || true
+command helm --kubeconfig "$WORKLOAD_KUBECONFIG" repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets >/dev/null 2>&1 || true
+command helm --kubeconfig "$WORKLOAD_KUBECONFIG" repo update eso sealed-secrets >/dev/null 2>&1 || true
 
-command helm --kube-context "$CTX" upgrade --install external-secrets eso/external-secrets \
+command helm --kubeconfig "$WORKLOAD_KUBECONFIG" upgrade --install external-secrets eso/external-secrets \
   --namespace external-secrets --create-namespace \
   --version "$ESO_VERSION" --set installCRDs=true --wait --timeout 5m >/dev/null
 ok "[$NAME] external-secrets $ESO_VERSION"
 
-command helm --kube-context "$CTX" upgrade --install sealed-secrets sealed-secrets/sealed-secrets \
+command helm --kubeconfig "$WORKLOAD_KUBECONFIG" upgrade --install sealed-secrets sealed-secrets/sealed-secrets \
   --namespace kube-system \
   --version "$SEALED_SECRETS_VERSION" \
   --set fullnameOverride=sealed-secrets-controller \
