@@ -21,6 +21,12 @@ type templateMetadataPatch struct {
 	// (external-CD wiring). Only honored for editable (imported) templates; send
 	// an empty array to clear it. Read-only/synced templates reject it.
 	Images *[]TemplateImageDTO `json:"images,omitempty"`
+	// DeveloperValues, when non-nil, replaces the developer-facing values
+	// projection (which Helm value paths the app-creation editor exposes). Send an
+	// empty array to clear it, reverting to full-base seeding. Like Images this is
+	// curation rather than source chart content, so it is honored for read-only
+	// synced/built-in templates too — stored sync-safe.
+	DeveloperValues *[]ValueFieldDTO `json:"developerValues,omitempty"`
 	// DeliveryMode, when non-nil, sets the template's default app delivery mode:
 	// "pipeline" (Kargo + promotion) or "direct" (deploy each env from values, no
 	// Kargo); "" reverts to the default (pipeline). Only honored for editable
@@ -100,6 +106,9 @@ func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r
 	}
 	if patch.Images != nil {
 		updated.Spec.Images = imagesFromDTO(*patch.Images)
+	}
+	if patch.DeveloperValues != nil {
+		updated.Spec.DeveloperValues = developerValuesFromDTO(*patch.DeveloperValues)
 	}
 	if patch.DeliveryMode != nil {
 		mode := strings.TrimSpace(*patch.DeliveryMode)
@@ -203,6 +212,18 @@ func (th *templateHandler) updateMetadataViaOverride(
 		}
 		ov.Images = imagesToOverride(*patch.Images)
 	}
+	// The developer-values projection is sync-safe curation for the same reason:
+	// it decides which values the app editor shows, not what the chart renders.
+	// Validate by applying the proposed list to a copy of the template.
+	if patch.DeveloperValues != nil {
+		check := *t
+		check.Spec.DeveloperValues = developerValuesFromDTO(*patch.DeveloperValues)
+		if err := check.Validate(); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		ov.DeveloperValues = developerValuesToOverride(*patch.DeveloperValues)
+	}
 	// Delivery mode is a sync-safe override too: it sets how apps from this
 	// template deliver (pipeline vs direct), not source chart content.
 	if patch.DeliveryMode != nil {
@@ -221,6 +242,9 @@ func (th *templateHandler) updateMetadataViaOverride(
 	dto.Title, dto.Category, dto.Description = applyMetadataOverride(dto.Title, dto.Category, dto.Description, ov.Metadata)
 	if len(ov.Images) > 0 {
 		dto.Images = imagesOverrideToDTO(ov.Images)
+	}
+	if len(ov.DeveloperValues) > 0 {
+		dto.DeveloperValues = developerValuesOverrideToDTO(ov.DeveloperValues)
 	}
 	if ov.DeliveryMode != "" {
 		dto.DeliveryMode = ov.DeliveryMode

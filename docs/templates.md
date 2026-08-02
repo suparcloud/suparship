@@ -175,12 +175,66 @@ spec:
   engine:
     type: helm               # only "helm" is supported in MVP
     chart: ./chart           # path relative to the template directory
-  inputs: [...]              # curated user-facing parameters
-  advancedInputs: [...]      # shown in an "Advanced" accordion (optional)
+  components: [...]          # named runtime units (optional; see templates-components.md)
+  # Platform-Engineer-authored Helm values overlays, layered below the
+  # developer's own overrides. Free-form; string leaves may use
+  # ((platform.*)) / ((vars.*)) tokens resolved at publish.
+  defaultValues: {...}       # applies to every environment
+  envValues: {...}           # per environment name, after defaultValues
+  previewDefaultValues: {...}  # previews only
+  developerValues: [...]     # the values projection a developer sees + edits
+  images: [...]              # declared image slots for external-CD (Kargo) wiring
+  injectCanonicalValues: <bool>  # false = passthrough/BYO chart
+  deliveryMode: <string>     # pipeline (default) | direct
   secretInputs: [...]        # secret-reference parameters (no literal values)
-  mappings: {...}            # input name → Helm value path expression
-  presets: [...]             # named shortcut value sets (optional)
+  inputs: [...]              # RETIRED — superseded by developerValues
+  advancedInputs: [...]      # RETIRED
+  mappings: {...}            # RETIRED
+  presets: [...]             # RETIRED
 ```
+
+Org platform engineers can layer their own `defaultValues` / `envValues` /
+`clusterValues` / `previewDefaultValues` on top of a template without forking it,
+via `PUT /api/v1/templates/{name}/overrides`. Those are stored separately from the
+template, so an external sync can't clobber them. `clusterValues` (keyed by cluster
+ref) exists only at that org level, not in `template.yaml`.
+
+### `developerValues` — the values projection
+
+A chart plus its platform overlays can carry far more than a developer should have
+to read. `developerValues` declares the small, ordered subset that is theirs:
+
+```yaml
+  developerValues:
+    - path: components.web.image.repository   # dotted Helm values path
+      title: Image Repository
+      type: string                            # string | number | boolean | enum
+      required: true
+      description: Container image, e.g. ghcr.io/org/app
+    - path: components.web.resources.size
+      title: Resource Size
+      type: enum
+      options: [small, medium, large]
+```
+
+The app-creation editor seeds from exactly these paths, prefilled with each key's
+current effective value. **Required** entries (and any whose effective value is
+empty) are seeded live; the rest are seeded **commented out** showing what they
+inherit. Only what the developer actually writes is saved, so an untouched key keeps
+tracking the chart/platform default rather than being frozen into the app.
+
+Declaring none keeps the previous behaviour: the editor seeds from the full platform
+base.
+
+This is a **view, not a permission boundary** — the editor offers a "Show all
+platform values" escape hatch and the API still accepts any key.
+
+Operators can curate the projection for a read-only synced/built-in template with
+`PATCH /api/v1/templates/{name}` (`developerValues`); it is stored sync-safe and
+REPLACES the template's own list.
+
+`path` is dotted, so it cannot express a key containing a dot — the same constraint
+`images[].tagKey` carries. A path resolving to a map projects that whole subtree.
 
 ### Validation rules enforced at load time
 
@@ -188,6 +242,9 @@ spec:
 - `kind` must be `Template`
 - `metadata.name` and `metadata.version` are required
 - `spec.title`, `spec.category`, and `spec.engine.type` are required
+- `developerValues[].path` is required and unique; an `enum` entry needs at least
+  one `options` entry; `min` must not exceed `max`; `pattern` must compile
+- `images[]` entries need `name`, `repository`, and `tagKey`; names are unique
 - Input names must be unique across `inputs` and `advancedInputs`
 - `enum` inputs must have at least one `options` entry
 - `secretRef` fields must be in `secret-name.key` format

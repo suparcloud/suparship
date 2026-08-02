@@ -149,6 +149,15 @@ type TemplateSpec struct {
 	// templates that don't opt into image-driven CD (the publisher then falls
 	// back to the legacy single-image behaviour).
 	Images []TemplateImage `yaml:"images,omitempty"`
+	// DeveloperValues declares the small, ordered projection of this chart's Helm
+	// values that belongs to the DEVELOPER — everything else in DefaultValues /
+	// EnvValues / PreviewDefaultValues (and in the chart) stays platform-owned and
+	// out of the app-creation editor. Empty = no projection declared, and the
+	// editor keeps seeding from the full concise platform base (today's behaviour).
+	//
+	// This is a VIEW, not an enforcement boundary: the editor's "Advanced" toggle
+	// still reveals the full base, and the API still accepts arbitrary rawValues.
+	DeveloperValues []ValueField `yaml:"developerValues,omitempty"`
 	// DeliveryMode is the default delivery mode for apps created from this
 	// template: "pipeline" (default; "" == this) for CI-image apps promoted via
 	// Kargo, or "direct" for off-the-shelf software (valkey, redis, postgres)
@@ -575,6 +584,45 @@ type Input struct {
 	// component. Must match a name in spec.components when non-empty.
 	// Omit for app-level inputs that apply across all components.
 	Component string `yaml:"component,omitempty"`
+}
+
+// ValueField declares ONE developer-facing Helm value: the values path the
+// developer owns, plus the metadata needed to present it.
+//
+// It supersedes the Input + Mappings pair. Input is keyed by a synthetic name and
+// needs a `mappings:` entry ("{{ .inputs.port }}") to reach a values path; a
+// ValueField IS the path, which is how every consumer downstream of the
+// values-editor-first flow already works.
+//
+// The presentation metadata deliberately mirrors Input's so a future form renderer
+// and the existing project.validateInputValue both apply unchanged: today the
+// platform seeds a commented YAML overlay from these, later it can render a form
+// from the same declaration with no data-model migration.
+type ValueField struct {
+	// Path is the dotted Helm values path this field owns (e.g.
+	// "components.web.image.repository"). A path resolving to a map projects that
+	// whole subtree. Dotted form cannot express a key containing a dot — the same
+	// constraint TemplateImage.TagKey and Mappings keys already carry.
+	Path string `yaml:"path"`
+	// Title is the human label; falls back to Path when empty.
+	Title string `yaml:"title,omitempty"`
+	// Type drives future form rendering and value validation. Empty = free-form.
+	Type InputType `yaml:"type,omitempty"`
+	// Description is shown as help text (a YAML comment in the 0.1 editor).
+	Description string `yaml:"description,omitempty"`
+	// Required marks a field the developer MUST supply. Required fields are seeded
+	// live (uncommented); everything else is seeded commented-out so an untouched
+	// value keeps inheriting from the chart/platform instead of being pinned into
+	// the app's overlay.
+	Required bool `yaml:"required,omitempty"`
+	// Default is the value to show when the path is absent from the effective values.
+	Default any `yaml:"default,omitempty"`
+	// Options enumerates the allowed values for Type "enum".
+	Options []string `yaml:"options,omitempty"`
+	// Min/Max/Pattern constrain numeric and string fields.
+	Min     *float64 `yaml:"min,omitempty"`
+	Max     *float64 `yaml:"max,omitempty"`
+	Pattern string   `yaml:"pattern,omitempty"`
 }
 
 // SecretInput defines a parameter whose value is a reference to a

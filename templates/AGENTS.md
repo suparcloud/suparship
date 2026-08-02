@@ -99,16 +99,24 @@ spec:
       produces: [Deployment, Service]
       optionallyProduces: [Ingress, ScaledObject, PodDisruptionBudget]
 
-  inputs:                    # curated user-facing parameters
-    - name: service_name
-      title: App Name
+  # Platform-Engineer-authored Helm values overlays. All four are free-form
+  # and layer BELOW the developer's own overrides:
+  defaultValues: {}          # every environment
+  envValues: {}              # per env name, after defaultValues
+  previewDefaultValues: {}   # previews only
+  # (org-level clusterValues live in the sync-safe TemplateOverride, not here)
+
+  developerValues:           # the values projection a developer sees + edits
+    - path: components.web.image.repository   # dotted Helm values path
+      title: Image Repository
       type: string
       required: true
-      pattern: "^[a-z][a-z0-9-]{0,61}[a-z0-9]$"
-    # types: string | number | boolean | enum
+      description: Container image, e.g. ghcr.io/org/app
+    # types: string | number | boolean | enum (all optional)
     # constraints: required, default, min, max, pattern, options
 
-  advancedInputs: []         # optional, shown in an Advanced accordion
+  inputs: []                 # RETIRED — see below
+  advancedInputs: []         # RETIRED — see below
 
   secretInputs:              # secret-reference parameters; never literal values
     - name: database_url
@@ -123,12 +131,59 @@ spec:
 Validation rules enforced at load time:
 
 - `metadata.name` and `metadata.version` are required.
+- `developerValues[].path` is required and unique; an `enum` entry needs
+  at least one `options` entry; `pattern` must compile.
 - Input names are unique across `inputs` and `advancedInputs`.
 - `enum` inputs need at least one `options` entry.
 - `secretRef` is `secret-name.key`.
 - Preset values may only reference declared input names.
 - `mappings` keys are dotted Helm value paths; values are Go-template
   expressions over `.inputs.<name>`.
+
+### `developerValues` — the values projection
+
+A template's chart and its `defaultValues` / `envValues` /
+`previewDefaultValues` can carry a great deal that a developer should
+never have to read: routing internals, cluster annotations, preview
+sizing. `developerValues` declares the small, ordered subset that IS
+theirs.
+
+The app-creation editor seeds from exactly those paths, prefilled with
+each key's current effective value:
+
+- **Required** entries (and any whose effective value is empty) are
+  seeded live — the developer must fill them in.
+- Everything else is seeded **commented out**, showing what it inherits.
+  Uncomment a line to override it. This matters: only what the developer
+  actually writes is saved, so an untouched key keeps tracking the chart
+  or platform default instead of being frozen into the app at creation.
+
+Declare no `developerValues` and the editor falls back to seeding from
+the full platform base — the pre-projection behaviour.
+
+**It is a view, not a permission boundary.** The editor offers a "Show
+all platform values" escape hatch for BYO charts, and the API still
+accepts any key. Use it to guide, not to lock down.
+
+Operators can curate the projection for a read-only synced or built-in
+template via `PATCH /api/v1/templates/{name}` with `developerValues` —
+stored in the sync-safe override, so a re-sync can't drop it, and it
+REPLACES the template's own list.
+
+`path` is dotted (`components.web.image.repository`) and so cannot
+express a key containing a dot — the same constraint `images[].tagKey`
+and `mappings` keys already carry. A path that resolves to a map
+projects that whole subtree.
+
+### Retired: `inputs` / `advancedInputs` / `mappings` / `presets`
+
+Apps are configured through the values editor now, not a generated
+form. These fields still parse and are still served, but nothing in the
+UI renders them, passthrough/BYO charts strip them, and app creation no
+longer validates against them. `developerValues` supersedes them: it is
+keyed directly by the Helm values path instead of a synthetic input name
+plus a `mappings` indirection. Don't add new ones. `secretInputs` is
+NOT retired — it is still rendered.
 
 Never put literal secret values in `template.yaml`, in `values.yaml`,
 or in mappings. Use `secretInputs` + `secretRef`.
@@ -250,9 +305,10 @@ commit message.
    the monorepo `file://` path. Run `helm dep update <chart-dir>`
    after adding the dep so `Chart.lock` and `charts/suparship-common-*.tgz`
    are written.
-3. Wire `inputs:` → `mappings:` so every Helm value the chart reads
-   can be set from the form. If a value should NOT be user-configurable,
-   leave it as a chart default and don't expose it.
+3. Declare `developerValues:` — the handful of Helm value paths a
+   developer owns. Everything you leave out stays platform-owned and
+   never reaches the app-creation editor. (`inputs:` → `mappings:` is
+   the retired predecessor; see below.)
 4. Add at least one preset (`starter` or `production`).
 5. Run `helm lint`, `helm template` against a fixture values file,
    `helm dep update`, then commit.

@@ -13,9 +13,16 @@ const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 import { EffectiveValuesView } from "../components/EffectiveValuesView";
 import { leafPaths, setAtPath, deleteAtPath } from "../lib/valuesTree";
 import { listTemplateVersions, fetchTemplateEffectiveValues, previewTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
-import type { TemplateVersionInfo, TemplateImage, TemplateSummary } from "../types";
+import type {
+  TemplateVersionInfo,
+  TemplateImage,
+  TemplateSummary,
+  ValueField,
+} from "../types";
+import { hasProjection, stringifyProjection } from "../lib/valuesProjection";
 import { ImagePullRules } from "../components/ImagePullRules";
 import {
+  groupByRepo,
   imageRulesToAppImages,
   imageRulesToComponentImages,
   savedByTagKeyFromApp,
@@ -2104,6 +2111,12 @@ function AppValuesEditor({
   // with newly-discovered repos; see the seed effect below.
   const [imageRules, setImageRules] = useState<ImageRules>({});
   const seededDataRef = useRef<string>("");
+  // Repos present in the FIRST discovery for this editor. A repo that shows up later
+  // (values edited to point somewhere new) has no saved binding for the same reason a
+  // brand-new component's does not — it never existed at save time, so it must inherit
+  // the template default instead of reading as deliberately disabled. See knownRepos in
+  // seedImageRules.
+  const baselineReposRef = useRef<ReadonlySet<string> | null>(null);
   const [imagesSaving, setImagesSaving] = useState(false);
 
   // Seed editors from the persisted overlays whenever the app data changes.
@@ -2142,6 +2155,7 @@ function AppValuesEditor({
       discoveredImages,
       savedTK,
       data.cd?.imagesConfigured,
+      baselineReposRef.current ?? undefined,
     );
     const dataId = JSON.stringify([
       data.images ?? null,
@@ -2206,7 +2220,15 @@ function AppValuesEditor({
         .then((res) => {
           setPreview(stringifyOverlay(res.values));
           setChartAvailable(res.chartDefaultsAvailable);
-          setDiscoveredImages(res.discoveredImages ?? []);
+          const imgs = res.discoveredImages ?? [];
+          // First discovery establishes which repos the saved bindings could have
+          // covered; anything appearing later is new (see baselineReposRef).
+          if (baselineReposRef.current === null) {
+            baselineReposRef.current = new Set(
+              groupByRepo(imgs).map((g) => g.repository),
+            );
+          }
+          setDiscoveredImages(imgs);
         })
         .catch(() => {
           /* leave last good preview */
@@ -2437,7 +2459,14 @@ function AppValuesEditor({
     return (
       JSON.stringify(imageRules) !==
       JSON.stringify(
-        seedImageRules(discoveredImages, savedTK, data.cd?.imagesConfigured),
+        // Same knownRepos as the seed effect — otherwise a newly-appeared repo seeds
+        // watched here but unwatched there and Save is stuck permanently enabled.
+        seedImageRules(
+          discoveredImages,
+          savedTK,
+          data.cd?.imagesConfigured,
+          baselineReposRef.current ?? undefined,
+        ),
       )
     );
   })();
@@ -4268,6 +4297,21 @@ function ComponentsTable({
   );
   const [manageSaving, setManageSaving] = useState(false);
   const [manageError, setManageError] = useState<string | null>(null);
+  // CD image pull, live in the manage canvas: images DISCOVERED from the draft
+  // components' values (so adding / retemplating a component surfaces its image before
+  // save), and the per-unique-repo rules the developer edits. Kept here rather than in
+  // ComposeComponents because a repo shared by two components is ONE Kargo subscription
+  // — the rules are app-wide, not per row.
+  const [manageDiscovered, setManageDiscovered] = useState<TemplateImage[]>([]);
+  const [manageRules, setManageRules] = useState<ImageRules>({});
+  const [manageImagesLoading, setManageImagesLoading] = useState(false);
+  // Repos present when manage mode OPENED. A repo missing from this set appeared
+  // mid-session, so an absent saved binding means "new", not "the user disabled it" —
+  // see seedImageRules' knownRepos. null until the first discovery lands.
+  const baselineReposRef = useRef<ReadonlySet<string> | null>(null);
+  // Direct-delivery apps have no Kargo pipeline, so no image pull to configure
+  // (mirrors the app-level Images panel's gate).
+  const isDirect = data.deliveryMode === "direct";
   // Stable envs the manage canvas edits per-component values for. Preview values are
   // tuned in the card (which handles the preview scope). Deduped by name.
   const manageEnvs = [
@@ -4277,11 +4321,19 @@ function ComponentsTable({
         .map((e) => e.envName),
     ),
   ];
+  // The env discovery runs against: the one being viewed, else the first stable env.
+  // Bindings are app-wide (keyed by tag key), so one env is enough to find the repos —
+  // a repo set ONLY in another env's override surfaces when that env is viewed.
+  const discEnv = currentEnv?.envName ?? manageEnvs[0] ?? "";
 
   function beginManage() {
     setDrafts(data.components.map(draftFromSummary));
     setManageError(null);
     setManaging(true);
+    // Reset discovery so the first pass re-establishes the baseline for this session.
+    baselineReposRef.current = null;
+    setManageDiscovered([]);
+    setManageRules({});
     if (templates.length === 0) {
       fetchTemplates()
         .then((r) => setTemplates(r.templates))
@@ -4293,6 +4345,100 @@ function ComponentsTable({
         .catch(() => setManageConfigVars({ platform: [], vars: [] }));
     }
   }
+
+  // Discover each draft component's images from its LIVE (unsaved) values — one
+  // template effective-values preview per component, mirroring the create wizard. The
+  // app-level preview endpoint can't be used here: it discovers from the SAVED
+  // component specs, so a component being added wouldn't appear.
+  const draftsImgKey = drafts
+    .map(
+      (d) =>
+        `${d.name}:${d.template}:${JSON.stringify(d.values)}:${JSON.stringify(
+          d.envValues[discEnv] ?? {},
+        )}`,
+    )
+    .join("|");
+  useEffect(() => {
+    if (!managing || isDirect || !discEnv || drafts.length === 0) {
+      setManageDiscovered([]);
+      return;
+    }
+    const composedDraft = drafts.length > 1;
+    let cancelled = false;
+    setManageImagesLoading(true);
+    // The first pass runs immediately so it reflects the UNEDITED drafts — that result
+    // is the session baseline, and a fast edit must not be able to poison it.
+    const delay = baselineReposRef.current === null ? 0 : 400;
+    const handle = setTimeout(() => {
+      Promise.all(
+        drafts.map((d) =>
+          d.template
+            ? previewTemplateEffectiveValues(
+                d.template,
+                discEnv,
+                "",
+                {
+                  // The component's effective overlay is its legacy all-envs base
+                  // merged with the per-env diff — what the backend threads into
+                  // DiscoverComponentImages as (values, envOverlay).
+                  defaultValues: mergeOverlay(
+                    d.values,
+                    d.envValues[discEnv] ?? {},
+                  ),
+                },
+                false, // preview
+                true, // asComponentOverlay (merge stored platform override)
+                false, // skipChart — need chart defaults to detect the image block
+              )
+                .then((res) =>
+                  (res.discoveredImages ?? []).map((img) => ({
+                    ...img,
+                    component: composedDraft ? d.name.trim() : undefined,
+                  })),
+                )
+                .catch(() => [] as TemplateImage[])
+            : Promise.resolve([] as TemplateImage[]),
+        ),
+      ).then((lists) => {
+        if (cancelled) return;
+        const flat = lists.flat();
+        if (baselineReposRef.current === null) {
+          baselineReposRef.current = new Set(
+            groupByRepo(flat).map((g) => g.repository),
+          );
+        }
+        setManageDiscovered(flat);
+        setManageImagesLoading(false);
+      });
+    }, delay);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [managing, isDirect, discEnv, draftsImgKey]);
+
+  // Seed the per-repo rules from the app's saved bindings, scoped by the session
+  // baseline so a repo that appeared mid-session inherits the template default rather
+  // than reading as deliberately disabled. Rebuild from the seeded keys so vanished
+  // repos are pruned, keeping the developer's in-progress edits for repos that persist.
+  useEffect(() => {
+    if (!managing) return;
+    setManageRules((cur) => {
+      const seeded = seedImageRules(
+        manageDiscovered,
+        savedByTagKeyFromComponents(data.components ?? []),
+        data.cd?.imagesConfigured,
+        baselineReposRef.current ?? undefined,
+      );
+      const next: ImageRules = {};
+      for (const repo of Object.keys(seeded)) {
+        next[repo] = repo in cur ? cur[repo]! : seeded[repo]!;
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [managing, manageDiscovered, data]);
 
   async function saveManage() {
     if (drafts.length === 0) {
@@ -4332,9 +4478,36 @@ function ComponentsTable({
         manageEnvs,
         true, // send cleared overlays as {} so the server prunes them
       );
+      // Fan the per-unique-image rules out to bindings. These MUST ride the sibling
+      // images / componentImages fields rather than components[].images: only those
+      // mark cd.imagesConfigured, without which an intentional "watch nothing" reverts
+      // to the template auto-bind on the next publish. The server applies the component
+      // list before matching these by name, so a component added here gets its binding
+      // in this same request. Send the shape matching the POST-save topology and clear
+      // the other, so a 1↔N split or collapse leaves no stale bindings behind.
+      const draftNames = drafts.map((d) => d.name.trim());
+      const imagePatch: Pick<UpdateAppRequest, "images" | "componentImages"> =
+        isDirect
+          ? {}
+          : drafts.length > 1
+            ? {
+                componentImages: imageRulesToComponentImages(
+                  manageDiscovered,
+                  manageRules,
+                  draftNames,
+                ),
+                images: [],
+              }
+            : {
+                images: imageRulesToAppImages(manageDiscovered, manageRules),
+                componentImages: Object.fromEntries(
+                  draftNames.map((n) => [n, []]),
+                ),
+              };
       await updateApp(project, data.name, {
         components: drafts.map(toComponentCreate),
         envComponentValues,
+        ...imagePatch,
       });
       toast.success("Components updated — re-publishing to GitOps.");
       await onSaved();
@@ -4452,6 +4625,25 @@ function ComponentsTable({
             configVars={manageConfigVars}
             environments={manageEnvs}
           />
+          {/* CD image pull for the DRAFT components — one row per unique repo across
+              all of them, so a component added above is wired to Kargo by the same
+              Save instead of needing a second trip to Settings. */}
+          {!isDirect && (
+            <div className="border-t border-gray-100 pt-4">
+              <p className="text-sm font-medium text-gray-700">Images (CD pull)</p>
+              <p className="mb-3 mt-1 text-xs text-gray-400">
+                Detected from these components' values
+                {discEnv ? ` for ${discEnv}` : ""}. One rule per unique image — pick
+                which Kargo watches and how it selects tags.
+              </p>
+              <ImagePullRules
+                discovered={manageDiscovered}
+                rules={manageRules}
+                onChange={setManageRules}
+                loading={manageImagesLoading}
+              />
+            </div>
+          )}
           {manageError && <p className="text-sm text-red-600">{manageError}</p>}
           <div className="flex items-center gap-2">
             <button
@@ -4641,6 +4833,15 @@ function ComponentValuesPanel({
   const [baseByScope, setBaseByScope] = useState<
     Record<string, Record<string, unknown>>
   >({});
+  // The template's developer-facing values projection, and the chart-INCLUSIVE base
+  // used only to prefill it (the projected keys' defaults live in the chart layer
+  // that baseByScope drops). fullByScope is fetched only when a projection exists.
+  const [projection, setProjection] = useState<ValueField[]>([]);
+  const [fullByScope, setFullByScope] = useState<
+    Record<string, Record<string, unknown>>
+  >({});
+  // Set once the developer asks to see the whole platform base (one-way reveal).
+  const [showAllValues, setShowAllValues] = useState(false);
   // seedText is what the editor shows: the platform base for the scope with the
   // developer's stored override merged on top. Before the base loads it is just the
   // stored override (base = {}), so the same buffer round-trips unchanged.
@@ -4730,11 +4931,46 @@ function ComponentValuesPanel({
         );
     req
       .then((res) => {
-        if (!cancelled)
-          setBaseByScope((c) => ({
-            ...c,
-            [scope]: (res.values as Record<string, unknown>) ?? {},
-          }));
+        if (cancelled) return;
+        setBaseByScope((c) => ({
+          ...c,
+          [scope]: (res.values as Record<string, unknown>) ?? {},
+        }));
+        // The projection rides this response. When the template declares one, also
+        // pull the chart-INCLUSIVE base for prefilling it — the projected keys'
+        // real defaults live in the chart layer that skipChart drops above.
+        const fields = res.developerValues ?? [];
+        setProjection(fields);
+        if (!hasProjection(fields) || fullByScope[scope] !== undefined) return;
+        const fullReq = appLevel
+          ? previewAppValues(
+              project,
+              data.name,
+              targetEnv,
+              { rawValues: devAllEnvs, envRawValues: {} },
+              isPreviewScope,
+              false, // keep chart defaults
+            )
+          : previewTemplateEffectiveValues(
+              templateName,
+              targetEnv,
+              "",
+              { defaultValues: devAllEnvs, envValues: {} },
+              isPreviewScope,
+              true,
+              false, // keep chart defaults
+            );
+        fullReq
+          .then((full) => {
+            if (!cancelled)
+              setFullByScope((c) => ({
+                ...c,
+                [scope]: (full.values as Record<string, unknown>) ?? {},
+              }));
+          })
+          .catch(() => {
+            if (!cancelled) setFullByScope((c) => ({ ...c, [scope]: {} }));
+          });
       })
       .catch(() => {
         if (!cancelled) setBaseByScope((c) => ({ ...c, [scope]: {} }));
@@ -4747,17 +4983,43 @@ function ComponentValuesPanel({
 
   // Once the base arrives, seed the editor with base ⊕ stored override — but only if
   // the developer hasn't already started editing (buffer still the stored-only text).
+  //
+  // When the template declares a projection and this scope has no stored override,
+  // the seed is the PROJECTION instead — the keys that are the developer's, prefilled
+  // from the chart-inclusive base. A scope that already carries an override keeps the
+  // plain base ⊕ override seed; we never rewrite existing work.
   useEffect(() => {
     const base = baseByScope[scope];
     if (base === undefined) return;
+    const stored = storedOverride(scope);
+    const useProjection =
+      hasProjection(projection) &&
+      !showAllValues &&
+      Object.keys(stored).length === 0;
+    const full = fullByScope[scope];
+    if (useProjection && full === undefined) return; // wait for the full base
     setTexts((cur) => {
       const buf = cur[scope] ?? "";
-      if (buf !== stringifyOverlay(storedOverride(scope))) return cur;
-      const seeded = stringifyOverlay(mergeOverlay(base, storedOverride(scope)));
+      if (buf !== stringifyOverlay(stored)) return cur;
+      const seeded = useProjection
+        ? stringifyProjection(full, projection)
+        : stringifyOverlay(mergeOverlay(base, stored));
       return buf === seeded ? cur : { ...cur, [scope]: seeded };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseByScope, scope]);
+  }, [baseByScope, fullByScope, projection, showAllValues, scope]);
+
+  // Reveal the whole platform base for this scope. One-way and non-destructive: the
+  // developer's current buffer is merged on top so nothing typed is lost.
+  function revealAllValues() {
+    const base = baseByScope[scope] ?? {};
+    const parsed = parseYamlOverlay(texts[scope] ?? "").value ?? {};
+    setShowAllValues(true);
+    setTexts((cur) => ({
+      ...cur,
+      [scope]: stringifyOverlay(mergeOverlay(base, parsed)),
+    }));
+  }
 
   // Debounced effective-values preview, reflecting unsaved edits to both layers.
   useEffect(() => {
@@ -4949,17 +5211,37 @@ function ComponentValuesPanel({
         </button>
       </div>
 
-      <p className="mb-2 text-xs text-gray-400">
-        Pre-filled with the platform base for{" "}
-        {isPreviewScope ? "previews" : scope} (template ⊕ platform defaults).{" "}
-        <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
-          Your changes
-        </span>{" "}
-        are highlighted; only the difference is saved. Expand the effective below for
-        the full as-deployed values. Reference{" "}
-        <code className="font-mono">{"((platform.*))"}</code> /{" "}
-        <code className="font-mono">{"((vars.*))"}</code> tokens.
-      </p>
+      {hasProjection(projection) && !showAllValues ? (
+        <p className="mb-2 text-xs text-gray-400">
+          The settings this template exposes for{" "}
+          {isPreviewScope ? "previews" : scope}, pre-filled with their current values
+          — uncomment a line to override it.{" "}
+          <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+            Your changes
+          </span>{" "}
+          are highlighted; only the difference is saved.{" "}
+          <button
+            type="button"
+            onClick={revealAllValues}
+            className="underline hover:text-gray-600"
+          >
+            Show all platform values
+          </button>{" "}
+          for anything not listed.
+        </p>
+      ) : (
+        <p className="mb-2 text-xs text-gray-400">
+          Pre-filled with the platform base for{" "}
+          {isPreviewScope ? "previews" : scope} (template ⊕ platform defaults).{" "}
+          <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+            Your changes
+          </span>{" "}
+          are highlighted; only the difference is saved. Expand the effective below
+          for the full as-deployed values. Reference{" "}
+          <code className="font-mono">{"((platform.*))"}</code> /{" "}
+          <code className="font-mono">{"((vars.*))"}</code> tokens.
+        </p>
+      )}
       <Suspense
         fallback={
           <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">

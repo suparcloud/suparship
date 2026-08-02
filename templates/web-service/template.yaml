@@ -38,6 +38,54 @@ spec:
       # No overrides needed; declared here for documentation only.
       capabilities: {}
 
+  # The developer-facing values projection: the handful of Helm values a developer
+  # owns. The app-creation editor seeds from exactly these keys (prefilled with
+  # their current effective values) instead of the whole chart+platform base, so
+  # everything else here and in defaultValues/envValues stays platform-owned and out
+  # of the way.
+  #
+  # Required fields are seeded live; the rest are seeded commented-out showing what
+  # they inherit, so an untouched value keeps tracking the chart default instead of
+  # being pinned into the app's overlay.
+  #
+  # This is a VIEW, not an enforcement boundary — the editor's "Show all platform
+  # values" escape hatch and the API both still accept any key.
+  developerValues:
+    - path: components.web.image.repository
+      title: Image Repository
+      type: string
+      required: true
+      description: Container image repository, e.g. ghcr.io/org/app or nginx.
+    - path: components.web.port
+      title: Container Port
+      type: number
+      default: 8080
+      min: 1
+      max: 65535
+      description: TCP port the container listens on.
+    - path: components.web.healthCheck.path
+      title: Health Check Path
+      type: string
+      description: HTTP path for liveness and readiness probes.
+    - path: components.web.resources.size
+      title: Resource Size
+      type: enum
+      options:
+        - small
+        - medium
+        - large
+      # Kept short: each description line becomes a comment line in the developer's
+      # seeded values, and YAML comments don't wrap.
+      description: |-
+        CPU/memory profile.
+        small 250m/256Mi · medium 500m/512Mi · large 1/1Gi
+    - path: components.web.replicas
+      title: Replica Count
+      type: number
+      min: 1
+      max: 20
+      description: Pod replicas. Ignored when autoscaling is enabled.
+
   inputs:
     - name: service_name
       title: App Name

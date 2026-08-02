@@ -64,11 +64,12 @@ func (th *templateHandler) handlePutTemplateOverride(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
 		return
 	}
-	// The override ConfigMap also co-stores the image mapping and display-metadata
-	// overrides (set from the Images / metadata editors). This endpoint only owns
-	// the Helm values layer, so load-modify-write: replace just the values fields
-	// and preserve Images/Metadata, otherwise saving platform overrides would
-	// clobber an image mapping a PE wired up for CD.
+	// The override ConfigMap also co-stores the image mapping, the developer-values
+	// projection, and display-metadata overrides (all set via PATCH /templates/{name}).
+	// This endpoint only owns the Helm values layer, so load-modify-write: replace
+	// just the values fields and leave the rest untouched, otherwise saving platform
+	// overrides would clobber an image mapping a PE wired up for CD or the curated
+	// projection developers see at app creation.
 	ov, err := kube.LoadTemplateOverride(r.Context(), th.kubeClient, name)
 	if err != nil {
 		if th.logger != nil {

@@ -39,6 +39,12 @@ type EffectiveValuesDTO struct {
 	// sidecars/init/proxy images they don't want promoted. Repository is shown for
 	// context; at publish it is re-read from the values, not from here.
 	DiscoveredImages []TemplateImageDTO `json:"discoveredImages,omitempty"`
+	// DeveloperValues is the template's developer-facing values projection (org
+	// override applied). The editor seeds from these paths instead of the whole
+	// base, so the developer sees the handful of keys that are theirs. Empty = no
+	// projection declared; callers keep today's full-base seeding. Rides this
+	// response so the seeding call sites need no extra round trip.
+	DeveloperValues []ValueFieldDTO `json:"developerValues,omitempty"`
 }
 
 // chartDefaults reads the template's chart bundle (.tgz stored as a cluster
@@ -174,6 +180,7 @@ func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool,
 		Interpolated:           false,
 		Layers:                 layers,
 		DiscoveredImages:       imagesToDTO(annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))),
+		DeveloperValues:        developerValuesToDTO(EffectiveDeveloperValues(t, ov)),
 	}
 }
 
@@ -434,6 +441,38 @@ func effectiveTemplateImageSlots(t *tpl.Template, ov *domain.TemplateOverride) [
 	}
 	if t != nil {
 		return t.Spec.Images
+	}
+	return nil
+}
+
+// EffectiveDeveloperValues returns the developer-facing values projection — the org
+// override's DeveloperValues when set (it REPLACES the template's own list, so an
+// operator can curate a read-only synced template without editing its source), else
+// the template's Spec.DeveloperValues. Mirrors effectiveTemplateImageSlots.
+//
+// An empty result means "no projection declared": callers keep seeding the editor
+// from the full concise platform base, which is the pre-projection behaviour.
+func EffectiveDeveloperValues(t *tpl.Template, ov *domain.TemplateOverride) []tpl.ValueField {
+	if ov != nil && len(ov.DeveloperValues) > 0 {
+		out := make([]tpl.ValueField, len(ov.DeveloperValues))
+		for i, f := range ov.DeveloperValues {
+			out[i] = tpl.ValueField{
+				Path:        f.Path,
+				Title:       f.Title,
+				Type:        tpl.InputType(f.Type),
+				Description: f.Description,
+				Required:    f.Required,
+				Default:     f.Default,
+				Options:     f.Options,
+				Min:         f.Min,
+				Max:         f.Max,
+				Pattern:     f.Pattern,
+			}
+		}
+		return out
+	}
+	if t != nil {
+		return t.Spec.DeveloperValues
 	}
 	return nil
 }
