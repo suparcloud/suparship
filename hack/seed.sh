@@ -8,10 +8,10 @@
 #
 # Idempotent: uses kubectl apply, safe to run multiple times.
 # The seeded data mirrors internal/fake/seed.go so the UI looks consistent
-# across fake mode (task dev) and cluster mode (task dev:cluster).
+# across fake mode (task dev) and cluster mode (task up).
 #
 # Prerequisites:
-#   task dev:cluster:bootstrap   # cluster and suparship-system namespace must exist
+#   task up   # cluster and suparship-system namespace must exist
 #
 # Admin credentials are NOT created here — they require a bcrypt hash.
 # Run once per cluster:
@@ -82,7 +82,7 @@ APPPROJECT
   ok "argocd AppProject 'demo'  (created/updated in argocd namespace)"
 else
   printf "  \033[0;33m!\033[0m  argocd namespace not found — skipping AppProject creation.\n"
-  printf "      Run 'task dev:cluster:argocd' first if you need GitOps integration.\n"
+  printf "      Run 'task up' first if you need GitOps integration.\n"
 fi
 
 # ── Admin credentials reminder ────────────────────────────────────────────

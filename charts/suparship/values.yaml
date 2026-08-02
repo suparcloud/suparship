@@ -224,19 +224,26 @@ environments: []
 #   baseDomain: prod.example.com
 #   namespacePattern: "{app}-{env}"
 
-# -- Workload clusters to register.
-# Each entry references an existing Secret containing a kubeconfig,
-# or uses inCluster: true for the local cluster.
+# -- Workload clusters to pre-register (METADATA ONLY).
+#
+# Entries here create the cluster record so ArgoCD can deploy to `apiServer`.
+# They do NOT create the kubeconfig Secret, so suparship cannot reach these
+# clusters for pod logs, live status, or sealed-secrets certs — all of which go
+# through the kubeconfig in Secret `suparship-cluster-kubeconfig-{name}`.
+#
+# For a fully-functional cluster, register it through the UI, the API, or:
+#   suparship cluster add --name prod-aks --api-server https://… --kubeconfig ./kc.yaml
+# which writes the record, the kubeconfig Secret, and the ArgoCD cluster Secret
+# together. Use this list for bootstrapping/GitOps-managed installs where you
+# add credentials separately.
 clusters: []
 # Example:
 # - name: in-cluster
 #   displayName: "Local Cluster"
 #   apiServer: https://kubernetes.default.svc
-#   inCluster: true
 # - name: prod-aks
 #   displayName: Production (Azure)
 #   apiServer: https://prod-aks.example.com
-#   existingSecret: suparship-cluster-prod-aks   # Secret with key: kubeconfig
 #   # Per-cluster routing (multi-cloud): this cluster's own DNS zone + ingress.
 #   # Overrides env → org routing for apps deployed here. baseDomain is the
 #   # default zone; per-mode profiles refine ingress class / issuer / domain.

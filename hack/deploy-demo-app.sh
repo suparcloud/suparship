@@ -17,10 +17,10 @@
 # Ingress:   http://hello.localhost:8880
 #
 # Prerequisites:
-#   task dev:cluster:bootstrap
-#   task dev:cluster:ingress
-#   task dev:cluster:argocd
-#   task dev:cluster:gitea
+#   task up
+#   task up:ingress
+#   task up
+#   task up
 #
 # Usage:
 #   ./hack/deploy-demo-app.sh
@@ -65,7 +65,7 @@ for cmd in kubectl git curl; do
 done
 
 kubectl get application suparship-apps -n "${ARGOCD_NAMESPACE}" >/dev/null 2>&1 \
-  || die "suparship-apps ArgoCD Application not found. Run: task dev:cluster:gitea"
+  || die "suparship-apps ArgoCD Application not found. Run: task up"
 echo ""
 
 # ── 2. Check /etc/hosts ───────────────────────────────────────────────────

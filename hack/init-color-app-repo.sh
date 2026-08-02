@@ -16,7 +16,7 @@
 #
 # Usage:
 #   ./hack/init-color-app-repo.sh
-#   task dev:cluster:init-color-app-repo
+#   task demo:color-app:repo
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
