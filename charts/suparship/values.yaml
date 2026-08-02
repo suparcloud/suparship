@@ -199,13 +199,18 @@ gitops:
   kargoGitRepoURL: ""
 
 # -- Environments define the promotion pipeline.
-# Each environment references a cluster by name via clusterRef.
+# Bind each one to registered clusters with `clusterRefs` (a list) plus
+# `activeClusterRef` (which member receives deploys). An environment with no
+# clusterRefs is UNBOUND and nothing will deploy to it.
+# `clusterRef` (singular) is still accepted as a deprecated alias.
+# Set `deployMode: all` to fan out to every clusterRef instead of just the active one.
 environments: []
 # Example:
 # - name: staging
 #   displayName: Staging
 #   order: 1
-#   clusterRef: in-cluster
+#   clusterRefs: [in-cluster]
+#   activeClusterRef: in-cluster
 #   baseDomain: staging.example.com
 #   namespacePattern: "{app}-{env}"
 # - name: prod

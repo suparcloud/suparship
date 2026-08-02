@@ -19,8 +19,23 @@ data:
         displayName: {{ $env.displayName | quote }}
         {{- end }}
         order: {{ default $i $env.order }}
-        {{- if $env.clusterRef }}
-        clusterRef: {{ $env.clusterRef | quote }}
+        {{- /* clusterRefs is the current form. clusterRef (singular) is accepted
+               as a deprecated alias so existing values files keep working — it
+               used to be emitted verbatim, which the server silently dropped,
+               leaving the environment unbound. */}}
+        {{- $refs := $env.clusterRefs }}
+        {{- if and (not $refs) $env.clusterRef }}
+        {{- $refs = list $env.clusterRef }}
+        {{- end }}
+        {{- if $refs }}
+        clusterRefs:
+          {{- range $refs }}
+          - {{ . | quote }}
+          {{- end }}
+        activeClusterRef: {{ default (first $refs) $env.activeClusterRef | quote }}
+        {{- end }}
+        {{- if $env.deployMode }}
+        deployMode: {{ $env.deployMode | quote }}
         {{- end }}
         {{- if $env.baseDomain }}
         baseDomain: {{ $env.baseDomain | quote }}
