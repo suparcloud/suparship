@@ -83,6 +83,17 @@ type OrgEnvironment struct {
 	// receives deploys. Validated to be a member of ClusterRefs (or empty).
 	// EffectiveClusterRef falls back to ClusterRefs[0] when empty.
 	ActiveClusterRef string `yaml:"activeClusterRef,omitempty"`
+	// ClusterRef is the pre-multi-cluster singular form. Kept ONLY so configs
+	// already written with it still bind: ParseOrg folds it into ClusterRefs and
+	// clears it, so a config self-heals the first time it is read and re-saved.
+	//
+	// Without this the key was silently dropped by the non-strict unmarshal and
+	// the environment loaded UNBOUND — which is what shipped in
+	// config/seed/org.yaml and in the Helm chart's org ConfigMap, so every
+	// install configuring environments through values had unbound envs.
+	//
+	// Deprecated: use ClusterRefs + ActiveClusterRef.
+	ClusterRef string `yaml:"clusterRef,omitempty"`
 	// BaseDomain is the ingress base domain for apps in this environment.
 	// App URLs are derived as: http://{app}.{baseDomain}
 	BaseDomain string `yaml:"baseDomain,omitempty"`
@@ -475,10 +486,37 @@ func ParseOrg(data []byte) (*Org, error) {
 	if err := yaml.Unmarshal(data, &org); err != nil {
 		return nil, fmt.Errorf("parsing org config: %w", err)
 	}
+	org.normalize()
 	if err := org.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid org config: %w", err)
 	}
 	return &org, nil
+}
+
+// normalize upgrades deprecated shapes in place, so the rest of the codebase
+// only ever sees the current one. Runs before Validate, since a folded value
+// has to satisfy the same rules as one written in the modern form.
+func (o *Org) normalize() {
+	for i := range o.Environments {
+		o.Environments[i].normalize()
+	}
+}
+
+// normalize folds the deprecated singular ClusterRef into ClusterRefs and
+// clears it. Marshal then emits only the modern keys, so a config rewritten
+// after any read is permanently repaired. An explicit ClusterRefs always wins —
+// we never second-guess a config that already uses the current form.
+func (e *OrgEnvironment) normalize() {
+	if e.ClusterRef == "" {
+		return
+	}
+	if len(e.ClusterRefs) == 0 {
+		e.ClusterRefs = []string{e.ClusterRef}
+		if e.ActiveClusterRef == "" {
+			e.ActiveClusterRef = e.ClusterRef
+		}
+	}
+	e.ClusterRef = ""
 }
 
 // Marshal serializes the Org to YAML.
