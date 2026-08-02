@@ -84,16 +84,29 @@ export function groupByRepo(discovered: TemplateImage[]): RepoGroup[] {
 // signal to fall back to the template defaults. So a configured app with no saved
 // binding for a declared repo shows it UNWATCHED (the user disabled it), matching the
 // backend, instead of reverting the disable on reload.
+//
+// `knownRepos`, when supplied, scopes that authority to the repos that EXISTED when the
+// editing session opened. "No saved binding" means "the user disabled it" only for a repo
+// they could actually have seen and unchecked; a repo that appears mid-session (a
+// component was added, or its values now point somewhere new) is BRAND NEW and seeds from
+// the template instead — declared → watched, mirroring the backend's auto-bind. Without
+// it, adding a component to a configured app silently yields no Kargo subscription.
+// Omit the argument to keep the old behaviour (every unsaved repo reads as disabled).
 export function seedImageRules(
   discovered: TemplateImage[],
   savedByTagKey: Record<string, { tagPattern?: string; selectionStrategy?: string }>,
   configured = false,
+  knownRepos?: ReadonlySet<string>,
 ): ImageRules {
   const hasSaved = configured || Object.keys(savedByTagKey).length > 0;
   const out: ImageRules = {};
   for (const g of groupByRepo(discovered)) {
     const savedImg = g.images.find((i) => savedByTagKey[i.tagKey]);
-    if (hasSaved) {
+    // A repo the baseline never saw can't carry a deliberate "off" — treat it as new.
+    // A saved binding still wins: a repo can be absent from THIS env's discovery yet
+    // carry a selection saved from another env, and that must not be unwatched.
+    const isNew = knownRepos ? !knownRepos.has(g.repository) && !savedImg : false;
+    if (hasSaved && !isNew) {
       const s = savedImg ? savedByTagKey[savedImg.tagKey] : undefined;
       out[g.repository] = {
         watched: !!savedImg,

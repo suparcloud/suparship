@@ -103,6 +103,45 @@ func (t *Template) Validate() error {
 		return err
 	}
 
+	if err := validateDeveloperValues(t.Spec.DeveloperValues); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateDeveloperValues checks the spec.developerValues projection: each entry
+// needs a path, paths are unique (two entries for one path would seed the key
+// twice), the type (when set) is recognised, an enum declares options, and any
+// bounds/pattern are coherent. Type is OPTIONAL here — unlike an Input, a
+// ValueField with no type is a valid free-form passthrough that the 0.1 YAML
+// editor renders fine; the type only starts mattering to a future form renderer.
+func validateDeveloperValues(fields []ValueField) error {
+	paths := make(map[string]bool, len(fields))
+	for i, f := range fields {
+		path := fmt.Sprintf("spec.developerValues[%d]", i)
+		if f.Path == "" {
+			return fmt.Errorf("%s: path is required", path)
+		}
+		if paths[f.Path] {
+			return fmt.Errorf("%s: duplicate path %q", path, f.Path)
+		}
+		paths[f.Path] = true
+		if f.Type != "" && !validInputTypes[f.Type] {
+			return fmt.Errorf("%s (%s): unsupported type %q", path, f.Path, f.Type)
+		}
+		if f.Type == InputTypeEnum && len(f.Options) == 0 {
+			return fmt.Errorf("%s (%s): enum type requires at least one option", path, f.Path)
+		}
+		if f.Min != nil && f.Max != nil && *f.Min > *f.Max {
+			return fmt.Errorf("%s (%s): min (%g) must not exceed max (%g)", path, f.Path, *f.Min, *f.Max)
+		}
+		if f.Pattern != "" {
+			if _, err := regexp.Compile(f.Pattern); err != nil {
+				return fmt.Errorf("%s (%s): invalid pattern %q: %w", path, f.Path, f.Pattern, err)
+			}
+		}
+	}
 	return nil
 }
 

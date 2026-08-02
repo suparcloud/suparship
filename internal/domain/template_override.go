@@ -39,6 +39,12 @@ type TemplateOverride struct {
 	// so operators can wire up CD for a BYO chart without editing its source.
 	// Mirrors tpl.TemplateImage; the server layer converts.
 	Images []TemplateImageOverride `json:"images,omitempty" yaml:"images,omitempty"`
+	// DeveloperValues holds the developer-facing values projection when set from the
+	// UI for a read-only synced/built-in template. When non-empty it REPLACES the
+	// template's own projection at read, so an operator can curate which values a
+	// developer sees for a BYO chart without editing its source. Mirrors
+	// tpl.ValueField; the server layer converts.
+	DeveloperValues []ValueFieldOverride `json:"developerValues,omitempty" yaml:"developerValues,omitempty"`
 	// DeliveryMode overrides the template's default app delivery mode ("pipeline"
 	// or "direct") for read-only synced/built-in templates, so an operator can
 	// mark a synced off-the-shelf chart (valkey, redis, postgres) "direct" without
@@ -63,6 +69,21 @@ type TemplateImageOverride struct {
 	TagKey            string `json:"tagKey" yaml:"tagKey"`
 	TagPattern        string `json:"tagPattern,omitempty" yaml:"tagPattern,omitempty"`
 	SelectionStrategy string `json:"selectionStrategy,omitempty" yaml:"selectionStrategy,omitempty"`
+}
+
+// ValueFieldOverride mirrors tpl.ValueField for storage in a sync-safe override
+// (domain must not import tpl). The server layer converts between them.
+type ValueFieldOverride struct {
+	Path        string   `json:"path" yaml:"path"`
+	Title       string   `json:"title,omitempty" yaml:"title,omitempty"`
+	Type        string   `json:"type,omitempty" yaml:"type,omitempty"`
+	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
+	Required    bool     `json:"required,omitempty" yaml:"required,omitempty"`
+	Default     any      `json:"default,omitempty" yaml:"default,omitempty"`
+	Options     []string `json:"options,omitempty" yaml:"options,omitempty"`
+	Min         *float64 `json:"min,omitempty" yaml:"min,omitempty"`
+	Max         *float64 `json:"max,omitempty" yaml:"max,omitempty"`
+	Pattern     string   `json:"pattern,omitempty" yaml:"pattern,omitempty"`
 }
 
 // IsEmpty reports whether the metadata override carries nothing.
@@ -90,6 +111,9 @@ func (o *TemplateOverride) IsEmpty() bool {
 		}
 	}
 	if len(o.Images) > 0 {
+		return false
+	}
+	if len(o.DeveloperValues) > 0 {
 		return false
 	}
 	if o.DeliveryMode != "" {

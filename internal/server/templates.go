@@ -63,6 +63,11 @@ type TemplateDetailDTO struct {
 	// wiring: which repo to watch and which values key holds each tag. Editable
 	// in template settings; auto-detected at import.
 	Images []TemplateImageDTO `json:"images,omitempty"`
+	// DeveloperValues is the developer-facing values projection: the small, ordered
+	// set of Helm value paths the app-creation editor seeds from, leaving the rest
+	// of the chart/platform values out of the developer's way. Empty = no
+	// projection; the editor seeds from the full concise platform base.
+	DeveloperValues []ValueFieldDTO `json:"developerValues,omitempty"`
 	// DeliveryMode is the template's default app delivery mode: "pipeline"
 	// (Kargo + promotion) or "direct" (deploy each env from values, no Kargo).
 	// "" means pipeline. The create wizard pre-selects this.
@@ -87,6 +92,22 @@ type TemplateImageDTO struct {
 	// TagPattern/SelectionStrategy are the inherited rule). The UI watches declared
 	// images by default; undeclared ones (sidecars) default off.
 	Declared bool `json:"declared,omitempty"`
+}
+
+// ValueFieldDTO mirrors tpl.ValueField on the wire: one developer-facing Helm
+// value path plus the metadata the editor renders as comments today and a form
+// will render as a control later.
+type ValueFieldDTO struct {
+	Path        string   `json:"path"`
+	Title       string   `json:"title,omitempty"`
+	Type        string   `json:"type,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Required    bool     `json:"required,omitempty"`
+	Default     any      `json:"default,omitempty"`
+	Options     []string `json:"options,omitempty"`
+	Min         *float64 `json:"min,omitempty"`
+	Max         *float64 `json:"max,omitempty"`
+	Pattern     string   `json:"pattern,omitempty"`
 }
 
 // TemplateSourceDTO describes where a template came from, for the UI's edit gating.
@@ -466,6 +487,11 @@ func (th *templateHandler) handleDetail(w http.ResponseWriter, r *http.Request) 
 			if len(ov.Images) > 0 {
 				dto.Images = imagesOverrideToDTO(ov.Images)
 			}
+			// A curated developer-values projection (set from the UI on a read-only
+			// template) replaces the template's own.
+			if len(ov.DeveloperValues) > 0 {
+				dto.DeveloperValues = developerValuesOverrideToDTO(ov.DeveloperValues)
+			}
 			// A delivery-mode override (sync-safe) wins over the template's own.
 			if ov.DeliveryMode != "" {
 				dto.DeliveryMode = ov.DeliveryMode
@@ -540,6 +566,7 @@ func templateToDetail(t *tpl.Template) TemplateDetailDTO {
 		EnvValues:             t.Spec.EnvValues,
 		InjectCanonicalValues: t.Spec.InjectCanonicalValues,
 		Images:                imagesToDTO(t.Spec.Images),
+		DeveloperValues:       developerValuesToDTO(t.Spec.DeveloperValues),
 		DeliveryMode:          t.Spec.DeliveryMode,
 	}
 }
@@ -613,6 +640,98 @@ func imagesOverrideToDTO(ovs []domain.TemplateImageOverride) []TemplateImageDTO 
 			TagKey:            o.TagKey,
 			TagPattern:        o.TagPattern,
 			SelectionStrategy: o.SelectionStrategy,
+		}
+	}
+	return out
+}
+
+// developerValuesToDTO / ...FromDTO / ...ToOverride / ...OverrideToDTO bridge the
+// three representations of the projection: tpl.ValueField (template source), the
+// wire DTO, and the sync-safe override storage form (used when the projection is
+// curated for a read-only synced/built-in template). Mirrors the images* helpers.
+func developerValuesToDTO(fields []tpl.ValueField) []ValueFieldDTO {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]ValueFieldDTO, len(fields))
+	for i, f := range fields {
+		out[i] = ValueFieldDTO{
+			Path:        f.Path,
+			Title:       f.Title,
+			Type:        string(f.Type),
+			Description: f.Description,
+			Required:    f.Required,
+			Default:     f.Default,
+			Options:     f.Options,
+			Min:         f.Min,
+			Max:         f.Max,
+			Pattern:     f.Pattern,
+		}
+	}
+	return out
+}
+
+func developerValuesFromDTO(dtos []ValueFieldDTO) []tpl.ValueField {
+	if len(dtos) == 0 {
+		return nil
+	}
+	out := make([]tpl.ValueField, len(dtos))
+	for i, d := range dtos {
+		out[i] = tpl.ValueField{
+			Path:        d.Path,
+			Title:       d.Title,
+			Type:        tpl.InputType(d.Type),
+			Description: d.Description,
+			Required:    d.Required,
+			Default:     d.Default,
+			Options:     d.Options,
+			Min:         d.Min,
+			Max:         d.Max,
+			Pattern:     d.Pattern,
+		}
+	}
+	return out
+}
+
+func developerValuesToOverride(dtos []ValueFieldDTO) []domain.ValueFieldOverride {
+	if len(dtos) == 0 {
+		return nil
+	}
+	out := make([]domain.ValueFieldOverride, len(dtos))
+	for i, d := range dtos {
+		out[i] = domain.ValueFieldOverride{
+			Path:        d.Path,
+			Title:       d.Title,
+			Type:        d.Type,
+			Description: d.Description,
+			Required:    d.Required,
+			Default:     d.Default,
+			Options:     d.Options,
+			Min:         d.Min,
+			Max:         d.Max,
+			Pattern:     d.Pattern,
+		}
+	}
+	return out
+}
+
+func developerValuesOverrideToDTO(ovs []domain.ValueFieldOverride) []ValueFieldDTO {
+	if len(ovs) == 0 {
+		return nil
+	}
+	out := make([]ValueFieldDTO, len(ovs))
+	for i, o := range ovs {
+		out[i] = ValueFieldDTO{
+			Path:        o.Path,
+			Title:       o.Title,
+			Type:        o.Type,
+			Description: o.Description,
+			Required:    o.Required,
+			Default:     o.Default,
+			Options:     o.Options,
+			Min:         o.Min,
+			Max:         o.Max,
+			Pattern:     o.Pattern,
 		}
 	}
 	return out

@@ -356,6 +356,23 @@ export interface TemplateInput {
   pattern?: string;
 }
 
+// ValueField is one entry of a template's developer-facing values projection: the
+// dotted Helm values path the developer owns, plus presentation metadata. Today it
+// drives the commented YAML the editor is seeded with; the same declaration is what
+// a future form renderer will read, which is why it carries type/options/bounds.
+export interface ValueField {
+  path: string;
+  title?: string;
+  type?: "string" | "number" | "boolean" | "enum";
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+  options?: string[];
+  min?: number;
+  max?: number;
+  pattern?: string;
+}
+
 export interface TemplateSecretInput {
   name: string;
   title: string;
@@ -396,6 +413,9 @@ export interface TemplateDetail {
   injectCanonicalValues?: boolean;
   // Per-service image mapping for external-CD (Kargo) wiring.
   images?: TemplateImage[];
+  // The developer-facing values projection (org override applied). Empty/absent =
+  // no projection; editors seed from the full concise platform base.
+  developerValues?: ValueField[];
   // Default app delivery mode: "pipeline" (Kargo + promotion) or "direct"
   // (deploy each env from values, no Kargo). "" means pipeline.
   deliveryMode?: string;
@@ -456,6 +476,10 @@ export interface EffectiveValuesResponse {
   // repository), each with its dotted tag key. The CD UI lists these so the user
   // can select which Kargo manages. Omitted/empty when none are found.
   discoveredImages?: TemplateImage[];
+  // The template's developer-facing values projection (org override applied).
+  // Rides this response so the seeding call sites need no extra round trip.
+  // Omitted/empty when the template declares none.
+  developerValues?: ValueField[];
 }
 
 // --- Onboarding types ---
