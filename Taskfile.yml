@@ -62,96 +62,22 @@ tasks:
     cmds:
       - ctlptl delete -f hack/dev/cluster.yaml
 
-  # ── Cluster dev — legacy script path ───────────────────────────────────
-  # Prefer `task up` (Tilt). These shell-script tasks remain for targeted
-  # re-installs and as a fallback. Run dev:cluster once to provision, then
-  # dev:cluster:serve for each session (runs the server on the host).
+  # ── Cluster helpers ────────────────────────────────────────────────────
+  # Prerequisite installs (cert-manager, Argo Rollouts, Kargo, ArgoCD, Gitea,
+  # ESO, Replicator, Reloader) are declared ONCE in the Tiltfile as
+  # helm_resource blocks — namespace, pinned version and ordering all live
+  # there. `task up` is the entry point. The tasks below are the bits Tilt
+  # does not own.
 
-  dev:cluster:
-    desc: "[legacy — prefer `task up`] Provision dev cluster via shell scripts: DNS + bootstrap + ingress + ArgoCD + Gitea + gitops-init + seed + cert-manager + Argo Rollouts + Kargo + ESO + Replicator + Reloader (idempotent)"
-    cmds:
-      - hack/setup-cluster.sh
-
-  dev:cluster:serve:
-    desc: "Start backend (cluster mode) + frontend against the running dev cluster"
-    cmds:
-      - hack/serve-cluster.sh
-
-  dev:cluster:delete:
-    desc: "Tear down the suparship dev cluster"
-    cmds:
-      - |
-        kind delete cluster --name suparship-dev \
-          && echo "  Cluster deleted." \
-          || echo "  Cluster 'suparship-dev' not found — nothing to delete."
-
-  # ── Cluster dev — individual component installs (targeted re-runs) ──────
-
-  dev:cluster:dns:
-    desc: "Set up wildcard *.localhost DNS via dnsmasq — macOS only, run once per machine"
+  dev:dns:
+    desc: "Set up wildcard *.localhost DNS via dnsmasq — macOS only, run once per machine (only needed for `task up:ingress`)"
     cmds:
       - hack/setup-dns.sh
 
-  dev:cluster:bootstrap:
-    desc: "Create kind cluster + namespaces (idempotent)"
-    cmds:
-      - hack/bootstrap-cluster.sh
-
-  dev:cluster:ingress:
-    desc: "Install NGINX ingress controller"
-    cmds:
-      - hack/install-ingress.sh
-
-  dev:cluster:argocd:
-    desc: "Install minimal ArgoCD (dev profile)"
-    cmds:
-      - hack/install-argocd.sh
-
-  dev:cluster:cert-manager:
-    desc: "Install cert-manager (dev profile) — required by Kargo for TLS certificates"
-    cmds:
-      - hack/install-cert-manager.sh
-
-  dev:cluster:argo-rollouts:
-    desc: "Install Argo Rollouts (dev profile) — required by Kargo for progressive delivery"
-    cmds:
-      - hack/install-argo-rollouts.sh
-
-  dev:cluster:kargo:
-    desc: "Install cert-manager + Argo Rollouts + Kargo via OCI chart (dev profile)"
-    deps: [dev:cluster:cert-manager, dev:cluster:argo-rollouts]
-    cmds:
-      - hack/install-kargo.sh
-
-  dev:cluster:eso:
-    desc: "Install External Secrets Operator + demo ClusterSecretStores (k8s, vault stub, aws-sm stub)"
-    cmds:
-      - hack/install-eso.sh
-
-  dev:cluster:replicator:
-    desc: "Install Stakater Replicator — replicates upper-level env ConfigMaps/Secrets across namespaces"
-    cmds:
-      - hack/install-replicator.sh
-
-  dev:cluster:reloader:
-    desc: "Install Stakater Reloader — triggers rolling restarts when ConfigMaps or Secrets change"
-    cmds:
-      - hack/install-reloader.sh
-
-  dev:cluster:registry:
-    desc: "Set up a local container registry (kind-registry on localhost:5001)"
-    cmds:
-      - hack/install-registry.sh
-
-  dev:cluster:gitea:
-    desc: "Install Gitea + create gitops repo + register with ArgoCD"
-    cmds:
-      - hack/install-gitea.sh
-
-  dev:cluster:gitops-init:
+  gitops:init:
     desc: "Re-push gitops repo skeleton to Gitea (charts + gitops-output)"
     env:
-      GITEA_HOST_URL: '{{default "http://gitea.localhost:8880" .GITEA_HOST_URL}}'
+      GITEA_HOST_URL: '{{default "http://localhost:3000" .GITEA_HOST_URL}}'
       GITEA_ADMIN_USER: '{{default "gitops" .GITEA_ADMIN_USER}}'
       GITEA_ADMIN_PASS: '{{default "gitops-dev-only" .GITEA_ADMIN_PASS}}'
       GITOPS_REPO_ORG: '{{default "gitops" .GITOPS_REPO_ORG}}'
@@ -161,25 +87,15 @@ tasks:
     cmds:
       - hack/init-gitops-repo.sh
 
-  dev:cluster:seed:
-    desc: "Seed demo data into the cluster (org, project, preview) — idempotent"
+  seed:
+    desc: "Seed demo data into the dev cluster (org, project, preview) — idempotent"
     cmds:
       - hack/seed.sh
 
-  dev:cluster:reset:
-    desc: "Remove seeded demo ConfigMaps from the cluster (re-seedable)"
+  seed:reset:
+    desc: "Remove seeded demo ConfigMaps from the dev cluster (re-seedable)"
     cmds:
       - hack/reset-cluster.sh
-
-  dev:cluster:seed-color-app:
-    desc: "Seed color-app demo via the suparship API (requires running server)"
-    cmds:
-      - hack/seed-color-app.sh
-
-  dev:cluster:init-color-app-repo:
-    desc: "Push color-app source code to a Gitea repo (demo/color-app)"
-    cmds:
-      - hack/init-color-app-repo.sh
 
   # ── Demo ───────────────────────────────────────────────────────────────
 
@@ -221,6 +137,16 @@ tasks:
         vars: { VERSION: "{{.VERSION}}", COLOR: "{{.COLOR}}" }
       - task: demo:color-app:push
         vars: { VERSION: "{{.VERSION}}" }
+
+  demo:color-app:repo:
+    desc: "Push color-app source code to a Gitea repo (demo/color-app)"
+    cmds:
+      - hack/init-color-app-repo.sh
+
+  demo:color-app:seed:
+    desc: "Seed the color-app demo via the suparship API (requires a running server)"
+    cmds:
+      - hack/seed-color-app.sh
 
   # ── Build & test ───────────────────────────────────────────────────────
 
@@ -283,4 +209,4 @@ tasks:
         rm -rf bin/ tmp/
         echo "  Removed: bin/  tmp/"
         echo "  To also clean the frontend build:  rm -rf ui/dist/"
-        echo "  To reset cluster seed data:        task dev:cluster:reset"
+        echo "  To reset cluster seed data:        task seed:reset"

@@ -145,11 +145,13 @@ task down            # stop Tilt, keep the cluster
 task cluster:delete  # delete the kind cluster + registry
 ```
 
-> **Legacy script path.** The older `task dev:cluster` (provision via ~15 shell
-> scripts) + `task dev:cluster:serve` (run the server on the host) flow still
-> works and is handy for targeted re-installs — individual components remain
-> available as `task dev:cluster:<component>` (e.g. `task dev:cluster:argocd`,
-> `task dev:cluster:seed`). But `task up` is the recommended path.
+> **One path, one place.** Every prerequisite (cert-manager, Argo Rollouts,
+> Kargo, ArgoCD, Gitea, External Secrets, Replicator, Reloader) is declared once
+> in the `Tiltfile` as a `helm_resource` — namespace, pinned version and install
+> order all live there. The `~15 hack/install-*.sh` scripts and the
+> `task dev:cluster:*` targets that used to duplicate this are gone. To re-run a
+> single component, hit it in the Tilt UI (<http://localhost:10350>) or
+> `tilt trigger <name>`. To bump a version, edit the `Tiltfile`.
 
 ### 3. CI mode
 
@@ -167,9 +169,9 @@ task charts:verify # schemas in sync, vendored libs in sync, helm lint clean
 | Symptom | Fix |
 |---------|-----|
 | Binary is stale or build artifacts are cluttering the workspace | `task reset` |
-| Seeded demo data is corrupted or you want a clean slate | `task dev:cluster:reset` then `task dev:cluster:seed` |
+| Seeded demo data is corrupted or you want a clean slate | `task seed:reset` then `task seed` |
 | Cluster is in an unrecoverable state | `task down && task cluster:delete && task up` |
-| Login fails in cluster mode (no admin Secret) | Tilt: re-trigger the `suparship-admin-secret` resource (`hack/dev/admin-secret.sh`). Legacy: `go build -o bin/suparship ./cmd/suparship && ./bin/suparship admin bootstrap` |
+| Login fails in cluster mode (no admin Secret) | Re-trigger the `suparship-admin-secret` resource in the Tilt UI (runs `hack/dev/admin-secret.sh`) |
 | Frontend refuses to start | `rm -rf ui/node_modules && cd ui && npm install` |
 
 ### `task reset` — clean local artifacts
@@ -184,7 +186,7 @@ task reset
 Fake mode state is in-memory and resets automatically the next time
 `task dev` starts — no explicit cleanup needed.
 
-### `task dev:cluster:reset` — remove seeded demo data
+### `task seed:reset` — remove seeded demo data
 
 Removes only the three ConfigMaps that `task seed` creates:
 
@@ -198,8 +200,8 @@ It does **not** delete the cluster, ArgoCD, namespaces, or admin credentials.
 Idempotent — safe to run if some resources are already gone.
 
 ```bash
-task dev:cluster:reset     # delete the three seed ConfigMaps
-task dev:cluster:seed      # restore them (Tilt's `seed` resource also re-applies them)
+task seed:reset     # delete the three seed ConfigMaps
+task seed      # restore them (Tilt's `seed` resource also re-applies them)
 ```
 
 To wipe everything and start from scratch:
@@ -240,8 +242,8 @@ With `task up`, suparShip runs **inside** the cluster (as the
 `charts/suparship` Deployment) and Tilt keeps it in sync with your working
 tree — on a Go change it recompiles in the container and restarts in a few
 seconds, so you get a fast loop while exercising the real in-cluster
-ServiceAccount, RBAC, and ConfigMaps. (The legacy `task dev:cluster:serve`
-path instead runs the server as a host process against the cluster.)
+ServiceAccount, RBAC, and ConfigMaps — the same code path production uses,
+rather than a host process holding a kubeconfig.
 
 ---
 

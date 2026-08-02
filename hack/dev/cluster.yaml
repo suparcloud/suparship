@@ -1,9 +1,9 @@
 # ctlptl declarative dev cluster + local registry for suparShip.
 #
-# Replaces hack/bootstrap-cluster.sh + hack/install-registry.sh: ctlptl creates
-# a kind cluster wired to a plain-HTTP local registry and writes the
-# `local-registry-hosting` ConfigMap that Tilt auto-detects — no self-signed
-# TLS certs, no containerd certs.d patching.
+# This is THE cluster definition (the old bootstrap-cluster.sh + install-registry.sh
+# pair it replaced is gone). ctlptl creates a kind cluster wired to a plain-HTTP
+# local registry and writes the `local-registry-hosting` ConfigMap Tilt auto-detects
+# — no self-signed TLS certs, no containerd certs.d patching.
 #
 # Apply:   ctlptl apply  -f hack/dev/cluster.yaml   (done for you by `task up`)
 # Delete:  ctlptl delete -f hack/dev/cluster.yaml   (`task cluster:delete`)

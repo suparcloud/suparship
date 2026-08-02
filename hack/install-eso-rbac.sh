@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hack/install-eso-rbac.sh — the non-Helm parts of ESO setup, extracted from
-# hack/install-eso.sh (steps 6, 6b, 7) so the Tiltfile can run them after the
+# the (now removed) monolithic ESO installer, so the Tiltfile can run them after the
 # external-secrets helm_resource is up:
 #
 #   1. suparship-eso-reader ServiceAccount + cluster-wide read ClusterRole/Binding
@@ -9,6 +9,10 @@
 #
 # Idempotent. Used by: Tiltfile (local_resource 'eso-reader').
 set -euo pipefail
+
+# Pin kubectl to the dev cluster — see hack/dev/lib.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dev/lib.sh"
+require_dev_context
 
 SYSTEM_NAMESPACE="${SUPARSHIP_SYSTEM_NAMESPACE:-suparship-system}"
 ESO_SA_NAME="suparship-eso-reader"

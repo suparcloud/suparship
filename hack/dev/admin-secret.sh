@@ -12,6 +12,10 @@
 # Override the password with SUPARSHIP_DEV_PASSWORD. Used by: Tiltfile.
 set -euo pipefail
 
+# Pin kubectl to the dev cluster — see hack/dev/lib.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+require_dev_context
+
 NS="${SUPARSHIP_SYSTEM_NAMESPACE:-suparship-system}"
 USER="${SUPARSHIP_DEV_USER:-admin}"
 PW="${SUPARSHIP_DEV_PASSWORD:-devpass}"

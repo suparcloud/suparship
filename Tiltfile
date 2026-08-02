@@ -47,10 +47,13 @@ helm_repo('stakater',   'https://stakater.github.io/stakater-charts', labels=['p
 helm_repo('gitea-charts', 'https://dl.gitea.com/charts', labels=['prereq'])
 
 # ── Namespaces (argocd before argocd install; suparship-system before app) ──
+# local_resource runs in the ambient shell, so --context is pinned explicitly:
+# Tilt validates its own context above but cannot police a subprocess.
 local_resource(
     'namespaces',
     cmd='for ns in suparship-system argocd; do ' +
-        'kubectl create ns "$ns" --dry-run=client -o yaml | kubectl apply -f -; done',
+        'kubectl --context %s create ns "$ns" --dry-run=client -o yaml ' % EXPECTED_CONTEXT +
+        '| kubectl --context %s apply -f -; done' % EXPECTED_CONTEXT,
     labels=['cluster'],
 )
 

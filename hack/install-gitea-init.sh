@@ -2,7 +2,7 @@
 # hack/install-gitea-init.sh — initialise the gitops monorepo in an
 # already-running Gitea and wire it into ArgoCD.
 #
-# Extracted from hack/install-gitea.sh (steps 6-9) so it works against either
+# Extracted from the (now removed) monolithic Gitea installer so it works against either
 # the Tilt port-forward (http://localhost:3000, default) or the optional
 # ingress (http://gitea.localhost:8880). Gitea itself is installed by the
 # Tiltfile's `gitea` helm_resource; this script runs after it is ready.
@@ -13,6 +13,10 @@
 #
 # Idempotent. Used by: Tiltfile (local_resource 'init-gitops').
 set -euo pipefail
+
+# Pin kubectl to the dev cluster — see hack/dev/lib.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dev/lib.sh"
+require_dev_context
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
