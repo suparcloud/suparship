@@ -36,7 +36,7 @@
 #   GITEA_CLUSTER_URL    e.g. http://gitea-http.gitea.svc.cluster.local:3000
 #   REPO_ROOT            absolute path to the suparship repo root
 #
-# Used by: hack/install-gitea.sh
+# Used by: hack/install-gitea-init.sh
 set -euo pipefail
 
 # ── Helpers ───────────────────────────────────────────────────────────────

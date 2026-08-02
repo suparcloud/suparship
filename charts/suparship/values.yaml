@@ -69,15 +69,25 @@ argocd:
   createSystemProject: true
 
 # ---------------------------------------------------------------------------
-# Optional infrastructure dependencies (subcharts)
-# Set to true to install as part of this release. Production users should
-# install these independently and set to false.
+# Prerequisite acknowledgements
+#
+# These do NOT install anything — this chart deploys suparship only, and the
+# reasoning is in Chart.yaml. They tell the pre-install prereq-check Job that a
+# component is being installed alongside this release (or is otherwise on its
+# way), so it should not fail the install for a component it cannot see yet.
+#
+# Leave false when the prerequisite is already present: the Job then verifies
+# it and fails loudly if it is missing, which is what you want.
 # ---------------------------------------------------------------------------
 dependencies:
+  # Skip the hard ArgoCD assertion (ns/argocd + deploy/argocd-server).
   argocd:
     enabled: false
+  # Skip the External Secrets assertion, which is only enforced when
+  # secrets.backend is "1password".
   eso:
     enabled: false
+  # Reserved: the ingress check is advisory (warns, never fails).
   ingressNginx:
     enabled: false
 

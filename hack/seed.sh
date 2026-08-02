@@ -34,8 +34,11 @@ die() { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Prereqs ───────────────────────────────────────────────────────────────
 command -v kubectl >/dev/null 2>&1 || die "'kubectl' not found."
+# Pin kubectl to the dev cluster — see hack/dev/lib.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dev/lib.sh"
+require_dev_context
 kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 \
-  || die "Namespace '$NAMESPACE' not found. Run: task dev:cluster:bootstrap"
+  || die "Namespace '$NAMESPACE' not found. Run: task up"
 
 echo ""
 echo "  suparship — seed demo data  (kubectl apply -f ${SEED_DIR}/)"

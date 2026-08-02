@@ -9,6 +9,7 @@ ADRs document significant decisions that shaped the system's design, API surface
 | ADR | Title | Status |
 |-----|-------|--------|
 | [ADR-0001](0001-app-as-primary-deployment-object.md) | App as Primary User-Facing Deployment Object | Accepted |
+| [ADR-0002](0002-app-vs-stack-boundary.md) | App ↔ Stack Boundary & Deployment Variants | Accepted |
 
 ## Related docs
 
