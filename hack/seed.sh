@@ -46,7 +46,29 @@ echo "  ────────────────────────
 echo ""
 
 # ── Apply all seed manifests ──────────────────────────────────────────────
-kubectl apply -f "${SEED_DIR}/" --namespace="${NAMESPACE}" >/dev/null
+# In multi-cluster mode the placeholder cluster records in clusters.yaml are not
+# just unrealistic, they are actively harmful: both point at
+# https://kubernetes.default.svc, and any app published while an environment is
+# bound to one leaves a dead envs/<env>/<project>/<app>/_targets/<placeholder>/
+# entry that generates an ArgoCD Application aimed at the tooling cluster. Some
+# seeded apps are embedded in the project record rather than being first-class
+# apps, so they are not reachable via the sync API and that entry never gets
+# rewritten.
+#
+# Skipping them leaves the environments referring to clusters that do not exist,
+# which the publisher treats as unbound and skips — so nothing is published until
+# hack/dev/seed-multi.sh binds the environments to the REAL clusters.
+if [ "${SUPARSHIP_MULTI:-}" = "1" ]; then
+  for f in "${SEED_DIR}"/*.yaml; do
+    case "$(basename "$f")" in
+      clusters.yaml) continue ;;
+    esac
+    kubectl apply -f "$f" --namespace="${NAMESPACE}" >/dev/null
+  done
+  ok "skipped clusters.yaml (multi-cluster mode — real clusters register later)"
+else
+  kubectl apply -f "${SEED_DIR}/" --namespace="${NAMESPACE}" >/dev/null
+fi
 
 ok "suparship-org-config          (default org, admins team)"
 ok "suparship-project-demo        (hello service, staging + prod)"

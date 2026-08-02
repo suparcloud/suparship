@@ -81,6 +81,46 @@ for stale in staging-cluster prod-cluster; do
   fi
 done
 
+# ── Republish every app against the real clusters ─────────────────────────
+# Tilt runs `seed` before this, so any app seeded there was already published
+# while the envs still pointed at the placeholder records — leaving a stale
+# envs/<env>/<project>/<app>/_targets/staging-cluster/app.yaml behind, and an
+# ArgoCD Application generated from it aimed at https://kubernetes.default.svc.
+#
+# A sync fixes it completely rather than needing surgery on the repo: the
+# publisher does RemoveAll on the env's _targets directory before rewriting it
+# (internal/gitops/publisher.go), so the dead per-cluster entry disappears and
+# the ApplicationSet prunes the Application that was generated from it.
+API="${SUPARSHIP_API:-http://localhost:8080}"
+USER="${SUPARSHIP_DEV_USER:-admin}"
+PASS="${SUPARSHIP_DEV_PASSWORD:-devpass}"
+
+COOKIE="$(curl -s -c - -X POST "$API/api/v1/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$USER\",\"password\":\"$PASS\"}" 2>/dev/null \
+  | awk '/suparship_session/ {print $NF}')"
+
+if [ -z "$COOKIE" ]; then
+  printf "  \033[0;33m–\033[0m  could not reach %s — skipping republish.\n" "$API"
+  printf "     Re-run this script, or sync apps from the UI, to clear any\n"
+  printf "     _targets entry still pointing at a placeholder cluster.\n"
+else
+  PROJECTS="$(curl -s -b "suparship_session=$COOKIE" "$API/api/v1/projects" 2>/dev/null \
+    | python3 -c 'import json,sys; print("\n".join(p["name"] for p in json.load(sys.stdin).get("projects",[])))' 2>/dev/null || true)"
+  for proj in $PROJECTS; do
+    APPS="$(curl -s -b "suparship_session=$COOKIE" "$API/api/v1/projects/$proj/apps" 2>/dev/null \
+      | python3 -c 'import json,sys; print("\n".join(a["name"] for a in json.load(sys.stdin).get("apps",[])))' 2>/dev/null || true)"
+    for app in $APPS; do
+      code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -b "suparship_session=$COOKIE" \
+        "$API/api/v1/projects/$proj/apps/$app/sync")"
+      case "$code" in
+        2*) ok "republished $proj/$app against the real clusters" ;;
+        *)  printf "  \033[0;33m–\033[0m  %s/%s sync returned HTTP %s (skipped)\n" "$proj" "$app" "$code" ;;
+      esac
+    done
+  done
+fi
+
 printf "\n  Environments now deploy to separate clusters. Verify:\n"
 printf "    kubectl --context kind-staging get ns\n"
 printf "    kubectl --context kind-prod    get ns\n\n"
