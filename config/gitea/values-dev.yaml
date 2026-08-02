@@ -3,7 +3,7 @@
 # Installs a minimal, single-replica Gitea suitable for a kind cluster.
 # NOT suitable for staging or production.
 #
-# Used by: hack/install-gitea.sh
+# Used by: Tiltfile (the `gitea` helm_resource)
 # Chart:   gitea 10.6.0 (Gitea v1.22.x)
 # Repo:    https://dl.gitea.com/charts/
 

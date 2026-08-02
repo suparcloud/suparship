@@ -9,13 +9,13 @@
 # generator and deploys them to the configured workload cluster. The preview
 # ApplicationSet watches gitops-output/previews/ for ephemeral environments.
 #
-# Applied once during cluster bootstrap by: hack/install-gitea.sh
+# Applied once during cluster bootstrap by: hack/install-gitea-init.sh
 # To view live status:  kubectl get application suparship-apps -n argocd
 #
 # NOTE: repoURL below uses the in-cluster Gitea service DNS. Do not change
 # this to the host-accessible ingress URL — ArgoCD is inside the cluster.
 #
-# Template placeholders (replaced by install-gitea.sh at apply time):
+# Template placeholders (replaced by install-gitea-init.sh at apply time):
 #   GITEA_CLUSTER_URL  →  http://gitea-http.gitea.svc.cluster.local:3000
 #   GITOPS_REPO_ORG    →  gitops
 #   GITOPS_REPO_NAME   →  gitops

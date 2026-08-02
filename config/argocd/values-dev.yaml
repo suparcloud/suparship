@@ -3,7 +3,7 @@
 # Installs a minimal, single-replica ArgoCD suitable for a kind cluster.
 # NOT suitable for staging or production.
 #
-# Used by: hack/install-argocd.sh
+# Used by: Tiltfile (the `argocd` helm_resource)
 # Chart:   argo-cd 7.7.0 (ArgoCD v2.13.x)
 # Repo:    https://argoproj.github.io/argo-helm
 
