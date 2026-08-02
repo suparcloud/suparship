@@ -84,7 +84,26 @@ helm_resource(
     flags=['--create-namespace', '--version=1.9.5',
            '--set=api.adminAccount.enabled=false', '--wait', '--timeout=10m0s'],
     resource_deps=['cert-manager', 'argo-rollouts'],
-    port_forwards=['8083:8080'],  # Kargo API/UI (https, self-signed) -> https://localhost:8083
+    labels=['prereq'],
+)
+# NOTE: no port_forwards on the helm_resource above — deliberately.
+#
+# Kargo's chart ships an hourly garbage-collector CronJob whose pods carry the
+# same release labels as its long-running Deployments. Tilt binds a resource to
+# the NEWEST matching pod, so within an hour of `tilt up` the `kargo` resource
+# latches onto a Completed GC pod. Tilt still reports the resource green (the
+# job succeeded) while its port-forward now targets a dead pod: :8083 accepts
+# connections and proxies nowhere, which looks exactly like "Kargo is down"
+# even though every Deployment is 1/1.
+#
+# Forward the API Deployment explicitly instead of relying on pod discovery.
+# The pod serves TLS on 8080 despite the container port being named `h2c`, so
+# the URL is https and the cert is self-signed.
+local_resource(
+    'kargo-api-forward',
+    serve_cmd='kubectl --context %s -n kargo port-forward deploy/kargo-api 8083:8080' % EXPECTED_CONTEXT,
+    resource_deps=['kargo'],
+    links=[link('https://localhost:8083', 'Kargo UI (self-signed cert)')],
     labels=['prereq'],
 )
 
