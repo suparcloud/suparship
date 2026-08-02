@@ -203,6 +203,15 @@ local_resource(
     resource_deps=['namespaces'], labels=['app'],
 )
 
+# ── GitOps push credentials ────────────────────────────────────────────────
+# Must exist BEFORE the suparship pod starts: gitops config is read at boot, and
+# without a usable credential the publisher stays disabled for the process
+# lifetime — app creates then silently write nothing.
+local_resource(
+    'gitops-credentials', cmd='hack/dev/gitops-credentials.sh',
+    resource_deps=['namespaces'], labels=['app'],
+)
+
 # ── Build suparShip from source (CGO dev image + live_update) ──────────────
 ui_sync = [sync('./ui/dist', '/app/ui')] if os.path.exists('ui/dist') else []
 docker_build_with_restart(
@@ -214,12 +223,21 @@ docker_build_with_restart(
     # live here. The rest is covered by env (SUPARSHIP_CLUSTER_MODE=kubernetes
     # from the chart; SUPARSHIP_ADDR/SUPARSHIP_UI_DIR from Dockerfile.dev) and
     # flag defaults (admin-secret-* default to the chart's values).
-    entrypoint='/usr/local/bin/suparship server --log-level=debug',
-    only=['go.mod', 'go.sum', 'cmd', 'internal', 'ui/dist'],
+    # --templates-dir: without it the server starts with ZERO templates, so
+    # `POST /apps` fails with `template "web-service" not found` and the golden
+    # path is unreachable. In-cluster suparship otherwise reads templates from
+    # ConfigMaps, which only an external template-repo sync populates; the
+    # built-ins live on disk in this repo, so point at them directly (the same
+    # thing the old host-process loop did with SUPARSHIP_TEMPLATES_DIR).
+    entrypoint='/usr/local/bin/suparship server --log-level=debug --templates-dir=/src/templates',
+    only=['go.mod', 'go.sum', 'cmd', 'internal', 'templates', 'ui/dist'],
     live_update=[
         fall_back_on(['go.mod', 'go.sum']),   # dep change -> full image rebuild
         sync('./cmd', '/src/cmd'),
         sync('./internal', '/src/internal'),
+        # Editing a template.yaml or its chart takes effect on the next sync —
+        # no rebuild, since templates are read from disk at request time.
+        sync('./templates', '/src/templates'),
     ] + ui_sync + [                            # all sync steps must precede run steps
         run('go build -o /usr/local/bin/suparship ./cmd/suparship',
             trigger=['./cmd', './internal']),
@@ -240,7 +258,30 @@ _chart_yaml = helm(
 def _is_helm_hook(o):
     anns = (o.get('metadata') or {}).get('annotations') or {}
     return 'helm.sh/hook' in anns
-_objs = [o for o in decode_yaml_stream(_chart_yaml) if o and not _is_helm_hook(o)]
+
+# Strip the ConfigMaps the chart intends to create ONCE and then leave alone.
+#
+# The chart guards them with `{{- if not (lookup "v1" "ConfigMap" ...) }}`, which
+# works under `helm install/upgrade` — but Tilt renders with `helm template`,
+# where `lookup` ALWAYS returns nil. So the guard is always true, Tilt applies
+# them on every reconcile, and they clobber whatever the running system has.
+#
+# For the org ConfigMap that is destructive: hack/seed.sh and
+# hack/dev/seed-multi.sh own it, and values-dev.yaml deliberately sets no
+# `environments`, so each apply silently ERASED every environment binding —
+# leaving "skipping kargo stage for unbound env" and nothing deployable.
+#
+# In dev, seed scripts own org + cluster state. The gitops/registry ConfigMaps
+# are NOT stripped: values-dev.yaml is their real source of truth.
+_SEED_OWNED = ['suparship-org-config']
+def _is_seed_owned(o):
+    if o.get('kind') != 'ConfigMap':
+        return False
+    name = (o.get('metadata') or {}).get('name') or ''
+    return name in _SEED_OWNED or name.startswith('suparship-cluster-')
+
+_objs = [o for o in decode_yaml_stream(_chart_yaml)
+         if o and not _is_helm_hook(o) and not _is_seed_owned(o)]
 k8s_yaml(encode_yaml_stream(_objs))
 k8s_resource(
     'suparship',
@@ -250,7 +291,7 @@ k8s_resource(
     # AppProject").
     objects=['suparship-system:appproject:argocd'],
     port_forwards=['8080:8080'],  # Service 80 -> pod 8080 ; Vite proxies /api here
-    resource_deps=['suparship-admin-secret', 'argocd', 'external-secrets'],
+    resource_deps=['suparship-admin-secret', 'gitops-credentials', 'init-gitops', 'argocd', 'external-secrets'],
     labels=['app'],
 )
 
