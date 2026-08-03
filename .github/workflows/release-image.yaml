@@ -5,6 +5,10 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  # Escape hatch: when release-please pushes the tag with GITHUB_TOKEN rather
+  # than a PAT, the tag push starts no workflow run. Dispatch this against the
+  # release tag to build the versioned image by hand.
+  workflow_dispatch:
 
 permissions:
   contents: read
