@@ -179,6 +179,14 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Reject a name that would collide with another app's ArgoCD Application name
+	// once the project prefix is folded (e.g. "bar" when "foo-bar" exists in "foo").
+	if other := ah.argoNameCollision(r.Context(), projectName, req.Name, ""); other != "" {
+		writeJSON(w, http.StatusConflict, errorResponse{
+			Error: "app \"" + req.Name + "\" would produce the same ArgoCD Application name as \"" + other + "\" (both resolve to \"" + secrets.DedupProjectPrefix(projectName, req.Name) + "\"); rename one",
+		})
+		return
+	}
 
 	// Convert secret refs from DTO to domain type for the Create pipeline.
 	domainSecretRefs := make([]domain.AppSecretRef, len(req.SecretRefs))
@@ -275,7 +283,6 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "template name is required"})
 		return
 	}
-
 
 	values := req.Values
 	if values == nil {
@@ -643,6 +650,10 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CD != nil {
 		cd := cdConfigFromDTO(req.CD)
+		// Preserve the image-config intent across a CD-only edit (managed/autoPromote
+		// toggle) — the DTO doesn't carry it, so a bare replacement would silently
+		// reset it and re-enable template auto-bind.
+		cd.ImagesConfigured = app.Spec.CD.ImagesConfigured
 		// Enabling CD-managed tag ownership requires a watchable image source (a
 		// selected image or an app image_repository); reject otherwise so we never
 		// publish a Warehouse that silently never promotes. Validate before mutating
@@ -654,6 +665,13 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		app.Spec.CD = cd
+	}
+	// A submitted image selection (either shape) means the user has explicitly
+	// reviewed CD image selection: from now on an empty selection means "watch
+	// nothing", not "auto-bind the template defaults". Set after the CD block so it
+	// survives a same-request CD replacement.
+	if req.Images != nil || req.ComponentImages != nil {
+		app.Spec.CD.ImagesConfigured = true
 	}
 	if dm := domain.DeliveryMode(strings.TrimSpace(req.DeliveryMode)); dm != "" {
 		app.Spec.DeliveryMode = dm
@@ -893,6 +911,14 @@ func (ah *appHandler) handleRenameApp(w http.ResponseWriter, r *http.Request) {
 	if _, err := ah.appStore.GetApp(r.Context(), projectName, newName); err == nil {
 		writeJSON(w, http.StatusConflict, errorResponse{
 			Error: "app \"" + newName + "\" already exists in project \"" + projectName + "\"",
+		})
+		return
+	}
+	// Reject a rename that would collide with another app's folded ArgoCD name
+	// (exclude the app being renamed).
+	if other := ah.argoNameCollision(r.Context(), projectName, newName, oldName); other != "" {
+		writeJSON(w, http.StatusConflict, errorResponse{
+			Error: "app \"" + newName + "\" would produce the same ArgoCD Application name as \"" + other + "\" (both resolve to \"" + secrets.DedupProjectPrefix(projectName, newName) + "\"); pick another name",
 		})
 		return
 	}
@@ -3153,6 +3179,39 @@ func (ah *appHandler) argoAppNamesForEnv(ctx context.Context, projectName, appNa
 	return out
 }
 
+// argoNameCollision returns an existing app in the project whose ArgoCD Application
+// name identity collides with candidate, or "" if none. When the org's ArgoAppName
+// pattern folds the project prefix ({projectApp}, the default), two apps like
+// "foo-bar" and "bar" in project "foo" both resolve to "foo-bar" and would produce
+// duplicate ArgoCD Application names in the shared argocd namespace — so one must be
+// rejected at create/rename. When the pattern doesn't dedup, the project prefix keeps
+// names unique and this is a no-op. Best-effort: a list failure never blocks the op.
+func (ah *appHandler) argoNameCollision(ctx context.Context, projectName, candidate, exclude string) string {
+	pattern := secrets.DefaultArgoAppName
+	if ah.orgProvider != nil {
+		if org, err := ah.orgOnce(ctx); err == nil && org != nil {
+			pattern = org.ResourceNaming.EffectiveArgoAppName()
+		}
+	}
+	if !strings.Contains(pattern, "{projectApp}") {
+		return ""
+	}
+	want := secrets.DedupProjectPrefix(projectName, candidate)
+	apps, err := ah.appStore.ListApps(ctx, projectName)
+	if err != nil {
+		return ""
+	}
+	for _, a := range apps {
+		if a.Name == exclude || a.Name == candidate {
+			continue
+		}
+		if secrets.DedupProjectPrefix(projectName, a.Name) == want {
+			return a.Name
+		}
+	}
+	return ""
+}
+
 // applyRuntimeInfo folds a RuntimeInfo into the env's stored status/urls/release.
 func (ah *appHandler) applyRuntimeInfo(env *domain.AppEnvironment, info *runtime.RuntimeInfo) {
 	env.Status.Phase = info.Status
@@ -3475,7 +3534,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		EnvRawValues:     envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
 		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
-		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote},
+		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured},
 		Images:           appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:     string(app.Spec.DeliveryMode),
 		PreviewsEnabled:  app.Spec.PreviewsEnabled,

@@ -36,8 +36,28 @@ type ResourceNaming struct {
 }
 
 // DefaultArgoAppName is the ArgoCD Application name pattern used when
-// ResourceNaming.ArgoAppName is unset. See the ArgoAppName field docs.
-const DefaultArgoAppName = "{project}-{app}-{cluster}"
+// ResourceNaming.ArgoAppName is unset. Uses {projectApp} (the project prefix folded
+// into the app name — see DedupProjectPrefix) so an app named with its project
+// prefix ("foo-bar" in project "foo") yields "foo-bar-{cluster}", not the redundant
+// "foo-foo-bar-{cluster}". {project}/{app} remain available for custom patterns.
+const DefaultArgoAppName = "{projectApp}-{cluster}"
+
+// DedupProjectPrefix folds the project prefix into the app name: it returns the app
+// name unchanged when it already carries the project (app == project, or app starts
+// with "{project}-"), else "{project}-{app}". This is the project-app identity used
+// for ArgoCD Application names (the {projectApp} token) — the project prefix is the
+// uniqueness guarantee in the shared argocd namespace, so callers that use this MUST
+// also enforce that no two apps in a project share the same DedupProjectPrefix
+// identity (e.g. "foo-bar" and "bar" in project "foo" both fold to "foo-bar").
+func DedupProjectPrefix(project, app string) string {
+	if project == "" {
+		return app
+	}
+	if app == project || strings.HasPrefix(app, project+"-") {
+		return app
+	}
+	return project + "-" + app
+}
 
 // ── Hardcoded conventions ─────────────────────────────────────────────────
 
@@ -60,9 +80,12 @@ type NamingParams struct {
 // dns1123 validates K8s resource names (lowercase, alphanumeric, '-').
 var dns1123 = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
-// RenderPattern replaces tokens in pattern with values from params.
+// RenderPattern replaces tokens in pattern with values from params. {projectApp} is
+// the project-prefix-deduped app identity (DedupProjectPrefix) — expanded BEFORE the
+// bare {project}/{app} tokens so it wins.
 func RenderPattern(pattern string, params NamingParams) string {
 	r := strings.NewReplacer(
+		"{projectApp}", DedupProjectPrefix(params.Project, params.App),
 		"{org}", params.Org,
 		"{env}", params.Env,
 		"{project}", params.Project,

@@ -225,6 +225,76 @@ func TestWriteComposedAppTree_RendersFiles(t *testing.T) {
 	}
 }
 
+// TestWriteComposedAppTree_Suspend asserts that suspending a composed app's env
+// writes each component's suspend key into its OWN values.yaml — using the
+// component template's SuspendKey, falling back to the app-level key — and that
+// RESUMING (clearing the flag and republishing) drops the toggle, since the
+// composed tree is fully rewritten each publish. Regression: the composed publish
+// path previously ignored the suspend flag entirely, so suspend/resume committed
+// nothing that scaled the component workloads down.
+func TestWriteComposedAppTree_Suspend(t *testing.T) {
+	dir := t.TempDir()
+	app := composedApp()
+
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:       "https://git/repo.git",
+		SyncAutomated: true,
+		TemplateLoader: keyedTemplateLoader{
+			"web-service": "web",
+			"worker":      "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+
+	// api inherits the app-level default key ("suspend"); worker declares a custom
+	// key ("paused") via its component platform values — proving per-component
+	// resolution and the app-level fallback in one publish.
+	compPV := map[string]gitops.ComponentPlatformValues{
+		"worker": {SuspendKey: "paused"},
+	}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+			Namespace: "bigly-staging", BaseDomain: "localhost",
+			Clusters:                []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+			SuspendKey:              "suspend",
+			ComponentPlatformValues: compPV},
+	}
+	compPath := func(comp string) string {
+		return filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", comp, "values.yaml")
+	}
+
+	// Suspend: flag set → each component's values.yaml carries its suspend toggle.
+	suspended := true
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"staging": {Suspend: &suspended},
+	}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("suspend publish: %v", err)
+	}
+	if got, _ := readRootMap(t, compPath("api"))["suspend"].(bool); !got {
+		t.Errorf("suspended api: suspend = %v, want true", got)
+	}
+	if got, _ := readRootMap(t, compPath("worker"))["paused"].(bool); !got {
+		t.Errorf("suspended worker: paused = %v, want true (custom component key)", got)
+	}
+
+	// Resume: clear the flag and republish → the toggle is gone from both components.
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"staging": {Suspend: nil},
+	}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("resume publish: %v", err)
+	}
+	if _, present := readRootMap(t, compPath("api"))["suspend"]; present {
+		t.Errorf("resumed api must not carry a suspend key")
+	}
+	if _, present := readRootMap(t, compPath("worker"))["paused"]; present {
+		t.Errorf("resumed worker must not carry a paused key")
+	}
+}
+
 // TestWriteComposedAppTree_FanOut asserts a composed app deploying to MULTIPLE
 // clusters in one env fans out: each cluster gets its own per-component values
 // tree under _clusters/<cluster>/… (with that cluster's routing host and platform

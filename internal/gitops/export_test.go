@@ -49,6 +49,19 @@ func (p *Publisher) PublishComposedAppEnvForTest(ctx context.Context, repoDir st
 	return p.publishComposedAppEnv(ctx, repoDir, app, env)
 }
 
+// PublishEnvFilesForTest exposes the per-env routing writer (composed vs
+// single-source) behind PublishAppEnv and the batched focus-env loops (the pin /
+// unpin / batch-publish path), for white-box tests without git.
+func (p *Publisher) PublishEnvFilesForTest(ctx context.Context, repoDir string, app *domain.App, env AppPublishEnv) error {
+	return p.publishEnvFiles(ctx, repoDir, app, env)
+}
+
+// UnpublishAppFilesForTest exposes UnpublishApp's file-removal (including preview
+// trees across all open preview names) to white-box tests, without git.
+func (p *Publisher) UnpublishAppFilesForTest(repoDir, projectName, appName string) (bool, error) {
+	return p.unpublishAppFiles(repoDir, projectName, appName)
+}
+
 // CollectComponentImagesForTest exposes collectComponentImages — the composed
 // per-component Kargo image resolver — to white-box tests.
 func CollectComponentImagesForTest(app *domain.App, resolved map[string][]KargoImage) []KargoImage {

@@ -973,6 +973,21 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 				}
 			}
 		}
+		// A pinned stable env freezes every component's image tag to the pinned tag
+		// (a promoted preview build). Applied per component below AFTER the preserved
+		// tag so the pin wins and holds until unpinned — the composed analog of the
+		// single-source pinnedTag. Preview envs are skipped above, so this is a stable
+		// env's pin.
+		pinnedTag := app.Spec.EnvironmentDefaults[env.EnvName].PinnedImageTag
+		// suspended writes each component's suspend toggle (its template's SuspendKey)
+		// to true so every workload scales down while the env stays published (no data
+		// loss, unlike undeploy). Resume clears the override, so nothing is written and
+		// the chart default (running) applies on the next republish. The composed analog
+		// of the single-source suspend in publishAppFiles.
+		suspended := false
+		if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && ov.Suspend != nil {
+			suspended = *ov.Suspend
+		}
 		if err := os.RemoveAll(p.appEnvDir(repoDir, env, app.ProjectName, app.Name, "components")); err != nil {
 			return fmt.Errorf("prune composed component values for env %s: %w", env.EnvName, err)
 		}
@@ -1106,6 +1121,27 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 					}
 					overlay = o
 				}
+				// Pin wins over the preserved/promoted tag: freeze each of this
+				// component's image tag key(s) to the pinned tag so a republish (or a
+				// newer promoted image) can't override the pin until it's cleared.
+				if pinnedTag != "" && len(c.Images) > 0 {
+					for _, img := range c.Images {
+						setStringAtPath(overlay, img.TagKey, pinnedTag)
+					}
+				}
+				// Suspend: toggle this component's suspend key on. Only written when
+				// suspended, so resume drops back to the chart default (running). Use the
+				// component template's own SuspendKey; fall back to the app-level key
+				// (the primary template's, defaulting to "suspend") if unset.
+				if suspended {
+					suspendKey := env.ComponentPlatformValues[c.Name].SuspendKey
+					if suspendKey == "" {
+						suspendKey = env.SuspendKey
+					}
+					if suspendKey != "" {
+						setValueAtPath(overlay, suspendKey, true)
+					}
+				}
 				// A BYO/passthrough component gets ONLY its own overlay (the chart's own
 				// values.yaml is the Helm base); platform.* is available via ((platform.*))
 				// tokens. suparship injects no canonical app/components/routing/image
@@ -1208,15 +1244,12 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 // the resulting git commit is a no-op (stagedIsEmpty check in commitAndPush).
 func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppPublishEnv) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		if app.Spec.IsComposed() {
-			// Composed: write just this env's component values + rendered
-			// Application (+ authorized-stage annotation) so the target env
-			// materializes on promotion. The Warehouse/Stages already exist from
-			// the full publish, so they're not rewritten here.
-			if err := p.publishComposedAppEnv(ctx, repoDir, app, env); err != nil {
-				return err
-			}
-		} else if err := p.publishAppFiles(repoDir, app, []AppPublishEnv{env}); err != nil {
+		// Composed: write just this env's component values + rendered Application
+		// (+ authorized-stage annotation) so the target env materializes on
+		// promotion. Single-source: the flat app.yaml + values.yaml. The
+		// Warehouse/Stages already exist from the full publish, so they're not
+		// rewritten here.
+		if err := p.publishEnvFiles(ctx, repoDir, app, env); err != nil {
 			return err
 		}
 		commitMsg := fmt.Sprintf("feat(apps): publish %s/%s to %s\n\nPromoted by suparship.", app.ProjectName, app.Name, env.EnvName)
@@ -1242,6 +1275,20 @@ func (p *Publisher) publishComposedAppEnv(ctx context.Context, repoDir string, a
 	return p.publishComposedAppFiles(repoDir, app, []AppPublishEnv{env}, componentKeys, componentCanonical)
 }
 
+// publishEnvFiles writes ONE env's tree for an app into an already-cloned repo,
+// routing a COMPOSED app to its per-component / multi-source writer and a
+// single-source app to the flat writer. It is the shared per-env body behind
+// PublishAppEnv and the batched focus-env loops (PublishApps / PublishAppsEnv), so a
+// pinned / suspended / promoted env of a composed app materializes as composed —
+// not as an orphaned single-source app.yaml + values.yaml (using the app's
+// "primary" template), which is what broke pin-to-env for app-component apps.
+func (p *Publisher) publishEnvFiles(ctx context.Context, repoDir string, app *domain.App, env AppPublishEnv) error {
+	if app.Spec.IsComposed() {
+		return p.publishComposedAppEnv(ctx, repoDir, app, env)
+	}
+	return p.publishAppFiles(repoDir, app, []AppPublishEnv{env})
+}
+
 // AppEnvPublish pairs an app with one resolved env to publish. It is the unit of
 // PublishAppsEnv, the batched form of PublishAppEnv.
 type AppEnvPublish struct {
@@ -1260,7 +1307,7 @@ func (p *Publisher) PublishAppsEnv(ctx context.Context, items []AppEnvPublish) e
 	}
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		for _, it := range items {
-			if err := p.publishAppFiles(repoDir, it.App, []AppPublishEnv{it.Env}); err != nil {
+			if err := p.publishEnvFiles(ctx, repoDir, it.App, it.Env); err != nil {
 				return err
 			}
 		}
@@ -1303,7 +1350,7 @@ func (p *Publisher) PublishApps(ctx context.Context, bundles []AppPublishBundle)
 				return err
 			}
 			for i := range b.FocusEnvs {
-				if err := p.publishAppFiles(repoDir, b.App, []AppPublishEnv{b.FocusEnvs[i]}); err != nil {
+				if err := p.publishEnvFiles(ctx, repoDir, b.App, b.FocusEnvs[i]); err != nil {
 					return err
 				}
 			}
@@ -2233,6 +2280,36 @@ func SelectKargoImages(discovered []tpl.TemplateImage, selection []domain.AppIma
 	return out
 }
 
+// SelectDeclaredKargoImages builds the CD image set from the DECLARED discovered
+// images (those the template declares a pull rule for — Declared=true), used as the
+// default when the user has bound no images. So a template that declares its image
+// pull config yields a healthy Warehouse with zero config ("inherit from template").
+// Undeclared discovered images (sidecars) are ignored. Rules fall back to the
+// platform defaults (7-char SHA / NewestBuild) when the slot leaves them unset.
+func SelectDeclaredKargoImages(discovered []tpl.TemplateImage) []KargoImage {
+	var out []KargoImage
+	for _, d := range discovered {
+		if !d.Declared || d.Repository == "" {
+			continue
+		}
+		img := KargoImage{
+			Name:              d.Name,
+			Repository:        d.Repository,
+			TagKey:            d.TagKey,
+			TagPattern:        d.TagPattern,
+			SelectionStrategy: d.SelectionStrategy,
+		}
+		if img.TagPattern == "" {
+			img.TagPattern = DefaultImageTagPattern
+		}
+		if img.SelectionStrategy == "" {
+			img.SelectionStrategy = DefaultImageSelectionStrategy
+		}
+		out = append(out, img)
+	}
+	return out
+}
+
 func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	projectNS := KargoNamespaceForProject(app.ProjectName)
 	kargoDir := p.outputDir(repoDir, "_infra", "kargo")
@@ -2327,32 +2404,37 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		}
 		images = resolveKargoImages(app, tmplImages)
 	}
-	if len(images) == 0 {
-		// No image bindings — applyKargoDefaults will seed a ghcr.io/{project}/{app}
-		// placeholder that won't pull. Warn rather than fail silently so the operator
-		// knows to declare images (component image bindings, or template settings).
-		slog.Warn("gitops: app has no image bindings — Kargo Warehouse will use a placeholder that won't pull; declare component images (composed) or template images",
-			"project", app.ProjectName, "app", app.Name, "composed", composed,
-			"placeholder", DefaultImageRepoURL(app.ProjectName, app.Name))
-	}
-
 	// ── Warehouse ──────────────────────────────────────────────────────────────
-	whOpts := KargoBuildOptions{
-		Images:                images,
-		InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
-		Branding:              p.cfg.Branding,
-		SubPath:               p.cfg.SubPath,
-	}
-	warehouse := BuildKargoWarehouse(app, whOpts)
-	whBytes, err := yaml.Marshal(warehouse)
-	if err != nil {
-		return fmt.Errorf("marshal kargo warehouse for %s: %w", app.Name, err)
-	}
 	whPath := filepath.Join(kargoDir, projectNS+"-"+app.Name+"-warehouse.yaml")
-	if err := p.writeFile(whPath, whBytes); err != nil {
-		return err
+	if len(images) == 0 {
+		// No image source — no user bindings, no template-declared images, and no
+		// image_repository. Do NOT write a placeholder Warehouse: an unreachable
+		// ghcr.io/{project}/{app} subscription just thrashes Kargo in a failing
+		// refresh loop. Prune any stale Warehouse and skip; the Stages still publish,
+		// and the Warehouse materializes healthy once an image is detected/bound
+		// (auto-inherited from the template, or set via the image editor).
+		if err := os.Remove(whPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("prune stale kargo warehouse for %s: %w", app.Name, err)
+		}
+		slog.Warn("gitops: no image source for CD — skipping Kargo Warehouse (promotions paused until an image is set)",
+			"project", app.ProjectName, "app", app.Name, "composed", composed)
+	} else {
+		whOpts := KargoBuildOptions{
+			Images:                images,
+			InsecureSkipTLSVerify: p.cfg.InsecureRegistry,
+			Branding:              p.cfg.Branding,
+			SubPath:               p.cfg.SubPath,
+		}
+		warehouse := BuildKargoWarehouse(app, whOpts)
+		whBytes, err := yaml.Marshal(warehouse)
+		if err != nil {
+			return fmt.Errorf("marshal kargo warehouse for %s: %w", app.Name, err)
+		}
+		if err := p.writeFile(whPath, whBytes); err != nil {
+			return err
+		}
+		slog.Debug("gitops: wrote kargo warehouse", "app", app.Name)
 	}
-	slog.Debug("gitops: wrote kargo warehouse", "app", app.Name)
 
 	// ── Stages ─────────────────────────────────────────────────────────────────
 	// Build a linear chain: stableEnvs[0] pulls from Warehouse, each subsequent
@@ -2486,6 +2568,12 @@ type ComponentPlatformValues struct {
 	// component's template — the composed analog of PreviewPublishSpec.
 	// TemplatePreviewValues. Only used on the composed preview path.
 	Preview map[string]any
+	// SuspendKey is the dotted Helm values key that toggles suspend for THIS
+	// component's chart (the component template's declared key, or the "suspend"
+	// convention default). When the env override sets Suspend=true, the composed
+	// publisher writes true here in the component's values.yaml so the workload
+	// scales down. The composed analog of AppPublishEnv.SuspendKey.
+	SuspendKey string
 }
 
 // AppPublishEnv carries per-environment publish context for PublishApp.
@@ -3100,100 +3188,136 @@ func (u *unpublishHelper) rm(path string) error {
 //   - envs/{env}/{project}/{app}/            — app Application + values
 //   - _app-resources/{env}/{project}/{app}/  — platform ConfigMap/ExternalSecret
 //   - _infra/kargo/{ns}-{app}-*.yaml         — Kargo Warehouse + Stage CRs
+//   - previews/*/{project}/*/{app}/          — open preview chart trees (all PRs)
+//   - _app-resources/previews/*/{project}/*/{app}/     — preview platform resources
+//   - _composed-apps/_previews/*/{project}/*/{app}/    — composed preview manifests
 //   - {env}/{project}/{app}/                 — legacy pre-envs/ layout
 //
-// Preview trees (previews/{baseEnv}/{project}/{preview}/{app}) are removed by the
-// per-app preview-delete flow, not here. No-op if nothing found.
+// No-op if nothing found.
 func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
-		var u unpublishHelper
-
-		// envs/{env}/{project}/{app} and _app-resources/{env}/{project}/{app}.
-		for _, base := range []string{"envs", "_app-resources"} {
-			baseDir := p.outputDir(repoDir, base)
-			entries, err := os.ReadDir(baseDir)
-			if err != nil {
-				continue // tree absent — nothing to remove
-			}
-			for _, e := range entries {
-				if !e.IsDir() || e.Name() == "previews" {
-					continue
-				}
-				if err := u.rm(filepath.Join(baseDir, e.Name(), projectName, appName)); err != nil {
-					return err
-				}
-				// Per-cluster fan-out values: envs/{env}/_clusters/{cluster}/{project}/{app}.
-				clustersDir := filepath.Join(baseDir, e.Name(), "_clusters")
-				if cents, cerr := os.ReadDir(clustersDir); cerr == nil {
-					for _, c := range cents {
-						if !c.IsDir() {
-							continue
-						}
-						if err := u.rm(filepath.Join(clustersDir, c.Name(), projectName, appName)); err != nil {
-							return err
-						}
-					}
-				}
-			}
+		removed, err := p.unpublishAppFiles(repoDir, projectName, appName)
+		if err != nil {
+			return err
 		}
-
-		// Kargo Warehouse + Stage CRs for this app. Match on BOTH the stamped
-		// suparship.io/project and suparship.io/app labels rather than the filename
-		// prefix: the flat _infra/kargo/ dir holds every project's CRs, so two
-		// projects can own an app with the same name, and a sibling app whose name
-		// extends this one (e.g. "web-admin" vs "web") shares the filename prefix —
-		// either would be wrongly pruned by a name match alone. The project's
-		// Project/ProjectConfig CRs carry no app label, so they are never matched here.
-		kargoDir := p.outputDir(repoDir, "_infra", "kargo")
-		if entries, err := os.ReadDir(kargoDir); err == nil {
-			for _, e := range entries {
-				if e.IsDir() {
-					continue
-				}
-				path := filepath.Join(kargoDir, e.Name())
-				if kargoManifestLabel(path, labelApp) != appName || kargoManifestLabel(path, labelProject) != projectName {
-					continue
-				}
-				if err := u.rm(path); err != nil {
-					return err
-				}
-			}
-		}
-
-		// Drop this app's promotion policies from the project's ProjectConfig
-		// (other apps in the project keep theirs).
-		projectNS := KargoNamespaceForProject(projectName)
-		if existing, perr := p.readKargoPromotionPolicies(kargoDir, projectNS); perr != nil {
-			return perr
-		} else if merged := MergeKargoPromotionPolicies(existing, appName, nil); len(merged) != len(existing) {
-			if werr := p.writeKargoProjectConfig(kargoDir, projectName, merged); werr != nil {
-				return werr
-			}
-			u.removed = true
-		}
-
-		// Legacy pre-envs/ layout: top-level {env}/{project}/{app}.
-		outputDir := p.outputDir(repoDir)
-		if entries, err := os.ReadDir(outputDir); err == nil {
-			for _, e := range entries {
-				if !e.IsDir() || isReservedTopLevelDir(e.Name()) {
-					continue
-				}
-				if err := u.rm(filepath.Join(outputDir, e.Name(), projectName, appName)); err != nil {
-					return err
-				}
-			}
-		}
-
-		if !u.removed {
+		if !removed {
 			slog.Debug("gitops: no app files found — nothing to delete",
 				"project", projectName, "app", appName)
 			return nil
 		}
-
 		commitMsg := fmt.Sprintf("feat(apps): delete app %s/%s\n\nDeleted by suparship.", projectName, appName)
 		return p.commitAndPush(ctx, repoDir, commitMsg)
 	})
+}
+
+// unpublishAppFiles removes all of an app's GitOps files from an already-cloned repo
+// (no git), reporting whether anything was removed. Covers the same layouts listed
+// on UnpublishApp, including preview trees across all open preview names. Extracted
+// for white-box testing without git.
+func (p *Publisher) unpublishAppFiles(repoDir, projectName, appName string) (bool, error) {
+	var u unpublishHelper
+
+	// envs/{env}/{project}/{app} and _app-resources/{env}/{project}/{app}.
+	for _, base := range []string{"envs", "_app-resources"} {
+		baseDir := p.outputDir(repoDir, base)
+		entries, err := os.ReadDir(baseDir)
+		if err != nil {
+			continue // tree absent — nothing to remove
+		}
+		for _, e := range entries {
+			if !e.IsDir() || e.Name() == "previews" {
+				continue
+			}
+			if err := u.rm(filepath.Join(baseDir, e.Name(), projectName, appName)); err != nil {
+				return u.removed, err
+			}
+			// Per-cluster fan-out values: envs/{env}/_clusters/{cluster}/{project}/{app}.
+			clustersDir := filepath.Join(baseDir, e.Name(), "_clusters")
+			if cents, cerr := os.ReadDir(clustersDir); cerr == nil {
+				for _, c := range cents {
+					if !c.IsDir() {
+						continue
+					}
+					if err := u.rm(filepath.Join(clustersDir, c.Name(), projectName, appName)); err != nil {
+						return u.removed, err
+					}
+				}
+			}
+		}
+	}
+
+	// Kargo Warehouse + Stage CRs for this app. Match on BOTH the stamped
+	// suparship.io/project and suparship.io/app labels rather than the filename
+	// prefix: the flat _infra/kargo/ dir holds every project's CRs, so two
+	// projects can own an app with the same name, and a sibling app whose name
+	// extends this one (e.g. "web-admin" vs "web") shares the filename prefix —
+	// either would be wrongly pruned by a name match alone. The project's
+	// Project/ProjectConfig CRs carry no app label, so they are never matched here.
+	kargoDir := p.outputDir(repoDir, "_infra", "kargo")
+	if entries, err := os.ReadDir(kargoDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			path := filepath.Join(kargoDir, e.Name())
+			if kargoManifestLabel(path, labelApp) != appName || kargoManifestLabel(path, labelProject) != projectName {
+				continue
+			}
+			if err := u.rm(path); err != nil {
+				return u.removed, err
+			}
+		}
+	}
+
+	// Drop this app's promotion policies from the project's ProjectConfig
+	// (other apps in the project keep theirs).
+	projectNS := KargoNamespaceForProject(projectName)
+	if existing, perr := p.readKargoPromotionPolicies(kargoDir, projectNS); perr != nil {
+		return u.removed, perr
+	} else if merged := MergeKargoPromotionPolicies(existing, appName, nil); len(merged) != len(existing) {
+		if werr := p.writeKargoProjectConfig(kargoDir, projectName, merged); werr != nil {
+			return u.removed, werr
+		}
+		u.removed = true
+	}
+
+	// Preview trees for this app across ALL open preview names. Critical for
+	// consolidation: when per-component apps (e.g. lk-sh-web, lk-sh-express-caller)
+	// are merged into a composed app (voiceai-lk-sh), unpublishing each old app must
+	// drop its single-source preview chart, platform, and composed-manifest trees —
+	// otherwise they linger under every open PR and keep rendering as phantom preview
+	// Applications. Layout: {root}/{baseEnv}/{project}/{preview}/{app}.
+	for _, root := range [][]string{
+		{"previews"},
+		{"_app-resources", "previews"},
+		{composedAppsDir, composedPreviewsSubdir},
+	} {
+		pattern := filepath.Join(p.outputDir(repoDir, root...), "*", projectName, "*", appName)
+		matches, gerr := filepath.Glob(pattern)
+		if gerr != nil {
+			return u.removed, fmt.Errorf("glob preview trees %s: %w", pattern, gerr)
+		}
+		for _, m := range matches {
+			if err := u.rm(m); err != nil {
+				return u.removed, err
+			}
+		}
+	}
+
+	// Legacy pre-envs/ layout: top-level {env}/{project}/{app}.
+	outputDir := p.outputDir(repoDir)
+	if entries, err := os.ReadDir(outputDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || isReservedTopLevelDir(e.Name()) {
+				continue
+			}
+			if err := u.rm(filepath.Join(outputDir, e.Name(), projectName, appName)); err != nil {
+				return u.removed, err
+			}
+		}
+	}
+
+	return u.removed, nil
 }
 
 // RemoveAppEnv removes a SINGLE environment's GitOps manifests for an app —

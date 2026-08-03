@@ -4,7 +4,12 @@ import {
   fetchTemplateEffectiveValues,
   previewTemplateEffectiveValues,
 } from "../lib/templates";
-import { diffOverlay, mergeOverlay, stringifyOverlay } from "../lib/yamlDoc";
+import {
+  diffOverlay,
+  mergeOverlay,
+  parseYamlOverlay,
+  stringifyOverlay,
+} from "../lib/yamlDoc";
 import type {
   ComponentCreate,
   ComponentEnvVar,
@@ -12,7 +17,9 @@ import type {
   ComponentSummary,
   EffectiveValuesResponse,
   TemplateSummary,
+  ValueField,
 } from "../types";
+import { hasProjection, stringifyProjection } from "../lib/valuesProjection";
 import type { ConfigVariables } from "../lib/configVars";
 
 // CodeMirror is heavy; load it only when the compose canvas is shown.
@@ -251,8 +258,24 @@ export function ComposeComponents({
   const [conciseBases, setConciseBases] = useState<
     Record<string, Record<string, unknown>>
   >({});
+  //   - projections: the template's declared developer-facing values projection,
+  //     from the same concise-base response (no extra round trip). When a template
+  //     declares one, the editor is seeded with just those keys instead of the whole
+  //     base — see the seed effect below.
+  //   - fullBases: per-(template, env) effective values WITH chart defaults, used
+  //     ONLY to prefill the projected keys. It is not the diff base: the interesting
+  //     defaults (image, port, size) live in the chart layer that the concise base
+  //     drops, so the projection has to read them from here. Fetched only for
+  //     templates that declare a projection, so nothing else pays for it.
+  const [projections, setProjections] = useState<Record<string, ValueField[]>>({});
+  const [fullBases, setFullBases] = useState<
+    Record<string, Record<string, unknown>>
+  >({});
+  // Rows that asked to see the whole platform base (one-way reveal; see showAllFor).
+  const [showAll, setShowAll] = useState<Record<number, boolean>>({});
   const fetchedChart = useRef<Set<string>>(new Set());
   const fetchedBase = useRef<Set<string>>(new Set());
+  const fetchedFull = useRef<Set<string>>(new Set());
   // Which component rows have their (on-demand) values editor expanded, by index.
   const [valuesOpen, setValuesOpen] = useState<Record<number, boolean>>({});
   // Which rows have their expandable "effective (as deployed)" reference open.
@@ -293,12 +316,28 @@ export function ComposeComponents({
         if (fetchedBase.current.has(k)) continue;
         fetchedBase.current.add(k);
         previewTemplateEffectiveValues(name, env, "", {}, false, true, true)
-          .then((res) =>
+          .then((res) => {
             setConciseBases((prev) => ({
               ...prev,
               [k]: (res.values as Record<string, unknown>) ?? {},
-            })),
-          )
+            }));
+            // The projection rides this response. When the template declares one,
+            // pull the chart-inclusive base too — that's where the projected keys'
+            // real defaults live.
+            const fields = res.developerValues ?? [];
+            setProjections((prev) => ({ ...prev, [name]: fields }));
+            if (hasProjection(fields) && !fetchedFull.current.has(k)) {
+              fetchedFull.current.add(k);
+              previewTemplateEffectiveValues(name, env, "", {}, false, true, false)
+                .then((full) =>
+                  setFullBases((prev) => ({
+                    ...prev,
+                    [k]: (full.values as Record<string, unknown>) ?? {},
+                  })),
+                )
+                .catch(() => setFullBases((prev) => ({ ...prev, [k]: {} })));
+            }
+          })
           .catch(() => setConciseBases((prev) => ({ ...prev, [k]: {} })));
       }
     }
@@ -308,18 +347,31 @@ export function ComposeComponents({
   // Once a (template, env) base arrives, seed each row's editor text for that env
   // with base ⊕ its stored per-env overlay — but only where the developer hasn't
   // edited (text still the bare overlay). Converges after one pass.
+  //
+  // When the template declares a developer-values projection AND the component has
+  // no stored overlay yet, the seed is the PROJECTION instead: the handful of keys
+  // that are the developer's, prefilled from the chart-inclusive base. A component
+  // that already carries values keeps the plain base ⊕ overlay seed — we never
+  // rewrite work someone has already done.
   useEffect(() => {
     let changed = false;
-    const next = components.map((c) => {
+    const next = components.map((c, i) => {
       let text = c.envValuesText;
       let mutated = false;
+      const fields = projections[c.template] ?? [];
+      const projected = hasProjection(fields) && !showAll[i];
       for (const env of envs) {
         const base = seedBaseFor(c, env);
         if (!base) continue;
         const stored = c.envValues[env] ?? {};
         const cur = text[env] ?? "";
         if (cur !== stringifyOverlay(stored)) continue; // edited or seeded
-        const seeded = stringifyOverlay(mergeOverlay(base, stored));
+        const full = fullBases[baseKey(c.template, env)];
+        const useProjection = projected && Object.keys(stored).length === 0;
+        if (useProjection && full === undefined) continue; // wait for the full base
+        const seeded = useProjection
+          ? stringifyProjection(mergeOverlay(full, c.values), fields)
+          : stringifyOverlay(mergeOverlay(base, stored));
         if (seeded === cur) continue;
         if (!mutated) {
           text = { ...text };
@@ -333,7 +385,25 @@ export function ComposeComponents({
     });
     if (changed) onChange(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conciseBases, components, envKey]);
+  }, [conciseBases, fullBases, projections, showAll, components, envKey]);
+
+  // showAllFor reveals the whole platform base for one row, for BYO charts and keys
+  // the projection doesn't cover. One-way and non-destructive: the developer's
+  // current overlay is merged on top, so nothing they typed is lost. Re-seeding is
+  // driven by clearing the row's editor text back to the bare overlay, which makes
+  // the seed effect above run again with showAll set.
+  function showAllFor(i: number) {
+    const c = components[i];
+    if (!c) return;
+    const text: Record<string, string> = { ...c.envValuesText };
+    for (const env of envs) {
+      const base = seedBaseFor(c, env);
+      const parsed = parseYamlOverlay(text[env] ?? "").value ?? {};
+      text[env] = stringifyOverlay(mergeOverlay(base ?? {}, parsed));
+    }
+    setShowAll((prev) => ({ ...prev, [i]: true }));
+    update(i, { envValuesText: text });
+  }
 
   function update(i: number, patch: Partial<ComponentDraft>) {
     onChange(components.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -368,11 +438,22 @@ export function ComposeComponents({
     if (!c) return;
     update(i, { envVars: [...c.envVars, { name: "", value: "" }] });
   }
-  // When the picked template changes, re-default the type/expose.
+  // When the picked template changes, re-default the type/expose AND reset the
+  // component's values/image state: the previous chart's per-env overrides, base
+  // overlay, and image bindings targeted a different schema, so clearing them lets
+  // the editor re-seed from the NEW template's platform base (otherwise the seed
+  // effect's "untouched" guard keeps the buffer stuck on the first template's base).
   function onTemplateChange(i: number, name: string) {
+    const reset: Partial<ComponentDraft> = {
+      values: {},
+      envValues: {},
+      envValuesText: {},
+      envValuesError: {},
+      images: [],
+    };
     const tmpl = templates.find((t) => t.name === name);
     if (!tmpl) {
-      update(i, { template: name });
+      update(i, { template: name, ...reset });
       return;
     }
     const type = categoryToType(tmpl.category);
@@ -380,6 +461,7 @@ export function ComposeComponents({
       template: name,
       type,
       exposeMode: type === "web" ? components[i]?.exposeMode || "external" : "disabled",
+      ...reset,
     });
   }
 
@@ -524,17 +606,37 @@ export function ComposeComponents({
                           })}
                         </div>
                       )}
-                      <p className="mb-2 text-xs text-gray-400">
-                        Pre-filled with the platform base for {env} (template ⊕
-                        platform defaults).{" "}
-                        <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
-                          Your changes
-                        </span>{" "}
-                        are highlighted; only the difference is saved for {env}.
-                        Reference{" "}
-                        <code className="font-mono">{"((platform.*))"}</code> /{" "}
-                        <code className="font-mono">{"((vars.*))"}</code> tokens.
-                      </p>
+                      {hasProjection(projections[c.template]) && !showAll[i] ? (
+                        <p className="mb-2 text-xs text-gray-400">
+                          The settings this template exposes for {env}, pre-filled
+                          with their current values — uncomment a line to override
+                          it.{" "}
+                          <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+                            Your changes
+                          </span>{" "}
+                          are highlighted; only the difference is saved.{" "}
+                          <button
+                            type="button"
+                            onClick={() => showAllFor(i)}
+                            className="underline hover:text-gray-600"
+                          >
+                            Show all platform values
+                          </button>{" "}
+                          for anything not listed.
+                        </p>
+                      ) : (
+                        <p className="mb-2 text-xs text-gray-400">
+                          Pre-filled with the platform base for {env} (template ⊕
+                          platform defaults).{" "}
+                          <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+                            Your changes
+                          </span>{" "}
+                          are highlighted; only the difference is saved for {env}.
+                          Reference{" "}
+                          <code className="font-mono">{"((platform.*))"}</code> /{" "}
+                          <code className="font-mono">{"((vars.*))"}</code> tokens.
+                        </p>
+                      )}
                       <ValuesEditor
                         label={`Your override — ${env}`}
                         value={c.envValuesText[env] ?? ""}

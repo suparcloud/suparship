@@ -39,6 +39,12 @@ type EffectiveValuesDTO struct {
 	// sidecars/init/proxy images they don't want promoted. Repository is shown for
 	// context; at publish it is re-read from the values, not from here.
 	DiscoveredImages []TemplateImageDTO `json:"discoveredImages,omitempty"`
+	// DeveloperValues is the template's developer-facing values projection (org
+	// override applied). The editor seeds from these paths instead of the whole
+	// base, so the developer sees the handful of keys that are theirs. Empty = no
+	// projection declared; callers keep today's full-base seeding. Rides this
+	// response so the seeding call sites need no extra round trip.
+	DeveloperValues []ValueFieldDTO `json:"developerValues,omitempty"`
 }
 
 // chartDefaults reads the template's chart bundle (.tgz stored as a cluster
@@ -173,7 +179,8 @@ func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool,
 		ChartDefaultsAvailable: available,
 		Interpolated:           false,
 		Layers:                 layers,
-		DiscoveredImages:       imagesToDTO(chartimport.DetectImageMappings(values)),
+		DiscoveredImages:       imagesToDTO(annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))),
+		DeveloperValues:        developerValuesToDTO(EffectiveDeveloperValues(t, ov)),
 	}
 }
 
@@ -341,12 +348,16 @@ func (ah *appHandler) componentDiscoveredImages(ctx context.Context, app *domain
 			continue
 		}
 		ov := loadOverride(ctx, ah.kubeClient, c.Template.Name)
-		for _, img := range DiscoverComponentImages(ctx, ah.kubeClient, t, ov, envName, c.Values) {
+		envOverlay := app.Spec.EnvironmentDefaults[envName].ComponentValues[c.Name]
+		for _, img := range DiscoverComponentImages(ctx, ah.kubeClient, t, ov, envName, c.Values, envOverlay) {
 			out = append(out, TemplateImageDTO{
-				Name:       img.Name,
-				Repository: img.Repository,
-				TagKey:     img.TagKey,
-				Component:  c.Name,
+				Name:              img.Name,
+				Repository:        img.Repository,
+				TagKey:            img.TagKey,
+				TagPattern:        img.TagPattern,
+				SelectionStrategy: img.SelectionStrategy,
+				Component:         c.Name,
+				Declared:          img.Declared,
 			})
 		}
 	}
@@ -407,19 +418,115 @@ func DiscoverAppImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Temp
 		canonicalBase = CanonicalBaseMap(app, envName, envType, namespace, orgName)
 	}
 	values := computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, "", appRaw, envRaw)
-	return chartimport.DetectImageMappings(values)
+	return annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))
+}
+
+// effectiveTemplateImageSlots returns the template's DECLARED image pull rules — the
+// org override's Images when set (it REPLACES the template's own mapping), else the
+// template's Spec.Images. These are the slots an app inherits (repo + tag rule per
+// service).
+func effectiveTemplateImageSlots(t *tpl.Template, ov *domain.TemplateOverride) []tpl.TemplateImage {
+	if ov != nil && len(ov.Images) > 0 {
+		out := make([]tpl.TemplateImage, len(ov.Images))
+		for i, im := range ov.Images {
+			out[i] = tpl.TemplateImage{
+				Name:              im.Name,
+				Repository:        im.Repository,
+				TagKey:            im.TagKey,
+				TagPattern:        im.TagPattern,
+				SelectionStrategy: im.SelectionStrategy,
+			}
+		}
+		return out
+	}
+	if t != nil {
+		return t.Spec.Images
+	}
+	return nil
+}
+
+// EffectiveDeveloperValues returns the developer-facing values projection — the org
+// override's DeveloperValues when set (it REPLACES the template's own list, so an
+// operator can curate a read-only synced template without editing its source), else
+// the template's Spec.DeveloperValues. Mirrors effectiveTemplateImageSlots.
+//
+// An empty result means "no projection declared": callers keep seeding the editor
+// from the full concise platform base, which is the pre-projection behaviour.
+func EffectiveDeveloperValues(t *tpl.Template, ov *domain.TemplateOverride) []tpl.ValueField {
+	if ov != nil && len(ov.DeveloperValues) > 0 {
+		out := make([]tpl.ValueField, len(ov.DeveloperValues))
+		for i, f := range ov.DeveloperValues {
+			out[i] = tpl.ValueField{
+				Path:        f.Path,
+				Title:       f.Title,
+				Type:        tpl.InputType(f.Type),
+				Description: f.Description,
+				Required:    f.Required,
+				Default:     f.Default,
+				Options:     f.Options,
+				Min:         f.Min,
+				Max:         f.Max,
+				Pattern:     f.Pattern,
+			}
+		}
+		return out
+	}
+	if t != nil {
+		return t.Spec.DeveloperValues
+	}
+	return nil
+}
+
+// annotateDeclaredImages marks each discovered image that matches a declared template
+// slot (by TagKey) as Declared and fills its inherited tag rule (TagPattern /
+// SelectionStrategy) from the slot where discovery left them unset. Discovered images
+// with no matching slot (sidecars, undeclared) keep Declared=false and no rule — the
+// UI shows them off by default. Mutates and returns the slice.
+func annotateDeclaredImages(discovered, slots []tpl.TemplateImage) []tpl.TemplateImage {
+	if len(discovered) == 0 || len(slots) == 0 {
+		return discovered
+	}
+	byKey := make(map[string]tpl.TemplateImage, len(slots))
+	for _, s := range slots {
+		byKey[s.TagKey] = s
+	}
+	for i := range discovered {
+		s, ok := byKey[discovered[i].TagKey]
+		if !ok {
+			continue
+		}
+		discovered[i].Declared = true
+		if discovered[i].TagPattern == "" {
+			discovered[i].TagPattern = s.TagPattern
+		}
+		if discovered[i].SelectionStrategy == "" {
+			discovered[i].SelectionStrategy = s.SelectionStrategy
+		}
+	}
+	return discovered
 }
 
 // DiscoverComponentImages returns the container images present in ONE composed
 // component's effective Helm values: its template's chart defaults ⊕ the
-// template/org value overlays ⊕ the component's own Values overlay. No canonical
-// base is layered — for a composed component the platform base carries no image
-// (each component's repository lives in its own overlay), so chart defaults ⊕
-// overlay is the exact discovery surface, and it needs no app/env cluster context.
-// This is the per-component counterpart of DiscoverAppImages, powering both the
-// publish-time Warehouse resolution and the UI's per-component image checklist.
-func DiscoverComponentImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Template, ov *domain.TemplateOverride, envName string, overlay map[string]any) []tpl.TemplateImage {
+// template/org value overlays ⊕ the component's base Values overlay ⊕ its per-env
+// override (envOverlay). No canonical base is layered — for a composed component the
+// platform base carries no image (each component's repository lives in its own
+// overlay), so chart defaults ⊕ overlays is the exact discovery surface. The per-env
+// overlay MUST be included: a component whose image repository is set per env (the
+// common case for a BYO chart whose template declares no image slot and whose base
+// leaves image.repository empty) would otherwise discover a repository-less image and
+// be dropped by DetectImageMappings — so it never gets wired to Kargo. This is the
+// per-component counterpart of DiscoverAppImages, powering both the publish-time
+// Warehouse resolution and the UI's per-component image checklist.
+func DiscoverComponentImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Template, ov *domain.TemplateOverride, envName string, overlay, envOverlay map[string]any) []tpl.TemplateImage {
 	chartVals, _ := chartDefaults(ctx, kc, t)
-	values := computeEffectiveValues(chartVals, nil, t, ov, envName, "", overlay, nil)
-	return chartimport.DetectImageMappings(values)
+	values := computeEffectiveValues(chartVals, nil, t, ov, envName, "", overlay, envOverlay)
+	return annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))
+}
+
+// EffectiveTemplateImageSlots exposes effectiveTemplateImageSlots to the publish
+// adapter so it can cheaply check whether a template declares any image pull rules
+// (to skip discovery entirely for a BYO component with no bindings and no slots).
+func EffectiveTemplateImageSlots(t *tpl.Template, ov *domain.TemplateOverride) []tpl.TemplateImage {
+	return effectiveTemplateImageSlots(t, ov)
 }

@@ -7,10 +7,26 @@ import (
 )
 
 func TestRenderArgoAppName_Default(t *testing.T) {
-	pattern := secrets.ResourceNaming{}.EffectiveArgoAppName() // "{project}-{app}-{cluster}"
+	pattern := secrets.ResourceNaming{}.EffectiveArgoAppName() // "{projectApp}-{cluster}"
 	got := RenderArgoAppName(pattern, "demo", "color-app", "staging", "staging-eastus")
 	if want := "demo-color-app-staging-eastus"; got != want {
 		t.Errorf("RenderArgoAppName = %q, want %q", got, want)
+	}
+}
+
+func TestRenderArgoAppName_DedupProjectPrefix(t *testing.T) {
+	p := secrets.DefaultArgoAppName
+	cases := []struct{ project, app, want string }{
+		{"foo", "foo-bar", "foo-bar-blah"},   // app carries the project prefix → not doubled
+		{"foo", "foo", "foo-blah"},           // app == project
+		{"foo", "bar", "foo-bar-blah"},       // no prefix → project prepended (unchanged)
+		{"foo", "foobar", "foo-foobar-blah"}, // "foobar" is not "foo-" boundary → NOT deduped
+		{"voiceai", "voiceai-lk-sh", "voiceai-lk-sh-blah"},
+	}
+	for _, c := range cases {
+		if got := RenderArgoAppName(p, c.project, c.app, "staging", "blah"); got != c.want {
+			t.Errorf("RenderArgoAppName(%q,%q) = %q, want %q", c.project, c.app, got, c.want)
+		}
 	}
 }
 

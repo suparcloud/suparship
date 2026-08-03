@@ -851,13 +851,35 @@ func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Contex
 		if ov != nil && len(ov.PreviewDefaultValues) > 0 {
 			preview = helmvalues.DeepMerge(preview, helmvalues.DeepCopyMap(ov.PreviewDefaultValues))
 		}
-		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster, Preview: preview}
+		m[c.Name] = gitops.ComponentPlatformValues{Default: def, Env: env, Cluster: cluster, Preview: preview, SuspendKey: tmpl.Spec.SuspendKey()}
 
-		if len(c.Images) == 0 {
+		// The component's per-env values overlay — an image repository is commonly
+		// set here (a BYO chart whose template declares no slot and whose base leaves
+		// image.repository empty), so it must feed discovery or that image is never
+		// wired to Kargo.
+		envOverlay := app.Spec.EnvironmentDefaults[envName].ComponentValues[c.Name]
+		// Skip discovery only when there is genuinely nothing that could carry an
+		// image: no bindings, no template-declared slots, AND no component values
+		// (base or per-env) that could set image.repository. Skipping on the first two
+		// alone dropped value-defined images (e.g. a `web` component pointing image at
+		// its own repo via its per-env values).
+		if len(c.Images) == 0 && len(server.EffectiveTemplateImageSlots(tmpl, ov)) == 0 &&
+			len(c.Values) == 0 && len(envOverlay) == 0 {
 			continue
 		}
-		discovered := server.DiscoverComponentImages(ctx, a.kubeClient, tmpl, ov, envName, c.Values)
-		resolved := gitops.SelectKargoImages(discovered, componentImageBindings(c.Images))
+		discovered := server.DiscoverComponentImages(ctx, a.kubeClient, tmpl, ov, envName, c.Values, envOverlay)
+		var resolved []gitops.KargoImage
+		if len(c.Images) == 0 {
+			// No explicit selection. Auto-bind the template-DECLARED images ONLY while
+			// the user hasn't configured CD — once they have, an empty selection is an
+			// explicit "watch nothing" (they disabled CD for this component's images),
+			// so leave resolved nil instead of re-binding the template defaults.
+			if !app.Spec.CD.ImagesConfigured {
+				resolved = gitops.SelectDeclaredKargoImages(discovered)
+			}
+		} else {
+			resolved = gitops.SelectKargoImages(discovered, componentImageBindings(c.Images))
+		}
 		// SelectKargoImages names each image after the DISCOVERED slot; re-stamp the
 		// owning component so the promotion targets that component's values file.
 		for i := range resolved {
@@ -902,7 +924,10 @@ func orgNameOf(org *rbac.Org) string {
 // whose image no longer appears in the values is skipped with a warning. Empty
 // selection → nil, letting the publisher fall back to the legacy single image.
 func (a *gitOpsPublisherAdapter) resolveCDImages(ctx context.Context, tmpl *tpl.Template, ov *domain.TemplateOverride, app *domain.App, env *domain.AppEnvironment, orgName string) []gitops.KargoImage {
-	if len(app.Spec.Images) == 0 {
+	// Skip discovery entirely when there's no explicit selection AND the template
+	// declares no image slots — nothing to watch (resolveKargoImages still applies
+	// the legacy image_repository fallback downstream).
+	if len(app.Spec.Images) == 0 && len(server.EffectiveTemplateImageSlots(tmpl, ov)) == 0 {
 		return nil
 	}
 	var envRaw map[string]any
@@ -910,6 +935,16 @@ func (a *gitOpsPublisherAdapter) resolveCDImages(ctx context.Context, tmpl *tpl.
 		envRaw = ovr.RawValues
 	}
 	discovered := server.DiscoverAppImages(ctx, a.kubeClient, tmpl, ov, app, env.EnvName, env.EnvType, env.Namespace, orgName, app.Spec.RawValues, envRaw)
+	if len(app.Spec.Images) == 0 {
+		// No explicit selection. Auto-bind the template-DECLARED images (so the
+		// Warehouse is healthy with zero config) ONLY while the user hasn't configured
+		// CD — once configured, an empty selection is an explicit "watch nothing"
+		// (they disabled CD), so return nil instead of re-binding the template defaults.
+		if app.Spec.CD.ImagesConfigured {
+			return nil
+		}
+		return gitops.SelectDeclaredKargoImages(discovered)
+	}
 	return gitops.SelectKargoImages(discovered, app.Spec.Images)
 }
 

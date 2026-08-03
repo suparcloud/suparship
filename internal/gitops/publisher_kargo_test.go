@@ -29,7 +29,9 @@ func newTestPublisher(t *testing.T) *gitops.Publisher {
 func TestPublishKargoCRs_WritesExpectedFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	app := &domain.App{Name: "hello", ProjectName: "demo", Spec: domain.AppSpec{
+		Values: map[string]any{"image_repository": "ghcr.io/demo/hello"},
+	}}
 	envs := []gitops.AppPublishEnv{
 		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
 		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
@@ -208,14 +210,20 @@ func TestPublishKargoCRs_PerProjectNamespaceAndAggregation(t *testing.T) {
 		}
 	}
 
+	// Each app has a real image source so a Warehouse is produced (no placeholder).
+	imgApp := func(project, name string) *domain.App {
+		return &domain.App{Name: name, ProjectName: project, Spec: domain.AppSpec{
+			Values: map[string]any{"image_repository": "ghcr.io/" + project + "/" + name},
+		}}
+	}
 	// Project "alpha": two apps "web" and "api" (must aggregate in one ProjectConfig).
 	for _, appName := range []string{"web", "api"} {
-		if err := p.PublishKargoCRsForTest(dir, &domain.App{Name: appName, ProjectName: "alpha"}, twoEnvs()); err != nil {
+		if err := p.PublishKargoCRsForTest(dir, imgApp("alpha", appName), twoEnvs()); err != nil {
 			t.Fatalf("publish alpha/%s: %v", appName, err)
 		}
 	}
 	// Project "beta": also has an app "web" — must not collide with alpha's.
-	if err := p.PublishKargoCRsForTest(dir, &domain.App{Name: "web", ProjectName: "beta"}, twoEnvs()); err != nil {
+	if err := p.PublishKargoCRsForTest(dir, imgApp("beta", "web"), twoEnvs()); err != nil {
 		t.Fatalf("publish beta/web: %v", err)
 	}
 
@@ -570,7 +578,12 @@ func TestPublishKargoCRs_UnboundEnvSkipped(t *testing.T) {
 
 func TestPublishKargoCRs_AllUnboundProducesWarehouseOnly(t *testing.T) {
 	dir := t.TempDir()
-	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	// A real image source (legacy image_repository) so a Warehouse is produced —
+	// the Warehouse is env-independent, but it now requires an image source (no
+	// more placeholder). This test's focus is the unbound-env Stage handling.
+	app := &domain.App{Name: "hello", ProjectName: "demo", Spec: domain.AppSpec{
+		Values: map[string]any{"image_repository": "ghcr.io/demo/hello"},
+	}}
 	// Both envs are unbound — only Warehouse + Project CR should be written, no Stage files.
 	envs := []gitops.AppPublishEnv{
 		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: false},
@@ -584,7 +597,7 @@ func TestPublishKargoCRs_AllUnboundProducesWarehouseOnly(t *testing.T) {
 
 	kargoDir := filepath.Join(dir, "_infra", "kargo")
 
-	// Warehouse should still be written (it's env-independent)
+	// Warehouse should still be written (it's env-independent) given an image source.
 	if _, err := os.Stat(filepath.Join(kargoDir, "kargo-demo-hello-warehouse.yaml")); os.IsNotExist(err) {
 		t.Error("warehouse file should exist even when all envs are unbound")
 	}

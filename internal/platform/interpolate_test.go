@@ -33,10 +33,10 @@ func TestInterpolate_PerTierRoutingTokens(t *testing.T) {
 		InternalGatewaySectionName: "https",
 	}}
 	cases := map[string]string{
-		"((platform.app)).internal.((platform.internalBaseDomain))": "tts.internal.aws.example.com",
-		"((platform.app)).((platform.externalBaseDomain))":          "tts.ext.example.com",
-		"class=((platform.internalIngressClassName))":               "class=nginx-internal",
-		"issuer=((platform.externalClusterIssuer))":                 "issuer=letsencrypt",
+		"((platform.app)).internal.((platform.internalBaseDomain))":                                                      "tts.internal.aws.example.com",
+		"((platform.app)).((platform.externalBaseDomain))":                                                               "tts.ext.example.com",
+		"class=((platform.internalIngressClassName))":                                                                    "class=nginx-internal",
+		"issuer=((platform.externalClusterIssuer))":                                                                      "issuer=letsencrypt",
 		"((platform.internalGatewayName))/((platform.internalGatewayNamespace))/((platform.internalGatewaySectionName))": "envoy-internal/envoy-gateway-system/https",
 	}
 	for in, want := range cases {
@@ -46,13 +46,32 @@ func TestInterpolate_PerTierRoutingTokens(t *testing.T) {
 	}
 }
 
+func TestInterpolate_Component(t *testing.T) {
+	c := Context{Platform: helmvalues.PlatformValues{App: "voiceai-lk-sh", Component: "express-caller"}}
+	cases := map[string]string{
+		"((platform.component))":                         "express-caller",
+		"[[platform.component]]":                         "express-caller", // legacy alias
+		"((platform.app))-((platform.component))-worker": "voiceai-lk-sh-express-caller-worker",
+	}
+	for in, want := range cases {
+		if got := c.Interpolate(in); got != want {
+			t.Errorf("Interpolate(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// App-level context (no component) → resolves to empty, like other identity tokens.
+	empty := Context{Platform: helmvalues.PlatformValues{App: "hello"}}
+	if got := empty.Interpolate("x=((platform.component))"); got != "x=" {
+		t.Errorf("empty component: got %q, want %q", got, "x=")
+	}
+}
+
 func TestInterpolate_PlatformAndVars(t *testing.T) {
 	c := testCtx()
 	cases := map[string]string{
 		"https://[[platform.routingHost]]/api": "https://hello.prod.acme.com/api",
 		"[[platform.env]]-latest":              "prod-latest",
 		"region=[[vars.REGION]]":               "region=us-east",
-		"[[platform.org]]/[[platform.app]]":      "acme/hello",
+		"[[platform.org]]/[[platform.app]]":    "acme/hello",
 	}
 	for in, want := range cases {
 		if got := c.Interpolate(in); got != want {
@@ -122,12 +141,12 @@ func TestInterpolate_PreviewName(t *testing.T) {
 	// collapses its adjacent separator so the result stays a VALID name.
 	stable := Context{Platform: helmvalues.PlatformValues{App: "hello"}}
 	cases := map[string]string{
-		"((platform.previewName))":                "",
-		"foo-((platform.previewName))":            "foo",
-		"foo-((platform.previewName)).acme.com":   "foo.acme.com",
-		"((platform.previewName)).acme.com":       "acme.com",
-		"foo.((platform.previewName))":            "foo",
-		"[[platform.previewName]]-foo":            "foo",
+		"((platform.previewName))":              "",
+		"foo-((platform.previewName))":          "foo",
+		"foo-((platform.previewName)).acme.com": "foo.acme.com",
+		"((platform.previewName)).acme.com":     "acme.com",
+		"foo.((platform.previewName))":          "foo",
+		"[[platform.previewName]]-foo":          "foo",
 	}
 	for in, want := range cases {
 		if got := stable.Interpolate(in); got != want {
@@ -172,13 +191,13 @@ func TestPlatformTokens_IncludesManagedNames(t *testing.T) {
 func TestInterpolate_LeavesHelmAndUnknownUntouched(t *testing.T) {
 	c := testCtx()
 	for _, s := range []string{
-		"{{ .Release.Name }}",    // Helm passthrough
-		"{{ .Values.foo }}-{x}",  // Helm + bare single brace
+		"{{ .Release.Name }}",   // Helm passthrough
+		"{{ .Values.foo }}-{x}", // Helm + bare single brace
 		`{"auths":{"{{ .host }}":{"username":"{{ .username }}"}}}`, // External Secrets Go template + JSON braces
-		"[[bogus]]",              // unknown token (right delimiter, no platform./vars. namespace)
-		"[[platform.nope]]",      // unknown platform field
-		"{platform.app}",         // old single-brace syntax is no longer a token
-		"plain string",           // no delimiters
+		"[[bogus]]",         // unknown token (right delimiter, no platform./vars. namespace)
+		"[[platform.nope]]", // unknown platform field
+		"{platform.app}",    // old single-brace syntax is no longer a token
+		"plain string",      // no delimiters
 	} {
 		if got := c.Interpolate(s); got != s {
 			t.Errorf("Interpolate(%q) = %q, want unchanged", s, got)

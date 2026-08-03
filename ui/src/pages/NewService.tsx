@@ -8,7 +8,18 @@ import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
 import { listOrgEnvironments } from "../lib/settings";
 import type { OrgEnvironment } from "../lib/settings";
-import { fetchTemplate, fetchTemplates } from "../lib/templates";
+import {
+  fetchTemplate,
+  fetchTemplates,
+  previewTemplateEffectiveValues,
+} from "../lib/templates";
+import { ImagePullRules } from "../components/ImagePullRules";
+import {
+  imageRulesToAppImages,
+  imageRulesToComponentImages,
+  seedImageRules,
+  type ImageRules,
+} from "../lib/imageRules";
 import {
   getSecretsBackend,
   upsertAppGlobalSecrets,
@@ -32,6 +43,7 @@ import type {
   TemplateSecretInput,
   SecretRefInput,
   ComponentCreate,
+  TemplateImage,
 } from "../types";
 
 type Step = "template" | "configure";
@@ -365,6 +377,12 @@ function ConfigureStep({
       : [],
   );
   const [cdManaged, setCdManaged] = useState(false);
+  // CD image discovery + per-unique-image pull rules for the base deploy env. Images
+  // are auto-detected from each component's template + values (live), stamped with
+  // their owning component, then edited per unique repository.
+  const [discoveredImages, setDiscoveredImages] = useState<TemplateImage[]>([]);
+  const [imageRules, setImageRules] = useState<ImageRules>({});
+  const [imagesLoading, setImagesLoading] = useState(false);
   // Delivery mode, defaulted from the template (a valkey/redis/postgres template
   // declares "direct"); the user can override. "direct" skips Kargo/promotion.
   const [deliveryMode, setDeliveryMode] = useState<string>(
@@ -387,6 +405,71 @@ function ConfigureStep({
   // in each component's card. Component values are per-env only (no all-envs base).
   const baseEnv =
     [...orgEnvs].sort((a, b) => a.order - b.order)[0]?.name ?? "";
+
+  // Discover CD images across components for the base deploy env (one preview per
+  // component, reflecting its live values), stamping the owning component for
+  // composed apps. Debounced; pipeline apps only.
+  const compsImgKey = components
+    .map(
+      (c) =>
+        `${c.name}:${c.template}:${JSON.stringify(c.envValues[baseEnv] ?? {})}`,
+    )
+    .join("|");
+  useEffect(() => {
+    if (isDirect || !baseEnv || components.length === 0) {
+      setDiscoveredImages([]);
+      return;
+    }
+    const composed = components.length > 1;
+    let cancelled = false;
+    setImagesLoading(true);
+    const handle = setTimeout(() => {
+      Promise.all(
+        components.map((c) =>
+          c.template
+            ? previewTemplateEffectiveValues(
+                c.template,
+                baseEnv,
+                "",
+                { defaultValues: c.envValues[baseEnv] ?? {} },
+                false, // preview
+                true, // asComponentOverlay (merge stored platform override)
+                false, // skipChart — need chart defaults to detect the image block
+              )
+                .then((res) =>
+                  (res.discoveredImages ?? []).map((img) => ({
+                    ...img,
+                    component: composed ? c.name.trim() : undefined,
+                  })),
+                )
+                .catch(() => [] as TemplateImage[])
+            : Promise.resolve([] as TemplateImage[]),
+        ),
+      ).then((lists) => {
+        if (cancelled) return;
+        setDiscoveredImages(lists.flat());
+        setImagesLoading(false);
+      });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compsImgKey, baseEnv, isDirect]);
+
+  // Seed per-unique-image rules from discovery (inherit-from-template defaults at
+  // create) — add newly-discovered repos, drop gone ones, keep the user's edits.
+  useEffect(() => {
+    setImageRules((cur) => {
+      const seeded = seedImageRules(discoveredImages, {});
+      const next: ImageRules = {};
+      for (const repo of Object.keys(seeded)) {
+        next[repo] = repo in cur ? cur[repo]! : seeded[repo]!;
+      }
+      return next;
+    });
+  }, [discoveredImages]);
 
   useEffect(() => {
     listConfigVariables(project)
@@ -548,7 +631,31 @@ function ConfigureStep({
     // Send one ComponentCreate per row; the first component's template is the
     // app-level "primary". A 1-component app renders single-source. For a blank
     // app there is no base template — the first component's template is used.
-    const componentsPayload: ComponentCreate[] = components.map(toComponentCreate);
+    // CD image bindings from the per-unique-image rules (pipeline apps only).
+    // Composed → per-component images; single-source → app-level images. Fanned out
+    // by repository. Untouched declared images are sent explicitly (same result as
+    // the backend's inherit-from-template default).
+    const composed = components.length > 1;
+    const componentImagesMap =
+      !isDirect && composed
+        ? imageRulesToComponentImages(
+            discoveredImages,
+            imageRules,
+            components.map((c) => c.name.trim()),
+          )
+        : {};
+    const componentsPayload: ComponentCreate[] = components.map((c) => {
+      const base = toComponentCreate(c);
+      if (!isDirect && composed) {
+        const imgs = componentImagesMap[c.name.trim()] ?? [];
+        return { ...base, images: imgs.length > 0 ? imgs : undefined };
+      }
+      return base;
+    });
+    const appImages =
+      !isDirect && !composed
+        ? imageRulesToAppImages(discoveredImages, imageRules)
+        : [];
     const templateName = components[0]?.template ?? template?.name ?? "";
 
     // Non-secret env vars ride along in the create request (committed to Git in
@@ -569,6 +676,7 @@ function ConfigureStep({
         template: templateName,
         components: componentsPayload,
         values: {},
+        images: appImages.length > 0 ? appImages : undefined,
         secretRefs: secretRefList,
         namespaceScope: namespaceScope !== "app" ? namespaceScope : undefined,
         namespacePattern: namespacePattern.trim() || undefined,
@@ -840,9 +948,25 @@ function ConfigureStep({
               When enabled, Kargo owns the image tag: it commits the
               discovered/promoted tag and re-publishing preserves it instead of
               resetting to your overrides. The tag you set in values acts only as
-              the initial seed. After creating the app, choose which images Kargo
-              watches from its Overview → Images.
+              the initial seed.
             </p>
+
+            {/* Per-unique-image CD pull rules for the base deploy env, so Kargo is
+                configured (and healthy) from create — no post-create step. */}
+            <div className="mt-4">
+              <p className="text-sm font-medium text-gray-700">Images (CD pull)</p>
+              <p className="mb-3 mt-1 text-xs text-gray-400">
+                Auto-detected from your components' templates + values
+                {baseEnv ? ` for ${baseEnv}` : ""}. One rule per unique image —
+                declared images are watched by default; refine below.
+              </p>
+              <ImagePullRules
+                discovered={discoveredImages}
+                rules={imageRules}
+                onChange={setImageRules}
+                loading={imagesLoading}
+              />
+            </div>
           </div>
         )}
       </FormSection>
