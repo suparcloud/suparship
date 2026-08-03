@@ -1,5 +1,11 @@
 # Local DNS for suparship Development
 
+> **Optional — only needed for the ingress path.** The default Tilt dev loop
+> (`task up`) reaches every service via localhost port-forwards and needs **no**
+> DNS setup. You only need the wildcard DNS below if you opt into ingress with
+> `task up:ingress` (or the legacy `*.localhost:8880` routing). See
+> [contributor-guide/hacking-on-suparship.md](contributor-guide/hacking-on-suparship.md).
+
 Without wildcard DNS you need a manual `/etc/hosts` entry for every ingress
 hostname — which is unworkable for preview environments like
 `pr-123.hello.preview.localhost`.
@@ -10,7 +16,7 @@ to `127.0.0.1`.
 ## macOS (automated)
 
 ```bash
-task dev:cluster:dns
+task dev:dns
 ```
 
 This script (idempotent, safe to re-run):

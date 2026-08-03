@@ -69,15 +69,25 @@ argocd:
   createSystemProject: true
 
 # ---------------------------------------------------------------------------
-# Optional infrastructure dependencies (subcharts)
-# Set to true to install as part of this release. Production users should
-# install these independently and set to false.
+# Prerequisite acknowledgements
+#
+# These do NOT install anything — this chart deploys suparship only, and the
+# reasoning is in Chart.yaml. They tell the pre-install prereq-check Job that a
+# component is being installed alongside this release (or is otherwise on its
+# way), so it should not fail the install for a component it cannot see yet.
+#
+# Leave false when the prerequisite is already present: the Job then verifies
+# it and fails loudly if it is missing, which is what you want.
 # ---------------------------------------------------------------------------
 dependencies:
+  # Skip the hard ArgoCD assertion (ns/argocd + deploy/argocd-server).
   argocd:
     enabled: false
+  # Skip the External Secrets assertion, which is only enforced when
+  # secrets.backend is "1password".
   eso:
     enabled: false
+  # Reserved: the ingress check is advisory (warns, never fails).
   ingressNginx:
     enabled: false
 
@@ -189,13 +199,18 @@ gitops:
   kargoGitRepoURL: ""
 
 # -- Environments define the promotion pipeline.
-# Each environment references a cluster by name via clusterRef.
+# Bind each one to registered clusters with `clusterRefs` (a list) plus
+# `activeClusterRef` (which member receives deploys). An environment with no
+# clusterRefs is UNBOUND and nothing will deploy to it.
+# `clusterRef` (singular) is still accepted as a deprecated alias.
+# Set `deployMode: all` to fan out to every clusterRef instead of just the active one.
 environments: []
 # Example:
 # - name: staging
 #   displayName: Staging
 #   order: 1
-#   clusterRef: in-cluster
+#   clusterRefs: [in-cluster]
+#   activeClusterRef: in-cluster
 #   baseDomain: staging.example.com
 #   namespacePattern: "{app}-{env}"
 # - name: prod
@@ -209,19 +224,26 @@ environments: []
 #   baseDomain: prod.example.com
 #   namespacePattern: "{app}-{env}"
 
-# -- Workload clusters to register.
-# Each entry references an existing Secret containing a kubeconfig,
-# or uses inCluster: true for the local cluster.
+# -- Workload clusters to pre-register (METADATA ONLY).
+#
+# Entries here create the cluster record so ArgoCD can deploy to `apiServer`.
+# They do NOT create the kubeconfig Secret, so suparship cannot reach these
+# clusters for pod logs, live status, or sealed-secrets certs — all of which go
+# through the kubeconfig in Secret `suparship-cluster-kubeconfig-{name}`.
+#
+# For a fully-functional cluster, register it through the UI, the API, or:
+#   suparship cluster add --name prod-aks --api-server https://… --kubeconfig ./kc.yaml
+# which writes the record, the kubeconfig Secret, and the ArgoCD cluster Secret
+# together. Use this list for bootstrapping/GitOps-managed installs where you
+# add credentials separately.
 clusters: []
 # Example:
 # - name: in-cluster
 #   displayName: "Local Cluster"
 #   apiServer: https://kubernetes.default.svc
-#   inCluster: true
 # - name: prod-aks
 #   displayName: Production (Azure)
 #   apiServer: https://prod-aks.example.com
-#   existingSecret: suparship-cluster-prod-aks   # Secret with key: kubeconfig
 #   # Per-cluster routing (multi-cloud): this cluster's own DNS zone + ingress.
 #   # Overrides env → org routing for apps deployed here. baseDomain is the
 #   # default zone; per-mode profiles refine ingress class / issuer / domain.

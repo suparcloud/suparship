@@ -12,18 +12,23 @@ metadata:
     suparship.io/type: cluster
     suparship.io/cluster: {{ .name | quote }}
 data:
+  {{- /* Only fields that exist on domain.Cluster. `inCluster` and
+         `kubeconfigSecretRef` used to be emitted here and were silently dropped
+         by json.Unmarshal — nothing in Go has ever read them.
+
+         A cluster registered this way is METADATA ONLY. ArgoCD can deploy to it
+         (destination.server comes from apiServer), but suparship cannot reach it
+         for pod logs, live status or sealed-secrets certs, because those go
+         through ClusterClientPool, which needs the kubeconfig Secret
+         suparship-cluster-kubeconfig-{name}. This chart does not create that
+         Secret. To register a fully-functional cluster use the UI, the API, or:
+           suparship cluster add --name … --api-server … --kubeconfig … */}}
   cluster.json: |
     {
       "name": {{ .name | quote }},
       "displayName": {{ default .name .displayName | quote }},
       "apiServer": {{ default "" .apiServer | quote }},
       "status": "registered"
-      {{- if .inCluster }},
-      "inCluster": true
-      {{- end }}
-      {{- if .existingSecret }},
-      "kubeconfigSecretRef": {{ .existingSecret | quote }}
-      {{- end }}
     }
 {{- end }}
 {{- end }}

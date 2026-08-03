@@ -35,7 +35,7 @@
 #
 # Usage:
 #   ./hack/setup-dns.sh             # run directly
-#   task dev:cluster:dns            # preferred: via Taskfile
+#   task dev:dns            # preferred: via Taskfile
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -212,7 +212,7 @@ cat <<EOF
     http://pr-123.hello.preview.localhost:8880   Preview environments
 
   Next step:
-    task dev:cluster                   provision the full dev cluster
+    task up                   provision the full dev cluster
 
   To verify DNS manually:
     dig @127.0.0.1 argocd.localhost    query dnsmasq directly → 127.0.0.1

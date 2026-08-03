@@ -373,12 +373,14 @@ environments:
   - name: staging
     displayName: Staging
     order: 1
-    clusterRef: in-cluster        # registered cluster name
+    clusterRefs: [in-cluster]     # registered cluster name(s)
+    activeClusterRef: in-cluster  # which one receives deploys
     baseDomain: staging.example.com
   - name: prod
     displayName: Production
     order: 2
-    clusterRef: prod-cluster      # empty = not yet bound to a cluster
+    clusterRefs: [prod-cluster]   # empty/omitted = env is UNBOUND, nothing deploys
+    activeClusterRef: prod-cluster
     baseDomain: prod.example.com
 teams:
   - name: admins
@@ -644,8 +646,21 @@ task dev:api    # backend only
 task dev:ui     # frontend only
 
 task test       # run all Go tests
-task help       # list all available tasks
+task --list     # list all available tasks
 ```
+
+### Cluster development (Tilt)
+
+For work that needs a real Kubernetes runtime (previews, promotions,
+ArgoCD/Kargo, secrets, GitOps), bring up the whole stack in-cluster with
+hot-reload:
+
+```bash
+task up         # ctlptl kind cluster + all prereqs + suparship (Tilt UI :10350)
+```
+
+See **[docs/contributor-guide/hacking-on-suparship.md](docs/contributor-guide/hacking-on-suparship.md)**
+for the full guide.
 
 ### Running processes separately (alternative)
 

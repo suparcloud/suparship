@@ -16,7 +16,8 @@ data:
       - name: staging
         displayName: Staging
         order: 1
-        clusterRef: staging-cluster
+        clusterRefs: [staging-cluster]
+        activeClusterRef: staging-cluster
         baseDomain: localhost
         # {app}-{env} avoids namespace collisions when staging and prod share
         # the same cluster (common in dev/single-cluster setups). In a true
@@ -26,7 +27,8 @@ data:
       - name: prod
         displayName: Production
         order: 2
-        clusterRef: prod-cluster
+        clusterRefs: [prod-cluster]
+        activeClusterRef: prod-cluster
         baseDomain: localhost
         namespacePattern: "{app}-{env}"
     teams:

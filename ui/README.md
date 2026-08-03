@@ -6,9 +6,15 @@ React + Vite + TypeScript + Tailwind frontend for suparship.
 
 ## Running locally (against the local backend)
 
-You need two terminals. The Vite dev server proxies all `/api` requests to the
-Go backend running on `:8080`, so no manual CORS configuration is needed on the
-frontend side.
+> The quickest path is `task dev` from the repo root — it starts the fake-mode
+> backend and this Vite dev server together. For full-stack/cluster work, `task up`
+> (Tilt) runs the backend in-cluster and Vite here proxies to its port-forward.
+> See [docs/contributor-guide/hacking-on-suparship.md](../docs/contributor-guide/hacking-on-suparship.md).
+> The manual two-terminal flow below is the underlying setup.
+
+The Vite dev server proxies all `/api` requests to the Go backend on `:8080`
+(the in-cluster pod's port-forward when using Tilt), so no manual CORS
+configuration is needed on the frontend side.
 
 ### Terminal 1 — Go backend (fake / no-cluster mode)
 

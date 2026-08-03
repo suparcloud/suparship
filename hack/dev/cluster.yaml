@@ -1,0 +1,46 @@
+# ctlptl declarative dev cluster + local registry for suparShip.
+#
+# This is THE cluster definition (the old bootstrap-cluster.sh + install-registry.sh
+# pair it replaced is gone). ctlptl creates a kind cluster wired to a plain-HTTP
+# local registry and writes the `local-registry-hosting` ConfigMap Tilt auto-detects
+# — no self-signed TLS certs, no containerd certs.d patching.
+#
+# Apply:   ctlptl apply  -f hack/dev/cluster.yaml   (done for you by `task up`)
+# Delete:  ctlptl delete -f hack/dev/cluster.yaml   (`task cluster:delete`)
+#
+# Docs: https://github.com/tilt-dev/ctlptl  (note: ctlptl objects are FLAT —
+# no metadata/spec wrappers.)
+apiVersion: ctlptl.dev/v1alpha1
+kind: Registry
+name: kind-registry
+# Host-side port. Matches the existing localhost:5001 used by demo image
+# pushes (see Taskfile `demo:color-app:*`).
+port: 5001
+---
+apiVersion: ctlptl.dev/v1alpha1
+kind: Cluster
+product: kind
+registry: kind-registry
+# Inline kind v1alpha4 config. Cluster name "suparship-dev" -> context
+# "kind-suparship-dev" (what the Tiltfile expects).
+kindV1Alpha4Cluster:
+  name: suparship-dev
+  nodes:
+    - role: control-plane
+      # Label so the optional NGINX ingress controller can schedule here.
+      kubeadmConfigPatches:
+        - |
+          kind: InitConfiguration
+          nodeRegistration:
+            kubeletExtraArgs:
+              node-labels: "ingress-ready=true"
+      # Pre-wire host ports so the OPTIONAL ingress path works without root:
+      #   http  -> http://localhost:8880   https -> https://localhost:8443
+      # (Default dev loop uses Tilt port-forwards and does not need these.)
+      extraPortMappings:
+        - containerPort: 80
+          hostPort: 8880
+          protocol: TCP
+        - containerPort: 443
+          hostPort: 8443
+          protocol: TCP

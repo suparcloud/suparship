@@ -9,7 +9,7 @@
 #
 # Usage:
 #   ./hack/install-gitea-tls-proxy.sh
-#   task dev:cluster:gitea-tls-proxy
+#   hack/install-gitea-tls-proxy.sh
 set -euo pipefail
 
 GITEA_NAMESPACE="gitea"

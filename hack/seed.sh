@@ -8,10 +8,10 @@
 #
 # Idempotent: uses kubectl apply, safe to run multiple times.
 # The seeded data mirrors internal/fake/seed.go so the UI looks consistent
-# across fake mode (task dev) and cluster mode (task dev:cluster).
+# across fake mode (task dev) and cluster mode (task up).
 #
 # Prerequisites:
-#   task dev:cluster:bootstrap   # cluster and suparship-system namespace must exist
+#   task up   # cluster and suparship-system namespace must exist
 #
 # Admin credentials are NOT created here — they require a bcrypt hash.
 # Run once per cluster:
@@ -34,8 +34,11 @@ die() { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
 # ── Prereqs ───────────────────────────────────────────────────────────────
 command -v kubectl >/dev/null 2>&1 || die "'kubectl' not found."
+# Pin kubectl to the dev cluster — see hack/dev/lib.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dev/lib.sh"
+require_dev_context
 kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 \
-  || die "Namespace '$NAMESPACE' not found. Run: task dev:cluster:bootstrap"
+  || die "Namespace '$NAMESPACE' not found. Run: task up"
 
 echo ""
 echo "  suparship — seed demo data  (kubectl apply -f ${SEED_DIR}/)"
@@ -43,7 +46,29 @@ echo "  ────────────────────────
 echo ""
 
 # ── Apply all seed manifests ──────────────────────────────────────────────
-kubectl apply -f "${SEED_DIR}/" --namespace="${NAMESPACE}" >/dev/null
+# In multi-cluster mode the placeholder cluster records in clusters.yaml are not
+# just unrealistic, they are actively harmful: both point at
+# https://kubernetes.default.svc, and any app published while an environment is
+# bound to one leaves a dead envs/<env>/<project>/<app>/_targets/<placeholder>/
+# entry that generates an ArgoCD Application aimed at the tooling cluster. Some
+# seeded apps are embedded in the project record rather than being first-class
+# apps, so they are not reachable via the sync API and that entry never gets
+# rewritten.
+#
+# Skipping them leaves the environments referring to clusters that do not exist,
+# which the publisher treats as unbound and skips — so nothing is published until
+# hack/dev/seed-multi.sh binds the environments to the REAL clusters.
+if [ "${SUPARSHIP_MULTI:-}" = "1" ]; then
+  for f in "${SEED_DIR}"/*.yaml; do
+    case "$(basename "$f")" in
+      clusters.yaml) continue ;;
+    esac
+    kubectl apply -f "$f" --namespace="${NAMESPACE}" >/dev/null
+  done
+  ok "skipped clusters.yaml (multi-cluster mode — real clusters register later)"
+else
+  kubectl apply -f "${SEED_DIR}/" --namespace="${NAMESPACE}" >/dev/null
+fi
 
 ok "suparship-org-config          (default org, admins team)"
 ok "suparship-project-demo        (hello service, staging + prod)"
@@ -79,7 +104,7 @@ APPPROJECT
   ok "argocd AppProject 'demo'  (created/updated in argocd namespace)"
 else
   printf "  \033[0;33m!\033[0m  argocd namespace not found — skipping AppProject creation.\n"
-  printf "      Run 'task dev:cluster:argocd' first if you need GitOps integration.\n"
+  printf "      Run 'task up' first if you need GitOps integration.\n"
 fi
 
 # ── Admin credentials reminder ────────────────────────────────────────────

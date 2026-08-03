@@ -1,0 +1,54 @@
+# charts/suparship value overrides for the Tilt dev loop (see Tiltfile).
+# NOT for production.
+image:
+  # Tilt builds Dockerfile.dev and injects it wherever this image ref appears.
+  repository: suparship-dev
+  tag: dev
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+server:
+  logLevel: debug
+
+# Off by default — flipped on with `task up:ingress` / `tilt up -- --ingress`.
+ingress:
+  enabled: false
+  className: nginx
+  host: suparship.localhost
+
+# Dev admin Secret is created by hack/dev/admin-secret.sh (login admin / devpass).
+admin:
+  secret:
+    name: suparship-admin-auth
+    namespace: suparship-system
+    usernameKey: username
+    passwordHashKey: password-hash
+
+argocd:
+  namespace: argocd
+  createSystemProject: true
+
+# Point suparship at the in-cluster Gitea the Tiltfile installs. Without this the
+# server logs "GitOps repository not configured" and the publisher is disabled —
+# app creates then report "published" while writing nothing, so no ArgoCD
+# Application is ever generated and nothing deploys. The whole golden path
+# silently no-ops.
+#
+# The URL is the in-CLUSTER service address: both suparship and ArgoCD reach
+# Gitea from inside the cluster, not through the host port-forward.
+gitops:
+  provider: generic
+  repoURL: http://gitea-http.gitea.svc.cluster.local:3000/gitops/gitops.git
+  branch: main
+  # Must match the skeleton hack/init-gitops-repo.sh pushes and the root
+  # Application in config/gitops/root-app.yaml, both of which use gitops-output/.
+  # Leave it empty and the publisher writes _infra/ and envs/ at the repo ROOT
+  # while the root app watches gitops-output/_infra — it syncs green against an
+  # empty directory and no ApplicationSet is ever generated, so nothing deploys.
+  subPath: gitops-output
+  # username/password Secret created by hack/dev/gitops-credentials.sh.
+  existingSecret: suparship-gitops-credentials
+  # The repo skeleton is pushed by hack/install-gitea-init.sh (Tilt's
+  # `init-gitops`), so suparship does not need to create it.
+  initializeRepo: false
