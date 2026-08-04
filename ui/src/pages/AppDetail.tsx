@@ -1,8 +1,8 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppTemplate } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents } from "../lib/apps";
 import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
@@ -12,7 +12,7 @@ import { diffOverlay, mergeOverlay, parseYamlOverlay, stringifyOverlay } from ".
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 import { EffectiveValuesView } from "../components/EffectiveValuesView";
 import { leafPaths, setAtPath, deleteAtPath } from "../lib/valuesTree";
-import { listTemplateVersions, fetchTemplateEffectiveValues, previewTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
+import { fetchTemplateEffectiveValues, previewTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
 import type {
   TemplateVersionInfo,
   TemplateImage,
@@ -819,10 +819,13 @@ export function AppDetail() {
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
 
-  // Template upgrade
-  const [templateVersions, setTemplateVersions] = useState<TemplateVersionInfo[]>([]);
+  // Template upgrade. The pin lives per component (that is what the publisher
+  // renders from), so the dialog is a per-component table even though the
+  // affordance that opens it is app-level.
   const [showUpgradeDialog, setShowUpgradeDialog] = useState(false);
-  const [upgradeTarget, setUpgradeTarget] = useState<string>("");
+  // component name → chosen target version; component name → include in submit.
+  const [upgradeTargets, setUpgradeTargets] = useState<Record<string, string>>({});
+  const [upgradeSelection, setUpgradeSelection] = useState<Record<string, boolean>>({});
   const [upgrading, setUpgrading] = useState(false);
 
   useEffect(() => {
@@ -852,24 +855,50 @@ export function AppDetail() {
     };
   }, [project, appName]);
 
-  // Pull the available versions for this app's template so we can surface
-  // an "Upgrade available" affordance + populate the upgrade picker.
-  // Silently no-ops on error: built-in templates have no archives, the
-  // endpoint returns []; broken cluster fetch shouldn't break app detail.
+  // Upgrade rows: one per component whose template is version-managed. The
+  // versions come from the app detail response (server-side, one pass over the
+  // app's distinct templates) rather than a fetch per template from here.
+  const upgradeRows = useMemo(() => {
+    const byTemplate = data?.templateVersions ?? {};
+    return (data?.components ?? [])
+      .filter((c) => c.template && (byTemplate[c.template]?.length ?? 0) > 0)
+      .map((c) => ({
+        name: c.name,
+        template: c.template as string,
+        current: c.templateVersion ?? "",
+        latest: c.latestVersion ?? "",
+        upgradeAvailable: !!c.upgradeAvailable,
+        versions: byTemplate[c.template as string] as TemplateVersionInfo[],
+      }));
+  }, [data?.components, data?.templateVersions]);
+
+  // Seed the dialog each time it opens: default-check only the rows that are
+  // actually behind, and default each target to that row's newest version.
   useEffect(() => {
-    if (!data?.template?.name) return;
-    let cancelled = false;
-    listTemplateVersions(data.template.name)
-      .then((res) => {
-        if (!cancelled) setTemplateVersions(res.versions ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setTemplateVersions([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [data?.template?.name]);
+    if (!showUpgradeDialog) return;
+    setUpgradeTargets(
+      Object.fromEntries(
+        upgradeRows.map((r) => [r.name, r.upgradeAvailable ? r.latest : r.current]),
+      ),
+    );
+    setUpgradeSelection(
+      Object.fromEntries(upgradeRows.map((r) => [r.name, r.upgradeAvailable])),
+    );
+  }, [showUpgradeDialog, upgradeRows]);
+
+  // Only checked rows whose target differs from what's deployed are submitted —
+  // re-sending an unchanged pin would be a no-op the backend has to reject.
+  const pendingUpgrades = useMemo(
+    () =>
+      upgradeRows
+        .filter((r) => upgradeSelection[r.name])
+        .map((r) => ({ name: r.name, target: upgradeTargets[r.name] ?? r.current }))
+        .filter((r) => {
+          const row = upgradeRows.find((x) => x.name === r.name);
+          return r.target && r.target !== row?.current;
+        }),
+    [upgradeRows, upgradeSelection, upgradeTargets],
+  );
 
   // When the user switches environments, fetch the specific env detail for
   // fresh runtime data. Errors are silently swallowed; the embedded summary
@@ -1007,37 +1036,33 @@ export function AppDetail() {
                 </span>
               </span>
             ) : (
-              <>
-                <Link
-                  to={`/templates/${data.template.name}`}
-                  className="inline-flex items-center gap-1 font-mono text-gray-600 hover:text-gray-900"
-                >
-                  {data.template.name}
-                  {data.template.version && (
-                    <span className="text-gray-400">
-                      v{data.template.version}
-                    </span>
-                  )}
-                </Link>
-                {(() => {
-                  const latest = templateVersions[0]?.version;
-                  if (!latest || !data.template.version) return null;
-                  if (latest === data.template.version) return null;
-                  return (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUpgradeTarget(latest);
-                        setShowUpgradeDialog(true);
-                      }}
-                      className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
-                      title={`Upgrade available: v${latest}`}
-                    >
-                      upgrade → v{latest}
-                    </button>
-                  );
-                })()}
-              </>
+              <Link
+                to={`/templates/${data.template.name}`}
+                className="inline-flex items-center gap-1 font-mono text-gray-600 hover:text-gray-900"
+              >
+                {data.template.name}
+                {data.template.version && (
+                  <span className="text-gray-400">v{data.template.version}</span>
+                )}
+              </Link>
+            )}
+            {/* Outside the composed/single branch on purpose: a composed app's
+                components can each be behind, and used to get no affordance. */}
+            {(data.upgradesAvailable ?? 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowUpgradeDialog(true)}
+                className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                title={
+                  data.upgradesAvailable === 1
+                    ? "A newer template version is available"
+                    : `${data.upgradesAvailable} components have newer template versions`
+                }
+              >
+                {(data.components?.length ?? 0) > 1 && data.upgradesAvailable! > 1
+                  ? `${data.upgradesAvailable} template upgrades`
+                  : `upgrade → v${data.components?.find((c) => c.upgradeAvailable)?.latestVersion ?? data.templateLatestVersion}`}
+              </button>
             )}
             {data.description && (
               <span className="text-gray-400">{data.description}</span>
@@ -1461,39 +1486,109 @@ export function AppDetail() {
         </div>
       )}
 
-      {/* Template upgrade dialog */}
+      {/* Template upgrade dialog — one row per component, because the pin lives
+          per component and a composed app can mix templates entirely. */}
       {showUpgradeDialog && data && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="mx-4 w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+          <div className="mx-4 w-full max-w-2xl rounded-2xl bg-white p-6 shadow-xl">
             <h3 className="text-lg font-semibold text-gray-900">
-              Upgrade template
+              Upgrade template{upgradeRows.length > 1 ? "s" : ""}
             </h3>
             <p className="mt-1 text-sm text-gray-500">
-              Pin {appName} to a different version of{" "}
-              <span className="font-mono">{data.template.name}</span> and re-publish.
+              {upgradeRows.length > 1
+                ? `Pick a version per component of ${appName} and re-publish. Each component renders from its own chart, so they upgrade independently.`
+                : `Pin ${appName} to a different version and re-publish.`}{" "}
               ArgoCD will roll the new chart bytes out on its next sync.
             </p>
             <p className="mt-2 text-xs text-amber-700">
-              No values migration is performed. If the new version's input schema
-              differs from{" "}
-              <span className="font-mono">v{data.template.version}</span>, edit
-              the app's values via the existing flow before upgrading.
+              No values migration is performed. A values key the new chart renamed
+              or removed goes silently inert — check the chart's values before
+              upgrading, and adjust the app's values via the existing flow.
             </p>
-            <label className="mt-4 block">
-              <span className="text-sm font-medium text-gray-700">Target version</span>
-              <select
-                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-gray-500 focus:ring-1 focus:ring-gray-500"
-                value={upgradeTarget}
-                onChange={(e) => setUpgradeTarget(e.target.value)}
-              >
-                {templateVersions.map((v) => (
-                  <option key={v.version} value={v.version}>
-                    v{v.version}
-                    {v.version === data.template.version ? " (current)" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
+
+            {upgradeRows.length === 0 ? (
+              <p className="mt-4 rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-500">
+                No component of this app uses a version-managed template.
+              </p>
+            ) : (
+              <div className="mt-4 max-h-80 overflow-y-auto rounded-lg border border-gray-200">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+                    <tr>
+                      <th className="w-10 px-3 py-2">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all upgradable components"
+                          checked={
+                            upgradeRows.length > 0 &&
+                            upgradeRows.every((r) => upgradeSelection[r.name])
+                          }
+                          onChange={(e) =>
+                            setUpgradeSelection(
+                              Object.fromEntries(
+                                upgradeRows.map((r) => [r.name, e.target.checked]),
+                              ),
+                            )
+                          }
+                        />
+                      </th>
+                      <th className="px-3 py-2">Component</th>
+                      <th className="px-3 py-2">Template</th>
+                      <th className="px-3 py-2">Current</th>
+                      <th className="px-3 py-2">Target</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {upgradeRows.map((row) => (
+                      <tr key={row.name}>
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            aria-label={`Upgrade ${row.name}`}
+                            checked={!!upgradeSelection[row.name]}
+                            onChange={(e) =>
+                              setUpgradeSelection((s) => ({
+                                ...s,
+                                [row.name]: e.target.checked,
+                              }))
+                            }
+                          />
+                        </td>
+                        <td className="px-3 py-2 font-medium text-gray-900">
+                          {row.name}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-xs text-gray-500">
+                          {row.template}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-xs text-gray-500">
+                          {row.current ? `v${row.current}` : "—"}
+                        </td>
+                        <td className="px-3 py-2">
+                          <select
+                            className="w-full rounded-md border border-gray-300 px-2 py-1 text-sm shadow-sm focus:border-gray-500 focus:ring-1 focus:ring-gray-500"
+                            value={upgradeTargets[row.name] ?? row.current}
+                            onChange={(e) =>
+                              setUpgradeTargets((t) => ({
+                                ...t,
+                                [row.name]: e.target.value,
+                              }))
+                            }
+                          >
+                            {row.versions.map((v) => (
+                              <option key={v.version} value={v.version}>
+                                v{v.version}
+                                {v.version === row.current ? " (current)" : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
             <div className="mt-6 flex justify-end gap-2">
               <button
                 type="button"
@@ -1505,21 +1600,27 @@ export function AppDetail() {
               </button>
               <button
                 type="button"
-                disabled={
-                  upgrading ||
-                  !upgradeTarget ||
-                  upgradeTarget === data.template.version
-                }
+                disabled={upgrading || pendingUpgrades.length === 0}
                 onClick={async () => {
                   if (!project || !appName) return;
                   setUpgrading(true);
                   try {
-                    const res = await upgradeAppTemplate(project, appName, upgradeTarget);
+                    const res = await upgradeAppComponents(
+                      project,
+                      appName,
+                      Object.fromEntries(
+                        pendingUpgrades.map((r) => [r.name, r.target]),
+                      ),
+                    );
+                    const moved = res.components ?? [];
+                    const only = moved.length === 1 ? moved[0] : undefined;
                     toast.success(
-                      `Upgraded ${appName}: v${res.fromVersion ?? "?"} → v${res.toVersion ?? upgradeTarget}`,
+                      only
+                        ? `Upgraded ${only.name}: v${only.fromVersion ?? "?"} → v${only.toVersion}`
+                        : `Upgraded ${moved.length} components of ${appName}`,
                     );
                     setShowUpgradeDialog(false);
-                    // Refresh app detail so the version pin reflects the new state.
+                    // Refresh app detail so the pins reflect the new state.
                     const refreshed = await getApp(project, appName);
                     setData(refreshed.app);
                   } catch (err) {
@@ -1530,7 +1631,11 @@ export function AppDetail() {
                 }}
                 className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
               >
-                {upgrading ? "Upgrading…" : "Upgrade"}
+                {upgrading
+                  ? "Upgrading…"
+                  : pendingUpgrades.length > 1
+                    ? `Upgrade ${pendingUpgrades.length} components`
+                    : "Upgrade"}
               </button>
             </div>
           </div>
@@ -1720,6 +1825,7 @@ export function AppDetail() {
             const refreshed = await getApp(data.project, data.name);
             setData(refreshed.app);
           }}
+          onUpgrade={() => setShowUpgradeDialog(true)}
         />
       )}
       {activeTab === "deployments" && (
@@ -3415,11 +3521,14 @@ function OverviewTab({
   currentEnv,
   project,
   onSaved,
+  onUpgrade,
 }: {
   data: AppDetailType;
   currentEnv: AppEnvironmentSummary | null;
   project: string;
   onSaved: () => Promise<void>;
+  /** Opens the app's template-upgrade dialog. */
+  onUpgrade: () => void;
 }) {
   const replicas = currentEnv
     ? `${currentEnv.status.available}/${currentEnv.status.replicas}`
@@ -3537,6 +3646,7 @@ function OverviewTab({
         currentEnv={currentEnv}
         project={project}
         onSaved={onSaved}
+        onUpgrade={onUpgrade}
       />
 
       {/* App-wide settings (delivery / CD-images / previews / clusters) live on
@@ -4274,12 +4384,15 @@ function ComponentsTable({
   currentEnv,
   project,
   onSaved,
+  onUpgrade,
 }: {
   data: AppDetailType;
   components: ComponentSummary[];
   currentEnv: AppEnvironmentSummary | null;
   project: string;
   onSaved: () => Promise<void>;
+  /** Opens the app's template-upgrade dialog (rows are per component there). */
+  onUpgrade: () => void;
 }) {
   const isMulti = components.length > 1;
   // Composed = a multi-source app (more than one component). In the unified model
@@ -4699,8 +4812,24 @@ function ComponentsTable({
                           template{" "}
                           <span className="font-medium text-gray-500">
                             {comp.template}
+                            {comp.templateVersion && (
+                              <span className="text-gray-400">
+                                {" "}
+                                v{comp.templateVersion}
+                              </span>
+                            )}
                           </span>
                         </span>
+                        {comp.upgradeAvailable && (
+                          <button
+                            type="button"
+                            onClick={onUpgrade}
+                            className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 font-medium text-amber-800 hover:bg-amber-100"
+                            title={`Upgrade available: v${comp.latestVersion}`}
+                          >
+                            upgrade → v{comp.latestVersion}
+                          </button>
+                        )}
                         {comp.inheritAppVars === false && (
                           <span
                             className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700"

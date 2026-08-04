@@ -649,6 +649,41 @@ func (s *AppSpec) BackfillComponentTemplates() {
 	}
 }
 
+// SyncPrimaryTemplate mirrors AppSpec.Template from the app's PRIMARY component,
+// the counterpart to BackfillComponentTemplates: components are where a template
+// pin is authored (one template = one component), and AppSpec.Template is the
+// mirror the single-source render path reads (publisher writeAppTree). Every path
+// that rewrites Components must call this so the two never drift.
+//
+// The primary is the component whose Template.Name already matches
+// AppSpec.Template.Name, else Components[0]. Matching by name first keeps a
+// composed app's mirror pinned to the same template when components are added,
+// removed, or reordered — Components[0] alone would make the mirror hop to a
+// different chart on an unrelated edit. No-op when the app has no components
+// (a BYO/passthrough app, where AppSpec.Template is the only pin there is).
+func (s *AppSpec) SyncPrimaryTemplate() {
+	if len(s.Components) == 0 {
+		return
+	}
+	primary := -1
+	for i := range s.Components {
+		if s.Components[i].Template == nil {
+			continue
+		}
+		if primary < 0 {
+			primary = i
+		}
+		if s.Components[i].Template.Name == s.Template.Name {
+			primary = i
+			break
+		}
+	}
+	if primary < 0 {
+		return // no component carries a template — nothing to mirror
+	}
+	s.Template = *s.Components[primary].Template
+}
+
 // EffectiveComponents returns the app's components for display and per-component
 // editing. In the unified model every app is a list of components; a legacy
 // single-source app that has no stored components yields ONE synthesized primary

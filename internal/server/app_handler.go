@@ -84,6 +84,10 @@ type appHandler struct {
 	// path (dashboard/project/stack) doesn't re-hit K8s + ArgoCD on every load.
 	// nil is a valid no-op cache (test handlers built as literals skip caching).
 	statusCache *statusCache
+	// templateVersionCache memoizes per-template archive listings for the app
+	// detail page's upgrade hints, so a composed app doesn't re-LIST ConfigMaps
+	// once per component on every render. nil is a valid no-op cache.
+	templateVersionCache *templateVersionCache
 	// async runs slow pin/unpin work in the background when a caller opts in
 	// (Prefer: respond-async), returning 202 + a task id instead of blocking the
 	// request on git round-trips. nil disables async (handlers stay synchronous).
@@ -119,11 +123,12 @@ func (ah *appHandler) ensureKargoProjectCreds(ctx context.Context, projectName s
 // rbacHandler.registerRoutes).
 func newAppHandler(store domain.AppStore, templates []*tpl.Template, clusterLoader ClusterTemplateLoader, projectStore project.Store) *appHandler {
 	return &appHandler{
-		appStore:      store,
-		builtin:       templates,
-		clusterLoader: clusterLoader,
-		projectStore:  projectStore,
-		statusCache:   newStatusCache(statusCacheTTL),
+		appStore:             store,
+		builtin:              templates,
+		clusterLoader:        clusterLoader,
+		projectStore:         projectStore,
+		statusCache:          newStatusCache(statusCacheTTL),
+		templateVersionCache: newTemplateVersionCache(templateVersionsTTL),
 	}
 }
 
@@ -588,17 +593,23 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	// Applied FIRST so the per-component config/values blocks below operate on the
 	// new set. The publisher prunes the stale-mode tree if this flips composed↔single.
 	if req.Components != nil {
-		specs, primary, err := ah.resolveComponentSpecs(r.Context(), req.Components)
+		// Hand the resolver the current components so an edit preserves each
+		// existing pin instead of re-pinning to whatever the registry now holds.
+		prevByName := make(map[string]domain.ComponentSpec, len(prevComponents))
+		for _, c := range prevComponents {
+			prevByName[c.Name] = c
+		}
+		specs, _, err := ah.resolveComponentSpecs(r.Context(), req.Components, prevByName)
 		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 			return
 		}
 		app.Spec.Components = specs
 		// Keep AppSpec.Template (the "primary") in sync so single-component readers
-		// and the single-source render path resolve the right chart.
-		if primary != nil {
-			app.Spec.Template = domain.AppTemplateRef{Name: primary.Metadata.Name, Version: primary.Metadata.Version}
-		}
+		// and the single-source render path resolve the right chart. Mirrored from
+		// the resolved component's PIN — reading it off the live template would
+		// re-pin the app to latest on every unrelated component edit.
+		app.Spec.SyncPrimaryTemplate()
 	}
 	if req.ClusterOverrides != nil {
 		// Replace per-(env, cluster) value overrides. Fold each into the app's
@@ -1163,6 +1174,9 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	})
 
 	detail := appToDetailDTO(app, envs)
+	// Upgrade hints are detail-only: the picker needs each component's own
+	// template's archived versions, which the list view can't afford to fan out.
+	ah.decorateTemplateUpgrades(ctx, &detail)
 	writeJSON(w, http.StatusOK, AppDetailResponse{App: detail})
 }
 
@@ -1620,23 +1634,50 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// upgradeAppTemplateRequest is the body for POST .../upgrade-template.
+// upgradeAppTemplateRequest is the body for POST .../upgrade-template. Exactly
+// one of Version / Components must be set.
 type upgradeAppTemplateRequest struct {
-	// Version is the target template version. Must be one of the
-	// versions returned by GET /api/v1/templates/{name}/versions.
-	Version string `json:"version"`
+	// Version upgrades the app's PRIMARY template: every component rendered by
+	// AppSpec.Template.Name moves to this version, and so does the app-level
+	// mirror. Components on a different template are left alone and reported
+	// back in the response's "skipped". Must be one of the versions returned by
+	// GET /api/v1/templates/{name}/versions.
+	Version string `json:"version,omitempty"`
+	// Components upgrades named components individually, keyed component name →
+	// target version. This is the general form: a composed app mixes templates
+	// (api→web-service, worker→worker, migrate→job), so there is no single
+	// app-level version that means anything for it. Each version is validated
+	// against ITS OWN component's template.
+	Components map[string]string `json:"components,omitempty"`
 }
 
-// handleUpgradeAppTemplate pins an app to a specific template version
-// and re-publishes via the existing gitops flow. The publisher's
-// version-aware ChartFetcher then resolves to the per-version archive
-// ConfigMap, so the chart bytes Argo deploys actually change.
+// upgradedComponentDTO reports one component's version move in the response.
+type upgradedComponentDTO struct {
+	Name        string `json:"name"`
+	Template    string `json:"template"`
+	FromVersion string `json:"fromVersion,omitempty"`
+	ToVersion   string `json:"toVersion"`
+}
+
+// handleUpgradeAppTemplate moves an app's template version pin(s) and
+// re-publishes via the existing gitops flow. The publisher's version-aware
+// ChartFetcher then resolves to the per-version archive ConfigMap, so the chart
+// bytes Argo deploys actually change.
 //
-// This does NOT migrate values when the new version's input schema
-// differs from the old one — operators are expected to check the
-// template's input shape before upgrading and adjust values via the
-// existing app-edit flow if needed. Argo will surface render errors
-// loudly enough for now; a values-migration prompt is a follow-up.
+// The pin lives per component (ComponentSpec.Template), because that is what the
+// composed render path reads — a ≥2-component app renders one chart source per
+// component and never looks at AppSpec.Template. But AppSpec.Template is not
+// decoration either: it is the pin the SINGLE-source path reads. So this writes
+// both, keeping the mirror in step via AppSpec.SyncPrimaryTemplate.
+//
+// Every version is validated before anything is mutated, then a single SaveApp +
+// PublishApp makes the whole upgrade atomic; a publish failure restores the
+// entire component list and the mirror.
+//
+// This does NOT migrate values when the new version's chart differs from the old
+// one. Overlays (ComponentSpec.Values / AppSpec.RawValues) are an additive layer
+// and are never rewritten — a renamed or removed chart key leaves the override
+// silently inert. A preflight diff is a follow-up (docs/templates.md).
 func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
@@ -1646,8 +1687,15 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
 		return
 	}
-	if strings.TrimSpace(req.Version) == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "version is required"})
+	wantVersion := strings.TrimSpace(req.Version)
+	switch {
+	case wantVersion == "" && len(req.Components) == 0:
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "version or components is required"})
+		return
+	case wantVersion != "" && len(req.Components) > 0:
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "set either version (upgrade the app's primary template) or components (per-component versions), not both",
+		})
 		return
 	}
 
@@ -1666,60 +1714,174 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Validate the requested version exists as an archive ConfigMap.
-	// Skip the check when no kubeClient is wired (test harnesses,
-	// fake mode) — caller's responsibility to pass a real version.
-	if ah.kubeClient != nil {
-		versions, err := kube.ListTemplateVersions(r.Context(), ah.kubeClient, app.Spec.Template.Name)
-		if err != nil {
-			slog.Error("upgrade-template: list versions failed", "template", app.Spec.Template.Name, "err", err)
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list template versions"})
-			return
-		}
-		var found bool
-		for _, v := range versions {
-			if v.Version == req.Version {
-				found = true
-				break
+	// A BYO/passthrough app stores no components at all (creator.go returns nil
+	// for a template with no declared components that opts out of the canonical
+	// schema). There AppSpec.Template is not a mirror — it is the only pin there
+	// is, and the single-source path renders straight from it. Do NOT synthesize a
+	// component to carry it: persisting one would trip the publisher's
+	// len(Components)==1 canonical-key remap, changing how the app renders as a
+	// side effect of an upgrade.
+	if len(app.Spec.Components) == 0 {
+		ah.upgradeTemplatelessApp(w, r, app, wantVersion, req.Components)
+		return
+	}
+	app.Spec.BackfillComponentTemplates()
+
+	// Resolve the target version per component BEFORE mutating anything.
+	targets := map[string]string{} // component name → target version
+	var skipped []string
+	if wantVersion != "" {
+		// A bare version means "upgrade the app's primary template". Components
+		// rendered by a different chart are untouched and reported back, so a
+		// composed app's other templates can't be moved by accident.
+		for _, c := range app.Spec.Components {
+			if c.Template == nil {
+				continue
+			}
+			if c.Template.Name == app.Spec.Template.Name {
+				targets[c.Name] = wantVersion
+			} else {
+				skipped = append(skipped, c.Name)
 			}
 		}
-		if !found {
+		if len(targets) == 0 {
 			writeJSON(w, http.StatusBadRequest, errorResponse{
-				Error: fmt.Sprintf("template %q has no archived version %q — call GET /api/v1/templates/%s/versions to see what's available",
-					app.Spec.Template.Name, req.Version, app.Spec.Template.Name),
+				Error: fmt.Sprintf("no component of %q uses template %q — name the components explicitly instead",
+					appName, app.Spec.Template.Name),
 			})
+			return
+		}
+	} else {
+		byName := map[string]domain.ComponentSpec{}
+		for _, c := range app.Spec.Components {
+			byName[c.Name] = c
+		}
+		for name, v := range req.Components {
+			c, ok := byName[name]
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, errorResponse{
+					Error: fmt.Sprintf("app %q has no component %q", appName, name),
+				})
+				return
+			}
+			if c.Template == nil {
+				writeJSON(w, http.StatusBadRequest, errorResponse{
+					Error: fmt.Sprintf("component %q carries no template to upgrade", name),
+				})
+				return
+			}
+			if strings.TrimSpace(v) == "" {
+				writeJSON(w, http.StatusBadRequest, errorResponse{
+					Error: fmt.Sprintf("component %q: version is required", name),
+				})
+				return
+			}
+			targets[name] = strings.TrimSpace(v)
+		}
+	}
+
+	// Validate each target against ITS OWN component's template — a composed app
+	// mixes charts, so one app-level version list would check the wrong archives.
+	// Skipped when no kubeClient is wired (test harnesses, fake mode).
+	for _, c := range app.Spec.Components {
+		target, ok := targets[c.Name]
+		if !ok || c.Template == nil {
+			continue
+		}
+		if !ah.templateHasVersion(w, r, c.Template.Name, target, c.Name) {
 			return
 		}
 	}
 
-	// No-op early-return: re-pinning to the same version is fine but
-	// don't pretend we did work. The UI shouldn't surface this button
-	// when versions match, but be safe.
-	if app.Spec.Template.Version == req.Version {
-		writeJSON(w, http.StatusOK, map[string]string{
-			"message": "app already pinned to " + req.Version,
+	// Snapshot for rollback, then apply. Components are value types holding a
+	// Template POINTER, so a slice copy would share those pointers with the
+	// mutated spec — deep-copy each ref.
+	prevComponents := make([]domain.ComponentSpec, len(app.Spec.Components))
+	copy(prevComponents, app.Spec.Components)
+	for i := range prevComponents {
+		if prevComponents[i].Template != nil {
+			t := *prevComponents[i].Template
+			prevComponents[i].Template = &t
+		}
+	}
+	prevTemplate := app.Spec.Template
+
+	var moved []upgradedComponentDTO
+	for i := range app.Spec.Components {
+		c := &app.Spec.Components[i]
+		target, ok := targets[c.Name]
+		if !ok || c.Template == nil || c.Template.Version == target {
+			continue
+		}
+		moved = append(moved, upgradedComponentDTO{
+			Name:        c.Name,
+			Template:    c.Template.Name,
+			FromVersion: c.Template.Version,
+			ToVersion:   target,
+		})
+		t := *c.Template
+		t.Version = target
+		c.Template = &t
+	}
+	app.Spec.SyncPrimaryTemplate()
+
+	// Nothing actually moved — re-pinning to the current version is fine, but
+	// don't pretend we did work (or churn a gitops commit for it).
+	if len(moved) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": "app already pinned to the requested version(s)",
 			"project": projectName,
 			"app":     appName,
-			"version": req.Version,
+			"skipped": skipped,
 		})
 		return
 	}
 
-	prevVersion := app.Spec.Template.Version
-	app.Spec.Template.Version = req.Version
-	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
-		slog.Error("upgrade-template: save app failed", "project", projectName, "app", appName, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist version pin"})
+	if !ah.saveAndRepublishUpgrade(w, r, app, func() {
+		app.Spec.Components = prevComponents
+		app.Spec.Template = prevTemplate
+	}) {
 		return
 	}
 
-	// Re-publish via the same path as /sync. PublishApp's syncChart
-	// honours app.Spec.Template.Version (PR5.1), so the chart bytes in
-	// the gitops repo actually change to the new version's archive.
+	slog.Info("app upgraded to template version",
+		"project", projectName, "app", appName,
+		"components", len(moved), "skipped", len(skipped),
+		"from", prevTemplate.Version, "to", app.Spec.Template.Version,
+	)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "app upgraded — ArgoCD will sync the new chart bytes shortly",
+		"project": projectName,
+		"app":     appName,
+		// fromVersion/toVersion describe the PRIMARY template, unchanged from
+		// before per-component upgrades existed, so older clients keep working.
+		"fromVersion": prevTemplate.Version,
+		"toVersion":   app.Spec.Template.Version,
+		"components":  moved,
+		"skipped":     skipped,
+	})
+}
+
+// saveAndRepublishUpgrade persists a mutated app and re-publishes it via the same
+// path as /sync, restoring the pre-upgrade state through restore() if the publish
+// fails so the store never drifts from what's actually in the gitops repo. It
+// writes the error response itself; reports whether the caller may continue.
+func (ah *appHandler) saveAndRepublishUpgrade(w http.ResponseWriter, r *http.Request, app *domain.App, restore func()) bool {
+	projectName, appName := app.ProjectName, app.Name
+
+	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
+		slog.Error("upgrade-template: save app failed", "project", projectName, "app", appName, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist version pin"})
+		return false
+	}
+
+	// PublishApp's syncChart honours each component's Template.Version (and
+	// AppSpec.Template.Version on the single-source path), so the chart bytes in
+	// the gitops repo actually change.
 	allEnvs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list app environments"})
-		return
+		return false
 	}
 	var stableEnvs []*domain.AppEnvironment
 	for _, env := range allEnvs {
@@ -1733,29 +1895,98 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 
 	ah.ensureAppNamespaces(r.Context(), app, stableEnvs)
 	if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
-		// Roll the version pin back so the operator can retry without
-		// the saved state being stuck on a version that didn't publish.
-		app.Spec.Template.Version = prevVersion
+		restore()
 		_ = ah.appStore.SaveApp(r.Context(), projectName, app)
-		slog.Error("upgrade-template: publish failed; rolled back version pin",
-			"project", projectName, "app", appName, "from", prevVersion, "to", req.Version, "err", err)
+		slog.Error("upgrade-template: publish failed; rolled back version pins",
+			"project", projectName, "app", appName, "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{
-			Error: "publish failed; version pin rolled back: " + err.Error(),
+			Error: "publish failed; version pins rolled back: " + err.Error(),
 		})
+		return false
+	}
+	return true
+}
+
+// upgradeTemplatelessApp handles the app shape that stores no components at all
+// (BYO/passthrough). There is no component level to write: AppSpec.Template is
+// the pin the single-source render path reads, so it is upgraded directly. The
+// per-component request form has nothing to address here and is rejected.
+func (ah *appHandler) upgradeTemplatelessApp(w http.ResponseWriter, r *http.Request, app *domain.App, wantVersion string, components map[string]string) {
+	if len(components) > 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: fmt.Sprintf("app %q has no components; upgrade it with {\"version\": ...}", app.Name),
+		})
+		return
+	}
+	if app.Spec.Template.Name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: fmt.Sprintf("app %q has no template to upgrade", app.Name),
+		})
+		return
+	}
+	if !ah.templateHasVersion(w, r, app.Spec.Template.Name, wantVersion, "") {
+		return
+	}
+
+	prevVersion := app.Spec.Template.Version
+	if prevVersion == wantVersion {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": "app already pinned to the requested version(s)",
+			"project": app.ProjectName,
+			"app":     app.Name,
+		})
+		return
+	}
+	app.Spec.Template.Version = wantVersion
+
+	if !ah.saveAndRepublishUpgrade(w, r, app, func() {
+		app.Spec.Template.Version = prevVersion
+	}) {
 		return
 	}
 
 	slog.Info("app upgraded to template version",
-		"project", projectName, "app", appName,
-		"from", prevVersion, "to", req.Version,
+		"project", app.ProjectName, "app", app.Name,
+		"from", prevVersion, "to", wantVersion,
 	)
-	writeJSON(w, http.StatusOK, map[string]string{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"message":     "app upgraded — ArgoCD will sync the new chart bytes shortly",
-		"project":     projectName,
-		"app":         appName,
+		"project":     app.ProjectName,
+		"app":         app.Name,
 		"fromVersion": prevVersion,
-		"toVersion":   req.Version,
+		"toVersion":   wantVersion,
 	})
+}
+
+// templateHasVersion checks that a version exists as an archive ConfigMap for the
+// named template, writing the error response and reporting false when it doesn't.
+// component, when non-empty, prefixes the message so a composed app's failure
+// names the offending component. Skipped (returns true) when no kubeClient is
+// wired — test harnesses and fake mode leave version validity to the caller.
+func (ah *appHandler) templateHasVersion(w http.ResponseWriter, r *http.Request, templateName, version, component string) bool {
+	if ah.kubeClient == nil {
+		return true
+	}
+	versions, err := kube.ListTemplateVersions(r.Context(), ah.kubeClient, templateName)
+	if err != nil {
+		slog.Error("upgrade-template: list versions failed", "template", templateName, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list template versions"})
+		return false
+	}
+	for _, v := range versions {
+		if v.Version == version {
+			return true
+		}
+	}
+	prefix := ""
+	if component != "" {
+		prefix = fmt.Sprintf("component %q: ", component)
+	}
+	writeJSON(w, http.StatusBadRequest, errorResponse{
+		Error: fmt.Sprintf("%stemplate %q has no archived version %q — call GET /api/v1/templates/%s/versions to see what's available",
+			prefix, templateName, version, templateName),
+	})
+	return false
 }
 
 // resolveEnvNamespaces overwrites each environment's Namespace field with the
@@ -3765,7 +3996,19 @@ func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
 // first resolved template as the app "primary". Composed invariants are validated.
 // Used by the edit-composed update path; the create handler has its own inline
 // copy that maps errors to per-field HTTP statuses.
-func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []ComponentCreateDTO) ([]domain.ComponentSpec, *tpl.Template, error) {
+//
+// prev holds the app's CURRENT components keyed by name (nil at create). It is
+// what keeps an edit from becoming an accidental upgrade: PATCH replaces the
+// whole component list, and clients that don't echo a version back would
+// otherwise have every component silently re-pinned to registry latest. The
+// resolution order per component is:
+//
+//	1. an explicit template.version on the wire — the caller means it;
+//	2. else the STORED pin, when the component already exists under the same
+//	   template name — an edit to anything else must not move the chart;
+//	3. else the template's current version — a brand-new component, or a
+//	   deliberate retemplate onto a different chart, correctly lands on latest.
+func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []ComponentCreateDTO, prev map[string]domain.ComponentSpec) ([]domain.ComponentSpec, *tpl.Template, error) {
 	var specs []domain.ComponentSpec
 	var primary *tpl.Template
 	for i, c := range dtos {
@@ -3803,7 +4046,11 @@ func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []Componen
 			}
 			version := c.Template.Version
 			if version == "" {
-				version = ctmpl.Metadata.Version
+				if p, ok := prev[c.Name]; ok && p.Template != nil && p.Template.Name == ctmpl.Metadata.Name {
+					version = p.Template.Version
+				} else {
+					version = ctmpl.Metadata.Version
+				}
 			}
 			cs.Template = &domain.AppTemplateRef{Name: ctmpl.Metadata.Name, Version: version}
 			if primary == nil {
@@ -3852,6 +4099,7 @@ func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]dom
 		}
 		if c.Template != nil {
 			dto.Template = c.Template.Name
+			dto.TemplateVersion = c.Template.Version
 		}
 		for _, e := range c.EnvVars {
 			dto.EnvVars = append(dto.EnvVars, ComponentEnvVarDTO{

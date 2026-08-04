@@ -272,18 +272,33 @@ export function syncApp(
   );
 }
 
+export interface UpgradedComponent {
+  name: string;
+  template: string;
+  fromVersion?: string;
+  toVersion: string;
+}
+
 export interface UpgradeAppTemplateResponse {
   message: string;
   project: string;
   app: string;
+  /** The PRIMARY template's move, for the single-component headline. */
   fromVersion?: string;
   toVersion?: string;
+  /** Every component whose pin actually moved. */
+  components?: UpgradedComponent[];
+  /** Components left alone because they render from a different template. */
+  skipped?: string[];
 }
 
 /**
- * Pins an app to a specific template version and re-publishes. The
- * version must be one of those returned by GET /templates/{name}/versions.
- * On publish failure the backend rolls the pin back so a retry sees the
+ * Upgrades the app's PRIMARY template: every component rendered by that template
+ * moves to `version`, and so does the app-level pin. Components on a different
+ * template are untouched and returned in `skipped`. The version must be one of
+ * those the app detail response lists under templateVersions.
+ *
+ * On publish failure the backend rolls every pin back so a retry sees the
  * pre-upgrade state.
  */
 export function upgradeAppTemplate(
@@ -294,6 +309,24 @@ export function upgradeAppTemplate(
   return api.post<UpgradeAppTemplateResponse>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/upgrade-template`,
     { version },
+  );
+}
+
+/**
+ * Upgrades named components individually, keyed component name → target version.
+ * This is the general form: a composed app mixes templates, so there is no single
+ * app-level version that means anything for it. Each version is validated against
+ * its own component's template, and the whole batch is applied atomically — one
+ * bad version rejects the request without touching any pin.
+ */
+export function upgradeAppComponents(
+  project: string,
+  app: string,
+  components: Record<string, string>,
+): Promise<UpgradeAppTemplateResponse> {
+  return api.post<UpgradeAppTemplateResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/upgrade-template`,
+    { components },
   );
 }
 
