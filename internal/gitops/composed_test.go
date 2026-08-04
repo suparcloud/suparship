@@ -63,6 +63,44 @@ func composedApp() *domain.App {
 	}
 }
 
+// TestBuildComposedApplication_PerComponentVersions is what makes a
+// component-level upgrade meaningful: two components on the SAME template but
+// different versions must resolve to two distinct chart directories, so
+// upgrading one leaves the other's bytes exactly where they were.
+func TestBuildComposedApplication_PerComponentVersions(t *testing.T) {
+	app := &domain.App{
+		Name:        "bigly",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentType("web"), Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service", Version: "2.0.0"}},
+				{Name: "web", Type: domain.ComponentType("web"), Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"}},
+			},
+		},
+	}
+	manifest := gitops.BuildComposedApplication(app, gitops.ComposedBuildOptions{
+		RepoURL:       "https://git/repo.git",
+		AppName:       "demo-bigly-staging",
+		EnvName:       "staging",
+		ClusterServer: "https://c1",
+		Namespace:     "bigly-staging",
+		ComponentValues: map[string]string{
+			"api": "envs/staging/demo/bigly/components/api/values.yaml",
+			"web": "envs/staging/demo/bigly/components/web/values.yaml",
+		},
+	})
+
+	// Name-sorted: api (2.0.0) then web (1.0.0), each under its own version dir.
+	want := []string{"charts/web-service/2.0.0", "charts/web-service/1.0.0"}
+	for i, wp := range want {
+		if got := manifest.Spec.Sources[i+1].Path; got != wp {
+			t.Errorf("chart source %d path = %q, want %q", i, got, wp)
+		}
+	}
+}
+
 // TestBuildComposedApplication asserts the rendered multi-source Application:
 // a values-ref source plus one chart source per component (name-sorted), each
 // with its own release name and per-component values file, and NO bare `source:`.

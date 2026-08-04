@@ -34,6 +34,10 @@ export interface ComponentDraft {
   name: string;
   /** template name (the component's own chart) */
   template: string;
+  /** the chart version this component is PINNED to. Round-tripped unchanged so
+   *  saving structure never moves the deployed chart; cleared when the template
+   *  picker changes (a retemplate is a new chart, so it pins to latest). */
+  templateVersion?: string;
   /** web | worker | job */
   type: string;
   /** disabled | internal | external */
@@ -161,6 +165,7 @@ export function draftFromSummary(c: ComponentSummary): ComponentDraft {
   return {
     name: c.name,
     template: c.template ?? "",
+    templateVersion: c.templateVersion,
     type: c.type,
     exposeMode: c.exposeMode || (c.type === "web" ? "external" : "disabled"),
     values: c.values ?? {},
@@ -208,7 +213,11 @@ export function toComponentCreate(d: ComponentDraft): ComponentCreate {
     type: d.type,
     enabled: true,
     exposeMode: d.type === "web" ? d.exposeMode : undefined,
-    template: { name: d.template },
+    template: {
+      name: d.template,
+      // Echo the pin back so an edit can't be read as "upgrade me to latest".
+      ...(d.templateVersion ? { version: d.templateVersion } : {}),
+    },
     values: Object.keys(d.values).length > 0 ? d.values : undefined,
     // Only send when opting out — inherit (default) needs no field.
     inheritAppVars: d.inheritAppVars ? undefined : false,
@@ -450,6 +459,9 @@ export function ComposeComponents({
       envValuesText: {},
       envValuesError: {},
       images: [],
+      // Drop the pin too — it belonged to the old chart. Sending no version lets
+      // the server pin the retemplated component to the new template's latest.
+      templateVersion: undefined,
     };
     const tmpl = templates.find((t) => t.name === name);
     if (!tmpl) {
@@ -485,7 +497,16 @@ export function ComposeComponents({
               />
             </div>
             <div className="min-w-[10rem] flex-1">
-              <label className={labelCls}>Template</label>
+              <label className={labelCls}>
+                Template
+                {/* The pin is shown, not editable: saving structure here keeps
+                    the chart where it is. Versions are changed via Upgrade. */}
+                {c.templateVersion && (
+                  <span className="ml-1 font-normal text-gray-400">
+                    · pinned v{c.templateVersion}
+                  </span>
+                )}
+              </label>
               <select
                 className={inputCls}
                 value={c.template}

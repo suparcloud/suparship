@@ -592,6 +592,13 @@ export interface ComponentSummary {
   exposeMode?: string;
   /** The component's own template. */
   template?: string;
+  /** The chart version this component is pinned to (what actually deploys). */
+  templateVersion?: string;
+  /** Newest archived version of THIS component's template. Empty = the template
+   *  isn't version-managed, so no upgrade affordance should be shown. */
+  latestVersion?: string;
+  /** Whether latestVersion is newer than templateVersion. */
+  upgradeAvailable?: boolean;
   /** The component's base Helm values overlay (all environments), editable. */
   values?: Record<string, unknown>;
   /** Per-environment overlay overrides keyed by env name (deep-merged over
@@ -719,6 +726,15 @@ export interface AppDetail {
   deliveryMode?: string;
   // Whether this app supports preview (ephemeral PR) environments. Default true.
   previewsEnabled: boolean;
+  // Newest archived version of the app's PRIMARY template. Empty when that
+  // template isn't version-managed (a built-in with no archives).
+  templateLatestVersion?: string;
+  // How many components have a newer template version available. The upgrade
+  // affordance keys off this so it works for composed apps too.
+  upgradesAvailable?: number;
+  // Archived versions of every template this app's components use, keyed by
+  // template name, newest first — the source for the upgrade picker.
+  templateVersions?: Record<string, TemplateVersionInfo[]>;
 }
 
 // CDConfig configures who owns the deployed image tag. When managed is true an
