@@ -321,10 +321,56 @@ The gallery is currently a flat grid. Worth adding:
 
 ### Versioning + upgrades
 
-- Pin `app.spec.template.version` (currently `template.name` only).
-- Surface "upgrade available" on `AppDetail` when the cluster has a newer template version than the app pins.
-- Generate a dry-run diff — render Helm values before/after the version bump so the operator sees what changes before approving.
-- Schema-migration rules for inputs that change between template versions (rename/removal/type-change).
+**Where an upgrade is applied: at component level, mirrored to the app.** Every
+component carries its own `template: {name, version}` pin (`ComponentSpec.Template`),
+because a composed app mixes charts — api→web-service, worker→worker,
+migrate→job — and two components can even sit on different versions of the same
+template. That per-component pin is what the composed publisher renders from.
+`AppSpec.Template` is the mirror of the primary component, and it is what the
+*single-source* path (a 0- or 1-component app) renders from, so both are written
+together via `AppSpec.SyncPrimaryTemplate()`. Never author the app-level pin on
+its own.
+
+`POST /api/v1/projects/{p}/apps/{a}/upgrade-template` takes either shape:
+
+```jsonc
+{"version": "2.0.0"}                            // the app's PRIMARY template:
+                                                // every component on that template
+                                                // moves; others are returned in
+                                                // "skipped"
+{"components": {"api": "2.0.0", "web": "1.4.0"}} // per component, each validated
+                                                // against ITS OWN template
+```
+
+Both forms are atomic: every target version is validated before anything is
+written, then one save + one publish, and a publish failure restores every pin.
+`GET .../apps/{a}` reports `components[].templateVersion` / `latestVersion` /
+`upgradeAvailable`, plus app-level `upgradesAvailable` and `templateVersions`
+(archived versions per template, newest first) so the picker needs no extra calls.
+
+Note an editing invariant: a component PATCH that omits `template.version`
+*preserves* the stored pin rather than re-pinning to the registry's current
+version. Only an explicit version, a brand-new component, or a retemplate onto a
+different chart lands on latest.
+
+Still open:
+
+- Generate a dry-run diff — render Helm values before/after the version bump so
+  the operator sees what changes before approving. The dangerous case is silent:
+  a values key the new chart renamed or removed leaves the developer's overlay
+  inert and deploys the chart default instead. `kube.LoadChartBundleVersion` +
+  `chartimport.ParseArchive` already give both sides of that comparison.
+- Schema-migration rules for inputs that change between template versions
+  (rename/removal/type-change).
+- **Only the chart is pinned.** Template *metadata* — `defaultValues`,
+  `envValues`, `previewDefaultValues`, `images`, `suspendKey`,
+  `injectCanonicalValues` — is resolved by NAME at latest on every publish
+  (`server.ResolveTemplates`), so a pinned app already tracks the newest
+  template's overlays. Making that version-aware needs a
+  `kube.LoadTemplateVersion` and is a behaviour change for every running app.
+- **Archives are not immutable.** `kube.SaveTemplate` overwrites the per-version
+  archive, and `PATCH /templates/{name}` re-saves without bumping — so version X's
+  bytes can change under a pinned app. Refuse to overwrite a differing archive.
 
 ### Smaller follow-ups
 

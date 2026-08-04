@@ -205,6 +205,66 @@ func TestBackfillComponentTemplates(t *testing.T) {
 	}
 }
 
+func TestSyncPrimaryTemplate(t *testing.T) {
+	// Single component: the mirror follows the component's pin, which is what
+	// makes a component-level upgrade visible to the single-source render path.
+	single := AppSpec{
+		Template:   AppTemplateRef{Name: "web-service", Version: "1.0.0"},
+		Components: []ComponentSpec{{Name: "web", Template: &AppTemplateRef{Name: "web-service", Version: "2.0.0"}}},
+	}
+	single.SyncPrimaryTemplate()
+	if single.Template.Version != "2.0.0" {
+		t.Errorf("mirror version = %q, want 2.0.0", single.Template.Version)
+	}
+
+	// Heterogeneous composed app: the primary is the component matching the
+	// CURRENT mirror name, not Components[0] — so an unrelated component sorting
+	// ahead of it doesn't make the mirror hop to a different chart.
+	composed := AppSpec{
+		Template: AppTemplateRef{Name: "web-service", Version: "1.0.0"},
+		Components: []ComponentSpec{
+			{Name: "api", Template: &AppTemplateRef{Name: "job", Version: "3.0.0"}},
+			{Name: "web", Template: &AppTemplateRef{Name: "web-service", Version: "2.0.0"}},
+		},
+	}
+	composed.SyncPrimaryTemplate()
+	if composed.Template.Name != "web-service" || composed.Template.Version != "2.0.0" {
+		t.Errorf("mirror = %+v, want web-service@2.0.0", composed.Template)
+	}
+
+	// No component matches the mirror name → fall back to the first component
+	// that carries a template at all.
+	orphan := AppSpec{
+		Template: AppTemplateRef{Name: "retired", Version: "1.0.0"},
+		Components: []ComponentSpec{
+			{Name: "api", Template: &AppTemplateRef{Name: "job", Version: "3.0.0"}},
+		},
+	}
+	orphan.SyncPrimaryTemplate()
+	if orphan.Template.Name != "job" || orphan.Template.Version != "3.0.0" {
+		t.Errorf("mirror = %+v, want job@3.0.0", orphan.Template)
+	}
+
+	// No components (BYO/passthrough): AppSpec.Template is the only pin there
+	// is, so it must survive untouched.
+	byo := AppSpec{Template: AppTemplateRef{Name: "chartmuseum-app", Version: "1.0.0"}}
+	byo.SyncPrimaryTemplate()
+	if byo.Template.Name != "chartmuseum-app" || byo.Template.Version != "1.0.0" {
+		t.Errorf("no components → mirror must be untouched, got %+v", byo.Template)
+	}
+
+	// Components exist but none carries a template (pre-backfill legacy state):
+	// no-op rather than clearing the app's pin.
+	legacy := AppSpec{
+		Template:   AppTemplateRef{Name: "web-service", Version: "1.0.0"},
+		Components: []ComponentSpec{{Name: "web"}},
+	}
+	legacy.SyncPrimaryTemplate()
+	if legacy.Template.Name != "web-service" || legacy.Template.Version != "1.0.0" {
+		t.Errorf("untemplated components → mirror must be untouched, got %+v", legacy.Template)
+	}
+}
+
 func TestValidateComponents(t *testing.T) {
 	web := ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true}
 	worker := ComponentSpec{Name: "worker", Type: ComponentWorker, Enabled: true}

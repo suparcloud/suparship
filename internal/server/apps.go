@@ -35,6 +35,16 @@ type ComponentSummaryDTO struct {
 	// Template is the component's own template name (every component carries one
 	// in the unified model).
 	Template string `json:"template,omitempty"`
+	// TemplateVersion is the chart version this component is PINNED to — the
+	// version the publisher actually renders from. Returned so an edit can round-
+	// trip it back on PATCH instead of silently re-pinning to registry latest.
+	TemplateVersion string `json:"templateVersion,omitempty"`
+	// LatestVersion is the newest archived version of THIS component's template.
+	// Empty means the template is not version-managed (a built-in with no
+	// archives), in which case no upgrade affordance should be shown.
+	LatestVersion string `json:"latestVersion,omitempty"`
+	// UpgradeAvailable reports that LatestVersion is newer than TemplateVersion.
+	UpgradeAvailable bool `json:"upgradeAvailable,omitempty"`
 	// Values is the component's base Helm values overlay (all environments) — its
 	// value-based config, editable on the app detail page (composed apps).
 	Values map[string]any `json:"values,omitempty"`
@@ -229,6 +239,17 @@ type AppDetailDTO struct {
 	// PreviewsEnabled reports whether this app supports preview (ephemeral PR)
 	// environments. Defaults to true on create; editable via the update endpoint.
 	PreviewsEnabled bool `json:"previewsEnabled"`
+	// TemplateLatestVersion is the newest archived version of the app's PRIMARY
+	// template. Empty when that template isn't version-managed.
+	TemplateLatestVersion string `json:"templateLatestVersion,omitempty"`
+	// UpgradesAvailable counts the components with a newer template version. The
+	// app-level upgrade affordance keys off this, so it works for a composed app
+	// whose components sit on different templates.
+	UpgradesAvailable int `json:"upgradesAvailable,omitempty"`
+	// TemplateVersions lists the archived versions of every template this app's
+	// components use, keyed by template name, newest first. Served here so the
+	// upgrade picker needs no extra round-trips (one per distinct template).
+	TemplateVersions map[string][]TemplateVersionDTO `json:"templateVersions,omitempty"`
 }
 
 // CDConfigDTO mirrors domain.CDConfig on the wire. When Managed is true an
