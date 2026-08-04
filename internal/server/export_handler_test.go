@@ -322,6 +322,7 @@ func TestSecretBackendTypes_MatchHelmValues(t *testing.T) {
 	helmTypes := map[secrets.BackendType]bool{
 		"k8s":         true,
 		"onepassword": true,
+		"vault":       true,
 	}
 	for bt := range secrets.ValidBackendTypes {
 		if !helmTypes[bt] {

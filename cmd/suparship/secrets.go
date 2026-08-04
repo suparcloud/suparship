@@ -33,7 +33,17 @@ var secretsBackendCmd = &cobra.Command{
 var secretsBackendSetCmd = &cobra.Command{
 	Use:   "set",
 	Short: "Set the secret backend type",
+	Long: `Switches which backend the org stores secrets in. Takes effect without a
+restart.
+
+Every backend's configuration is retained across switches, so selecting a
+backend you used before reloads its settings rather than starting blank. Switching
+does NOT move existing values — use ` + "`suparship secrets migrate`" + ` for that.
+
+The Vault backend needs a server address before it can be activated; set it under
+Settings → Secrets Backend (or PUT /api/v1/org/secret-backend), then switch.`,
 	Example: `  suparship secrets backend set --type=onepassword
+  suparship secrets backend set --type=vault
   suparship secrets backend set --type=k8s`,
 	RunE: runSecretsBackendSet,
 }
@@ -90,7 +100,8 @@ what would be removed.`,
 }
 
 func init() {
-	secretsBackendSetCmd.Flags().String("type", "", "backend type: k8s, onepassword")
+	secretsBackendSetCmd.Flags().String("type", "",
+		"backend type: "+strings.Join(secrets.BackendTypeNames(), ", "))
 
 	secretsSATokenCmd.Flags().String("from-file", "", "path to file containing the SA token (required)")
 
@@ -143,13 +154,24 @@ func runSecretsBackendSet(cmd *cobra.Command, _ []string) error {
 
 	bt := secrets.BackendType(backendType)
 	if !secrets.ValidBackendTypes[bt] {
-		return fmt.Errorf("unsupported backend type: %s (use k8s or onepassword)", backendType)
+		return fmt.Errorf("unsupported backend type: %s (use %s)",
+			backendType, strings.Join(secrets.BackendTypeNames(), ", "))
 	}
 
 	org.SecretBackend.Type = bt
 	if bt == secrets.Backend1Password && org.SecretBackend.OnePassword == nil {
 		org.SecretBackend.OnePassword = &secrets.OnePasswordConfig{
 			GroupName: secrets.DefaultOnePasswordGroup,
+		}
+	}
+	// Vault has no CLI-settable equivalent of the 1Password group default: it
+	// needs a server address, which is entered via the UI/API. Say so here rather
+	// than letting Validate return a bare "requires a server address" that gives
+	// the operator nowhere to go. Same pointer the migrate path uses.
+	if bt == secrets.BackendVault {
+		if v := org.SecretBackend.Vault; v == nil || strings.TrimSpace(v.Address) == "" {
+			return fmt.Errorf("vault backend has no server address configured — set it under " +
+				"Settings → Secrets Backend (or PUT /api/v1/org/secret-backend), then switch")
 		}
 	}
 
