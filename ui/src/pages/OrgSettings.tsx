@@ -41,10 +41,12 @@ import {
   listSharedEnvSecretKeys,
   upsertSharedEnvSecrets,
   deleteSharedEnvSecretKey,
+  getVaultPolicies,
 } from "../lib/secrets";
 import type {
   SecretBackendConfig,
   VaultInfo,
+  VaultPoliciesResponse,
 } from "../lib/secrets";
 import { listClusters } from "../lib/clusters";
 import type { Cluster } from "../lib/clusters";
@@ -2262,8 +2264,36 @@ function ClusterTokensCard({
   const [tokenInputs, setTokenInputs] = useState<Record<string, string>>({});
   const [busyCluster, setBusyCluster] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Vault only: the least-privilege policy set. Each cluster's token must carry
+  // ONLY the global policy plus its bound envs' — a mount-wide read grant would
+  // let a staging cluster read prod.
+  const [vaultPolicies, setVaultPolicies] = useState<VaultPoliciesResponse | null>(null);
+  const [showPolicyHCL, setShowPolicyHCL] = useState(false);
 
   const isVault = backend === "vault";
+
+  useEffect(() => {
+    if (!isVault) {
+      setVaultPolicies(null);
+      return;
+    }
+    let cancelled = false;
+    // Silently no-ops: the policy block is guidance, and a failure here must not
+    // block pasting a token.
+    getVaultPolicies()
+      .then((res) => {
+        if (!cancelled) setVaultPolicies(res);
+      })
+      .catch(() => {
+        if (!cancelled) setVaultPolicies(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isVault]);
+
+  const policyFor = (cluster: string) =>
+    vaultPolicies?.clusters.find((c) => c.cluster === cluster);
   const tokenRefs =
     (isVault
       ? config.vault?.clusterTokens
@@ -2305,9 +2335,11 @@ function ClusterTokensCard({
       <p className="mb-2 mt-0.5 text-xs text-gray-500">
         {isVault ? (
           <>
-            One Vault token per cluster (read access to the suparship mount),
-            used by that cluster&apos;s External Secrets Operator. Pasting a
-            token seals it and publishes the cluster&apos;s single{" "}
+            One Vault token per cluster, used by that cluster&apos;s External
+            Secrets Operator. Scope each token to the global prefix plus the
+            envs bound to that cluster — never the whole mount, or a staging
+            cluster can read production. The command per cluster is below.
+            Pasting a token seals it and publishes the cluster&apos;s single{" "}
             <code className="font-mono">suparship-store</code>{" "}
             ClusterSecretStore.
           </>
@@ -2390,9 +2422,83 @@ function ClusterTokensCard({
                     {busyCluster === c.name ? "Sealing…" : "Seal"}
                   </button>
                 </div>
+                {/* The exact token this cluster should get: scoped to global +
+                    its bound envs, so it cannot read any other environment. */}
+                {isVault && policyFor(c.name) && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-700">
+                      Mint this cluster&apos;s token —{" "}
+                      {policyFor(c.name)!.policies.length} scoped{" "}
+                      {policyFor(c.name)!.policies.length === 1
+                        ? "policy"
+                        : "policies"}
+                    </summary>
+                    <pre className="mt-1.5 overflow-x-auto rounded-md bg-gray-900 p-2.5 text-xs leading-relaxed text-gray-100">
+                      {policyFor(c.name)!.tokenCommand}
+                    </pre>
+                    <p className="mt-1 text-xs text-gray-400">
+                      Reads{" "}
+                      <span className="font-mono">global</span>
+                      {policyFor(c.name)!.boundEnvs.length > 0
+                        ? ` + ${policyFor(c.name)!.boundEnvs.join(", ")}`
+                        : " only (no environment bound yet)"}
+                      . Revoke the previous token in Vault after rotating.
+                    </p>
+                  </details>
+                )}
               </div>
             );
           })}
+        </div>
+      )}
+      {/* The policies the above token commands reference. Written once per
+          environment; a cluster's entitlement is which ones its token carries, so
+          these do not change as clusters come and go. */}
+      {isVault && vaultPolicies && (
+        <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50/50 p-3">
+          <button
+            type="button"
+            onClick={() => setShowPolicyHCL((v) => !v)}
+            className="text-xs font-medium text-gray-700 hover:text-gray-900"
+          >
+            {showPolicyHCL ? "▾" : "▸"} Vault policies for mount{" "}
+            <span className="font-mono">{vaultPolicies.mount}</span> (
+            {vaultPolicies.readPolicies.length + 1})
+          </button>
+          {!showPolicyHCL && (
+            <p className="mt-1 text-xs text-gray-500">
+              One read policy per scope, so no cluster gets mount-wide read.
+              Write these once, then mint each cluster&apos;s token above.
+            </p>
+          )}
+          {showPolicyHCL && (
+            <div className="mt-2 space-y-3">
+              <p className="text-xs text-gray-500">
+                Run these against your Vault as an operator — suparship holds a
+                write token for the KV mount, not the{" "}
+                <span className="font-mono">sys/policy</span> rights these need.
+              </p>
+              {[vaultPolicies.writePolicy, ...vaultPolicies.readPolicies].map(
+                (p) => (
+                  <div key={p.name}>
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-mono text-xs text-gray-900">
+                        {p.name}
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        {p.env
+                          ? `read: ${p.env}`
+                          : "suparship's own write token — spans the mount"}
+                      </span>
+                    </div>
+                    <pre className="mt-1 overflow-x-auto rounded-md bg-gray-900 p-2.5 text-xs leading-relaxed text-gray-100">
+                      {`vault policy write ${p.name} - <<'EOF'\n${p.hcl}EOF`}
+                    </pre>
+                  </div>
+                ),
+              )}
+            </div>
+          )}
         </div>
       )}
       {error && <p className="mt-2 text-xs text-red-600">{error}</p>}

@@ -176,6 +176,41 @@ export function setClusterConnectToken(
   );
 }
 
+// ── Vault least-privilege policies ──────────────────────────────────────────
+// For the Vault backend a suparship "vault" is a path prefix in one KV mount, so
+// a path-scoped POLICY is what isolates one env's secrets from another's. These
+// are computed, never applied: suparship holds a write token for the KV mount,
+// not the sys/policy rights that writing policies and minting tokens need.
+
+export interface VaultPolicy {
+  name: string;
+  /** "global", or the environment name. Absent on the write policy. */
+  env?: string;
+  hcl: string;
+}
+
+export interface VaultClusterPolicy {
+  cluster: string;
+  /** The envs bound to this cluster — why it is entitled to those policies. */
+  boundEnvs: string[];
+  policies: string[];
+  /** Ready-to-run `vault token create`, one -policy flag per entitled scope. */
+  tokenCommand: string;
+}
+
+export interface VaultPoliciesResponse {
+  mount: string;
+  /** suparship's own control-plane policy (mount-wide by design). */
+  writePolicy: VaultPolicy;
+  /** Global read policy plus one per environment. Clusters compose these. */
+  readPolicies: VaultPolicy[];
+  clusters: VaultClusterPolicy[];
+}
+
+export function getVaultPolicies(): Promise<VaultPoliciesResponse> {
+  return api.get<VaultPoliciesResponse>("/org/secret-backend/vault-policies");
+}
+
 // ── Secret sync ────────────────────────────────────────────────────────────────
 
 export function syncSecrets(

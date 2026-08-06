@@ -128,19 +128,129 @@ model with a different provider stanza.
 ### Admin walkthrough (Vault)
 
 1. **Enable a KV v2 mount** on your Vault: `vault secrets enable -path=suparship -version=2 kv`.
-2. **Create two policies**: read-write on `suparship/*` (for suparship) and
-   read-only (for cluster ESO tokens).
-3. **Settings → Secrets Backend → HashiCorp Vault**: enter the server address
+2. **Write the policies.** Because a suparship vault is a *path prefix*, a
+   path-scoped policy is the thing that actually isolates one environment's
+   secrets from another's — see [Least privilege](#least-privilege-vault) below
+   for why this matters and how it's enforced. suparship renders the exact set
+   for your mount and environments under **Settings → Secrets Backend → Vault
+   policies**, or via `GET /api/v1/org/secret-backend/vault-policies`. KV v2
+   routes values through `data/` and listings + item deletion through
+   `metadata/`, so both prefixes appear in each policy.
+
+   ```bash
+   # suparship's own write policy — mount-wide ON PURPOSE: suparship is the
+   # control plane that creates and rotates items in every scope.
+   vault policy write suparship-write - <<'EOF'
+   path "suparship/data/*"     { capabilities = ["create", "update", "read", "delete"] }
+   path "suparship/metadata/*" { capabilities = ["read", "list", "delete"] }
+   EOF
+
+   # ESO read policies — ONE PER SCOPE PREFIX, never mount-wide.
+   vault policy write suparship-eso-read-global - <<'EOF'
+   path "suparship/data/suparship-secrets-global/*"     { capabilities = ["read"] }
+   path "suparship/metadata/suparship-secrets-global/*" { capabilities = ["read", "list"] }
+   EOF
+
+   # ...and one like this for each environment (staging shown):
+   vault policy write suparship-eso-read-env-staging - <<'EOF'
+   path "suparship/data/suparship-secrets-env-staging/*"     { capabilities = ["read"] }
+   path "suparship/metadata/suparship-secrets-env-staging/*" { capabilities = ["read", "list"] }
+   EOF
+   ```
+
+3. **Mint the tokens.** One write token for suparship, then one read token per
+   workload cluster carrying only the scopes that cluster is entitled to —
+   Vault policies are additive, so entitlement is *which policies the token
+   carries*:
+
+   ```bash
+   vault token create -policy=suparship-write -orphan \
+     -display-name=suparship-server -ttl=2160h
+
+   # a cluster bound to staging only:
+   vault token create -orphan \
+     -policy=suparship-eso-read-global \
+     -policy=suparship-eso-read-env-staging \
+     -display-name=suparship-eso-<cluster> -ttl=2160h
+   ```
+
+   The UI prints this command per cluster, with the policy flags already
+   matching that cluster's environment bindings.
+
+   `-orphan` so a token doesn't die with the operator token that minted it;
+   per-cluster display names keep audits and revocation per-cluster. Use a
+   plain TTL and rotate by re-pasting before expiry — **not** `-period`
+   tokens, which expire unless actively renewed and nothing in this pipeline
+   renews them. Leave Vault's `default` policy attached: suparship's connection
+   probe is a token self-lookup, which `default` grants. (In the `task up:vault`
+   dev loop, both tokens are simply the dev root token `root`.)
+4. **Settings → Secrets Backend → HashiCorp Vault**: enter the server address
    (reachable from the tooling cluster AND every workload cluster) and the
    mount; save.
-4. **Paste the write token** — suparship stores and probes it.
-5. **Per cluster: paste a read token** — suparship seals and publishes that
+5. **Paste the write token** — suparship stores and probes it.
+6. **Per cluster: paste its read token** — suparship seals and publishes that
    cluster's `ClusterSecretStore`. Rotation is a re-paste, same as 1Password
-   Connect tokens.
+   Connect tokens; revoke the old token in Vault afterwards.
 
 Vault Enterprise namespaces and a private CA bundle are supported via the same
 settings panel (`secrets.vault.namespace` / `secrets.vault.caCert` in Helm
 values).
+
+### Least privilege (Vault)
+
+One KV mount for every environment is fine — a Vault path prefix is a real
+isolation boundary, and nothing about SOC 2 requires a separate secret engine per
+environment. What matters is that **policy** enforces the boundary. Granting each
+cluster `read` on `{mount}/data/*` would not: every workload cluster's ESO token
+could then read production, and anyone able to read the `vault-token` Secret in a
+staging cluster's `external-secrets` namespace would have prod secrets. That is a
+least-privilege / prod-vs-non-prod segregation finding, and it is the one thing
+this layout has to get right.
+
+So read policies are **per scope prefix**, and a cluster's token composes the ones
+it is entitled to:
+
+| Policy | Grants read on | Who carries it |
+|---|---|---|
+| `suparship-write` | the whole mount | suparship itself (control plane) |
+| `suparship-eso-read-global` | `{mount}/…-secrets-global/*` | every cluster |
+| `suparship-eso-read-env-<env>` | `{mount}/…-secrets-env-<env>/*` | clusters bound to `<env>` |
+
+Per scope rather than per cluster because Vault policies are additive: an
+environment's policy is written once and never changes as clusters are added,
+removed, or failed over — only the token's policy list does. Entitlement follows
+the same binding rule the 1Password backend uses for Connect tokens
+(`clusterVaultIDs`): the global prefix plus every environment **bound** to that
+cluster, not just the active one, so a standby resolves secrets across a failover.
+
+Two prefix families is complete coverage. `VaultName` maps every scope onto one of
+them, so cluster overrides, project-env, stack-env, and preview items all live
+under their environment's prefix and need no grant of their own.
+
+suparship computes the set but never applies it: its write token covers the KV
+mount, not the `sys/policy` and token-create rights these need. Get the current
+set from **Settings → Secrets Backend** or
+`GET /api/v1/org/secret-backend/vault-policies`.
+
+**Re-run the per-cluster token command after changing an environment's cluster
+bindings.** Binding a new env to a cluster does not widen its existing token —
+ESO will fail to resolve the new env's items until the token is re-minted with
+that env's policy and re-pasted. That is the intended direction of failure: a
+missing grant breaks a lookup loudly, where an over-broad one stays silent.
+
+### Audit and rotation (Vault)
+
+Two things the policies above don't cover, both worth settling before an audit:
+
+- **Enable a Vault audit device** (`vault audit enable file
+  file_path=/vault/logs/audit.log`, or `socket`). suparship's own audit trail
+  (`internal/secrets/audit.go`) records the mutations *it* performs — actor,
+  scope, key names, never values — but it cannot see ESO's reads or anything done
+  out-of-band with a token. Vault's audit device is where read evidence lives.
+- **These are static tokens.** Rotation is a re-paste, and `-orphan` means an
+  operator's departure does not revoke them — put the per-cluster tokens in your
+  access-review procedure. Kubernetes/JWT auth for ESO→Vault is the real fix and
+  is still open (see [Out of scope](#out-of-scope-this-iteration)).
 
 ## Migrating between backends
 
