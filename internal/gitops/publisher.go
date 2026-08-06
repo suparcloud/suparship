@@ -191,9 +191,6 @@ func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, 
 	p.cfg.RoutingProfiles = routingProfiles
 }
 
-// usesUnifiedStore reports whether app ExternalSecrets should extract from the
-// single per-cluster ClusterSecretStore (1Password backend) instead of the
-// per-vault stores (k8s backend).
 // externalSecretRefreshInterval is the org-configured ExternalSecret refresh
 // interval (secrets.DefaultRefreshInterval when unset / no backend config).
 func (p *Publisher) externalSecretRefreshInterval() string {
@@ -203,8 +200,14 @@ func (p *Publisher) externalSecretRefreshInterval() string {
 	return p.cfg.BackendConfig.ExternalSecrets.EffectiveRefreshInterval()
 }
 
-func (p *Publisher) usesUnifiedStore() bool {
-	return p.cfg.BackendConfig != nil && p.cfg.BackendConfig.Effective() == secrets.Backend1Password
+// effectiveBackend returns the org's secret backend type (k8s when no backend
+// config is set), which selects the ESO store/key layout — see
+// WorkloadExternalSecretParams.Backend.
+func (p *Publisher) effectiveBackend() secrets.BackendType {
+	if p.cfg.BackendConfig == nil {
+		return secrets.BackendK8s
+	}
+	return p.cfg.BackendConfig.Effective()
 }
 
 // NewPublisher creates a Publisher from cfg.
@@ -866,7 +869,7 @@ func (p *Publisher) buildComponentExternalSecret(env AppPublishEnv, app *domain.
 		Cluster:         env.ClusterRef,
 		Presence:        env.ScopeKeys,
 		SecretKeys:      env.ScopeSecretKeys,
-		UnifiedStore:    p.usesUnifiedStore(),
+		Backend:         p.effectiveBackend(),
 		Branding:        p.cfg.Branding,
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	}, name, renames)
@@ -1931,7 +1934,7 @@ func (p *Publisher) writeAppPlatformResources(
 		Stack:           app.Spec.Stack,
 		Cluster:         env.ClusterRef,
 		Presence:        env.ScopeKeys,
-		UnifiedStore:    p.usesUnifiedStore(),
+		Backend:         p.effectiveBackend(),
 		Branding:        p.cfg.Branding,
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	})
@@ -2857,7 +2860,7 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 		Presence:        preview.ScopeKeys,
 		IsPreview:       true,
 		PreviewName:     preview.PreviewName,
-		UnifiedStore:    p.usesUnifiedStore(),
+		Backend:         p.effectiveBackend(),
 		Branding:        p.cfg.Branding,
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	})
@@ -3034,7 +3037,7 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 		Presence:        preview.ScopeKeys,
 		IsPreview:       true,
 		PreviewName:     preview.PreviewName,
-		UnifiedStore:    p.usesUnifiedStore(),
+		Backend:         p.effectiveBackend(),
 		Branding:        p.cfg.Branding,
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	})

@@ -2469,8 +2469,8 @@ func selfHealSealedTokens(
 	if err != nil || org == nil {
 		return
 	}
-	if org.SecretBackend.Effective() != secrets.Backend1Password {
-		return // only 1Password publishes sealed tokens + stores
+	if !org.SecretBackend.UsesPerClusterCredentials() {
+		return // only credentialed backends (1Password, Vault) publish sealed tokens + stores
 	}
 	clusters, err := clusterStore.ListClusters(ctx)
 	if err != nil {
@@ -2489,30 +2489,54 @@ func selfHealSealedTokens(
 			continue
 		}
 
-		// Need the cluster's stashed token to reconstruct the sealed Secret.
-		token, err := secrets.LoadConnectToken(ctx, kubeClient, secrets.ClusterStashKey(c.Name))
+		// Need the cluster's stashed credential to reconstruct the sealed
+		// Secret. Stash names are backend-qualified — the previous backend's
+		// stash is never resealed into the current backend's store.
+		token, err := secrets.LoadClusterCredential(ctx, kubeClient, org.SecretBackend.ClusterStashSecretName(c.Name))
 		if err != nil || len(token) == 0 {
-			logger.Info("self-heal: no stashed Connect token — operator must re-paste it",
-				"cluster", c.Name)
+			logger.Info("self-heal: no stashed credential — operator must re-paste it",
+				"cluster", c.Name, "backend", org.SecretBackend.Effective())
+			continue
+		}
+		if c.APIServer == "" {
 			continue
 		}
 
-		// Vaults this cluster reads: the global vault + the env vault of each
-		// environment bound to it (mirrors server.clusterVaultIDs).
-		var vaultIDs []string
-		if ref := org.SecretBackend.FindVault(secrets.GlobalScope()); ref != nil && ref.VaultID != "" {
-			vaultIDs = append(vaultIDs, ref.VaultID)
+		params := gitops.ClusterSealParams{
+			ClusterName:       c.Name,
+			ArgoCDDestination: c.APIServer,
+			ESONamespace:      c.EffectiveESONamespace(),
+			Token:             token,
+			Backend:           org.SecretBackend.Effective(),
 		}
-		for _, e := range org.Environments {
-			if !e.IsBoundTo(c.Name) {
+		if org.SecretBackend.Effective() == secrets.BackendVault {
+			v := org.SecretBackend.Vault
+			if v == nil || v.Address == "" {
+				logger.Warn("self-heal: vault backend has no address configured", "cluster", c.Name)
 				continue
 			}
-			if ref := org.SecretBackend.FindVault(secrets.EnvScope(e.Name)); ref != nil && ref.VaultID != "" {
+			params.Vault = gitops.VaultStoreConfig{
+				Address: v.Address, Mount: v.EffectiveMount(), Namespace: v.Namespace, CACertPEM: v.CACert,
+			}
+		} else {
+			// Vaults this cluster reads: the global vault + the env vault of
+			// each environment bound to it (mirrors server.clusterVaultIDs).
+			var vaultIDs []string
+			if ref := org.SecretBackend.FindVault(secrets.GlobalScope()); ref != nil && ref.VaultID != "" {
 				vaultIDs = append(vaultIDs, ref.VaultID)
 			}
-		}
-		if len(vaultIDs) == 0 || c.APIServer == "" {
-			continue
+			for _, e := range org.Environments {
+				if !e.IsBoundTo(c.Name) {
+					continue
+				}
+				if ref := org.SecretBackend.FindVault(secrets.EnvScope(e.Name)); ref != nil && ref.VaultID != "" {
+					vaultIDs = append(vaultIDs, ref.VaultID)
+				}
+			}
+			if len(vaultIDs) == 0 {
+				continue
+			}
+			params.VaultIDs = vaultIDs
 		}
 
 		kubeForCluster, err := clusterPool.Get(ctx, c.Name)
@@ -2526,23 +2550,17 @@ func selfHealSealedTokens(
 			continue
 		}
 
-		var connectEndpoint string
-		if ref := org.SecretBackend.FindClusterToken(c.Name); ref != nil {
-			connectEndpoint = ref.ConnectEndpoint
+		if params.Backend == secrets.Backend1Password {
+			if ref := org.SecretBackend.FindClusterToken(c.Name); ref != nil {
+				params.ConnectEndpoint = ref.ConnectEndpoint
+			}
+			if params.ConnectEndpoint == "" && org.SecretBackend.OnePassword != nil {
+				params.ConnectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
+			}
 		}
-		if connectEndpoint == "" && org.SecretBackend.OnePassword != nil {
-			connectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
-		}
+		params.Cert = cert
 
-		if err := pub.PublishClusterSecretStore(ctx, gitops.ClusterSealParams{
-			ClusterName:       c.Name,
-			ArgoCDDestination: c.APIServer,
-			ESONamespace:      c.EffectiveESONamespace(),
-			Cert:              cert,
-			Token:             token,
-			VaultIDs:          vaultIDs,
-			ConnectEndpoint:   connectEndpoint,
-		}); err != nil {
+		if err := pub.PublishClusterSecretStore(ctx, params); err != nil {
 			logger.Warn("self-heal: republish failed", "cluster", c.Name, "error", err)
 			continue
 		}

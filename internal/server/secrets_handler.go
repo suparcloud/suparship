@@ -482,17 +482,29 @@ func (h *secretsHandler) handleUnregisterEnvVault(w http.ResponseWriter, r *http
 // ── Per-cluster Connect token (1Password) ───────────────────────────────────
 
 // SetClusterConnectTokenRequest is the JSON body for
-// POST .../secret-backend/clusters/{cluster}/connect-token. The token must
-// have access to every vault the cluster reads: the global vault plus the env
-// vaults of the environments bound to this cluster.
+// POST .../secret-backend/clusters/{cluster}/connect-token — the active
+// backend's per-cluster credential. For 1Password the token must have access
+// to every vault the cluster reads (global + the env vaults of its bound
+// environments); for Vault it is a Vault token with read access to the
+// suparship mount. `token` is the backend-neutral field; `connectToken` is
+// its pre-Vault alias, kept for wire compatibility.
 type SetClusterConnectTokenRequest struct {
-	ConnectToken    string `json:"connectToken"`
+	Token           string `json:"token,omitempty"`
+	ConnectToken    string `json:"connectToken,omitempty"`
 	ConnectEndpoint string `json:"connectEndpoint,omitempty"`
 }
 
-// handleSetClusterConnectToken stashes the cluster's single Connect token,
-// seals it with the cluster's cert, and publishes the unified
-// ClusterSecretStore (suparship-store) listing every vault the cluster reads.
+// credential returns the pasted credential, whichever field carried it.
+func (r SetClusterConnectTokenRequest) credential() string {
+	if r.Token != "" {
+		return r.Token
+	}
+	return r.ConnectToken
+}
+
+// handleSetClusterConnectToken stashes the cluster's single per-cluster
+// credential, seals it with the cluster's cert, and publishes the unified
+// ClusterSecretStore (suparship-store) it authenticates.
 func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *http.Request) {
 	clusterName := r.PathValue("cluster")
 	var req SetClusterConnectTokenRequest
@@ -500,8 +512,8 @@ func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
 		return
 	}
-	if req.ConnectToken == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "connectToken is required"})
+	if req.credential() == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "token is required"})
 		return
 	}
 	req.ConnectEndpoint = strings.TrimSpace(req.ConnectEndpoint)
@@ -515,8 +527,8 @@ func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
 		return
 	}
-	if org.SecretBackend.Effective() != secrets.Backend1Password {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "connect tokens require the 1Password backend"})
+	if !org.SecretBackend.UsesPerClusterCredentials() {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "per-cluster tokens require the 1Password or Vault backend"})
 		return
 	}
 	if h.sealPublisher == nil {
@@ -534,8 +546,10 @@ func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *
 
 	// Stash the token so later vault/binding changes can re-seal without a
 	// re-paste. Best-effort — sealing below still uses the in-memory token.
+	// The stash name is backend-qualified (see ClusterStashSecretName) so the
+	// two backends' credentials never alias.
 	if h.kubeClient != nil {
-		if err := secrets.StashConnectToken(ctx, h.kubeClient, secrets.ClusterStashKey(clusterName), []byte(req.ConnectToken)); err != nil {
+		if err := secrets.StashClusterCredential(ctx, h.kubeClient, org.SecretBackend.ClusterStashSecretName(clusterName), []byte(req.credential())); err != nil {
 			h.logger.Warn("cluster token: stash failed (re-seal degraded)", "cluster", clusterName, "error", err)
 		}
 	}
@@ -643,44 +657,60 @@ func (h *secretsHandler) sealCluster(ctx context.Context, org *rbac.Org, cluster
 		return fmt.Errorf("cluster %q has no apiServer", clusterName)
 	}
 
-	vaultIDs := clusterVaultIDs(org, clusterName)
-	if len(vaultIDs) == 0 {
-		return fmt.Errorf("no vaults registered for cluster %q (set the global vault / register env vaults first)", clusterName)
+	params := gitops.ClusterSealParams{
+		ClusterName:       clusterName,
+		ArgoCDDestination: cluster.APIServer,
+		ESONamespace:      cluster.EffectiveESONamespace(),
+		Backend:           org.SecretBackend.Effective(),
+	}
+	switch org.SecretBackend.Effective() {
+	case secrets.BackendVault:
+		v := org.SecretBackend.Vault
+		if v == nil || v.Address == "" {
+			return fmt.Errorf("vault backend has no server address configured")
+		}
+		params.Vault = gitops.VaultStoreConfig{
+			Address:   v.Address,
+			Mount:     v.EffectiveMount(),
+			Namespace: v.Namespace,
+			CACertPEM: v.CACert,
+		}
+	default: // 1Password
+		vaultIDs := clusterVaultIDs(org, clusterName)
+		if len(vaultIDs) == 0 {
+			return fmt.Errorf("no vaults registered for cluster %q (set the global vault / register env vaults first)", clusterName)
+		}
+		params.VaultIDs = vaultIDs
+		// Connect endpoint precedence: per-cluster override > org-level
+		// setting > built-in default (resolved by the YAML builder when empty).
+		if tokenRef != nil {
+			params.ConnectEndpoint = tokenRef.ConnectEndpoint
+		}
+		if params.ConnectEndpoint == "" && org.SecretBackend.OnePassword != nil {
+			params.ConnectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
+		}
 	}
 
+	// The stash name is backend-qualified, so a backend switch can never seal
+	// the PREVIOUS backend's credential into the new backend's store.
 	var token []byte
 	if h.kubeClient != nil {
-		if t, err := secrets.LoadConnectToken(ctx, h.kubeClient, secrets.ClusterStashKey(clusterName)); err == nil {
+		if t, err := secrets.LoadClusterCredential(ctx, h.kubeClient, org.SecretBackend.ClusterStashSecretName(clusterName)); err == nil {
 			token = t
 		}
 	}
 	if len(token) == 0 {
-		return fmt.Errorf("no Connect token pasted for cluster %q yet", clusterName)
+		return fmt.Errorf("no %s token pasted for cluster %q yet", org.SecretBackend.Effective(), clusterName)
 	}
+	params.Token = token
 
 	cert, err := h.fetchFreshCert(ctx, clusterName)
 	if err != nil {
 		return fmt.Errorf("fetch sealing cert for %q: %w", clusterName, err)
 	}
+	params.Cert = cert
 
-	// Connect endpoint precedence: per-cluster override > org-level setting >
-	// built-in default (resolved by the YAML builder when empty).
-	var connectEndpoint string
-	if tokenRef != nil {
-		connectEndpoint = tokenRef.ConnectEndpoint
-	}
-	if connectEndpoint == "" && org.SecretBackend.OnePassword != nil {
-		connectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
-	}
-	return h.sealPublisher.PublishClusterSecretStore(ctx, gitops.ClusterSealParams{
-		ClusterName:       clusterName,
-		ArgoCDDestination: cluster.APIServer,
-		ESONamespace:      cluster.EffectiveESONamespace(),
-		Cert:              cert,
-		Token:             token,
-		VaultIDs:          vaultIDs,
-		ConnectEndpoint:   connectEndpoint,
-	})
+	return h.sealPublisher.PublishClusterSecretStore(ctx, params)
 }
 
 // resealAllClusters republishes every registered cluster's unified store —

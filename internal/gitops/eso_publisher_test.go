@@ -301,7 +301,7 @@ func TestBuildAppExternalSecret_UnifiedStore(t *testing.T) {
 		Namespace:    "acme-web-prod",
 		Env:          "prod",
 		Cluster:      "c1",
-		UnifiedStore: true,
+		Backend:      secrets.Backend1Password,
 		Presence: ScopePresence{
 			GlobalShared: true,
 			EnvApp:       true,
@@ -521,7 +521,7 @@ func TestBuildComponentExternalSecret_UnifiedStoreNoSourceRef(t *testing.T) {
 		App: "web", Namespace: "acme-web-prod", Env: "prod", Project: "acme",
 		Presence:     ScopePresence{EnvApp: true},
 		SecretKeys:   ScopeSecretKeys{EnvApp: []string{"TOKEN"}},
-		UnifiedStore: true,
+		Backend:      secrets.Backend1Password,
 	}, "web-w-secrets", map[string]string{"TOKEN": "TOKEN"})
 	if cfg == nil || len(cfg.Data) != 1 {
 		t.Fatalf("expected 1 data entry, got %+v", cfg)

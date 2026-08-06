@@ -11,30 +11,50 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
-// ClusterSealParams describes the single 1Password Connect token + unified
+// ClusterSealParams describes the single per-cluster credential + unified
 // ClusterSecretStore to publish for ONE workload cluster. A cluster carries
-// ONE token with access to every vault it reads — the org-wide global vault
-// plus the env vault(s) of the environments deployed to it (which also hold
-// its cluster-override items) — and ONE store listing those vaults.
+// ONE credential granting access to everything it reads, and ONE store
+// (secrets.UnifiedStoreName) resolving through it. For 1Password the
+// credential is a Connect token and the store lists the cluster's vault UUIDs;
+// for Vault it is a Vault token and the store carries the server address +
+// KV v2 mount. The sealing and publishing mechanics are identical.
 type ClusterSealParams struct {
 	// ClusterName is the registered suparship cluster name (used for the
 	// per-cluster ArgoCD Application name and the _secret-stores/{cluster}/ dir).
 	ClusterName string
 	// ArgoCDDestination is the target cluster API server URL (https://...).
 	ArgoCDDestination string
-	// ESONamespace is where ESO + the sealed Connect-token Secret live on the
+	// ESONamespace is where ESO + the sealed credential Secret live on the
 	// target cluster. Defaults to "external-secrets".
 	ESONamespace string
 	// Cert is the target cluster's sealed-secrets controller public cert (PEM).
 	Cert []byte
-	// Token is the cluster's single plaintext Connect token. It is sealed with
-	// the target cluster's cert and never written to Git in plaintext.
+	// Token is the cluster's single plaintext credential (Connect token or
+	// Vault token, per Backend). It is sealed with the target cluster's cert
+	// and never written to Git in plaintext.
 	Token []byte
+	// Backend selects the store shape and the sealed Secret's name.
+	// "" means 1Password, the only backend that sealed before this existed.
+	Backend secrets.BackendType
 	// VaultIDs are the 1Password vault UUIDs this cluster reads (global first,
 	// then env vaults). Rendered into the unified store's vaults map in order.
+	// 1Password only.
 	VaultIDs []string
 	// ConnectEndpoint overrides the in-cluster 1Password Connect URL.
+	// 1Password only.
 	ConnectEndpoint string
+	// Vault carries the HashiCorp Vault store parameters. Vault only.
+	// ESONamespace and Branding are filled in from the params at render time.
+	Vault VaultStoreConfig
+}
+
+// backend returns the effective backend for the seal ("" = 1Password, which
+// predates the field).
+func (p ClusterSealParams) backend() secrets.BackendType {
+	if p.Backend == "" {
+		return secrets.Backend1Password
+	}
+	return p.Backend
 }
 
 // PublishClusterSecretStore seals the cluster's Connect token with the target
@@ -61,17 +81,42 @@ func (p *Publisher) PublishClusterSecretStore(ctx context.Context, params Cluste
 	if len(params.Token) == 0 {
 		return fmt.Errorf("PublishClusterSecretStore: token is required for cluster %q", params.ClusterName)
 	}
-	if len(params.VaultIDs) == 0 {
-		return fmt.Errorf("PublishClusterSecretStore: no vaults registered for cluster %q", params.ClusterName)
-	}
 	esoNS := params.ESONamespace
 	if esoNS == "" {
 		esoNS = secrets.OnePasswordRemoteNamespace
 	}
 
+	// Per-backend validation, sealed Secret name and store shape. The rest of
+	// the pipeline — sealing, file layout, the ArgoCD Application — is
+	// backend-agnostic.
+	var sealedName, storeYAML string
+	switch params.backend() {
+	case secrets.BackendVault:
+		if params.Vault.Address == "" {
+			return fmt.Errorf("PublishClusterSecretStore: vault address is required for cluster %q", params.ClusterName)
+		}
+		sealedName = secrets.VaultTokenClusterSecretName
+		vcfg := params.Vault
+		vcfg.ESONamespace = esoNS
+		vcfg.Branding = p.cfg.Branding
+		storeYAML = BuildVaultClusterSecretStoreYAML(vcfg)
+	default: // 1Password
+		if len(params.VaultIDs) == 0 {
+			return fmt.Errorf("PublishClusterSecretStore: no vaults registered for cluster %q", params.ClusterName)
+		}
+		sealedName = secrets.ConnectTokenSecretName
+		storeYAML = BuildUnifiedClusterSecretStoreYAML(UnifiedStoreConfig{
+			VaultIDs:        params.VaultIDs,
+			ESONamespace:    esoNS,
+			ConnectEndpoint: params.ConnectEndpoint,
+			Branding:        p.cfg.Branding,
+		})
+	}
+
 	// Render both files first so a sealing error aborts before any write.
+	// Both backends use the same in-Secret key ("token").
 	sealedYAML, err := seal.BuildSealedSecret(params.Cert, seal.SealedSecretInput{
-		Name:      secrets.ConnectTokenSecretName,
+		Name:      sealedName,
 		Namespace: esoNS,
 		Scope:     seal.ScopeNamespaceWide,
 		Data:      map[string][]byte{secrets.SATokenSecretKey: params.Token},
@@ -84,12 +129,6 @@ func (p *Publisher) PublishClusterSecretStore(ctx context.Context, params Cluste
 	if err != nil {
 		return fmt.Errorf("seal token for cluster %q: %w", params.ClusterName, err)
 	}
-	storeYAML := BuildUnifiedClusterSecretStoreYAML(UnifiedStoreConfig{
-		VaultIDs:        params.VaultIDs,
-		ESONamespace:    esoNS,
-		ConnectEndpoint: params.ConnectEndpoint,
-		Branding:        p.cfg.Branding,
-	})
 
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		storesDir := p.outputDir(repoDir, "_secret-stores", params.ClusterName)
