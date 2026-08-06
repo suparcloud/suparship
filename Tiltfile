@@ -33,12 +33,17 @@ if k8s_context() != EXPECTED_CONTEXT:
 # ── Config: optional ingress + *.localhost routing, optional workload clusters ─
 config.define_bool('ingress')
 config.define_bool('multi')
+config.define_bool('vault')
 cfg = config.parse()
 INGRESS = cfg.get('ingress', False) or os.getenv('SUPARSHIP_INGRESS') == '1'
 # MULTI adds two kind WORKLOAD clusters (kind-staging, kind-prod) and rebinds the
 # seeded environments onto them, so the tooling/workload split is real. Off by
 # default: it costs a couple of GiB, and nothing about UI or API work needs it.
 MULTI = cfg.get('multi', False) or os.getenv('SUPARSHIP_MULTI') == '1'
+# VAULT adds a HashiCorp Vault (dev mode: in-memory, auto-unsealed, root token
+# "root") and switches the org's secret backend to it, for working on the vault
+# secrets backend. Off by default. Composes with --multi.
+VAULT = cfg.get('vault', False) or os.getenv('SUPARSHIP_VAULT') == '1'
 
 # Host-reachable Gitea URL the init script clones from.
 GITEA_HOST_URL = 'http://gitea.localhost:8880' if INGRESS else 'http://localhost:3000'
@@ -50,6 +55,8 @@ helm_repo('eso',        'https://charts.external-secrets.io', labels=['prereq'])
 helm_repo('mittwald',   'https://helm.mittwald.de', labels=['prereq'])
 helm_repo('stakater',   'https://stakater.github.io/stakater-charts', labels=['prereq'])
 helm_repo('gitea-charts', 'https://dl.gitea.com/charts', labels=['prereq'])
+if VAULT:
+    helm_repo('hashicorp', 'https://helm.releases.hashicorp.com', labels=['prereq'])
 
 # ── Namespaces (argocd before argocd install; suparship-system before app) ──
 # local_resource runs in the ambient shell, so --context is pinned explicitly:
@@ -158,6 +165,37 @@ local_resource(
     'eso-reader', cmd='hack/install-eso-rbac.sh',
     resource_deps=['external-secrets', 'namespaces'], labels=['prereq'],
 )
+
+# ── Optional: HashiCorp Vault secrets backend (`task up:vault`) ────────────
+# Dev-mode Vault: in-memory storage, auto-unsealed, fixed root token "root" —
+# DEV ONLY, everything dies with the pod. The injector is disabled because
+# suparship's delivery path is ESO, not agent injection.
+if VAULT:
+    helm_resource(
+        'vault', 'hashicorp/vault', namespace='vault',
+        flags=['--create-namespace', '--version=0.30.0',
+               '--set=server.dev.enabled=true',
+               '--set=server.dev.devRootToken=root',
+               '--set=injector.enabled=false',
+               '--wait', '--timeout=5m0s'],
+        resource_deps=['hashicorp'],
+        port_forwards=['8200:8200'],  # http://localhost:8200 (token: root)
+        links=[link('http://localhost:8200', 'Vault UI (token: root)')],
+        labels=['prereq'],
+    )
+    # Mount + token Secrets + org backend switch. Runs AFTER seed (and
+    # seed-multi in multi mode): both rewrite the org ConfigMap wholesale and
+    # would erase the backend selection, whereas this script goes through
+    # PUT /org/secret-backend, which merges. Re-trigger this resource if you
+    # ever re-run seed by hand.
+    _vault_bootstrap_deps = ['vault', 'external-secrets', 'suparship', 'seed']
+    if MULTI:
+        _vault_bootstrap_deps += ['seed-multi']
+    local_resource(
+        'vault-bootstrap', cmd='hack/dev/vault-bootstrap.sh',
+        resource_deps=_vault_bootstrap_deps,
+        labels=['prereq'],
+    )
 
 # ── ConfigMap/Secret replication + reload ──────────────────────────────────
 helm_resource(
@@ -349,4 +387,6 @@ suparShip dev cluster is starting.  Tilt UI: http://localhost:10350
   ArgoCD        : http://localhost:8081
   Gitea         : http://localhost:3000       gitops / gitops-dev-only
   Kargo API     : https://localhost:8083
-%s""" % ("  Ingress ON: also at http://suparship.localhost:8880" if INGRESS else "  (run `task up:ingress` for *.localhost routing)"))
+%s%s""" % (
+    "  Vault         : http://localhost:8200       token: root (dev mode)\n" if VAULT else "",
+    "  Ingress ON: also at http://suparship.localhost:8880" if INGRESS else "  (run `task up:ingress` for *.localhost routing)"))

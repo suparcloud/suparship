@@ -57,6 +57,7 @@ When everything is green:
 | ArgoCD | <http://localhost:8081> | `admin` / (see below) |
 | Gitea | <http://localhost:3000> | `gitops` / `gitops-dev-only` |
 | Kargo UI / API | <http://localhost:8083> | `admin` / `devpass` |
+| Vault (only with `task up:vault`) | <http://localhost:8200> | token `root` |
 
 > ArgoCD admin password:
 > `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`
@@ -155,6 +156,31 @@ differs here is only where the resulting Application lands.
 > running multi-cluster locally.
 
 Tear-down removes all three: `task cluster:delete`.
+
+---
+
+## Optional: HashiCorp Vault backend (`task up:vault`)
+
+For working on the `vault` secrets backend. Adds a **dev-mode** Vault
+(in-memory, auto-unsealed, fixed root token `root` — everything it stores dies
+with the pod) and a `vault-bootstrap` resource that enables the `suparship`
+KV v2 mount, creates the write-token Secret (`suparship-vault-token` in
+`suparship-system`) and ESO's read-token Secret (`vault-token` in
+`external-secrets`), then switches the org's secret backend to vault through
+`PUT /org/secret-backend`.
+
+The org switch goes through the API on purpose: the handler *merges* onto the
+stored config, so it is safe to run after `seed`/`seed-multi` rewrite the org
+ConfigMap wholesale. If you re-run `task seed` by hand afterwards, re-trigger
+`vault-bootstrap` in the Tilt UI to restore the backend selection.
+
+Composes with multi-cluster: `tilt up -- --vault --multi` (or set
+`SUPARSHIP_VAULT=1`). Poke at it directly:
+
+```bash
+kubectl --context kind-suparship-dev -n vault exec vault-0 -- \
+  vault kv list suparship/          # list suparship's containers in the mount
+```
 
 ---
 

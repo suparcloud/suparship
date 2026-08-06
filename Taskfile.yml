@@ -52,6 +52,13 @@ tasks:
       - ctlptl apply -f hack/dev/cluster.yaml
       - tilt up -- --ingress
 
+  up:vault:
+    desc: "Like `task up`, plus a dev-mode HashiCorp Vault wired in as the org's secret backend"
+    cmds:
+      - hack/preflight.sh tilt
+      - ctlptl apply -f hack/dev/cluster.yaml
+      - tilt up -- --vault
+
   up:multi:
     desc: "Like `task up`, plus kind-staging + kind-prod workload clusters (real multi-cluster; ~+2 GiB RAM)"
     cmds:
