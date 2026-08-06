@@ -3,10 +3,21 @@
 suparship organises secrets along two axes — **scope** (where a value varies) and
 **tier** (who owns it) — and materialises them at runtime with the
 [External Secrets Operator](https://external-secrets.io) (ESO). The same model
-works with two backends: plain Kubernetes Secrets (`k8s`) and **1Password**.
+works with three backends: **HashiCorp Vault** (`vault`, the recommended
+open-source backend), **1Password** (`onepassword`), and plain Kubernetes
+Secrets (`k8s`, deprecated — see below).
 
 The setup is **opinionated by design** — one supported way to wire each backend.
 Fewer knobs, less cognitive load, easier audits.
+
+> **The `k8s` backend is deprecated — demo/dev only.** Its "vaults" are
+> namespaces on the **tooling cluster**, and its ClusterSecretStores sync only
+> there — so on any *remote* workload cluster, app ExternalSecrets reference a
+> store that never arrives and sit NotReady forever. It keeps working for
+> single-cluster installs and stays selectable where already configured, but
+> new installs should use Vault or 1Password. Move off it with
+> `suparship secrets migrate --from k8s --to vault` (see
+> [Migrating between backends](#migrating-between-backends)).
 
 ## The model: three scopes, two tiers
 
@@ -77,6 +88,80 @@ rebinding an env to a different cluster needs no regeneration.
 The **k8s** backend keeps one store per vault/namespace
 (`suparship-store-{global|env-{env}}`) — ESO's `kubernetes` provider reads
 exactly one `remoteNamespace` per store.
+
+## HashiCorp Vault backend
+
+For the **Vault** backend, a suparship "vault" is a **path prefix inside one
+KV v2 mount** (default mount: `suparship`) and an item is the KV entry beneath
+it:
+
+| Thing | Vault path (`mount=suparship, app=web, project=acme, env=prod`) |
+|---|---|
+| Global vault | `suparship/suparship-secrets-global/` |
+| Env vault | `suparship/suparship-secrets-env-prod/` |
+| Shared item | `suparship/suparship-secrets-global/shared-global` |
+| App item | `suparship/suparship-secrets-env-prod/acme-web-env-prod` |
+| ClusterSecretStore (one per cluster) | `suparship-store` |
+| ESO token Secret (per cluster) | `vault-token` in `external-secrets` |
+
+Because the containers are **derived paths**, there is no per-scope
+registration step — no global-vault pick, no env-vault registration. Generated
+`ExternalSecret`s reference items by full path
+(`dataFrom.extract.key: "suparship-secrets-env-prod/acme-web-env-prod"`), and
+every cluster runs one `ClusterSecretStore` with the same fixed name, so app
+ExternalSecrets stay cluster-agnostic — exactly the 1Password unified-store
+model with a different provider stanza.
+
+### Two credential types (Vault)
+
+- **Write token** (stored in suparship as K8s Secret `suparship-vault-token`):
+  used by suparship itself to create/update/read/delete items under the mount —
+  the data plane for developer secrets. Paste it in Settings → Secrets Backend;
+  pasting also probes the connection.
+- **Read token, one per cluster** (sealed, delivered via GitOps): that
+  cluster's ESO authenticates with it to pull values. Needs read on the mount
+  only. Pasted per cluster in the UI; suparship seals it against the cluster's
+  sealed-secrets cert and publishes the sealed token + `ClusterSecretStore`
+  through the same per-cluster pipeline the 1Password backend uses — so it
+  reaches **remote workload clusters** correctly.
+
+### Admin walkthrough (Vault)
+
+1. **Enable a KV v2 mount** on your Vault: `vault secrets enable -path=suparship -version=2 kv`.
+2. **Create two policies**: read-write on `suparship/*` (for suparship) and
+   read-only (for cluster ESO tokens).
+3. **Settings → Secrets Backend → HashiCorp Vault**: enter the server address
+   (reachable from the tooling cluster AND every workload cluster) and the
+   mount; save.
+4. **Paste the write token** — suparship stores and probes it.
+5. **Per cluster: paste a read token** — suparship seals and publishes that
+   cluster's `ClusterSecretStore`. Rotation is a re-paste, same as 1Password
+   Connect tokens.
+
+Vault Enterprise namespaces and a private CA bundle are supported via the same
+settings panel (`secrets.vault.namespace` / `secrets.vault.caCert` in Helm
+values).
+
+## Migrating between backends
+
+`suparship secrets migrate` copies every item the org owns — shared and app
+tier, across all scopes — from one backend's storage into another's:
+
+```bash
+suparship secrets migrate --from k8s --to vault --dry-run   # review first
+suparship secrets migrate --from k8s --to vault
+```
+
+Additive and idempotent: the source is never modified, the destination is
+merged into, and a re-run converges. Values stay inside the CLI process; only
+item names and counts are printed. Per-PR preview overrides are not migrated
+(transient, re-created by CI on the next push).
+
+Rollout: migrate → switch the backend (Settings → Secrets Backend or
+`suparship secrets backend set --type=vault`; takes effect without a restart) →
+verify apps' ExternalSecrets are Ready → clean up the source backend by hand.
+Switching back at any point loses nothing — every backend's configuration is
+retained across switches.
 
 ## Two credential types (1Password)
 
@@ -519,7 +604,9 @@ generated CRs in Git); the runtime is plain ESO + sealed-secrets + ArgoCD.
 ## Out of scope (this iteration)
 
 - Sealing-cert rotation / re-sealing on cert change.
-- HashiCorp Vault and AWS-SM `VaultStore` implementations.
+- AWS-SM `VaultStore` implementation.
+- Kubernetes/JWT auth for ESO→Vault (the sealed per-cluster token reuses the
+  proven pipeline; revisit once Vault is field-proven).
 - Binary / file secrets (TLS certs, kubeconfigs) — UI accepts only UTF-8
   `KEY=value`, ≤64 KiB.
 - Per-PR preview vaults — previews resolve secrets from the env/global scopes.

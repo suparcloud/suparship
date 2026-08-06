@@ -149,11 +149,14 @@ boundary now provides the isolation the `-{env}` suffix was compensating for.
 touches a workload cluster, so it is already fully testable on one cluster. What
 differs here is only where the resulting Application lands.
 
-> **Known gap.** The `k8s` secret backend is hub-only: `_infra/secret-stores/`
-> syncs to the tooling cluster, so a remote workload cluster never receives its
-> `suparship-store-*` and app ExternalSecrets there will dangle. The 1Password
-> backend does publish per-cluster stores. Surfacing this is part of the point of
-> running multi-cluster locally.
+> **Known gap (and why `k8s` is deprecated).** The `k8s` secret backend is
+> hub-only: `_infra/secret-stores/` syncs to the tooling cluster, so a remote
+> workload cluster never receives its `suparship-store-*` and app
+> ExternalSecrets there will dangle. The 1Password and Vault backends publish
+> per-cluster stores through the seal pipeline and reach remote clusters
+> correctly — `tilt up -- --vault --multi` is the end-to-end test of exactly
+> that. Surfacing the contrast is part of the point of running multi-cluster
+> locally.
 
 Tear-down removes all three: `task cluster:delete`.
 
