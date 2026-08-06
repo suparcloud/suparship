@@ -32,11 +32,9 @@ VAULT_POD="vault-0"
 VAULT_MOUNT="${SUPARSHIP_VAULT_MOUNT:-suparship}"
 # The fixed dev root token (set via server.dev.devRootToken in the Tiltfile).
 VAULT_DEV_TOKEN="${SUPARSHIP_VAULT_TOKEN:-root}"
-# In-cluster address: suparship and ESO both dial the Service, not the
-# host port-forward. Dev mode serves plain HTTP.
-VAULT_ADDR="http://vault.${VAULT_NS}.svc.cluster.local:8200"
 SYSTEM_NS="${SUPARSHIP_SYSTEM_NAMESPACE:-suparship-system}"
 ESO_NS="${SUPARSHIP_ESO_NAMESPACE:-external-secrets}"
+MULTI="${SUPARSHIP_MULTI:-0}"
 
 info() { printf "  \033[0;36m%s\033[0m\n" "$*"; }
 ok()   { printf "  \033[0;32m✓\033[0m  %s\n" "$*"; }
@@ -57,6 +55,29 @@ else
   kubectl -n "$VAULT_NS" exec "$VAULT_POD" -- \
     vault secrets enable -path="$VAULT_MOUNT" -version=2 kv >/dev/null
   ok "KV v2 mount '${VAULT_MOUNT}' enabled"
+fi
+
+# ── 1b. The address every consumer dials ───────────────────────────────────
+# There is ONE org-level Vault address, and it is rendered into every cluster's
+# ClusterSecretStore — so it must be reachable from the tooling cluster AND
+# every workload cluster. Single-cluster: the Service DNS name is fine.
+# Multi-cluster: workload clusters cannot resolve the tooling cluster's
+# Service DNS, but all kind clusters share the "kind" docker network — so
+# expose Vault on a NodePort and address it via the tooling node's
+# docker-network IP (reachable from every cluster's pods; NOT from the macOS
+# host, which is why the port-forward at localhost:8200 still exists for you).
+if [ "$MULTI" = "1" ]; then
+  info "multi mode: exposing Vault on a NodePort for cross-cluster access..."
+  kubectl -n "$VAULT_NS" patch svc vault -p '{"spec":{"type":"NodePort"}}' >/dev/null
+  NODE_PORT="$(kubectl -n "$VAULT_NS" get svc vault -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}')"
+  NODE_IP="$(docker inspect suparship-dev-control-plane \
+    --format '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' 2>/dev/null || true)"
+  [ -n "$NODE_PORT" ] || die "could not read Vault NodePort"
+  [ -n "$NODE_IP" ] || die "could not determine the tooling node's docker-network IP"
+  VAULT_ADDR="http://${NODE_IP}:${NODE_PORT}"
+  ok "Vault reachable cross-cluster at $VAULT_ADDR"
+else
+  VAULT_ADDR="http://vault.${VAULT_NS}.svc.cluster.local:8200"
 fi
 
 # ── 2. suparship's write token ─────────────────────────────────────────────

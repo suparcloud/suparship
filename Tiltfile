@@ -191,8 +191,11 @@ if VAULT:
     _vault_bootstrap_deps = ['vault', 'external-secrets', 'suparship', 'seed']
     if MULTI:
         _vault_bootstrap_deps += ['seed-multi']
+    # SUPARSHIP_MULTI switches the org's Vault address to a NodePort on the
+    # tooling node's docker-network IP, so workload clusters can reach it —
+    # they cannot resolve the tooling cluster's Service DNS.
     local_resource(
-        'vault-bootstrap', cmd='hack/dev/vault-bootstrap.sh',
+        'vault-bootstrap', cmd='SUPARSHIP_MULTI=%s hack/dev/vault-bootstrap.sh' % ('1' if MULTI else '0'),
         resource_deps=_vault_bootstrap_deps,
         labels=['prereq'],
     )
