@@ -12,11 +12,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/hcvault"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 )
 
@@ -99,6 +101,29 @@ what would be removed.`,
 	RunE: runSecretsPruneLegacyItems,
 }
 
+var secretsMigrateCmd = &cobra.Command{
+	Use:   "migrate",
+	Short: "Copy all secrets from one backend into another",
+	Long: `Copies every secret item the org owns — shared and app tier, across the
+global, env, cluster, project, stack and preview-band scopes — from one
+backend's storage into another's. Use it to move off the deprecated k8s
+backend, or between 1Password and Vault.
+
+Additive and idempotent: the source is never modified, the destination is
+merged into (a key that exists on both sides takes the source's value), and a
+re-run converges. Values stay inside this process; only item names and counts
+are printed or logged. Per-PR preview overrides are not migrated — they are
+transient CI-written values, re-created on the next push.
+
+Typical rollout: --dry-run to review, run for real, switch the org backend
+(suparship secrets backend set / Settings → Secrets Backend), verify apps
+resolve, and only then clean up the source backend by hand.`,
+	Example: `  suparship secrets migrate --from k8s --to vault --dry-run
+  suparship secrets migrate --from k8s --to vault
+  suparship secrets migrate --from onepassword --to vault --scope env`,
+	RunE: runSecretsMigrate,
+}
+
 func init() {
 	secretsBackendSetCmd.Flags().String("type", "",
 		"backend type: "+strings.Join(secrets.BackendTypeNames(), ", "))
@@ -112,6 +137,11 @@ func init() {
 
 	secretsPruneLegacyItemsCmd.Flags().Bool("dry-run", false, "list the legacy items that would be deleted without deleting them")
 
+	secretsMigrateCmd.Flags().String("from", "", "source backend: k8s, onepassword, vault (required)")
+	secretsMigrateCmd.Flags().String("to", "", "destination backend: k8s, onepassword, vault (required)")
+	secretsMigrateCmd.Flags().Bool("dry-run", false, "report what would be migrated without writing anything")
+	secretsMigrateCmd.Flags().String("scope", "all", "restrict to one band: global (org/project/stack items), env (env/cluster/preview items), or all")
+
 	secretsBackendCmd.AddCommand(secretsBackendSetCmd)
 	secretsCmd.AddCommand(secretsBackendCmd)
 	secretsCmd.AddCommand(secretsSATokenCmd)
@@ -119,6 +149,7 @@ func init() {
 	secretsCmd.AddCommand(secretsBindCmd)
 	secretsCmd.AddCommand(secretsUnbindCmd)
 	secretsCmd.AddCommand(secretsPruneLegacyItemsCmd)
+	secretsCmd.AddCommand(secretsMigrateCmd)
 	rootCmd.AddCommand(secretsCmd)
 }
 
@@ -403,19 +434,27 @@ func runSecretsPruneLegacyItems(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// buildLegacyItemMigrator constructs the concrete vault store for the org's
-// backend, asserted to secrets.LegacyItemMigrator. Mirrors the server's vault
-// wiring: k8s Secrets by default, or the 1Password SA store when that backend is
-// active and its SA token is present.
-func buildLegacyItemMigrator(ctx context.Context, client kubernetes.Interface, org *rbac.Org) (secrets.LegacyItemMigrator, error) {
-	if org.SecretBackend.Effective() == secrets.Backend1Password {
-		sec, err := client.CoreV1().Secrets(secrets.SystemNamespace).Get(ctx, secrets.SATokenSecretName, metav1.GetOptions{})
+// buildBackendStore constructs the concrete vault store for a NAMED backend,
+// reading its credential from the cluster. Used by the CLI paths that need a
+// specific backend regardless of which one is active (migrate) or the active
+// one (legacy-item prune). Mirrors the server's dynamic wiring.
+func buildBackendStore(ctx context.Context, client kubernetes.Interface, org *rbac.Org, bt secrets.BackendType) (secrets.VaultStore, error) {
+	readToken := func(name, key string) (string, error) {
+		sec, err := client.CoreV1().Secrets(secrets.SystemNamespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("reading SA token %s: %w", secrets.SATokenSecretName, err)
+			return "", fmt.Errorf("reading token secret %s: %w", name, err)
 		}
-		token := strings.TrimSpace(string(sec.Data[secrets.SATokenSecretKey]))
+		token := strings.TrimSpace(string(sec.Data[key]))
 		if token == "" {
-			return nil, fmt.Errorf("SA token secret %s is empty", secrets.SATokenSecretName)
+			return "", fmt.Errorf("token secret %s is empty", name)
+		}
+		return token, nil
+	}
+	switch bt {
+	case secrets.Backend1Password:
+		token, err := readToken(secrets.SATokenSecretName, secrets.SATokenSecretKey)
+		if err != nil {
+			return nil, err
 		}
 		saClient, err := onepassword.NewSDKClient(ctx, token)
 		if err != nil {
@@ -425,6 +464,129 @@ func buildLegacyItemMigrator(ctx context.Context, client kubernetes.Interface, o
 			return org.SecretBackend.VaultIDForScope(scope)
 		}
 		return onepassword.NewSAVaultStore(saClient, resolver), nil
+	case secrets.BackendVault:
+		vcfg := org.SecretBackend.Vault
+		if vcfg == nil || vcfg.Address == "" {
+			return nil, fmt.Errorf("vault backend has no server address configured (Settings → Secrets Backend)")
+		}
+		token, err := readToken(secrets.VaultTokenSecretName, secrets.VaultTokenSecretKey)
+		if err != nil {
+			return nil, err
+		}
+		apiClient, err := hcvault.NewAPIClient(hcvault.APIConfig{
+			Address:   vcfg.Address,
+			Token:     token,
+			Mount:     vcfg.EffectiveMount(),
+			Namespace: vcfg.Namespace,
+			CACert:    vcfg.CACert,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("init vault client: %w", err)
+		}
+		return hcvault.NewHCVaultStore(apiClient), nil
+	default:
+		return secrets.NewK8sVaultStore(client), nil
 	}
-	return secrets.NewK8sVaultStore(client), nil
+}
+
+// buildLegacyItemMigrator constructs the ACTIVE backend's store asserted to
+// secrets.LegacyItemMigrator.
+func buildLegacyItemMigrator(ctx context.Context, client kubernetes.Interface, org *rbac.Org) (secrets.LegacyItemMigrator, error) {
+	store, err := buildBackendStore(ctx, client, org, org.SecretBackend.Effective())
+	if err != nil {
+		return nil, err
+	}
+	m, ok := store.(secrets.LegacyItemMigrator)
+	if !ok {
+		return nil, fmt.Errorf("backend %s does not support item migration", org.SecretBackend.Effective())
+	}
+	return m, nil
+}
+
+func runSecretsMigrate(cmd *cobra.Command, _ []string) error {
+	ctx := cmd.Context()
+	fromFlag, _ := cmd.Flags().GetString("from")
+	toFlag, _ := cmd.Flags().GetString("to")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	scopeFlag, _ := cmd.Flags().GetString("scope")
+
+	if fromFlag == "" || toFlag == "" {
+		return fmt.Errorf("--from and --to are required")
+	}
+	if err := validateMigrateBackends(fromFlag, toFlag); err != nil {
+		return err
+	}
+	if scopeFlag != "all" && scopeFlag != "global" && scopeFlag != "env" {
+		return fmt.Errorf("--scope must be global, env, or all")
+	}
+
+	kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
+	kubecontext, _ := cmd.Root().PersistentFlags().GetString("context")
+	client, err := k8s.NewClientset(kubeconfig, kubecontext)
+	if err != nil {
+		return fmt.Errorf("connecting to cluster: %w", err)
+	}
+	org, err := rbac.NewK8sOrgProvider(client, nil).GetOrg(ctx)
+	if err != nil {
+		return fmt.Errorf("loading org config: %w", err)
+	}
+
+	fromStore, err := buildBackendStore(ctx, client, org, secrets.BackendType(fromFlag))
+	if err != nil {
+		return fmt.Errorf("source backend %s: %w", fromFlag, err)
+	}
+	exporter, ok := fromStore.(secrets.ItemExporter)
+	if !ok {
+		return fmt.Errorf("source backend %s cannot export items", fromFlag)
+	}
+	toStore, err := buildBackendStore(ctx, client, org, secrets.BackendType(toFlag))
+	if err != nil {
+		return fmt.Errorf("destination backend %s: %w", toFlag, err)
+	}
+
+	// Enumerate everything the org could own; absent items no-op.
+	projectStore := project.NewK8sStore(client)
+	projects, err := projectStore.List(ctx)
+	if err != nil {
+		return fmt.Errorf("listing projects: %w", err)
+	}
+	appStore := kube.NewK8sAppStore(client)
+	stackStore := kube.NewK8sStackStore(client)
+	appsByProject := map[string][]*domain.App{}
+	stacksByProject := map[string][]*domain.Stack{}
+	for _, p := range projects {
+		if apps, err := appStore.ListApps(ctx, p.Metadata.Name); err == nil {
+			appsByProject[p.Metadata.Name] = apps
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: listing apps in %s failed: %v\n", p.Metadata.Name, err)
+		}
+		if stacks, err := stackStore.ListStacks(ctx, p.Metadata.Name); err == nil {
+			stacksByProject[p.Metadata.Name] = stacks
+		}
+	}
+
+	targets := filterTargets(migrationTargets(org, projects, appsByProject, stacksByProject), scopeFlag)
+	logger := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
+	res := migrateItems(ctx, exporter, toStore, targets, dryRun, logger)
+
+	out := cmd.OutOrStdout()
+	if dryRun {
+		fmt.Fprintf(out, "Dry run — %d items (%d keys) would migrate %s → %s", res.Migrated, res.Keys, fromFlag, toFlag)
+		if res.Empty > 0 {
+			fmt.Fprintf(out, ", plus %d empty items ensured", res.Empty)
+		}
+		fmt.Fprintln(out, ":")
+		for _, l := range res.Labels {
+			fmt.Fprintf(out, "  %s\n", l)
+		}
+		fmt.Fprintln(out, "\nRe-run without --dry-run to migrate.")
+		return nil
+	}
+	fmt.Fprintf(out, "Migrated %d items (%d keys) %s → %s; %d empty items ensured; %d failures.\n",
+		res.Migrated, res.Keys, fromFlag, toFlag, res.Empty, res.Failures)
+	if res.Failures > 0 {
+		return fmt.Errorf("%d items failed to migrate; see logs", res.Failures)
+	}
+	fmt.Fprintf(out, "\nNext: switch the org backend (`suparship secrets backend set --type=%s`\nor Settings → Secrets Backend), verify apps resolve, then clean up the\nsource backend by hand. The source was not modified.\n", toFlag)
+	return nil
 }
