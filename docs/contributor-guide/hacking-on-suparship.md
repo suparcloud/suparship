@@ -57,7 +57,7 @@ When everything is green:
 | ArgoCD | <http://localhost:8081> | `admin` / (see below) |
 | Gitea | <http://localhost:3000> | `gitops` / `gitops-dev-only` |
 | Kargo UI / API | <http://localhost:8083> | `admin` / `devpass` |
-| Vault (only with `task up:vault`) | <http://localhost:8200> | token `root` |
+| Vault (only with `task up:vault`) | <http://localhost:8200> | root token: see [below](#optional-hashicorp-vault-backend-task-upvault) |
 
 > ArgoCD admin password:
 > `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`
@@ -164,13 +164,47 @@ Tear-down removes all three: `task cluster:delete`.
 
 ## Optional: HashiCorp Vault backend (`task up:vault`)
 
-For working on the `vault` secrets backend. Adds a **dev-mode** Vault
-(in-memory, auto-unsealed, fixed root token `root` — everything it stores dies
-with the pod) and a `vault-bootstrap` resource that enables the `suparship`
-KV v2 mount, creates the write-token Secret (`suparship-vault-token` in
-`suparship-system`) and ESO's read-token Secret (`vault-token` in
-`external-secrets`), then switches the org's secret backend to vault through
-`PUT /org/secret-backend`.
+For working on the `vault` secrets backend. Adds a Vault plus a
+`vault-bootstrap` resource that initialises and unseals it, enables the
+`suparship` KV v2 mount, creates the write-token Secret
+(`suparship-vault-token` in `suparship-system`) and ESO's read-token Secret
+(`vault-token` in `external-secrets`), then switches the org's secret backend to
+vault through `PUT /org/secret-backend`.
+
+**The data persists.** Vault runs standalone with file storage on a PVC, so
+secrets you enter survive a pod restart, a `tilt down`/`tilt up`, and image
+rebuilds. (It used to run in dev mode, where storage was in-memory — a pod
+restart took not just your values but the KV mount itself, which made the
+backend tedious to work on.) State still dies with the cluster, since the PVC is
+hostPath-backed on the kind node.
+
+**After a Vault pod restart it comes back SEALED.** That is the cost of
+persistence: dev-mode Vault auto-unsealed, a real storage backend does not.
+Re-trigger `vault-bootstrap` in the Tilt UI (or re-run the script) — it unseals
+from the stashed key and no-ops everything already in place. Nothing unseals it
+automatically, because that would mean handing the unseal key to an in-cluster
+controller, which isn't worth building for a dev loop.
+
+The root token is generated at init, not fixed. Both it and the 1-of-1 unseal
+key are stashed in `vault/vault-dev-keys`; the bootstrap output prints the token:
+
+```bash
+kubectl --context kind-suparship-dev -n vault get secret vault-dev-keys \
+  -o jsonpath='{.data.root-token}' | base64 -d
+```
+
+DEV ONLY, and not just the 1-of-1 key: that one root token is reused as both
+suparship's write token and ESO's read token, so nothing here is
+least-privilege. A real install mints per-scope read policies — see
+[secrets.md](../secrets.md#least-privilege-vault).
+
+Start over with a clean Vault:
+
+```bash
+kubectl --context kind-suparship-dev -n vault delete pvc data-vault-0 secret vault-dev-keys
+kubectl --context kind-suparship-dev -n vault delete pod vault-0
+# then re-trigger vault-bootstrap
+```
 
 The org switch goes through the API on purpose: the handler *merges* onto the
 stored config, so it is safe to run after `seed`/`seed-multi` rewrite the org
@@ -181,8 +215,10 @@ Composes with multi-cluster: `tilt up -- --vault --multi` (or set
 `SUPARSHIP_VAULT=1`). Poke at it directly:
 
 ```bash
+TOKEN=$(kubectl --context kind-suparship-dev -n vault get secret vault-dev-keys \
+  -o jsonpath='{.data.root-token}' | base64 -d)
 kubectl --context kind-suparship-dev -n vault exec vault-0 -- \
-  vault kv list suparship/          # list suparship's containers in the mount
+  env VAULT_TOKEN="$TOKEN" vault kv list suparship/   # suparship's containers in the mount
 ```
 
 ---

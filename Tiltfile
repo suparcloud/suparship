@@ -40,9 +40,19 @@ INGRESS = cfg.get('ingress', False) or os.getenv('SUPARSHIP_INGRESS') == '1'
 # seeded environments onto them, so the tooling/workload split is real. Off by
 # default: it costs a couple of GiB, and nothing about UI or API work needs it.
 MULTI = cfg.get('multi', False) or os.getenv('SUPARSHIP_MULTI') == '1'
-# VAULT adds a HashiCorp Vault (dev mode: in-memory, auto-unsealed, root token
-# "root") and switches the org's secret backend to it, for working on the vault
-# secrets backend. Off by default. Composes with --multi.
+# VAULT adds a HashiCorp Vault and switches the org's secret backend to it, for
+# working on the vault secrets backend. Off by default. Composes with --multi.
+#
+# The Vault it brings up PERSISTS: standalone mode with file storage on a PVC, so
+# secrets you enter survive a pod restart, a `tilt down`/`tilt up`, and an image
+# rebuild. (Dev-mode Vault stored everything in memory, which meant the KV mount
+# itself vanished with the pod.) State still dies with the cluster, since the PVC
+# is hostPath-backed on the kind node — `kind delete cluster` is the reset, or
+# delete the PVC + pod for a fresh init.
+#
+# The cost of persistence is that Vault is no longer auto-unsealed: it comes up
+# uninitialised the first time and SEALED after every restart, so vault-bootstrap
+# does init + unseal (see hack/dev/vault-bootstrap.sh).
 VAULT = cfg.get('vault', False) or os.getenv('SUPARSHIP_VAULT') == '1'
 
 # Host-reachable Gitea URL the init script clones from.
@@ -167,27 +177,51 @@ local_resource(
 )
 
 # ── Optional: HashiCorp Vault secrets backend (`task up:vault`) ────────────
-# Dev-mode Vault: in-memory storage, auto-unsealed, fixed root token "root" —
-# DEV ONLY, everything dies with the pod. The injector is disabled because
-# suparship's delivery path is ESO, not agent injection.
+# Standalone Vault with file storage on a PVC, so its data survives pod restarts
+# (see the VAULT comment above). The injector is disabled because suparship's
+# delivery path is ESO, not agent injection.
+#
+# Two deliberate departures from the usual helm_resource shape, both forced by
+# the fact that a persistent Vault starts sealed:
+#
+#   - NO --wait. The chart's readiness probe runs `vault status`, which exits
+#     non-zero while Vault is uninitialised or sealed, so the pod never becomes
+#     Ready and `helm install --wait` would sit there until it timed out. Tilt
+#     instead treats the resource as done when the install returns, and
+#     vault-bootstrap waits for the pod to be Running before init/unseal.
+#   - readinessProbe disabled. The chart's probe IS `vault status`, whose exit
+#     code is the seal status (0 unsealed, 2 sealed), so a sealed pod never goes
+#     Ready. vault-bootstrap gates on `resource_deps=['vault', ...]`, and Tilt
+#     resolves that on pod readiness — so leaving the probe on deadlocks the very
+#     step that would unseal it. bootstrap reaches Vault by `kubectl exec`, not
+#     through the Service, so it does not need the probe; and suparship/ESO only
+#     dial Vault after bootstrap has unsealed it.
 if VAULT:
     helm_resource(
         'vault', 'hashicorp/vault', namespace='vault',
         flags=['--create-namespace', '--version=0.30.0',
-               '--set=server.dev.enabled=true',
-               '--set=server.dev.devRootToken=root',
+               '--set=server.standalone.enabled=true',
+               '--set=server.dataStorage.enabled=true',
+               '--set=server.dataStorage.size=1Gi',
+               '--set=server.readinessProbe.enabled=false',
                '--set=injector.enabled=false',
-               '--wait', '--timeout=5m0s'],
+               '--timeout=5m0s'],
         resource_deps=['hashicorp'],
-        port_forwards=['8200:8200'],  # http://localhost:8200 (token: root)
-        links=[link('http://localhost:8200', 'Vault UI (token: root)')],
+        port_forwards=['8200:8200'],  # http://localhost:8200
+        links=[link('http://localhost:8200', 'Vault UI (token: see vault-bootstrap logs)')],
         labels=['prereq'],
     )
-    # Mount + token Secrets + org backend switch. Runs AFTER seed (and
-    # seed-multi in multi mode): both rewrite the org ConfigMap wholesale and
-    # would erase the backend selection, whereas this script goes through
-    # PUT /org/secret-backend, which merges. Re-trigger this resource if you
-    # ever re-run seed by hand.
+    # Init + unseal, then mount + token Secrets + org backend switch. Runs AFTER
+    # seed (and seed-multi in multi mode): both rewrite the org ConfigMap
+    # wholesale and would erase the backend selection, whereas this script goes
+    # through PUT /org/secret-backend, which merges. Re-trigger this resource if
+    # you ever re-run seed by hand.
+    #
+    # RE-TRIGGER IT AFTER A VAULT POD RESTART TOO. A persistent Vault comes back
+    # sealed, and nothing in the cluster unseals it automatically — that would
+    # mean handing the unseal key to a controller, which is not worth building
+    # for a dev loop. The script is idempotent: it unseals, notices the mount and
+    # Secrets already exist, and re-asserts the org backend.
     _vault_bootstrap_deps = ['vault', 'external-secrets', 'suparship', 'seed']
     if MULTI:
         _vault_bootstrap_deps += ['seed-multi']
