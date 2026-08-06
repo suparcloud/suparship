@@ -29,6 +29,7 @@ import {
   getSecretsBackend,
   updateSecretsBackend,
   saveSAToken,
+  saveVaultToken,
   listVaults,
   setGlobalVault,
   registerEnvVault,
@@ -1200,14 +1201,26 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
 
 const BACKEND_OPTIONS = [
   {
-    value: "k8s",
-    label: "Kubernetes Secrets",
-    description: "Native K8s Secrets in app namespaces (demo/default)",
+    value: "vault",
+    label: "HashiCorp Vault",
+    description:
+      "Vault KV via External Secrets Operator (open source, production)",
+    deprecated: false,
   },
   {
     value: "onepassword",
     label: "1Password",
     description: "1Password via External Secrets Operator (production)",
+    deprecated: false,
+  },
+  {
+    value: "k8s",
+    label: "Kubernetes Secrets (deprecated)",
+    description:
+      "Native K8s Secrets on the tooling cluster — demo only; cannot serve remote workload clusters. Migrate with `suparship secrets migrate`.",
+    // Deprecated: offered only when it is ALREADY the active backend, so
+    // existing installs keep working but nobody selects it fresh.
+    deprecated: true,
   },
 ];
 
@@ -1389,7 +1402,9 @@ function SecretsBackendSection() {
             {/* Provider selector */}
             <div className="space-y-2">
               <label className="text-xs font-medium text-gray-700">Provider</label>
-              {BACKEND_OPTIONS.map((opt) => (
+              {BACKEND_OPTIONS.filter(
+                (opt) => !opt.deprecated || config.type === opt.value,
+              ).map((opt) => (
                 <label
                   key={opt.value}
                   className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
@@ -1470,6 +1485,19 @@ function SecretsBackendSection() {
                 </span>
               </p>
             </div>
+
+            {/* HashiCorp Vault section */}
+            {config.type === "vault" && (
+              <VaultBackendPanel
+                config={config}
+                clusters={orgClusters}
+                orgEnvs={orgEnvs}
+                onConfigChanged={async () => {
+                  const updated = await getSecretsBackend();
+                  setConfig(updated);
+                }}
+              />
+            )}
 
             {/* 1Password section */}
             {config.type === "onepassword" && (
@@ -2049,22 +2077,197 @@ function PlatformVaultPicker({
 // ClusterSecretStore (suparship-store). Binding a new env to a cluster later
 // needs a re-issued token covering the new vault — re-paste it here.
 
+// VaultBackendPanel is the HashiCorp Vault configuration surface. Note what it
+// does NOT have compared with 1Password: no vault registration, no global-vault
+// pick — Vault containers are derived paths inside one KV v2 mount, so setup is
+// the address + mount, the write token, and one sealed token per cluster.
+function VaultBackendPanel({
+  config,
+  clusters,
+  orgEnvs,
+  onConfigChanged,
+}: {
+  config: SecretBackendConfig;
+  clusters: Cluster[];
+  orgEnvs: OrgEnvironment[];
+  onConfigChanged: () => Promise<void>;
+}) {
+  const vcfg = config.vault || {};
+  const [address, setAddress] = useState(vcfg.address || "");
+  const [mount, setMount] = useState(vcfg.mount || "");
+  const [namespace, setNamespace] = useState(vcfg.namespace || "");
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+
+  const [writeToken, setWriteToken] = useState("");
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const [tokenMsg, setTokenMsg] = useState<string | null>(null);
+
+  async function handleSaveConnection() {
+    setSaving(true);
+    setSaveMsg(null);
+    try {
+      await updateSecretsBackend({
+        type: "vault",
+        vault: {
+          ...vcfg,
+          address: address.trim(),
+          mount: mount.trim(),
+          namespace: namespace.trim(),
+        },
+      });
+      await onConfigChanged();
+      setSaveMsg("Saved.");
+    } catch (err) {
+      setSaveMsg(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveWriteToken() {
+    if (!writeToken.trim()) return;
+    setTokenBusy(true);
+    setTokenMsg(null);
+    try {
+      const res = await saveVaultToken(writeToken.trim());
+      if (res.valid) {
+        setTokenMsg("Token saved — connection to Vault verified.");
+        setWriteToken("");
+      } else {
+        setTokenMsg(res.error || "Token validation failed.");
+      }
+    } catch (err) {
+      setTokenMsg(err instanceof Error ? err.message : "Failed to save token");
+    } finally {
+      setTokenBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* Connection */}
+      <div className="space-y-2">
+        <label className="text-xs font-medium text-gray-700">
+          Vault connection
+        </label>
+        <p className="text-xs text-gray-500">
+          suparship stores every secret under one KV v2 mount; per-scope
+          containers (<code className="font-mono">suparship-secrets-global</code>
+          , <code className="font-mono">suparship-secrets-env-*</code>) are
+          derived paths inside it — nothing to register per environment. The
+          address must be reachable from the tooling cluster AND every workload
+          cluster.
+        </p>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <input
+            type="text"
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono sm:col-span-2"
+            placeholder="https://vault.example.com:8200"
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+          />
+          <input
+            type="text"
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+            placeholder="mount (default: suparship)"
+            value={mount}
+            onChange={(e) => setMount(e.target.value)}
+          />
+        </div>
+        <input
+          type="text"
+          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+          placeholder="Vault Enterprise namespace (optional)"
+          value={namespace}
+          onChange={(e) => setNamespace(e.target.value)}
+        />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleSaveConnection}
+            disabled={saving || !address.trim()}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save connection"}
+          </button>
+          {saveMsg && <span className="text-xs text-gray-500">{saveMsg}</span>}
+        </div>
+      </div>
+
+      {/* Write token */}
+      <div className="space-y-2">
+        <label className="text-xs font-medium text-gray-700">
+          suparship write token
+        </label>
+        <p className="text-xs text-gray-500">
+          The token suparship writes secret items with (needs create/update/
+          read/delete on the mount). Stored as K8s Secret{" "}
+          <code className="font-mono">suparship-vault-token</code>; pasting also
+          tests the connection. Never logged.
+        </p>
+        <div className="flex items-end gap-2">
+          <input
+            type="password"
+            className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+            placeholder="hvs.…"
+            value={writeToken}
+            onChange={(e) => setWriteToken(e.target.value)}
+          />
+          <button
+            onClick={handleSaveWriteToken}
+            disabled={tokenBusy || !writeToken.trim()}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+          >
+            {tokenBusy ? "Testing…" : "Save & test"}
+          </button>
+        </div>
+        {tokenMsg && (
+          <p
+            className={`text-xs ${
+              tokenMsg.startsWith("Token saved")
+                ? "text-green-700"
+                : "text-red-600"
+            }`}
+          >
+            {tokenMsg}
+          </p>
+        )}
+      </div>
+
+      {/* Per-cluster read tokens — same seal-and-publish flow as 1Password */}
+      <ClusterTokensCard
+        config={config}
+        clusters={clusters}
+        orgEnvs={orgEnvs}
+        onChanged={onConfigChanged}
+        backend="vault"
+      />
+    </div>
+  );
+}
+
 function ClusterTokensCard({
   config,
   clusters,
   orgEnvs,
   onChanged,
+  backend = "onepassword",
 }: {
   config: SecretBackendConfig;
   clusters: Cluster[];
   orgEnvs: OrgEnvironment[];
   onChanged: () => Promise<void>;
+  backend?: "onepassword" | "vault";
 }) {
   const [tokenInputs, setTokenInputs] = useState<Record<string, string>>({});
   const [busyCluster, setBusyCluster] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const tokenRefs = config.onePassword?.clusterTokens || [];
+  const isVault = backend === "vault";
+  const tokenRefs =
+    (isVault
+      ? config.vault?.clusterTokens
+      : config.onePassword?.clusterTokens) || [];
   const refFor = (name: string) => tokenRefs.find((t) => t.cluster === name);
   const boundEnvsFor = (name: string) =>
     orgEnvs
@@ -2080,7 +2283,10 @@ function ClusterTokensCard({
     setBusyCluster(cluster);
     setError(null);
     try {
-      await setClusterConnectToken(cluster, { connectToken: token });
+      await setClusterConnectToken(
+        cluster,
+        isVault ? { token } : { connectToken: token },
+      );
       setTokenInputs((cur) => ({ ...cur, [cluster]: "" }));
       await onChanged();
     } catch (err) {
@@ -2094,13 +2300,26 @@ function ClusterTokensCard({
   return (
     <div>
       <label className="text-xs font-medium text-gray-700">
-        Cluster Connect Tokens
+        {isVault ? "Cluster Vault Tokens" : "Cluster Connect Tokens"}
       </label>
       <p className="mb-2 mt-0.5 text-xs text-gray-500">
-        One Connect token per cluster, covering the global vault plus the env
-        vaults bound to that cluster. Pasting a token publishes the
-        cluster&apos;s single{" "}
-        <code className="font-mono">suparship-store</code> ClusterSecretStore.
+        {isVault ? (
+          <>
+            One Vault token per cluster (read access to the suparship mount),
+            used by that cluster&apos;s External Secrets Operator. Pasting a
+            token seals it and publishes the cluster&apos;s single{" "}
+            <code className="font-mono">suparship-store</code>{" "}
+            ClusterSecretStore.
+          </>
+        ) : (
+          <>
+            One Connect token per cluster, covering the global vault plus the
+            env vaults bound to that cluster. Pasting a token publishes the
+            cluster&apos;s single{" "}
+            <code className="font-mono">suparship-store</code>{" "}
+            ClusterSecretStore.
+          </>
+        )}
       </p>
       {clusters.length === 0 ? (
         <p className="text-xs text-gray-400">
@@ -2123,8 +2342,9 @@ function ClusterTokensCard({
                       {c.name}
                     </span>
                     <span className="ml-2 text-xs text-gray-400">
-                      reads: global
-                      {envs.length > 0 ? `, ${envs.join(", ")}` : ""}
+                      {isVault
+                        ? `envs: ${envs.length > 0 ? envs.join(", ") : "none bound"}`
+                        : `reads: global${envs.length > 0 ? `, ${envs.join(", ")}` : ""}`}
                     </span>
                   </div>
                   {ref?.sealed ? (
@@ -2146,8 +2366,10 @@ function ClusterTokensCard({
                     className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
                     placeholder={
                       ref?.sealed
-                        ? "Paste a new token to rotate / widen vault access…"
-                        : "Paste this cluster's Connect token…"
+                        ? "Paste a new token to rotate…"
+                        : isVault
+                          ? "Paste this cluster's Vault token…"
+                          : "Paste this cluster's Connect token…"
                     }
                     value={tokenInputs[c.name] || ""}
                     onChange={(e) =>

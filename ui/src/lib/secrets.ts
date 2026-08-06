@@ -57,9 +57,22 @@ export interface ExternalSecretSettings {
   refreshInterval?: string;
 }
 
+// HCVaultConfig mirrors the server's HashiCorp Vault backend config. Unlike
+// 1Password there is NO per-scope vault registration: containers are derived
+// paths inside one KV v2 mount, so setup is just the address, the mount, and
+// one sealed token per workload cluster.
+export interface HCVaultConfig {
+  address?: string;
+  mount?: string;
+  namespace?: string;
+  caCert?: string;
+  clusterTokens?: ClusterTokenRef[];
+}
+
 export interface SecretBackendConfig {
   type: string;
   onePassword?: OnePasswordConfig;
+  vault?: HCVaultConfig;
   externalSecrets?: ExternalSecretSettings;
 }
 
@@ -98,6 +111,13 @@ export function updateSecretsBackend(
 
 export function saveSAToken(token: string): Promise<SATokenResponse> {
   return api.post<SATokenResponse>("/org/secret-backend/sa-token", { token });
+}
+
+// saveVaultToken saves suparship's HashiCorp Vault WRITE token (the data
+// plane it writes items with) and validates it against the configured Vault
+// address + mount. Set the address first.
+export function saveVaultToken(token: string): Promise<SATokenResponse> {
+  return api.post<SATokenResponse>("/org/secret-backend/vault-token", { token });
 }
 
 export function listVaults(): Promise<VaultInfo[]> {
@@ -139,14 +159,16 @@ export function unregisterEnvVault(env: string): Promise<void> {
   return api.del(`/org/secret-backend/vaults/env/${encodeURIComponent(env)}`);
 }
 
-// ── Per-cluster Connect token (1Password) ───────────────────────────────────
-// One token per cluster, with access to every vault the cluster reads (the
-// global vault + its bound env vaults). suparship stashes it, seals it, and
-// publishes the cluster's single unified ClusterSecretStore.
+// ── Per-cluster credential (1Password Connect token / Vault token) ──────────
+// One credential per cluster: for 1Password a Connect token with access to
+// every vault the cluster reads; for Vault a read token for the suparship
+// mount. suparship stashes it, seals it, and publishes the cluster's single
+// unified ClusterSecretStore. `token` is the backend-neutral field;
+// `connectToken` is its pre-Vault alias.
 
 export function setClusterConnectToken(
   cluster: string,
-  body: { connectToken: string; connectEndpoint?: string },
+  body: { token?: string; connectToken?: string; connectEndpoint?: string },
 ): Promise<void> {
   return api.post(
     `/org/secret-backend/clusters/${encodeURIComponent(cluster)}/connect-token`,

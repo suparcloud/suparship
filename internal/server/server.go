@@ -28,6 +28,7 @@ import (
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/hcvault"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/token"
@@ -793,6 +794,20 @@ func New(cfg Config) *Server {
 				rh.secretsHandler.saTokenStore = NewKubeSATokenStore(cfg.KubeClient)
 				rh.secretsHandler.saClientFactory = func(ctx context.Context, token string) (onepassword.SAClient, error) {
 					return onepassword.NewSDKClient(ctx, token)
+				}
+				rh.secretsHandler.vaultTokenStore = NewKubeVaultTokenStore(cfg.KubeClient)
+				rh.secretsHandler.vaultProber = func(ctx context.Context, vcfg secrets.HCVaultConfig, token string) error {
+					apiClient, err := hcvault.NewAPIClient(hcvault.APIConfig{
+						Address:   vcfg.Address,
+						Token:     token,
+						Mount:     vcfg.EffectiveMount(),
+						Namespace: vcfg.Namespace,
+						CACert:    vcfg.CACert,
+					})
+					if err != nil {
+						return err
+					}
+					return hcvault.NewHCVaultStore(apiClient).Probe(ctx, secrets.GlobalScope())
 				}
 				rh.secretsHandler.certCache = seal.NewK8sCertCache(cfg.KubeClient)
 			}

@@ -95,6 +95,11 @@ type secretsHandler struct {
 	logger          *slog.Logger
 	saTokenStore    SATokenStore
 	saClientFactory SAClientFactory
+	// vaultTokenStore persists suparship's HashiCorp Vault write token; the
+	// prober validates an (org vault config, token) pair by dialing Vault.
+	// Both nil in fake mode — the paste endpoint then stores without probing.
+	vaultTokenStore SATokenStore
+	vaultProber     func(ctx context.Context, cfg secrets.HCVaultConfig, token string) error
 	clusterStore    domain.ClusterStore
 	certCache       seal.CertCache
 	sealPublisher   SealedTokenPublisher
@@ -257,6 +262,46 @@ func (h *secretsHandler) handlePostSAToken(w http.ResponseWriter, r *http.Reques
 		}
 		writeJSON(w, http.StatusOK, SATokenResponse{Valid: true, VaultCount: count})
 		return
+	}
+	writeJSON(w, http.StatusOK, SATokenResponse{Valid: true})
+}
+
+// handlePostVaultToken saves suparship's HashiCorp Vault write token and
+// validates it against the org's configured Vault (address/mount), mirroring
+// the SA-token paste flow. The response reuses SATokenResponse's shape
+// (valid/error); VaultCount is meaningless for Vault and left zero.
+func (h *secretsHandler) handlePostVaultToken(w http.ResponseWriter, r *http.Request) {
+	var req SATokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.Token == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "token is required"})
+		return
+	}
+	org, err := h.orgStore.GetOrg(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	vcfg := org.SecretBackend.Vault
+	if vcfg == nil || vcfg.Address == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "set the Vault server address first (Settings → Secrets Backend)"})
+		return
+	}
+	if h.vaultTokenStore != nil {
+		if err := h.vaultTokenStore.SaveToken(r.Context(), req.Token); err != nil {
+			h.logger.Error("failed to save vault token", "err", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist token"})
+			return
+		}
+	}
+	if h.vaultProber != nil {
+		if err := h.vaultProber(r.Context(), *vcfg, req.Token); err != nil {
+			writeJSON(w, http.StatusOK, SATokenResponse{Valid: false, Error: err.Error()})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, SATokenResponse{Valid: true})
 }

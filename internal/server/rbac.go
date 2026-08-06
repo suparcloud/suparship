@@ -269,6 +269,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("PUT /api/v1/org/secret-backend", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePutSecretsBackendFull)))
 		// SA token + vault listing.
 		mux.HandleFunc("POST /api/v1/org/secret-backend/sa-token", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePostSAToken)))
+		mux.HandleFunc("POST /api/v1/org/secret-backend/vault-token", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePostVaultToken)))
 		mux.HandleFunc("GET /api/v1/org/secret-backend/vaults", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListVaults)))
 		// Global vault: the 1Password vault holding global-scope items.
 		mux.HandleFunc("PUT /api/v1/org/secret-backend/global-vault", requireOrgAdmin(rh.requireOrgAdmin(sh.handleSetGlobalVault)))
