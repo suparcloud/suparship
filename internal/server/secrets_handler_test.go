@@ -196,6 +196,70 @@ func TestPutSecretsBackend_PreservesConfigAcrossTypeSwitch(t *testing.T) {
 	}
 }
 
+// Three-way round trip: every backend's config must coexist and survive any
+// switch order. This is what makes "try Vault, switch back, forward again"
+// a zero-re-entry operation.
+func TestPutSecretsBackend_ThreeWayConfigPersistence(t *testing.T) {
+	mux, ah := newSecretsMux()
+
+	// Configure 1Password, then Vault (switch sends the new backend's config).
+	rec := do(t, mux, ah, "PUT", "/api/v1/org/secret-backend", "alice", "org_admin", map[string]any{
+		"type":        "onepassword",
+		"onePassword": map[string]any{"groupName": "Suparship"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("configure 1Password: got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, mux, ah, "PUT", "/api/v1/org/secret-backend", "alice", "org_admin", map[string]any{
+		"type":  "vault",
+		"vault": map[string]any{"address": "https://vault.example.com:8200", "mount": "platform-kv"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("configure vault: got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Switch to k8s with only {type}: BOTH configs must survive.
+	if rec = do(t, mux, ah, "PUT", "/api/v1/org/secret-backend", "alice", "org_admin", map[string]any{"type": "k8s"}); rec.Code != http.StatusOK {
+		t.Fatalf("switch to k8s: got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, mux, ah, "GET", "/api/v1/org/secret-backend", "alice", "org_admin", nil)
+	var cfg secrets.BackendConfig
+	mustDecode(t, rec.Body.Bytes(), &cfg)
+	if cfg.Effective() != secrets.BackendK8s {
+		t.Errorf("type = %q, want k8s", cfg.Type)
+	}
+	if cfg.OnePassword == nil || cfg.OnePassword.GroupName != "Suparship" {
+		t.Errorf("1Password config lost: %+v", cfg.OnePassword)
+	}
+	if cfg.Vault == nil || cfg.Vault.Address != "https://vault.example.com:8200" || cfg.Vault.Mount != "platform-kv" {
+		t.Errorf("vault config lost: %+v", cfg.Vault)
+	}
+
+	// Re-select vault with only {type}: the saved config reloads and validates
+	// (vault requires an address — proof the retained one is what validated).
+	if rec = do(t, mux, ah, "PUT", "/api/v1/org/secret-backend", "alice", "org_admin", map[string]any{"type": "vault"}); rec.Code != http.StatusOK {
+		t.Fatalf("re-select vault: got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, mux, ah, "GET", "/api/v1/org/secret-backend", "alice", "org_admin", nil)
+	mustDecode(t, rec.Body.Bytes(), &cfg)
+	if cfg.Effective() != secrets.BackendVault || cfg.Vault == nil || cfg.Vault.Mount != "platform-kv" {
+		t.Fatalf("re-selecting vault did not reload config: %+v", cfg)
+	}
+	if cfg.OnePassword == nil {
+		t.Error("1Password config lost while vault active")
+	}
+}
+
+// Selecting vault with no address anywhere must be rejected, not silently
+// stored as an unusable backend.
+func TestPutSecretsBackend_VaultRequiresAddress(t *testing.T) {
+	mux, ah := newSecretsMux()
+	rec := do(t, mux, ah, "PUT", "/api/v1/org/secret-backend", "alice", "org_admin", map[string]any{"type": "vault"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("vault without address: got %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestSharedSecrets_RoundTrip exercises shared-tier CRUD across the three
 // scopes through the org-admin routes.
 func TestSharedSecrets_RoundTrip(t *testing.T) {

@@ -26,6 +26,7 @@ import (
 type SecretBackendDTO struct {
 	Type        string                     `json:"type"`
 	OnePassword *secrets.OnePasswordConfig `json:"onePassword,omitempty"`
+	Vault       *secrets.HCVaultConfig     `json:"vault,omitempty"`
 }
 
 // SecretKeyDTO is one entry in the key-only list returned by GET .../secrets.
@@ -140,6 +141,9 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 	newCfg.Type = bt
 	if dto.OnePassword != nil {
 		newCfg.OnePassword = dto.OnePassword
+	}
+	if dto.Vault != nil {
+		newCfg.Vault = dto.Vault
 	}
 	if err := newCfg.Validate(); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})

@@ -35,6 +35,7 @@ import (
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/hcvault"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/token"
@@ -288,49 +289,45 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		appStore = kubeDeps.AppStore
 		stackStore = kube.NewK8sStackStore(client)
 		clusterStore = kubeDeps.ClusterStore
-		// Default: k8s backend (vault = namespace). Overridden below when the
-		// org is configured for 1Password and an SA token is available.
-		vaultStore = secrets.NewK8sVaultStore(client)
-
-		// orgProvider is set unconditionally above; a bare block scopes the
-		// 1Password wiring's locals without a redundant (always-true) nil guard.
-		{
-			if org, orgErr := orgProvider.GetOrg(cmd.Context()); orgErr == nil && org != nil {
-				if org.SecretBackend.Effective() == secrets.Backend1Password && org.SecretBackend.OnePassword != nil {
-					saTokenRaw, tokenErr := func() (string, error) {
-						sec, err := client.CoreV1().Secrets("suparship-system").Get(
-							cmd.Context(), secrets.SATokenSecretName, metav1.GetOptions{},
-						)
-						if err != nil {
-							return "", err
-						}
-						return string(sec.Data[secrets.SATokenSecretKey]), nil
-					}()
-					if tokenErr != nil {
-						logger.Warn("1Password backend: could not read SA token — falling back to k8s vault store",
-							"secret", secrets.SATokenSecretName, "error", tokenErr)
-					} else if saTokenRaw != "" {
-						saClient, saErr := onepassword.NewSDKClient(cmd.Context(), saTokenRaw)
-						if saErr != nil {
-							logger.Warn("1Password backend: SA client init failed — falling back to k8s vault store", "error", saErr)
-						} else {
-							// Resolver loads org config fresh so vault selections
-							// (global/env) made after startup take effect. Cluster
-							// scope resolves to its env vault.
-							resolver := func(scope secrets.Scope) (string, error) {
-								o, err := orgProvider.GetOrg(context.Background())
-								if err != nil {
-									return "", err
-								}
-								return o.SecretBackend.VaultIDForScope(scope)
-							}
-							vaultStore = onepassword.NewSAVaultStore(saClient, resolver)
-							logger.Info("1Password vault store enabled (global/env vaults resolved from org config; cluster overrides live in env vaults)")
-						}
-					}
+		// The vault store resolves its backend PER OPERATION from the current
+		// org config (k8s / 1Password / HashiCorp Vault), so switching the
+		// backend in Settings takes effect without a restart. Credentialed
+		// stores are built lazily and cached on their token + config; while a
+		// selected backend is unusable (no token pasted yet, client error)
+		// operations degrade to the k8s store with a logged warning.
+		readTokenSecret := func(name, key string) func(ctx context.Context) (string, error) {
+			return func(ctx context.Context) (string, error) {
+				sec, err := client.CoreV1().Secrets(secrets.SystemNamespace).Get(ctx, name, metav1.GetOptions{})
+				if err != nil {
+					return "", err
 				}
+				return string(sec.Data[key]), nil
 			}
 		}
+		vaultStore = newDynamicVaultStore(
+			orgProvider,
+			secrets.NewK8sVaultStore(client),
+			func(ctx context.Context, token string) (onepassword.SAClient, error) {
+				return onepassword.NewSDKClient(ctx, token)
+			},
+			readTokenSecret(secrets.SATokenSecretName, secrets.SATokenSecretKey),
+			logger,
+		).withHCVault(
+			func(cfg secrets.HCVaultConfig, token string) (secrets.VaultStore, error) {
+				apiClient, err := hcvault.NewAPIClient(hcvault.APIConfig{
+					Address:   cfg.Address,
+					Token:     token,
+					Mount:     cfg.EffectiveMount(),
+					Namespace: cfg.Namespace,
+					CACert:    cfg.CACert,
+				})
+				if err != nil {
+					return nil, err
+				}
+				return hcvault.NewHCVaultStore(apiClient), nil
+			},
+			readTokenSecret(secrets.VaultTokenSecretName, secrets.VaultTokenSecretKey),
+		)
 		gitopsConfigStore = gitops.NewConfigStore(client)
 		templateRegistryStore = tpl.NewRegistryStore(client)
 		registryStore = registry.NewStore(client)

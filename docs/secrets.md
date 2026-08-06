@@ -442,6 +442,36 @@ easy to audit.
 
 ## Troubleshooting
 
+### "Secrets aren't getting saved in Vault" / saving returns an error
+
+If a save **fails** with *backend is set to "vault" but …; refusing the write*,
+that is deliberate. The selected backend could not be built, and rather than
+storing the value in Kubernetes instead — which would return 200, read back
+correctly, and leave Vault empty — the write is refused. Check
+`GET /api/v1/credentials/health` (the `vault` entry names the cause) or:
+
+```bash
+kubectl logs -n suparship-system deploy/suparship | grep "selected secrets backend unavailable"
+kubectl get secret suparship-vault-token -n suparship-system   # the WRITE token
+```
+
+The four causes: no server address, no write token, the client failed to build
+(bad CA bundle / unparseable address), or a missing `vault` config block.
+
+Note the **write token is a separate credential from the per-cluster read
+tokens**. The write token goes in Settings → Secrets Backend and is what suparship
+itself writes with; the per-cluster ones go in *Cluster Vault Tokens* and are what
+each cluster's ESO reads with. Pasting only the per-cluster tokens leaves every
+write refused.
+
+Reads deliberately still fall back to the previous backend, so an operator
+mid-migration can see what the old one holds. Only writes fail closed.
+
+**On builds before this behaviour existed**, the same conditions silently
+redirected writes to the Kubernetes store. If secrets appeared to save but Vault
+was empty, they are in the `suparship-secrets-*` namespaces — recover them with
+`suparship secrets migrate --from k8s --to vault`.
+
 ### App pods don't see global keys
 
 The cluster's Connect token is missing or can't read the global vault. Confirm
