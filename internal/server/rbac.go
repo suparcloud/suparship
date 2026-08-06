@@ -269,6 +269,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("PUT /api/v1/org/secret-backend", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePutSecretsBackendFull)))
 		// SA token + vault listing.
 		mux.HandleFunc("POST /api/v1/org/secret-backend/sa-token", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePostSAToken)))
+		mux.HandleFunc("POST /api/v1/org/secret-backend/vault-token", requireOrgAdmin(rh.requireOrgAdmin(sh.handlePostVaultToken)))
 		mux.HandleFunc("GET /api/v1/org/secret-backend/vaults", requireOrgAdmin(rh.requireOrgAdmin(sh.handleListVaults)))
 		// Global vault: the 1Password vault holding global-scope items.
 		mux.HandleFunc("PUT /api/v1/org/secret-backend/global-vault", requireOrgAdmin(rh.requireOrgAdmin(sh.handleSetGlobalVault)))
@@ -280,6 +281,10 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// vault + the env vaults bound to that cluster; sealing publishes the
 		// cluster's single unified ClusterSecretStore.
 		mux.HandleFunc("POST /api/v1/org/secret-backend/clusters/{cluster}/connect-token", requireOrgAdmin(rh.requireOrgAdmin(sh.handleSetClusterConnectToken)))
+		// Least-privilege Vault policy set: one read policy per scope prefix, and
+		// per cluster the subset its env bindings entitle it to. Computed only —
+		// the operator applies it against their own Vault.
+		mux.HandleFunc("GET /api/v1/org/secret-backend/vault-policies", requireOrgAdmin(rh.requireOrgAdmin(sh.handleGetVaultPolicies)))
 
 		// ── Shared-tier secrets (org-admin) across the 3 scopes ──
 		// Cluster scope is per-(env, cluster): routes nest cluster under env.

@@ -50,6 +50,25 @@ one-time operator action** on the 1Password secret backend. The k8s secret
 backend is unaffected. (config-schema unchanged at `v1` — the changes are
 operational, and the config decoder tolerates the removed fields.)
 
+**HashiCorp Vault secret backend; `k8s` backend deprecated.** A new `vault`
+backend (HashiCorp Vault KV v2 via ESO) is the recommended open-source choice.
+No action needed on existing installs — `k8s` keeps working and remains
+selectable where already active — but it is deprecated because it cannot serve
+remote workload clusters (its ClusterSecretStores only ever sync to the
+tooling cluster), and it will be removed in a future release. To move:
+
+```bash
+suparship secrets migrate --from k8s --to vault --dry-run
+suparship secrets migrate --from k8s --to vault
+suparship secrets backend set --type=vault   # or Settings → Secrets Backend
+```
+
+then verify app ExternalSecrets are Ready before cleaning up the old
+`suparship-secrets-*` namespaces by hand. Backend configuration is retained
+across switches, so trying Vault and switching back loses nothing.
+(config-schema unchanged: the new `secretBackend.vault` block is additive and
+older binaries ignore it.)
+
 **Per-cluster ArgoCD Application names (`{project}-{app}-{cluster}` by default).**
 ArgoCD Application names are now per-cluster and configurable via the org
 ResourceNaming `argoAppName` pattern (Settings → Namespace Naming → ArgoCD

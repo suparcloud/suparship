@@ -76,6 +76,23 @@ func (m *MemVaultStore) DeleteKey(_ context.Context, scope Scope, tier Tier, app
 
 func (m *MemVaultStore) Probe(_ context.Context, _ Scope) error { return nil }
 
+var _ ItemExporter = (*MemVaultStore)(nil)
+
+// ExportItem implements ItemExporter. Absent item → (nil, nil).
+func (m *MemVaultStore) ExportItem(_ context.Context, scope Scope, tier Tier, app string) (map[string][]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	item := m.items[memItemKey(scope, tier, app)]
+	if item == nil {
+		return nil, nil
+	}
+	out := make(map[string][]byte, len(item))
+	for k, v := range item {
+		out[k] = append([]byte(nil), v...)
+	}
+	return out, nil
+}
+
 var _ LegacyItemMigrator = (*MemVaultStore)(nil)
 
 // CopyItem implements LegacyItemMigrator.

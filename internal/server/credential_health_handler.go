@@ -5,6 +5,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -72,6 +75,7 @@ func (h *credentialHealthHandler) handleHealth(w http.ResponseWriter, r *http.Re
 	creds = append(creds, h.checkGitOps(ctx))
 	creds = append(creds, h.checkRegistry(ctx))
 	creds = append(creds, h.checkOnePassword(ctx))
+	creds = append(creds, h.checkVault(ctx))
 	creds = append(creds, h.checkTemplates(ctx)...)
 
 	overall := credStatusHealthy
@@ -215,6 +219,101 @@ func (h *credentialHealthHandler) checkOnePassword(ctx context.Context) Credenti
 	cs.Status = credStatusHealthy
 	cs.Message = "Token secret present"
 	return cs
+}
+
+// checkVault reports whether the HashiCorp Vault backend can actually be used.
+//
+// This exists because the failure it catches is otherwise INVISIBLE. When Vault
+// is selected but its write token or address is missing, secret writes used to be
+// redirected to the Kubernetes store, returning 200 and reading back fine — so an
+// operator saw their secrets "saved" while Vault stayed empty. Writes now fail
+// closed (dynamicVaultStore.resolve), and this check is how the cause shows up
+// somewhere an operator looks, instead of only in a server log line.
+//
+// Both the address and the write token are required: either one missing means no
+// write can succeed, so both are reported as missing rather than warning.
+func (h *credentialHealthHandler) checkVault(ctx context.Context) CredentialStatus {
+	cs := CredentialStatus{Name: "vault"}
+
+	if h.orgProvider == nil {
+		cs.Status = credStatusNotConfigured
+		cs.Message = "Vault not configured"
+		return cs
+	}
+
+	org, err := h.orgProvider.GetOrg(ctx)
+	if err != nil {
+		cs.Status = credStatusMissing
+		cs.Message = "Failed to read org config"
+		return cs
+	}
+
+	if org.SecretBackend.Effective() != secrets.BackendVault {
+		cs.Status = credStatusNotConfigured
+		cs.Message = "Secret backend is not Vault"
+		return cs
+	}
+
+	if org.SecretBackend.Vault == nil || org.SecretBackend.Vault.Address == "" {
+		cs.Status = credStatusMissing
+		cs.Message = "Vault is the selected backend but no server address is configured — " +
+			"secret writes are refused until it is set (Settings → Secrets Backend)"
+		return cs
+	}
+
+	cs.SecretRef = secrets.VaultTokenSecretName
+	if !h.secretExists(ctx, secrets.VaultTokenSecretName) {
+		cs.Status = credStatusMissing
+		cs.Message = "Write token secret " + secrets.VaultTokenSecretName + " not found — " +
+			"secret writes are refused until it is pasted (Settings → Secrets Backend)"
+		return cs
+	}
+
+	// Per-cluster ESO read tokens are a separate credential from the write token
+	// above: without them a cluster's workloads cannot resolve secrets even though
+	// suparship itself writes them fine. Report it as a warning, not missing —
+	// the control plane is healthy, the data plane is incomplete.
+	if pending := unsealedVaultClusters(org); len(pending) > 0 {
+		cs.Status = credStatusWarning
+		cs.Message = "Write token present, but " + strconv.Itoa(len(pending)) +
+			" cluster(s) have no sealed read token yet (" + strings.Join(pending, ", ") +
+			") — their workloads cannot resolve secrets"
+		return cs
+	}
+
+	cs.Status = credStatusHealthy
+	cs.Message = "Write token present; every cluster has a sealed read token"
+	return cs
+}
+
+// unsealedVaultClusters returns the clusters bound to an environment that have no
+// sealed Vault token yet, sorted. A cluster bound to nothing is skipped — it has
+// no workloads resolving secrets, so a missing token is not yet a problem.
+func unsealedVaultClusters(org *rbac.Org) []string {
+	bound := map[string]bool{}
+	for _, e := range org.Environments {
+		for _, ref := range e.ClusterRefs {
+			if ref != "" {
+				bound[ref] = true
+			}
+		}
+	}
+	sealed := map[string]bool{}
+	if org.SecretBackend.Vault != nil {
+		for _, t := range org.SecretBackend.Vault.ClusterTokens {
+			if t.Sealed {
+				sealed[t.Cluster] = true
+			}
+		}
+	}
+	var pending []string
+	for name := range bound {
+		if !sealed[name] {
+			pending = append(pending, name)
+		}
+	}
+	sort.Strings(pending)
+	return pending
 }
 
 // checkTemplates returns one CredentialStatus per external template

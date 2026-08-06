@@ -225,6 +225,34 @@ func (w *SAVaultStore) DeleteItem(ctx context.Context, scope secrets.Scope, item
 	return nil
 }
 
+var _ secrets.ItemExporter = (*SAVaultStore)(nil)
+
+// ExportItem implements secrets.ItemExporter: the item's fields as key/value
+// pairs, for cross-backend migration only. Absent item → (nil, nil).
+func (w *SAVaultStore) ExportItem(ctx context.Context, scope secrets.Scope, tier secrets.Tier, app string) (map[string][]byte, error) {
+	vaultID, err := w.resolver(scope)
+	if err != nil {
+		return nil, err
+	}
+	title := secrets.ItemName(scope, tier, app)
+	id, err := w.findItemID(ctx, vaultID, title)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, nil
+	}
+	item, err := w.client.GetItem(ctx, vaultID, id)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]byte, len(item.Fields))
+	for _, f := range item.Fields {
+		out[f.Label] = []byte(f.Value)
+	}
+	return out, nil
+}
+
 func (w *SAVaultStore) Probe(ctx context.Context, scope secrets.Scope) error {
 	vaultID, err := w.resolver(scope)
 	if err != nil {

@@ -3,10 +3,21 @@
 suparship organises secrets along two axes — **scope** (where a value varies) and
 **tier** (who owns it) — and materialises them at runtime with the
 [External Secrets Operator](https://external-secrets.io) (ESO). The same model
-works with two backends: plain Kubernetes Secrets (`k8s`) and **1Password**.
+works with three backends: **HashiCorp Vault** (`vault`, the recommended
+open-source backend), **1Password** (`onepassword`), and plain Kubernetes
+Secrets (`k8s`, deprecated — see below).
 
 The setup is **opinionated by design** — one supported way to wire each backend.
 Fewer knobs, less cognitive load, easier audits.
+
+> **The `k8s` backend is deprecated — demo/dev only.** Its "vaults" are
+> namespaces on the **tooling cluster**, and its ClusterSecretStores sync only
+> there — so on any *remote* workload cluster, app ExternalSecrets reference a
+> store that never arrives and sit NotReady forever. It keeps working for
+> single-cluster installs and stays selectable where already configured, but
+> new installs should use Vault or 1Password. Move off it with
+> `suparship secrets migrate --from k8s --to vault` (see
+> [Migrating between backends](#migrating-between-backends)).
 
 ## The model: three scopes, two tiers
 
@@ -77,6 +88,191 @@ rebinding an env to a different cluster needs no regeneration.
 The **k8s** backend keeps one store per vault/namespace
 (`suparship-store-{global|env-{env}}`) — ESO's `kubernetes` provider reads
 exactly one `remoteNamespace` per store.
+
+## HashiCorp Vault backend
+
+For the **Vault** backend, a suparship "vault" is a **path prefix inside one
+KV v2 mount** (default mount: `suparship`) and an item is the KV entry beneath
+it:
+
+| Thing | Vault path (`mount=suparship, app=web, project=acme, env=prod`) |
+|---|---|
+| Global vault | `suparship/suparship-secrets-global/` |
+| Env vault | `suparship/suparship-secrets-env-prod/` |
+| Shared item | `suparship/suparship-secrets-global/shared-global` |
+| App item | `suparship/suparship-secrets-env-prod/acme-web-env-prod` |
+| ClusterSecretStore (one per cluster) | `suparship-store` |
+| ESO token Secret (per cluster) | `vault-token` in `external-secrets` |
+
+Because the containers are **derived paths**, there is no per-scope
+registration step — no global-vault pick, no env-vault registration. Generated
+`ExternalSecret`s reference items by full path
+(`dataFrom.extract.key: "suparship-secrets-env-prod/acme-web-env-prod"`), and
+every cluster runs one `ClusterSecretStore` with the same fixed name, so app
+ExternalSecrets stay cluster-agnostic — exactly the 1Password unified-store
+model with a different provider stanza.
+
+### Two credential types (Vault)
+
+- **Write token** (stored in suparship as K8s Secret `suparship-vault-token`):
+  used by suparship itself to create/update/read/delete items under the mount —
+  the data plane for developer secrets. Paste it in Settings → Secrets Backend;
+  pasting also probes the connection.
+- **Read token, one per cluster** (sealed, delivered via GitOps): that
+  cluster's ESO authenticates with it to pull values. Needs read on the mount
+  only. Pasted per cluster in the UI; suparship seals it against the cluster's
+  sealed-secrets cert and publishes the sealed token + `ClusterSecretStore`
+  through the same per-cluster pipeline the 1Password backend uses — so it
+  reaches **remote workload clusters** correctly.
+
+### Admin walkthrough (Vault)
+
+1. **Enable a KV v2 mount** on your Vault: `vault secrets enable -path=suparship -version=2 kv`.
+2. **Write the policies.** Because a suparship vault is a *path prefix*, a
+   path-scoped policy is the thing that actually isolates one environment's
+   secrets from another's — see [Least privilege](#least-privilege-vault) below
+   for why this matters and how it's enforced. suparship renders the exact set
+   for your mount and environments under **Settings → Secrets Backend → Vault
+   policies**, or via `GET /api/v1/org/secret-backend/vault-policies`. KV v2
+   routes values through `data/` and listings + item deletion through
+   `metadata/`, so both prefixes appear in each policy.
+
+   ```bash
+   # suparship's own write policy — mount-wide ON PURPOSE: suparship is the
+   # control plane that creates and rotates items in every scope.
+   vault policy write suparship-write - <<'EOF'
+   path "suparship/data/*"     { capabilities = ["create", "update", "read", "delete"] }
+   path "suparship/metadata/*" { capabilities = ["read", "list", "delete"] }
+   EOF
+
+   # ESO read policies — ONE PER SCOPE PREFIX, never mount-wide.
+   vault policy write suparship-eso-read-global - <<'EOF'
+   path "suparship/data/suparship-secrets-global/*"     { capabilities = ["read"] }
+   path "suparship/metadata/suparship-secrets-global/*" { capabilities = ["read", "list"] }
+   EOF
+
+   # ...and one like this for each environment (staging shown):
+   vault policy write suparship-eso-read-env-staging - <<'EOF'
+   path "suparship/data/suparship-secrets-env-staging/*"     { capabilities = ["read"] }
+   path "suparship/metadata/suparship-secrets-env-staging/*" { capabilities = ["read", "list"] }
+   EOF
+   ```
+
+3. **Mint the tokens.** One write token for suparship, then one read token per
+   workload cluster carrying only the scopes that cluster is entitled to —
+   Vault policies are additive, so entitlement is *which policies the token
+   carries*:
+
+   ```bash
+   vault token create -policy=suparship-write -orphan \
+     -display-name=suparship-server -ttl=2160h
+
+   # a cluster bound to staging only:
+   vault token create -orphan \
+     -policy=suparship-eso-read-global \
+     -policy=suparship-eso-read-env-staging \
+     -display-name=suparship-eso-<cluster> -ttl=2160h
+   ```
+
+   The UI prints this command per cluster, with the policy flags already
+   matching that cluster's environment bindings.
+
+   `-orphan` so a token doesn't die with the operator token that minted it;
+   per-cluster display names keep audits and revocation per-cluster. Use a
+   plain TTL and rotate by re-pasting before expiry — **not** `-period`
+   tokens, which expire unless actively renewed and nothing in this pipeline
+   renews them. Leave Vault's `default` policy attached: suparship's connection
+   probe is a token self-lookup, which `default` grants. (In the `task up:vault`
+   dev loop both tokens are simply Vault's generated root token, stashed in
+   `vault/vault-dev-keys` — convenient, and deliberately not least-privilege.)
+4. **Settings → Secrets Backend → HashiCorp Vault**: enter the server address
+   (reachable from the tooling cluster AND every workload cluster) and the
+   mount; save.
+5. **Paste the write token** — suparship stores and probes it.
+6. **Per cluster: paste its read token** — suparship seals and publishes that
+   cluster's `ClusterSecretStore`. Rotation is a re-paste, same as 1Password
+   Connect tokens; revoke the old token in Vault afterwards.
+
+Vault Enterprise namespaces and a private CA bundle are supported via the same
+settings panel (`secrets.vault.namespace` / `secrets.vault.caCert` in Helm
+values).
+
+### Least privilege (Vault)
+
+One KV mount for every environment is fine — a Vault path prefix is a real
+isolation boundary, and nothing about SOC 2 requires a separate secret engine per
+environment. What matters is that **policy** enforces the boundary. Granting each
+cluster `read` on `{mount}/data/*` would not: every workload cluster's ESO token
+could then read production, and anyone able to read the `vault-token` Secret in a
+staging cluster's `external-secrets` namespace would have prod secrets. That is a
+least-privilege / prod-vs-non-prod segregation finding, and it is the one thing
+this layout has to get right.
+
+So read policies are **per scope prefix**, and a cluster's token composes the ones
+it is entitled to:
+
+| Policy | Grants read on | Who carries it |
+|---|---|---|
+| `suparship-write` | the whole mount | suparship itself (control plane) |
+| `suparship-eso-read-global` | `{mount}/…-secrets-global/*` | every cluster |
+| `suparship-eso-read-env-<env>` | `{mount}/…-secrets-env-<env>/*` | clusters bound to `<env>` |
+
+Per scope rather than per cluster because Vault policies are additive: an
+environment's policy is written once and never changes as clusters are added,
+removed, or failed over — only the token's policy list does. Entitlement follows
+the same binding rule the 1Password backend uses for Connect tokens
+(`clusterVaultIDs`): the global prefix plus every environment **bound** to that
+cluster, not just the active one, so a standby resolves secrets across a failover.
+
+Two prefix families is complete coverage. `VaultName` maps every scope onto one of
+them, so cluster overrides, project-env, stack-env, and preview items all live
+under their environment's prefix and need no grant of their own.
+
+suparship computes the set but never applies it: its write token covers the KV
+mount, not the `sys/policy` and token-create rights these need. Get the current
+set from **Settings → Secrets Backend** or
+`GET /api/v1/org/secret-backend/vault-policies`.
+
+**Re-run the per-cluster token command after changing an environment's cluster
+bindings.** Binding a new env to a cluster does not widen its existing token —
+ESO will fail to resolve the new env's items until the token is re-minted with
+that env's policy and re-pasted. That is the intended direction of failure: a
+missing grant breaks a lookup loudly, where an over-broad one stays silent.
+
+### Audit and rotation (Vault)
+
+Two things the policies above don't cover, both worth settling before an audit:
+
+- **Enable a Vault audit device** (`vault audit enable file
+  file_path=/vault/logs/audit.log`, or `socket`). suparship's own audit trail
+  (`internal/secrets/audit.go`) records the mutations *it* performs — actor,
+  scope, key names, never values — but it cannot see ESO's reads or anything done
+  out-of-band with a token. Vault's audit device is where read evidence lives.
+- **These are static tokens.** Rotation is a re-paste, and `-orphan` means an
+  operator's departure does not revoke them — put the per-cluster tokens in your
+  access-review procedure. Kubernetes/JWT auth for ESO→Vault is the real fix and
+  is still open (see [Out of scope](#out-of-scope-this-iteration)).
+
+## Migrating between backends
+
+`suparship secrets migrate` copies every item the org owns — shared and app
+tier, across all scopes — from one backend's storage into another's:
+
+```bash
+suparship secrets migrate --from k8s --to vault --dry-run   # review first
+suparship secrets migrate --from k8s --to vault
+```
+
+Additive and idempotent: the source is never modified, the destination is
+merged into, and a re-run converges. Values stay inside the CLI process; only
+item names and counts are printed. Per-PR preview overrides are not migrated
+(transient, re-created by CI on the next push).
+
+Rollout: migrate → switch the backend (Settings → Secrets Backend or
+`suparship secrets backend set --type=vault`; takes effect without a restart) →
+verify apps' ExternalSecrets are Ready → clean up the source backend by hand.
+Switching back at any point loses nothing — every backend's configuration is
+retained across switches.
 
 ## Two credential types (1Password)
 
@@ -442,6 +638,36 @@ easy to audit.
 
 ## Troubleshooting
 
+### "Secrets aren't getting saved in Vault" / saving returns an error
+
+If a save **fails** with *backend is set to "vault" but …; refusing the write*,
+that is deliberate. The selected backend could not be built, and rather than
+storing the value in Kubernetes instead — which would return 200, read back
+correctly, and leave Vault empty — the write is refused. Check
+`GET /api/v1/credentials/health` (the `vault` entry names the cause) or:
+
+```bash
+kubectl logs -n suparship-system deploy/suparship | grep "selected secrets backend unavailable"
+kubectl get secret suparship-vault-token -n suparship-system   # the WRITE token
+```
+
+The four causes: no server address, no write token, the client failed to build
+(bad CA bundle / unparseable address), or a missing `vault` config block.
+
+Note the **write token is a separate credential from the per-cluster read
+tokens**. The write token goes in Settings → Secrets Backend and is what suparship
+itself writes with; the per-cluster ones go in *Cluster Vault Tokens* and are what
+each cluster's ESO reads with. Pasting only the per-cluster tokens leaves every
+write refused.
+
+Reads deliberately still fall back to the previous backend, so an operator
+mid-migration can see what the old one holds. Only writes fail closed.
+
+**On builds before this behaviour existed**, the same conditions silently
+redirected writes to the Kubernetes store. If secrets appeared to save but Vault
+was empty, they are in the `suparship-secrets-*` namespaces — recover them with
+`suparship secrets migrate --from k8s --to vault`.
+
 ### App pods don't see global keys
 
 The cluster's Connect token is missing or can't read the global vault. Confirm
@@ -489,7 +715,9 @@ generated CRs in Git); the runtime is plain ESO + sealed-secrets + ArgoCD.
 ## Out of scope (this iteration)
 
 - Sealing-cert rotation / re-sealing on cert change.
-- HashiCorp Vault and AWS-SM `VaultStore` implementations.
+- AWS-SM `VaultStore` implementation.
+- Kubernetes/JWT auth for ESO→Vault (the sealed per-cluster token reuses the
+  proven pipeline; revisit once Vault is field-proven).
 - Binary / file secrets (TLS certs, kubeconfigs) — UI accepts only UTF-8
   `KEY=value`, ≤64 KiB.
 - Per-PR preview vaults — previews resolve secrets from the env/global scopes.

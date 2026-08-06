@@ -10,9 +10,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// connectTokenStashKey is the data key inside the per-cluster stash Secret
-// that holds the plaintext 1Password Connect token.
-const connectTokenStashKey = "token"
+// clusterCredentialStashKey is the data key inside the per-cluster stash
+// Secret that holds the plaintext credential.
+const clusterCredentialStashKey = "token"
 
 // ClusterStashKey returns the stash key for one cluster's Connect token.
 // Each cluster has exactly one token, covering every vault it reads.
@@ -36,23 +36,43 @@ func ConnectTokenStashName(key string) string {
 	return "suparship-onepassword-connect-token-" + key
 }
 
-// StashConnectToken upserts the plaintext Connect token into
-// suparship-system under the given stash key (one per cluster).
-// Idempotent; rotating tokens is a normal operation (operator re-pastes
-// via the cluster token flow) and the stash should reflect the latest
-// value.
+// VaultTokenStashName returns the suparship-system Secret name stashing one
+// cluster's Vault token — the Vault backend's counterpart to
+// ConnectTokenStashName, and deliberately a DIFFERENT name per backend: the
+// stashes must never alias, or a backend switch would re-seal the previous
+// backend's credential into the new backend's ClusterSecretStore.
+func VaultTokenStashName(cluster string) string {
+	return "suparship-vault-token-cluster-" + cluster
+}
+
+// ClusterStashSecretName returns the stash Secret name for the ACTIVE
+// backend's per-cluster credential, or "" for backends that have none (k8s).
+func (c BackendConfig) ClusterStashSecretName(cluster string) string {
+	switch c.Effective() {
+	case Backend1Password:
+		return ConnectTokenStashName(ClusterStashKey(cluster))
+	case BackendVault:
+		return VaultTokenStashName(cluster)
+	default:
+		return ""
+	}
+}
+
+// StashClusterCredential upserts a plaintext per-cluster credential into
+// suparship-system under the given Secret name (one per cluster per backend).
+// Idempotent; rotating is a normal operation (operator re-pastes via the
+// cluster token flow) and the stash should reflect the latest value.
 //
 // Failure to stash is treated as non-fatal by callers — sealing still
 // works for the current request, only later re-seals are degraded. The
 // error is returned so callers can log it.
-func StashConnectToken(ctx context.Context, client kubernetes.Interface, key string, token []byte) error {
-	if key == "" {
-		return fmt.Errorf("stash key required")
+func StashClusterCredential(ctx context.Context, client kubernetes.Interface, name string, token []byte) error {
+	if name == "" {
+		return fmt.Errorf("stash secret name required")
 	}
 	if len(token) == 0 {
 		return fmt.Errorf("token required")
 	}
-	name := ConnectTokenStashName(key)
 	secrets := client.CoreV1().Secrets(SystemNamespace)
 
 	desired := &corev1.Secret{
@@ -61,55 +81,59 @@ func StashConnectToken(ctx context.Context, client kubernetes.Interface, key str
 			Namespace: SystemNamespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "suparship",
-				"suparship.io/type":            "onepassword-connect-token-stash",
-				"suparship.io/key":             key,
+				"suparship.io/type":            "cluster-credential-stash",
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{connectTokenStashKey: token},
+		Data: map[string][]byte{clusterCredentialStashKey: token},
 	}
 
 	existing, err := secrets.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		if _, createErr := secrets.Create(ctx, desired, metav1.CreateOptions{}); createErr != nil {
-			return fmt.Errorf("create connect-token stash: %w", createErr)
+			return fmt.Errorf("create credential stash: %w", createErr)
 		}
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("get connect-token stash: %w", err)
+		return fmt.Errorf("get credential stash: %w", err)
 	}
 	desired.ResourceVersion = existing.ResourceVersion
 	if _, updateErr := secrets.Update(ctx, desired, metav1.UpdateOptions{}); updateErr != nil {
-		return fmt.Errorf("update connect-token stash: %w", updateErr)
+		return fmt.Errorf("update credential stash: %w", updateErr)
 	}
 	return nil
 }
 
-// LoadConnectToken returns the plaintext Connect token from the
-// suparship-system stash under the given key, or (nil, nil) when no
-// stash exists. The not-found case is intentionally not an error —
-// callers treat it as "operator never pasted a token for this cluster"
-// and skip it with a friendly log message.
-func LoadConnectToken(ctx context.Context, client kubernetes.Interface, key string) ([]byte, error) {
-	sec, err := client.CoreV1().Secrets(SystemNamespace).Get(ctx, ConnectTokenStashName(key), metav1.GetOptions{})
+// LoadClusterCredential returns the plaintext credential from the
+// suparship-system stash Secret, or (nil, nil) when no stash exists. The
+// not-found case is intentionally not an error — callers treat it as
+// "operator never pasted a token for this cluster" and skip it with a
+// friendly log message.
+func LoadClusterCredential(ctx context.Context, client kubernetes.Interface, name string) ([]byte, error) {
+	if name == "" {
+		return nil, nil
+	}
+	sec, err := client.CoreV1().Secrets(SystemNamespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get connect-token stash %q: %w", key, err)
+		return nil, fmt.Errorf("get credential stash %q: %w", name, err)
 	}
-	return sec.Data[connectTokenStashKey], nil
+	return sec.Data[clusterCredentialStashKey], nil
 }
 
-// DeleteConnectToken removes the stash under the given key. Called when
-// an operator removes a cluster so we don't leak a token the platform
-// no longer manages. Not-found is non-error (the stash may already be
-// gone).
-func DeleteConnectToken(ctx context.Context, client kubernetes.Interface, key string) error {
-	err := client.CoreV1().Secrets(SystemNamespace).Delete(ctx, ConnectTokenStashName(key), metav1.DeleteOptions{})
+// DeleteClusterCredential removes the stash Secret by name. Called when an
+// operator removes a cluster so we don't leak a credential the platform no
+// longer manages. Not-found is non-error (the stash may already be gone).
+func DeleteClusterCredential(ctx context.Context, client kubernetes.Interface, name string) error {
+	if name == "" {
+		return nil
+	}
+	err := client.CoreV1().Secrets(SystemNamespace).Delete(ctx, name, metav1.DeleteOptions{})
 	if err == nil || apierrors.IsNotFound(err) {
 		return nil
 	}
-	return fmt.Errorf("delete connect-token stash %q: %w", key, err)
+	return fmt.Errorf("delete credential stash %q: %w", name, err)
 }

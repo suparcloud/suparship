@@ -10,14 +10,15 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
-func TestStashConnectToken_CreateThenUpdate(t *testing.T) {
+func TestStashClusterCredential_CreateThenUpdate(t *testing.T) {
 	client := fake.NewClientset()
 	ctx := context.Background()
+	name := secrets.ConnectTokenStashName("staging")
 
-	if err := secrets.StashConnectToken(ctx, client, "staging", []byte("first")); err != nil {
+	if err := secrets.StashClusterCredential(ctx, client, name, []byte("first")); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	got, err := secrets.LoadConnectToken(ctx, client, "staging")
+	got, err := secrets.LoadClusterCredential(ctx, client, name)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -26,18 +27,18 @@ func TestStashConnectToken_CreateThenUpdate(t *testing.T) {
 	}
 
 	// Rotate.
-	if err := secrets.StashConnectToken(ctx, client, "staging", []byte("second")); err != nil {
+	if err := secrets.StashClusterCredential(ctx, client, name, []byte("second")); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
-	got, _ = secrets.LoadConnectToken(ctx, client, "staging")
+	got, _ = secrets.LoadClusterCredential(ctx, client, name)
 	if string(got) != "second" {
 		t.Errorf("rotated load = %q, want second", got)
 	}
 }
 
-func TestLoadConnectToken_MissingIsNotError(t *testing.T) {
+func TestLoadClusterCredential_MissingIsNotError(t *testing.T) {
 	client := fake.NewClientset()
-	got, err := secrets.LoadConnectToken(context.Background(), client, "never-stashed")
+	got, err := secrets.LoadClusterCredential(context.Background(), client, "never-stashed")
 	if err != nil {
 		t.Fatalf("missing stash should not error, got: %v", err)
 	}
@@ -46,31 +47,60 @@ func TestLoadConnectToken_MissingIsNotError(t *testing.T) {
 	}
 }
 
-func TestDeleteConnectToken_IdempotentOnMissing(t *testing.T) {
+func TestDeleteClusterCredential_IdempotentOnMissing(t *testing.T) {
 	client := fake.NewClientset()
-	if err := secrets.DeleteConnectToken(context.Background(), client, "never-stashed"); err != nil {
+	if err := secrets.DeleteClusterCredential(context.Background(), client, "never-stashed"); err != nil {
 		t.Fatalf("delete on missing should be no-op, got: %v", err)
 	}
 }
 
 func TestStash_LabelsForDiscovery(t *testing.T) {
 	client := fake.NewClientset()
-	key := secrets.ClusterStashKey("prod-eu")
-	if err := secrets.StashConnectToken(context.Background(), client, key, []byte("x")); err != nil {
+	name := secrets.ConnectTokenStashName(secrets.ClusterStashKey("prod-eu"))
+	if err := secrets.StashClusterCredential(context.Background(), client, name, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	sec, err := client.CoreV1().Secrets("suparship-system").Get(context.Background(),
-		secrets.ConnectTokenStashName(key), metav1.GetOptions{})
+	sec, err := client.CoreV1().Secrets("suparship-system").Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Stash carries the type label so an operator inheriting the
-	// platform can `kubectl get secrets -n suparship-system -l
-	// suparship.io/type=onepassword-connect-token-stash` to find them all.
-	if sec.Labels["suparship.io/type"] != "onepassword-connect-token-stash" {
-		t.Errorf("missing type label: %v", sec.Labels)
+	// Stash carries the type label so an operator inheriting the platform can
+	// `kubectl get secrets -n suparship-system -l
+	// suparship.io/type=cluster-credential-stash` to find them all, whichever
+	// backend wrote them.
+	if sec.Labels["suparship.io/type"] != "cluster-credential-stash" {
+		t.Errorf("stash label = %q", sec.Labels["suparship.io/type"])
 	}
-	if sec.Labels["suparship.io/key"] != key {
-		t.Errorf("missing key label: %v", sec.Labels)
+}
+
+// The two backends' stash names must never alias — a backend switch that
+// resealed the previous backend's credential into the new backend's store
+// would publish a working-looking ClusterSecretStore with a token for the
+// wrong system.
+func TestClusterStashSecretName_BackendQualified(t *testing.T) {
+	op := secrets.BackendConfig{Type: secrets.Backend1Password}
+	hv := secrets.BackendConfig{Type: secrets.BackendVault}
+	k8s := secrets.BackendConfig{Type: secrets.BackendK8s}
+
+	opName := op.ClusterStashSecretName("eu-1")
+	hvName := hv.ClusterStashSecretName("eu-1")
+	if opName == "" || hvName == "" {
+		t.Fatalf("credentialed backends must have stash names; got %q, %q", opName, hvName)
+	}
+	if opName == hvName {
+		t.Errorf("stash names alias across backends: %q", opName)
+	}
+	if got := k8s.ClusterStashSecretName("eu-1"); got != "" {
+		t.Errorf("k8s backend has no per-cluster credential, stash name = %q", got)
+	}
+
+	// A credential stashed under one backend is invisible to the other.
+	client := fake.NewClientset()
+	ctx := context.Background()
+	if err := secrets.StashClusterCredential(ctx, client, opName, []byte("op-token")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := secrets.LoadClusterCredential(ctx, client, hvName); got != nil {
+		t.Errorf("vault stash read the 1Password credential: %q", got)
 	}
 }

@@ -26,6 +26,7 @@ import (
 type SecretBackendDTO struct {
 	Type        string                     `json:"type"`
 	OnePassword *secrets.OnePasswordConfig `json:"onePassword,omitempty"`
+	Vault       *secrets.HCVaultConfig     `json:"vault,omitempty"`
 }
 
 // SecretKeyDTO is one entry in the key-only list returned by GET .../secrets.
@@ -94,11 +95,40 @@ type secretsHandler struct {
 	logger          *slog.Logger
 	saTokenStore    SATokenStore
 	saClientFactory SAClientFactory
+	// vaultTokenStore persists suparship's HashiCorp Vault write token; the
+	// prober validates an (org vault config, token) pair by dialing Vault.
+	// Both nil in fake mode — the paste endpoint then stores without probing.
+	vaultTokenStore SATokenStore
+	vaultProber     func(ctx context.Context, cfg secrets.HCVaultConfig, token string) error
 	clusterStore    domain.ClusterStore
 	certCache       seal.CertCache
 	sealPublisher   SealedTokenPublisher
 	clusterPool     sealClientPool
 	kubeClient      kubernetes.Interface
+	// onBackendChanged, when set, is invoked (in the background) after the org's
+	// secret backend TYPE changes.
+	//
+	// Every app's ExternalSecret embeds choices the backend makes: which
+	// ClusterSecretStore it names, and for Vault whether the remoteRef key carries
+	// its container path. Those are fixed at publish time, so without a
+	// re-publish a switch leaves every app pointing at the previous backend's
+	// store — which on the new backend does not exist, and ESO reports only
+	// "unable to validate store". Wired to republishAllApps in cmd/suparship;
+	// nil disables (fake mode, tests).
+	onBackendChanged func(ctx context.Context, reason string)
+}
+
+// backendTypeChangedAsync re-publishes every app in the background when the
+// backend type actually moved. Best-effort and fire-and-forget, matching
+// resealAllClustersAsync: the org write has already succeeded, and a publish
+// failure must not fail the request that changed the setting.
+func (h *secretsHandler) backendTypeChangedAsync(from, to secrets.BackendType, reason string) {
+	if h.onBackendChanged == nil || from == to {
+		return
+	}
+	h.logger.Info("secret backend changed — re-publishing apps so their ExternalSecrets name the new backend's store",
+		"from", from, "to", to, "reason", reason)
+	go h.onBackendChanged(context.Background(), reason)
 }
 
 // ── Org backend config ────────────────────────────────────────────────────────
@@ -136,10 +166,14 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 	// when the request omits them (so switching backends doesn't lose config and
 	// re-selecting a backend reloads it). ExternalSecrets (backend-independent) is
 	// likewise preserved.
+	prevType := org.SecretBackend.Effective()
 	newCfg := org.SecretBackend
 	newCfg.Type = bt
 	if dto.OnePassword != nil {
 		newCfg.OnePassword = dto.OnePassword
+	}
+	if dto.Vault != nil {
+		newCfg.Vault = dto.Vault
 	}
 	if err := newCfg.Validate(); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -160,6 +194,8 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 	// Config changes (e.g. the org-level Connect endpoint) are baked into each
 	// cluster's unified store — republish them best-effort in the background.
 	h.resealAllClustersAsync("backend-config-updated")
+	// A type change additionally invalidates every app's ExternalSecret.
+	h.backendTypeChangedAsync(prevType, newCfg.Effective(), "backend-type-changed")
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -182,6 +218,7 @@ func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *h
 	// preserved — switching the active backend (e.g. to k8s) sends only {type},
 	// and the previously configured backend's settings (1Password) must survive so
 	// re-selecting it reloads its config. JSON null still explicitly clears a field.
+	prevType := org.SecretBackend.Effective()
 	cfg := org.SecretBackend
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
@@ -206,6 +243,7 @@ func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *h
 	// Config changes (e.g. the org-level Connect endpoint) are baked into each
 	// cluster's unified store — republish them best-effort in the background.
 	h.resealAllClustersAsync("backend-config-updated")
+	h.backendTypeChangedAsync(prevType, cfg.Effective(), "backend-type-changed")
 	writeJSON(w, http.StatusOK, cfg)
 }
 
@@ -253,6 +291,46 @@ func (h *secretsHandler) handlePostSAToken(w http.ResponseWriter, r *http.Reques
 		}
 		writeJSON(w, http.StatusOK, SATokenResponse{Valid: true, VaultCount: count})
 		return
+	}
+	writeJSON(w, http.StatusOK, SATokenResponse{Valid: true})
+}
+
+// handlePostVaultToken saves suparship's HashiCorp Vault write token and
+// validates it against the org's configured Vault (address/mount), mirroring
+// the SA-token paste flow. The response reuses SATokenResponse's shape
+// (valid/error); VaultCount is meaningless for Vault and left zero.
+func (h *secretsHandler) handlePostVaultToken(w http.ResponseWriter, r *http.Request) {
+	var req SATokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	if req.Token == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "token is required"})
+		return
+	}
+	org, err := h.orgStore.GetOrg(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
+		return
+	}
+	vcfg := org.SecretBackend.Vault
+	if vcfg == nil || vcfg.Address == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "set the Vault server address first (Settings → Secrets Backend)"})
+		return
+	}
+	if h.vaultTokenStore != nil {
+		if err := h.vaultTokenStore.SaveToken(r.Context(), req.Token); err != nil {
+			h.logger.Error("failed to save vault token", "err", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist token"})
+			return
+		}
+	}
+	if h.vaultProber != nil {
+		if err := h.vaultProber(r.Context(), *vcfg, req.Token); err != nil {
+			writeJSON(w, http.StatusOK, SATokenResponse{Valid: false, Error: err.Error()})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, SATokenResponse{Valid: true})
 }
@@ -482,17 +560,29 @@ func (h *secretsHandler) handleUnregisterEnvVault(w http.ResponseWriter, r *http
 // ── Per-cluster Connect token (1Password) ───────────────────────────────────
 
 // SetClusterConnectTokenRequest is the JSON body for
-// POST .../secret-backend/clusters/{cluster}/connect-token. The token must
-// have access to every vault the cluster reads: the global vault plus the env
-// vaults of the environments bound to this cluster.
+// POST .../secret-backend/clusters/{cluster}/connect-token — the active
+// backend's per-cluster credential. For 1Password the token must have access
+// to every vault the cluster reads (global + the env vaults of its bound
+// environments); for Vault it is a Vault token with read access to the
+// suparship mount. `token` is the backend-neutral field; `connectToken` is
+// its pre-Vault alias, kept for wire compatibility.
 type SetClusterConnectTokenRequest struct {
-	ConnectToken    string `json:"connectToken"`
+	Token           string `json:"token,omitempty"`
+	ConnectToken    string `json:"connectToken,omitempty"`
 	ConnectEndpoint string `json:"connectEndpoint,omitempty"`
 }
 
-// handleSetClusterConnectToken stashes the cluster's single Connect token,
-// seals it with the cluster's cert, and publishes the unified
-// ClusterSecretStore (suparship-store) listing every vault the cluster reads.
+// credential returns the pasted credential, whichever field carried it.
+func (r SetClusterConnectTokenRequest) credential() string {
+	if r.Token != "" {
+		return r.Token
+	}
+	return r.ConnectToken
+}
+
+// handleSetClusterConnectToken stashes the cluster's single per-cluster
+// credential, seals it with the cluster's cert, and publishes the unified
+// ClusterSecretStore (suparship-store) it authenticates.
 func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *http.Request) {
 	clusterName := r.PathValue("cluster")
 	var req SetClusterConnectTokenRequest
@@ -500,8 +590,8 @@ func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
 		return
 	}
-	if req.ConnectToken == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "connectToken is required"})
+	if req.credential() == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "token is required"})
 		return
 	}
 	req.ConnectEndpoint = strings.TrimSpace(req.ConnectEndpoint)
@@ -515,8 +605,8 @@ func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org"})
 		return
 	}
-	if org.SecretBackend.Effective() != secrets.Backend1Password {
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "connect tokens require the 1Password backend"})
+	if !org.SecretBackend.UsesPerClusterCredentials() {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "per-cluster tokens require the 1Password or Vault backend"})
 		return
 	}
 	if h.sealPublisher == nil {
@@ -534,8 +624,10 @@ func (h *secretsHandler) handleSetClusterConnectToken(w http.ResponseWriter, r *
 
 	// Stash the token so later vault/binding changes can re-seal without a
 	// re-paste. Best-effort — sealing below still uses the in-memory token.
+	// The stash name is backend-qualified (see ClusterStashSecretName) so the
+	// two backends' credentials never alias.
 	if h.kubeClient != nil {
-		if err := secrets.StashConnectToken(ctx, h.kubeClient, secrets.ClusterStashKey(clusterName), []byte(req.ConnectToken)); err != nil {
+		if err := secrets.StashClusterCredential(ctx, h.kubeClient, org.SecretBackend.ClusterStashSecretName(clusterName), []byte(req.credential())); err != nil {
 			h.logger.Warn("cluster token: stash failed (re-seal degraded)", "cluster", clusterName, "error", err)
 		}
 	}
@@ -643,44 +735,60 @@ func (h *secretsHandler) sealCluster(ctx context.Context, org *rbac.Org, cluster
 		return fmt.Errorf("cluster %q has no apiServer", clusterName)
 	}
 
-	vaultIDs := clusterVaultIDs(org, clusterName)
-	if len(vaultIDs) == 0 {
-		return fmt.Errorf("no vaults registered for cluster %q (set the global vault / register env vaults first)", clusterName)
+	params := gitops.ClusterSealParams{
+		ClusterName:       clusterName,
+		ArgoCDDestination: cluster.APIServer,
+		ESONamespace:      cluster.EffectiveESONamespace(),
+		Backend:           org.SecretBackend.Effective(),
+	}
+	switch org.SecretBackend.Effective() {
+	case secrets.BackendVault:
+		v := org.SecretBackend.Vault
+		if v == nil || v.Address == "" {
+			return fmt.Errorf("vault backend has no server address configured")
+		}
+		params.Vault = gitops.VaultStoreConfig{
+			Address:   v.Address,
+			Mount:     v.EffectiveMount(),
+			Namespace: v.Namespace,
+			CACertPEM: v.CACert,
+		}
+	default: // 1Password
+		vaultIDs := clusterVaultIDs(org, clusterName)
+		if len(vaultIDs) == 0 {
+			return fmt.Errorf("no vaults registered for cluster %q (set the global vault / register env vaults first)", clusterName)
+		}
+		params.VaultIDs = vaultIDs
+		// Connect endpoint precedence: per-cluster override > org-level
+		// setting > built-in default (resolved by the YAML builder when empty).
+		if tokenRef != nil {
+			params.ConnectEndpoint = tokenRef.ConnectEndpoint
+		}
+		if params.ConnectEndpoint == "" && org.SecretBackend.OnePassword != nil {
+			params.ConnectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
+		}
 	}
 
+	// The stash name is backend-qualified, so a backend switch can never seal
+	// the PREVIOUS backend's credential into the new backend's store.
 	var token []byte
 	if h.kubeClient != nil {
-		if t, err := secrets.LoadConnectToken(ctx, h.kubeClient, secrets.ClusterStashKey(clusterName)); err == nil {
+		if t, err := secrets.LoadClusterCredential(ctx, h.kubeClient, org.SecretBackend.ClusterStashSecretName(clusterName)); err == nil {
 			token = t
 		}
 	}
 	if len(token) == 0 {
-		return fmt.Errorf("no Connect token pasted for cluster %q yet", clusterName)
+		return fmt.Errorf("no %s token pasted for cluster %q yet", org.SecretBackend.Effective(), clusterName)
 	}
+	params.Token = token
 
 	cert, err := h.fetchFreshCert(ctx, clusterName)
 	if err != nil {
 		return fmt.Errorf("fetch sealing cert for %q: %w", clusterName, err)
 	}
+	params.Cert = cert
 
-	// Connect endpoint precedence: per-cluster override > org-level setting >
-	// built-in default (resolved by the YAML builder when empty).
-	var connectEndpoint string
-	if tokenRef != nil {
-		connectEndpoint = tokenRef.ConnectEndpoint
-	}
-	if connectEndpoint == "" && org.SecretBackend.OnePassword != nil {
-		connectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
-	}
-	return h.sealPublisher.PublishClusterSecretStore(ctx, gitops.ClusterSealParams{
-		ClusterName:       clusterName,
-		ArgoCDDestination: cluster.APIServer,
-		ESONamespace:      cluster.EffectiveESONamespace(),
-		Cert:              cert,
-		Token:             token,
-		VaultIDs:          vaultIDs,
-		ConnectEndpoint:   connectEndpoint,
-	})
+	return h.sealPublisher.PublishClusterSecretStore(ctx, params)
 }
 
 // resealAllClusters republishes every registered cluster's unified store —
@@ -736,7 +844,13 @@ func (h *secretsHandler) resealAllClustersAsync(reason string) {
 		if err != nil || org == nil {
 			return
 		}
-		if org.SecretBackend.Effective() != secrets.Backend1Password {
+		// Both credentialed backends publish a per-cluster ClusterSecretStore that
+		// bakes in org-level config — the Connect endpoint for 1Password, the
+		// server address and mount for Vault — so both must be re-published when
+		// that config changes. Gating on 1Password alone left Vault stores frozen
+		// at whatever address they were first sealed with, so changing the address
+		// updated the org but not the manifest any cluster actually reads.
+		if !org.SecretBackend.UsesPerClusterCredentials() {
 			return
 		}
 		h.resealAllClusters(ctx, org, reason)

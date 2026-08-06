@@ -57,6 +57,7 @@ When everything is green:
 | ArgoCD | <http://localhost:8081> | `admin` / (see below) |
 | Gitea | <http://localhost:3000> | `gitops` / `gitops-dev-only` |
 | Kargo UI / API | <http://localhost:8083> | `admin` / `devpass` |
+| Vault (only with `task up:vault`) | <http://localhost:8200> | root token: see [below](#optional-hashicorp-vault-backend-task-upvault) |
 
 > ArgoCD admin password:
 > `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`
@@ -148,13 +149,77 @@ boundary now provides the isolation the `-{env}` suffix was compensating for.
 touches a workload cluster, so it is already fully testable on one cluster. What
 differs here is only where the resulting Application lands.
 
-> **Known gap.** The `k8s` secret backend is hub-only: `_infra/secret-stores/`
-> syncs to the tooling cluster, so a remote workload cluster never receives its
-> `suparship-store-*` and app ExternalSecrets there will dangle. The 1Password
-> backend does publish per-cluster stores. Surfacing this is part of the point of
-> running multi-cluster locally.
+> **Known gap (and why `k8s` is deprecated).** The `k8s` secret backend is
+> hub-only: `_infra/secret-stores/` syncs to the tooling cluster, so a remote
+> workload cluster never receives its `suparship-store-*` and app
+> ExternalSecrets there will dangle. The 1Password and Vault backends publish
+> per-cluster stores through the seal pipeline and reach remote clusters
+> correctly — `tilt up -- --vault --multi` is the end-to-end test of exactly
+> that. Surfacing the contrast is part of the point of running multi-cluster
+> locally.
 
 Tear-down removes all three: `task cluster:delete`.
+
+---
+
+## Optional: HashiCorp Vault backend (`task up:vault`)
+
+For working on the `vault` secrets backend. Adds a Vault plus a
+`vault-bootstrap` resource that initialises and unseals it, enables the
+`suparship` KV v2 mount, creates the write-token Secret
+(`suparship-vault-token` in `suparship-system`) and ESO's read-token Secret
+(`vault-token` in `external-secrets`), then switches the org's secret backend to
+vault through `PUT /org/secret-backend`.
+
+**The data persists.** Vault runs standalone with file storage on a PVC, so
+secrets you enter survive a pod restart, a `tilt down`/`tilt up`, and image
+rebuilds. (It used to run in dev mode, where storage was in-memory — a pod
+restart took not just your values but the KV mount itself, which made the
+backend tedious to work on.) State still dies with the cluster, since the PVC is
+hostPath-backed on the kind node.
+
+**After a Vault pod restart it comes back SEALED.** That is the cost of
+persistence: dev-mode Vault auto-unsealed, a real storage backend does not.
+Re-trigger `vault-bootstrap` in the Tilt UI (or re-run the script) — it unseals
+from the stashed key and no-ops everything already in place. Nothing unseals it
+automatically, because that would mean handing the unseal key to an in-cluster
+controller, which isn't worth building for a dev loop.
+
+The root token is generated at init, not fixed. Both it and the 1-of-1 unseal
+key are stashed in `vault/vault-dev-keys`; the bootstrap output prints the token:
+
+```bash
+kubectl --context kind-suparship-dev -n vault get secret vault-dev-keys \
+  -o jsonpath='{.data.root-token}' | base64 -d
+```
+
+DEV ONLY, and not just the 1-of-1 key: that one root token is reused as both
+suparship's write token and ESO's read token, so nothing here is
+least-privilege. A real install mints per-scope read policies — see
+[secrets.md](../secrets.md#least-privilege-vault).
+
+Start over with a clean Vault:
+
+```bash
+kubectl --context kind-suparship-dev -n vault delete pvc data-vault-0 secret vault-dev-keys
+kubectl --context kind-suparship-dev -n vault delete pod vault-0
+# then re-trigger vault-bootstrap
+```
+
+The org switch goes through the API on purpose: the handler *merges* onto the
+stored config, so it is safe to run after `seed`/`seed-multi` rewrite the org
+ConfigMap wholesale. If you re-run `task seed` by hand afterwards, re-trigger
+`vault-bootstrap` in the Tilt UI to restore the backend selection.
+
+Composes with multi-cluster: `tilt up -- --vault --multi` (or set
+`SUPARSHIP_VAULT=1`). Poke at it directly:
+
+```bash
+TOKEN=$(kubectl --context kind-suparship-dev -n vault get secret vault-dev-keys \
+  -o jsonpath='{.data.root-token}' | base64 -d)
+kubectl --context kind-suparship-dev -n vault exec vault-0 -- \
+  env VAULT_TOKEN="$TOKEN" vault kv list suparship/   # suparship's containers in the mount
+```
 
 ---
 

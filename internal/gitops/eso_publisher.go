@@ -2,6 +2,7 @@ package gitops
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -160,6 +161,71 @@ spec:
 	return sb.String()
 }
 
+// VaultStoreConfig captures the single per-cluster ClusterSecretStore for the
+// HashiCorp Vault backend: the fixed name (secrets.UnifiedStoreName, shared
+// with 1Password so app ExternalSecrets stay cluster-agnostic), the server
+// address + KV v2 mount, and the cluster's one sealed Vault token.
+type VaultStoreConfig struct {
+	// Address is the Vault server URL, reachable FROM the workload cluster.
+	Address string
+	// Mount is the KV v2 mount. Defaults to secrets.DefaultVaultMount.
+	Mount string
+	// Namespace is the Vault Enterprise namespace (optional).
+	Namespace string
+	// CACertPEM is the PEM CA bundle when Vault serves a private CA (optional).
+	// Rendered base64-encoded into spec.provider.vault.caBundle.
+	CACertPEM string
+	// ESONamespace is the namespace on the target cluster where the sealed
+	// Vault-token Secret lives. Defaults to "external-secrets" when empty.
+	ESONamespace string
+	// Branding stamps platform identity into the generated labels.
+	Branding branding.Config
+}
+
+// BuildVaultClusterSecretStoreYAML renders the per-cluster ClusterSecretStore
+// for the Vault backend. Same fixed name and per-cluster publishing path as the
+// 1Password unified store; only the provider stanza differs. Auth is the
+// cluster's one sealed Vault token (secrets.VaultTokenClusterSecretName),
+// delivered through the same seal-and-publish pipeline as Connect tokens.
+func BuildVaultClusterSecretStoreYAML(cfg VaultStoreConfig) string {
+	esoNS := cfg.ESONamespace
+	if esoNS == "" {
+		esoNS = secrets.OnePasswordRemoteNamespace
+	}
+	mount := cfg.Mount
+	if mount == "" {
+		mount = secrets.DefaultVaultMount
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: %s
+  labels:
+%s
+spec:
+  provider:
+    vault:
+      server: %s
+      path: %s
+      version: v2
+`, secrets.UnifiedStoreName(), branding.LabelsYAML(cfg.Branding.ManagedByLabels(), 4), cfg.Address, mount))
+	if cfg.Namespace != "" {
+		sb.WriteString(fmt.Sprintf("      namespace: %s\n", cfg.Namespace))
+	}
+	if cfg.CACertPEM != "" {
+		sb.WriteString(fmt.Sprintf("      caBundle: %s\n", base64.StdEncoding.EncodeToString([]byte(cfg.CACertPEM))))
+	}
+	sb.WriteString(fmt.Sprintf(`      auth:
+        tokenSecretRef:
+          name: %s
+          key: %s
+          namespace: %s
+`, secrets.VaultTokenClusterSecretName, secrets.VaultTokenSecretKey, esoNS))
+	return sb.String()
+}
+
 // BuildExternalSecretYAML renders the single merged ExternalSecret. dataFrom
 // is applied in Items order (later overwrites earlier), and each item emits a
 // per-entry sourceRef.storeRef when its store differs from the default
@@ -301,11 +367,17 @@ type WorkloadExternalSecretParams struct {
 	// PreviewName is the preview (PR) name, used to key the per-PR override item.
 	// Only consulted when IsPreview is true.
 	PreviewName string
-	// UnifiedStore selects the 1Password layout: every item extracts from the
-	// single per-cluster store (secrets.UnifiedStoreName), so no per-entry
-	// sourceRef is emitted. False = k8s layout with per-vault stores.
-	UnifiedStore bool
-	Branding     branding.Config
+	// Backend selects the store/key layout ("" = k8s):
+	//   k8s        — per-vault stores; bare item names; per-entry sourceRef
+	//                when an item's store differs from the default.
+	//   1password  — the single per-cluster store (secrets.UnifiedStoreName);
+	//                bare item names (the store's vaults map resolves them).
+	//   vault      — the single per-cluster store; item keys are FULL KV v2
+	//                paths ({VaultName(scope)}/{ItemName(...)}), because one
+	//                mount holds every container and the path is the only
+	//                thing distinguishing them.
+	Backend  secrets.BackendType
+	Branding branding.Config
 	// RefreshInterval is the org-configured ExternalSecret refresh interval.
 	// Empty falls back to secrets.DefaultRefreshInterval at render time.
 	RefreshInterval string
@@ -327,10 +399,10 @@ type WorkloadExternalSecretParams struct {
 // cluster items live in the env vault and are included only when the env is
 // bound to a cluster.
 //
-// Store wiring depends on the backend: with UnifiedStore (1Password) every
-// item extracts from the single per-cluster store, so no sourceRef is emitted;
-// otherwise (k8s) each item carries its scope's per-vault store and non-global
-// items emit a per-entry sourceRef.
+// Store wiring depends on the backend: 1Password and Vault extract every item
+// from the single per-cluster store, so no sourceRef is emitted (Vault
+// additionally path-qualifies each item key); k8s gives each item its scope's
+// per-vault store and non-global items emit a per-entry sourceRef.
 func BuildAppExternalSecret(p WorkloadExternalSecretParams) *ESOExternalSecretConfig {
 	items := buildScopeItems(p)
 	if len(items) == 0 {
@@ -363,10 +435,25 @@ type scopeItem struct {
 }
 
 func storeForScope(p WorkloadExternalSecretParams, scope secrets.Scope) string {
-	if p.UnifiedStore {
+	switch p.Backend {
+	case secrets.Backend1Password, secrets.BackendVault:
 		return secrets.UnifiedStoreName()
+	default:
+		return secrets.StoreName(scope)
 	}
-	return secrets.StoreName(scope)
+}
+
+// itemKeyFor renders the remoteRef key for an item name in a scope. Only the
+// Vault backend qualifies it: one KV v2 mount holds every container, so the
+// key must carry the container path. Getting this wrong is silent — ESO would
+// look up a bare name at the mount root, find nothing, and the ExternalSecret
+// would sit NotReady — so the exact format is pinned by tests on both this
+// package and the hcvault store (which writes the same path).
+func itemKeyFor(p WorkloadExternalSecretParams, scope secrets.Scope, name string) string {
+	if p.Backend == secrets.BackendVault {
+		return secrets.VaultName(scope) + "/" + name
+	}
+	return name
 }
 
 // buildScopeItems returns the present (scope, tier) vault items in precedence
@@ -375,13 +462,13 @@ func storeForScope(p WorkloadExternalSecretParams, scope secrets.Scope) string {
 func buildScopeItems(p WorkloadExternalSecretParams) []scopeItem {
 	var items []scopeItem
 	sharedItem := func(scope secrets.Scope, keys []string) {
-		items = append(items, scopeItem{ref: ESOItemRef{Key: secrets.SharedItemName(scope), StoreName: storeForScope(p, scope)}, keys: keys})
+		items = append(items, scopeItem{ref: ESOItemRef{Key: itemKeyFor(p, scope, secrets.SharedItemName(scope)), StoreName: storeForScope(p, scope)}, keys: keys})
 	}
 	appItem := func(scope secrets.Scope, keys []string) {
 		// App-tier items are project-qualified (WithProject) so a same-named app
 		// in another project never collides on the shared org/env vault. StoreName
 		// keys on Kind only, so the un-tagged scope still selects the right store.
-		items = append(items, scopeItem{ref: ESOItemRef{Key: secrets.AppItemName(scope.WithProject(p.Project), p.App), StoreName: storeForScope(p, scope)}, keys: keys})
+		items = append(items, scopeItem{ref: ESOItemRef{Key: itemKeyFor(p, scope, secrets.AppItemName(scope.WithProject(p.Project), p.App)), StoreName: storeForScope(p, scope)}, keys: keys})
 	}
 	hasProject := p.Project != ""
 	hasStack := p.Stack != ""

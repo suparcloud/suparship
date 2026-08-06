@@ -167,7 +167,7 @@ func TestEnrichPubEnv_AlwaysEnsuresBaselineAppSecret(t *testing.T) {
 		t.Fatal("expected GlobalApp presence forced true for an app with no secrets")
 	}
 	es := gitops.BuildAppExternalSecret(gitops.WorkloadExternalSecretParams{
-		App: "api", Namespace: "ns", Env: "staging", Presence: pub.ScopeKeys, UnifiedStore: true,
+		App: "api", Namespace: "ns", Env: "staging", Presence: pub.ScopeKeys, Backend: secrets.Backend1Password,
 	})
 	if es == nil {
 		t.Fatal("expected a non-nil ExternalSecret for an app with no secrets")

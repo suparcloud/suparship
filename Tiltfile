@@ -33,12 +33,27 @@ if k8s_context() != EXPECTED_CONTEXT:
 # ── Config: optional ingress + *.localhost routing, optional workload clusters ─
 config.define_bool('ingress')
 config.define_bool('multi')
+config.define_bool('vault')
 cfg = config.parse()
 INGRESS = cfg.get('ingress', False) or os.getenv('SUPARSHIP_INGRESS') == '1'
 # MULTI adds two kind WORKLOAD clusters (kind-staging, kind-prod) and rebinds the
 # seeded environments onto them, so the tooling/workload split is real. Off by
 # default: it costs a couple of GiB, and nothing about UI or API work needs it.
 MULTI = cfg.get('multi', False) or os.getenv('SUPARSHIP_MULTI') == '1'
+# VAULT adds a HashiCorp Vault and switches the org's secret backend to it, for
+# working on the vault secrets backend. Off by default. Composes with --multi.
+#
+# The Vault it brings up PERSISTS: standalone mode with file storage on a PVC, so
+# secrets you enter survive a pod restart, a `tilt down`/`tilt up`, and an image
+# rebuild. (Dev-mode Vault stored everything in memory, which meant the KV mount
+# itself vanished with the pod.) State still dies with the cluster, since the PVC
+# is hostPath-backed on the kind node — `kind delete cluster` is the reset, or
+# delete the PVC + pod for a fresh init.
+#
+# The cost of persistence is that Vault is no longer auto-unsealed: it comes up
+# uninitialised the first time and SEALED after every restart, so vault-bootstrap
+# does init + unseal (see hack/dev/vault-bootstrap.sh).
+VAULT = cfg.get('vault', False) or os.getenv('SUPARSHIP_VAULT') == '1'
 
 # Host-reachable Gitea URL the init script clones from.
 GITEA_HOST_URL = 'http://gitea.localhost:8880' if INGRESS else 'http://localhost:3000'
@@ -50,6 +65,8 @@ helm_repo('eso',        'https://charts.external-secrets.io', labels=['prereq'])
 helm_repo('mittwald',   'https://helm.mittwald.de', labels=['prereq'])
 helm_repo('stakater',   'https://stakater.github.io/stakater-charts', labels=['prereq'])
 helm_repo('gitea-charts', 'https://dl.gitea.com/charts', labels=['prereq'])
+if VAULT:
+    helm_repo('hashicorp', 'https://helm.releases.hashicorp.com', labels=['prereq'])
 
 # ── Namespaces (argocd before argocd install; suparship-system before app) ──
 # local_resource runs in the ambient shell, so --context is pinned explicitly:
@@ -158,6 +175,73 @@ local_resource(
     'eso-reader', cmd='hack/install-eso-rbac.sh',
     resource_deps=['external-secrets', 'namespaces'], labels=['prereq'],
 )
+
+# ── Optional: HashiCorp Vault secrets backend (`task up:vault`) ────────────
+# Standalone Vault with file storage on a PVC, so its data survives pod restarts
+# (see the VAULT comment above). The injector is disabled because suparship's
+# delivery path is ESO, not agent injection.
+#
+# Two deliberate departures from the usual helm_resource shape, both forced by
+# the fact that a persistent Vault starts sealed:
+#
+#   - NO --wait. The chart's readiness probe runs `vault status`, which exits
+#     non-zero while Vault is uninitialised or sealed, so the pod never becomes
+#     Ready and `helm install --wait` would sit there until it timed out. Tilt
+#     instead treats the resource as done when the install returns, and
+#     vault-bootstrap waits for the pod to be Running before init/unseal.
+#   - readinessProbe disabled. The chart's probe IS `vault status`, whose exit
+#     code is the seal status (0 unsealed, 2 sealed), so a sealed pod never goes
+#     Ready. vault-bootstrap gates on `resource_deps=['vault', ...]`, and Tilt
+#     resolves that on pod readiness — so leaving the probe on deadlocks the very
+#     step that would unseal it. bootstrap reaches Vault by `kubectl exec`, not
+#     through the Service, so it does not need the probe; and suparship/ESO only
+#     dial Vault after bootstrap has unsealed it.
+if VAULT:
+    # Clusters created before Vault became persistent have a storage-less
+    # StatefulSet, and the API forbids ADDING volumeClaimTemplates to an existing
+    # one — so `helm upgrade` fails outright and the vault resource goes red.
+    # Delete the incompatible StatefulSet first so helm recreates it with the
+    # volume. No-op on a fresh cluster and on every later run.
+    local_resource(
+        'vault-storage-migrate', cmd='hack/dev/vault-storage-migrate.sh',
+        labels=['prereq'],
+    )
+    helm_resource(
+        'vault', 'hashicorp/vault', namespace='vault',
+        flags=['--create-namespace', '--version=0.30.0',
+               '--set=server.standalone.enabled=true',
+               '--set=server.dataStorage.enabled=true',
+               '--set=server.dataStorage.size=1Gi',
+               '--set=server.readinessProbe.enabled=false',
+               '--set=injector.enabled=false',
+               '--timeout=5m0s'],
+        resource_deps=['hashicorp', 'vault-storage-migrate'],
+        port_forwards=['8200:8200'],  # http://localhost:8200
+        links=[link('http://localhost:8200', 'Vault UI (token: see vault-bootstrap logs)')],
+        labels=['prereq'],
+    )
+    # Init + unseal, then mount + token Secrets + org backend switch. Runs AFTER
+    # seed (and seed-multi in multi mode): both rewrite the org ConfigMap
+    # wholesale and would erase the backend selection, whereas this script goes
+    # through PUT /org/secret-backend, which merges. Re-trigger this resource if
+    # you ever re-run seed by hand.
+    #
+    # RE-TRIGGER IT AFTER A VAULT POD RESTART TOO. A persistent Vault comes back
+    # sealed, and nothing in the cluster unseals it automatically — that would
+    # mean handing the unseal key to a controller, which is not worth building
+    # for a dev loop. The script is idempotent: it unseals, notices the mount and
+    # Secrets already exist, and re-asserts the org backend.
+    _vault_bootstrap_deps = ['vault', 'external-secrets', 'suparship', 'seed']
+    if MULTI:
+        _vault_bootstrap_deps += ['seed-multi']
+    # SUPARSHIP_MULTI switches the org's Vault address to a NodePort on the
+    # tooling node's docker-network IP, so workload clusters can reach it —
+    # they cannot resolve the tooling cluster's Service DNS.
+    local_resource(
+        'vault-bootstrap', cmd='SUPARSHIP_MULTI=%s hack/dev/vault-bootstrap.sh' % ('1' if MULTI else '0'),
+        resource_deps=_vault_bootstrap_deps,
+        labels=['prereq'],
+    )
 
 # ── ConfigMap/Secret replication + reload ──────────────────────────────────
 helm_resource(
@@ -349,4 +433,6 @@ suparShip dev cluster is starting.  Tilt UI: http://localhost:10350
   ArgoCD        : http://localhost:8081
   Gitea         : http://localhost:3000       gitops / gitops-dev-only
   Kargo API     : https://localhost:8083
-%s""" % ("  Ingress ON: also at http://suparship.localhost:8880" if INGRESS else "  (run `task up:ingress` for *.localhost routing)"))
+%s%s""" % (
+    "  Vault         : http://localhost:8200       token: root (dev mode)\n" if VAULT else "",
+    "  Ingress ON: also at http://suparship.localhost:8880" if INGRESS else "  (run `task up:ingress` for *.localhost routing)"))

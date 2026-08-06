@@ -29,6 +29,7 @@ import {
   getSecretsBackend,
   updateSecretsBackend,
   saveSAToken,
+  saveVaultToken,
   listVaults,
   setGlobalVault,
   registerEnvVault,
@@ -40,10 +41,12 @@ import {
   listSharedEnvSecretKeys,
   upsertSharedEnvSecrets,
   deleteSharedEnvSecretKey,
+  getVaultPolicies,
 } from "../lib/secrets";
 import type {
   SecretBackendConfig,
   VaultInfo,
+  VaultPoliciesResponse,
 } from "../lib/secrets";
 import { listClusters } from "../lib/clusters";
 import type { Cluster } from "../lib/clusters";
@@ -1200,14 +1203,26 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
 
 const BACKEND_OPTIONS = [
   {
-    value: "k8s",
-    label: "Kubernetes Secrets",
-    description: "Native K8s Secrets in app namespaces (demo/default)",
+    value: "vault",
+    label: "HashiCorp Vault",
+    description:
+      "Vault KV via External Secrets Operator (open source, production)",
+    deprecated: false,
   },
   {
     value: "onepassword",
     label: "1Password",
     description: "1Password via External Secrets Operator (production)",
+    deprecated: false,
+  },
+  {
+    value: "k8s",
+    label: "Kubernetes Secrets (deprecated)",
+    description:
+      "Native K8s Secrets on the tooling cluster — demo only; cannot serve remote workload clusters. Migrate with `suparship secrets migrate`.",
+    // Deprecated: offered only when it is ALREADY the active backend, so
+    // existing installs keep working but nobody selects it fresh.
+    deprecated: true,
   },
 ];
 
@@ -1389,7 +1404,9 @@ function SecretsBackendSection() {
             {/* Provider selector */}
             <div className="space-y-2">
               <label className="text-xs font-medium text-gray-700">Provider</label>
-              {BACKEND_OPTIONS.map((opt) => (
+              {BACKEND_OPTIONS.filter(
+                (opt) => !opt.deprecated || config.type === opt.value,
+              ).map((opt) => (
                 <label
                   key={opt.value}
                   className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
@@ -1470,6 +1487,19 @@ function SecretsBackendSection() {
                 </span>
               </p>
             </div>
+
+            {/* HashiCorp Vault section */}
+            {config.type === "vault" && (
+              <VaultBackendPanel
+                config={config}
+                clusters={orgClusters}
+                orgEnvs={orgEnvs}
+                onConfigChanged={async () => {
+                  const updated = await getSecretsBackend();
+                  setConfig(updated);
+                }}
+              />
+            )}
 
             {/* 1Password section */}
             {config.type === "onepassword" && (
@@ -2049,22 +2079,225 @@ function PlatformVaultPicker({
 // ClusterSecretStore (suparship-store). Binding a new env to a cluster later
 // needs a re-issued token covering the new vault — re-paste it here.
 
+// VaultBackendPanel is the HashiCorp Vault configuration surface. Note what it
+// does NOT have compared with 1Password: no vault registration, no global-vault
+// pick — Vault containers are derived paths inside one KV v2 mount, so setup is
+// the address + mount, the write token, and one sealed token per cluster.
+function VaultBackendPanel({
+  config,
+  clusters,
+  orgEnvs,
+  onConfigChanged,
+}: {
+  config: SecretBackendConfig;
+  clusters: Cluster[];
+  orgEnvs: OrgEnvironment[];
+  onConfigChanged: () => Promise<void>;
+}) {
+  const vcfg = config.vault || {};
+  const [address, setAddress] = useState(vcfg.address || "");
+  const [mount, setMount] = useState(vcfg.mount || "");
+  const [namespace, setNamespace] = useState(vcfg.namespace || "");
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+
+  const [writeToken, setWriteToken] = useState("");
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const [tokenMsg, setTokenMsg] = useState<string | null>(null);
+
+  async function handleSaveConnection() {
+    setSaving(true);
+    setSaveMsg(null);
+    try {
+      await updateSecretsBackend({
+        type: "vault",
+        vault: {
+          ...vcfg,
+          address: address.trim(),
+          mount: mount.trim(),
+          namespace: namespace.trim(),
+        },
+      });
+      await onConfigChanged();
+      setSaveMsg("Saved.");
+    } catch (err) {
+      setSaveMsg(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveWriteToken() {
+    if (!writeToken.trim()) return;
+    setTokenBusy(true);
+    setTokenMsg(null);
+    try {
+      const res = await saveVaultToken(writeToken.trim());
+      if (res.valid) {
+        setTokenMsg("Token saved — connection to Vault verified.");
+        setWriteToken("");
+      } else {
+        setTokenMsg(res.error || "Token validation failed.");
+      }
+    } catch (err) {
+      setTokenMsg(err instanceof Error ? err.message : "Failed to save token");
+    } finally {
+      setTokenBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* Connection */}
+      <div className="space-y-2">
+        <label className="text-xs font-medium text-gray-700">
+          Vault connection
+        </label>
+        <p className="text-xs text-gray-500">
+          suparship stores every secret under one KV v2 mount; per-scope
+          containers (<code className="font-mono">suparship-secrets-global</code>
+          , <code className="font-mono">suparship-secrets-env-*</code>) are
+          derived paths inside it — nothing to register per environment. The
+          address must be reachable from the tooling cluster AND every workload
+          cluster.
+        </p>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <input
+            type="text"
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono sm:col-span-2"
+            placeholder="https://vault.example.com:8200"
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+          />
+          <input
+            type="text"
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+            placeholder="mount (default: suparship)"
+            value={mount}
+            onChange={(e) => setMount(e.target.value)}
+          />
+        </div>
+        <input
+          type="text"
+          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+          placeholder="Vault Enterprise namespace (optional)"
+          value={namespace}
+          onChange={(e) => setNamespace(e.target.value)}
+        />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleSaveConnection}
+            disabled={saving || !address.trim()}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+          >
+            {saving ? "Saving…" : "Save connection"}
+          </button>
+          {saveMsg && <span className="text-xs text-gray-500">{saveMsg}</span>}
+        </div>
+      </div>
+
+      {/* Write token */}
+      <div className="space-y-2">
+        <label className="text-xs font-medium text-gray-700">
+          suparship write token
+        </label>
+        <p className="text-xs text-gray-500">
+          The token suparship writes secret items with (needs create/update/
+          read/delete on the mount). Stored as K8s Secret{" "}
+          <code className="font-mono">suparship-vault-token</code>; pasting also
+          tests the connection. Never logged.
+        </p>
+        <div className="flex items-end gap-2">
+          <input
+            type="password"
+            className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
+            placeholder="hvs.…"
+            value={writeToken}
+            onChange={(e) => setWriteToken(e.target.value)}
+          />
+          <button
+            onClick={handleSaveWriteToken}
+            disabled={tokenBusy || !writeToken.trim()}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+          >
+            {tokenBusy ? "Testing…" : "Save & test"}
+          </button>
+        </div>
+        {tokenMsg && (
+          <p
+            className={`text-xs ${
+              tokenMsg.startsWith("Token saved")
+                ? "text-green-700"
+                : "text-red-600"
+            }`}
+          >
+            {tokenMsg}
+          </p>
+        )}
+      </div>
+
+      {/* Per-cluster read tokens — same seal-and-publish flow as 1Password */}
+      <ClusterTokensCard
+        config={config}
+        clusters={clusters}
+        orgEnvs={orgEnvs}
+        onChanged={onConfigChanged}
+        backend="vault"
+      />
+    </div>
+  );
+}
+
 function ClusterTokensCard({
   config,
   clusters,
   orgEnvs,
   onChanged,
+  backend = "onepassword",
 }: {
   config: SecretBackendConfig;
   clusters: Cluster[];
   orgEnvs: OrgEnvironment[];
   onChanged: () => Promise<void>;
+  backend?: "onepassword" | "vault";
 }) {
   const [tokenInputs, setTokenInputs] = useState<Record<string, string>>({});
   const [busyCluster, setBusyCluster] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Vault only: the least-privilege policy set. Each cluster's token must carry
+  // ONLY the global policy plus its bound envs' — a mount-wide read grant would
+  // let a staging cluster read prod.
+  const [vaultPolicies, setVaultPolicies] = useState<VaultPoliciesResponse | null>(null);
+  const [showPolicyHCL, setShowPolicyHCL] = useState(false);
 
-  const tokenRefs = config.onePassword?.clusterTokens || [];
+  const isVault = backend === "vault";
+
+  useEffect(() => {
+    if (!isVault) {
+      setVaultPolicies(null);
+      return;
+    }
+    let cancelled = false;
+    // Silently no-ops: the policy block is guidance, and a failure here must not
+    // block pasting a token.
+    getVaultPolicies()
+      .then((res) => {
+        if (!cancelled) setVaultPolicies(res);
+      })
+      .catch(() => {
+        if (!cancelled) setVaultPolicies(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isVault]);
+
+  const policyFor = (cluster: string) =>
+    vaultPolicies?.clusters.find((c) => c.cluster === cluster);
+  const tokenRefs =
+    (isVault
+      ? config.vault?.clusterTokens
+      : config.onePassword?.clusterTokens) || [];
   const refFor = (name: string) => tokenRefs.find((t) => t.cluster === name);
   const boundEnvsFor = (name: string) =>
     orgEnvs
@@ -2080,7 +2313,10 @@ function ClusterTokensCard({
     setBusyCluster(cluster);
     setError(null);
     try {
-      await setClusterConnectToken(cluster, { connectToken: token });
+      await setClusterConnectToken(
+        cluster,
+        isVault ? { token } : { connectToken: token },
+      );
       setTokenInputs((cur) => ({ ...cur, [cluster]: "" }));
       await onChanged();
     } catch (err) {
@@ -2094,13 +2330,28 @@ function ClusterTokensCard({
   return (
     <div>
       <label className="text-xs font-medium text-gray-700">
-        Cluster Connect Tokens
+        {isVault ? "Cluster Vault Tokens" : "Cluster Connect Tokens"}
       </label>
       <p className="mb-2 mt-0.5 text-xs text-gray-500">
-        One Connect token per cluster, covering the global vault plus the env
-        vaults bound to that cluster. Pasting a token publishes the
-        cluster&apos;s single{" "}
-        <code className="font-mono">suparship-store</code> ClusterSecretStore.
+        {isVault ? (
+          <>
+            One Vault token per cluster, used by that cluster&apos;s External
+            Secrets Operator. Scope each token to the global prefix plus the
+            envs bound to that cluster — never the whole mount, or a staging
+            cluster can read production. The command per cluster is below.
+            Pasting a token seals it and publishes the cluster&apos;s single{" "}
+            <code className="font-mono">suparship-store</code>{" "}
+            ClusterSecretStore.
+          </>
+        ) : (
+          <>
+            One Connect token per cluster, covering the global vault plus the
+            env vaults bound to that cluster. Pasting a token publishes the
+            cluster&apos;s single{" "}
+            <code className="font-mono">suparship-store</code>{" "}
+            ClusterSecretStore.
+          </>
+        )}
       </p>
       {clusters.length === 0 ? (
         <p className="text-xs text-gray-400">
@@ -2123,8 +2374,9 @@ function ClusterTokensCard({
                       {c.name}
                     </span>
                     <span className="ml-2 text-xs text-gray-400">
-                      reads: global
-                      {envs.length > 0 ? `, ${envs.join(", ")}` : ""}
+                      {isVault
+                        ? `envs: ${envs.length > 0 ? envs.join(", ") : "none bound"}`
+                        : `reads: global${envs.length > 0 ? `, ${envs.join(", ")}` : ""}`}
                     </span>
                   </div>
                   {ref?.sealed ? (
@@ -2146,8 +2398,10 @@ function ClusterTokensCard({
                     className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono"
                     placeholder={
                       ref?.sealed
-                        ? "Paste a new token to rotate / widen vault access…"
-                        : "Paste this cluster's Connect token…"
+                        ? "Paste a new token to rotate…"
+                        : isVault
+                          ? "Paste this cluster's Vault token…"
+                          : "Paste this cluster's Connect token…"
                     }
                     value={tokenInputs[c.name] || ""}
                     onChange={(e) =>
@@ -2168,9 +2422,83 @@ function ClusterTokensCard({
                     {busyCluster === c.name ? "Sealing…" : "Seal"}
                   </button>
                 </div>
+                {/* The exact token this cluster should get: scoped to global +
+                    its bound envs, so it cannot read any other environment. */}
+                {isVault && policyFor(c.name) && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-700">
+                      Mint this cluster&apos;s token —{" "}
+                      {policyFor(c.name)!.policies.length} scoped{" "}
+                      {policyFor(c.name)!.policies.length === 1
+                        ? "policy"
+                        : "policies"}
+                    </summary>
+                    <pre className="mt-1.5 overflow-x-auto rounded-md bg-gray-900 p-2.5 text-xs leading-relaxed text-gray-100">
+                      {policyFor(c.name)!.tokenCommand}
+                    </pre>
+                    <p className="mt-1 text-xs text-gray-400">
+                      Reads{" "}
+                      <span className="font-mono">global</span>
+                      {policyFor(c.name)!.boundEnvs.length > 0
+                        ? ` + ${policyFor(c.name)!.boundEnvs.join(", ")}`
+                        : " only (no environment bound yet)"}
+                      . Revoke the previous token in Vault after rotating.
+                    </p>
+                  </details>
+                )}
               </div>
             );
           })}
+        </div>
+      )}
+      {/* The policies the above token commands reference. Written once per
+          environment; a cluster's entitlement is which ones its token carries, so
+          these do not change as clusters come and go. */}
+      {isVault && vaultPolicies && (
+        <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50/50 p-3">
+          <button
+            type="button"
+            onClick={() => setShowPolicyHCL((v) => !v)}
+            className="text-xs font-medium text-gray-700 hover:text-gray-900"
+          >
+            {showPolicyHCL ? "▾" : "▸"} Vault policies for mount{" "}
+            <span className="font-mono">{vaultPolicies.mount}</span> (
+            {vaultPolicies.readPolicies.length + 1})
+          </button>
+          {!showPolicyHCL && (
+            <p className="mt-1 text-xs text-gray-500">
+              One read policy per scope, so no cluster gets mount-wide read.
+              Write these once, then mint each cluster&apos;s token above.
+            </p>
+          )}
+          {showPolicyHCL && (
+            <div className="mt-2 space-y-3">
+              <p className="text-xs text-gray-500">
+                Run these against your Vault as an operator — suparship holds a
+                write token for the KV mount, not the{" "}
+                <span className="font-mono">sys/policy</span> rights these need.
+              </p>
+              {[vaultPolicies.writePolicy, ...vaultPolicies.readPolicies].map(
+                (p) => (
+                  <div key={p.name}>
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-mono text-xs text-gray-900">
+                        {p.name}
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        {p.env
+                          ? `read: ${p.env}`
+                          : "suparship's own write token — spans the mount"}
+                      </span>
+                    </div>
+                    <pre className="mt-1 overflow-x-auto rounded-md bg-gray-900 p-2.5 text-xs leading-relaxed text-gray-100">
+                      {`vault policy write ${p.name} - <<'EOF'\n${p.hcl}EOF`}
+                    </pre>
+                  </div>
+                ),
+              )}
+            </div>
+          )}
         </div>
       )}
       {error && <p className="mt-2 text-xs text-red-600">{error}</p>}

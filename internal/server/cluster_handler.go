@@ -397,8 +397,15 @@ func (ch *clusterHandler) cleanupClusterSecrets(ctx context.Context, name string
 		}
 	}
 	if ch.kubeClient != nil {
-		if err := secrets.DeleteConnectToken(ctx, ch.kubeClient, secrets.ClusterStashKey(name)); err != nil {
-			ch.logger.Warn("cluster delete: token stash cleanup failed", "cluster", name, "error", err)
+		// Delete BOTH backends' stashes: whichever backend is active now, a
+		// removed cluster must leak neither credential.
+		for _, stash := range []string{
+			secrets.ConnectTokenStashName(secrets.ClusterStashKey(name)),
+			secrets.VaultTokenStashName(name),
+		} {
+			if err := secrets.DeleteClusterCredential(ctx, ch.kubeClient, stash); err != nil {
+				ch.logger.Warn("cluster delete: token stash cleanup failed", "cluster", name, "stash", stash, "error", err)
+			}
 		}
 	}
 }

@@ -49,13 +49,26 @@ spec:
                 echo "WARNING — No IngressClass found. App URLs may not work."
               fi
 
-              {{- if eq .Values.secrets.backend "1password" }}
+              {{- if or (eq .Values.secrets.backend "1password") (eq .Values.secrets.backend "vault") }}
               echo -n "Checking External Secrets Operator... "
               if kubectl get crd externalsecrets.external-secrets.io >/dev/null 2>&1; then
                 echo "OK"
               else
-                echo "MISSING — ESO required for 1password backend. Install ESO or set dependencies.eso.enabled=true"
+                echo "MISSING — ESO required for {{ .Values.secrets.backend }} backend. Install ESO or set dependencies.eso.enabled=true"
                 FAILED=1
+              fi
+
+              {{- /*
+                Both backends ship a per-cluster credential that is sealed before
+                it is committed to Git, so sealed-secrets must be present or the
+                store can never be published. Advisory: the controller may live
+                on the workload clusters rather than here.
+              */}}
+              echo -n "Checking sealed-secrets... "
+              if kubectl get crd sealedsecrets.bitnami.com >/dev/null 2>&1; then
+                echo "OK"
+              else
+                echo "WARNING — sealed-secrets CRD not found on this cluster. Required on every cluster that receives a {{ .Values.secrets.backend }} credential."
               fi
               {{- end }}
 

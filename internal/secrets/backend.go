@@ -17,14 +17,55 @@ import (
 type BackendType string
 
 const (
+	// BackendK8s stores items as plain Secrets in namespaces on the TOOLING
+	// cluster.
+	//
+	// Deprecated: demo/dev only. Its ClusterSecretStores are published to
+	// _infra/, which the root App-of-Apps syncs solely to the tooling cluster,
+	// so ExternalSecrets on a remote workload cluster reference a store that was
+	// never delivered there and never resolve. Use BackendVault instead; see
+	// `suparship secrets migrate`.
 	BackendK8s       BackendType = "k8s"
 	Backend1Password BackendType = "onepassword"
+	// BackendVault stores items in a HashiCorp Vault KV v2 mount. Note this is
+	// the Vault PRODUCT — distinct from suparship's own "vault" concept (the
+	// per-scope item container named by VaultName).
+	BackendVault BackendType = "vault"
 )
 
 // ValidBackendTypes is the set of recognized backend type strings.
 var ValidBackendTypes = map[BackendType]bool{
 	BackendK8s:       true,
 	Backend1Password: true,
+	BackendVault:     true,
+}
+
+// BackendTypeNames returns the recognized backend types, sorted, for help text
+// and error messages. Derived from ValidBackendTypes rather than hand-listed so
+// adding a backend can't leave a stale "use k8s or onepassword" behind.
+func BackendTypeNames() []string {
+	names := make([]string, 0, len(ValidBackendTypes))
+	for t := range ValidBackendTypes {
+		names = append(names, string(t))
+	}
+	sort.Strings(names)
+	return names
+}
+
+// UsesPerClusterCredentials reports whether the backend ships a distinct
+// credential to every workload cluster, sealed via sealed-secrets and published
+// through the per-cluster ClusterSecretStore flow.
+//
+// True for 1Password (Connect token) and Vault (Vault token). False for k8s,
+// whose ESO reads Secrets in-cluster via a ServiceAccount and therefore has no
+// credential to distribute — which is also why it cannot serve remote clusters.
+func (c BackendConfig) UsesPerClusterCredentials() bool {
+	switch c.Effective() {
+	case Backend1Password, BackendVault:
+		return true
+	default:
+		return false
+	}
 }
 
 // ── 1Password SA-driven config ────────────────────────────────────────────
@@ -106,6 +147,51 @@ type VaultRef struct {
 	LastError string `json:"lastError,omitempty" yaml:"lastError,omitempty"`
 }
 
+// ── HashiCorp Vault config ────────────────────────────────────────────────
+
+// HCVaultConfig holds HashiCorp Vault org-level configuration.
+//
+// Unlike 1Password, Vault needs NO per-scope registration step: a suparship
+// vault is a path prefix inside one KV v2 mount, so global and env containers
+// are derived from the scope (see VaultName) rather than being created and
+// recorded by an operator. That removes the global-vault pick and the env-vault
+// registration entirely — the only setup is the address, the mount, and one
+// sealed token per workload cluster.
+//
+// Non-secret configuration only. The token suparship itself writes with lives
+// in the VaultTokenSecretName K8s Secret, mirroring how the 1Password SA token
+// is stored.
+type HCVaultConfig struct {
+	// Address is the Vault server URL ESO and suparship both dial,
+	// e.g. "https://vault.example.com:8200".
+	Address string `json:"address,omitempty" yaml:"address,omitempty"`
+
+	// Mount is the KV v2 mount that holds every suparship item.
+	// Empty means DefaultVaultMount.
+	Mount string `json:"mount,omitempty" yaml:"mount,omitempty"`
+
+	// Namespace is the Vault Enterprise namespace. Empty for Vault OSS.
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+
+	// CACert is a PEM bundle for a Vault served with a private CA. Empty uses
+	// the system trust store.
+	CACert string `json:"caCert,omitempty" yaml:"caCert,omitempty"`
+
+	// ClusterTokens tracks, per workload cluster, the state of that cluster's
+	// Vault token: stashed when the operator pastes it, sealed once the
+	// SealedSecret + ClusterSecretStore are published to gitops. Same shape and
+	// lifecycle as the 1Password Connect tokens, so the seal pipeline is shared.
+	ClusterTokens []ClusterTokenRef `json:"clusterTokens,omitempty" yaml:"clusterTokens,omitempty"`
+}
+
+// EffectiveMount returns the configured KV v2 mount, or DefaultVaultMount.
+func (v *HCVaultConfig) EffectiveMount() string {
+	if v == nil || strings.TrimSpace(v.Mount) == "" {
+		return DefaultVaultMount
+	}
+	return strings.TrimSpace(v.Mount)
+}
+
 // ── BackendConfig ─────────────────────────────────────────────────────────
 
 // BackendConfig is the org-level configuration for the secret storage backend.
@@ -115,7 +201,14 @@ type BackendConfig struct {
 	Type BackendType `json:"type" yaml:"type"`
 	// OnePassword holds 1Password-specific configuration.
 	// Only used when Type is "onepassword".
+	//
+	// Every backend's config is retained regardless of which Type is active, so
+	// switching backends and switching back does not lose settings. The PUT
+	// handlers merge rather than replace for exactly this reason.
 	OnePassword *OnePasswordConfig `json:"onePassword,omitempty" yaml:"onePassword,omitempty"`
+	// Vault holds HashiCorp Vault configuration.
+	// Only used when Type is "vault".
+	Vault *HCVaultConfig `json:"vault,omitempty" yaml:"vault,omitempty"`
 	// ExternalSecrets holds org-level settings for the ExternalSecret resources
 	// suparship generates (independent of the backend type).
 	ExternalSecrets ExternalSecretSettings `json:"externalSecrets,omitempty" yaml:"externalSecrets,omitempty"`
@@ -158,8 +251,19 @@ func (c BackendConfig) Effective() BackendType {
 //
 // k8s backend needs no operator setup. 1Password needs: a global vault, an env
 // vault per bound environment, and a sealed Connect token for each cluster that
-// runs at least one environment.
+// runs at least one environment. Vault needs only a server address and a sealed
+// token per bound cluster — its per-scope containers are derived paths, so
+// there is nothing to register.
 func (c BackendConfig) SetupComplete(envNames, boundClusters []string) (bool, string) {
+	if c.Effective() == BackendVault {
+		if c.Vault == nil || strings.TrimSpace(c.Vault.Address) == "" {
+			return false, "Set the Vault server address under Settings → Secrets Backend."
+		}
+		if unsealed := c.unsealedClusters(boundClusters); len(unsealed) > 0 {
+			return false, "Paste a Vault token for cluster(s): " + strings.Join(unsealed, ", ") + "."
+		}
+		return true, ""
+	}
 	if c.Effective() != Backend1Password {
 		return true, ""
 	}
@@ -176,6 +280,14 @@ func (c BackendConfig) SetupComplete(envNames, boundClusters []string) (bool, st
 	if len(missingEnvVaults) > 0 {
 		return false, "Register an env vault for: " + strings.Join(missingEnvVaults, ", ") + "."
 	}
+	if unsealed := c.unsealedClusters(boundClusters); len(unsealed) > 0 {
+		return false, "Paste a Connect token for cluster(s): " + strings.Join(unsealed, ", ") + "."
+	}
+	return true, ""
+}
+
+// unsealedClusters returns the clusters with no sealed per-cluster credential.
+func (c BackendConfig) unsealedClusters(boundClusters []string) []string {
 	var unsealed []string
 	for _, cl := range boundClusters {
 		ref := c.FindClusterToken(cl)
@@ -183,16 +295,21 @@ func (c BackendConfig) SetupComplete(envNames, boundClusters []string) (bool, st
 			unsealed = append(unsealed, cl)
 		}
 	}
-	if len(unsealed) > 0 {
-		return false, "Paste a Connect token for cluster(s): " + strings.Join(unsealed, ", ") + "."
-	}
-	return true, ""
+	return unsealed
 }
 
 // Validate checks the backend config for save-time correctness.
 func (c BackendConfig) Validate() error {
 	if !ValidBackendTypes[c.Effective()] {
 		return ErrInvalidBackendType
+	}
+	if c.Effective() == BackendVault {
+		// Only validated when Vault is the ACTIVE backend: a retained config
+		// from a previous selection is allowed to be incomplete, otherwise
+		// switching away from a half-configured Vault would be impossible.
+		if c.Vault == nil || strings.TrimSpace(c.Vault.Address) == "" {
+			return ErrVaultAddressRequired
+		}
 	}
 	return nil
 }
@@ -276,14 +393,46 @@ func removeVaultRef(refs []VaultRef, key string) []VaultRef {
 	return filtered
 }
 
-// FindClusterToken returns the ClusterTokenRef for the cluster, or nil.
-func (c BackendConfig) FindClusterToken(cluster string) *ClusterTokenRef {
-	if c.OnePassword == nil {
+// clusterTokensOf returns a pointer to the ACTIVE backend's per-cluster token
+// slice, so the seal pipeline works the same whether the credential is a
+// 1Password Connect token or a Vault token. Returns nil for backends that carry
+// no per-cluster credential (k8s). When create is true the backend's config
+// block is allocated if absent.
+//
+// The returned pointer aliases the shared config even on a value receiver,
+// because OnePassword and Vault are themselves pointers.
+func (c *BackendConfig) clusterTokensOf(create bool) *[]ClusterTokenRef {
+	switch c.Effective() {
+	case Backend1Password:
+		if c.OnePassword == nil {
+			if !create {
+				return nil
+			}
+			c.OnePassword = &OnePasswordConfig{}
+		}
+		return &c.OnePassword.ClusterTokens
+	case BackendVault:
+		if c.Vault == nil {
+			if !create {
+				return nil
+			}
+			c.Vault = &HCVaultConfig{}
+		}
+		return &c.Vault.ClusterTokens
+	default:
 		return nil
 	}
-	for i := range c.OnePassword.ClusterTokens {
-		if c.OnePassword.ClusterTokens[i].Cluster == cluster {
-			return &c.OnePassword.ClusterTokens[i]
+}
+
+// FindClusterToken returns the ClusterTokenRef for the cluster, or nil.
+func (c BackendConfig) FindClusterToken(cluster string) *ClusterTokenRef {
+	toks := c.clusterTokensOf(false)
+	if toks == nil {
+		return nil
+	}
+	for i := range *toks {
+		if (*toks)[i].Cluster == cluster {
+			return &(*toks)[i]
 		}
 	}
 	return nil
@@ -291,35 +440,35 @@ func (c BackendConfig) FindClusterToken(cluster string) *ClusterTokenRef {
 
 // UpsertClusterToken adds or replaces the per-cluster token ref.
 func (c *BackendConfig) UpsertClusterToken(ref ClusterTokenRef) {
-	if c.OnePassword == nil {
-		c.OnePassword = &OnePasswordConfig{}
+	toks := c.clusterTokensOf(true)
+	if toks == nil {
+		return
 	}
-	op := c.OnePassword
-	for i := range op.ClusterTokens {
-		if op.ClusterTokens[i].Cluster == ref.Cluster {
-			op.ClusterTokens[i] = ref
+	for i := range *toks {
+		if (*toks)[i].Cluster == ref.Cluster {
+			(*toks)[i] = ref
 			return
 		}
 	}
-	op.ClusterTokens = append(op.ClusterTokens, ref)
-	sort.Slice(op.ClusterTokens, func(i, j int) bool {
-		return op.ClusterTokens[i].Cluster < op.ClusterTokens[j].Cluster
+	*toks = append(*toks, ref)
+	sort.Slice(*toks, func(i, j int) bool {
+		return (*toks)[i].Cluster < (*toks)[j].Cluster
 	})
 }
 
 // RemoveClusterToken removes the per-cluster token ref. No-op if absent.
 func (c *BackendConfig) RemoveClusterToken(cluster string) {
-	if c.OnePassword == nil {
+	toks := c.clusterTokensOf(false)
+	if toks == nil {
 		return
 	}
-	op := c.OnePassword
-	filtered := op.ClusterTokens[:0]
-	for _, t := range op.ClusterTokens {
+	filtered := (*toks)[:0]
+	for _, t := range *toks {
 		if t.Cluster != cluster {
 			filtered = append(filtered, t)
 		}
 	}
-	op.ClusterTokens = filtered
+	*toks = filtered
 }
 
 // ── App-level read result ─────────────────────────────────────────────────
@@ -351,3 +500,36 @@ const (
 // single Connect token on target clusters (after being unsealed by
 // sealed-secrets). One token per cluster, covering every vault it reads.
 const ConnectTokenSecretName = "op-connect-token"
+
+// ── HashiCorp Vault storage conventions ───────────────────────────────────
+
+const (
+	// VaultTokenSecretName is the well-known K8s Secret in suparship-system
+	// holding the Vault token suparship itself writes items with — the data
+	// plane, analogous to SATokenSecretName.
+	VaultTokenSecretName = "suparship-vault-token"
+	// VaultTokenSecretKey is the data key inside VaultTokenSecretName.
+	VaultTokenSecretKey = "token"
+	// DefaultVaultMount is the KV v2 mount holding every suparship item when
+	// the org has not configured one.
+	DefaultVaultMount = "suparship"
+)
+
+// VaultTokenClusterSecretName is the K8s Secret name holding a workload
+// cluster's own Vault token (after sealed-secrets decrypts it), which that
+// cluster's ESO authenticates with. One per cluster, mirroring
+// ConnectTokenSecretName.
+const VaultTokenClusterSecretName = "vault-token"
+
+// ClusterCredentialSecretName returns the on-cluster Secret name holding the
+// active backend's per-cluster credential, or "" when the backend has none.
+func (c BackendConfig) ClusterCredentialSecretName() string {
+	switch c.Effective() {
+	case Backend1Password:
+		return ConnectTokenSecretName
+	case BackendVault:
+		return VaultTokenClusterSecretName
+	default:
+		return ""
+	}
+}

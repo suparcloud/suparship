@@ -35,6 +35,7 @@ import (
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/hcvault"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/server"
 	"github.com/suparcloud/suparship/internal/token"
@@ -288,49 +289,45 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		appStore = kubeDeps.AppStore
 		stackStore = kube.NewK8sStackStore(client)
 		clusterStore = kubeDeps.ClusterStore
-		// Default: k8s backend (vault = namespace). Overridden below when the
-		// org is configured for 1Password and an SA token is available.
-		vaultStore = secrets.NewK8sVaultStore(client)
-
-		// orgProvider is set unconditionally above; a bare block scopes the
-		// 1Password wiring's locals without a redundant (always-true) nil guard.
-		{
-			if org, orgErr := orgProvider.GetOrg(cmd.Context()); orgErr == nil && org != nil {
-				if org.SecretBackend.Effective() == secrets.Backend1Password && org.SecretBackend.OnePassword != nil {
-					saTokenRaw, tokenErr := func() (string, error) {
-						sec, err := client.CoreV1().Secrets("suparship-system").Get(
-							cmd.Context(), secrets.SATokenSecretName, metav1.GetOptions{},
-						)
-						if err != nil {
-							return "", err
-						}
-						return string(sec.Data[secrets.SATokenSecretKey]), nil
-					}()
-					if tokenErr != nil {
-						logger.Warn("1Password backend: could not read SA token — falling back to k8s vault store",
-							"secret", secrets.SATokenSecretName, "error", tokenErr)
-					} else if saTokenRaw != "" {
-						saClient, saErr := onepassword.NewSDKClient(cmd.Context(), saTokenRaw)
-						if saErr != nil {
-							logger.Warn("1Password backend: SA client init failed — falling back to k8s vault store", "error", saErr)
-						} else {
-							// Resolver loads org config fresh so vault selections
-							// (global/env) made after startup take effect. Cluster
-							// scope resolves to its env vault.
-							resolver := func(scope secrets.Scope) (string, error) {
-								o, err := orgProvider.GetOrg(context.Background())
-								if err != nil {
-									return "", err
-								}
-								return o.SecretBackend.VaultIDForScope(scope)
-							}
-							vaultStore = onepassword.NewSAVaultStore(saClient, resolver)
-							logger.Info("1Password vault store enabled (global/env vaults resolved from org config; cluster overrides live in env vaults)")
-						}
-					}
+		// The vault store resolves its backend PER OPERATION from the current
+		// org config (k8s / 1Password / HashiCorp Vault), so switching the
+		// backend in Settings takes effect without a restart. Credentialed
+		// stores are built lazily and cached on their token + config; while a
+		// selected backend is unusable (no token pasted yet, client error)
+		// operations degrade to the k8s store with a logged warning.
+		readTokenSecret := func(name, key string) func(ctx context.Context) (string, error) {
+			return func(ctx context.Context) (string, error) {
+				sec, err := client.CoreV1().Secrets(secrets.SystemNamespace).Get(ctx, name, metav1.GetOptions{})
+				if err != nil {
+					return "", err
 				}
+				return string(sec.Data[key]), nil
 			}
 		}
+		vaultStore = newDynamicVaultStore(
+			orgProvider,
+			secrets.NewK8sVaultStore(client),
+			func(ctx context.Context, token string) (onepassword.SAClient, error) {
+				return onepassword.NewSDKClient(ctx, token)
+			},
+			readTokenSecret(secrets.SATokenSecretName, secrets.SATokenSecretKey),
+			logger,
+		).withHCVault(
+			func(cfg secrets.HCVaultConfig, token string) (secrets.VaultStore, error) {
+				apiClient, err := hcvault.NewAPIClient(hcvault.APIConfig{
+					Address:   cfg.Address,
+					Token:     token,
+					Mount:     cfg.EffectiveMount(),
+					Namespace: cfg.Namespace,
+					CACert:    cfg.CACert,
+				})
+				if err != nil {
+					return nil, err
+				}
+				return hcvault.NewHCVaultStore(apiClient), nil
+			},
+			readTokenSecret(secrets.VaultTokenSecretName, secrets.VaultTokenSecretKey),
+		)
 		gitopsConfigStore = gitops.NewConfigStore(client)
 		templateRegistryStore = tpl.NewRegistryStore(client)
 		registryStore = registry.NewStore(client)
@@ -425,6 +422,25 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			// charts/ extract step. Inline-mode templates pass through
 			// unchanged.
 			pubCfg.TemplateLoader = templateLoaderFromClient(kubeClient)
+			// The secret backend decides which ClusterSecretStore every app's
+			// ExternalSecret names, and whether Vault remoteRef keys carry their
+			// container path. Read it LIVE rather than snapshotting at boot: the
+			// backend is switchable at runtime, and a stale value silently renders
+			// every app against the wrong backend. Left unset it defaulted to k8s
+			// forever, so apps on a 1Password/Vault org referenced the per-vault
+			// store name (suparship-store-global) that only the k8s backend
+			// publishes — ESO then reported InvalidProviderConfig with no hint why.
+			if orgProvider != nil {
+				pubCfg.BackendConfigFunc = func() secrets.BackendConfig {
+					org, err := orgProvider.GetOrg(context.Background())
+					if err != nil || org == nil {
+						// Same fallback as a nil config: never guess a credentialed
+						// backend from a failed read.
+						return secrets.BackendConfig{Type: secrets.BackendK8s}
+					}
+					return org.SecretBackend
+				}
+			}
 
 			// InsecureRegistry is read from the registry ConfigMap (if configured).
 			if registryStore != nil {
@@ -624,23 +640,37 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	srv := server.New(server.Config{
-		Addr:                    addr,
-		UIDir:                   uiDir,
-		CORSOrigins:             origins,
-		Authenticator:           authenticator,
-		OrgProvider:             orgProvider,
-		Templates:               templates,
-		ClusterTemplateLoader:   clusterTemplateLoaderFromClient(kubeClient),
-		RegistrySyncEngine:      registrySyncEngine(kubeClient, logger),
-		ProjectStore:            projectStore,
-		TokenStore:              tokenStore,
-		RuntimeProvider:         runtimeProvider,
-		LogsProvider:            logsProvider,
-		PreviewStore:            previewStore,
-		AppStore:                appStore,
-		StackStore:              stackStore,
-		ClusterStore:            clusterStore,
-		VaultStore:              vaultStore,
+		Addr:                  addr,
+		UIDir:                 uiDir,
+		CORSOrigins:           origins,
+		Authenticator:         authenticator,
+		OrgProvider:           orgProvider,
+		Templates:             templates,
+		ClusterTemplateLoader: clusterTemplateLoaderFromClient(kubeClient),
+		RegistrySyncEngine:    registrySyncEngine(kubeClient, logger),
+		ProjectStore:          projectStore,
+		TokenStore:            tokenStore,
+		RuntimeProvider:       runtimeProvider,
+		LogsProvider:          logsProvider,
+		PreviewStore:          previewStore,
+		AppStore:              appStore,
+		StackStore:            stackStore,
+		ClusterStore:          clusterStore,
+		VaultStore:            vaultStore,
+		// Switching the secret backend changes which ClusterSecretStore every
+		// app's ExternalSecret names (and, for Vault, whether its remoteRef key is
+		// path-qualified). Those are baked in at publish time, so re-publish the
+		// fleet — otherwise every app keeps pointing at the old backend's store
+		// and ESO reports "unable to validate store" with no clue why. Reuses the
+		// same routine the generator-version bump uses at startup.
+		OnSecretBackendChanged: func(ctx context.Context, reason string) {
+			if failures := republishAllApps(ctx, gitOpsPublisher, appStore, projectStore, orgProvider, logger); failures > 0 {
+				logger.Warn("republish after secret-backend change: some apps failed",
+					"reason", reason, "failures", failures)
+			} else {
+				logger.Info("republish after secret-backend change: complete", "reason", reason)
+			}
+		},
 		GitOpsPublisher:         publisherHolder,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,
@@ -2469,8 +2499,8 @@ func selfHealSealedTokens(
 	if err != nil || org == nil {
 		return
 	}
-	if org.SecretBackend.Effective() != secrets.Backend1Password {
-		return // only 1Password publishes sealed tokens + stores
+	if !org.SecretBackend.UsesPerClusterCredentials() {
+		return // only credentialed backends (1Password, Vault) publish sealed tokens + stores
 	}
 	clusters, err := clusterStore.ListClusters(ctx)
 	if err != nil {
@@ -2489,30 +2519,54 @@ func selfHealSealedTokens(
 			continue
 		}
 
-		// Need the cluster's stashed token to reconstruct the sealed Secret.
-		token, err := secrets.LoadConnectToken(ctx, kubeClient, secrets.ClusterStashKey(c.Name))
+		// Need the cluster's stashed credential to reconstruct the sealed
+		// Secret. Stash names are backend-qualified — the previous backend's
+		// stash is never resealed into the current backend's store.
+		token, err := secrets.LoadClusterCredential(ctx, kubeClient, org.SecretBackend.ClusterStashSecretName(c.Name))
 		if err != nil || len(token) == 0 {
-			logger.Info("self-heal: no stashed Connect token — operator must re-paste it",
-				"cluster", c.Name)
+			logger.Info("self-heal: no stashed credential — operator must re-paste it",
+				"cluster", c.Name, "backend", org.SecretBackend.Effective())
+			continue
+		}
+		if c.APIServer == "" {
 			continue
 		}
 
-		// Vaults this cluster reads: the global vault + the env vault of each
-		// environment bound to it (mirrors server.clusterVaultIDs).
-		var vaultIDs []string
-		if ref := org.SecretBackend.FindVault(secrets.GlobalScope()); ref != nil && ref.VaultID != "" {
-			vaultIDs = append(vaultIDs, ref.VaultID)
+		params := gitops.ClusterSealParams{
+			ClusterName:       c.Name,
+			ArgoCDDestination: c.APIServer,
+			ESONamespace:      c.EffectiveESONamespace(),
+			Token:             token,
+			Backend:           org.SecretBackend.Effective(),
 		}
-		for _, e := range org.Environments {
-			if !e.IsBoundTo(c.Name) {
+		if org.SecretBackend.Effective() == secrets.BackendVault {
+			v := org.SecretBackend.Vault
+			if v == nil || v.Address == "" {
+				logger.Warn("self-heal: vault backend has no address configured", "cluster", c.Name)
 				continue
 			}
-			if ref := org.SecretBackend.FindVault(secrets.EnvScope(e.Name)); ref != nil && ref.VaultID != "" {
+			params.Vault = gitops.VaultStoreConfig{
+				Address: v.Address, Mount: v.EffectiveMount(), Namespace: v.Namespace, CACertPEM: v.CACert,
+			}
+		} else {
+			// Vaults this cluster reads: the global vault + the env vault of
+			// each environment bound to it (mirrors server.clusterVaultIDs).
+			var vaultIDs []string
+			if ref := org.SecretBackend.FindVault(secrets.GlobalScope()); ref != nil && ref.VaultID != "" {
 				vaultIDs = append(vaultIDs, ref.VaultID)
 			}
-		}
-		if len(vaultIDs) == 0 || c.APIServer == "" {
-			continue
+			for _, e := range org.Environments {
+				if !e.IsBoundTo(c.Name) {
+					continue
+				}
+				if ref := org.SecretBackend.FindVault(secrets.EnvScope(e.Name)); ref != nil && ref.VaultID != "" {
+					vaultIDs = append(vaultIDs, ref.VaultID)
+				}
+			}
+			if len(vaultIDs) == 0 {
+				continue
+			}
+			params.VaultIDs = vaultIDs
 		}
 
 		kubeForCluster, err := clusterPool.Get(ctx, c.Name)
@@ -2526,23 +2580,17 @@ func selfHealSealedTokens(
 			continue
 		}
 
-		var connectEndpoint string
-		if ref := org.SecretBackend.FindClusterToken(c.Name); ref != nil {
-			connectEndpoint = ref.ConnectEndpoint
+		if params.Backend == secrets.Backend1Password {
+			if ref := org.SecretBackend.FindClusterToken(c.Name); ref != nil {
+				params.ConnectEndpoint = ref.ConnectEndpoint
+			}
+			if params.ConnectEndpoint == "" && org.SecretBackend.OnePassword != nil {
+				params.ConnectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
+			}
 		}
-		if connectEndpoint == "" && org.SecretBackend.OnePassword != nil {
-			connectEndpoint = org.SecretBackend.OnePassword.Connect.Endpoint
-		}
+		params.Cert = cert
 
-		if err := pub.PublishClusterSecretStore(ctx, gitops.ClusterSealParams{
-			ClusterName:       c.Name,
-			ArgoCDDestination: c.APIServer,
-			ESONamespace:      c.EffectiveESONamespace(),
-			Cert:              cert,
-			Token:             token,
-			VaultIDs:          vaultIDs,
-			ConnectEndpoint:   connectEndpoint,
-		}); err != nil {
+		if err := pub.PublishClusterSecretStore(ctx, params); err != nil {
 			logger.Warn("self-heal: republish failed", "cluster", c.Name, "error", err)
 			continue
 		}

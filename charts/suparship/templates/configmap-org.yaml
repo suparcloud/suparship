@@ -62,6 +62,23 @@ data:
           {{- end }}
         {{- end }}
       {{- end }}
+      {{- if eq .Values.secrets.backend "vault" }}
+      {{- /*
+        Keys must match the yaml tags on secrets.HCVaultConfig exactly, or the
+        tolerant decoder drops them silently and the backend loads unconfigured.
+        Per-cluster tokens are runtime state (pasted, sealed) and are never
+        rendered here — the chart would clobber them on every reconcile.
+      */}}
+      vault:
+        address: {{ .Values.secrets.vault.address | quote }}
+        mount: {{ default "suparship" .Values.secrets.vault.mount | quote }}
+        {{- if .Values.secrets.vault.namespace }}
+        namespace: {{ .Values.secrets.vault.namespace | quote }}
+        {{- end }}
+        {{- if .Values.secrets.vault.caCert }}
+        caCert: {{ .Values.secrets.vault.caCert | quote }}
+        {{- end }}
+      {{- end }}
     {{- end }}
     teams:
       - name: admins

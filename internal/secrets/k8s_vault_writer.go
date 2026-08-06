@@ -218,6 +218,27 @@ func (w *K8sVaultStore) DeleteItem(ctx context.Context, scope Scope, itemName st
 	return nil
 }
 
+var _ ItemExporter = (*K8sVaultStore)(nil)
+
+// ExportItem implements ItemExporter: the Secret's full data, for
+// cross-backend migration only. Absent item → (nil, nil).
+func (w *K8sVaultStore) ExportItem(ctx context.Context, scope Scope, tier Tier, app string) (map[string][]byte, error) {
+	ns := VaultName(scope)
+	name := ItemName(scope, tier, app)
+	secret, err := w.client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading secret %s/%s: %w", ns, name, err)
+	}
+	out := make(map[string][]byte, len(secret.Data))
+	for k, v := range secret.Data {
+		out[k] = append([]byte(nil), v...)
+	}
+	return out, nil
+}
+
 func (w *K8sVaultStore) Probe(ctx context.Context, scope Scope) error {
 	ns := VaultName(scope)
 	if err := w.ensureNamespace(ctx, ns); err != nil {

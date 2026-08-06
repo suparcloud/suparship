@@ -84,7 +84,7 @@ dependencies:
   argocd:
     enabled: false
   # Skip the External Secrets assertion, which is only enforced when
-  # secrets.backend is "1password".
+  # secrets.backend is "1password" or "vault".
   eso:
     enabled: false
   # Reserved: the ingress check is advisory (warns, never fails).
@@ -257,8 +257,29 @@ clusters: []
 
 # -- Secret backend configuration
 secrets:
-  # -- Backend type: k8s, 1password, vault, aws-sm
+  # -- Backend type: vault, 1password, k8s
+  # `vault` (HashiCorp Vault) is the recommended open-source backend.
+  # `k8s` is DEPRECATED — demo/dev only. Its ClusterSecretStores reach the
+  # tooling cluster only, so ExternalSecrets on remote workload clusters never
+  # resolve. Migrate with `suparship secrets migrate --from k8s --to vault`.
   backend: k8s
+  vault:
+    # -- Vault server URL, e.g. https://vault.example.com:8200 (required when
+    # backend is "vault")
+    address: ""
+    # -- KV v2 mount holding every suparship item. Per-scope containers are
+    # derived paths inside it, so there is nothing to register per environment.
+    mount: suparship
+    # -- Vault Enterprise namespace. Leave empty for Vault OSS.
+    namespace: ""
+    # -- PEM CA bundle when Vault is served with a private CA. Empty uses the
+    # system trust store.
+    caCert: ""
+    # The token suparship writes items with is NOT set here — it is read from
+    # the Secret `suparship-vault-token` (key: token) in the release namespace,
+    # created out of band or pasted in Settings → Secrets Backend. Each workload
+    # cluster's own read token is pasted per cluster and sealed before it is
+    # committed to Git.
   onePassword:
     # -- Mode: connect or service-account
     mode: connect

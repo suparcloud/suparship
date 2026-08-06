@@ -28,6 +28,7 @@ import (
 	"github.com/suparcloud/suparship/internal/runtime"
 	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
+	"github.com/suparcloud/suparship/internal/secrets/hcvault"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/token"
@@ -547,8 +548,14 @@ type Config struct {
 	StuckAppManager         StuckAppManager         // optional: enables platform stuck-app detection + unstick endpoints
 	VaultStore              secrets.VaultStore      // optional: enables secret CRUD across global/env/cluster scopes
 	SecretsAuditor          secrets.SecretAuditor   // optional: enables audit logging for secret ops (enterprise builds can supply a SIEM sink)
-	ReadinessProbers        []ReadinessProber       // optional: checked by GET /readyz
-	CookieSecure            bool                    // true for production (HTTPS)
+	// OnSecretBackendChanged, when set, is called in the background after the
+	// org's secret backend TYPE changes. Apps' ExternalSecrets bake in the store
+	// name (and, for Vault, the item-key shape) the backend implies, so they must
+	// be re-published or they keep naming the previous backend's store. Wired to
+	// republishAllApps in cmd/suparship; nil is a no-op (fake mode, tests).
+	OnSecretBackendChanged func(ctx context.Context, reason string)
+	ReadinessProbers       []ReadinessProber // optional: checked by GET /readyz
+	CookieSecure           bool              // true for production (HTTPS)
 	// License reports the active edition and entitled enterprise features. Nil
 	// is treated as the community edition. The core only uses it to advertise
 	// the edition via GET /api/v1/meta; enterprise builds supply a Validator
@@ -782,17 +789,32 @@ func New(cfg Config) *Server {
 		}
 		if cfg.AppStore != nil && cfg.VaultStore != nil {
 			rh.secretsHandler = &secretsHandler{
-				orgStore: cfg.OrgProvider,
-				appStore: cfg.AppStore,
-				vault:    cfg.VaultStore,
-				auditor:  cfg.SecretsAuditor,
-				logger:   cfg.Logger,
+				orgStore:         cfg.OrgProvider,
+				appStore:         cfg.AppStore,
+				vault:            cfg.VaultStore,
+				auditor:          cfg.SecretsAuditor,
+				logger:           cfg.Logger,
+				onBackendChanged: cfg.OnSecretBackendChanged,
 			}
 			if cfg.KubeClient != nil {
 				rh.secretsHandler.kubeClient = cfg.KubeClient
 				rh.secretsHandler.saTokenStore = NewKubeSATokenStore(cfg.KubeClient)
 				rh.secretsHandler.saClientFactory = func(ctx context.Context, token string) (onepassword.SAClient, error) {
 					return onepassword.NewSDKClient(ctx, token)
+				}
+				rh.secretsHandler.vaultTokenStore = NewKubeVaultTokenStore(cfg.KubeClient)
+				rh.secretsHandler.vaultProber = func(ctx context.Context, vcfg secrets.HCVaultConfig, token string) error {
+					apiClient, err := hcvault.NewAPIClient(hcvault.APIConfig{
+						Address:   vcfg.Address,
+						Token:     token,
+						Mount:     vcfg.EffectiveMount(),
+						Namespace: vcfg.Namespace,
+						CACert:    vcfg.CACert,
+					})
+					if err != nil {
+						return err
+					}
+					return hcvault.NewHCVaultStore(apiClient).Probe(ctx, secrets.GlobalScope())
 				}
 				rh.secretsHandler.certCache = seal.NewK8sCertCache(cfg.KubeClient)
 			}

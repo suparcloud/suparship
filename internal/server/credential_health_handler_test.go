@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,8 +98,8 @@ func TestCredentialHealth_AllNotConfigured(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if len(resp.Credentials) != 4 {
-		t.Fatalf("credentials count = %d, want 4 (gitops, registry, 1password, templates); body = %s", len(resp.Credentials), w.Body.String())
+	if len(resp.Credentials) != 5 {
+		t.Fatalf("credentials count = %d, want 5 (gitops, registry, 1password, vault, templates); body = %s", len(resp.Credentials), w.Body.String())
 	}
 	for _, c := range resp.Credentials {
 		if c.Status != credStatusNotConfigured {
@@ -361,5 +362,146 @@ func TestCredentialHealth_Unauthenticated(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+// ── Vault backend health ────────────────────────────────────────────────────
+// These cover the failure that used to be invisible: Vault selected but unusable,
+// so writes were silently redirected to the Kubernetes store. Writes now refuse
+// (dynamicVaultStore.resolve) and this check is where an operator sees why.
+
+func vaultHealthOrg(cfg *secrets.HCVaultConfig) *rbac.Org {
+	return &rbac.Org{
+		Name:         "test",
+		DisplayName:  "Test",
+		Teams:        []rbac.Team{{Name: "admins", DisplayName: "Admins", Members: []string{"admin"}}},
+		RoleBindings: []rbac.RoleBinding{{Project: "*", Team: "admins", Role: "org_admin"}},
+		SecretBackend: secrets.BackendConfig{
+			Type:  secrets.BackendVault,
+			Vault: cfg,
+		},
+	}
+}
+
+func vaultCredStatus(t *testing.T, org *rbac.Org, objs ...runtime.Object) CredentialStatus {
+	t.Helper()
+	mux, ah := newCredHealthMux(t, org, objs...)
+	req := httptest.NewRequest("GET", "/api/v1/credentials/health", nil)
+	req.AddCookie(sessionCookieFor(ah, "admin", "org_admin"))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	var resp CredentialHealthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, c := range resp.Credentials {
+		if c.Name == "vault" {
+			return c
+		}
+	}
+	t.Fatalf("no vault entry in %s", w.Body.String())
+	return CredentialStatus{}
+}
+
+// Write token present and every bound cluster sealed → healthy.
+func TestCredentialHealth_VaultHealthy(t *testing.T) {
+	org := vaultHealthOrg(&secrets.HCVaultConfig{
+		Address:       "https://vault.example.com:8200",
+		ClusterTokens: []secrets.ClusterTokenRef{{Cluster: "eu-1", Sealed: true}},
+	})
+	org.Environments = []rbac.OrgEnvironment{{Name: "prod", ClusterRefs: []string{"eu-1"}}}
+
+	got := vaultCredStatus(t, org, makeSecret(secrets.VaultTokenSecretName))
+	if got.Status != credStatusHealthy {
+		t.Errorf("status = %q (%s), want healthy", got.Status, got.Message)
+	}
+	if got.SecretRef != secrets.VaultTokenSecretName {
+		t.Errorf("secretRef = %q", got.SecretRef)
+	}
+}
+
+// The exact condition behind "secrets not getting saved in vault": no write
+// token. It must report missing and say writes are refused.
+func TestCredentialHealth_VaultMissingWriteToken(t *testing.T) {
+	org := vaultHealthOrg(&secrets.HCVaultConfig{Address: "https://vault.example.com:8200"})
+
+	got := vaultCredStatus(t, org) // no token Secret seeded
+	if got.Status != credStatusMissing {
+		t.Errorf("status = %q, want missing", got.Status)
+	}
+	if !strings.Contains(got.Message, secrets.VaultTokenSecretName) {
+		t.Errorf("message should name the missing Secret: %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "refused") {
+		t.Errorf("message should say writes are refused: %q", got.Message)
+	}
+}
+
+func TestCredentialHealth_VaultMissingAddress(t *testing.T) {
+	got := vaultCredStatus(t, vaultHealthOrg(&secrets.HCVaultConfig{}),
+		makeSecret(secrets.VaultTokenSecretName))
+	if got.Status != credStatusMissing {
+		t.Errorf("status = %q, want missing", got.Status)
+	}
+	if !strings.Contains(got.Message, "address") {
+		t.Errorf("message should name the missing address: %q", got.Message)
+	}
+}
+
+// A nil Vault config with the backend selected is the same unusable state.
+func TestCredentialHealth_VaultNilConfig(t *testing.T) {
+	got := vaultCredStatus(t, vaultHealthOrg(nil), makeSecret(secrets.VaultTokenSecretName))
+	if got.Status != credStatusMissing {
+		t.Errorf("status = %q, want missing", got.Status)
+	}
+}
+
+// Write token fine but a bound cluster has no sealed read token: the control
+// plane works, the data plane doesn't. Warning, not missing — and it must name
+// the cluster so the operator knows where to paste.
+func TestCredentialHealth_VaultUnsealedClusterWarns(t *testing.T) {
+	org := vaultHealthOrg(&secrets.HCVaultConfig{
+		Address:       "https://vault.example.com:8200",
+		ClusterTokens: []secrets.ClusterTokenRef{{Cluster: "eu-1", Sealed: true}},
+	})
+	org.Environments = []rbac.OrgEnvironment{
+		{Name: "prod", ClusterRefs: []string{"eu-1"}},
+		{Name: "staging", ClusterRefs: []string{"stg-1"}}, // never sealed
+	}
+
+	got := vaultCredStatus(t, org, makeSecret(secrets.VaultTokenSecretName))
+	if got.Status != credStatusWarning {
+		t.Errorf("status = %q (%s), want warning", got.Status, got.Message)
+	}
+	if !strings.Contains(got.Message, "stg-1") {
+		t.Errorf("message should name the unsealed cluster: %q", got.Message)
+	}
+	if strings.Contains(got.Message, "eu-1") {
+		t.Errorf("message should not list the sealed cluster: %q", got.Message)
+	}
+}
+
+// A cluster bound to no environment resolves no secrets, so a missing token
+// there is not yet a problem.
+func TestCredentialHealth_VaultIgnoresUnboundClusters(t *testing.T) {
+	org := vaultHealthOrg(&secrets.HCVaultConfig{Address: "https://vault.example.com:8200"})
+	org.Environments = nil // nothing bound anywhere
+
+	got := vaultCredStatus(t, org, makeSecret(secrets.VaultTokenSecretName))
+	if got.Status != credStatusHealthy {
+		t.Errorf("status = %q (%s), want healthy", got.Status, got.Message)
+	}
+}
+
+// On another backend the entry is informational, not a failure.
+func TestCredentialHealth_VaultNotSelected(t *testing.T) {
+	org := vaultHealthOrg(&secrets.HCVaultConfig{Address: "https://vault.example.com:8200"})
+	org.SecretBackend.Type = secrets.Backend1Password
+	org.SecretBackend.OnePassword = &secrets.OnePasswordConfig{}
+
+	got := vaultCredStatus(t, org)
+	if got.Status != credStatusNotConfigured {
+		t.Errorf("status = %q, want not_configured", got.Status)
 	}
 }

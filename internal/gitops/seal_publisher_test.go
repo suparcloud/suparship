@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/branding"
+	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // freshTestCertPEM generates a self-signed cert and returns the PEM bytes.
@@ -75,6 +76,8 @@ func TestPublishClusterSecretStore_ValidatesInputs(t *testing.T) {
 		{"missing cert", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Token: token, VaultIDs: vaults}},
 		{"missing token", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Cert: certPEM, VaultIDs: vaults}},
 		{"missing vaults", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Cert: certPEM, Token: token}},
+		// Vault backend: the store needs a server address, not vault IDs.
+		{"vault missing address", ClusterSealParams{ClusterName: "c1", ArgoCDDestination: "https://k8s:6443", Cert: certPEM, Token: token, Backend: secrets.BackendVault}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

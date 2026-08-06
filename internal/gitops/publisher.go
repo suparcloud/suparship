@@ -77,7 +77,21 @@ type PublisherConfig struct {
 	// BackendConfig is the org-level secret backend configuration.
 	// When non-nil and the effective backend is 1Password, PublishEnvInfra
 	// also writes ClusterSecretStore YAMLs to _infra/secret-stores/.
+	//
+	// Prefer BackendConfigFunc. This is a boot-time snapshot, and the backend can
+	// be switched at runtime.
 	BackendConfig *secrets.BackendConfig
+	// BackendConfigFunc returns the CURRENT backend config, and takes precedence
+	// over BackendConfig.
+	//
+	// The backend decides what every app's ExternalSecret says: which
+	// ClusterSecretStore it names (unified for 1Password/Vault vs per-vault for
+	// k8s — storeForScope) and, for Vault, whether the remoteRef key is qualified
+	// with its container path (itemKeyFor). Rendering that from a stale snapshot
+	// points apps at a store that does not exist on their cluster, and ESO fails
+	// with a config error that says nothing about the cause. Nil falls back to
+	// BackendConfig, then to BackendK8s.
+	BackendConfigFunc func() secrets.BackendConfig
 	// ChartFetcher resolves a packaged Helm chart (chart.tgz) by template
 	// name when no local TemplatesDir entry exists. Used for templates
 	// imported via the BYO-chart flow, where the chart bytes live in a
@@ -191,9 +205,6 @@ func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, 
 	p.cfg.RoutingProfiles = routingProfiles
 }
 
-// usesUnifiedStore reports whether app ExternalSecrets should extract from the
-// single per-cluster ClusterSecretStore (1Password backend) instead of the
-// per-vault stores (k8s backend).
 // externalSecretRefreshInterval is the org-configured ExternalSecret refresh
 // interval (secrets.DefaultRefreshInterval when unset / no backend config).
 func (p *Publisher) externalSecretRefreshInterval() string {
@@ -203,8 +214,18 @@ func (p *Publisher) externalSecretRefreshInterval() string {
 	return p.cfg.BackendConfig.ExternalSecrets.EffectiveRefreshInterval()
 }
 
-func (p *Publisher) usesUnifiedStore() bool {
-	return p.cfg.BackendConfig != nil && p.cfg.BackendConfig.Effective() == secrets.Backend1Password
+// effectiveBackend returns the org's secret backend type (k8s when no backend
+// config is set), which selects the ESO store/key layout — see
+// WorkloadExternalSecretParams.Backend.
+func (p *Publisher) effectiveBackend() secrets.BackendType {
+	if p.cfg.BackendConfigFunc != nil {
+		cfg := p.cfg.BackendConfigFunc()
+		return cfg.Effective()
+	}
+	if p.cfg.BackendConfig == nil {
+		return secrets.BackendK8s
+	}
+	return p.cfg.BackendConfig.Effective()
 }
 
 // NewPublisher creates a Publisher from cfg.
@@ -866,7 +887,7 @@ func (p *Publisher) buildComponentExternalSecret(env AppPublishEnv, app *domain.
 		Cluster:         env.ClusterRef,
 		Presence:        env.ScopeKeys,
 		SecretKeys:      env.ScopeSecretKeys,
-		UnifiedStore:    p.usesUnifiedStore(),
+		Backend:         p.effectiveBackend(),
 		Branding:        p.cfg.Branding,
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	}, name, renames)
@@ -1931,7 +1952,7 @@ func (p *Publisher) writeAppPlatformResources(
 		Stack:           app.Spec.Stack,
 		Cluster:         env.ClusterRef,
 		Presence:        env.ScopeKeys,
-		UnifiedStore:    p.usesUnifiedStore(),
+		Backend:         p.effectiveBackend(),
 		Branding:        p.cfg.Branding,
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	})
@@ -2857,7 +2878,7 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 		Presence:        preview.ScopeKeys,
 		IsPreview:       true,
 		PreviewName:     preview.PreviewName,
-		UnifiedStore:    p.usesUnifiedStore(),
+		Backend:         p.effectiveBackend(),
 		Branding:        p.cfg.Branding,
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	})
@@ -3034,7 +3055,7 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 		Presence:        preview.ScopeKeys,
 		IsPreview:       true,
 		PreviewName:     preview.PreviewName,
-		UnifiedStore:    p.usesUnifiedStore(),
+		Backend:         p.effectiveBackend(),
 		Branding:        p.cfg.Branding,
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	})
