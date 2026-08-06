@@ -165,3 +165,19 @@ type LegacyItemMigrator interface {
 	// No-op (nil) when it does not exist. Used by prune-legacy-items after cutover.
 	DeleteItem(ctx context.Context, scope Scope, itemName string) error
 }
+
+// ItemExporter reads an item's full contents — the ONLY value-returning read
+// in this package, and deliberately a separate interface: VaultStore stays
+// value-blind (ListKeys returns names only), and nothing behind an HTTP
+// handler ever holds this type. It exists solely so `suparship secrets
+// migrate` can copy items between backends; values stay inside the process and
+// are never logged.
+//
+// Like LegacyItemMigrator, it is implemented by the concrete stores and
+// consumed via a type assertion on the raw backing store — a backend that
+// cannot export (or a wrapper that must not) simply doesn't implement it.
+type ItemExporter interface {
+	// ExportItem returns every key/value in the (scope, tier, app) item.
+	// An absent item is (nil, nil) — not an error.
+	ExportItem(ctx context.Context, scope Scope, tier Tier, app string) (map[string][]byte, error)
+}
