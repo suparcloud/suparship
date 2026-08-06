@@ -197,6 +197,15 @@ local_resource(
 #     through the Service, so it does not need the probe; and suparship/ESO only
 #     dial Vault after bootstrap has unsealed it.
 if VAULT:
+    # Clusters created before Vault became persistent have a storage-less
+    # StatefulSet, and the API forbids ADDING volumeClaimTemplates to an existing
+    # one — so `helm upgrade` fails outright and the vault resource goes red.
+    # Delete the incompatible StatefulSet first so helm recreates it with the
+    # volume. No-op on a fresh cluster and on every later run.
+    local_resource(
+        'vault-storage-migrate', cmd='hack/dev/vault-storage-migrate.sh',
+        labels=['prereq'],
+    )
     helm_resource(
         'vault', 'hashicorp/vault', namespace='vault',
         flags=['--create-namespace', '--version=0.30.0',
@@ -206,7 +215,7 @@ if VAULT:
                '--set=server.readinessProbe.enabled=false',
                '--set=injector.enabled=false',
                '--timeout=5m0s'],
-        resource_deps=['hashicorp'],
+        resource_deps=['hashicorp', 'vault-storage-migrate'],
         port_forwards=['8200:8200'],  # http://localhost:8200
         links=[link('http://localhost:8200', 'Vault UI (token: see vault-bootstrap logs)')],
         labels=['prereq'],
