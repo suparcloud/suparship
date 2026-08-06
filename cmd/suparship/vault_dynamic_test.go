@@ -13,7 +13,7 @@ import (
 
 type fakeOrgStore struct{ org *rbac.Org }
 
-func (f *fakeOrgStore) GetOrg(context.Context) (*rbac.Org, error)  { return f.org, nil }
+func (f *fakeOrgStore) GetOrg(context.Context) (*rbac.Org, error)    { return f.org, nil }
 func (f *fakeOrgStore) SaveOrg(_ context.Context, o *rbac.Org) error { f.org = o; return nil }
 
 // The dynamic vault store must dispatch to the backend the CURRENT org config

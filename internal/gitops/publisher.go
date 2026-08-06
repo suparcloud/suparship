@@ -77,7 +77,21 @@ type PublisherConfig struct {
 	// BackendConfig is the org-level secret backend configuration.
 	// When non-nil and the effective backend is 1Password, PublishEnvInfra
 	// also writes ClusterSecretStore YAMLs to _infra/secret-stores/.
+	//
+	// Prefer BackendConfigFunc. This is a boot-time snapshot, and the backend can
+	// be switched at runtime.
 	BackendConfig *secrets.BackendConfig
+	// BackendConfigFunc returns the CURRENT backend config, and takes precedence
+	// over BackendConfig.
+	//
+	// The backend decides what every app's ExternalSecret says: which
+	// ClusterSecretStore it names (unified for 1Password/Vault vs per-vault for
+	// k8s — storeForScope) and, for Vault, whether the remoteRef key is qualified
+	// with its container path (itemKeyFor). Rendering that from a stale snapshot
+	// points apps at a store that does not exist on their cluster, and ESO fails
+	// with a config error that says nothing about the cause. Nil falls back to
+	// BackendConfig, then to BackendK8s.
+	BackendConfigFunc func() secrets.BackendConfig
 	// ChartFetcher resolves a packaged Helm chart (chart.tgz) by template
 	// name when no local TemplatesDir entry exists. Used for templates
 	// imported via the BYO-chart flow, where the chart bytes live in a
@@ -204,6 +218,10 @@ func (p *Publisher) externalSecretRefreshInterval() string {
 // config is set), which selects the ESO store/key layout — see
 // WorkloadExternalSecretParams.Backend.
 func (p *Publisher) effectiveBackend() secrets.BackendType {
+	if p.cfg.BackendConfigFunc != nil {
+		cfg := p.cfg.BackendConfigFunc()
+		return cfg.Effective()
+	}
 	if p.cfg.BackendConfig == nil {
 		return secrets.BackendK8s
 	}

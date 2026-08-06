@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -412,4 +413,110 @@ func TestSetClusterConnectToken_RequiresOnePassword(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422 (1Password backend required), got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+// ── Republish on backend switch ──────────────────────────────────────────────
+// Apps' ExternalSecrets bake in the ClusterSecretStore name (and, for Vault, the
+// remoteRef key shape) that the backend implies. Switching the backend without
+// re-publishing leaves every app naming the previous backend's store — which on
+// the new backend does not exist, and ESO only says "unable to validate store".
+
+func TestPutSecretsBackend_RepublishesAppsOnTypeChange(t *testing.T) {
+	var mu sync.Mutex
+	var reasons []string
+	hook := func(_ context.Context, reason string) {
+		mu.Lock()
+		defer mu.Unlock()
+		reasons = append(reasons, reason)
+	}
+	readReasons := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), reasons...)
+	}
+
+	org := &rbac.Org{}
+	h := &secretsHandler{
+		orgStore:         &staticOrgProvider{org: org},
+		logger:           slog.Default(),
+		onBackendChanged: hook,
+	}
+
+	put := func(body any) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest("PUT", "/api/v1/org/secret-backend", bytes.NewReader(b))
+		rec := httptest.NewRecorder()
+		h.handlePutSecretsBackendFull(rec, req)
+		return rec
+	}
+
+	// k8s (the zero value's effective type) → vault: a real change, so republish.
+	rec := put(map[string]any{"type": "vault", "vault": map[string]any{"address": "http://vault:8200"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("switch to vault: got %d: %s", rec.Code, rec.Body.String())
+	}
+	waitFor(t, func() bool { return len(readReasons()) == 1 })
+	if got := readReasons(); got[0] != "backend-type-changed" {
+		t.Errorf("reason = %q, want backend-type-changed", got[0])
+	}
+
+	// Re-PUT the SAME type: config-only edit, no store-name change, so no
+	// republish — the fleet publish is expensive and must not fire on every save.
+	rec = put(map[string]any{"type": "vault", "vault": map[string]any{"address": "http://vault-2:8200"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("same-type edit: got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := readReasons(); len(got) != 1 {
+		t.Errorf("same-type edit triggered %d republishes, want 0 extra: %v", len(got)-1, got)
+	}
+
+	// vault → k8s: a change again.
+	rec = put(map[string]any{"type": "k8s"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("switch to k8s: got %d: %s", rec.Code, rec.Body.String())
+	}
+	waitFor(t, func() bool { return len(readReasons()) == 2 })
+}
+
+// A rejected switch must not republish — the org was never changed.
+func TestPutSecretsBackend_NoRepublishOnRejectedSwitch(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	h := &secretsHandler{
+		orgStore: &staticOrgProvider{org: &rbac.Org{}},
+		logger:   slog.Default(),
+		onBackendChanged: func(context.Context, string) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+		},
+	}
+
+	// vault with no address fails Validate.
+	b, _ := json.Marshal(map[string]any{"type": "vault"})
+	req := httptest.NewRequest("PUT", "/api/v1/org/secret-backend", bytes.NewReader(b))
+	rec := httptest.NewRecorder()
+	h.handlePutSecretsBackendFull(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	time.Sleep(50 * time.Millisecond) // give a stray goroutine a chance to fire
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 0 {
+		t.Errorf("republish fired %d times on a rejected switch", calls)
+	}
+}
+
+// waitFor polls cond briefly — the republish hook is deliberately asynchronous.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met within 1s")
 }

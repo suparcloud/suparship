@@ -422,6 +422,25 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			// charts/ extract step. Inline-mode templates pass through
 			// unchanged.
 			pubCfg.TemplateLoader = templateLoaderFromClient(kubeClient)
+			// The secret backend decides which ClusterSecretStore every app's
+			// ExternalSecret names, and whether Vault remoteRef keys carry their
+			// container path. Read it LIVE rather than snapshotting at boot: the
+			// backend is switchable at runtime, and a stale value silently renders
+			// every app against the wrong backend. Left unset it defaulted to k8s
+			// forever, so apps on a 1Password/Vault org referenced the per-vault
+			// store name (suparship-store-global) that only the k8s backend
+			// publishes — ESO then reported InvalidProviderConfig with no hint why.
+			if orgProvider != nil {
+				pubCfg.BackendConfigFunc = func() secrets.BackendConfig {
+					org, err := orgProvider.GetOrg(context.Background())
+					if err != nil || org == nil {
+						// Same fallback as a nil config: never guess a credentialed
+						// backend from a failed read.
+						return secrets.BackendConfig{Type: secrets.BackendK8s}
+					}
+					return org.SecretBackend
+				}
+			}
 
 			// InsecureRegistry is read from the registry ConfigMap (if configured).
 			if registryStore != nil {
@@ -621,23 +640,37 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	srv := server.New(server.Config{
-		Addr:                    addr,
-		UIDir:                   uiDir,
-		CORSOrigins:             origins,
-		Authenticator:           authenticator,
-		OrgProvider:             orgProvider,
-		Templates:               templates,
-		ClusterTemplateLoader:   clusterTemplateLoaderFromClient(kubeClient),
-		RegistrySyncEngine:      registrySyncEngine(kubeClient, logger),
-		ProjectStore:            projectStore,
-		TokenStore:              tokenStore,
-		RuntimeProvider:         runtimeProvider,
-		LogsProvider:            logsProvider,
-		PreviewStore:            previewStore,
-		AppStore:                appStore,
-		StackStore:              stackStore,
-		ClusterStore:            clusterStore,
-		VaultStore:              vaultStore,
+		Addr:                  addr,
+		UIDir:                 uiDir,
+		CORSOrigins:           origins,
+		Authenticator:         authenticator,
+		OrgProvider:           orgProvider,
+		Templates:             templates,
+		ClusterTemplateLoader: clusterTemplateLoaderFromClient(kubeClient),
+		RegistrySyncEngine:    registrySyncEngine(kubeClient, logger),
+		ProjectStore:          projectStore,
+		TokenStore:            tokenStore,
+		RuntimeProvider:       runtimeProvider,
+		LogsProvider:          logsProvider,
+		PreviewStore:          previewStore,
+		AppStore:              appStore,
+		StackStore:            stackStore,
+		ClusterStore:          clusterStore,
+		VaultStore:            vaultStore,
+		// Switching the secret backend changes which ClusterSecretStore every
+		// app's ExternalSecret names (and, for Vault, whether its remoteRef key is
+		// path-qualified). Those are baked in at publish time, so re-publish the
+		// fleet — otherwise every app keeps pointing at the old backend's store
+		// and ESO reports "unable to validate store" with no clue why. Reuses the
+		// same routine the generator-version bump uses at startup.
+		OnSecretBackendChanged: func(ctx context.Context, reason string) {
+			if failures := republishAllApps(ctx, gitOpsPublisher, appStore, projectStore, orgProvider, logger); failures > 0 {
+				logger.Warn("republish after secret-backend change: some apps failed",
+					"reason", reason, "failures", failures)
+			} else {
+				logger.Info("republish after secret-backend change: complete", "reason", reason)
+			}
+		},
 		GitOpsPublisher:         publisherHolder,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,

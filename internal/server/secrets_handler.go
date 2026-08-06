@@ -105,6 +105,30 @@ type secretsHandler struct {
 	sealPublisher   SealedTokenPublisher
 	clusterPool     sealClientPool
 	kubeClient      kubernetes.Interface
+	// onBackendChanged, when set, is invoked (in the background) after the org's
+	// secret backend TYPE changes.
+	//
+	// Every app's ExternalSecret embeds choices the backend makes: which
+	// ClusterSecretStore it names, and for Vault whether the remoteRef key carries
+	// its container path. Those are fixed at publish time, so without a
+	// re-publish a switch leaves every app pointing at the previous backend's
+	// store — which on the new backend does not exist, and ESO reports only
+	// "unable to validate store". Wired to republishAllApps in cmd/suparship;
+	// nil disables (fake mode, tests).
+	onBackendChanged func(ctx context.Context, reason string)
+}
+
+// backendTypeChangedAsync re-publishes every app in the background when the
+// backend type actually moved. Best-effort and fire-and-forget, matching
+// resealAllClustersAsync: the org write has already succeeded, and a publish
+// failure must not fail the request that changed the setting.
+func (h *secretsHandler) backendTypeChangedAsync(from, to secrets.BackendType, reason string) {
+	if h.onBackendChanged == nil || from == to {
+		return
+	}
+	h.logger.Info("secret backend changed — re-publishing apps so their ExternalSecrets name the new backend's store",
+		"from", from, "to", to, "reason", reason)
+	go h.onBackendChanged(context.Background(), reason)
 }
 
 // ── Org backend config ────────────────────────────────────────────────────────
@@ -142,6 +166,7 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 	// when the request omits them (so switching backends doesn't lose config and
 	// re-selecting a backend reloads it). ExternalSecrets (backend-independent) is
 	// likewise preserved.
+	prevType := org.SecretBackend.Effective()
 	newCfg := org.SecretBackend
 	newCfg.Type = bt
 	if dto.OnePassword != nil {
@@ -169,6 +194,8 @@ func (h *secretsHandler) handlePutSecretsBackend(w http.ResponseWriter, r *http.
 	// Config changes (e.g. the org-level Connect endpoint) are baked into each
 	// cluster's unified store — republish them best-effort in the background.
 	h.resealAllClustersAsync("backend-config-updated")
+	// A type change additionally invalidates every app's ExternalSecret.
+	h.backendTypeChangedAsync(prevType, newCfg.Effective(), "backend-type-changed")
 	writeJSON(w, http.StatusOK, dto)
 }
 
@@ -191,6 +218,7 @@ func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *h
 	// preserved — switching the active backend (e.g. to k8s) sends only {type},
 	// and the previously configured backend's settings (1Password) must survive so
 	// re-selecting it reloads its config. JSON null still explicitly clears a field.
+	prevType := org.SecretBackend.Effective()
 	cfg := org.SecretBackend
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
@@ -215,6 +243,7 @@ func (h *secretsHandler) handlePutSecretsBackendFull(w http.ResponseWriter, r *h
 	// Config changes (e.g. the org-level Connect endpoint) are baked into each
 	// cluster's unified store — republish them best-effort in the background.
 	h.resealAllClustersAsync("backend-config-updated")
+	h.backendTypeChangedAsync(prevType, cfg.Effective(), "backend-type-changed")
 	writeJSON(w, http.StatusOK, cfg)
 }
 
@@ -815,7 +844,13 @@ func (h *secretsHandler) resealAllClustersAsync(reason string) {
 		if err != nil || org == nil {
 			return
 		}
-		if org.SecretBackend.Effective() != secrets.Backend1Password {
+		// Both credentialed backends publish a per-cluster ClusterSecretStore that
+		// bakes in org-level config — the Connect endpoint for 1Password, the
+		// server address and mount for Vault — so both must be re-published when
+		// that config changes. Gating on 1Password alone left Vault stores frozen
+		// at whatever address they were first sealed with, so changing the address
+		// updated the org but not the manifest any cluster actually reads.
+		if !org.SecretBackend.UsesPerClusterCredentials() {
 			return
 		}
 		h.resealAllClusters(ctx, org, reason)
