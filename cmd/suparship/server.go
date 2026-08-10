@@ -149,6 +149,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		deploymentHistoryReader server.DeploymentHistoryReader
 		projectAppCounter       server.ProjectAppCounter
 		appDiagnosticsReader    server.AppDiagnosticsReader
+		argoAppGate             server.ArgoAppGate
 		stuckAppManager         server.StuckAppManager
 		argoRefresh             argoRefresher // triggers ArgoCD refresh after publish
 
@@ -244,6 +245,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			deploymentHistoryReader = &argoCDHistoryAdapter{reader: argoCDReader}
 			projectAppCounter = argoCDReader
 			appDiagnosticsReader = argoCDReader
+			argoAppGate = argoCDReader
 			stuckAppManager = &stuckAppAdapter{reader: argoCDReader}
 			argoRefresh = argoCDReader
 			logger.Info("kargo promoter enabled via dynamic client")
@@ -678,6 +680,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		DeploymentHistoryReader: deploymentHistoryReader,
 		ProjectAppCounter:       projectAppCounter,
 		AppDiagnosticsReader:    appDiagnosticsReader,
+		ArgoAppGate:             argoAppGate,
 		StuckAppManager:         stuckAppManager,
 		ReadinessProbers:        readinessProbers,
 		CookieSecure:            cookieSecure,

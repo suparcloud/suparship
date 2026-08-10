@@ -178,14 +178,40 @@ export function TemplateDetail() {
             </p>
           )}
         </div>
-        <button
-          type="button"
-          onClick={handleDelete}
-          disabled={deleting}
-          className="shrink-0 rounded-md border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-        >
-          {deleting ? "Deleting…" : "Delete template"}
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          {template.disabled && (
+            <span className="rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700">
+              disabled
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={async () => {
+              // Disable = retire from the gallery + refuse NEW apps, keep
+              // existing apps working. The right "remove" for built-ins,
+              // which ship on disk and cannot be deleted. Reversible.
+              try {
+                const updated = await updateTemplateMetadata(template.name, {
+                  disabled: !template.disabled,
+                });
+                setTemplate(updated);
+              } catch (err) {
+                alert(err instanceof Error ? err.message : "Failed to update template");
+              }
+            }}
+            className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            {template.disabled ? "Enable" : "Disable"}
+          </button>
+          <button
+            type="button"
+            onClick={handleDelete}
+            disabled={deleting}
+            className="rounded-md border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+          >
+            {deleting ? "Deleting…" : "Delete template"}
+          </button>
+        </div>
       </div>
 
       {/* Metadata — editable for org_admins on imported templates */}

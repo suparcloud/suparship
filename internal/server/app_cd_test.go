@@ -5,6 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
+
+	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/session"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 // TestCreateApp_CDConfigRoundTrips verifies the create request's cd block is
@@ -182,5 +187,81 @@ func TestUpdateApp_CDWithoutImageSourceRejected(t *testing.T) {
 	}
 	if pub.publishApps != 0 {
 		t.Errorf("rejected update must not publish, got %d PublishApp calls", pub.publishApps)
+	}
+}
+
+// The exact bug from the field: a COMPOSED app (images live per component, or
+// auto-bind from component templates) could never enable cd.managed /
+// auto-promote — validation only looked at app-level Spec.Images and
+// values["image_repository"], which composed apps don't use.
+func TestUpdateApp_CDComposedAppWithComponentTemplateImages(t *testing.T) {
+	imageTemplate := &tpl.Template{
+		APIVersion: tpl.CurrentAPIVersion,
+		Kind:       tpl.TemplateKind,
+		Metadata:   tpl.Metadata{Name: "svc-with-images", Version: "1.0.0"},
+		Spec: tpl.TemplateSpec{
+			Title:  "Svc",
+			Engine: tpl.Engine{Type: tpl.EngineHelm},
+			Images: []tpl.TemplateImage{{Name: "web", TagKey: "image.tag"}},
+		},
+	}
+
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+	store := newMemAppStore()
+	store.mu.Lock()
+	store.apps[testProject] = make(map[string]*domain.App)
+	store.mu.Unlock()
+	appH := newAppHandler(store, []*tpl.Template{imageTemplate}, nil, nil)
+	pub := &updatePublisher{}
+	appH.gitOpsPublisher = pub
+	rh := &rbacHandler{auth: ah, orgStore: &staticOrgProvider{org: testRBACOrg()}, appHandler: appH}
+	rh.registerRoutes(mux)
+
+	// Composed app: no app-level images, no image_repository — components carry
+	// templates whose declared images publish auto-binds.
+	app := &domain.App{
+		Name:        "composed-cd",
+		ProjectName: testProject,
+		Spec: domain.AppSpec{
+			Components: []domain.ComponentSpec{
+				{Name: "frontend", Type: domain.ComponentWeb, Enabled: true, Template: &domain.AppTemplateRef{Name: "svc-with-images"}},
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true, Template: &domain.AppTemplateRef{Name: "svc-with-images"}},
+			},
+		},
+	}
+	store.addApp(app)
+
+	rec := patchAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "composed-cd",
+		updateAppRequest{CD: &CDConfigDTO{Managed: true, AutoPromote: true}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("composed app with component template images: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := store.GetApp(context.Background(), testProject, "composed-cd")
+	if !got.Spec.CD.Managed || !got.Spec.CD.AutoPromote {
+		t.Errorf("cd not persisted: %+v", got.Spec.CD)
+	}
+
+	// Component STORED selections also count, even once images are configured.
+	app2 := &domain.App{
+		Name:        "composed-cd-2",
+		ProjectName: testProject,
+		Spec: domain.AppSpec{
+			CD: domain.CDConfig{ImagesConfigured: true},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Images: []domain.ComponentImage{{Name: "api", TagKey: "image.tag"}}},
+			},
+		},
+	}
+	store.addApp(app2)
+	rec = patchAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "composed-cd-2",
+		updateAppRequest{CD: &CDConfigDTO{Managed: true}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("composed app with stored component selection: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

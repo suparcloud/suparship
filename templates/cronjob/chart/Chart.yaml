@@ -1,9 +1,9 @@
 apiVersion: v2
-name: web-service
-description: A suparship template chart for deploying HTTP web apps
+name: cronjob
+description: A suparship template chart for cron-scheduled tasks
 type: application
-version: 1.1.0
-appVersion: "1.1.0"
+version: 1.0.0
+appVersion: "1.0.0"
 annotations:
   suparship.io/values-schema-version: v1
 dependencies:

@@ -33,6 +33,12 @@ type templateMetadataPatch struct {
 	// (imported) templates — it changes app-creation semantics, not display
 	// metadata, so read-only/synced templates reject it (set it at the source).
 	DeliveryMode *string `json:"deliveryMode,omitempty"`
+	// Disabled, when non-nil, retires (true) or restores (false) the template:
+	// disabled templates stay listed (marked) but refuse new apps; existing
+	// apps keep working. Stored in the sync-safe override for EVERY provenance,
+	// including built-ins — it's operational state, not template content, and
+	// must survive re-syncs and image rebuilds alike.
+	Disabled *bool `json:"disabled,omitempty"`
 }
 
 // handleUpdateTemplateMetadata serves PATCH /api/v1/templates/{name}.
@@ -76,6 +82,26 @@ func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r
 	if !ok {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "template not found"})
 		return
+	}
+
+	// Disabled is handled up front, for every provenance: it lives in the
+	// sync-safe override even for editable templates, because it's operational
+	// state — writing it into template.yaml would silently resurrect the
+	// template on the next import/sync.
+	if patch.Disabled != nil {
+		ov, err := kube.LoadTemplateOverride(r.Context(), th.kubeClient, name)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load template override"})
+			return
+		}
+		if ov == nil {
+			ov = &domain.TemplateOverride{}
+		}
+		ov.Disabled = *patch.Disabled
+		if err := kube.SaveTemplateOverride(r.Context(), th.kubeClient, name, ov); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save template override"})
+			return
+		}
 	}
 
 	// Read-only body (synced / built-in): persist a sync-safe metadata override.
@@ -142,6 +168,9 @@ func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r
 	}
 
 	dto := templateToDetail(&updated)
+	if ov, err := kube.LoadTemplateOverride(r.Context(), th.kubeClient, name); err == nil && ov != nil {
+		dto.Disabled = ov.Disabled
+	}
 	dto.Source, dto.Editable = th.templateProvenance(r.Context(), name)
 	writeJSON(w, http.StatusOK, dto)
 }
@@ -249,6 +278,7 @@ func (th *templateHandler) updateMetadataViaOverride(
 	if ov.DeliveryMode != "" {
 		dto.DeliveryMode = ov.DeliveryMode
 	}
+	dto.Disabled = ov.Disabled
 	dto.Source, dto.Editable = th.templateProvenance(r.Context(), name)
 	writeJSON(w, http.StatusOK, dto)
 }

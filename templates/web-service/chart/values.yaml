@@ -71,6 +71,20 @@ serviceAccount:
 # Set to "" to disable.
 reloader: "true"
 
+# -- PodDisruptionBudget: keep rollouts and node drains from taking the whole
+# app down at once. maxUnavailable (never minAvailable) so a single-replica
+# app can still be drained.
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+# -- Graceful shutdown. preStopSleepSeconds keeps the pod serving while
+# endpoint controllers and load balancers drop it from rotation (0 disables);
+# terminationGracePeriodSeconds must exceed the sleep + the app's own
+# drain time.
+preStopSleepSeconds: 15
+terminationGracePeriodSeconds: 30
+
 # -- envFrom hierarchy — populated by the suparship publisher per app-env.
 # The chart suppresses the envFrom block when both lists are empty.
 suparship:

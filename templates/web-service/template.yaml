@@ -12,7 +12,7 @@ apiVersion: suparship.io/v1alpha1
 kind: Template
 metadata:
   name: web-service
-  version: "1.0.0"
+  version: "1.1.0"
 spec:
   title: Web App
   description: >-
@@ -31,7 +31,7 @@ spec:
       defaultEnabled: true
       previewEnabled: true
       exposed: true
-      produces: [Deployment, Service]
+      produces: [Deployment, Service, PodDisruptionBudget]
       optionallyProduces: [Ingress, ScaledObject]
       # All web defaults apply — expose=true, routing=ingress,
       # autoscaling=keda, pdb=true, resources=true, replicas=true.

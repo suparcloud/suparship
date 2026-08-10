@@ -314,3 +314,58 @@ func TestUpdateTemplateMetadata_BuiltinSavesOverride(t *testing.T) {
 }
 
 func strptr(s string) *string { return &s }
+
+// Disabling works for EVERY provenance — including built-ins, which cannot be
+// deleted — and round-trips: PATCH sets it, the list marks it, PATCH clears it.
+func TestUpdateTemplateMetadata_DisableRoundTrip(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	builtin := metadataTestTemplate() // served from the builtin slice, NOT the cluster
+	th := &templateHandler{
+		builtin:    []*tpl.Template{builtin},
+		kubeClient: client,
+	}
+
+	// Disable.
+	disabled := true
+	rec := httptest.NewRecorder()
+	th.handleUpdateTemplateMetadata(rec, patchReq(builtin.Metadata.Name, templateMetadataPatch{Disabled: &disabled}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var dto TemplateDetailDTO
+	_ = json.NewDecoder(rec.Body).Decode(&dto)
+	if !dto.Disabled {
+		t.Error("detail DTO should report disabled")
+	}
+
+	// The gallery list marks it (still listed — admins must be able to find it).
+	rec = httptest.NewRecorder()
+	th.handleList(rec, httptest.NewRequest("GET", "/api/v1/templates", nil))
+	var list TemplatesResponse
+	_ = json.NewDecoder(rec.Body).Decode(&list)
+	if len(list.Templates) != 1 || !list.Templates[0].Disabled {
+		t.Errorf("list should mark the template disabled: %+v", list.Templates)
+	}
+
+	// The sync-safe override carries it — a re-sync or image rebuild can't
+	// resurrect the template.
+	ov, err := kube.LoadTemplateOverride(context.Background(), client, builtin.Metadata.Name)
+	if err != nil || ov == nil || !ov.Disabled {
+		t.Fatalf("override should persist disabled: %+v, %v", ov, err)
+	}
+
+	// Re-enable.
+	enabled := false
+	rec = httptest.NewRecorder()
+	th.handleUpdateTemplateMetadata(rec, patchReq(builtin.Metadata.Name, templateMetadataPatch{Disabled: &enabled}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	th.handleList(rec, httptest.NewRequest("GET", "/api/v1/templates", nil))
+	list = TemplatesResponse{}
+	_ = json.NewDecoder(rec.Body).Decode(&list)
+	if len(list.Templates) != 1 || list.Templates[0].Disabled {
+		t.Errorf("template should be re-enabled in the list: %+v", list.Templates)
+	}
+}

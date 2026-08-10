@@ -73,7 +73,9 @@ export function NewService() {
     async function load() {
       try {
         const data = await fetchTemplates();
-        if (!cancelled) setTemplates(data.templates);
+        // Disabled (retired) templates are listed for admins but must not be
+        // offered for new apps — the server enforces this too (422 on create).
+        if (!cancelled) setTemplates(data.templates.filter((t) => !t.disabled));
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load templates");
       } finally {

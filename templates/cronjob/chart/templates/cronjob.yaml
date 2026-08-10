@@ -1,0 +1,66 @@
+{{- $cron := .Values.components.cron }}
+{{- if $cron.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "cronjob.fullname" . }}
+  labels:
+    {{- include "cronjob.labels" . | nindent 4 }}
+spec:
+  schedule: {{ $cron.schedule | default "0 3 * * *" | quote }}
+  # The platform suspend convention maps directly onto the CronJob: suspending
+  # the app pauses the schedule, resuming picks it back up. Nothing is deleted
+  # either way.
+  suspend: {{ or .Values.suspend $cron.suspend | default false }}
+  # Forbid by default: a slow run must never overlap the next one — most cron
+  # tasks (reports, syncs, cleanups) are not safe to run concurrently. Change
+  # to Allow/Replace via the values editor when yours is.
+  concurrencyPolicy: {{ $cron.concurrencyPolicy | default "Forbid" }}
+  # If the scheduler was down (or the schedule suspended) past this window,
+  # the missed run is SKIPPED rather than fired late.
+  startingDeadlineSeconds: {{ $cron.startingDeadlineSeconds | default 300 }}
+  successfulJobsHistoryLimit: {{ $cron.successfulJobsHistoryLimit | default 3 }}
+  failedJobsHistoryLimit: {{ $cron.failedJobsHistoryLimit | default 3 }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "cronjob.labels" . | nindent 8 }}
+    spec:
+      backoffLimit: {{ $cron.backoffLimit | default 2 }}
+      {{- with $cron.activeDeadlineSeconds }}
+      activeDeadlineSeconds: {{ . }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            {{- include "cronjob.labels" . | nindent 12 }}
+            {{- include "suparship-common.componentNameLabel" "cron" | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          {{- if .Values.serviceAccount.create }}
+          serviceAccountName: {{ include "cronjob.serviceAccountName" . }}
+          {{- end }}
+          containers:
+            - name: {{ include "cronjob.fullname" . }}
+              image: "{{ $cron.image.repository | default "busybox" }}:{{ $cron.image.tag | default "stable" }}"
+              imagePullPolicy: IfNotPresent
+              {{- with $cron.command }}
+              command:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- with $cron.args }}
+              args:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- include "cronjob.resources" . | nindent 16 }}
+              {{- include "suparship-common.envFrom" . | nindent 14 }}
+              {{- if $cron.env }}
+              # ComponentSpec.Config: direct env entries — override all envFrom levels above.
+              env:
+                {{- range $k, $v := $cron.env }}
+                - name: {{ $k }}
+                  value: {{ $v | quote }}
+                {{- end }}
+              {{- end }}
+{{- end }}

@@ -280,6 +280,57 @@ Secret inputs:
 
 Presets: `starter` (single replica, small, no ingress) and `production` (three replicas, large, ingress enabled).
 
+Production hardening (v1.1.0): zero-downtime `RollingUpdate` (surge 1 /
+unavailable 0), a `preStop` sleep so rollouts don't 502 while load balancers
+drop pods from rotation, and a default-on `PodDisruptionBudget`
+(`maxUnavailable: 1`, so single-replica apps still drain).
+
+### `worker`
+
+A long-running background worker — queue consumer, event processor, outbox
+relay. No Service, no Ingress, no ports: a worker is defined by what it
+consumes, not what it serves.
+
+**Category:** `worker`  
+**Default component topology:** single `worker` component (Deployment + PDB, optional KEDA ScaledObject)  
+**Engine:** Helm (`./chart`)
+
+Developer values: image repository, replica count, resource size. Set the
+worker's entrypoint via the values editor (`components.worker.command`/`args`)
+when the image's own entrypoint isn't the worker loop. For autoscaling, wire a
+**queue-length KEDA trigger** through `autoscaling.triggers` — the cpu/memory
+default is only a fallback that tracks pull-based work poorly. Shutdown is a
+drain: SIGTERM, then a 60s grace budget (`terminationGracePeriodSeconds`).
+
+### `cronjob`
+
+A task on a cron schedule — reports, syncs, cleanups. Unlike `job` (a one-shot
+ArgoCD PreSync hook that gates a release), `cronjob` is a long-lived CronJob
+that runs independent of deploys.
+
+**Category:** `cron`  
+**Default component topology:** single `cron` component (CronJob)  
+**Engine:** Helm (`./chart`)
+
+Developer values: image repository, schedule (cron expression), resource size.
+Defaults chosen for safety: `concurrencyPolicy: Forbid` (a slow run never
+overlaps the next), missed runs skipped after 300s rather than fired late,
+failed runs kept for debugging (`failedJobsHistoryLimit: 3`). The platform
+suspend flag maps directly onto `CronJob.spec.suspend`, so suspending the app
+pauses the schedule without deleting anything.
+
+## Disabling a template
+
+Org admins can retire any template — including built-ins, which ship on disk
+and cannot be deleted — with `PATCH /api/v1/templates/{name}` `{"disabled":
+true}` (or the Disable button on the template detail page). A disabled
+template stays listed (marked) so it can be found and re-enabled, but the
+create flow doesn't offer it and the server refuses new apps from it with a
+422. **Existing apps are untouched**: they pin chart versions, not gallery
+entries, and keep publishing/editing/upgrading. The flag lives in the
+template's sync-safe override, so re-syncs and image rebuilds can't resurrect
+a retired template.
+
 ## Writing a new template
 
 1. Create `templates/<name>/template.yaml` following the schema above.

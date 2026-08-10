@@ -49,6 +49,8 @@ type appHandler struct {
 	logsProvider            runtime.LogsProvider    // optional: enables GET .../apps/{app}/logs
 	gitOpsPublisher         GitOpsPublisher         // optional: commits argocd manifests to gitops repo on create
 	kargoPromoter           KargoPromoter           // optional: creates Kargo Promotion CRs on promote
+	argoAppGate             ArgoAppGate             // optional: refuses Kargo promotions until the target Application exists
+	argoAppWaitTimeout      time.Duration           // how long promoteAppEnv polls the gate (defaulted in newAppHandler)
 	kargoStatusReader       KargoStatusReader       // optional: reads live Kargo Promotion status
 	kargoPipelineReader     KargoPipelineReader     // optional: reads live Kargo Stage pipeline status
 	deploymentHistoryReader DeploymentHistoryReader // optional: reads ArgoCD sync history
@@ -129,7 +131,34 @@ func newAppHandler(store domain.AppStore, templates []*tpl.Template, clusterLoad
 		projectStore:         projectStore,
 		statusCache:          newStatusCache(statusCacheTTL),
 		templateVersionCache: newTemplateVersionCache(templateVersionsTTL),
+		argoAppWaitTimeout:   defaultArgoAppWaitTimeout,
 	}
+}
+
+// defaultArgoAppWaitTimeout bounds how long a promotion waits for ArgoCD to
+// generate the target env's Application before giving up with a retryable
+// error. Long enough to cover the common case (the Application already exists,
+// or a webhook-triggered appset reconcile lands quickly); deliberately shorter
+// than the ApplicationSet git generator's default requeue (~3 min) — a
+// first-ever promotion to an env may need one retry, which beats holding an
+// HTTP request open for minutes.
+const defaultArgoAppWaitTimeout = 20 * time.Second
+
+// templateDisabled reports whether the template is retired via its sync-safe
+// override. Gates NEW app creation only — existing apps keep every other
+// operation (values editing, publish, upgrade), because disabling means "stop
+// offering this", not "break what's running on it". Fail-open on any read
+// problem or when no cluster client is wired (fake mode): an unreadable
+// override must not block creation.
+func (ah *appHandler) templateDisabled(ctx context.Context, name string) bool {
+	if ah.kubeClient == nil {
+		return false
+	}
+	ov, err := kube.LoadTemplateOverride(ctx, ah.kubeClient, name)
+	if err != nil || ov == nil {
+		return false
+	}
+	return ov.Disabled
 }
 
 // lookupTemplate resolves a template by name live (cluster overrides built-in),
@@ -248,6 +277,12 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
+			if ah.templateDisabled(r.Context(), c.Template.Name) {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+					Error: "components[" + itoa(i) + "]: template \"" + c.Template.Name + "\" is disabled — an org admin can re-enable it under Templates",
+				})
+				return
+			}
 			version := c.Template.Version
 			if version == "" {
 				version = ctmpl.Metadata.Version
@@ -279,6 +314,12 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, errorResponse{
 				Error: "template \"" + req.Template + "\" not found",
+			})
+			return
+		}
+		if ah.templateDisabled(r.Context(), req.Template) {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+				Error: "template \"" + req.Template + "\" is disabled — an org admin can re-enable it under Templates",
 			})
 			return
 		}
@@ -665,12 +706,15 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		// toggle) — the DTO doesn't carry it, so a bare replacement would silently
 		// reset it and re-enable template auto-bind.
 		cd.ImagesConfigured = app.Spec.CD.ImagesConfigured
-		// Enabling CD-managed tag ownership requires a watchable image source (a
-		// selected image or an app image_repository); reject otherwise so we never
-		// publish a Warehouse that silently never promotes. Validate before mutating
-		// CD so a rejection leaves it as-is.
+		// Enabling CD-managed tag ownership requires a watchable image source;
+		// reject otherwise so we never publish a Warehouse that silently never
+		// promotes. Validate before mutating CD so a rejection leaves it as-is.
+		// imagesConfigured is computed as it will be AFTER this request: a
+		// same-request explicit selection (req.Images / req.ComponentImages,
+		// already applied to app.Spec above) flips it below this block.
 		if cd.Managed {
-			if err := validateCDImageSource(app.Spec.Values, app.Spec.Images); err != nil {
+			imagesConfigured := app.Spec.CD.ImagesConfigured || req.Images != nil || req.ComponentImages != nil
+			if err := ah.validateCDImageSource(r.Context(), app, imagesConfigured); err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 				return
 			}
@@ -2872,6 +2916,11 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 var (
 	errPromoteAppNotFound = errors.New("app not found")
 	errPromoteBadRequest  = errors.New("invalid promotion")
+	// errPromoteTargetNotReady means the target env's manifests are published
+	// but ArgoCD has not generated its Application yet. Retryable — 409, not
+	// 4xx-permanent or 5xx: the git side is done and a later retry succeeds
+	// once the ApplicationSet reconciles.
+	errPromoteTargetNotReady = errors.New("target environment not ready")
 )
 
 // statusForPromoteErr maps a promoteAppEnv error to an HTTP status.
@@ -2881,8 +2930,47 @@ func statusForPromoteErr(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, errPromoteBadRequest), errors.Is(err, domainapp.ErrNoRelease):
 		return http.StatusBadRequest
+	case errors.Is(err, errPromoteTargetNotReady):
+		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
+	}
+}
+
+// waitForTargetArgoApp polls the ArgoCD Application gate until the target
+// env's generated Application exists, the timeout lapses, or ctx is done.
+//
+// Fail-open on gate ERRORS (a broken dynamic client must not freeze every
+// promotion — log and proceed) but fail-closed on definitive absence. Nil gate
+// (fake mode, no dynamic client) means no check, preserving prior behavior.
+func (ah *appHandler) waitForTargetArgoApp(ctx context.Context, projectName, appName, envName string) error {
+	if ah.argoAppGate == nil {
+		return nil
+	}
+	timeout := ah.argoAppWaitTimeout
+	if timeout <= 0 {
+		timeout = defaultArgoAppWaitTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		exists, err := ah.argoAppGate.HasAppForEnv(ctx, projectName, appName, envName)
+		if err != nil {
+			slog.Warn("promote: ArgoCD application check failed — proceeding without the gate",
+				"project", projectName, "app", appName, "env", envName, "err", err)
+			return nil
+		}
+		if exists {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w: %s manifests are published, but ArgoCD has not generated the %s Application yet (the ApplicationSet can take up to its poll interval, ~3 min, on a first promotion) — retry shortly; nothing was promoted",
+				errPromoteTargetNotReady, envName, envName)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %v", errPromoteTargetNotReady, ctx.Err())
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 
@@ -2927,15 +3015,18 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 	}
 
 	// Write GitOps files for the target environment before triggering the
-	// promotion. This ensures ArgoCD can find app.yaml + values.yaml when
-	// Kargo (or the store fallback) signals a sync. Best-effort: a publish
-	// failure is logged but does not abort the promotion.
+	// promotion, so ArgoCD can find app.yaml + values.yaml when Kargo (or the
+	// store fallback) signals a sync. A publish failure ABORTS the promotion:
+	// proceeding used to "succeed" while the target env had no manifests in
+	// git — Kargo updated nothing deployable and the UI reported a green
+	// promotion. Failing loudly here is the fix for that silent green.
 	if ah.gitOpsPublisher != nil {
 		ah.ensureAppNamespace(ctx, app, targetEnv)
 		if pubErr := ah.gitOpsPublisher.PublishAppEnv(ctx, app, targetEnv); pubErr != nil {
-			slog.Warn("promote: failed to publish env files — proceeding with promotion",
+			slog.Error("promote: failed to publish env files — aborting promotion",
 				"project", projectName, "app", appName,
 				"env", targetEnvName, "err", pubErr)
+			return nil, fmt.Errorf("failed to publish %s manifests to gitops — promotion aborted (nothing was promoted): %w", targetEnvName, pubErr)
 		}
 	}
 
@@ -2943,6 +3034,17 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 	// drives the actual release copy through the Kargo pipeline; suparship
 	// then returns the Promotion details rather than the local release copy.
 	if ah.kargoPromoter != nil {
+		// Refuse to promote until the target env's ArgoCD Application exists.
+		// The promotion's argocd-update step targets that Application by name;
+		// against a nonexistent one, Kargo commits the git changes, deploys
+		// nothing, and reports success. On the FIRST promotion to an env the
+		// Application genuinely cannot exist yet — its app.yaml only entered
+		// git in the publish above — so poll briefly for the ApplicationSet to
+		// generate it, then return a retryable 409 rather than block the
+		// request for the appset's full requeue interval.
+		if err := ah.waitForTargetArgoApp(ctx, projectName, appName, targetEnvName); err != nil {
+			return nil, err
+		}
 		kargoResult, err := ah.kargoPromoter.CreatePromotion(ctx, projectName, appName, sourceEnv.EnvName, targetEnvName)
 		if err != nil {
 			slog.Error("kargo promotion failed",
@@ -3713,19 +3815,57 @@ func validateImageBindings(bindings []domain.AppImageBinding) error {
 }
 
 // validateCDImageSource rejects enabling CD-managed tag ownership (cd.managed) on
-// an app that has no image for Kargo to watch. Without at least one selected image
-// (discovered from the app's Helm values) and without an app-level
-// image_repository, publish would produce no Warehouse subscription — so the CD
-// pipeline would silently never promote. Catching it at the API gives the operator
-// immediate, actionable feedback rather than a quietly broken Warehouse.
-func validateCDImageSource(values map[string]any, images []domain.AppImageBinding) error {
-	if len(images) > 0 {
+// an app that has no image for Kargo to watch — publish would produce no
+// Warehouse subscription, so the CD pipeline would silently never promote.
+// Catching it at the API gives the operator immediate, actionable feedback
+// rather than a quietly broken Warehouse.
+//
+// The check mirrors every source the PUBLISHER actually watches, in order:
+// the app-level image selection, the legacy app image_repository value, any
+// component's stored selection (composed apps keep images per component —
+// checking only the app level rejected every composed app, the bug this
+// rewrite fixes), and finally — when the selection was never explicitly
+// configured — the template-declared images that publish auto-binds, for the
+// app's template and each component's own (a sync-safe Images override
+// replaces a template's declared set, so it counts too).
+//
+// imagesConfigured is the value the app will have AFTER this request: once an
+// operator has explicitly saved a selection, an empty one means "watch
+// nothing" and auto-bind no longer applies, so template images stop counting.
+func (ah *appHandler) validateCDImageSource(ctx context.Context, app *domain.App, imagesConfigured bool) error {
+	if len(app.Spec.Images) > 0 {
 		return nil
 	}
-	if repo, ok := values["image_repository"].(string); ok && strings.TrimSpace(repo) != "" {
+	if repo, ok := app.Spec.Values["image_repository"].(string); ok && strings.TrimSpace(repo) != "" {
 		return nil
 	}
-	return fmt.Errorf("continuous delivery (cd.managed) needs an image for Kargo to watch: select at least one image under the app's Images section, or set image_repository on the app")
+	for i := range app.Spec.Components {
+		if len(app.Spec.Components[i].Images) > 0 {
+			return nil
+		}
+	}
+	if !imagesConfigured {
+		names := make(map[string]bool)
+		if app.Spec.Template.Name != "" {
+			names[app.Spec.Template.Name] = true
+		}
+		for _, c := range app.Spec.Components {
+			if c.Template != nil && c.Template.Name != "" {
+				names[c.Template.Name] = true
+			}
+		}
+		for name := range names {
+			if ah.kubeClient != nil {
+				if ov, err := kube.LoadTemplateOverride(ctx, ah.kubeClient, name); err == nil && ov != nil && len(ov.Images) > 0 {
+					return nil
+				}
+			}
+			if tmpl, ok := ah.lookupTemplate(ctx, name); ok && len(tmpl.Spec.Images) > 0 {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("continuous delivery (cd.managed) needs an image for Kargo to watch: select at least one image under Images (on the app or a component), or set image_repository on the app")
 }
 
 func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO {

@@ -8,11 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	kubefake "k8s.io/client-go/kubernetes/fake"
+
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/session"
@@ -1306,5 +1310,60 @@ func TestCreateAppSingleEnvOnlyCreatesOneEnv(t *testing.T) {
 	}
 	if resp.App.Environments[0].EnvName != "dev" {
 		t.Errorf("expected env name %q, got %q", "dev", resp.App.Environments[0].EnvName)
+	}
+}
+
+// A disabled template must refuse NEW apps with an actionable 422 — while a
+// template that is merely marked in the gallery (not this one) creates fine.
+// Existing apps are untouched by disabling: nothing here deletes or blocks
+// them, and no other endpoint consults the flag.
+func TestCreateApp_DisabledTemplateRefused(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	if err := kube.SaveTemplateOverride(context.Background(), kubeClient, "web-service",
+		&domain.TemplateOverride{Disabled: true}); err != nil {
+		t.Fatalf("seed override: %v", err)
+	}
+
+	mux, ah, appStore := newAppCreateMuxWith([]*tpl.Template{appCreateTestTemplate()}, nil)
+	// Wire the cluster client so templateDisabled can read the override.
+	// (newAppCreateMuxWith doesn't; reach into the handler via a fresh mux.)
+	mux2 := http.NewServeMux()
+	ah2 := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah2.registerRoutes(mux2)
+	projStore := newMemProjectStore()
+	_ = projStore.Save(context.Background(), appCreateTestProject())
+	orgProv := &staticOrgProvider{org: testRBACOrg()}
+	appH := newAppHandler(appStore, []*tpl.Template{appCreateTestTemplate()}, nil, projStore)
+	appH.orgProvider = orgProv
+	appH.kubeClient = kubeClient
+	rh := &rbacHandler{auth: ah2, orgStore: orgProv, appHandler: appH}
+	rh.registerRoutes(mux2)
+
+	rec := postCreateAppJSON(mux2, sessionCookieFor(ah2, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "blocked-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "ghcr.io/org/app:v1"},
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for a disabled template, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "disabled") {
+		t.Errorf("error should say the template is disabled: %s", rec.Body.String())
+	}
+	if _, err := appStore.GetApp(context.Background(), "demo", "blocked-app"); err == nil {
+		t.Error("no app should have been created")
+	}
+
+	// Same request on the harness WITHOUT the override → creates fine.
+	rec = postCreateAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), "demo", createAppRequest{
+		Name:     "allowed-app",
+		Template: "web-service",
+		Values:   map[string]any{"image": "ghcr.io/org/app:v1"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("control create failed: %d: %s", rec.Code, rec.Body.String())
 	}
 }

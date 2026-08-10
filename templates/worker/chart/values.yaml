@@ -1,0 +1,97 @@
+# Default values for the worker template chart.
+#
+# Follows the suparship canonical HelmValues schema (see
+# templates/web-service/chart/values.yaml for the full commentary). A worker
+# has no Service, no Ingress, no routing and no ports — the canonical
+# `routing.*` keys are absent on purpose.
+
+# -- App identity — injected by suparship at publish time.
+app:
+  name: ""
+  env: ""
+
+# -- Platform metadata — injected by suparship at publish time.
+platform:
+  org: ""
+  project: ""
+  app: ""
+  env: ""
+  envType: ""
+  cluster: ""
+  namespace: ""
+  baseDomain: ""
+  routingHost: ""
+
+# -- Per-component configuration managed by suparship.
+components:
+  worker:
+    enabled: true
+    image:
+      # Default to a harmless placeholder loop; set your own image.
+      repository: busybox
+      tag: "stable"
+    # The worker loop entrypoint, when the image's own entrypoint isn't it.
+    # Set via the values editor, e.g.  command: ["python", "-m", "app.worker"].
+    command: []
+    args: []
+    replicas: 1
+    resources:
+      # small | medium | large — maps to CPU/memory limits via the
+      # suparship-common library helper.
+      size: small
+
+# -- Routing is not used by a worker, but the canonical schema requires the block.
+routing:
+  host: ""
+  component: worker
+
+# -- ServiceAccount configuration.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -- Stakater Reloader auto-restart on Secret/ConfigMap change.
+# Set to "" to disable.
+reloader: "true"
+
+# -- PodDisruptionBudget — maxUnavailable so single-replica workers don't
+# block node drains.
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+# -- Drain budget: how long a worker gets to finish in-flight work after
+# SIGTERM before it is killed.
+terminationGracePeriodSeconds: 60
+
+# -- envFrom hierarchy — populated by the suparship publisher per app-env.
+suparship:
+  envFromConfigMaps: []
+  envFromSecrets: []
+
+# -- KEDA ScaledObject. For workers, set `triggers` to a queue-length trigger
+# (rabbitmq / kafka / redis-streams / aws-sqs / ...) — the cpu+memory default
+# is only a fallback that tracks load poorly for pull-based work.
+autoscaling:
+  enabled: false
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  cooldownPeriod: 300
+  pollingInterval: 30
+  cpuTarget: 80
+  memoryTarget: 90
+  triggers: []
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30

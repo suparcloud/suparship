@@ -29,6 +29,10 @@ type TemplateSummaryDTO struct {
 	Description string `json:"description,omitempty"`
 	Category    string `json:"category"`
 	Engine      string `json:"engine"`
+	// Disabled marks a retired template: still listed (so an admin can find
+	// and re-enable it) but the create flow must not offer it and the server
+	// refuses new apps from it. Existing apps are unaffected.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // TemplatesResponse is the JSON body for GET /api/v1/templates.
@@ -72,6 +76,8 @@ type TemplateDetailDTO struct {
 	// (Kargo + promotion) or "direct" (deploy each env from values, no Kargo).
 	// "" means pipeline. The create wizard pre-selects this.
 	DeliveryMode string `json:"deliveryMode,omitempty"`
+	// Disabled mirrors TemplateSummaryDTO.Disabled (retired, refuses new apps).
+	Disabled bool `json:"disabled,omitempty"`
 	// Editable is true when metadata can be edited in place (cluster-stored and
 	// NOT managed by an external sync). Source describes provenance.
 	Editable bool               `json:"editable"`
@@ -462,6 +468,7 @@ func (th *templateHandler) handleList(w http.ResponseWriter, r *http.Request) {
 			Description: description,
 			Category:    category,
 			Engine:      t.Spec.Engine.Type,
+			Disabled:    overrides[t.Metadata.Name] != nil && overrides[t.Metadata.Name].Disabled,
 		})
 	}
 	writeJSON(w, http.StatusOK, TemplatesResponse{Templates: list})
@@ -496,6 +503,7 @@ func (th *templateHandler) handleDetail(w http.ResponseWriter, r *http.Request) 
 			if ov.DeliveryMode != "" {
 				dto.DeliveryMode = ov.DeliveryMode
 			}
+			dto.Disabled = ov.Disabled
 		}
 	}
 	src, editable := th.templateProvenance(r.Context(), name)

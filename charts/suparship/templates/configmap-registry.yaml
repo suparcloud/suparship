@@ -13,6 +13,9 @@ data:
   registry.yaml: |
     enabled: true
     url: {{ .Values.registry.url | quote }}
+    {{- if .Values.registry.insecure }}
+    insecure: true
+    {{- end }}
     {{- if .Values.registry.username }}
     username: {{ .Values.registry.username | quote }}
     {{- end }}

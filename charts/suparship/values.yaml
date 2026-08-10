@@ -305,6 +305,10 @@ registry:
   existingSecret: ""
   # -- Which environments need imagePullSecrets from this registry
   environments: []
+  # -- Disable TLS verification for Kargo Warehouse image subscriptions.
+  # Required for plain-HTTP registries (e.g. the local kind registry); leave
+  # false for any real registry.
+  insecure: false
 
 # -- Template configuration
 templates:

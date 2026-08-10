@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -690,7 +691,11 @@ func (f *failingPublisher) RemoveAppEnv(_ context.Context, _, _, _ string) error
 func (f *failingPublisher) UnpublishProjectApps(_ context.Context, _ string) error  { return nil }
 func (f *failingPublisher) UnpublishProjectInfra(_ context.Context, _ string) error { return nil }
 
-func TestPromote_PublishAppEnvFailureContinues(t *testing.T) {
+// A PublishAppEnv failure must ABORT the promotion. The old behavior —
+// proceed and return 200 — promoted into an env with no manifests in git:
+// Kargo had nothing deployable to update and the UI showed a green promotion
+// that deployed nothing.
+func TestPromote_PublishAppEnvFailureAborts(t *testing.T) {
 	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, &failingPublisher{})
 
 	store.addApp(promoteTestApp(testProject))
@@ -699,8 +704,165 @@ func TestPromote_PublishAppEnvFailureContinues(t *testing.T) {
 	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
 		AppPromoteRequest{TargetEnvironment: "prod"})
 
-	// Promotion should succeed even though file publishing failed.
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on publish failure, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "nothing was promoted") {
+		t.Errorf("error should say nothing was promoted: %s", resp.Body.String())
+	}
+}
+
+// ── ArgoCD Application gate ─────────────────────────────────────────────────
+
+type fakeArgoAppGate struct {
+	exists bool
+	err    error
+	calls  int
+}
+
+func (g *fakeArgoAppGate) HasAppForEnv(_ context.Context, _, _, _ string) (bool, error) {
+	g.calls++
+	return g.exists, g.err
+}
+
+type recordingPromoter struct {
+	calls  int
+	result KargoPromotionResult
+}
+
+func (p *recordingPromoter) CreatePromotion(_ context.Context, _, appName, fromStage, toStage string) (KargoPromotionResult, error) {
+	p.calls++
+	if p.result.Name == "" {
+		p.result = KargoPromotionResult{Name: appName + "-to-" + toStage, Stage: toStage, Freight: "f-1", Phase: "Pending"}
+	}
+	return p.result, nil
+}
+
+// newTestAppPromoteMuxWithGate wires publisher + Kargo promoter + Application
+// gate, with a near-zero gate timeout so absence tests don't sleep.
+func newTestAppPromoteMuxWithGate(projectName string, pub GitOpsPublisher, promoter KargoPromoter, gate ArgoAppGate) (*http.ServeMux, *authHandler, *memAppStore) {
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+
+	store := newMemAppStore()
+	store.mu.Lock()
+	store.apps[projectName] = make(map[string]*domain.App)
+	store.mu.Unlock()
+
+	appH := newAppHandler(store, nil, nil, nil)
+	appH.gitOpsPublisher = pub
+	appH.kargoPromoter = promoter
+	appH.argoAppGate = gate
+	appH.argoAppWaitTimeout = 10 * time.Millisecond
+
+	rh := &rbacHandler{
+		auth:       ah,
+		orgStore:   &staticOrgProvider{org: testRBACOrg()},
+		appHandler: appH,
+	}
+	rh.registerRoutes(mux)
+
+	return mux, ah, store
+}
+
+// The heart of the fix: when the target env's ArgoCD Application does not
+// exist, the promotion is REFUSED with a retryable 409 and no Kargo Promotion
+// CR is created — previously Kargo promoted into the void and reported green.
+func TestPromote_RefusedWhenTargetArgoAppMissing(t *testing.T) {
+	rec := &recordingPublisher{}
+	promoter := &recordingPromoter{}
+	gate := &fakeArgoAppGate{exists: false}
+	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, rec, promoter, gate)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("expected 409 when Application missing, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if promoter.calls != 0 {
+		t.Errorf("Kargo promotion must NOT be created when the Application is missing (calls=%d)", promoter.calls)
+	}
+	// The publish DID happen — that's what makes the retry succeed later.
+	if len(rec.publishedEnvs) == 0 || rec.publishedEnvs[0] != "prod" {
+		t.Errorf("prod manifests should be published before the gate: %v", rec.publishedEnvs)
+	}
+	if !strings.Contains(resp.Body.String(), "retry") {
+		t.Errorf("409 body should tell the operator to retry: %s", resp.Body.String())
+	}
+}
+
+func TestPromote_ProceedsWhenTargetArgoAppExists(t *testing.T) {
+	promoter := &recordingPromoter{}
+	gate := &fakeArgoAppGate{exists: true}
+	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, &recordingPublisher{}, promoter, gate)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
 	if resp.Code != http.StatusOK {
-		t.Fatalf("expected 200 even with publish failure, got %d: %s", resp.Code, resp.Body.String())
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if promoter.calls != 1 {
+		t.Errorf("expected exactly one Kargo promotion, got %d", promoter.calls)
+	}
+	if gate.calls == 0 {
+		t.Error("gate was never consulted")
+	}
+	var pr AppPromoteResponse
+	mustDecode(t, resp.Body.Bytes(), &pr)
+	if pr.Mechanism != "kargo" {
+		t.Errorf("mechanism = %q, want kargo", pr.Mechanism)
+	}
+}
+
+// A broken gate (dynamic client error) must not freeze promotions — fail open
+// with a logged warning rather than blocking every release on an RBAC or API
+// hiccup.
+func TestPromote_GateErrorFailsOpen(t *testing.T) {
+	promoter := &recordingPromoter{}
+	gate := &fakeArgoAppGate{err: fmt.Errorf("rbac denied")}
+	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, &recordingPublisher{}, promoter, gate)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("gate error should fail open, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if promoter.calls != 1 {
+		t.Errorf("promotion should proceed on gate error, calls=%d", promoter.calls)
+	}
+}
+
+// No gate wired (fake mode / no dynamic client): prior behavior is preserved.
+func TestPromote_NoGateWiredProceeds(t *testing.T) {
+	promoter := &recordingPromoter{}
+	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, &recordingPublisher{}, promoter, nil)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 with no gate, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if promoter.calls != 1 {
+		t.Errorf("expected one promotion, got %d", promoter.calls)
 	}
 }

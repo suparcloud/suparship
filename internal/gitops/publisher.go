@@ -583,13 +583,54 @@ func enabledDeployEnvs(app *domain.App, envs []AppPublishEnv) []AppPublishEnv {
 	return result
 }
 
+// promotedDeployEnvs extends a pipeline app's first-deploy set with every bound
+// stable env whose app files ALREADY exist in the cloned repo — an env a
+// promotion has materialized via PublishAppEnv. firstDeployEnvs keeps a
+// never-promoted higher env absent (ArgoCD must not deploy it before its first
+// promotion), but once the env is live its files must track config edits the
+// same way the base env's do — otherwise saving prod values commits nothing
+// until the next promotion. An env explicitly decommissioned (Deploy=false) is
+// left untouched, matching enabledDeployEnvs; promoted image tags survive the
+// republish via the existing preserveTag / pinnedTag handling.
+func (p *Publisher) promotedDeployEnvs(repoDir string, app *domain.App, envs, deployEnvs []AppPublishEnv) []AppPublishEnv {
+	included := make(map[string]bool, len(deployEnvs))
+	for _, env := range deployEnvs {
+		included[env.EnvName] = true
+	}
+	out := deployEnvs
+	for _, env := range envs {
+		if env.EnvType == domain.AppEnvPreview || !env.Bound || included[env.EnvName] {
+			continue
+		}
+		if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok && ov.Deploy != nil && !*ov.Deploy {
+			continue
+		}
+		if p.envMaterialized(repoDir, env, app.ProjectName, app.Name) {
+			out = append(out, env)
+		}
+	}
+	return out
+}
+
+// envMaterialized reports whether an env already carries this app's files in
+// the repo, in any layout: the inline values tree (single-source values and
+// _targets, and composed per-component values, all under envs/), the
+// external-mode tree, or the composed rendered-Application tree.
+func (p *Publisher) envMaterialized(repoDir string, env AppPublishEnv, projectName, appName string) bool {
+	return dirNonEmpty(p.appEnvDir(repoDir, env, projectName, appName)) ||
+		dirNonEmpty(p.appEnvDirExternal(repoDir, env, projectName, appName)) ||
+		dirNonEmpty(p.composedAppDir(repoDir, env, projectName, appName))
+}
+
 // PublishApp writes the per-app app.yaml and values.yaml for each environment,
 // plus Kargo Warehouse and Stage CRs so promotions are wired automatically.
 //
 // On initial creation only the first bound stable environment (lowest Order)
 // and any preview environments receive app.yaml + values.yaml. Higher stable
 // environments are intentionally skipped so ArgoCD does not deploy to them
-// until an explicit promotion writes their files via PublishAppEnv.
+// until an explicit promotion writes their files via PublishAppEnv. Once an
+// env has been promoted (its files exist in the repo), republishes keep
+// updating it so config edits reach every deployed env, not just the base.
 //
 // Written files (first bound stable env + previews):
 //   - gitops-output/{envName}/{project}/{app}/app.yaml
@@ -638,11 +679,15 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 	}
 
 	// Pipeline apps deploy only the first stable env (+ previews) on create;
-	// prod waits for a promotion. Direct apps have no promotion, so every bound
-	// stable env deploys from its own values immediately.
+	// prod waits for a promotion — but an env a promotion has already
+	// materialized keeps receiving republishes so config edits reach it.
+	// Direct apps have no promotion, so every bound stable env deploys from
+	// its own values immediately.
 	deployEnvs := firstDeployEnvs(envs)
 	if app.Spec.IsDirect() {
 		deployEnvs = enabledDeployEnvs(app, envs)
+	} else {
+		deployEnvs = p.promotedDeployEnvs(repoDir, app, envs, deployEnvs)
 	}
 	if err := p.publishAppFiles(repoDir, app, deployEnvs); err != nil {
 		return err
@@ -688,6 +733,8 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 	deployEnvs := firstDeployEnvs(envs)
 	if app.Spec.IsDirect() {
 		deployEnvs = enabledDeployEnvs(app, envs)
+	} else {
+		deployEnvs = p.promotedDeployEnvs(repoDir, app, envs, deployEnvs)
 	}
 
 	// Sync each component's chart into charts/{template}/{versionDir}/ so the

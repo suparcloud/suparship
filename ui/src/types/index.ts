@@ -170,6 +170,9 @@ export interface TemplateSummary {
   description?: string;
   category: string;
   engine: string;
+  /** Retired by an org admin: still listed for management, but the create
+   *  flow must not offer it (the server also refuses with a 422). */
+  disabled?: boolean;
 }
 
 export interface TemplatesResponse {
@@ -404,6 +407,9 @@ export interface TemplateDetail {
   secretInputs: TemplateSecretInput[];
   presets: TemplatePreset[];
   components?: TemplateComponentInfo[];
+  /** Retired: refuses new apps; existing apps keep working. Toggled via
+   *  PATCH {disabled} by org admins. */
+  disabled?: boolean;
   // Platform-Engineer-authored Helm values overlays (all-envs + per-env),
   // layered above chart defaults and below developer overrides.
   defaultValues?: Record<string, unknown>;
@@ -443,6 +449,10 @@ export interface TemplateMetadataPatch {
   // deliveryMode sets the template's default app delivery mode ("pipeline" or
   // "direct"). Editable (imported) templates only; "" reverts to pipeline.
   deliveryMode?: string;
+  // disabled retires (true) / restores (false) the template. Works for every
+  // provenance, including built-ins — this is how a shipped template is
+  // "removed" without deleting files. Existing apps keep working.
+  disabled?: boolean;
 }
 
 // TemplateOverride is the org-level platform values overlay a PE/SRE authors for

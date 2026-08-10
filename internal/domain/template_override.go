@@ -50,6 +50,14 @@ type TemplateOverride struct {
 	// mark a synced off-the-shelf chart (valkey, redis, postgres) "direct" without
 	// editing its source. Empty = no override (use the template's own). Sync-safe.
 	DeliveryMode string `json:"deliveryMode,omitempty" yaml:"deliveryMode,omitempty"`
+	// Disabled retires the template from active use: the gallery marks it
+	// disabled and app creation refuses it, while EXISTING apps built from it
+	// keep working (values editing, publishing, upgrades are untouched — apps
+	// pin chart versions, not gallery entries). This is how an operator
+	// "removes" a built-in template: built-ins ship on disk inside the image,
+	// so deletion isn't a mechanism — a sync-safe flag is. Reversible via the
+	// same PATCH that set it.
+	Disabled bool `json:"disabled,omitempty" yaml:"disabled,omitempty"`
 }
 
 // TemplateMetadataOverride carries display-metadata overrides. Each field is
@@ -117,6 +125,11 @@ func (o *TemplateOverride) IsEmpty() bool {
 		return false
 	}
 	if o.DeliveryMode != "" {
+		return false
+	}
+	// A bare Disabled:true is a real override — dropping it here would make
+	// Save() delete the ConfigMap and silently re-enable the template.
+	if o.Disabled {
 		return false
 	}
 	return o.Metadata.IsEmpty()

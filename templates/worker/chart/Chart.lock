@@ -1,0 +1,6 @@
+dependencies:
+- name: suparship-common
+  repository: file://../../../charts/lib/suparship-common
+  version: 0.1.0
+digest: sha256:a40dddda871ad4c1254ed8e9fa76906d00ce172ec668f962fb2d752bbf0e63e2
+generated: "2026-08-07T14:43:07.194808+05:30"

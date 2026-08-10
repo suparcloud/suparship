@@ -111,6 +111,35 @@ needs `*.localhost` to resolve to `127.0.0.1` — see [docs/local-dns.md](../loc
 
 ---
 
+## The CD golden path, locally
+
+The dev loop wires the ctlptl kind registry in as the org registry
+(`hack/dev/values-dev.yaml` sets `registry.url: kind-registry:5000` with
+`insecure: true` — the registry is plain HTTP, and without that flag Kargo's
+Warehouse attempts TLS and never resolves a single tag). That makes the whole
+image-driven flow real:
+
+```bash
+task demo:color-app:release VERSION=0.2.0 COLOR=green
+# → pushes localhost:5001/demo/color-app:0.2.0
+# → the color-app Warehouse (kargo-demo namespace) discovers the tag as Freight
+# → promote staging → prod from the UI (or watch auto-promote, if enabled)
+```
+
+The host pushes to `localhost:5001`; everything in-cluster (nodes pulling,
+Kargo polling) reaches the same registry as `kind-registry:5000` via ctlptl's
+docker-network alias — including the `task up:multi` workload clusters. Check
+Freight discovery with:
+
+```bash
+kubectl --context kind-suparship-dev -n kargo-demo get warehouses,freight
+```
+
+`insecure` is read into the publisher at server boot; if you change it later,
+restart the suparship pod and re-sync apps so Warehouses are re-rendered.
+
+---
+
 ## Optional: real multi-cluster (`task up:multi`)
 
 By default everything runs on one kind cluster wearing three hats — tooling,

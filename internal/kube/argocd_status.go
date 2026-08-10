@@ -99,6 +99,32 @@ func (r *ArgoCDStatusReader) CountProjectApplications(ctx context.Context, proje
 	return count, nil
 }
 
+// HasAppForEnv reports whether at least one generated ArgoCD Application
+// exists for the given project/app/env. Matched by suparship identity labels —
+// not by reconstructing the name, which is configurable (org ResourceNaming
+// pattern) and per-cluster. The "-platform" companion Application shares the
+// labels and does not deploy the workload, so it does not count.
+//
+// Used as the promotion gate: a Kargo promotion whose argocd-update step
+// targets a nonexistent Application updates git and deploys nothing, so the
+// caller refuses to promote until this returns true. Errors are returned (not
+// swallowed like the read paths above) — the gate treats them as "unknown" and
+// fails open, which must be its decision, not this method's.
+func (r *ArgoCDStatusReader) HasAppForEnv(ctx context.Context, projectName, appName, envName string) (bool, error) {
+	sel := "suparship.io/project=" + projectName + ",suparship.io/app=" + appName + ",suparship.io/env=" + envName
+	list, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
+	if err != nil {
+		return false, fmt.Errorf("listing argocd apps for %s/%s env %s: %w", projectName, appName, envName, err)
+	}
+	for i := range list.Items {
+		if strings.HasSuffix(list.Items[i].GetName(), "-platform") {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 // parseArgoCDStatus maps ArgoCD sync/health status to domain.AppRuntimeStatus.

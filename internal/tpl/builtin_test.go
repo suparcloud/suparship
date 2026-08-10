@@ -29,8 +29,8 @@ func TestBuiltinTemplates(t *testing.T) {
 func assertWebServiceTemplate(t *testing.T, tmpl *Template) {
 	t.Helper()
 
-	if tmpl.Metadata.Version != "1.0.0" {
-		t.Errorf("expected version 1.0.0, got %q", tmpl.Metadata.Version)
+	if tmpl.Metadata.Version != "1.1.0" {
+		t.Errorf("expected version 1.1.0, got %q", tmpl.Metadata.Version)
 	}
 	if tmpl.Spec.Engine.Type != EngineHelm {
 		t.Errorf("expected engine type %q, got %q", EngineHelm, tmpl.Spec.Engine.Type)

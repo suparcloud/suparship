@@ -185,6 +185,20 @@ export function RegistrySettings() {
                 placeholder="staging, prod"
               />
             </Field>
+
+            <Field
+              label="Insecure (skip TLS verification)"
+              help="For plain-HTTP registries only — e.g. a local kind registry. Kargo image watching fails against an HTTP registry without this. Never enable for a real registry."
+            >
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={config.insecure ?? false}
+                  onChange={(e) => update({ insecure: e.target.checked || undefined })}
+                />
+                Skip TLS verification for image watching
+              </label>
+            </Field>
           </>
         )}
 

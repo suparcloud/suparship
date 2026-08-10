@@ -1,8 +1,10 @@
 package gitops_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -190,6 +192,97 @@ func TestPublishAppEnv_WritesTargetEnv(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "envs", "prod", "demo", "hello", "values.yaml")); os.IsNotExist(err) {
 		t.Error("expected prod values.yaml to exist after PublishAppEnv")
+	}
+}
+
+// --- republish of already-promoted envs ---
+
+// Once a promotion has materialized a higher env, a full republish (the
+// values-save / app-edit path) must rewrite that env's files too. A prod
+// values edit used to produce no git change until the next promotion, while
+// the same edit on the base env committed immediately.
+func TestWriteAppTree_RepublishesPromotedEnv(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec:        domain.AppSpec{Template: domain.AppTemplateRef{Name: "web-service"}},
+	}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost"},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, BaseDomain: "localhost"},
+	}
+	p := newTestPublisher(t)
+
+	// Create: only staging materializes.
+	if err := p.WriteAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteAppTreeForTest (create): %v", err)
+	}
+	prodValues := filepath.Join(dir, "envs", "prod", "demo", "hello", "values.yaml")
+	if _, err := os.Stat(prodValues); !os.IsNotExist(err) {
+		t.Fatal("prod must not be materialized before its first promotion")
+	}
+
+	// Promote: prod materializes via the per-env publish.
+	if err := p.PublishAppEnvForTest(dir, app, envs[1]); err != nil {
+		t.Fatalf("PublishAppEnvForTest: %v", err)
+	}
+	if _, err := os.Stat(prodValues); err != nil {
+		t.Fatalf("prod values.yaml should exist after promotion publish: %v", err)
+	}
+
+	// Save prod values → full republish must rewrite prod's values.yaml.
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"prod": {RawValues: map[string]any{"replicaCount": 5}},
+	}
+	if err := p.WriteAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteAppTreeForTest (republish): %v", err)
+	}
+	data, err := os.ReadFile(prodValues)
+	if err != nil {
+		t.Fatalf("read prod values.yaml: %v", err)
+	}
+	if !strings.Contains(string(data), "replicaCount: 5") {
+		t.Errorf("prod values.yaml must carry the saved override after republish, got:\n%s", data)
+	}
+}
+
+// A decommissioned env (Deploy=false) stays untouched by a republish even if
+// its files are still in the repo — mirroring enabledDeployEnvs for direct apps.
+func TestWriteAppTree_SkipsDecommissionedPromotedEnv(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec:        domain.AppSpec{Template: domain.AppTemplateRef{Name: "web-service"}},
+	}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost"},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, BaseDomain: "localhost"},
+	}
+	p := newTestPublisher(t)
+	if err := p.PublishAppEnvForTest(dir, app, envs[1]); err != nil {
+		t.Fatalf("PublishAppEnvForTest: %v", err)
+	}
+	prodValues := filepath.Join(dir, "envs", "prod", "demo", "hello", "values.yaml")
+	before, err := os.ReadFile(prodValues)
+	if err != nil {
+		t.Fatalf("read prod values.yaml: %v", err)
+	}
+
+	deploy := false
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"prod": {Deploy: &deploy, RawValues: map[string]any{"replicaCount": 5}},
+	}
+	if err := p.WriteAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteAppTreeForTest: %v", err)
+	}
+	after, err := os.ReadFile(prodValues)
+	if err != nil {
+		t.Fatalf("read prod values.yaml after republish: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Error("a decommissioned env's files must not be rewritten by a republish")
 	}
 }
 

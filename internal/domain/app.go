@@ -779,6 +779,16 @@ type CDConfig struct {
 	// the same image is promoted to (and healthy in) the first stage (staging),
 	// Kargo auto-promotes it down the chain to prod without a manual click.
 	// Only meaningful for pipeline delivery; ignored for direct apps (no Kargo).
+	//
+	// The FIRST promotion to each higher env must still be manual: an env's
+	// gitops files are only written by an explicit promotion (see
+	// firstDeployEnvs / PublishAppEnv), and until they exist there is no
+	// ArgoCD Application for Kargo's auto-created Promotion to update — it
+	// would promote into the void. The manual promotion establishes the files
+	// and the Application (the promote endpoint gates on both); auto-promote
+	// takes over from then on. Publishing every env's files at creation
+	// instead would deploy prod BEFORE staging ever verified, defeating the
+	// pipeline — so this ordering is deliberate, not a gap.
 	AutoPromote bool `json:"autoPromote,omitempty" yaml:"autoPromote,omitempty"`
 	// ImagesConfigured records that the user has explicitly reviewed and saved the
 	// CD image selection (the Images panel). Once true, an EMPTY image selection —

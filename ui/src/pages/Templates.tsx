@@ -195,7 +195,14 @@ export function Templates() {
               )}
 
               <div className="mt-4 flex items-center justify-between">
-                <span className="text-xs text-gray-400">v{t.version}</span>
+                <span className="text-xs text-gray-400">
+                  v{t.version}
+                  {t.disabled && (
+                    <span className="ml-2 rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700">
+                      disabled
+                    </span>
+                  )}
+                </span>
                 <span className="text-xs font-medium text-gray-400 transition-colors group-hover:text-gray-600">
                   View details &rarr;
                 </span>

@@ -37,6 +37,23 @@ argocd:
 #
 # The URL is the in-CLUSTER service address: both suparship and ArgoCD reach
 # Gitea from inside the cluster, not through the host port-forward.
+# The local kind registry (ctlptl, hack/dev/cluster.yaml) as the org registry.
+# Without this the registry config never exists in dev, so the Warehouse the
+# publisher writes for the seeded color-app carries insecureSkipTLSVerify:false
+# — and Kargo then attempts TLS against the plain-HTTP kind-registry:5000 and
+# never resolves a single tag. The golden path (push tag → Warehouse sees it →
+# Freight → promote) silently dead-ends at its first step.
+#
+# The URL is the IN-CLUSTER name (ctlptl aliases the registry container on the
+# kind docker network); the host pushes to localhost:5001. `insecure` rides the
+# same registry ConfigMap and is read at server boot into the publisher, so it
+# must exist BEFORE the first app publish — which values-dev guarantees, since
+# the chart install applies the ConfigMap alongside the Deployment.
+registry:
+  enabled: true
+  url: kind-registry:5000
+  insecure: true
+
 gitops:
   provider: generic
   repoURL: http://gitea-http.gitea.svc.cluster.local:3000/gitops/gitops.git

@@ -96,6 +96,15 @@ type ProjectAppCounter interface {
 	CountProjectApplications(ctx context.Context, projectName string) (int, error)
 }
 
+// ArgoAppGate reports whether a generated ArgoCD Application exists for an
+// app's environment. The promotion path uses it to refuse a Kargo promotion
+// whose argocd-update step would target a nonexistent Application — that
+// promotion updates git, deploys nothing, and reports success. Implementations
+// must be safe for concurrent use.
+type ArgoAppGate interface {
+	HasAppForEnv(ctx context.Context, projectName, appName, envName string) (bool, error)
+}
+
 // KargoPromoter creates Kargo Promotion CRs to advance freight through the
 // promotion pipeline. When nil the app promotion endpoint falls back to the
 // in-store release copy (MVP stub). Implementations must be safe for concurrent use.
@@ -540,6 +549,7 @@ type Config struct {
 	ClusterStore            domain.ClusterStore     // optional: enables /api/v1/clusters endpoints when set
 	GitOpsPublisher         GitOpsPublisher         // optional: commits app manifests to gitops repo on create
 	KargoPromoter           KargoPromoter           // optional: enables real Kargo-backed promotions
+	ArgoAppGate             ArgoAppGate             // optional: blocks Kargo promotions until the target env's Application exists
 	KargoStatusReader       KargoStatusReader       // optional: enables GET promotion-status endpoint
 	KargoPipelineReader     KargoPipelineReader     // optional: enables GET pipeline-stages endpoint
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
@@ -755,6 +765,10 @@ func New(cfg Config) *Server {
 				cfg.Logger.Info("kargo promoter enabled — promotions will use Kargo Promotion CRs")
 			} else {
 				cfg.Logger.Info("kargo promoter not configured — using in-store release copy for promotions")
+			}
+			if cfg.ArgoAppGate != nil {
+				rh.appHandler.argoAppGate = cfg.ArgoAppGate
+				cfg.Logger.Info("argocd application gate enabled — promotions wait for the target env's Application")
 			}
 			if cfg.KargoStatusReader != nil {
 				rh.appHandler.kargoStatusReader = cfg.KargoStatusReader
