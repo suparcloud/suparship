@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -209,6 +210,15 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectName, appName, 
 		"freight", freight,
 	)
 
+	return s.submitPromotion(ctx, ns, projectName, appName, toStage, qualifiedToStage, freight)
+}
+
+// submitPromotion creates a Promotion CR deploying the given Freight to the
+// (already-qualified) target Stage: approve the Freight for the Stage, embed the
+// Stage's promotion steps (the k8s API does no defaulting), create the CR.
+// Shared by CreatePromotion (current freight of an upstream stage) and
+// PromoteFreight (a specific historical freight — rollback).
+func (s *KargoStore) submitPromotion(ctx context.Context, ns, projectName, appName, envName, qualifiedToStage, freight string) (*KargoPromotionInfo, error) {
 	// Approve the Freight for the target Stage so Kargo allows the Promotion even
 	// when staging verification is absent (the case with pure argoCDAppUpdates).
 	if approveErr := s.approveFreightForStage(ctx, ns, freight, qualifiedToStage); approveErr != nil {
@@ -242,7 +252,7 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectName, appName, 
 		return nil, fmt.Errorf("target stage %q defines no promotion steps (spec.promotionTemplate.spec.steps is empty) — re-publish the app's Kargo CRs", qualifiedToStage)
 	}
 
-	promotionName := fmt.Sprintf("%s-%s-%d", appName, toStage, time.Now().Unix())
+	promotionName := fmt.Sprintf("%s-%s-%d", appName, envName, time.Now().Unix())
 
 	slog.Debug("kargo create promotion: submitting Promotion CR",
 		"namespace", ns,
@@ -295,6 +305,131 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectName, appName, 
 		"initialPhase", info.Phase,
 	)
 	return info, nil
+}
+
+// KargoFreightImage is one image a Freight carries (repository + tag).
+type KargoFreightImage struct {
+	RepoURL string
+	Tag     string
+}
+
+// KargoFreightRecord describes one Freight a Stage has run, for the rollback
+// picker. DiscoveredAt is the Freight CR's creation time (when the Warehouse
+// discovered the build), not the promotion time — Kargo's freightHistory carries
+// no per-entry timestamp.
+type KargoFreightRecord struct {
+	Name         string
+	Images       []KargoFreightImage
+	DiscoveredAt string
+	Current      bool
+}
+
+// StageFreightHistory returns the Freight the app's {env} Stage has run, newest
+// first (first entry = currently deployed), each resolved to its images. Freight
+// already garbage-collected by Kargo is skipped — it can't be promoted again, so
+// listing it would offer a rollback that must fail.
+func (s *KargoStore) StageFreightHistory(ctx context.Context, projectName, appName, envName string, limit int) ([]KargoFreightRecord, error) {
+	ns := kargoNamespaceForProject(projectName)
+	stageName := kargoStageName(appName, envName)
+	obj, err := s.dynamic.Resource(kargoStageGVR).Namespace(ns).Get(ctx, stageName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get kargo stage %s/%s: %w", ns, stageName, err)
+	}
+	statusRaw, _ := obj.Object["status"].(map[string]any)
+	names := freightNamesFromHistory(statusRaw)
+	if limit > 0 && len(names) > limit {
+		names = names[:limit]
+	}
+	out := make([]KargoFreightRecord, 0, len(names))
+	for i, name := range names {
+		fr, ferr := s.dynamic.Resource(kargoFreightGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+		if ferr != nil {
+			slog.Debug("kargo freight history: freight not readable (GC'd?) — skipping",
+				"namespace", ns, "stage", stageName, "freight", name, "error", ferr)
+			continue
+		}
+		rec := KargoFreightRecord{
+			Name:         name,
+			Current:      i == 0,
+			DiscoveredAt: fr.GetCreationTimestamp().UTC().Format(time.RFC3339),
+		}
+		if images, found, _ := unstructured.NestedSlice(fr.Object, "images"); found {
+			for _, raw := range images {
+				m, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				tag, _, _ := unstructuredString(m, "tag")
+				repo, _, _ := unstructuredString(m, "repoURL")
+				if tag == "" && repo == "" {
+					continue
+				}
+				rec.Images = append(rec.Images, KargoFreightImage{RepoURL: repo, Tag: tag})
+			}
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
+// PromoteFreight creates a Promotion deploying a SPECIFIC Freight to the app's
+// {env} Stage — the rollback primitive. The freight must appear in the stage's
+// own freightHistory, so arbitrary freight can't be pushed to an env through the
+// rollback door.
+func (s *KargoStore) PromoteFreight(ctx context.Context, projectName, appName, envName, freightName string) (*KargoPromotionInfo, error) {
+	ns := kargoNamespaceForProject(projectName)
+	stageName := kargoStageName(appName, envName)
+	obj, err := s.dynamic.Resource(kargoStageGVR).Namespace(ns).Get(ctx, stageName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get kargo stage %s/%s: %w", ns, stageName, err)
+	}
+	statusRaw, _ := obj.Object["status"].(map[string]any)
+	if !slices.Contains(freightNamesFromHistory(statusRaw), freightName) {
+		return nil, fmt.Errorf("freight %q was never deployed to stage %q", freightName, stageName)
+	}
+	return s.submitPromotion(ctx, ns, projectName, appName, envName, stageName, freightName)
+}
+
+// freightNamesFromHistory returns every freight name in status.freightHistory,
+// newest collection first, deduped (a re-promoted freight appears once, at its
+// most recent position). The single-name freightNameFromHistory keeps its own
+// first-collection-only fast path.
+func freightNamesFromHistory(statusRaw map[string]any) []string {
+	if statusRaw == nil {
+		return nil
+	}
+	history, ok := statusRaw["freightHistory"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, rawColl := range history {
+		coll, ok := rawColl.(map[string]any)
+		if !ok {
+			continue
+		}
+		items, ok := coll["items"].(map[string]any)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0, len(items))
+		for k := range items {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			item, ok := items[k].(map[string]any)
+			if !ok {
+				continue
+			}
+			if name, _, _ := unstructuredString(item, "name"); name != "" && !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
+	return out
 }
 
 // GetPromotionStatus returns the observed status of a named Kargo Promotion CR

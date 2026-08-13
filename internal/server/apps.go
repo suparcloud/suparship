@@ -219,6 +219,11 @@ type AppDetailDTO struct {
 	// RawValues surfaces the app-level freeform Helm values overlay so the UI can
 	// edit it. Omitted when unset.
 	RawValues map[string]any `json:"rawValues,omitempty"`
+	// EnvTemplateVersions surfaces env-scoped template version pins, keyed env
+	// name → component name → version (reserved "" component key = the
+	// app-level pin of a component-less app). Present only while envs diverge —
+	// converged pins fold into the app-wide component versions.
+	EnvTemplateVersions map[string]map[string]string `json:"envTemplateVersions,omitempty"`
 	// EnvRawValues surfaces per-environment overlays keyed by env name, for envs
 	// that have one. Mirrors what the edit PATCH accepts.
 	EnvRawValues map[string]map[string]any `json:"envRawValues,omitempty"`
@@ -691,6 +696,37 @@ type KargoAppPipelineResponse struct {
 	Available bool `json:"available"`
 	// Stages is ordered staging → prod (matches the promotion chain).
 	Stages []KargoStageStatusDTO `json:"stages"`
+}
+
+// --- Rollback DTOs ---
+
+// RollbackCandidateImageDTO is one image (repo + tag) a freight carries.
+type RollbackCandidateImageDTO struct {
+	Repository string `json:"repository,omitempty"`
+	Tag        string `json:"tag,omitempty"`
+}
+
+// RollbackCandidateDTO is one previously-deployed Kargo freight of an env.
+type RollbackCandidateDTO struct {
+	// Freight is the Kargo Freight name — what POST .../rollback takes.
+	Freight string `json:"freight"`
+	// Images are the freight's images (a composed app's shared warehouse can
+	// carry one per component repository).
+	Images []RollbackCandidateImageDTO `json:"images"`
+	// DiscoveredAt is when the Warehouse discovered the build (RFC 3339) —
+	// Kargo keeps no per-entry promotion timestamp.
+	DiscoveredAt string `json:"discoveredAt,omitempty"`
+	// Current marks the freight the env is running now (not a rollback target).
+	Current bool `json:"current,omitempty"`
+}
+
+// RollbackCandidatesResponse is the JSON body for
+// GET .../apps/{app}/environments/{env}/rollback-candidates. Available=false
+// (no Kargo integration, direct-delivery app, or an unreadable stage) means
+// rollback simply isn't offered — not an error.
+type RollbackCandidatesResponse struct {
+	Available  bool                   `json:"available"`
+	Candidates []RollbackCandidateDTO `json:"candidates"`
 }
 
 // --- Deployment history DTOs ---

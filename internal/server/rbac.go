@@ -391,6 +391,8 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/undeploy", manageProject(rh.appHandler.handleUndeployAppEnv))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handlePinAppEnv))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handleUnpinAppEnv))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}/rollback-candidates", viewProject(rh.appHandler.handleGetAppEnvRollbackCandidates))
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/rollback", manageProject(rh.appHandler.handleRollbackAppEnv))
 		// Poll the result of an async (Prefer: respond-async) pin/unpin/preview.
 		// Project-scoped read: same view privilege as any other project status read.
 		// pin-tasks is a legacy alias kept so already-shipped CI keeps working.

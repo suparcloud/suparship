@@ -706,6 +706,17 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger,
 	)
 
+	// CD auto-promotion reconciler: promotes opted-in apps down their pipeline
+	// when an upstream env runs newer freight (see server/auto_promote.go).
+	// Interval override / opt-out via SUPARSHIP_AUTO_PROMOTE_INTERVAL ("0" off).
+	if s := envOr("SUPARSHIP_AUTO_PROMOTE_INTERVAL", "1m"); s != "" {
+		if d, derr := time.ParseDuration(s); derr != nil {
+			logger.Warn("auto-promote: invalid interval, reconciler disabled", "value", s, "err", derr)
+		} else {
+			srv.StartAutoPromoteLoop(cmd.Context(), d)
+		}
+	}
+
 	if err := srv.Run(cmd.Context()); err != nil {
 		logger.Error("server exited with error", "error", err)
 		return err
@@ -1198,6 +1209,42 @@ func (a *kargoPromoterAdapter) CurrentFreightImageTag(ctx context.Context, proje
 
 func (a *kargoPromoterAdapter) LatestFreightImageTag(ctx context.Context, projectName, appName, repoSubstr string) (string, error) {
 	return a.store.LatestFreightImageTag(ctx, projectName, appName, repoSubstr)
+}
+
+// StageFreightHistory / PromoteFreight implement the server's optional
+// kargoFreightHistorian capability — the rollback primitives.
+func (a *kargoPromoterAdapter) StageFreightHistory(ctx context.Context, projectName, appName, envName string, limit int) ([]server.KargoFreightRecord, error) {
+	recs, err := a.store.StageFreightHistory(ctx, projectName, appName, envName, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.KargoFreightRecord, 0, len(recs))
+	for _, r := range recs {
+		images := make([]server.KargoFreightImage, 0, len(r.Images))
+		for _, im := range r.Images {
+			images = append(images, server.KargoFreightImage{RepoURL: im.RepoURL, Tag: im.Tag})
+		}
+		out = append(out, server.KargoFreightRecord{
+			Name:         r.Name,
+			Images:       images,
+			DiscoveredAt: r.DiscoveredAt,
+			Current:      r.Current,
+		})
+	}
+	return out, nil
+}
+
+func (a *kargoPromoterAdapter) PromoteFreight(ctx context.Context, projectName, appName, envName, freightName string) (server.KargoPromotionResult, error) {
+	info, err := a.store.PromoteFreight(ctx, projectName, appName, envName, freightName)
+	if err != nil {
+		return server.KargoPromotionResult{}, err
+	}
+	return server.KargoPromotionResult{
+		Name:    info.Name,
+		Stage:   info.Stage,
+		Freight: info.Freight,
+		Phase:   info.Phase,
+	}, nil
 }
 
 // GetPromotionStatus implements server.KargoStatusReader. The promotion lives in

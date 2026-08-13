@@ -137,6 +137,14 @@ export function EnvConfigEditor({
           {description && (
             <p className="mt-0.5 text-xs text-gray-500">{description}</p>
           )}
+          {config.configMapName && (
+            <p className="mt-0.5 text-xs text-gray-400">
+              K8s ConfigMap:{" "}
+              <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-xs">
+                {config.configMapName}
+              </code>
+            </p>
+          )}
         </div>
         {!readOnly && !loading && !loadError && (
           <div className="flex gap-2">

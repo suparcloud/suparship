@@ -15,8 +15,15 @@ import { getAtPath, linePathsOfText, setAtPath } from "./valuesTree";
 // splitPath turns a declared dotted path into key segments. Dotted form can't
 // express a key containing a dot — the same constraint TemplateImage.tagKey and
 // the legacy `mappings` keys already carry.
-function splitPath(path: string): string[] {
+export function splitPath(path: string): string[] {
   return path.split(".").filter((s) => s !== "");
+}
+
+// declaredPaths returns every dotted path a field owns: the primary path plus
+// its mirrors. Every consumer that asks "which keys belong to this field"
+// (seeding, fan-out writes, out-of-projection accounting) walks this list.
+export function declaredPaths(f: ValueField): string[] {
+  return [f.path, ...(f.mirrors ?? [])];
 }
 
 // hasProjection reports whether a template declares a projection at all. False =>
@@ -25,9 +32,28 @@ export function hasProjection(fields: ValueField[] | undefined): boolean {
   return !!fields && fields.length > 0;
 }
 
+// inferType guesses a ValueField input type from an observed effective value —
+// used to prefill a field created via click-to-expose. Maps and arrays return
+// undefined (free-form): the projection can carry them, but they have no typed
+// control.
+export function inferType(
+  v: unknown,
+): "string" | "number" | "boolean" | undefined {
+  switch (typeof v) {
+    case "boolean":
+      return "boolean";
+    case "number":
+      return "number";
+    case "string":
+      return "string";
+    default:
+      return undefined;
+  }
+}
+
 // effectiveValueOf resolves what to SHOW for a field: the value already present in
 // the effective values, else the field's declared default.
-function effectiveValueOf(
+export function effectiveValueOf(
   base: Record<string, unknown> | null | undefined,
   f: ValueField,
 ): unknown {
@@ -44,15 +70,20 @@ function isUnset(v: unknown): boolean {
 // each value from the effective values (falling back to the declared default).
 // Used for the future form renderer and for tests; the 0.1 editor uses
 // stringifyProjection, which additionally decides what to comment out.
+// Mirror paths are included, each with its own effective value — mirrors only
+// converge once the developer actually sets the field.
 export function projectValues(
   base: Record<string, unknown> | null | undefined,
   fields: ValueField[],
 ): Record<string, unknown> {
   let out: Record<string, unknown> = {};
   for (const f of fields) {
-    const segs = splitPath(f.path);
-    if (segs.length === 0) continue;
-    out = setAtPath(out, segs, effectiveValueOf(base, f));
+    for (const p of declaredPaths(f)) {
+      const segs = splitPath(p);
+      if (segs.length === 0) continue;
+      const v = getAtPath(base, segs);
+      out = setAtPath(out, segs, v === undefined ? f.default : v);
+    }
   }
   return out;
 }
@@ -124,19 +155,30 @@ export function stringifyProjection(
   const present = fields.filter((f) => splitPath(f.path).length > 0);
   if (present.length === 0) return "";
 
+  // The live/commented decision is per FIELD (from the primary path's value),
+  // but every declared path — primary and mirrors — is emitted, each showing its
+  // OWN inherited value: mirrors may legitimately diverge (containerPort 8080 vs
+  // service.port 80) until the developer sets the field and the form syncs them.
   const livePaths: string[][] = [];
   let obj: Record<string, unknown> = {};
   for (const f of present) {
-    const segs = splitPath(f.path);
-    const v = effectiveValueOf(base, f);
-    const live = f.required || isUnset(v);
-    if (live) livePaths.push(segs);
-    obj = setAtPath(obj, segs, live && isUnset(v) ? "" : v);
+    const live = f.required || isUnset(effectiveValueOf(base, f));
+    for (const p of declaredPaths(f)) {
+      const segs = splitPath(p);
+      if (segs.length === 0) continue;
+      if (live) livePaths.push(segs);
+      const raw = getAtPath(base, segs);
+      const v = raw === undefined ? f.default : raw;
+      obj = setAtPath(obj, segs, live && isUnset(v) ? "" : v);
+    }
   }
 
   const doc = new Document(obj);
   for (const f of present) {
     attachComment(doc, splitPath(f.path), commentLinesFor(f));
+    for (const m of f.mirrors ?? []) {
+      attachComment(doc, splitPath(m), [`same value as ${f.path}`]);
+    }
   }
 
   // Comment out every line that no live field needs. A parent map is kept only when

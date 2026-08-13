@@ -66,6 +66,34 @@ func TestValidateDeveloperValues(t *testing.T) {
 			fields:  []ValueField{{Path: "name", Pattern: "["}},
 			wantErr: "invalid pattern",
 		},
+		{
+			// One question filling several keys: port → containerPort + service.port.
+			name: "valid mirrors",
+			fields: []ValueField{
+				{Path: "containerPort", Type: InputTypeNumber, Mirrors: []string{"service.port", "healthCheck.port"}},
+			},
+			wantErr: "",
+		},
+		{
+			name:    "empty mirror path",
+			fields:  []ValueField{{Path: "containerPort", Mirrors: []string{""}}},
+			wantErr: "mirror path must not be empty",
+		},
+		{
+			// A mirror duplicating its own primary would write the key twice.
+			name:    "mirror duplicates own path",
+			fields:  []ValueField{{Path: "containerPort", Mirrors: []string{"containerPort"}}},
+			wantErr: "duplicate path",
+		},
+		{
+			// Mirrors share the path namespace with every other field.
+			name: "mirror collides with another field's path",
+			fields: []ValueField{
+				{Path: "service.port"},
+				{Path: "containerPort", Mirrors: []string{"service.port"}},
+			},
+			wantErr: "duplicate path",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

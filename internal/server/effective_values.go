@@ -458,6 +458,7 @@ func EffectiveDeveloperValues(t *tpl.Template, ov *domain.TemplateOverride) []tp
 		for i, f := range ov.DeveloperValues {
 			out[i] = tpl.ValueField{
 				Path:        f.Path,
+				Mirrors:     f.Mirrors,
 				Title:       f.Title,
 				Type:        tpl.InputType(f.Type),
 				Description: f.Description,

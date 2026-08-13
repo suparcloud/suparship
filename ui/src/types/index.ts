@@ -365,6 +365,10 @@ export interface TemplateInput {
 // a future form renderer will read, which is why it carries type/options/bounds.
 export interface ValueField {
   path: string;
+  // Additional dotted paths that receive the SAME value as path (one question,
+  // many keys — e.g. containerPort mirrored to service.port). Editor-only
+  // fan-out: the stored overlay is still plain Helm values at every path.
+  mirrors?: string[];
   title?: string;
   type?: "string" | "number" | "boolean" | "enum";
   description?: string;
@@ -453,6 +457,12 @@ export interface TemplateMetadataPatch {
   // provenance, including built-ins — this is how a shipped template is
   // "removed" without deleting files. Existing apps keep working.
   disabled?: boolean;
+  // developerValues, when present, replaces the developer-facing values
+  // projection wholesale. Editable templates are patched in place; read-only
+  // (synced/built-in) templates store it as a sync-safe override that shadows
+  // the source's own list. Send [] to clear (override → revert to source's
+  // projection; in-place → no projection at all).
+  developerValues?: ValueField[];
 }
 
 // TemplateOverride is the org-level platform values overlay a PE/SRE authors for
@@ -722,6 +732,10 @@ export interface AppDetail {
   rawValues?: Record<string, unknown>;
   // Per-environment freeform overlays keyed by env name.
   envRawValues?: Record<string, Record<string, unknown>>;
+  // Env-scoped template version pins, keyed env → component name → version
+  // (reserved "" key = the app-level pin of a component-less app). Present
+  // only while envs diverge.
+  envTemplateVersions?: Record<string, Record<string, string>>;
   // App-level per-component config keyed by component name.
   componentConfigs?: Record<string, ComponentConfig>;
   // Per-(env, component) overrides keyed env → component.

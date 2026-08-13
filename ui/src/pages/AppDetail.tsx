@@ -2,11 +2,12 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents } from "../lib/apps";
-import type { ClusterValueOverride, UpdateAppRequest } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents } from "../lib/apps";
+import type { ClusterValueOverride, RollbackCandidate, RollbackCandidatesResponse, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
-import { diffOverlay, mergeOverlay, parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
+import { deepEqual, diffOverlay, mergeOverlay, parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
+import { useAuth } from "../lib/AuthContext";
 
 // CodeMirror is heavy; only the values editor needs it.
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
@@ -19,7 +20,8 @@ import type {
   TemplateSummary,
   ValueField,
 } from "../types";
-import { hasProjection, stringifyProjection } from "../lib/valuesProjection";
+import { declaredPaths, hasProjection, splitPath, stringifyProjection } from "../lib/valuesProjection";
+import { ProjectionForm } from "../components/ProjectionForm";
 import { ImagePullRules } from "../components/ImagePullRules";
 import {
   groupByRepo,
@@ -682,15 +684,22 @@ function EnvPipelineBar({
                     </span>
                   )}
 
-                  {/* Pinned badge: env held to a specific preview image, CD paused. */}
-                  {env.pinnedTag && (
+                  {/* Held badge: env pinned to a preview image or rolled back —
+                      CD paused either way (a rollback hold may carry no single tag). */}
+                  {(env.pinnedTag || env.pinnedFrom) && (
                     <span
-                      title={`Pinned to ${env.pinnedFrom || env.pinnedTag} — auto-promote paused`}
+                      title={
+                        env.pinnedFrom === "rollback"
+                          ? "Rolled back — CD paused until resumed"
+                          : `Pinned to ${env.pinnedFrom || env.pinnedTag} — auto-promote paused`
+                      }
                       className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
                         isSelected ? "bg-white/10 text-white/80" : "bg-purple-100 text-purple-700"
                       }`}
                     >
-                      📌 {env.pinnedFrom || "pinned"}
+                      {env.pinnedFrom === "rollback"
+                        ? "⏪ rolled back"
+                        : `📌 ${env.pinnedFrom || "pinned"}`}
                     </span>
                   )}
 
@@ -823,6 +832,8 @@ export function AppDetail() {
   // renders from), so the dialog is a per-component table even though the
   // affordance that opens it is app-level.
   const [showUpgradeDialog, setShowUpgradeDialog] = useState(false);
+  // Which environment the upgrade applies to ("" = all environments at once).
+  const [upgradeEnv, setUpgradeEnv] = useState("");
   // component name → chosen target version; component name → include in submit.
   const [upgradeTargets, setUpgradeTargets] = useState<Record<string, string>>({});
   const [upgradeSelection, setUpgradeSelection] = useState<Record<string, boolean>>({});
@@ -874,6 +885,8 @@ export function AppDetail() {
 
   // Seed the dialog each time it opens: default-check only the rows that are
   // actually behind, and default each target to that row's newest version.
+  // The upgrade scope defaults to the CURRENTLY CHOSEN environment (falling
+  // back to the first stable env) — upgrades roll out env by env, not app-wide.
   useEffect(() => {
     if (!showUpgradeDialog) return;
     setUpgradeTargets(
@@ -884,10 +897,24 @@ export function AppDetail() {
     setUpgradeSelection(
       Object.fromEntries(upgradeRows.map((r) => [r.name, r.upgradeAvailable])),
     );
+    const stables = (data?.environments ?? []).filter((e) => e.envType !== "preview");
+    const selectedStable = stables.find((e) => e.envName === selectedEnvName);
+    setUpgradeEnv(selectedStable?.envName ?? stables[0]?.envName ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showUpgradeDialog, upgradeRows]);
 
-  // Only checked rows whose target differs from what's deployed are submitted —
-  // re-sending an unchanged pin would be a no-op the backend has to reject.
+  // The version a row currently runs in the CHOSEN upgrade scope: the env's
+  // own pin when it has one, else the app-wide pin. "" scope = the app-wide pin.
+  const envCurrentOf = useCallback(
+    (name: string, appWide: string) =>
+      (upgradeEnv ? data?.envTemplateVersions?.[upgradeEnv]?.[name] : undefined) ??
+      appWide,
+    [upgradeEnv, data?.envTemplateVersions],
+  );
+
+  // Only checked rows whose target differs from what the chosen scope runs are
+  // submitted — re-sending an unchanged pin would be a no-op the backend has to
+  // reject.
   const pendingUpgrades = useMemo(
     () =>
       upgradeRows
@@ -895,9 +922,9 @@ export function AppDetail() {
         .map((r) => ({ name: r.name, target: upgradeTargets[r.name] ?? r.current }))
         .filter((r) => {
           const row = upgradeRows.find((x) => x.name === r.name);
-          return r.target && r.target !== row?.current;
+          return r.target && r.target !== envCurrentOf(r.name, row?.current ?? "");
         }),
-    [upgradeRows, upgradeSelection, upgradeTargets],
+    [upgradeRows, upgradeSelection, upgradeTargets, envCurrentOf],
   );
 
   // When the user switches environments, fetch the specific env detail for
@@ -1506,6 +1533,34 @@ export function AppDetail() {
               upgrading, and adjust the app's values via the existing flow.
             </p>
 
+            {/* Scope: upgrades roll out env by env — the chosen env gets a
+                per-env version pin; other envs keep running their version until
+                they're upgraded too (pins fold together once all envs match). */}
+            <div className="mt-3 flex items-center gap-2">
+              <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                Apply to
+              </span>
+              <select
+                value={upgradeEnv}
+                onChange={(e) => setUpgradeEnv(e.target.value)}
+                className="rounded-md border border-gray-300 px-2 py-1 text-sm"
+              >
+                {(data.environments ?? [])
+                  .filter((e) => e.envType !== "preview")
+                  .map((e) => (
+                    <option key={e.envName} value={e.envName}>
+                      {e.envName} only
+                    </option>
+                  ))}
+                <option value="">all environments</option>
+              </select>
+              {upgradeEnv && (
+                <span className="text-xs text-gray-400">
+                  other environments keep their current version
+                </span>
+              )}
+            </div>
+
             {upgradeRows.length === 0 ? (
               <p className="mt-4 rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-500">
                 No component of this app uses a version-managed template.
@@ -1561,7 +1616,9 @@ export function AppDetail() {
                           {row.template}
                         </td>
                         <td className="px-3 py-2 font-mono text-xs text-gray-500">
-                          {row.current ? `v${row.current}` : "—"}
+                          {envCurrentOf(row.name, row.current)
+                            ? `v${envCurrentOf(row.name, row.current)}`
+                            : "—"}
                         </td>
                         <td className="px-3 py-2">
                           <select
@@ -1577,7 +1634,9 @@ export function AppDetail() {
                             {row.versions.map((v) => (
                               <option key={v.version} value={v.version}>
                                 v{v.version}
-                                {v.version === row.current ? " (current)" : ""}
+                                {v.version === envCurrentOf(row.name, row.current)
+                                  ? " (current)"
+                                  : ""}
                               </option>
                             ))}
                           </select>
@@ -1611,13 +1670,15 @@ export function AppDetail() {
                       Object.fromEntries(
                         pendingUpgrades.map((r) => [r.name, r.target]),
                       ),
+                      upgradeEnv || undefined,
                     );
                     const moved = res.components ?? [];
                     const only = moved.length === 1 ? moved[0] : undefined;
+                    const scope = upgradeEnv ? ` in ${upgradeEnv}` : "";
                     toast.success(
                       only
-                        ? `Upgraded ${only.name}: v${only.fromVersion ?? "?"} → v${only.toVersion}`
-                        : `Upgraded ${moved.length} components of ${appName}`,
+                        ? `Upgraded ${only.name}${scope}: v${only.fromVersion ?? "?"} → v${only.toVersion}`
+                        : `Upgraded ${moved.length} components of ${appName}${scope}`,
                     );
                     setShowUpgradeDialog(false);
                     // Refresh app detail so the pins reflect the new state.
@@ -1833,6 +1894,10 @@ export function AppDetail() {
           project={project ?? ""}
           appName={appName ?? ""}
           envName={selectedEnvName ?? data.environments.find((e) => e.envType !== "preview")?.envName ?? ""}
+          onChanged={async () => {
+            const refreshed = await getApp(project ?? "", appName ?? "");
+            setData(refreshed.app);
+          }}
         />
       )}
       {activeTab === "previews" && (
@@ -2343,23 +2408,51 @@ function AppValuesEditor({
     return () => clearTimeout(handle);
   }, [project, data.name, previewEnv, baseText, envTexts]);
 
+  // Save covers EVERY edited scope in one request (one publish, one gitops
+  // commit) — saving only the active scope silently discarded the other scopes'
+  // edits when the post-save reload re-seeded their buffers.
+  const valuesScopeLabel = (s: string) =>
+    s === BASE_SCOPE ? "base" : s === PREVIEW_SCOPE ? "preview" : s;
+  const persistedValuesFor = (s: string): Record<string, unknown> =>
+    s === BASE_SCOPE
+      ? ((data.rawValues as Record<string, unknown>) ?? {})
+      : ((data.envRawValues?.[s] as Record<string, unknown>) ?? {});
+  const textFor = (s: string) => (s === BASE_SCOPE ? baseText : (envTexts[s] ?? ""));
+  const allValueScopes = [BASE_SCOPE, ...envs, PREVIEW_SCOPE];
+  const dirtyValueScopes = allValueScopes.filter((s) => {
+    const parsed = parseYamlOverlay(textFor(s));
+    return parsed.error !== null || !deepEqual(parsed.value ?? {}, persistedValuesFor(s));
+  });
+
   async function save() {
-    const parsed = parseYamlOverlay(activeText);
-    if (parsed.error) {
-      setYamlError(parsed.error);
-      return;
+    const req: UpdateAppRequest = {};
+    for (const s of dirtyValueScopes) {
+      const parsed = parseYamlOverlay(textFor(s));
+      if (parsed.error) {
+        setYamlError(parsed.error);
+        toast.error(`Invalid YAML in ${valuesScopeLabel(s)} — fix it before saving.`);
+        return;
+      }
+      if (s === BASE_SCOPE) {
+        req.rawValues = parsed.value ?? {};
+      } else {
+        req.envRawValues = { ...(req.envRawValues ?? {}), [s]: parsed.value ?? {} };
+      }
     }
+    if (!req.rawValues && !req.envRawValues) return;
     setSaving(true);
+    const progress = toast.loading("Saving values — publishing to GitOps…");
     try {
-      const req: UpdateAppRequest =
-        scope === BASE_SCOPE
-          ? { rawValues: parsed.value ?? {} }
-          : { envRawValues: { [scope]: parsed.value ?? {} } };
       await updateApp(project, data.name, req);
-      toast.success("Values saved — re-publishing to GitOps.");
+      toast.success(
+        `Values saved for ${dirtyValueScopes.map(valuesScopeLabel).join(", ")} and published to GitOps.`,
+        { id: progress },
+      );
       await onSaved();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save values");
+      toast.error(err instanceof Error ? err.message : "Failed to save values", {
+        id: progress,
+      });
     } finally {
       setSaving(false);
     }
@@ -2545,12 +2638,16 @@ function AppValuesEditor({
 
   async function saveCD() {
     setCdSaving(true);
+    const progress = toast.loading("Saving CD settings — publishing to GitOps…");
     try {
       await updateApp(project, data.name, { cd: { managed: cdManaged, autoPromote } });
-      toast.success("CD settings saved — re-publishing to GitOps.");
+      toast.success("CD settings saved and published to GitOps.", { id: progress });
       await onSaved();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save CD settings");
+      toast.error(
+        err instanceof Error ? err.message : "Failed to save CD settings",
+        { id: progress },
+      );
     } finally {
       setCdSaving(false);
     }
@@ -2579,6 +2676,7 @@ function AppValuesEditor({
 
   async function saveImages() {
     setImagesSaving(true);
+    const progress = toast.loading("Saving CD images — publishing to GitOps…");
     try {
       if (composedApp) {
         await updateApp(project, data.name, {
@@ -2593,11 +2691,12 @@ function AppValuesEditor({
           images: imageRulesToAppImages(discoveredImages, imageRules),
         });
       }
-      toast.success("CD images saved — re-publishing to GitOps.");
+      toast.success("CD images saved and published to GitOps.", { id: progress });
       await onSaved();
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Failed to save CD images",
+        { id: progress },
       );
     } finally {
       setImagesSaving(false);
@@ -2651,22 +2750,33 @@ function AppValuesEditor({
                   }}
                   className="rounded-md border border-gray-300 px-2 py-1 text-xs"
                 >
-                  <option value={BASE_SCOPE}>Base (all environments)</option>
+                  {/* "•" marks scopes with unsaved edits — Save covers them all. */}
+                  <option value={BASE_SCOPE}>
+                    Base (all environments)
+                    {dirtyValueScopes.includes(BASE_SCOPE) ? " •" : ""}
+                  </option>
                   {envs.map((env) => (
                     <option key={env} value={env}>
-                      {env} overrides
+                      {env} overrides{dirtyValueScopes.includes(env) ? " •" : ""}
                     </option>
                   ))}
                   {previewsEnabled && (
-                    <option value={PREVIEW_SCOPE}>preview overrides (all previews)</option>
+                    <option value={PREVIEW_SCOPE}>
+                      preview overrides (all previews)
+                      {dirtyValueScopes.includes(PREVIEW_SCOPE) ? " •" : ""}
+                    </option>
                   )}
                 </select>
                 <button
                   onClick={save}
-                  disabled={saving || yamlError !== null}
+                  disabled={saving || yamlError !== null || dirtyValueScopes.length === 0}
                   className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
                 >
-                  {saving ? "Saving…" : "Save"}
+                  {saving
+                    ? "Saving…"
+                    : dirtyValueScopes.length > 1
+                      ? `Save (${dirtyValueScopes.length})`
+                      : "Save"}
                 </button>
               </>
             )}
@@ -3390,16 +3500,19 @@ function PinControls({
   const pinnedTag = enriched?.pinnedTag ?? currentEnv.pinnedTag;
   const pinnedFrom = enriched?.pinnedFrom ?? currentEnv.pinnedFrom;
 
-  // Pinned stable env → offer unpin (pipeline-only; direct apps never pin).
-  if (!isDirect && currentEnv.envType !== "preview" && pinnedTag) {
+  // Held stable env (pinned to a preview, or a rollback hold) → offer resuming
+  // CD (pipeline-only; direct apps never pin). A rollback hold may carry no
+  // single tag (multi-image freight), so gate on either field.
+  if (!isDirect && currentEnv.envType !== "preview" && (pinnedTag || pinnedFrom)) {
+    const isRollback = pinnedFrom === "rollback";
     async function unpin() {
       setBusy(true);
       try {
         await unpinAppEnv(project, app, currentEnv!.envName);
-        toast.success(`${currentEnv!.envName} unpinned — normal delivery resumed`);
+        toast.success(`${currentEnv!.envName} — normal delivery resumed`);
         await onChanged();
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Failed to unpin");
+        toast.error(err instanceof Error ? err.message : "Failed to resume");
       } finally {
         setBusy(false);
       }
@@ -3407,17 +3520,32 @@ function PinControls({
     return (
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-purple-200 bg-purple-50 px-4 py-2.5">
         <span className="text-sm text-purple-900">
-          📌 Pinned to{" "}
-          <span className="font-medium">{pinnedFrom || "a preview"}</span>{" "}
-          <code className="font-mono text-xs">{pinnedTag}</code> — auto-promote
-          paused; new images won't deploy here until unpinned.
+          {isRollback ? (
+            <>
+              ⏪ Rolled back
+              {pinnedTag && (
+                <>
+                  {" "}
+                  to <code className="font-mono text-xs">{pinnedTag}</code>
+                </>
+              )}{" "}
+              — CD paused; new images won't deploy here until you resume.
+            </>
+          ) : (
+            <>
+              📌 Pinned to{" "}
+              <span className="font-medium">{pinnedFrom || "a preview"}</span>{" "}
+              <code className="font-mono text-xs">{pinnedTag}</code> — auto-promote
+              paused; new images won't deploy here until unpinned.
+            </>
+          )}
         </span>
         <button
           onClick={unpin}
           disabled={busy}
           className="shrink-0 rounded-md border border-purple-300 bg-white px-3 py-1 text-xs font-medium text-purple-700 hover:bg-purple-50 disabled:opacity-50"
         >
-          {busy ? "Unpinning…" : "Unpin"}
+          {busy ? "Resuming…" : isRollback ? "Resume CD" : "Unpin"}
         </button>
       </div>
     );
@@ -3723,10 +3851,12 @@ function DeploymentsTab({
   project,
   appName,
   envName,
+  onChanged,
 }: {
   project: string;
   appName: string;
   envName: string;
+  onChanged: () => Promise<void>;
 }) {
   const [historyData, setHistoryData] = useState<AppDeploymentHistoryResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -3765,6 +3895,13 @@ function DeploymentsTab({
   }, [project, appName, envName]);
 
   return (
+    <div className="space-y-4">
+    <RollbackPanel
+      project={project}
+      appName={appName}
+      envName={envName}
+      onChanged={onChanged}
+    />
     <div className="rounded-xl border border-gray-200 bg-white">
       <div className="border-b border-gray-100 px-5 py-3">
         <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
@@ -3822,6 +3959,123 @@ function DeploymentsTab({
           ))}
         </ul>
       )}
+    </div>
+    </div>
+  );
+}
+
+// RollbackPanel lists the images (Kargo freight) this env has previously run and
+// lets the user roll back to one. Rolling back re-promotes that freight through
+// the normal promotion steps and PAUSES CD for the env (a rollback hold — the
+// pinned-state banner offers "Resume CD"), so newer builds don't immediately
+// promote over the rollback. Hidden when Kargo isn't wired, the app is
+// direct-delivery, or there's nothing older to roll back to.
+function RollbackPanel({
+  project,
+  appName,
+  envName,
+  onChanged,
+}: {
+  project: string;
+  appName: string;
+  envName: string;
+  onChanged: () => Promise<void>;
+}) {
+  const [data, setData] = useState<RollbackCandidatesResponse | null>(null);
+  const [busyFreight, setBusyFreight] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    if (!project || !appName || !envName) return;
+    getRollbackCandidates(project, appName, envName)
+      .then(setData)
+      .catch(() => setData(null));
+  }, [project, appName, envName]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // A single entry is just the current image — nothing to roll back to.
+  if (!data?.available || data.candidates.length < 2) return null;
+
+  const tagsLabel = (c: RollbackCandidate): string => {
+    const tags = [...new Set(c.images.map((im) => im.tag).filter(Boolean))];
+    if (tags.length <= 1) return tags[0] ?? c.freight.slice(0, 8);
+    // Divergent tags: qualify each by its repo's last path segment.
+    return c.images
+      .filter((im) => im.tag)
+      .map((im) => `${im.repository?.split("/").pop() ?? "?"}:${im.tag}`)
+      .join(" · ");
+  };
+
+  async function rollback(c: RollbackCandidate) {
+    const label = tagsLabel(c);
+    if (
+      !window.confirm(
+        `Roll back ${envName} to ${label}?\n\n` +
+          "The image is re-promoted through the normal pipeline steps, and CD " +
+          "for this environment is paused until you resume it — new builds " +
+          "won't deploy here while the rollback holds.",
+      )
+    )
+      return;
+    setBusyFreight(c.freight);
+    try {
+      await rollbackAppEnv(project, appName, envName, c.freight);
+      toast.success(`Rolling back ${envName} to ${label} — CD paused until resumed.`);
+      load();
+      await onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Rollback failed");
+    } finally {
+      setBusyFreight(null);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-5 py-3">
+        <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+          Previous images
+          <span className="ml-2 font-mono normal-case text-gray-300">· {envName}</span>
+        </h2>
+      </div>
+      <ul className="divide-y divide-gray-50">
+        {data.candidates.map((c) => (
+          <li
+            key={c.freight}
+            className="flex items-center justify-between gap-3 px-5 py-2.5"
+          >
+            <div className="min-w-0">
+              <span className="font-mono text-xs text-gray-700">{tagsLabel(c)}</span>
+              {c.current && (
+                <span className="ml-2 rounded-full bg-green-50 px-1.5 py-0.5 text-[10px] font-medium text-green-700">
+                  current
+                </span>
+              )}
+              {c.discoveredAt && (
+                <span className="ml-2 text-[11px] text-gray-400">
+                  built{" "}
+                  {new Date(c.discoveredAt).toLocaleString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </span>
+              )}
+            </div>
+            {!c.current && (
+              <button
+                onClick={() => rollback(c)}
+                disabled={busyFreight !== null}
+                className="shrink-0 rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {busyFreight === c.freight ? "Rolling back…" : "Roll back"}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -4581,6 +4835,11 @@ function ComponentsTable({
     }
     setManageSaving(true);
     setManageError(null);
+    // The whole save (chart syncs + per-env render for every component) runs
+    // async server-side; the loading toast holds until the task completes.
+    const progress = toast.loading(
+      "Saving components — publishing to GitOps in the background…",
+    );
     try {
       // Send the component list (structure + preserved legacy base values) plus the
       // per-env component overlays edited in the canvas. envComponentValues covers
@@ -4622,11 +4881,15 @@ function ComponentsTable({
         envComponentValues,
         ...imagePatch,
       });
-      toast.success("Components updated — re-publishing to GitOps.");
+      toast.success("Components updated and published to GitOps.", {
+        id: progress,
+      });
       await onSaved();
       setManaging(false);
     } catch (e) {
-      setManageError(e instanceof Error ? e.message : "Failed to save components");
+      const msg = e instanceof Error ? e.message : "Failed to save components";
+      toast.error(msg, { id: progress });
+      setManageError(msg);
     } finally {
       setManageSaving(false);
     }
@@ -4905,6 +5168,32 @@ function ComponentsTable({
 // to feed the preview base and the "your all-envs" tint; it is not an editable tab.
 const COMP_BASE_SCOPE = "__base__";
 
+const isPathPrefix = (a: string[], b: string[]) =>
+  a.length <= b.length && a.every((s, i) => b[i] === s);
+
+// countExtraOverrides counts the overlay leaves NOT owned by any projected path —
+// surfaced in the form view so overrides made in Advanced (or saved before the
+// projection existed) stay visible instead of silently riding along.
+function countExtraOverrides(
+  obj: Record<string, unknown>,
+  projected: string[][],
+  prefix: string[] = [],
+): number {
+  let n = 0;
+  for (const [k, v] of Object.entries(obj)) {
+    const path = [...prefix, k];
+    if (projected.some((p) => isPathPrefix(p, path))) continue;
+    const isMap = typeof v === "object" && v !== null && !Array.isArray(v);
+    if (isMap && Object.keys(v as object).length > 0) {
+      // A projected path deeper in this subtree may still own parts of it.
+      n += countExtraOverrides(v as Record<string, unknown>, projected, path);
+    } else {
+      n += 1;
+    }
+  }
+  return n;
+}
+
 function ComponentValuesPanel({
   data,
   project,
@@ -4971,6 +5260,12 @@ function ComponentValuesPanel({
   >({});
   // Set once the developer asks to see the whole platform base (one-way reveal).
   const [showAllValues, setShowAllValues] = useState(false);
+  // When a projection exists, the DEFAULT surface is a tri-state form (a lens
+  // over the same YAML buffer); "Advanced" shows the buffer itself. Revealing all
+  // platform values forces YAML — the form can't represent the whole base.
+  const [viewMode, setViewMode] = useState<"form" | "yaml">("form");
+  const [formInvalid, setFormInvalid] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   // seedText is what the editor shows: the platform base for the scope with the
   // developer's stored override merged on top. Before the base loads it is just the
   // stored override (base = {}), so the same buffer round-trips unchanged.
@@ -4986,6 +5281,8 @@ function ComponentValuesPanel({
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [chartAvailable, setChartAvailable] = useState(true);
   const [configVars, setConfigVars] = useState<ConfigVariables | null>(null);
+  const { user } = useAuth();
+  const isOrgAdmin = user?.role === "org_admin";
 
   const templateName = appLevel ? data.template.name : comp.template ?? "";
 
@@ -4995,6 +5292,7 @@ function ComponentValuesPanel({
     const m: Record<string, string> = {};
     for (const s of scopes) m[s] = seedText(s);
     setTexts(m);
+    touchedScopesRef.current = new Set();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, comp]);
 
@@ -5013,10 +5311,43 @@ function ComponentValuesPanel({
       .catch(() => setConfigVars({ platform: [], vars: [] }));
   }, [project]);
 
+  // Scopes the USER actually edited (typed, used the form, or revealed all
+  // values). Programmatic writes — persisted-state seeding, the projection
+  // seed — don't count, so a merely-VISITED tab (whose projection seed diffs
+  // structurally via its live required fields) is never saved as a side effect
+  // of saving another tab. Cleared when the app data reloads (post-save).
+  const touchedScopesRef = useRef<Set<string>>(new Set());
   const activeText = texts[scope] ?? "";
-  const setActiveText = (t: string) =>
+  const setActiveText = (t: string) => {
+    touchedScopesRef.current.add(scope);
     setTexts((cur) => ({ ...cur, [scope]: t }));
-  const dirty = activeText !== seedText(scope);
+  };
+  // overlayFor is what save would persist for a scope: its buffer diffed
+  // against the concise platform base. A never-visited scope is inherently
+  // clean (its buffer is the stored-only text and its base is unfetched, so the
+  // diff reproduces the stored override exactly).
+  const overlayFor = (s: string) => {
+    const parsed = parseYamlOverlay(texts[s] ?? "");
+    return {
+      overlay: diffOverlay(baseByScope[s] ?? {}, parsed.value ?? {}),
+      error: parsed.error,
+    };
+  };
+  // Save covers EVERY edited env tab in one request (one publish, one gitops
+  // commit) — saving only the active tab silently discarded the other tabs'
+  // edits on the post-save reload. Structural comparison keeps a reformat or an
+  // untouched projection seed from reading as dirty.
+  const dirtyScopes = tabScopes.filter((s) => {
+    if (!touchedScopesRef.current.has(s)) return false;
+    const { overlay, error } = overlayFor(s);
+    return error !== null || !deepEqual(overlay, storedOverride(s));
+  });
+  const parsedActive = parseYamlOverlay(activeText);
+  const activeOverlay = diffOverlay(
+    baseByScope[scope] ?? {},
+    parsedActive.value ?? {},
+  );
+  const dirty = dirtyScopes.length > 0;
 
   // The env whose effective values we preview: the selected env scope, else the
   // currently-viewed env, else the first stable env.
@@ -5144,6 +5475,7 @@ function ComponentValuesPanel({
     const base = baseByScope[scope] ?? {};
     const parsed = parseYamlOverlay(texts[scope] ?? "").value ?? {};
     setShowAllValues(true);
+    touchedScopesRef.current.add(scope);
     setTexts((cur) => ({
       ...cur,
       [scope]: stringifyOverlay(mergeOverlay(base, parsed)),
@@ -5229,26 +5561,43 @@ function ComponentValuesPanel({
   }, [open, showEffective, project, data.name, previewEnv, texts, appLevel, templateName, isPreviewScope]);
 
   async function save() {
-    const parsed = parseYamlOverlay(activeText);
-    if (parsed.error) {
-      setYamlError(parsed.error);
-      return;
+    // Save EVERY edited scope in one request: the editors hold base ⊕ the
+    // developer's changes per env tab; persist each dirty tab's DIFF vs its
+    // platform base. One updateApp = one publish = one gitops commit covering
+    // all edited envs — saving only the active tab used to silently drop the
+    // other tabs' edits when the post-save reload re-seeded their buffers.
+    const overlays: Record<string, Record<string, unknown>> = {};
+    for (const s of dirtyScopes) {
+      const { overlay, error } = overlayFor(s);
+      if (error) {
+        setYamlError(error);
+        toast.error(`Invalid YAML in the ${scopeLabel(s)} tab — fix it before saving.`);
+        return;
+      }
+      overlays[s] = overlay;
     }
+    if (Object.keys(overlays).length === 0) return;
     setYamlError(null);
     setSaving(true);
+    const progress = toast.loading("Saving values — publishing to GitOps…");
     try {
-      // The editor holds base ⊕ the developer's changes; persist only the DIFF vs
-      // the platform base — the minimal per-env (or preview) override. scope is
-      // always a stable env or the preview band (no "all envs" tab).
-      const overlay = diffOverlay(baseByScope[scope] ?? {}, parsed.value ?? {});
       const req: UpdateAppRequest = appLevel
-        ? { envRawValues: { [scope]: overlay } }
-        : { envComponentValues: { [scope]: { [comp.name]: overlay } } };
+        ? { envRawValues: overlays }
+        : {
+            envComponentValues: Object.fromEntries(
+              Object.entries(overlays).map(([s, ov]) => [s, { [comp.name]: ov }]),
+            ),
+          };
       await updateApp(project, data.name, req);
-      toast.success("Values saved — re-publishing to GitOps.");
+      toast.success(
+        `Values saved for ${Object.keys(overlays).map(scopeLabel).join(", ")} and published to GitOps.`,
+        { id: progress },
+      );
       await onSaved();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to save values");
+      toast.error(e instanceof Error ? e.message : "Failed to save values", {
+        id: progress,
+      });
     } finally {
       setSaving(false);
     }
@@ -5271,22 +5620,40 @@ function ComponentValuesPanel({
   // Origin-tint inputs for the Effective view: the leaf paths this env's override
   // sets ("your {env}") — the DIFF of the editor vs the platform base — and the
   // developer's read-only all-envs overlay ("your all-envs").
-  const scopePaths = leafPaths(
-    diffOverlay(baseByScope[scope] ?? {}, parseYamlOverlay(activeText).value ?? {}),
-  );
+  const scopePaths = leafPaths(activeOverlay);
   const basePaths = leafPaths(devAllEnvs);
+
+  // Which surface to show: the tri-state form is the default whenever the
+  // template declares a projection and the developer hasn't revealed the whole
+  // base (the form can't represent "everything", so reveal forces YAML).
+  const projectionActive = hasProjection(projection) && !showAllValues;
+  const view = projectionActive ? viewMode : "yaml";
+  const extraCount = projectionActive
+    ? countExtraOverrides(
+        activeOverlay,
+        projection.flatMap((f) => declaredPaths(f).map(splitPath)),
+      )
+    : 0;
 
   // Click-to-override / reset: mutate the CURRENT scope's overlay buffer (marks it
   // dirty; the debounced preview + tints refresh automatically). Uses Helm-safe
   // set/delete (arrays whole; empty ancestors pruned).
   const editScope = (fn: (o: Record<string, unknown>) => Record<string, unknown>) => {
     const cur = parseYamlOverlay(texts[scope] ?? "").value ?? {};
+    touchedScopesRef.current.add(scope);
     setTexts((c) => ({ ...c, [scope]: stringifyOverlay(fn(cur)) }));
     setYamlError(null);
   };
   const onOverride = (path: string[], value: unknown) =>
     editScope((o) => setAtPath(o, path, value));
   const onReset = (path: string[]) => editScope((o) => deleteAtPath(o, path));
+  // Form fan-out: a field's primary path + mirrors are written/cleared in ONE
+  // buffer update — sequential editScope calls in the same tick would each parse
+  // the stale buffer and drop the earlier write.
+  const onSetMany = (paths: string[][], value: unknown) =>
+    editScope((o) => paths.reduce((acc, p) => setAtPath(acc, p, value), o));
+  const onInheritMany = (paths: string[][]) =>
+    editScope((o) => paths.reduce((acc, p) => deleteAtPath(acc, p), o));
 
   return (
     <div className="mt-3">
@@ -5327,69 +5694,189 @@ function ComponentValuesPanel({
             >
               {scopeLabel(s)}
               {overridden(s) ? " ●" : ""}
+              {/* Unsaved edits on this tab — Save covers every marked tab. */}
+              {dirtyScopes.includes(s) && (
+                <span className={scope === s ? "text-amber-300" : "text-amber-500"}> •</span>
+              )}
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={save}
-          disabled={saving || !dirty || yamlError !== null}
-          className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
-        >
-          {saving ? "Saving…" : "Save"}
-        </button>
-      </div>
-
-      {hasProjection(projection) && !showAllValues ? (
-        <p className="mb-2 text-xs text-gray-400">
-          The settings this template exposes for{" "}
-          {isPreviewScope ? "previews" : scope}, pre-filled with their current values
-          — uncomment a line to override it.{" "}
-          <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
-            Your changes
-          </span>{" "}
-          are highlighted; only the difference is saved.{" "}
+        <div className="flex items-center gap-2">
+          {projectionActive && (
+            <div className="inline-flex overflow-hidden rounded-md border border-gray-200 text-[11px] font-medium">
+              <button
+                type="button"
+                onClick={() => {
+                  // The form derives from the buffer, so it needs a parseable one.
+                  if (parsedActive.error) {
+                    toast.error(
+                      "Fix the YAML first — the form needs a valid document.",
+                    );
+                    return;
+                  }
+                  setViewMode("form");
+                }}
+                className={`px-2 py-0.5 ${
+                  view === "form"
+                    ? "bg-gray-900 text-white"
+                    : "bg-white text-gray-500 hover:bg-gray-50"
+                }`}
+              >
+                Form
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("yaml")}
+                className={`px-2 py-0.5 ${
+                  view === "yaml"
+                    ? "bg-gray-900 text-white"
+                    : "bg-white text-gray-500 hover:bg-gray-50"
+                }`}
+              >
+                Advanced
+              </button>
+            </div>
+          )}
           <button
             type="button"
-            onClick={revealAllValues}
-            className="underline hover:text-gray-600"
+            onClick={save}
+            disabled={
+              saving ||
+              !dirty ||
+              yamlError !== null ||
+              (view === "form" && formInvalid)
+            }
+            className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
           >
-            Show all platform values
-          </button>{" "}
-          for anything not listed.
-        </p>
-      ) : (
-        <p className="mb-2 text-xs text-gray-400">
-          Pre-filled with the platform base for{" "}
-          {isPreviewScope ? "previews" : scope} (template ⊕ platform defaults).{" "}
-          <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
-            Your changes
-          </span>{" "}
-          are highlighted; only the difference is saved. Expand the effective below
-          for the full as-deployed values. Reference{" "}
-          <code className="font-mono">{"((platform.*))"}</code> /{" "}
-          <code className="font-mono">{"((vars.*))"}</code> tokens.
-        </p>
-      )}
-      <Suspense
-        fallback={
-          <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
-            Loading editor…
+            {saving
+              ? "Saving…"
+              : dirtyScopes.length > 1
+                ? `Save (${dirtyScopes.length} envs)`
+                : "Save"}
+          </button>
+        </div>
+      </div>
+
+      {/* Curate-nudge for platform admins: this template gives developers no
+          focused surface, so they're looking at the whole platform base. */}
+      {isOrgAdmin &&
+        !bannerDismissed &&
+        !hasProjection(projection) &&
+        baseByScope[scope] !== undefined &&
+        templateName !== "" && (
+          <div className="mb-2 flex items-start justify-between gap-2 rounded-md bg-amber-50 px-3 py-2">
+            <p className="text-xs text-amber-700">
+              This template doesn't declare developer values, so developers see
+              the full platform base here.{" "}
+              <Link
+                to={`/templates/${encodeURIComponent(templateName)}#developer-values`}
+                className="font-medium underline"
+              >
+                Curate developer values
+              </Link>{" "}
+              on the template page to give them a focused surface.
+            </p>
+            <button
+              type="button"
+              onClick={() => setBannerDismissed(true)}
+              className="shrink-0 text-xs text-amber-500 hover:text-amber-700"
+            >
+              ✕
+            </button>
           </div>
-        }
-      >
-        <ValuesEditor
-          label={`Your override — ${scopeLabel(scope)}`}
-          value={activeText}
-          configVars={configVars}
-          highlightBase={baseByScope[scope]}
-          placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 200m"}
-          onChange={setActiveText}
-          onValidChange={(_, err) => setYamlError(err)}
-        />
-      </Suspense>
-      {yamlError && (
-        <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
+        )}
+
+      {view === "form" ? (
+        <>
+          <p className="mb-2 text-xs text-gray-400">
+            The settings this template exposes for{" "}
+            {isPreviewScope ? "previews" : scope}. Untouched fields inherit the
+            platform value and save nothing — only fields you set are stored.
+          </p>
+          {fullByScope[scope] === undefined ? (
+            <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
+              Loading fields…
+            </div>
+          ) : (
+            <ProjectionForm
+              key={scope}
+              fields={projection}
+              overlay={activeOverlay}
+              effectiveFull={fullByScope[scope] ?? null}
+              onSet={onSetMany}
+              onInherit={onInheritMany}
+              onValidity={(ok) => setFormInvalid(!ok)}
+            />
+          )}
+          {extraCount > 0 && (
+            <p className="mt-2 text-xs text-gray-400">
+              {extraCount} additional override{extraCount === 1 ? "" : "s"} set
+              outside these fields —{" "}
+              <button
+                type="button"
+                onClick={() => setViewMode("yaml")}
+                className="underline hover:text-gray-600"
+              >
+                view in Advanced
+              </button>
+              .
+            </p>
+          )}
+        </>
+      ) : (
+        <>
+          {projectionActive ? (
+            <p className="mb-2 text-xs text-gray-400">
+              The settings this template exposes for{" "}
+              {isPreviewScope ? "previews" : scope}, pre-filled with their current
+              values — uncomment a line to override it.{" "}
+              <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+                Your changes
+              </span>{" "}
+              are highlighted; only the difference is saved.{" "}
+              <button
+                type="button"
+                onClick={revealAllValues}
+                className="underline hover:text-gray-600"
+              >
+                Show all platform values
+              </button>{" "}
+              for anything not listed.
+            </p>
+          ) : (
+            <p className="mb-2 text-xs text-gray-400">
+              Pre-filled with the platform base for{" "}
+              {isPreviewScope ? "previews" : scope} (template ⊕ platform defaults).{" "}
+              <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+                Your changes
+              </span>{" "}
+              are highlighted; only the difference is saved. Expand the effective
+              below for the full as-deployed values. Reference{" "}
+              <code className="font-mono">{"((platform.*))"}</code> /{" "}
+              <code className="font-mono">{"((vars.*))"}</code> tokens.
+            </p>
+          )}
+          <Suspense
+            fallback={
+              <div className="rounded-lg border border-gray-200 p-4 text-xs text-gray-400">
+                Loading editor…
+              </div>
+            }
+          >
+            <ValuesEditor
+              label={`Your override — ${scopeLabel(scope)}`}
+              value={activeText}
+              configVars={configVars}
+              highlightBase={baseByScope[scope]}
+              placeholder={"# e.g.\nresources:\n  requests:\n    cpu: 200m"}
+              onChange={setActiveText}
+              onValidChange={(_, err) => setYamlError(err)}
+            />
+          </Suspense>
+          {yamlError && (
+            <p className="mt-2 text-xs text-red-600">Invalid YAML: {yamlError}</p>
+          )}
+        </>
       )}
 
       {/* Effective (as deployed) — reference/advanced, hidden by default. */}
@@ -5490,6 +5977,7 @@ function ResolvedEnvPanel({
   envName: string;
 }) {
   const [vars, setVars] = useState<ResolvedEnvVar[]>([]);
+  const [configMapName, setConfigMapName] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -5497,7 +5985,10 @@ function ResolvedEnvPanel({
     setLoading(true);
     setError(null);
     getResolvedEnvConfig(project, appName, envName)
-      .then((res) => setVars(res.vars ?? []))
+      .then((res) => {
+        setVars(res.vars ?? []);
+        setConfigMapName(res.configMapName ?? "");
+      })
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load"))
       .finally(() => setLoading(false));
   }, [project, appName, envName]);
@@ -5519,6 +6010,15 @@ function ResolvedEnvPanel({
           <p className="mt-0.5 text-xs text-gray-500">
             Merged view for <span className="font-mono font-medium">{envName}</span> — shows which hierarchy level wins each key.
           </p>
+          {configMapName && (
+            <p className="mt-0.5 text-xs text-gray-400">
+              K8s ConfigMap:{" "}
+              <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-xs">
+                {configMapName}
+              </code>
+              <span className="ml-1">(plain vars; secret keys come from the env Secret)</span>
+            </p>
+          )}
         </div>
         <button
           onClick={load}

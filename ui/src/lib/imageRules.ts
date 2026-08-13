@@ -73,6 +73,17 @@ export function groupByRepo(discovered: TemplateImage[]): RepoGroup[] {
   return order.map((r) => by.get(r)!);
 }
 
+// bindingKey scopes a saved binding to its owning component. Composed components
+// routinely share one tagKey (every template uses image.tag), so a bare-tagKey
+// lookup would let one component's surviving binding masquerade as another's —
+// unselecting a repo then reads as still-selected after reload because a
+// different component still saves the same tagKey. Uses a NUL separator, which
+// never appears in component names or tag keys.
+const KEY_SEP = "\u0000";
+function bindingKey(component: string | undefined, tagKey: string): string {
+  return component ? component + KEY_SEP + tagKey : tagKey;
+}
+
 // seedImageRules builds the initial per-repo rules from the discovered images and the
 // app's SAVED bindings (by tagKey). When the app has any saved binding, those win
 // (watched = repo has a saved tagKey; rule = the saved rule). When there are NO saved
@@ -99,15 +110,20 @@ export function seedImageRules(
   knownRepos?: ReadonlySet<string>,
 ): ImageRules {
   const hasSaved = configured || Object.keys(savedByTagKey).length > 0;
+  // Component-scoped key first (composed bindings), bare tagKey as fallback
+  // (app-level bindings, where discovered images carry no component — and
+  // 1-component composed apps saved at the app level).
+  const savedFor = (i: TemplateImage) =>
+    savedByTagKey[bindingKey(i.component, i.tagKey)] ?? savedByTagKey[i.tagKey];
   const out: ImageRules = {};
   for (const g of groupByRepo(discovered)) {
-    const savedImg = g.images.find((i) => savedByTagKey[i.tagKey]);
+    const savedImg = g.images.find((i) => savedFor(i) !== undefined);
     // A repo the baseline never saw can't carry a deliberate "off" — treat it as new.
     // A saved binding still wins: a repo can be absent from THIS env's discovery yet
     // carry a selection saved from another env, and that must not be unwatched.
     const isNew = knownRepos ? !knownRepos.has(g.repository) && !savedImg : false;
     if (hasSaved && !isNew) {
-      const s = savedImg ? savedByTagKey[savedImg.tagKey] : undefined;
+      const s = savedImg ? savedFor(savedImg) : undefined;
       out[g.repository] = {
         watched: !!savedImg,
         tagPattern: s?.tagPattern || g.inherited.tagPattern,
@@ -125,15 +141,16 @@ export function seedImageRules(
 }
 
 // savedByTagKeyFromComponents / ...FromApp flatten stored bindings into a
-// tagKey → rule lookup for seedImageRules.
+// key → rule lookup for seedImageRules. Component bindings are keyed per
+// component (see bindingKey); app-level bindings by bare tagKey.
 export function savedByTagKeyFromComponents(
-  components: { images?: ComponentImage[] }[],
+  components: { name: string; images?: ComponentImage[] }[],
 ): Record<string, { tagPattern?: string; selectionStrategy?: string }> {
   const out: Record<string, { tagPattern?: string; selectionStrategy?: string }> =
     {};
   for (const c of components) {
     for (const im of c.images ?? []) {
-      out[im.tagKey] = {
+      out[bindingKey(c.name, im.tagKey)] = {
         tagPattern: im.tagPattern,
         selectionStrategy: im.selectionStrategy,
       };

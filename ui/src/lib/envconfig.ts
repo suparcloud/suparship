@@ -12,6 +12,10 @@ export interface SecretRef {
 export interface EnvConfig {
   vars?: Record<string, string>;
   secretRefs?: SecretRef[];
+  // Rendered ConfigMap the vars land in (the value behind
+  // platform.configMapName). Only present on app-scoped GET responses — every
+  // layer merges into one <app>-config per environment. Read-only.
+  configMapName?: string;
 }
 
 export interface ResolvedEnvVar {
@@ -23,6 +27,7 @@ export interface ResolvedEnvVar {
 
 export interface ResolvedEnvConfigResponse {
   vars: ResolvedEnvVar[];
+  configMapName?: string;
 }
 
 // ── Org level ──────────────────────────────────────────────────────────────────

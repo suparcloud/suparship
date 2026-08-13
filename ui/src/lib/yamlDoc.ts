@@ -53,7 +53,7 @@ export function mergeOverlay(
 // deepEqual compares two parsed-YAML values structurally: maps key-by-key, arrays
 // element-by-element in order (Helm treats arrays as ordered, replace-wholesale),
 // scalars by ===. Used to decide whether an edited leaf still equals its base.
-function deepEqual(a: unknown, b: unknown): boolean {
+export function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (Array.isArray(a) || Array.isArray(b)) {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {

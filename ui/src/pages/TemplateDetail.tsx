@@ -18,6 +18,7 @@ import type { Cluster } from "../lib/clusters";
 import { listPlatformConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
 import { parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
+import { DeveloperValuesSection } from "../components/DeveloperValuesSection";
 import type {
   TemplateDetail as TemplateDetailType,
   TemplateImage,
@@ -219,6 +220,10 @@ export function TemplateDetail() {
 
       {/* Image mappings — drive external-CD (Kargo) wiring */}
       <ImagesSection template={template} onUpdated={setTemplate} />
+
+      {/* Developer values — the curated projection developers see in the app
+          editor. Without it, the component editor seeds the full platform base. */}
+      <DeveloperValuesSection template={template} onUpdated={setTemplate} />
 
       {/* Template inputs are deprecated and not shown — apps are configured via
           the values editor, and the effective-values preview is the real "what

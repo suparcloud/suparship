@@ -632,6 +632,33 @@ type Server struct {
 	// passes.
 	bg       *sync.WaitGroup
 	bgCancel context.CancelFunc
+	// appHandler backs background reconcilers (StartAutoPromoteLoop). Nil when
+	// no AppStore was configured.
+	appHandler *appHandler
+}
+
+// StartAutoPromoteLoop runs the CD auto-promotion reconciler on a ticker until
+// ctx is done (see auto_promote.go for why this is server-driven rather than
+// Kargo's autoPromotionEnabled alone). No-op when apps aren't configured or
+// interval <= 0; the reconciler itself no-ops per tick when the Kargo pipeline
+// reader or promoter is absent, so wiring this unconditionally is safe.
+func (s *Server) StartAutoPromoteLoop(ctx context.Context, interval time.Duration) {
+	if s.appHandler == nil || interval <= 0 {
+		return
+	}
+	s.logger.Info("cd auto-promotion reconciler enabled", "interval", interval)
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.appHandler.runAutoPromoteOnce(ctx)
+			}
+		}
+	}()
 }
 
 // New creates a Server from the given Config.
@@ -687,6 +714,8 @@ func New(cfg Config) *Server {
 		cfg.Logger.Info("template endpoints enabled", "count", len(cfg.Templates))
 	}
 
+	// Carried out of the block below into the Server, for background reconcilers.
+	var appH *appHandler
 	if cfg.OrgProvider != nil && ah != nil {
 		rh := &rbacHandler{
 			auth:         ah,
@@ -787,6 +816,7 @@ func New(cfg Config) *Server {
 				cfg.Logger.Info("app diagnostics reader enabled — ArgoCD/ESO errors surfaced in app status")
 			}
 			cfg.Logger.Info("app endpoints enabled")
+			appH = rh.appHandler
 		}
 		if cfg.AppStore != nil && cfg.ProjectStore != nil {
 			ech := &envConfigHandler{
@@ -1002,9 +1032,10 @@ func New(cfg Config) *Server {
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,
 		},
-		logger:   cfg.Logger,
-		bg:       &bgWG,
-		bgCancel: bgCancel,
+		logger:     cfg.Logger,
+		bg:         &bgWG,
+		bgCancel:   bgCancel,
+		appHandler: appH,
 	}
 }
 

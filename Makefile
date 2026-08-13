@@ -71,6 +71,10 @@ clean:
 	rm -f coverage.out
 
 ## dev-api: Run backend — sources .env then .env.cluster (if present) so gitops vars are loaded
+# Pinned to the dev cluster context (override with DEV_KUBE_CONTEXT), like
+# hack/dev/lib.sh and the Tiltfile's EXPECTED_CONTEXT — so a dev server can
+# never silently bind to whatever context kubectl last used (e.g. prod).
+# Harmless in fake mode, where no cluster client is built.
 dev-api: build
 	@bash -c '\
 		set -a; \
@@ -78,7 +82,7 @@ dev-api: build
 		[ -f .env.cluster ] && . ./.env.cluster; \
 		set +a; \
 		: "$${SUPARSHIP_CORS_ORIGINS:=http://localhost:5173}"; \
-		exec ./bin/$(BINARY_NAME) server'
+		exec ./bin/$(BINARY_NAME) server --context "$${DEV_KUBE_CONTEXT:-kind-suparship-dev}"'
 
 ## dev-ui: Run frontend Vite dev server — sources .env so VITE_DEBUG etc. are picked up
 dev-ui:

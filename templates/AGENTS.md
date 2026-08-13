@@ -112,6 +112,10 @@ spec:
       type: string
       required: true
       description: Container image, e.g. ghcr.io/org/app
+    - path: containerPort    # one question, many keys: mirrors receive
+      title: Port            # the SAME value when the developer sets it
+      type: number
+      mirrors: [service.port, healthCheck.port]
     # types: string | number | boolean | enum (all optional)
     # constraints: required, default, min, max, pattern, options
 
@@ -131,8 +135,10 @@ spec:
 Validation rules enforced at load time:
 
 - `metadata.name` and `metadata.version` are required.
-- `developerValues[].path` is required and unique; an `enum` entry needs
-  at least one `options` entry; `pattern` must compile.
+- `developerValues[].path` is required and unique; `mirrors` share that
+  namespace (no key may appear twice across any path or mirror); an
+  `enum` entry needs at least one `options` entry; `pattern` must
+  compile.
 - Input names are unique across `inputs` and `advancedInputs`.
 - `enum` inputs need at least one `options` entry.
 - `secretRef` is `secret-name.key`.
@@ -157,6 +163,13 @@ each key's current effective value:
   Uncomment a line to override it. This matters: only what the developer
   actually writes is saved, so an untouched key keeps tracking the chart
   or platform default instead of being frozen into the app at creation.
+
+A field may declare `mirrors`: additional dotted paths that receive the
+same value (ask for a port once, fill `containerPort` and
+`service.port`). The fan-out is purely an editor concern — the saved
+overlay is plain Helm values at every path, and until the developer sets
+the field each path keeps its own inherited value, which may
+legitimately differ.
 
 Declare no `developerValues` and the editor falls back to seeding from
 the full platform base — the pre-projection behaviour.

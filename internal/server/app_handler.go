@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/client-go/dynamic"
@@ -38,6 +39,10 @@ import (
 // is non-nil.
 type appHandler struct {
 	appStore domain.AppStore
+	// autoPromoteAttempts backs the auto-promotion reconciler's retry cooldown
+	// (see auto_promote.go), keyed "{project}/{app}/{env}".
+	autoPromoteMu       sync.Mutex
+	autoPromoteAttempts map[string]autoPromoteAttempt
 	// builtin + clusterLoader resolve templates live (cluster overrides built-in)
 	// so externally-synced templates are usable for app creation/upgrade without
 	// a restart. Use lookupTemplate; do not read a cached index.
@@ -132,6 +137,7 @@ func newAppHandler(store domain.AppStore, templates []*tpl.Template, clusterLoad
 		statusCache:          newStatusCache(statusCacheTTL),
 		templateVersionCache: newTemplateVersionCache(templateVersionsTTL),
 		argoAppWaitTimeout:   defaultArgoAppWaitTimeout,
+		autoPromoteAttempts:  map[string]autoPromoteAttempt{},
 	}
 }
 
@@ -844,50 +850,55 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		app.Spec.EnvironmentDefaults = ed
 	}
 
-	if err := ah.appStore.SaveApp(r.Context(), projectName, app); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
-		return
-	}
-
-	// Re-publish so values.yaml reflects the new inputs (best-effort with
-	// rollback, mirroring upgrade-template). Skip cleanly when no publisher.
-	if ah.gitOpsPublisher != nil {
-		allEnvs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list app environments"})
-			return
+	// The slow half — persist + full gitops publish — runs through dispatchOp so
+	// a caller can opt into async (Prefer: respond-async / ?async=1) and poll
+	// .../tasks/{id} for the result instead of holding the request open through
+	// the git round-trips: a many-component manage save (chart syncs + composed
+	// render per env + Kargo CRs) routinely outlives gateway timeouts. All
+	// request validation already ran synchronously above, so bad input still
+	// fails fast even in async mode.
+	op := func(ctx context.Context) (int, any, error) {
+		if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
+			return http.StatusInternalServerError, nil, errors.New("failed to save app")
 		}
-		var stableEnvs []*domain.AppEnvironment
-		for _, env := range allEnvs {
-			if env.EnvType != domain.AppEnvPreview {
-				stableEnvs = append(stableEnvs, env)
+
+		// Re-publish so values.yaml reflects the new inputs (best-effort with
+		// rollback, mirroring upgrade-template). Skip cleanly when no publisher.
+		if ah.gitOpsPublisher != nil {
+			allEnvs, err := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
+			if err != nil {
+				return http.StatusInternalServerError, nil, errors.New("failed to list app environments")
 			}
+			var stableEnvs []*domain.AppEnvironment
+			for _, env := range allEnvs {
+				if env.EnvType != domain.AppEnvPreview {
+					stableEnvs = append(stableEnvs, env)
+				}
+			}
+			if len(stableEnvs) == 0 {
+				stableEnvs = ah.stableEnvsFromOrg(ctx, app)
+			}
+			ah.ensureAppNamespaces(ctx, app, stableEnvs)
+			if err := ah.gitOpsPublisher.PublishApp(ctx, app, stableEnvs); err != nil {
+				app.Spec.Values, app.Spec.DisplayName, app.Spec.Description = prevValues, prevDisplay, prevDesc
+				app.Spec.EnvironmentDefaults = prevEnvDefaults
+				app.Spec.RawValues = prevRawValues
+				app.Spec.Components = prevComponents
+				app.Spec.CD = prevCD
+				app.Spec.PreviewsEnabled = prevPreviewsEnabled
+				_ = ah.appStore.SaveApp(ctx, projectName, app)
+				slog.Error("update-app: publish failed; rolled back config change",
+					"project", projectName, "app", appName, "err", err)
+				return http.StatusInternalServerError, nil, fmt.Errorf("publish failed; config change rolled back: %w", err)
+			}
+			ah.ensureKargoProjectCreds(ctx, projectName)
 		}
-		if len(stableEnvs) == 0 {
-			stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
-		}
-		ah.ensureAppNamespaces(r.Context(), app, stableEnvs)
-		if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
-			app.Spec.Values, app.Spec.DisplayName, app.Spec.Description = prevValues, prevDisplay, prevDesc
-			app.Spec.EnvironmentDefaults = prevEnvDefaults
-			app.Spec.RawValues = prevRawValues
-			app.Spec.Components = prevComponents
-			app.Spec.CD = prevCD
-			app.Spec.PreviewsEnabled = prevPreviewsEnabled
-			_ = ah.appStore.SaveApp(r.Context(), projectName, app)
-			slog.Error("update-app: publish failed; rolled back config change",
-				"project", projectName, "app", appName, "err", err)
-			writeJSON(w, http.StatusInternalServerError, errorResponse{
-				Error: "publish failed; config change rolled back: " + err.Error(),
-			})
-			return
-		}
-		ah.ensureKargoProjectCreds(r.Context(), projectName)
-	}
 
-	saved, _ := ah.appStore.GetApp(r.Context(), projectName, appName)
-	savedEnvs, _ := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
-	writeJSON(w, http.StatusOK, updateAppResponse{App: appToDetailDTO(saved, savedEnvs)})
+		saved, _ := ah.appStore.GetApp(ctx, projectName, appName)
+		savedEnvs, _ := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
+		return http.StatusOK, updateAppResponse{App: appToDetailDTO(saved, savedEnvs)}, nil
+	}
+	dispatchOp(w, r, ah.async, "update-app", projectName, op)
 }
 
 // handleDeleteApp handles DELETE /api/v1/projects/{project}/apps/{app}.
@@ -1693,6 +1704,15 @@ type upgradeAppTemplateRequest struct {
 	// app-level version that means anything for it. Each version is validated
 	// against ITS OWN component's template.
 	Components map[string]string `json:"components,omitempty"`
+	// Environment scopes the upgrade to ONE stable environment: the version
+	// pins are written as that env's overrides (EnvironmentOverride.
+	// TemplateVersions) instead of the app-wide pins, so e.g. staging runs the
+	// new chart while production stays put — upgrade production the same way
+	// when it's ready. Once every stable env converges on one version the
+	// overrides fold into the app-wide pin. Omitted = upgrade every environment
+	// at once (the pre-env-scoping behavior; any env-scoped pins for the moved
+	// components are cleared).
+	Environment string `json:"environment,omitempty"`
 }
 
 // upgradedComponentDTO reports one component's version move in the response.
@@ -1758,6 +1778,24 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Env-scoped upgrade: the target must be an existing stable environment.
+	envScope := strings.TrimSpace(req.Environment)
+	if envScope != "" {
+		envRec, envErr := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, envScope)
+		if envErr != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse{
+				Error: fmt.Sprintf("environment %q not found for app %q", envScope, appName),
+			})
+			return
+		}
+		if envRec.EnvType == domain.AppEnvPreview {
+			writeJSON(w, http.StatusBadRequest, errorResponse{
+				Error: "cannot upgrade a preview environment — previews follow their base env",
+			})
+			return
+		}
+	}
+
 	// A BYO/passthrough app stores no components at all (creator.go returns nil
 	// for a template with no declared components that opts out of the canonical
 	// schema). There AppSpec.Template is not a mirror — it is the only pin there
@@ -1766,7 +1804,7 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 	// len(Components)==1 canonical-key remap, changing how the app renders as a
 	// side effect of an upgrade.
 	if len(app.Spec.Components) == 0 {
-		ah.upgradeTemplatelessApp(w, r, app, wantVersion, req.Components)
+		ah.upgradeTemplatelessApp(w, r, app, wantVersion, req.Components, envScope)
 		return
 	}
 	app.Spec.BackfillComponentTemplates()
@@ -1837,6 +1875,13 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		}
 	}
 
+	// Env-scoped: write the pins as the chosen env's overrides and stop —
+	// the app-wide pins (and every other env) stay untouched.
+	if envScope != "" {
+		ah.upgradeAppTemplateForEnv(w, r, app, envScope, targets, skipped)
+		return
+	}
+
 	// Snapshot for rollback, then apply. Components are value types holding a
 	// Template POINTER, so a slice copy would share those pointers with the
 	// mutated spec — deep-copy each ref.
@@ -1849,6 +1894,7 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		}
 	}
 	prevTemplate := app.Spec.Template
+	prevEnvDefaults := snapshotEnvTemplateVersions(app)
 
 	var moved []upgradedComponentDTO
 	for i := range app.Spec.Components {
@@ -1868,6 +1914,17 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		c.Template = &t
 	}
 	app.Spec.SyncPrimaryTemplate()
+	// An app-wide upgrade supersedes any env-scoped pins for the moved
+	// components — leaving them would silently hold those envs on old versions.
+	for envName, ov := range app.Spec.EnvironmentDefaults {
+		for name := range targets {
+			delete(ov.TemplateVersions, name)
+		}
+		if len(ov.TemplateVersions) == 0 {
+			ov.TemplateVersions = nil
+		}
+		app.Spec.EnvironmentDefaults[envName] = ov
+	}
 
 	// Nothing actually moved — re-pinning to the current version is fine, but
 	// don't pretend we did work (or churn a gitops commit for it).
@@ -1884,6 +1941,7 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 	if !ah.saveAndRepublishUpgrade(w, r, app, func() {
 		app.Spec.Components = prevComponents
 		app.Spec.Template = prevTemplate
+		restoreEnvTemplateVersions(app, prevEnvDefaults)
 	}) {
 		return
 	}
@@ -1901,6 +1959,208 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		// before per-component upgrades existed, so older clients keep working.
 		"fromVersion": prevTemplate.Version,
 		"toVersion":   app.Spec.Template.Version,
+		"components":  moved,
+		"skipped":     skipped,
+	})
+}
+
+// snapshotEnvTemplateVersions / restoreEnvTemplateVersions snapshot ONLY the
+// per-env TemplateVersions maps (the piece upgrade paths mutate) for rollback.
+func snapshotEnvTemplateVersions(app *domain.App) map[string]map[string]string {
+	out := make(map[string]map[string]string, len(app.Spec.EnvironmentDefaults))
+	for envName, ov := range app.Spec.EnvironmentDefaults {
+		if ov.TemplateVersions == nil {
+			out[envName] = nil
+			continue
+		}
+		tv := make(map[string]string, len(ov.TemplateVersions))
+		for k, v := range ov.TemplateVersions {
+			tv[k] = v
+		}
+		out[envName] = tv
+	}
+	return out
+}
+
+func restoreEnvTemplateVersions(app *domain.App, snap map[string]map[string]string) {
+	for envName, tv := range snap {
+		ov := app.Spec.EnvironmentDefaults[envName]
+		ov.TemplateVersions = tv
+		app.Spec.EnvironmentDefaults[envName] = ov
+	}
+}
+
+// stableEnvNamesForApp lists the app's stable (non-preview) environment names,
+// falling back to the org's environments when none are recorded yet — the same
+// universe saveAndRepublishUpgrade publishes to.
+func (ah *appHandler) stableEnvNamesForApp(ctx context.Context, app *domain.App) []string {
+	var out []string
+	if envs, err := ah.appStore.ListAppEnvironments(ctx, app.ProjectName, app.Name); err == nil {
+		for _, e := range envs {
+			if e.EnvType != domain.AppEnvPreview {
+				out = append(out, e.EnvName)
+			}
+		}
+	}
+	if len(out) == 0 {
+		for _, e := range ah.stableEnvsFromOrg(ctx, app) {
+			out = append(out, e.EnvName)
+		}
+	}
+	return out
+}
+
+// collapseConvergedTemplateVersions folds env-scoped version pins back into the
+// app-wide pin once EVERY stable env explicitly pins the same version for a
+// component (or, via the reserved "" key, the templateless app-level pin). The
+// spec then reads as if the upgrade had been app-wide all along, and previews /
+// newly-materialized envs inherit the converged version naturally.
+func (ah *appHandler) collapseConvergedTemplateVersions(ctx context.Context, app *domain.App) {
+	ed := app.Spec.EnvironmentDefaults
+	if len(ed) == 0 {
+		return
+	}
+	envNames := ah.stableEnvNamesForApp(ctx, app)
+	if len(envNames) == 0 {
+		return
+	}
+	keys := map[string]bool{}
+	for _, name := range envNames {
+		for k := range ed[name].TemplateVersions {
+			keys[k] = true
+		}
+	}
+	for key := range keys {
+		ver := ""
+		converged := true
+		for _, name := range envNames {
+			v := ed[name].TemplateVersions[key]
+			if v == "" || (ver != "" && v != ver) {
+				converged = false
+				break
+			}
+			ver = v
+		}
+		if !converged || ver == "" {
+			continue
+		}
+		if key == "" {
+			app.Spec.Template.Version = ver
+		} else {
+			for i := range app.Spec.Components {
+				c := &app.Spec.Components[i]
+				if c.Name == key && c.Template != nil {
+					t := *c.Template
+					t.Version = ver
+					c.Template = &t
+				}
+			}
+		}
+		for _, name := range envNames {
+			ov := ed[name]
+			delete(ov.TemplateVersions, key)
+			if len(ov.TemplateVersions) == 0 {
+				ov.TemplateVersions = nil
+			}
+			ed[name] = ov
+		}
+	}
+	app.Spec.SyncPrimaryTemplate()
+}
+
+// upgradeAppTemplateForEnv writes validated version targets as ONE env's
+// overrides (EnvironmentOverride.TemplateVersions) — the env-scoped upgrade. A
+// target equal to the app-wide pin clears that env's override instead (the env
+// simply follows the pin again), and full convergence across stable envs folds
+// into the app-wide pin via collapseConvergedTemplateVersions.
+func (ah *appHandler) upgradeAppTemplateForEnv(w http.ResponseWriter, r *http.Request, app *domain.App, envName string, targets map[string]string, skipped []string) {
+	projectName, appName := app.ProjectName, app.Name
+
+	appPin := map[string]string{}
+	tmplName := map[string]string{}
+	for _, c := range app.Spec.Components {
+		if c.Template != nil {
+			appPin[c.Name] = c.Template.Version
+			tmplName[c.Name] = c.Template.Name
+		}
+	}
+	// Reserved "" key = the app-level pin of a component-less (BYO) app.
+	appPin[""] = app.Spec.Template.Version
+	tmplName[""] = app.Spec.Template.Name
+
+	prevComponents := make([]domain.ComponentSpec, len(app.Spec.Components))
+	copy(prevComponents, app.Spec.Components)
+	for i := range prevComponents {
+		if prevComponents[i].Template != nil {
+			t := *prevComponents[i].Template
+			prevComponents[i].Template = &t
+		}
+	}
+	prevTemplate := app.Spec.Template
+	prevEnvDefaults := snapshotEnvTemplateVersions(app)
+
+	ov := app.Spec.EnvironmentDefaults[envName]
+	next := map[string]string{}
+	for k, v := range ov.TemplateVersions {
+		next[k] = v
+	}
+	var moved []upgradedComponentDTO
+	for name, target := range targets {
+		cur := next[name]
+		if cur == "" {
+			cur = appPin[name]
+		}
+		if cur == target {
+			continue
+		}
+		moved = append(moved, upgradedComponentDTO{
+			Name:        name,
+			Template:    tmplName[name],
+			FromVersion: cur,
+			ToVersion:   target,
+		})
+		if target == appPin[name] {
+			delete(next, name)
+		} else {
+			next[name] = target
+		}
+	}
+	if len(moved) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message":     fmt.Sprintf("%s is already on the requested version(s)", envName),
+			"project":     projectName,
+			"app":         appName,
+			"environment": envName,
+			"skipped":     skipped,
+		})
+		return
+	}
+	if len(next) == 0 {
+		next = nil
+	}
+	ov.TemplateVersions = next
+	if app.Spec.EnvironmentDefaults == nil {
+		app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+	}
+	app.Spec.EnvironmentDefaults[envName] = ov
+
+	ah.collapseConvergedTemplateVersions(r.Context(), app)
+
+	if !ah.saveAndRepublishUpgrade(w, r, app, func() {
+		app.Spec.Components = prevComponents
+		app.Spec.Template = prevTemplate
+		restoreEnvTemplateVersions(app, prevEnvDefaults)
+	}) {
+		return
+	}
+
+	slog.Info("app env upgraded to template version",
+		"project", projectName, "app", appName, "env", envName, "components", len(moved))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":     fmt.Sprintf("%s upgraded — ArgoCD will sync its new chart bytes shortly; other environments are unchanged", envName),
+		"project":     projectName,
+		"app":         appName,
+		"environment": envName,
 		"components":  moved,
 		"skipped":     skipped,
 	})
@@ -1953,9 +2213,10 @@ func (ah *appHandler) saveAndRepublishUpgrade(w http.ResponseWriter, r *http.Req
 
 // upgradeTemplatelessApp handles the app shape that stores no components at all
 // (BYO/passthrough). There is no component level to write: AppSpec.Template is
-// the pin the single-source render path reads, so it is upgraded directly. The
+// the pin the single-source render path reads, so it is upgraded directly (or,
+// env-scoped, via the env's reserved-"" TemplateVersions override). The
 // per-component request form has nothing to address here and is rejected.
-func (ah *appHandler) upgradeTemplatelessApp(w http.ResponseWriter, r *http.Request, app *domain.App, wantVersion string, components map[string]string) {
+func (ah *appHandler) upgradeTemplatelessApp(w http.ResponseWriter, r *http.Request, app *domain.App, wantVersion string, components map[string]string, envScope string) {
 	if len(components) > 0 {
 		writeJSON(w, http.StatusBadRequest, errorResponse{
 			Error: fmt.Sprintf("app %q has no components; upgrade it with {\"version\": ...}", app.Name),
@@ -1972,7 +2233,14 @@ func (ah *appHandler) upgradeTemplatelessApp(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if envScope != "" {
+		// The reserved "" key pins the app-level template for this env only.
+		ah.upgradeAppTemplateForEnv(w, r, app, envScope, map[string]string{"": wantVersion}, nil)
+		return
+	}
+
 	prevVersion := app.Spec.Template.Version
+	prevEnvDefaults := snapshotEnvTemplateVersions(app)
 	if prevVersion == wantVersion {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"message": "app already pinned to the requested version(s)",
@@ -1982,9 +2250,18 @@ func (ah *appHandler) upgradeTemplatelessApp(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	app.Spec.Template.Version = wantVersion
+	// An app-wide upgrade supersedes any env-scoped pin of the app-level template.
+	for envName, ov := range app.Spec.EnvironmentDefaults {
+		delete(ov.TemplateVersions, "")
+		if len(ov.TemplateVersions) == 0 {
+			ov.TemplateVersions = nil
+		}
+		app.Spec.EnvironmentDefaults[envName] = ov
+	}
 
 	if !ah.saveAndRepublishUpgrade(w, r, app, func() {
 		app.Spec.Template.Version = prevVersion
+		restoreEnvTemplateVersions(app, prevEnvDefaults)
 	}) {
 		return
 	}
@@ -2381,6 +2658,33 @@ type kargoFreightReader interface {
 	LatestFreightImageTag(ctx context.Context, projectName, appName, repoSubstr string) (string, error)
 }
 
+// KargoFreightImage / KargoFreightRecord mirror the kube-layer freight types at
+// the server boundary (server must not import kube).
+type KargoFreightImage struct {
+	RepoURL string
+	Tag     string
+}
+
+type KargoFreightRecord struct {
+	Name         string
+	Images       []KargoFreightImage
+	DiscoveredAt string
+	Current      bool
+}
+
+// kargoFreightHistorian is the optional capability (implemented by the Kargo
+// promoter) to list a stage's previously-deployed freight and re-promote one of
+// them — the rollback primitives.
+type kargoFreightHistorian interface {
+	StageFreightHistory(ctx context.Context, projectName, appName, envName string, limit int) ([]KargoFreightRecord, error)
+	PromoteFreight(ctx context.Context, projectName, appName, envName, freightName string) (KargoPromotionResult, error)
+}
+
+// rollbackPinnedFrom is the EnvironmentOverride.PinnedFrom marker for a rollback
+// hold: it pauses Kargo auto-promotion for the stage (any non-empty PinnedFrom
+// does) without naming a source preview. "Resume CD" is the existing unpin.
+const rollbackPinnedFrom = "rollback"
+
 // appImageRepoSubstr returns the app's image repository (when set on the app),
 // used to pick the right image within a multi-image freight. Empty for
 // template-image apps, where the per-app freight is matched by warehouse origin.
@@ -2706,6 +3010,235 @@ func (ah *appHandler) handleUnpinAppEnv(w http.ResponseWriter, r *http.Request) 
 		return http.StatusOK, map[string]string{"message": msg, "project": projectName, "app": appName, "env": envName}, nil
 	}
 	dispatchOp(w, r, ah.async, "unpin-app", projectName, op)
+}
+
+// Sentinels for rollback, mapped to HTTP status by statusForRollbackErr.
+var (
+	errRollbackUnavailable    = errors.New("rollback unavailable: Kargo integration is not enabled")
+	errRollbackFreightMissing = errors.New("that build is not in this environment's deploy history (it may have been cleaned up)")
+	errRollbackCurrent        = errors.New("that build is already the one deployed")
+)
+
+func statusForRollbackErr(err error) int {
+	switch {
+	case errors.Is(err, errRollbackUnavailable):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, errPinAppNotFound), errors.Is(err, errPinTargetNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, errPinNotPipeline), errors.Is(err, errPinTargetIsPreview),
+		errors.Is(err, errRollbackFreightMissing), errors.Is(err, errRollbackCurrent):
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// rollbackAppEnvSpec validates a rollback and places the HOLD on the spec
+// WITHOUT publishing: PinnedFrom="rollback" pauses Kargo auto-promotion for the
+// stage (the pinned policy) so newer freight doesn't immediately re-promote over
+// the rolled-back one, and — when the target freight runs a single distinct tag —
+// PinnedImageTag holds that tag across republishes. A multi-tag freight leaves
+// PinnedImageTag empty: the promotion writes each component's own tag and the
+// CD-managed preserve path keeps them on republish (a single pinned tag would
+// clobber them). Returns the app, env record, and the freight record.
+func (ah *appHandler) rollbackAppEnvSpec(ctx context.Context, projectName, appName, envName, freightName string) (*domain.App, *domain.AppEnvironment, *KargoFreightRecord, error) {
+	historian, ok := ah.kargoPromoter.(kargoFreightHistorian)
+	if !ok {
+		return nil, nil, nil, errRollbackUnavailable
+	}
+	app, err := ah.appStore.GetApp(ctx, projectName, appName)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
+	}
+	if app.Spec.IsDirect() {
+		return nil, nil, nil, errPinNotPipeline
+	}
+	targetEnv, err := ah.appStore.GetAppEnvironment(ctx, projectName, appName, envName)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: %q for app %q", errPinTargetNotFound, envName, appName)
+	}
+	if targetEnv.EnvType == domain.AppEnvPreview {
+		return nil, nil, nil, errPinTargetIsPreview
+	}
+
+	records, err := historian.StageFreightHistory(ctx, projectName, appName, envName, 0)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("read deploy history: %w", err)
+	}
+	var rec *KargoFreightRecord
+	for i := range records {
+		if records[i].Name == freightName {
+			rec = &records[i]
+			break
+		}
+	}
+	if rec == nil {
+		return nil, nil, nil, errRollbackFreightMissing
+	}
+	if rec.Current {
+		return nil, nil, nil, errRollbackCurrent
+	}
+
+	// Capture the pre-rollback tag once (mirrors pinAppEnvSpec) so "Resume CD"
+	// can restore it; a rollback over an existing hold keeps the original capture.
+	prePin := app.Spec.EnvironmentDefaults[envName].PrePinImageTag
+	if app.Spec.EnvironmentDefaults[envName].PinnedFrom == "" {
+		if fr, ok := ah.kargoPromoter.(kargoFreightReader); ok {
+			frCtx, cancel := context.WithTimeout(ctx, liveReadTimeout)
+			if tag, ferr := fr.CurrentFreightImageTag(frCtx, projectName, appName, envName, appImageRepoSubstr(app)); ferr == nil {
+				prePin = tag
+			}
+			cancel()
+		}
+	}
+
+	if app.Spec.EnvironmentDefaults == nil {
+		app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+	}
+	ov := app.Spec.EnvironmentDefaults[envName]
+	ov.PinnedFrom = rollbackPinnedFrom
+	ov.PinnedImageTag = singleDistinctTag(rec.Images)
+	if prePin != "" && prePin != ov.PinnedImageTag {
+		ov.PrePinImageTag = prePin
+	}
+	app.Spec.EnvironmentDefaults[envName] = ov
+	if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to save app: %w", err)
+	}
+	return app, targetEnv, rec, nil
+}
+
+// singleDistinctTag returns the tag shared by every image of a freight, or ""
+// when the freight carries several distinct tags (or none).
+func singleDistinctTag(images []KargoFreightImage) string {
+	tag := ""
+	for _, im := range images {
+		if im.Tag == "" {
+			continue
+		}
+		if tag == "" {
+			tag = im.Tag
+		} else if im.Tag != tag {
+			return ""
+		}
+	}
+	return tag
+}
+
+// rollbackAppEnv places the rollback hold, republishes (auto-promotion off +
+// tag hold committed), then re-promotes the historical freight through Kargo —
+// the same promotion steps a normal promote runs, just with older freight. If
+// the promotion can't be created, the hold is reverted best-effort so the env
+// isn't left paused for nothing.
+func (ah *appHandler) rollbackAppEnv(ctx context.Context, projectName, appName, envName, freightName string) (*KargoFreightRecord, KargoPromotionResult, error) {
+	app, targetEnv, rec, err := ah.rollbackAppEnvSpec(ctx, projectName, appName, envName, freightName)
+	if err != nil {
+		return nil, KargoPromotionResult{}, err
+	}
+	if err := ah.republishAppsFocus(ctx, []appFocusPublish{{app: app, focusEnv: targetEnv}}); err != nil {
+		return nil, KargoPromotionResult{}, fmt.Errorf("failed to publish rollback hold: %w", err)
+	}
+	historian := ah.kargoPromoter.(kargoFreightHistorian) // asserted in rollbackAppEnvSpec
+	promo, err := historian.PromoteFreight(ctx, projectName, appName, envName, freightName)
+	if err != nil {
+		if _, _, _, _, uerr := ah.unpinAppEnvSpec(ctx, projectName, appName, envName); uerr == nil {
+			_ = ah.republishAppsFocus(ctx, []appFocusPublish{{app: app, focusEnv: targetEnv}})
+		}
+		return nil, KargoPromotionResult{}, fmt.Errorf("failed to create rollback promotion: %w", err)
+	}
+	return rec, promo, nil
+}
+
+type rollbackAppEnvRequest struct {
+	// Freight is the Kargo Freight name to roll back to — one of the entries
+	// returned by GET .../rollback-candidates.
+	Freight string `json:"freight"`
+}
+
+// handleRollbackAppEnv serves POST .../apps/{app}/environments/{env}/rollback.
+func (ah *appHandler) handleRollbackAppEnv(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	var req rollbackAppEnvRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	req.Freight = strings.TrimSpace(req.Freight)
+	if req.Freight == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "freight is required"})
+		return
+	}
+	op := func(ctx context.Context) (int, any, error) {
+		rec, promo, err := ah.rollbackAppEnv(ctx, projectName, appName, envName, req.Freight)
+		if err != nil {
+			return statusForRollbackErr(err), nil, err
+		}
+		images := make([]RollbackCandidateImageDTO, 0, len(rec.Images))
+		for _, im := range rec.Images {
+			images = append(images, RollbackCandidateImageDTO{Repository: im.RepoURL, Tag: im.Tag})
+		}
+		return http.StatusOK, map[string]any{
+			"message":   "rolling back " + envName + " — CD paused until you resume it",
+			"project":   projectName,
+			"app":       appName,
+			"env":       envName,
+			"freight":   rec.Name,
+			"images":    images,
+			"promotion": promo.Name,
+		}, nil
+	}
+	dispatchOp(w, r, ah.async, "rollback-app", projectName, op)
+}
+
+// handleGetAppEnvRollbackCandidates serves
+// GET .../apps/{app}/environments/{env}/rollback-candidates: the freight this
+// env has run (newest first, first = current), for the rollback picker.
+// Best-effort: no Kargo integration (or a read failure) yields available=false
+// rather than an error — the UI then simply doesn't offer rollback.
+func (ah *appHandler) handleGetAppEnvRollbackCandidates(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	empty := RollbackCandidatesResponse{Available: false, Candidates: []RollbackCandidateDTO{}}
+	historian, ok := ah.kargoPromoter.(kargoFreightHistorian)
+	if !ok {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app not found: " + appName})
+		return
+	}
+	if app.Spec.IsDirect() {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	records, err := historian.StageFreightHistory(r.Context(), projectName, appName, envName, 20)
+	if err != nil {
+		slog.Debug("rollback candidates: freight history read failed",
+			"project", projectName, "app", appName, "env", envName, "err", err)
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	dtos := make([]RollbackCandidateDTO, 0, len(records))
+	for _, rec := range records {
+		images := make([]RollbackCandidateImageDTO, 0, len(rec.Images))
+		for _, im := range rec.Images {
+			images = append(images, RollbackCandidateImageDTO{Repository: im.RepoURL, Tag: im.Tag})
+		}
+		dtos = append(dtos, RollbackCandidateDTO{
+			Freight:      rec.Name,
+			Images:       images,
+			DiscoveredAt: rec.DiscoveredAt,
+			Current:      rec.Current,
+		})
+	}
+	writeJSON(w, http.StatusOK, RollbackCandidatesResponse{Available: true, Candidates: dtos})
 }
 
 // Sentinels for suspend/resume, mapped to HTTP status by statusForSuspendErr.
@@ -3895,20 +4428,21 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 			Name:    app.Spec.Template.Name,
 			Version: app.Spec.Template.Version,
 		},
-		Values:           values,
-		SecretRefs:       secretRefs,
-		Components:       componentDTOs(app.EffectiveComponents(), app.Spec.EnvironmentDefaults),
-		Environments:     envDTOs,
-		ClusterOverrides: clusterOverridesDTO(app.Spec.EnvironmentDefaults),
-		TargetClusters:   targetClustersDTO(app.Spec.EnvironmentDefaults),
-		RawValues:        app.Spec.RawValues,
-		EnvRawValues:     envRawValuesDTO(app.Spec.EnvironmentDefaults),
-		ComponentConfigs: componentConfigsDTO(app.Spec.Components),
-		EnvComponents:    envComponentsDTO(app.Spec.EnvironmentDefaults),
-		CD:               CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured},
-		Images:           appImageBindingsToDTO(app.Spec.Images),
-		DeliveryMode:     string(app.Spec.DeliveryMode),
-		PreviewsEnabled:  app.Spec.PreviewsEnabled,
+		Values:              values,
+		SecretRefs:          secretRefs,
+		Components:          componentDTOs(app.EffectiveComponents(), app.Spec.EnvironmentDefaults),
+		Environments:        envDTOs,
+		ClusterOverrides:    clusterOverridesDTO(app.Spec.EnvironmentDefaults),
+		TargetClusters:      targetClustersDTO(app.Spec.EnvironmentDefaults),
+		RawValues:           app.Spec.RawValues,
+		EnvRawValues:        envRawValuesDTO(app.Spec.EnvironmentDefaults),
+		ComponentConfigs:    componentConfigsDTO(app.Spec.Components),
+		EnvComponents:       envComponentsDTO(app.Spec.EnvironmentDefaults),
+		EnvTemplateVersions: envTemplateVersionsDTO(app.Spec.EnvironmentDefaults),
+		CD:                  CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured},
+		Images:              appImageBindingsToDTO(app.Spec.Images),
+		DeliveryMode:        string(app.Spec.DeliveryMode),
+		PreviewsEnabled:     app.Spec.PreviewsEnabled,
 	}
 }
 
@@ -3962,6 +4496,20 @@ func envComponentsDTO(defaults map[string]domain.EnvironmentOverride) map[string
 
 // envRawValuesDTO extracts per-env raw-values overlays from EnvironmentDefaults,
 // keyed by env name. Returns nil when no env has one.
+func envTemplateVersionsDTO(defaults map[string]domain.EnvironmentOverride) map[string]map[string]string {
+	var out map[string]map[string]string
+	for envName, ov := range defaults {
+		if len(ov.TemplateVersions) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string]map[string]string{}
+		}
+		out[envName] = ov.TemplateVersions
+	}
+	return out
+}
+
 func envRawValuesDTO(defaults map[string]domain.EnvironmentOverride) map[string]map[string]any {
 	var out map[string]map[string]any
 	for envName, ov := range defaults {
@@ -4143,11 +4691,11 @@ func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
 // otherwise have every component silently re-pinned to registry latest. The
 // resolution order per component is:
 //
-//	1. an explicit template.version on the wire — the caller means it;
-//	2. else the STORED pin, when the component already exists under the same
-//	   template name — an edit to anything else must not move the chart;
-//	3. else the template's current version — a brand-new component, or a
-//	   deliberate retemplate onto a different chart, correctly lands on latest.
+//  1. an explicit template.version on the wire — the caller means it;
+//  2. else the STORED pin, when the component already exists under the same
+//     template name — an edit to anything else must not move the chart;
+//  3. else the template's current version — a brand-new component, or a
+//     deliberate retemplate onto a different chart, correctly lands on latest.
 func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []ComponentCreateDTO, prev map[string]domain.ComponentSpec) ([]domain.ComponentSpec, *tpl.Template, error) {
 	var specs []domain.ComponentSpec
 	var primary *tpl.Template

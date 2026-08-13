@@ -1,4 +1,4 @@
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import type {
   AppImageBinding,
   CDConfig,
@@ -136,15 +136,74 @@ export interface UpdateAppRequest {
   previewsEnabled?: boolean;
 }
 
-export function updateApp(
+// --- Accept-and-poll async operations ---
+// The server can defer a slow operation (Prefer: respond-async / ?async=1):
+// the request validates synchronously, returns 202 + a task id, and the heavy
+// save + gitops publish runs on a server goroutine. We poll the task to its
+// terminal state and return exactly what the synchronous call would have.
+
+interface AcceptedTask {
+  taskId: string;
+  state: string;
+  statusUrl: string;
+}
+
+interface AsyncTaskStatus<T> {
+  id: string;
+  state: "pending" | "running" | "succeeded" | "failed";
+  status?: number;
+  result?: T;
+  error?: string;
+}
+
+function isAcceptedTask(v: unknown): v is AcceptedTask {
+  return (
+    typeof v === "object" && v !== null && "taskId" in v && "statusUrl" in v
+  );
+}
+
+// pollTask polls a deferred operation until it succeeds or fails. The server
+// keeps working regardless — a poll timeout only means the CLIENT stopped
+// watching, so the error says so instead of implying the save was lost.
+async function pollTask<T>(project: string, taskId: string): Promise<T> {
+  const deadline = Date.now() + 15 * 60_000;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const t = await api.get<AsyncTaskStatus<T>>(
+      `/projects/${encodeURIComponent(project)}/tasks/${encodeURIComponent(taskId)}`,
+    );
+    if (t.state === "succeeded") return t.result as T;
+    if (t.state === "failed") {
+      throw new ApiError(t.status ?? 500, t.error || "operation failed");
+    }
+    if (Date.now() > deadline) {
+      throw new ApiError(
+        504,
+        "the save is still publishing on the server — refresh in a bit to see the result",
+      );
+    }
+  }
+}
+
+// updateApp saves app changes and re-publishes to GitOps. Slow by nature (a
+// many-component manage save syncs charts and renders every env), so it opts
+// into the server's accept-and-poll async mode — the request can't hit a
+// gateway 504; we poll the task to completion instead. A server without the
+// async runner (fake mode / older builds) simply responds synchronously and the
+// shape check falls through. Callers see the same promise either way.
+export async function updateApp(
   project: string,
   app: string,
   req: UpdateAppRequest,
 ): Promise<CreateAppResponse> {
-  return api.patch<CreateAppResponse>(
-    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}`,
+  const res = await api.patch<CreateAppResponse | AcceptedTask>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}?async=1`,
     req,
   );
+  if (isAcceptedTask(res)) {
+    return pollTask<CreateAppResponse>(project, res.taskId);
+  }
+  return res;
 }
 
 // previewAppValues computes the read-only effective values for an existing
@@ -202,6 +261,55 @@ export function pinAppEnv(
   return api.post<{ message: string; imageTag: string }>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/pin`,
     { fromPreview },
+  );
+}
+
+// --- Rollback (previous deployments) ---
+
+export interface RollbackCandidateImage {
+  repository?: string;
+  tag?: string;
+}
+
+/** One previously-deployed Kargo freight of an env (rollback target). */
+export interface RollbackCandidate {
+  freight: string;
+  images: RollbackCandidateImage[];
+  /** When the Warehouse discovered the build (not the promotion time). */
+  discoveredAt?: string;
+  /** The freight the env runs now — not a rollback target. */
+  current?: boolean;
+}
+
+export interface RollbackCandidatesResponse {
+  /** False = rollback isn't offered (no Kargo, direct app, unreadable stage). */
+  available: boolean;
+  candidates: RollbackCandidate[];
+}
+
+// getRollbackCandidates lists the freight an env has run, newest first.
+export function getRollbackCandidates(
+  project: string,
+  app: string,
+  env: string,
+): Promise<RollbackCandidatesResponse> {
+  return api.get<RollbackCandidatesResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/rollback-candidates`,
+  );
+}
+
+// rollbackAppEnv re-promotes a previously-deployed freight to the env and
+// places a rollback hold: CD (auto-promotion) is paused for the env until
+// resumed via unpinAppEnv.
+export function rollbackAppEnv(
+  project: string,
+  app: string,
+  env: string,
+  freight: string,
+): Promise<{ message: string; promotion: string }> {
+  return api.post<{ message: string; promotion: string }>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/rollback`,
+    { freight },
   );
 }
 
@@ -323,10 +431,13 @@ export function upgradeAppComponents(
   project: string,
   app: string,
   components: Record<string, string>,
+  // Scope the upgrade to ONE stable environment (its per-env version pins);
+  // omit to upgrade every environment at once.
+  environment?: string,
 ): Promise<UpgradeAppTemplateResponse> {
   return api.post<UpgradeAppTemplateResponse>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/upgrade-template`,
-    { components },
+    environment ? { components, environment } : { components },
   );
 }
 

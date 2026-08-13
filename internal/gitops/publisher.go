@@ -708,6 +708,17 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 		if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name, app.Spec.Template.Version); err != nil {
 			return fmt.Errorf("sync chart for template %s@%s: %w", app.Spec.Template.Name, app.Spec.Template.Version, err)
 		}
+		// Env-scoped template pins may put an env on a DIFFERENT version than
+		// the app-wide pin — sync each distinct one too (syncChart dedups an
+		// already-present immutable version).
+		for _, env := range deployEnvs {
+			envApp := domain.AppForEnvTemplateVersions(app, env.EnvName)
+			if v := envApp.Spec.Template.Version; v != app.Spec.Template.Version {
+				if err := p.syncChart(ctx, repoDir, app.Spec.Template.Name, v); err != nil {
+					return fmt.Errorf("sync chart for template %s@%s (env %s): %w", app.Spec.Template.Name, v, env.EnvName, err)
+				}
+			}
+		}
 	}
 
 	// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
@@ -754,6 +765,19 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 		}
 		componentKeys[c.Name] = p.resolveComponentKey(ctx, c.Template.Name, c.Name)
 		componentCanonical[c.Name] = p.resolveComponentCanonical(ctx, c.Template.Name)
+	}
+	// Env-scoped template pins: sync any per-env component versions that differ
+	// from the app-wide pins (syncChart dedups already-present versions).
+	for _, env := range deployEnvs {
+		envApp := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		if envApp == app {
+			continue
+		}
+		for _, c := range envApp.Spec.ComposedComponents() {
+			if err := p.syncChart(ctx, repoDir, c.Template.Name, c.Template.Version); err != nil {
+				return fmt.Errorf("sync chart for component %s (%s@%s, env %s): %w", c.Name, c.Template.Name, c.Template.Version, env.EnvName, err)
+			}
+		}
 	}
 
 	if err := p.publishComposedAppFiles(repoDir, app, deployEnvs, componentKeys, componentCanonical); err != nil {
@@ -989,6 +1013,11 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 				"app", app.Name, "env", env.EnvName)
 			continue
 		}
+
+		// Env-scoped template pins: everything below renders THIS env's effective
+		// template versions (chart source paths in the Application), so an
+		// upgraded staging runs the new chart while production keeps its own.
+		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
 
 		ns := env.Namespace
 		if ns == "" {
@@ -1333,7 +1362,10 @@ func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppP
 func (p *Publisher) publishComposedAppEnv(ctx context.Context, repoDir string, app *domain.App, env AppPublishEnv) error {
 	componentKeys := make(map[string]string, len(app.Spec.Components))
 	componentCanonical := make(map[string]bool, len(app.Spec.Components))
-	for _, c := range app.Spec.ComposedComponents() {
+	// Sync THIS env's effective chart versions (env-scoped template pins) so a
+	// promotion into an env that pins a different version finds its bytes.
+	envApp := domain.AppForEnvTemplateVersions(app, env.EnvName)
+	for _, c := range envApp.Spec.ComposedComponents() {
 		if err := p.syncChart(ctx, repoDir, c.Template.Name, c.Template.Version); err != nil {
 			return fmt.Errorf("sync chart for component %s (%s@%s): %w", c.Name, c.Template.Name, c.Template.Version, err)
 		}
@@ -1450,6 +1482,10 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 				"app", app.Name, "env", env.EnvName)
 			continue
 		}
+
+		// Env-scoped template pins: app.yaml's ChartPath below must point at THIS
+		// env's effective template version.
+		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
 
 		// Resolve the namespace: use the pre-computed value from the caller
 		// when set; fall back to the legacy "{app}-{env}" default.
@@ -2823,6 +2859,9 @@ func (p *Publisher) PublishPreviews(ctx context.Context, bundles []PreviewPublis
 // file-generation logic — notably image-tag resolution — is testable without a
 // repo clone.
 func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview PreviewPublishSpec) error {
+	// Previews clone their base env, including its env-scoped template pins —
+	// a preview of an upgraded staging must run staging's chart version.
+	app = domain.AppForEnvTemplateVersions(app, preview.BaseEnv)
 	previewMeta := PreviewAppMetadata{
 		AppName:       app.Name,
 		PreviewName:   preview.PreviewName,
@@ -2955,6 +2994,8 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 // app-wide preview ConfigMap/ExternalSecret (reused from the single-source
 // preview platform tree). Discovery is the static previews-composed root app.
 func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir string, app *domain.App, preview PreviewPublishSpec) error {
+	// Previews clone their base env, including its env-scoped template pins.
+	app = domain.AppForEnvTemplateVersions(app, preview.BaseEnv)
 	previewOrgName := p.cfg.OrgName
 	if previewOrgName == "" {
 		previewOrgName = "default"

@@ -425,6 +425,14 @@ type EnvironmentOverride struct {
 	// leaves may reference ((platform.*))/((vars.*)) tokens. No secrets. Only
 	// meaningful for composed apps (each component is its own chart source).
 	ComponentValues map[string]map[string]any `json:"componentValues,omitempty" yaml:"componentValues,omitempty"`
+	// TemplateVersions pins template versions for THIS environment only, keyed
+	// by component name (the reserved key "" pins the app-level template of a
+	// component-less BYO app). An env-scoped upgrade writes here so e.g. staging
+	// runs a new chart version while production stays on the app-wide pin; once
+	// every stable env converges on one version the upgrade handler folds it
+	// into the app-wide pin and clears these. Resolved via
+	// AppForEnvTemplateVersions at publish; previews follow their base env.
+	TemplateVersions map[string]string `json:"templateVersions,omitempty" yaml:"templateVersions,omitempty"`
 	// ClusterOverrides holds per-cluster value overrides keyed by cluster name,
 	// applied on top of this env override for apps in a fan-out environment
 	// (deployMode "all"). Each cluster's published values.yaml is the env values
@@ -637,6 +645,42 @@ func (s AppSpec) IsComposed() bool {
 // AppSpec.Template, so every component carries a Template uniformly. No-op when a
 // component already has its own Template or when AppSpec.Template is empty.
 // Idempotent — called on load (app stores) and safe to call repeatedly.
+// AppForEnvTemplateVersions returns the app as it should render for envName:
+// when the env pins template versions (EnvironmentOverride.TemplateVersions,
+// written by an env-scoped upgrade), a COPY is returned with those versions
+// applied to the matching components' Template.Version and — via
+// SyncPrimaryTemplate — the AppSpec.Template mirror the single-source render
+// path reads. The reserved "" key pins the app-level template of a
+// component-less BYO app. With no overrides the app itself is returned, so the
+// hot path allocates nothing. Callers must treat the result as read-only shared
+// state either way.
+func AppForEnvTemplateVersions(app *App, envName string) *App {
+	if app == nil {
+		return nil
+	}
+	pins := app.Spec.EnvironmentDefaults[envName].TemplateVersions
+	if len(pins) == 0 {
+		return app
+	}
+	out := *app
+	out.Spec.Components = make([]ComponentSpec, len(app.Spec.Components))
+	copy(out.Spec.Components, app.Spec.Components)
+	for i := range out.Spec.Components {
+		v, ok := pins[out.Spec.Components[i].Name]
+		if !ok || v == "" || out.Spec.Components[i].Template == nil {
+			continue
+		}
+		t := *out.Spec.Components[i].Template
+		t.Version = v
+		out.Spec.Components[i].Template = &t
+	}
+	if v := pins[""]; v != "" && len(out.Spec.Components) == 0 {
+		out.Spec.Template.Version = v
+	}
+	out.Spec.SyncPrimaryTemplate()
+	return &out
+}
+
 func (s *AppSpec) BackfillComponentTemplates() {
 	if s.Template.Name == "" {
 		return

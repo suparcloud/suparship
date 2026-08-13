@@ -127,6 +127,17 @@ func validateDeveloperValues(fields []ValueField) error {
 			return fmt.Errorf("%s: duplicate path %q", path, f.Path)
 		}
 		paths[f.Path] = true
+		// Mirrors share the path namespace: two fields (or a field and a mirror)
+		// writing the same key would fight over it in the seeded editor.
+		for _, m := range f.Mirrors {
+			if m == "" {
+				return fmt.Errorf("%s (%s): mirror path must not be empty", path, f.Path)
+			}
+			if paths[m] {
+				return fmt.Errorf("%s (%s): duplicate path %q (also declared as a path or mirror elsewhere)", path, f.Path, m)
+			}
+			paths[m] = true
+		}
 		if f.Type != "" && !validInputTypes[f.Type] {
 			return fmt.Errorf("%s (%s): unsupported type %q", path, f.Path, f.Type)
 		}

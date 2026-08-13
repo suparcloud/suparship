@@ -248,3 +248,43 @@ func TestPublishAppFiles_AllUnboundWritesNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestPublishAppFiles_EnvScopedTemplateVersion verifies that an env-scoped
+// template pin (EnvironmentOverride.TemplateVersions) changes ONLY that env's
+// app.yaml chart path: an upgraded staging renders the new chart version while
+// prod keeps the app-wide pin.
+func TestPublishAppFiles_EnvScopedTemplateVersion(t *testing.T) {
+	dir := t.TempDir()
+
+	app := &domain.App{
+		Name:        "hello",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				// Reserved "" key: the app-level pin of a component-less app.
+				"staging": {TemplateVersions: map[string]string{"": "1.1.0"}},
+			},
+		},
+	}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost"},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, BaseDomain: "localhost"},
+	}
+
+	p := newTestPublisher(t)
+	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishAppFilesForTest: %v", err)
+	}
+
+	for envName, wantChart := range map[string]string{
+		"staging": "web-service/1.1.0",
+		"prod":    "web-service/1.0.0",
+	} {
+		appYAML := filepath.Join(dir, "envs", envName, "demo", "hello", "_targets", "in-cluster", "app.yaml")
+		meta := readAppMeta(t, appYAML)
+		if meta.ChartPath != wantChart {
+			t.Errorf("%s chartPath = %q, want %q", envName, meta.ChartPath, wantChart)
+		}
+	}
+}

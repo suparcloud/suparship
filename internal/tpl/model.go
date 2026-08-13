@@ -604,6 +604,13 @@ type ValueField struct {
 	// whole subtree. Dotted form cannot express a key containing a dot — the same
 	// constraint TemplateImage.TagKey and Mappings keys already carry.
 	Path string `yaml:"path"`
+	// Mirrors lists additional dotted paths that receive the SAME value as Path —
+	// one question, many keys (e.g. path containerPort with mirror service.port).
+	// Purely an editor concern: the form writes the value to every path and the
+	// seeded YAML emits every path, so the stored overlay and publish stay plain
+	// Helm values. Until the developer sets the field, each path keeps its own
+	// inherited value — mirrors may legitimately diverge before opt-in.
+	Mirrors []string `yaml:"mirrors,omitempty"`
 	// Title is the human label; falls back to Path when empty.
 	Title string `yaml:"title,omitempty"`
 	// Type drives future form rendering and value validation. Empty = free-form.

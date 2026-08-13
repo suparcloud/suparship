@@ -20,6 +20,8 @@ import type {
   ValueField,
 } from "../types";
 import { hasProjection, stringifyProjection } from "../lib/valuesProjection";
+import { setAtPath, deleteAtPath } from "../lib/valuesTree";
+import { ProjectionForm } from "./ProjectionForm";
 import type { ConfigVariables } from "../lib/configVars";
 
 // CodeMirror is heavy; load it only when the compose canvas is shown.
@@ -282,6 +284,10 @@ export function ComposeComponents({
   >({});
   // Rows that asked to see the whole platform base (one-way reveal; see showAllFor).
   const [showAll, setShowAll] = useState<Record<number, boolean>>({});
+  // Per-row values surface: the tri-state developer-values FORM (default when
+  // the template declares a projection) vs the Advanced projected-YAML editor —
+  // mirroring the app-detail component panel. Reveal-all forces YAML.
+  const [rowView, setRowView] = useState<Record<number, "form" | "yaml">>({});
   const fetchedChart = useRef<Set<string>>(new Set());
   const fetchedBase = useRef<Set<string>>(new Set());
   const fetchedFull = useRef<Set<string>>(new Set());
@@ -416,6 +422,27 @@ export function ComposeComponents({
 
   function update(i: number, patch: Partial<ComponentDraft>) {
     onChange(components.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
+  }
+
+  // editRowValues applies a structural edit (the form's set/inherit fan-out) to
+  // one row's env buffer, keeping text + parsed overlay in step — the manage-form
+  // analog of the app-detail panel's editScope. The form is a lens over the same
+  // YAML buffer, so the Advanced editor and the saved diff stay consistent.
+  function editRowValues(
+    i: number,
+    env: string,
+    fn: (o: Record<string, unknown>) => Record<string, unknown>,
+  ) {
+    const c = components[i];
+    if (!c) return;
+    const base = seedBaseFor(c, env) ?? {};
+    const cur = parseYamlOverlay(c.envValuesText[env] ?? "").value ?? {};
+    const nextFull = fn(cur);
+    update(i, {
+      envValuesText: { ...c.envValuesText, [env]: stringifyOverlay(nextFull) },
+      envValues: { ...c.envValues, [env]: diffOverlay(base, nextFull) },
+      envValuesError: { ...c.envValuesError, [env]: null },
+    });
   }
   function remove(i: number) {
     onChange(components.filter((_, idx) => idx !== i));
@@ -627,70 +654,186 @@ export function ComposeComponents({
                           })}
                         </div>
                       )}
-                      {hasProjection(projections[c.template]) && !showAll[i] ? (
-                        <p className="mb-2 text-xs text-gray-400">
-                          The settings this template exposes for {env}, pre-filled
-                          with their current values — uncomment a line to override
-                          it.{" "}
-                          <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
-                            Your changes
-                          </span>{" "}
-                          are highlighted; only the difference is saved.{" "}
-                          <button
-                            type="button"
-                            onClick={() => showAllFor(i)}
-                            className="underline hover:text-gray-600"
-                          >
-                            Show all platform values
-                          </button>{" "}
-                          for anything not listed.
-                        </p>
-                      ) : (
-                        <p className="mb-2 text-xs text-gray-400">
-                          Pre-filled with the platform base for {env} (template ⊕
-                          platform defaults).{" "}
-                          <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
-                            Your changes
-                          </span>{" "}
-                          are highlighted; only the difference is saved for {env}.
-                          Reference{" "}
-                          <code className="font-mono">{"((platform.*))"}</code> /{" "}
-                          <code className="font-mono">{"((vars.*))"}</code> tokens.
-                        </p>
-                      )}
-                      <ValuesEditor
-                        label={`Your override — ${env}`}
-                        value={c.envValuesText[env] ?? ""}
-                        configVars={configVars ?? undefined}
-                        highlightBase={base}
-                        height="16rem"
-                        placeholder={
-                          "# e.g.\nresources:\n  requests:\n    cpu: 200m"
-                        }
-                        onChange={(text) =>
-                          update(i, {
-                            envValuesText: { ...c.envValuesText, [env]: text },
-                          })
-                        }
-                        onValidChange={(parsed, err) =>
-                          update(i, {
-                            envValuesError: { ...c.envValuesError, [env]: err },
-                            ...(parsed
-                              ? {
-                                  envValues: {
-                                    ...c.envValues,
-                                    [env]: diffOverlay(base ?? {}, parsed),
-                                  },
-                                }
-                              : {}),
-                          })
-                        }
-                      />
-                      {c.envValuesError[env] && (
-                        <p className="mt-2 text-xs text-red-600">
-                          Invalid YAML: {c.envValuesError[env]}
-                        </p>
-                      )}
+                      {(() => {
+                        const fields = projections[c.template] ?? [];
+                        const projectionActive =
+                          hasProjection(fields) && !showAll[i];
+                        // Form is the DEFAULT surface when the template declares
+                        // a developer-values projection — same as the app-detail
+                        // component panel; reveal-all forces the YAML editor.
+                        const view = projectionActive
+                          ? (rowView[i] ?? "form")
+                          : "yaml";
+                        const parseErr = c.envValuesError[env] ?? null;
+                        const full = fullBases[baseKey(c.template, env)];
+                        const rowOverlay = diffOverlay(
+                          base ?? {},
+                          parseYamlOverlay(c.envValuesText[env] ?? "").value ?? {},
+                        );
+                        return (
+                          <>
+                            {projectionActive && (
+                              <div className="mb-2 inline-flex overflow-hidden rounded-md border border-gray-200 text-[11px] font-medium">
+                                <button
+                                  type="button"
+                                  disabled={!!parseErr}
+                                  title={
+                                    parseErr
+                                      ? "Fix the YAML first — the form needs a valid document."
+                                      : undefined
+                                  }
+                                  onClick={() =>
+                                    setRowView((m) => ({ ...m, [i]: "form" }))
+                                  }
+                                  className={`px-2 py-0.5 disabled:opacity-50 ${
+                                    view === "form"
+                                      ? "bg-gray-900 text-white"
+                                      : "bg-white text-gray-500 hover:bg-gray-50"
+                                  }`}
+                                >
+                                  Form
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setRowView((m) => ({ ...m, [i]: "yaml" }))
+                                  }
+                                  className={`px-2 py-0.5 ${
+                                    view === "yaml"
+                                      ? "bg-gray-900 text-white"
+                                      : "bg-white text-gray-500 hover:bg-gray-50"
+                                  }`}
+                                >
+                                  Advanced
+                                </button>
+                              </div>
+                            )}
+                            {view === "form" ? (
+                              <>
+                                <p className="mb-2 text-xs text-gray-400">
+                                  The settings this template exposes for {env}.
+                                  Untouched fields inherit the platform value and
+                                  save nothing — only fields you set are stored.
+                                </p>
+                                {full === undefined ? (
+                                  <div className="rounded-lg border border-gray-200 p-3 text-xs text-gray-400">
+                                    Loading fields…
+                                  </div>
+                                ) : (
+                                  <ProjectionForm
+                                    key={`${i}:${env}`}
+                                    fields={fields}
+                                    overlay={rowOverlay}
+                                    effectiveFull={mergeOverlay(full, c.values)}
+                                    onSet={(paths, v) =>
+                                      editRowValues(i, env, (o) =>
+                                        paths.reduce(
+                                          (acc, p) => setAtPath(acc, p, v),
+                                          o,
+                                        ),
+                                      )
+                                    }
+                                    onInherit={(paths) =>
+                                      editRowValues(i, env, (o) =>
+                                        paths.reduce(
+                                          (acc, p) => deleteAtPath(acc, p),
+                                          o,
+                                        ),
+                                      )
+                                    }
+                                    // Required-unset renders its error ring but
+                                    // doesn't gate the dialog's save — matching
+                                    // the YAML seed, which emitted "" for those.
+                                    onValidity={() => {}}
+                                  />
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                {projectionActive ? (
+                                  <p className="mb-2 text-xs text-gray-400">
+                                    The settings this template exposes for {env},
+                                    pre-filled with their current values —
+                                    uncomment a line to override it.{" "}
+                                    <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+                                      Your changes
+                                    </span>{" "}
+                                    are highlighted; only the difference is saved.{" "}
+                                    <button
+                                      type="button"
+                                      onClick={() => showAllFor(i)}
+                                      className="underline hover:text-gray-600"
+                                    >
+                                      Show all platform values
+                                    </button>{" "}
+                                    for anything not listed.
+                                  </p>
+                                ) : (
+                                  <p className="mb-2 text-xs text-gray-400">
+                                    Pre-filled with the platform base for {env}{" "}
+                                    (template ⊕ platform defaults).{" "}
+                                    <span className="rounded-sm bg-indigo-50 px-1 text-indigo-600">
+                                      Your changes
+                                    </span>{" "}
+                                    are highlighted; only the difference is saved
+                                    for {env}. Reference{" "}
+                                    <code className="font-mono">
+                                      {"((platform.*))"}
+                                    </code>{" "}
+                                    /{" "}
+                                    <code className="font-mono">
+                                      {"((vars.*))"}
+                                    </code>{" "}
+                                    tokens.
+                                  </p>
+                                )}
+                                <ValuesEditor
+                                  label={`Your override — ${env}`}
+                                  value={c.envValuesText[env] ?? ""}
+                                  configVars={configVars ?? undefined}
+                                  highlightBase={base}
+                                  height="16rem"
+                                  placeholder={
+                                    "# e.g.\nresources:\n  requests:\n    cpu: 200m"
+                                  }
+                                  onChange={(text) =>
+                                    update(i, {
+                                      envValuesText: {
+                                        ...c.envValuesText,
+                                        [env]: text,
+                                      },
+                                    })
+                                  }
+                                  onValidChange={(parsed, err) =>
+                                    update(i, {
+                                      envValuesError: {
+                                        ...c.envValuesError,
+                                        [env]: err,
+                                      },
+                                      ...(parsed
+                                        ? {
+                                            envValues: {
+                                              ...c.envValues,
+                                              [env]: diffOverlay(
+                                                base ?? {},
+                                                parsed,
+                                              ),
+                                            },
+                                          }
+                                        : {}),
+                                    })
+                                  }
+                                />
+                                {c.envValuesError[env] && (
+                                  <p className="mt-2 text-xs text-red-600">
+                                    Invalid YAML: {c.envValuesError[env]}
+                                  </p>
+                                )}
+                              </>
+                            )}
+                          </>
+                        );
+                      })()}
                       {/* Effective (chart + platform ⊕ overrides) — advanced
                           reference, hidden by default, mirroring the card. */}
                       <button

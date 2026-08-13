@@ -83,6 +83,7 @@ type TemplateImageOverride struct {
 // (domain must not import tpl). The server layer converts between them.
 type ValueFieldOverride struct {
 	Path        string   `json:"path" yaml:"path"`
+	Mirrors     []string `json:"mirrors,omitempty" yaml:"mirrors,omitempty"`
 	Title       string   `json:"title,omitempty" yaml:"title,omitempty"`
 	Type        string   `json:"type,omitempty" yaml:"type,omitempty"`
 	Description string   `json:"description,omitempty" yaml:"description,omitempty"`

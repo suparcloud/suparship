@@ -105,6 +105,7 @@ type TemplateImageDTO struct {
 // will render as a control later.
 type ValueFieldDTO struct {
 	Path        string   `json:"path"`
+	Mirrors     []string `json:"mirrors,omitempty"`
 	Title       string   `json:"title,omitempty"`
 	Type        string   `json:"type,omitempty"`
 	Description string   `json:"description,omitempty"`
@@ -665,6 +666,7 @@ func developerValuesToDTO(fields []tpl.ValueField) []ValueFieldDTO {
 	for i, f := range fields {
 		out[i] = ValueFieldDTO{
 			Path:        f.Path,
+			Mirrors:     f.Mirrors,
 			Title:       f.Title,
 			Type:        string(f.Type),
 			Description: f.Description,
@@ -687,6 +689,7 @@ func developerValuesFromDTO(dtos []ValueFieldDTO) []tpl.ValueField {
 	for i, d := range dtos {
 		out[i] = tpl.ValueField{
 			Path:        d.Path,
+			Mirrors:     d.Mirrors,
 			Title:       d.Title,
 			Type:        tpl.InputType(d.Type),
 			Description: d.Description,
@@ -709,6 +712,7 @@ func developerValuesToOverride(dtos []ValueFieldDTO) []domain.ValueFieldOverride
 	for i, d := range dtos {
 		out[i] = domain.ValueFieldOverride{
 			Path:        d.Path,
+			Mirrors:     d.Mirrors,
 			Title:       d.Title,
 			Type:        d.Type,
 			Description: d.Description,
@@ -731,6 +735,7 @@ func developerValuesOverrideToDTO(ovs []domain.ValueFieldOverride) []ValueFieldD
 	for i, o := range ovs {
 		out[i] = ValueFieldDTO{
 			Path:        o.Path,
+			Mirrors:     o.Mirrors,
 			Title:       o.Title,
 			Type:        o.Type,
 			Description: o.Description,

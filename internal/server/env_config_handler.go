@@ -45,6 +45,7 @@ import (
 	"github.com/suparcloud/suparship/internal/platform"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
@@ -64,6 +65,12 @@ type EnvConfigDTO struct {
 	// SecretRefs holds references to external secrets that will be injected as
 	// environment variables. No plaintext secret values are stored here.
 	SecretRefs []SecretRefDTO `json:"secretRefs,omitempty"`
+	// ConfigMapName is the rendered ConfigMap these vars land in (the value
+	// behind platform.configMapName) — the variables counterpart of the secret
+	// endpoints' secretName. Set only on app-scoped GET responses: every layer
+	// merges into ONE <app>-config per environment, so org/project scopes have
+	// no single ConfigMap to name, and per-preview names vary. Ignored on PUT.
+	ConfigMapName string `json:"configMapName,omitempty"`
 }
 
 // ResolvedEnvVarDTO is one entry in the resolved endpoint response.
@@ -85,6 +92,9 @@ type ResolvedEnvConfigResponse struct {
 	// Vars lists all resolved environment variables with source attribution.
 	// Entries are sorted by key for stable output.
 	Vars []ResolvedEnvVarDTO `json:"vars"`
+	// ConfigMapName is the rendered ConfigMap the plain vars land in for this
+	// env (see EnvConfigDTO.ConfigMapName).
+	ConfigMapName string `json:"configMapName,omitempty"`
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -517,7 +527,9 @@ func (h *envConfigHandler) handleGetAppEnvConfig(w http.ResponseWriter, r *http.
 		return
 	}
 
-	writeJSON(w, http.StatusOK, toEnvConfigDTO(app.Spec.EnvConfig))
+	dto := toEnvConfigDTO(app.Spec.EnvConfig)
+	dto.ConfigMapName = secrets.AppConfigMapName(appName)
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // handlePutAppEnvConfig serves PUT /api/v1/projects/{project}/apps/{app}/envconfig.
@@ -571,7 +583,13 @@ func (h *envConfigHandler) handleGetAppEnvEnvConfig(w http.ResponseWriter, r *ht
 	}
 
 	cfg := appEnvConfig(app, envName)
-	writeJSON(w, http.StatusOK, toEnvConfigDTO(cfg))
+	dto := toEnvConfigDTO(cfg)
+	// The preview band has no single rendered ConfigMap to name — each preview
+	// renders its own (name depends on the namespace strategy).
+	if envName != domain.PreviewOverrideKey {
+		dto.ConfigMapName = secrets.AppConfigMapName(appName)
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // handlePutAppEnvEnvConfig serves
@@ -699,7 +717,10 @@ func (h *envConfigHandler) handleGetResolvedEnvConfig(w http.ResponseWriter, r *
 		entries = append(entries, entry)
 	}
 
-	writeJSON(w, http.StatusOK, ResolvedEnvConfigResponse{Vars: entries})
+	writeJSON(w, http.StatusOK, ResolvedEnvConfigResponse{
+		Vars:          entries,
+		ConfigMapName: secrets.AppConfigMapName(appName),
+	})
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
