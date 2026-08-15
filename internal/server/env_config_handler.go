@@ -630,6 +630,64 @@ func (h *envConfigHandler) handlePutAppEnvEnvConfig(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
+// handleGetAppPreviewEnvConfig serves
+// GET /api/v1/projects/{project}/apps/{app}/envs/{env}/preview-envconfig:
+// env vars for previews whose BASE env is {env}
+// (EnvironmentOverride.PreviewEnvConfig) — the per-base-env preview band,
+// layered above the legacy all-previews band at preview publish.
+func (h *envConfigHandler) handleGetAppPreviewEnvConfig(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	app, err := h.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app not found: " + appName})
+		return
+	}
+	writeJSON(w, http.StatusOK, toEnvConfigDTO(app.Spec.EnvironmentDefaults[envName].PreviewEnvConfig))
+}
+
+// handlePutAppPreviewEnvConfig serves the PUT counterpart. 202: the republish
+// runs asynchronously, mirroring the other envconfig writes.
+func (h *envConfigHandler) handlePutAppPreviewEnvConfig(w http.ResponseWriter, r *http.Request) {
+	projectName := r.PathValue("project")
+	appName := r.PathValue("app")
+	envName := r.PathValue("env")
+
+	dto, ok := decodeEnvConfigDTO(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	cfg := fromEnvConfigDTO(dto)
+	if err := envconfig.ValidateEnvConfig(cfg); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
+	app, err := h.appStore.GetApp(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app not found: " + appName})
+		return
+	}
+
+	if app.Spec.EnvironmentDefaults == nil {
+		app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{}
+	}
+	ov := app.Spec.EnvironmentDefaults[envName]
+	ov.PreviewEnvConfig = cfg
+	app.Spec.EnvironmentDefaults[envName] = ov
+
+	if err := h.appStore.SaveApp(r.Context(), projectName, app); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
+		return
+	}
+
+	h.scheduleRepublish(projectName, appName)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
 // ── Resolved view ─────────────────────────────────────────────────────────────
 
 // handleGetResolvedEnvConfig serves

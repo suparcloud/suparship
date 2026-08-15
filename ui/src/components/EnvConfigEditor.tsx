@@ -37,6 +37,10 @@ export interface EnvConfigEditorProps {
   fetchFn: () => Promise<EnvConfig>;
   saveFn: (cfg: EnvConfig) => Promise<unknown>;
   readOnly?: boolean;
+  // Optional pre-save gate for high-blast-radius scopes (e.g. all-environment
+  // variables on an app with production). Returning false aborts silently and
+  // keeps the editor open.
+  confirmSave?: () => boolean;
 }
 
 // ── Component ──────────────────────────────────────────────────────────────────
@@ -47,6 +51,7 @@ export function EnvConfigEditor({
   fetchFn,
   saveFn,
   readOnly = false,
+  confirmSave,
 }: EnvConfigEditorProps) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -89,6 +94,7 @@ export function EnvConfigEditor({
   }
 
   async function handleSave() {
+    if (confirmSave && !confirmSave()) return;
     // Validate keys
     for (const row of draftVars) {
       if (!row.key) continue;

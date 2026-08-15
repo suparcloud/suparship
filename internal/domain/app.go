@@ -410,6 +410,12 @@ type EnvironmentOverride struct {
 	// EnvConfig holds env vars and secret refs specific to this app+environment
 	// combination (App Environment level of the hierarchy — wins all other levels).
 	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
+	// PreviewEnvConfig holds env vars for PREVIEWS WHOSE BASE ENV IS THIS
+	// environment, overlaid on the base env's merged vars at preview publish —
+	// so previews of staging and previews of production can differ. Layered
+	// ABOVE the legacy all-previews band (EnvironmentDefaults["preview"].
+	// EnvConfig), which keeps applying beneath for back-compat.
+	PreviewEnvConfig envconfig.EnvConfig `json:"previewEnvConfig,omitempty" yaml:"previewEnvConfig,omitempty"`
 	// RawValues is a freeform Helm values overlay for this environment, deep-merged
 	// on top of the app-level RawValues and the generated chart values at publish
 	// time (env wins). String leaves may reference ((platform.*))/((vars.*)) tokens,

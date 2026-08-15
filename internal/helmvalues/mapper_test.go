@@ -897,3 +897,48 @@ func TestMapToHelmValuesForEnv_ClusterRoutingOverride(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// While INHERITING app vars, a component's EnvVars literal entries render as
+// explicit env[] (the extend/override channel that beats envFrom); source-mapped
+// entries are curated-mode-only and must not leak into env[] here.
+func TestBuildComponentValues_InheritModeEnvVarLiterals(t *testing.T) {
+	c := webComponent("web")
+	c.Config = map[string]string{"BASE": "from-config"}
+	c.EnvVars = []domain.ComponentEnvVar{
+		{Name: "EXTRA", Value: "added"},
+		{Name: "BASE", Value: "overridden"},
+		{Name: "MAPPED", FromConfig: "SOME_KEY"}, // inert while inheriting
+	}
+	app := webApp("hello", c)
+
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
+		"acme.com", "hello-staging", "", "acme", nil, nil, nil)
+
+	env := hv.Components["web"].Env
+	if env["EXTRA"] != "added" {
+		t.Errorf("EXTRA = %q, want added", env["EXTRA"])
+	}
+	if env["BASE"] != "overridden" {
+		t.Errorf("BASE = %q, want overridden (EnvVars literal beats Config)", env["BASE"])
+	}
+	if _, ok := env["MAPPED"]; ok {
+		t.Error("source-mapped entry must not render as env[] while inheriting")
+	}
+}
+
+// When the component opts OUT (curated mode), EnvVars keeps driving the
+// projection, not env[] — the literals must NOT double-render as env[] entries.
+func TestBuildComponentValues_CuratedModeEnvVarsNotInEnv(t *testing.T) {
+	off := false
+	c := webComponent("web")
+	c.InheritAppVars = &off
+	c.EnvVars = []domain.ComponentEnvVar{{Name: "ONLY_IN_PROJECTION", Value: "v"}}
+	app := webApp("hello", c)
+
+	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
+		"acme.com", "hello-staging", "", "acme", nil, nil, nil)
+
+	if _, ok := hv.Components["web"].Env["ONLY_IN_PROJECTION"]; ok {
+		t.Error("curated-mode EnvVars must not render as env[] (they live in the projection)")
+	}
+}

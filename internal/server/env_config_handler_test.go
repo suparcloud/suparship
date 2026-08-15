@@ -980,3 +980,46 @@ func doEnvConfigPut(t *testing.T, mux *http.ServeMux, ah *authHandler, method, p
 		t.Fatalf("%s %s: unexpected error %d: %s", method, path, rec.Code, rec.Body.String())
 	}
 }
+
+// The per-base-env preview band round-trips through its own endpoints and is
+// stored on the ENV's override (PreviewEnvConfig) — distinct from both the
+// env's own vars and the legacy all-previews "preview" band.
+func TestAppPreviewEnvConfig_RoundTrip(t *testing.T) {
+	mux, ah := newEnvConfigMux()
+	cookie := sessionCookieFor(ah, "alice", "org_admin")
+
+	body, _ := json.Marshal(EnvConfigDTO{Vars: map[string]string{"PREVIEW_ONLY": "yes"}})
+	put := httptest.NewRequest("PUT", "/api/v1/projects/api/apps/backend/envs/staging/preview-envconfig", bytes.NewReader(body))
+	put.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, put)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("PUT status = %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	get := httptest.NewRequest("GET", "/api/v1/projects/api/apps/backend/envs/staging/preview-envconfig", nil)
+	get.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, get)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", rec.Code)
+	}
+	var dto EnvConfigDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &dto); err != nil {
+		t.Fatal(err)
+	}
+	if dto.Vars["PREVIEW_ONLY"] != "yes" {
+		t.Fatalf("preview band var not persisted: %+v", dto.Vars)
+	}
+
+	// Must NOT bleed into the env's own (non-preview) vars.
+	getEnv := httptest.NewRequest("GET", "/api/v1/projects/api/apps/backend/envs/staging/envconfig", nil)
+	getEnv.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, getEnv)
+	var edto EnvConfigDTO
+	_ = json.Unmarshal(rec.Body.Bytes(), &edto)
+	if _, leaked := edto.Vars["PREVIEW_ONLY"]; leaked {
+		t.Errorf("preview band var leaked into the env's own vars")
+	}
+}

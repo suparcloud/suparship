@@ -30,6 +30,33 @@ export interface ResolvedEnvConfigResponse {
   configMapName?: string;
 }
 
+// ── Per-base-env preview band ─────────────────────────────────────────────────
+// Env vars for previews whose BASE env is {env} (previews of staging vs
+// previews of production can differ). Layered above the legacy all-previews
+// band at preview publish.
+
+export function getAppPreviewEnvConfig(
+  project: string,
+  app: string,
+  env: string,
+): Promise<EnvConfig> {
+  return api.get<EnvConfig>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/preview-envconfig`,
+  );
+}
+
+export function updateAppPreviewEnvConfig(
+  project: string,
+  app: string,
+  env: string,
+  cfg: EnvConfig,
+): Promise<unknown> {
+  return api.put(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/envs/${encodeURIComponent(env)}/preview-envconfig`,
+    cfg,
+  );
+}
+
 // ── Org level ──────────────────────────────────────────────────────────────────
 
 export function getOrgEnvConfig(): Promise<EnvConfig> {

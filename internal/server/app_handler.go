@@ -706,6 +706,51 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Per-component env-var settings from the variables drawer — a focused patch
+	// so a variables tweak never resends (and can't clobber) component structure.
+	if len(req.ComponentEnvVars) > 0 {
+		known := make(map[string]bool, len(app.Spec.Components))
+		for _, c := range app.Spec.Components {
+			known[c.Name] = true
+		}
+		for name := range req.ComponentEnvVars {
+			if !known[name] {
+				writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unknown component: " + name})
+				return
+			}
+		}
+		// Apply on a COPY and validate before assigning — a rejected patch must
+		// leave the (store-shared) spec untouched.
+		next := append([]domain.ComponentSpec(nil), app.Spec.Components...)
+		for i := range next {
+			patch, ok := req.ComponentEnvVars[next[i].Name]
+			if !ok {
+				continue
+			}
+			c := &next[i]
+			if patch.InheritAppVars != nil {
+				v := *patch.InheritAppVars
+				c.InheritAppVars = &v
+			}
+			if patch.EnvVars != nil {
+				var evs []domain.ComponentEnvVar
+				for _, e := range *patch.EnvVars {
+					evs = append(evs, domain.ComponentEnvVar{
+						Name:       e.Name,
+						Value:      e.Value,
+						FromConfig: e.FromConfig,
+						FromSecret: e.FromSecret,
+					})
+				}
+				c.EnvVars = evs
+			}
+		}
+		if err := domain.ValidateComponents(next); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		app.Spec.Components = next
+	}
 	if req.CD != nil {
 		cd := cdConfigFromDTO(req.CD)
 		// Preserve the image-config intent across a CD-only edit (managed/autoPromote
@@ -4726,6 +4771,20 @@ func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []Componen
 				FromConfig: e.FromConfig,
 				FromSecret: e.FromSecret,
 			})
+		}
+		// Carry forward the fields this DTO cannot express from the prior
+		// same-name spec. req.Components replaces the list wholesale, so
+		// without this a manage save silently WIPED per-component config
+		// (env defaults, envFrom extras, resources, scaling) set via the
+		// componentConfigs API or template defaults.
+		if p, ok := prev[c.Name]; ok {
+			cs.Config = p.Config
+			cs.EnvFromSecrets = p.EnvFromSecrets
+			cs.EnvFromConfigMaps = p.EnvFromConfigMaps
+			cs.Resources = p.Resources
+			cs.Scaling = p.Scaling
+			cs.Replicas = p.Replicas
+			cs.SizePreset = p.SizePreset
 		}
 		if c.Template != nil && c.Template.Name != "" {
 			ctmpl, ok := ah.lookupTemplate(ctx, c.Template.Name)

@@ -250,6 +250,9 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// App-Environment level — developer writes (202 async), viewer reads.
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig", viewProject(ec.handleGetAppEnvEnvConfig))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig", devProject(ec.handlePutAppEnvEnvConfig))
+		// Per-base-env preview band: env vars for previews whose base env is {env}.
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/preview-envconfig", viewProject(ec.handleGetAppPreviewEnvConfig))
+		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envs/{env}/preview-envconfig", devProject(ec.handlePutAppPreviewEnvConfig))
 		// Resolved view — any viewer.
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig/resolved", viewProject(ec.handleGetResolvedEnvConfig))
 		// Variable catalog for the UI picker — any viewer.

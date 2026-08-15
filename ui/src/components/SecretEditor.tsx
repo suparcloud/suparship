@@ -43,6 +43,10 @@ export interface SecretEditorProps {
   upsertFn: (entries: Record<string, string>) => Promise<void>;
   deleteFn: (key: string) => Promise<void>;
   readOnly?: boolean;
+  // Optional pre-save gate for high-blast-radius scopes (e.g. global secrets on
+  // an app with production). Returning false aborts silently, keeping the
+  // editor open. Per-key deletion keeps its own confirm.
+  confirmSave?: () => boolean;
 }
 
 export function SecretEditor({
@@ -52,6 +56,7 @@ export function SecretEditor({
   upsertFn,
   deleteFn,
   readOnly = false,
+  confirmSave,
 }: SecretEditorProps) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -111,6 +116,7 @@ export function SecretEditor({
   }
 
   async function handleSave() {
+    if (confirmSave && !confirmSave()) return;
     const entries: Record<string, string> = {};
     for (const row of draftRows) {
       const k = row.key.trim();

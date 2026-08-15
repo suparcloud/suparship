@@ -917,3 +917,38 @@ func TestValidateExposeModes(t *testing.T) {
 		})
 	}
 }
+
+// Source-mapped env entries (fromConfig/fromSecret) require curated mode —
+// while inheriting they'd silently do nothing, so they're rejected loudly.
+func TestValidateComponents_SourceMappedEnvVarsRequireCuration(t *testing.T) {
+	off := false
+	cases := []struct {
+		name    string
+		inherit *bool
+		entry   ComponentEnvVar
+		wantErr bool
+	}{
+		{"literal while inheriting ok", nil, ComponentEnvVar{Name: "A", Value: "1"}, false},
+		{"fromConfig while inheriting rejected", nil, ComponentEnvVar{Name: "A", FromConfig: "X"}, true},
+		{"fromSecret while inheriting rejected", nil, ComponentEnvVar{Name: "A", FromSecret: "Y"}, true},
+		{"fromConfig when curated ok", &off, ComponentEnvVar{Name: "A", FromConfig: "X"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			comps := []ComponentSpec{{
+				Name:           "web",
+				Type:           ComponentWeb,
+				Enabled:        true,
+				InheritAppVars: tc.inherit,
+				EnvVars:        []ComponentEnvVar{tc.entry},
+			}}
+			err := ValidateComponents(comps)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected an error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

@@ -2059,16 +2059,23 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 		scopeKeys.PreviewPRApp = has(pr.WithProject(app.ProjectName), secrets.TierApp, app.Name)
 	}
 
-	// Env vars: base env's merged vars + the reserved "preview" band on top.
+	// Env vars: base env's merged vars, the legacy all-previews band, then the
+	// base env's OWN preview band on top — previews of staging and previews of
+	// production can differ (EnvironmentOverride.PreviewEnvConfig).
 	envVars := a.mergeAllEnvVars(ctx, app, baseEnv, clusterRef, org)
-	if ov, ok := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]; ok && len(ov.EnvConfig.Vars) > 0 {
+	overlay := func(vars map[string]string) {
+		if len(vars) == 0 {
+			return
+		}
 		if envVars == nil {
 			envVars = map[string]string{}
 		}
-		for k, v := range ov.EnvConfig.Vars {
+		for k, v := range vars {
 			envVars[k] = v
 		}
 	}
+	overlay(app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey].EnvConfig.Vars)
+	overlay(app.Spec.EnvironmentDefaults[baseEnv].PreviewEnvConfig.Vars)
 
 	// Resolve the base env's value overlays (template/org platform overrides +
 	// stack shared values) exactly as a stable publish would, so the preview

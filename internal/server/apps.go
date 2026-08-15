@@ -368,6 +368,17 @@ type ComponentEnvVarDTO struct {
 	FromSecret string `json:"fromSecret,omitempty"`
 }
 
+// ComponentEnvVarsPatchDTO patches ONE component's env-var settings on update
+// without resending the whole components list (which would replace structure).
+// The component-variables drawer uses this so a variables tweak can't collide
+// with structural edits.
+type ComponentEnvVarsPatchDTO struct {
+	// InheritAppVars, when non-nil, sets the inherit toggle.
+	InheritAppVars *bool `json:"inheritAppVars,omitempty"`
+	// EnvVars, when non-nil, REPLACES the component's env-var list ([] clears).
+	EnvVars *[]ComponentEnvVarDTO `json:"envVars,omitempty"`
+}
+
 // ComponentImageDTO is one composed-component image selection for Kargo CD. The
 // repository is discovered from the component's values (keyed by TagKey); it is
 // carried here only as a legacy/BYO fallback.
@@ -522,6 +533,10 @@ type updateAppRequest struct {
 	// env → component. Each entry overrides the app-level component config for
 	// that environment only.
 	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
+	// ComponentEnvVars patches the named components' env-var settings
+	// (inheritAppVars + curated/added envVars) without touching component
+	// structure — the component-variables drawer's write path.
+	ComponentEnvVars map[string]ComponentEnvVarsPatchDTO `json:"componentEnvVars,omitempty"`
 	// CD, when non-nil, replaces the app's continuous-delivery settings
 	// (external-CD tag ownership). Omit to leave unchanged.
 	CD *CDConfigDTO `json:"cd,omitempty"`

@@ -22,6 +22,7 @@ import type {
 import { hasProjection, stringifyProjection } from "../lib/valuesProjection";
 import { setAtPath, deleteAtPath } from "../lib/valuesTree";
 import { ProjectionForm } from "./ProjectionForm";
+import { ComponentEnvPanel } from "./ComponentEnvPanel";
 import type { ConfigVariables } from "../lib/configVars";
 
 // CodeMirror is heavy; load it only when the compose canvas is shown.
@@ -248,6 +249,8 @@ export function ComposeComponents({
   onChange,
   configVars,
   environments,
+  initialEnv,
+  appRef,
 }: {
   templates: TemplateSummary[];
   components: ComponentDraft[];
@@ -256,8 +259,26 @@ export function ComposeComponents({
   // The env scopes to edit values for. Create passes just the base deploy env
   // (e.g. ["staging"]); manage passes the app's stable envs. Values are per-env.
   environments: string[];
+  // Seeds the canvas-wide env context (e.g. the app page's selected env).
+  initialEnv?: string;
+  // When editing an EXISTING app (manage), enables the variables drawer's
+  // inherited-keys checklist; absent on the create flow (nothing resolved yet).
+  appRef?: { project: string; appName: string };
 }) {
   const envs = environments.length > 0 ? environments : ["staging"];
+  // ONE env context for the whole canvas: every component row edits the same
+  // env at once. Per-row env tabs let rows silently sit on DIFFERENT envs —
+  // the same competing-scope trap as the app page's old per-panel env tabs.
+  const [canvasEnv, setCanvasEnv] = useState<string>(
+    initialEnv && envs.includes(initialEnv) ? initialEnv : (envs[0] ?? "staging"),
+  );
+  // Per-row editor selection: one "Values | Variables" segmented control per row
+  // (same pattern as the app-detail component card), one panel open at a time.
+  // Env-vars edits are draft mode: Apply updates the draft; the actual save
+  // happens with the canvas save.
+  const [rowSection, setRowSection] = useState<
+    Record<number, "values" | "env" | null>
+  >({});
   // Per-(template, env) bases, fetched once each and cached (components sharing a
   // template+env share the fetch):
   //   - bases: chart + platform defaults, env-agnostic, for the expandable
@@ -291,13 +312,9 @@ export function ComposeComponents({
   const fetchedChart = useRef<Set<string>>(new Set());
   const fetchedBase = useRef<Set<string>>(new Set());
   const fetchedFull = useRef<Set<string>>(new Set());
-  // Which component rows have their (on-demand) values editor expanded, by index.
-  const [valuesOpen, setValuesOpen] = useState<Record<number, boolean>>({});
   // Which rows have their expandable "effective (as deployed)" reference open.
   const [effectiveOpen, setEffectiveOpen] = useState<Record<number, boolean>>({});
-  // The env tab selected per component row (defaults to the first env).
-  const [activeEnv, setActiveEnv] = useState<Record<number, string>>({});
-  const baseKey = (template: string, env: string) => `${template} ${env}`;
+  const baseKey = (template: string, env: string) => `${template}\u0000${env}`;
 
   // The seed base for a (component, env): the concise PLATFORM base for that env
   // (shared per template+env) with the component's legacy all-envs base overlay
@@ -456,24 +473,6 @@ export function ComposeComponents({
     ]);
   }
 
-  // Curated env-var editing (only when a component opts out of inheriting all app vars).
-  function updateEnv(i: number, j: number, patch: Partial<ComponentEnvVar>) {
-    const c = components[i];
-    if (!c) return;
-    update(i, {
-      envVars: c.envVars.map((e, idx) => (idx === j ? { ...e, ...patch } : e)),
-    });
-  }
-  function removeEnv(i: number, j: number) {
-    const c = components[i];
-    if (!c) return;
-    update(i, { envVars: c.envVars.filter((_, idx) => idx !== j) });
-  }
-  function addEnv(i: number) {
-    const c = components[i];
-    if (!c) return;
-    update(i, { envVars: [...c.envVars, { name: "", value: "" }] });
-  }
   // When the picked template changes, re-default the type/expose AND reset the
   // component's values/image state: the previous chart's per-env overrides, base
   // overlay, and image bindings targeted a different schema, so clearing them lets
@@ -506,6 +505,37 @@ export function ComposeComponents({
 
   return (
     <div className="space-y-3">
+      {/* Canvas-wide env context — one selector for EVERY component below, so
+          rows can't silently sit on different envs. Dots mark envs that carry
+          any component's override. */}
+      {envs.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-gray-600">Environment</span>
+          {envs.map((e) => {
+            const hasValues = components.some(
+              (c) => c.envValues[e] && Object.keys(c.envValues[e]!).length > 0,
+            );
+            return (
+              <button
+                key={e}
+                type="button"
+                onClick={() => setCanvasEnv(e)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                  canvasEnv === e
+                    ? "bg-gray-900 text-white"
+                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                {e}
+                {hasValues ? " ●" : ""}
+              </button>
+            );
+          })}
+          <span className="text-[11px] text-gray-400">
+            applies to every component below
+          </span>
+        </div>
+      )}
       {components.map((c, i) => (
         <div
           key={i}
@@ -592,32 +622,62 @@ export function ComposeComponents({
               Same surface as the app-detail per-component card. On-demand
               (collapsed) so adding several components isn't cluttered. */}
           {(() => {
-            const env = activeEnv[i] ?? envs[0] ?? "staging";
+            const env = canvasEnv;
             const base = seedBaseFor(c, env);
             const hasOverride = Object.values(c.envValues).some(
               (v) => v && Object.keys(v).length > 0,
             );
+            const section = rowSection[i] ?? null;
+            const pick = (s: "values" | "env") =>
+              setRowSection((cur) => ({
+                ...cur,
+                [i]: cur[i] === s ? null : s,
+              }));
+            const segClass = (active: boolean) =>
+              `inline-flex items-center gap-1 px-2.5 py-1 ${
+                active
+                  ? "bg-gray-900 text-white"
+                  : "bg-white text-gray-500 hover:bg-gray-50"
+              }`;
             return (
               <div className="mt-3">
-                <button
-                  type="button"
-                  onClick={() => setValuesOpen((o) => ({ ...o, [i]: !o[i] }))}
-                  aria-expanded={!!valuesOpen[i]}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
-                >
-                  <span
-                    className={`transition-transform ${valuesOpen[i] ? "rotate-90" : ""}`}
+                {/* One segmented control per row ("Values | Variables") — the two
+                    editors are peers, one open at a time; clicking the active
+                    segment collapses it. Same pattern as the app-detail card. */}
+                <div className="inline-flex overflow-hidden rounded-md border border-gray-200 text-[11px] font-medium">
+                  <button
+                    type="button"
+                    onClick={() => pick("values")}
+                    aria-expanded={section === "values"}
+                    className={segClass(section === "values")}
                   >
-                    ▸
-                  </span>
-                  values
-                  {hasOverride && !valuesOpen[i] && (
-                    <span className="ml-1 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-600">
-                      overridden
-                    </span>
-                  )}
-                </button>
-                {valuesOpen[i] && (
+                    Values
+                    {hasOverride && section !== "values" && (
+                      <span className="rounded-full bg-indigo-50 px-1.5 py-px text-[10px] text-indigo-600">
+                        edited
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => pick("env")}
+                    aria-expanded={section === "env"}
+                    className={`${segClass(section === "env")} border-l border-gray-200`}
+                  >
+                    Variables
+                    {!c.inheritAppVars && section !== "env" && (
+                      <span className="rounded-full bg-amber-50 px-1.5 py-px text-[10px] text-amber-700">
+                        curated
+                      </span>
+                    )}
+                    {c.inheritAppVars && c.envVars.length > 0 && section !== "env" && (
+                      <span className="rounded-full bg-indigo-50 px-1.5 py-px text-[10px] text-indigo-600">
+                        +{c.envVars.length}
+                      </span>
+                    )}
+                  </button>
+                </div>
+                {section === "values" && (
                   <Suspense
                     fallback={
                       <div className="mt-2 rounded-lg border border-gray-200 p-3 text-xs text-gray-400">
@@ -626,33 +686,16 @@ export function ComposeComponents({
                     }
                   >
                     <div className="mt-2">
-                      {/* Env tabs (only when more than one env is offered). */}
+                      {/* The env comes from the canvas-wide selector above —
+                          rows never carry their own env context. */}
                       {envs.length > 1 && (
-                        <div className="mb-2 flex flex-wrap gap-1">
-                          {envs.map((e) => {
-                            const dirty =
-                              (c.envValues[e] &&
-                                Object.keys(c.envValues[e]!).length > 0) ||
-                              false;
-                            return (
-                              <button
-                                key={e}
-                                type="button"
-                                onClick={() =>
-                                  setActiveEnv((m) => ({ ...m, [i]: e }))
-                                }
-                                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                                  env === e
-                                    ? "bg-gray-900 text-white"
-                                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                                }`}
-                              >
-                                {e}
-                                {dirty ? " ●" : ""}
-                              </button>
-                            );
-                          })}
-                        </div>
+                        <p className="mb-2 text-[11px] text-gray-400">
+                          Editing{" "}
+                          <span className="font-mono font-medium text-gray-600">
+                            {env}
+                          </span>{" "}
+                          values — switch environments at the top of the list.
+                        </p>
                       )}
                       {(() => {
                         const fields = projections[c.template] ?? [];
@@ -880,109 +923,28 @@ export function ComposeComponents({
             );
           })()}
 
-          {/* Environment: inherit all app vars, or curate a subset. */}
+          {/* Environment variables: same inline panel as the component card —
+              add/override by default, inheritance curation collapsed inside.
+              Opened by the row's "Env vars" segment above. */}
           <div className="mt-3 border-t border-gray-100 pt-3">
-            <label className="flex items-center gap-2 text-xs font-medium text-gray-600">
-              <input
-                type="checkbox"
-                checked={c.inheritAppVars}
-                onChange={(e) => update(i, { inheritAppVars: e.target.checked })}
-                className="h-3.5 w-3.5 rounded border-gray-300"
+            {rowSection[i] === "env" && (
+              <ComponentEnvPanel
+                componentName={c.name || `component-${i + 1}`}
+                value={{ inheritAppVars: c.inheritAppVars, envVars: c.envVars }}
+                appCtx={
+                  appRef
+                    ? { project: appRef.project, appName: appRef.appName, env: canvasEnv }
+                    : undefined
+                }
+                saveLabel="Apply"
+                onSave={(next) => {
+                  update(i, {
+                    inheritAppVars: next.inheritAppVars,
+                    envVars: next.envVars,
+                  });
+                  setRowSection((cur) => ({ ...cur, [i]: null }));
+                }}
               />
-              Inherit all app vars (config + secrets)
-            </label>
-            {!c.inheritAppVars && (
-              <div className="mt-2 space-y-2">
-                <p className="text-xs text-gray-400">
-                  This component sees only the vars below — pick a literal, an app
-                  config key, or an app secret key (renamed into a per-component
-                  Secret). No blanket app secrets.
-                </p>
-                {c.envVars.map((e, j) => {
-                  const fromConfig = e.fromConfig !== undefined;
-                  const fromSecret = e.fromSecret !== undefined;
-                  const source = fromConfig
-                    ? "config"
-                    : fromSecret
-                      ? "secret"
-                      : "value";
-                  const keyed = fromConfig || fromSecret;
-                  return (
-                    <div key={j} className="flex flex-wrap items-center gap-2">
-                      <input
-                        type="text"
-                        className={`${inputCls} w-40 font-mono`}
-                        placeholder="ENV_NAME"
-                        value={e.name}
-                        onChange={(ev) => updateEnv(i, j, { name: ev.target.value })}
-                      />
-                      <select
-                        className={`${inputCls} w-36`}
-                        value={source}
-                        onChange={(ev) =>
-                          updateEnv(
-                            i,
-                            j,
-                            ev.target.value === "config"
-                              ? { fromConfig: "", fromSecret: undefined, value: undefined }
-                              : ev.target.value === "secret"
-                                ? { fromSecret: "", fromConfig: undefined, value: undefined }
-                                : { value: "", fromConfig: undefined, fromSecret: undefined },
-                          )
-                        }
-                      >
-                        <option value="value">literal</option>
-                        <option value="config">app config key</option>
-                        <option value="secret">app secret key</option>
-                      </select>
-                      <input
-                        type="text"
-                        className={`${inputCls} min-w-[8rem] flex-1 ${keyed ? "font-mono" : ""}`}
-                        placeholder={
-                          fromConfig
-                            ? "APP_CONFIG_KEY"
-                            : fromSecret
-                              ? "APP_SECRET_KEY"
-                              : "value"
-                        }
-                        value={
-                          (fromConfig
-                            ? e.fromConfig
-                            : fromSecret
-                              ? e.fromSecret
-                              : e.value) ?? ""
-                        }
-                        onChange={(ev) =>
-                          updateEnv(
-                            i,
-                            j,
-                            fromConfig
-                              ? { fromConfig: ev.target.value }
-                              : fromSecret
-                                ? { fromSecret: ev.target.value }
-                                : { value: ev.target.value },
-                          )
-                        }
-                      />
-                      <button
-                        type="button"
-                        onClick={() => removeEnv(i, j)}
-                        className="rounded-md px-2 py-1 text-xs text-gray-400 hover:bg-red-50 hover:text-red-600"
-                        aria-label="Remove variable"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  );
-                })}
-                <button
-                  type="button"
-                  onClick={() => addEnv(i)}
-                  className="text-xs font-medium text-indigo-600 hover:text-indigo-700"
-                >
-                  + Add variable
-                </button>
-              </div>
             )}
 
             {/* Stateful: render this component as its OWN prune-disabled ArgoCD

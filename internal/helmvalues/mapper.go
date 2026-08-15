@@ -423,8 +423,22 @@ func buildComponentValues(
 	// Per-component, per-env override layered on top of the app-level spec.
 	co := envOverride.Components[c.Name]
 
-	// env: component Config + env-wide Config + per-(env,component) override.
-	env := mergeConfig(mergeConfig(c.Config, envOverride.Config), co.Env)
+	// env: component Config + inherit-mode EnvVars literals + env-wide Config +
+	// per-(env,component) override. While INHERITING app vars, an EnvVars entry
+	// with a literal Value is the component's extend/override channel: it
+	// renders as an explicit env[] entry, which beats every envFrom source —
+	// so a component can add or override a variable without freezing its
+	// inherited set. (When opted out, EnvVars drives the curated projection
+	// instead; source-mapped entries are curated-mode-only by validation.)
+	inheritAdds := map[string]string{}
+	if c.InheritAppVars == nil || *c.InheritAppVars {
+		for _, ev := range c.EnvVars {
+			if ev.Value != "" {
+				inheritAdds[ev.Name] = ev.Value
+			}
+		}
+	}
+	env := mergeConfig(mergeConfig(mergeConfig(c.Config, inheritAdds), envOverride.Config), co.Env)
 
 	sizePreset := string(c.SizePreset)
 	if envOverride.SizePreset != "" {

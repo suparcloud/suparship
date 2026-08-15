@@ -80,9 +80,21 @@ func ValidateComponents(components []ComponentSpec) error {
 				i, c.Name, c.Type,
 			)
 		}
+		inheriting := c.InheritAppVars == nil || *c.InheritAppVars
 		for _, e := range c.EnvVars {
 			if err := validateComponentEnvVar(c.Name, e); err != nil {
 				return fmt.Errorf("components[%d]: %w", i, err)
+			}
+			// Source-mapped entries (fromConfig/fromSecret) only mean anything
+			// in the curated projection — while INHERITING app vars, the key
+			// already arrives via envFrom, so a mapping would silently do
+			// nothing. Literal Value entries are the inherit-mode
+			// extend/override channel and are always fine.
+			if inheriting && (e.FromConfig != "" || e.FromSecret != "") {
+				return fmt.Errorf(
+					"components[%d] %q env %q: fromConfig/fromSecret require inheritAppVars=false (a curated variable list); while inheriting, add a literal value or configure the variable at app/env scope",
+					i, c.Name, e.Name,
+				)
 			}
 		}
 		for _, img := range c.Images {

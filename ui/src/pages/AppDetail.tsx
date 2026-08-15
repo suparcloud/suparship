@@ -23,6 +23,7 @@ import type {
 import { declaredPaths, hasProjection, splitPath, stringifyProjection } from "../lib/valuesProjection";
 import { ProjectionForm } from "../components/ProjectionForm";
 import { ImagePullRules } from "../components/ImagePullRules";
+import { ComponentEnvPanel } from "../components/ComponentEnvPanel";
 import {
   groupByRepo,
   imageRulesToAppImages,
@@ -43,6 +44,8 @@ import { createAppPreview, deleteAppPreview } from "../lib/previews";
 import {
   getAppEnvConfig,
   getAppEnvEnvConfig,
+  getAppPreviewEnvConfig,
+  updateAppPreviewEnvConfig,
   getResolvedEnvConfig,
   updateAppEnvConfig,
   updateAppEnvEnvConfig,
@@ -92,16 +95,20 @@ import type {
 // Tab types
 // ---------------------------------------------------------------------------
 
-type TabId = "overview" | "deployments" | "previews" | "settings" | "logs" | "traffic" | "envvars";
+// Variables & secrets are CONFIGURATION, not runtime observation, so they live
+// under Settings (the GitHub/Vercel model) rather than as a top-level tab under
+// the env pipeline widget — one place to configure, and the widget scopes only
+// the runtime tabs.
+type TabId = "overview" | "deployments" | "previews" | "settings" | "logs" | "traffic";
 
+// The runtime (env-scoped) views. Settings is NOT here — it renders as a
+// right-aligned gear tab, set apart as the app-level configuration destination.
 const TABS: { id: TabId; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "deployments", label: "Deployments" },
   { id: "previews", label: "Previews" },
-  { id: "settings", label: "Settings" },
   { id: "logs", label: "Logs" },
   { id: "traffic", label: "Traffic" },
-  { id: "envvars", label: "Variables" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1110,14 +1117,7 @@ export function AppDetail() {
               Open app
             </a>
           )}
-          <button
-            onClick={() => setActiveTab("logs")}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
-            title="View logs"
-          >
-            {icons.terminal}
-            Logs
-          </button>
+          {/* No Logs button here — the Logs tab is the one way to logs. */}
           <button
             onClick={() => {
               setShowPreviewForm(true);
@@ -1178,6 +1178,23 @@ export function AppDetail() {
             if (data.deliveryMode === "direct") return null;
             const promotion = getPromoteTarget(currentEnv, data.environments);
             if (!promotion) return null;
+            // Nothing deployed in the source env yet — there's nothing to
+            // promote and the endpoint would refuse; don't invite the click.
+            const sourceEnv = data.environments.find(
+              (e) => e.envName === promotion.source,
+            );
+            if (!sourceEnv?.release?.tag) {
+              return (
+                <button
+                  disabled
+                  className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg bg-gray-200 px-3.5 py-2 text-sm font-medium text-gray-400 shadow-sm"
+                  title={`Deploy to ${promotion.source} first — nothing to promote yet`}
+                >
+                  {icons.rocket}
+                  Promote to {promotion.target}
+                </button>
+              );
+            }
             // A pinned target is frozen — promotion is paused until it's unpinned.
             const targetEnv = data.environments.find((e) => e.envName === promotion.target);
             if (targetEnv?.pinnedTag) {
@@ -1209,34 +1226,8 @@ export function AppDetail() {
               </button>
             );
           })()}
-          <button
-            onClick={() => {
-              setRenameInput("");
-              setRenameError(null);
-              setShowRename(true);
-            }}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
-            title="Rename this app"
-          >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Z" />
-            </svg>
-            Rename
-          </button>
-          <button
-            onClick={() => {
-              setDeleteConfirmInput("");
-              setDeleteError(null);
-              setShowDeleteConfirm(true);
-            }}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3.5 py-2 text-sm font-medium text-red-600 shadow-sm transition-colors hover:bg-red-50"
-            title="Delete this app"
-          >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
-            </svg>
-            Delete
-          </button>
+          {/* Rename/Delete live in Settings → General's danger zone — the
+              header keeps only operational actions. */}
         </div>
       </div>
       {syncState === "error" && syncError && (
@@ -1847,19 +1838,12 @@ export function AppDetail() {
           );
         })()}
 
-      {/* Environment pipeline bar: stable envs as pipeline nodes, previews as pills */}
-      <EnvPipelineBar
-        project={project ?? ""}
-        appName={appName ?? ""}
-        nonPreviewEnvs={nonPreviewEnvs}
-        previewEnvs={previewEnvs}
-        selectedEnvName={selectedEnvName}
-        onSelect={setSelectedEnvName}
-      />
-
-      {/* Tab bar */}
+      {/* Tab bar — ABOVE the env widget: tabs partition the page, and the env
+          widget belongs to the env-scoped tabs' content, not to the page
+          chrome. Settings (app-level configuration) renders with no
+          environment context at all. */}
       <div className="border-b border-gray-200">
-        <nav className="-mb-px flex gap-6">
+        <nav className="-mb-px flex items-center gap-6">
           {TABS.map((tab) => (
             <button
               key={tab.id}
@@ -1873,8 +1857,37 @@ export function AppDetail() {
               {tab.label}
             </button>
           ))}
+          {/* Settings: the app-level configuration destination — right-aligned
+              with a gear, set apart from the env-scoped runtime views. */}
+          <button
+            onClick={() => setActiveTab("settings")}
+            className={`ml-auto inline-flex items-center gap-1.5 pb-3 text-sm font-medium transition-colors ${
+              activeTab === "settings"
+                ? "border-b-2 border-gray-900 text-gray-900"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 0 1 0 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.109-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 0 1 0-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28Z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+            </svg>
+            Settings
+          </button>
         </nav>
       </div>
+
+      {/* Environment pipeline bar: stable envs as pipeline nodes, previews as
+          pills — the env selector for the runtime tabs below it. */}
+      {activeTab !== "settings" && (
+        <EnvPipelineBar
+          project={project ?? ""}
+          appName={appName ?? ""}
+          nonPreviewEnvs={nonPreviewEnvs}
+          previewEnvs={previewEnvs}
+          selectedEnvName={selectedEnvName}
+          onSelect={setSelectedEnvName}
+        />
+      )}
 
       {/* Tab panels */}
       {activeTab === "overview" && (
@@ -1916,6 +1929,16 @@ export function AppDetail() {
             const refreshed = await getApp(data.project, data.name);
             setData(refreshed.app);
           }}
+          onRename={() => {
+            setRenameInput("");
+            setRenameError(null);
+            setShowRename(true);
+          }}
+          onDelete={() => {
+            setDeleteConfirmInput("");
+            setDeleteError(null);
+            setShowDeleteConfirm(true);
+          }}
         />
       )}
       {activeTab === "logs" && (
@@ -1928,15 +1951,6 @@ export function AppDetail() {
         />
       )}
       {activeTab === "traffic" && <TrafficTab />}
-      {activeTab === "envvars" && (
-        <EnvVarsTab
-          project={project ?? ""}
-          appName={appName ?? ""}
-          environments={data.environments}
-          selectedEnvName={selectedEnvName}
-          onSelectEnv={setSelectedEnvName}
-        />
-      )}
     </div>
   );
 }
@@ -2720,7 +2734,15 @@ function AppValuesEditor({
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
-      <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
+      {/* The composed (Settings) variant skips the card title — "Settings →
+          General → SETTINGS" would say the same thing three times. */}
+      <div
+        className={
+          composed
+            ? "hidden"
+            : "flex items-center justify-between border-b border-gray-100 px-5 py-3"
+        }
+      >
         <h2 className="text-xs font-medium uppercase tracking-wider text-gray-400">
           {composed ? "Settings" : "Values"}
         </h2>
@@ -3818,27 +3840,115 @@ function SettingsTab({
   currentEnv,
   project,
   onSaved,
+  onRename,
+  onDelete,
 }: {
   data: AppDetailType;
   currentEnv: AppEnvironmentSummary | null;
   project: string;
   onSaved: () => Promise<void>;
+  // Open the rename / delete dialogs (owned by the page). Rare management
+  // actions live here in the danger zone, not as always-visible header buttons.
+  onRename: () => void;
+  onDelete: () => void;
 }) {
+  // Settings is the configuration home (the GitHub/Vercel model): General for
+  // delivery/CD/clusters, Variables & secrets for runtime env config. Both are
+  // app-owned — the env widget above renders env-unscoped here.
+  const [section, setSection] = useState<"general" | "variables">("general");
   return (
     <div className="space-y-6">
-      <AppValuesEditor
-        data={data}
-        project={project}
-        currentEnvName={currentEnv?.envName ?? null}
-        onSaved={onSaved}
-        composed={true}
-      />
-      {/* Legacy structured config (from the old form) — frozen, read-only. */}
-      <LegacyConfigNotice data={data} />
-      {/* Per-cluster overrides — only for fan-out environments. Advanced. */}
-      <Disclosure title="Per-cluster overrides (advanced)">
-        <ClusterOverridesEditor data={data} project={project} onSaved={onSaved} />
-      </Disclosure>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-gray-500">
+          App-level settings — these apply to the whole app, across all
+          environments.
+        </p>
+        <div className="inline-flex overflow-hidden rounded-md border border-gray-200 text-xs font-medium">
+          {(
+            [
+              ["general", "General"],
+              ["variables", "Variables & secrets"],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setSection(id)}
+              className={`px-3 py-1 ${
+                section === id
+                  ? "bg-gray-900 text-white"
+                  : "bg-white text-gray-500 hover:bg-gray-50"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {section === "general" ? (
+        <>
+          <AppValuesEditor
+            data={data}
+            project={project}
+            currentEnvName={currentEnv?.envName ?? null}
+            onSaved={onSaved}
+            composed={true}
+          />
+          {/* Legacy structured config (from the old form) — frozen, read-only. */}
+          <LegacyConfigNotice data={data} />
+          {/* Per-cluster overrides — only for fan-out environments. Advanced. */}
+          <Disclosure title="Per-cluster overrides (advanced)">
+            <ClusterOverridesEditor data={data} project={project} onSaved={onSaved} />
+          </Disclosure>
+          {/* Danger zone — the GitHub/Vercel convention for rare, high-impact
+              management actions. */}
+          <div className="rounded-xl border border-red-200 bg-white p-5">
+            <h3 className="text-sm font-semibold text-red-700">Danger zone</h3>
+            <div className="mt-3 divide-y divide-red-100">
+              <div className="flex items-center justify-between gap-4 pb-3">
+                <div>
+                  <p className="text-sm font-medium text-gray-900">
+                    Rename this app
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Renames the app everywhere, including its gitops manifests.
+                  </p>
+                </div>
+                <button
+                  onClick={onRename}
+                  className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Rename
+                </button>
+              </div>
+              <div className="flex items-center justify-between gap-4 pt-3">
+                <div>
+                  <p className="text-sm font-medium text-red-700">
+                    Delete this app
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Removes the app and its gitops manifests. This cannot be
+                    undone.
+                  </p>
+                </div>
+                <button
+                  onClick={onDelete}
+                  className="shrink-0 rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : (
+        <EnvVarsTab
+          project={project}
+          appName={data.name}
+          environments={data.environments}
+          selectedEnvName={currentEnv?.envName ?? null}
+        />
+      )}
     </div>
   );
 }
@@ -4293,9 +4403,9 @@ function LogsTab({
   components,
   environments,
 }: LogsTabProps) {
-  const [env, setEnv] = useState(
-    selectedEnvName || environments[0]?.envName || "",
-  );
+  // The env comes from the page's env pipeline widget — the single selector;
+  // a tab-local dropdown would just duplicate (and could disagree with) it.
+  const env = selectedEnvName || environments[0]?.envName || "";
   const [component, setComponent] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [pod, setPod] = useState("");
@@ -4306,10 +4416,12 @@ function LogsTab({
   const scrollRef = useRef<HTMLPreElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Keep local env in sync when the parent environment switcher changes.
+  // A pod/container picked for one env is meaningless in another — clear them
+  // when the widget switches environments.
   useEffect(() => {
-    if (selectedEnvName) setEnv(selectedEnvName);
-  }, [selectedEnvName]);
+    setPod("");
+    setContainer("");
+  }, [env]);
 
   const loadLogs = useCallback(async () => {
     if (!env) return;
@@ -4348,28 +4460,15 @@ function LogsTab({
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Primary selectors: environment (+ component when multiple) */}
+      {/* Primary selectors: the env comes from the widget above; only the
+          component (when multiple) is picked here. */}
       <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
-        <div>
-          <label className="mb-1 block text-xs font-medium text-gray-500">
-            Environment
-          </label>
-          <select
-            value={env}
-            onChange={(e) => {
-              setEnv(e.target.value);
-              setPod("");
-              setContainer("");
-            }}
-            className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 focus:border-gray-500 focus:outline-none focus:ring-1 focus:ring-gray-500"
-          >
-            {environments.map((e) => (
-              <option key={e.envName} value={e.envName}>
-                {e.envName}
-              </option>
-            ))}
-          </select>
-        </div>
+        <p className="self-center text-xs text-gray-500">
+          Logs from{" "}
+          <span className="font-mono font-medium text-gray-900">
+            {env || "—"}
+          </span>
+        </p>
 
         {multiComponent && (
           <div>
@@ -4658,6 +4757,21 @@ function ComponentsTable({
   // only — each component's VALUES are edited inline in its card (on-demand).
   const [managing, setManaging] = useState(false);
   const [drafts, setDrafts] = useState<ComponentDraft[]>([]);
+  // Per-component editor selection: one segmented control per card ("values" /
+  // "env vars"), one panel open at a time, both collapsed by default. Keyed by
+  // component name. The env panel writes the widget-selected env's overrides
+  // (fallback: first stable env).
+  const [cardSection, setCardSection] = useState<
+    Record<string, "values" | "env" | null>
+  >({});
+  const [envSavingFor, setEnvSavingFor] = useState<string | null>(null);
+  const envPanelStableNames = (data.environments ?? [])
+    .filter((e) => e.envType !== "preview")
+    .map((e) => e.envName);
+  const envPanelEnv =
+    currentEnv && envPanelStableNames.includes(currentEnv.envName)
+      ? currentEnv.envName
+      : (envPanelStableNames[0] ?? null);
   const [templates, setTemplates] = useState<TemplateSummary[]>([]);
   const [manageConfigVars, setManageConfigVars] = useState<ConfigVariables | null>(
     null,
@@ -5000,6 +5114,12 @@ function ComponentsTable({
             onChange={setDrafts}
             configVars={manageConfigVars}
             environments={manageEnvs}
+            // Open the canvas on the env selected in the page header (a preview
+            // selection isn't in manageEnvs and falls back to the first env).
+            initialEnv={currentEnv?.envName}
+            // Existing app: the variables drawer can show the inherited-keys
+            // checklist.
+            appRef={{ project, appName: data.name }}
           />
           {/* CD image pull for the DRAFT components — one row per unique repo across
               all of them, so a component added above is wired to Kargo by the same
@@ -5131,11 +5251,79 @@ function ComponentsTable({
                   </div>
                 </div>
 
+                {/* One segmented control per card ("Values | Variables") instead
+                    of stacked text disclosures — the two editors are peers, one
+                    open at a time; clicking the active segment collapses it. */}
+                {(() => {
+                  const section = cardSection[comp.name] ?? null;
+                  const appLevel = components.length === 1;
+                  const hasValueOverrides = appLevel
+                    ? Object.keys(data.rawValues ?? {}).length > 0 ||
+                      Object.values(data.envRawValues ?? {}).some(
+                        (v) => Object.keys(v ?? {}).length > 0,
+                      )
+                    : Object.keys(comp.values ?? {}).length > 0 ||
+                      Object.values(comp.envValues ?? {}).some(
+                        (v) => Object.keys(v ?? {}).length > 0,
+                      );
+                  const envOverrideCount = envPanelEnv
+                    ? Object.keys(
+                        data.envComponents?.[envPanelEnv]?.[comp.name]?.env ?? {},
+                      ).length
+                    : 0;
+                  const pick = (s: "values" | "env") =>
+                    setCardSection((cur) => ({
+                      ...cur,
+                      [comp.name]: cur[comp.name] === s ? null : s,
+                    }));
+                  const segClass = (active: boolean) =>
+                    `inline-flex items-center gap-1 px-2.5 py-1 ${
+                      active
+                        ? "bg-gray-900 text-white"
+                        : "bg-white text-gray-500 hover:bg-gray-50"
+                    }`;
+                  return (
+                    <div className="mt-3 inline-flex overflow-hidden rounded-md border border-gray-200 text-[11px] font-medium">
+                      <button
+                        type="button"
+                        onClick={() => pick("values")}
+                        aria-expanded={section === "values"}
+                        className={segClass(section === "values")}
+                      >
+                        Values
+                        {hasValueOverrides && section !== "values" && (
+                          <span className="rounded-full bg-indigo-50 px-1.5 py-px text-[10px] text-indigo-600">
+                            edited
+                          </span>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => pick("env")}
+                        aria-expanded={section === "env"}
+                        className={`${segClass(section === "env")} border-l border-gray-200`}
+                      >
+                        Variables
+                        {comp.inheritAppVars === false && section !== "env" && (
+                          <span className="rounded-full bg-amber-50 px-1.5 py-px text-[10px] text-amber-700">
+                            curated
+                          </span>
+                        )}
+                        {envOverrideCount > 0 && section !== "env" && (
+                          <span className="rounded-full bg-indigo-50 px-1.5 py-px text-[10px] text-indigo-600">
+                            +{envOverrideCount}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  );
+                })()}
                 {/* Every component — single-source or composed — edits its
                     values through the same rich panel (scope tabs + effective
                     preview + layers). A single-component app edits the app-level
                     overlay (the sole component IS the app); composed components
-                    edit their own values. */}
+                    edit their own values. Always mounted so unsaved buffers
+                    survive switching sections; `open` controls rendering. */}
                 <ComponentValuesPanel
                   data={data}
                   project={project}
@@ -5143,7 +5331,79 @@ function ComponentsTable({
                   currentEnvName={currentEnv?.envName ?? null}
                   onSaved={onSaved}
                   appLevel={components.length === 1}
+                  open={cardSection[comp.name] === "values"}
                 />
+                {/* Per-component env vars: add/override is the default view;
+                    inheritance curation sits collapsed inside the panel. */}
+                <div>
+                  {cardSection[comp.name] === "env" &&
+                    (() => {
+                      const panelEnv = envPanelEnv;
+                      return (
+                        <ComponentEnvPanel
+                          componentName={comp.name}
+                          value={{
+                            inheritAppVars: comp.inheritAppVars !== false,
+                            envVars: comp.envVars ?? [],
+                          }}
+                          appCtx={{ project, appName: data.name, env: panelEnv }}
+                          envOverride={
+                            (panelEnv &&
+                              data.envComponents?.[panelEnv]?.[comp.name]?.env) ||
+                            {}
+                          }
+                          envName={panelEnv}
+                          saving={envSavingFor === comp.name}
+                          onSave={async (next) => {
+                            setEnvSavingFor(comp.name);
+                            const progress = toast.loading(
+                              "Saving component variables — publishing to GitOps…",
+                            );
+                            try {
+                              const req: UpdateAppRequest = {
+                                componentEnvVars: {
+                                  [comp.name]: {
+                                    inheritAppVars: next.inheritAppVars,
+                                    envVars: next.envVars,
+                                  },
+                                },
+                              };
+                              if (next.envOverride !== undefined && panelEnv) {
+                                // The handler replaces the named env's whole
+                                // component map — send the merged map, preserving
+                                // other components' entries and this component's
+                                // non-env fields.
+                                const envMap = {
+                                  ...(data.envComponents?.[panelEnv] ?? {}),
+                                };
+                                const existing = envMap[comp.name] ?? {};
+                                envMap[comp.name] = {
+                                  ...existing,
+                                  env: next.envOverride,
+                                };
+                                req.envComponents = { [panelEnv]: envMap };
+                              }
+                              await updateApp(project, data.name, req);
+                              toast.success(
+                                "Component variables saved and published.",
+                                { id: progress },
+                              );
+                              await onSaved();
+                            } catch (e) {
+                              toast.error(
+                                e instanceof Error
+                                  ? e.message
+                                  : "Failed to save component variables",
+                                { id: progress },
+                              );
+                            } finally {
+                              setEnvSavingFor(null);
+                            }
+                          }}
+                        />
+                      );
+                    })()}
+                </div>
               </div>
             );
           })}
@@ -5201,6 +5461,7 @@ function ComponentValuesPanel({
   currentEnvName,
   onSaved,
   appLevel,
+  open,
 }: {
   data: AppDetailType;
   project: string;
@@ -5210,6 +5471,10 @@ function ComponentValuesPanel({
   // appLevel = the app has exactly one component, so this panel edits the
   // app-level overlay (rawValues) rather than the component's own values.
   appLevel: boolean;
+  // Controlled by the card's "Values | Variables" segmented control — the panel
+  // owns no toggle of its own. State (buffers, dirty scopes) survives close/
+  // reopen because the component stays mounted; we just render nothing.
+  open: boolean;
 }) {
   const stableEnvs = (data.environments ?? [])
     .filter((e) => e.envType !== "preview")
@@ -5242,8 +5507,27 @@ function ComponentValuesPanel({
   };
   const savedText = (s: string): string => stringifyOverlay(storedOverride(s));
 
-  const [open, setOpen] = useState(false);
-  const [scope, setScope] = useState<string>(() => tabScopes[0] ?? COMP_BASE_SCOPE);
+  // The environment is chosen ONLY by the page's env pipeline widget — the
+  // panel follows it (one selector; the panel can never disagree with the
+  // header). The preview band is the one scope the widget can't express, so it
+  // stays a local toggle, snapping back whenever the widget selection changes.
+  const [previewBand, setPreviewBand] = useState(false);
+  useEffect(() => {
+    setPreviewBand(false);
+    setYamlError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentEnvName]);
+  const selectedIsPreview =
+    (data.environments ?? []).find((e) => e.envName === currentEnvName)
+      ?.envType === "preview";
+  const followedEnv =
+    currentEnvName && stableEnvs.includes(currentEnvName)
+      ? currentEnvName
+      : (stableEnvs[0] ?? null);
+  const scope =
+    (previewBand || selectedIsPreview) && showPreview
+      ? PREVIEW_SCOPE
+      : (followedEnv ?? COMP_BASE_SCOPE);
   const [showEffective, setShowEffective] = useState(false);
   // baseByScope caches the CONCISE platform base per scope (template ⊕ platform ⊕
   // shared dev overlay for the env, WITHOUT chart defaults) — fetched lazily to seed
@@ -5295,15 +5579,6 @@ function ComponentValuesPanel({
     touchedScopesRef.current = new Set();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, comp]);
-
-  // Keep the scope in step with the environment selected in the page header.
-  useEffect(() => {
-    if (!currentEnvName) return;
-    const env = (data.environments ?? []).find((e) => e.envName === currentEnvName);
-    if (appLevel && env?.envType === "preview") setScope(PREVIEW_SCOPE);
-    else if (env && stableEnvs.includes(env.envName)) setScope(env.envName);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentEnvName]);
 
   useEffect(() => {
     listConfigVariables(project)
@@ -5611,12 +5886,6 @@ function ComponentValuesPanel({
     return !!src && Object.keys(src).length > 0;
   };
 
-  // Whether any overlay (base or per-env) has content — surfaced on the collapsed
-  // toggle so a component with overrides is discoverable without expanding.
-  const hasOverrides =
-    savedText(COMP_BASE_SCOPE).trim() !== "" ||
-    scopes.some((s) => s !== COMP_BASE_SCOPE && overridden(s));
-
   // Origin-tint inputs for the Effective view: the leaf paths this env's override
   // sets ("your {env}") — the DIFF of the editor vs the platform base — and the
   // developer's read-only all-envs overlay ("your all-envs").
@@ -5655,51 +5924,42 @@ function ComponentValuesPanel({
   const onInheritMany = (paths: string[][]) =>
     editScope((o) => paths.reduce((acc, p) => deleteAtPath(acc, p), o));
 
+  if (!open) return null;
   return (
-    <div className="mt-3">
-      {/* Values are on-demand: collapsed by default so a page of components isn't
-          cluttered with editors. */}
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
-      >
-        <span className={`transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
-        values
-        {hasOverrides && !open && (
-          <span className="ml-1 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-600">
-            overridden
-          </span>
-        )}
-      </button>
-      {open && (
-      <div className="mt-2">
+    <div className="mt-2">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        {/* Scope tabs: one per stable env (+ preview). No "all envs" tab. */}
-        <div className="flex flex-wrap gap-1">
-          {tabScopes.map((s) => (
+        {/* The env comes from the page's env widget (one selector); only the
+            preview band — which the widget can't express — toggles here.
+            Unsaved edits across envs still batch into ONE save: switch env
+            up top, edit, switch back — buffers persist per env. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-medium text-gray-600">
+            {scopeLabel(scope)}
+            {overridden(scope) ? " ●" : ""} values
+          </span>
+          {showPreview && !selectedIsPreview && (
             <button
-              key={s}
               type="button"
-              onClick={() => {
-                setScope(s);
-                setYamlError(null);
-              }}
-              className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                scope === s
-                  ? "bg-gray-900 text-white"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+              onClick={() => setPreviewBand((v) => !v)}
+              title={
+                scope === PREVIEW_SCOPE
+                  ? `Back to ${followedEnv ?? "the selected environment"}`
+                  : "Values applied to every preview, on top of the base env"
+              }
+              className={`rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                scope === PREVIEW_SCOPE
+                  ? "bg-indigo-600 text-white"
+                  : "border border-indigo-200 text-indigo-600 hover:bg-indigo-50"
               }`}
             >
-              {scopeLabel(s)}
-              {overridden(s) ? " ●" : ""}
-              {/* Unsaved edits on this tab — Save covers every marked tab. */}
-              {dirtyScopes.includes(s) && (
-                <span className={scope === s ? "text-amber-300" : "text-amber-500"}> •</span>
-              )}
+              Preview band
             </button>
-          ))}
+          )}
+          {dirtyScopes.length > 0 && (
+            <span className="text-[11px] text-amber-600">
+              unsaved: {dirtyScopes.map(scopeLabel).join(", ")}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {projectionActive && (
@@ -5914,8 +6174,6 @@ function ComponentValuesPanel({
             deploy.
           </p>
         </div>
-      )}
-      </div>
       )}
     </div>
   );
@@ -6228,13 +6486,11 @@ function EnvVarsTab({
   appName,
   environments,
   selectedEnvName,
-  onSelectEnv,
 }: {
   project: string;
   appName: string;
   environments: import("../types").AppEnvironmentSummary[];
   selectedEnvName: string | null;
-  onSelectEnv: (name: string) => void;
 }) {
   // Only non-preview environments are meaningful for per-env env-var overrides.
   // Sort by promotion order so stableEnvs[0] is the first stable env (the
@@ -6242,9 +6498,40 @@ function EnvVarsTab({
   const stableEnvs = environments
     .filter((e) => e.envType !== "preview")
     .sort((a, b) => a.order - b.order || a.envName.localeCompare(b.envName));
-  const activeEnv = selectedEnvName ?? stableEnvs[0]?.envName ?? null;
-  // Base env for the preview band — its items live in this env's vault.
-  const previewBandEnv = stableEnvs[0]?.envName ?? null;
+  // Scope-first layout: exactly ONE scope's sections render at a time. This
+  // page lives under Settings — configuration, outside the runtime env context
+  // (the pipeline widget renders env-unscoped above) — so its explicit scope
+  // bar is the single selector in this context. selectedEnvName only seeds the
+  // INITIAL scope; the app-wide scope (which reaches production) is never the
+  // silent default — entering it takes an explicit click.
+  const [scope, setScope] = useState<string>(() =>
+    selectedEnvName && stableEnvs.some((e) => e.envName === selectedEnvName)
+      ? selectedEnvName
+      : (stableEnvs[0]?.envName ?? "all"),
+  );
+  const activeEnv = scope !== "all" ? scope : null;
+
+  // The blast-radius gate for app-wide writes (the "invalid env value took
+  // down prod" incident): one deliberate confirm, only when production exists.
+  const hasProd = stableEnvs.some((e) => e.envType === "prod");
+  const stableEnvNames = stableEnvs.map((e) => e.envName).join(", ");
+
+  // Legacy all-previews band: the old single preview-vars band, still applied
+  // beneath each env's own preview band for back-compat. Surfaced (under the
+  // app-wide scope) only while it carries anything, so migrated apps stop
+  // seeing it.
+  const [hasLegacyPreviewVars, setHasLegacyPreviewVars] = useState(false);
+  useEffect(() => {
+    getAppEnvEnvConfig(project, appName, "preview")
+      .then((cfg) => setHasLegacyPreviewVars(Object.keys(cfg.vars ?? {}).length > 0))
+      .catch(() => setHasLegacyPreviewVars(false));
+  }, [project, appName]);
+  const confirmAllEnvs = hasProd
+    ? () =>
+        window.confirm(
+          `This applies to EVERY environment of ${appName}: ${stableEnvNames} — including production.\n\nSave?`,
+        )
+    : undefined;
 
   const fetchAppCfg = useCallback(
     () => getAppEnvConfig(project, appName),
@@ -6271,86 +6558,102 @@ function EnvVarsTab({
 
   return (
     <div className="space-y-6">
-      {/* App-level variables — always visible */}
-      <EnvConfigEditor
-        title="App-level variables"
-        description="Applied to this app in all environments. Overrides org, environment-type, and project defaults."
-        fetchFn={fetchAppCfg}
-        saveFn={saveAppCfg}
-      />
-      <SecretEditor
-        title="Global secrets"
-        description="App secrets that are the same in every environment (global scope). Overridden by env- and cluster-scoped secrets."
-        fetchFn={() => listAppGlobalSecretKeys(project, appName)}
-        upsertFn={(entries) => upsertAppGlobalSecrets(project, appName, entries)}
-        deleteFn={(key) => deleteAppGlobalSecretKey(project, appName, key)}
-      />
+      {/* Scope bar — the FIRST element, because scope is the one dimension
+          where a mistake reaches production. Env scopes are labeled "only";
+          "All environments" is last, amber, and never the default. */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-sm font-medium text-gray-700">Scope</span>
+        {stableEnvs.map((env) => (
+          <button
+            key={env.envName}
+            onClick={() => setScope(env.envName)}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+              scope === env.envName
+                ? "bg-gray-900 text-white"
+                : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            {env.envName} only
+          </button>
+        ))}
+        <button
+          onClick={() => setScope("all")}
+          title="Config applied to EVERY environment — including production"
+          className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+            scope === "all"
+              ? "bg-amber-600 text-white"
+              : "border border-amber-300 text-amber-700 hover:bg-amber-50"
+          }`}
+        >
+          All environments
+        </button>
+      </div>
+
+      {scope === "all" && (
+        <>
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+            Everything in this scope applies to{" "}
+            <strong>every environment</strong> of {appName}
+            {stableEnvNames ? ` (${stableEnvNames})` : ""}
+            {hasProd ? " — including production" : ""}. For a single
+            environment, use its scope above.
+          </div>
+          <EnvConfigEditor
+            title="App-level variables"
+            description={`Applied to this app in ALL environments${stableEnvNames ? ` (${stableEnvNames})` : ""}. Overrides org, environment-type, and project defaults.`}
+            fetchFn={fetchAppCfg}
+            saveFn={saveAppCfg}
+            confirmSave={confirmAllEnvs}
+          />
+          <SecretEditor
+            title="Global secrets"
+            description={`App secrets that are the same in EVERY environment${stableEnvNames ? ` (${stableEnvNames})` : ""}. Overridden by env- and cluster-scoped secrets.`}
+            fetchFn={() => listAppGlobalSecretKeys(project, appName)}
+            upsertFn={(entries) => upsertAppGlobalSecrets(project, appName, entries)}
+            deleteFn={(key) => deleteAppGlobalSecretKey(project, appName, key)}
+            confirmSave={confirmAllEnvs}
+          />
+          {hasLegacyPreviewVars && (
+            <EnvConfigEditor
+              title="Legacy all-previews variables (deprecated)"
+              description="Applied to EVERY preview regardless of its base env, beneath each env's own preview variables. Move these into the per-env 'Previews of …' sections and clear this band — it disappears once empty."
+              fetchFn={() => getAppEnvEnvConfig(project, appName, "preview")}
+              saveFn={(cfg) => updateAppEnvEnvConfig(project, appName, "preview", cfg)}
+            />
+          )}
+        </>
+      )}
 
       {/* Preview band — one config applied to every preview, layered on top of
           the base env. Stored as preview-scoped items inside the base env vault
           (no per-preview vault). */}
-      {previewBandEnv && (
-        <div className="space-y-4 rounded-lg border border-indigo-100 bg-indigo-50/30 p-4">
-          <p className="text-xs font-medium uppercase tracking-wider text-indigo-500">
-            Preview band — applies to every preview (base env: {previewBandEnv})
-          </p>
-          <EnvConfigEditor
-            key="appenv-preview"
-            title="Preview variables"
-            description="Variables applied to every preview of this app, on top of its base env. Overridden by per-preview values."
-            fetchFn={() => getAppEnvEnvConfig(project, appName, "preview")}
-            saveFn={(cfg) => updateAppEnvEnvConfig(project, appName, "preview", cfg)}
-          />
-          <SecretEditor
-            key="secrets-preview"
-            title="Preview secrets"
-            description={`Secrets applied to every preview, on top of the base env. Stored as the "${appName}-env-preview" item in the "${previewBandEnv}" env vault.`}
-            fetchFn={() =>
-              listAppPreviewSecretKeys(project, appName, previewBandEnv)
-            }
-            upsertFn={(entries) =>
-              upsertAppPreviewSecrets(project, appName, previewBandEnv, entries)
-            }
-            deleteFn={(key) =>
-              deleteAppPreviewSecretKey(project, appName, previewBandEnv, key)
-            }
-          />
-        </div>
+      {/* Per-environment section — the scope bar above picks the env, so no
+          inner picker. */}
+      {stableEnvs.length === 0 && (
+        <p className="text-sm text-gray-400 italic">
+          No stable environments found. Deploy the app first.
+        </p>
       )}
-
-      {/* Per-environment section */}
-      <div className="space-y-3">
-        <div className="flex items-center gap-3">
-          <span className="text-sm font-medium text-gray-700">Environment</span>
-          <div className="flex gap-1.5">
-            {stableEnvs.map((env) => (
-              <button
-                key={env.envName}
-                onClick={() => onSelectEnv(env.envName)}
-                className={`rounded-full px-3 py-0.5 text-xs font-medium transition-colors ${
-                  activeEnv === env.envName
-                    ? "bg-gray-900 text-white"
-                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                {env.envName}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {activeEnv ? (
+      {activeEnv && (
+        <div className="space-y-3">
           <>
+            <p className="text-xs text-gray-500">
+              Everything below applies to the{" "}
+              <span className="font-mono font-medium">{activeEnv}</span>{" "}
+              environment only.
+            </p>
+            {/* The scope pill already names the env — generic titles, with the
+                single contextual mention living in each description. */}
             <EnvConfigEditor
               key={`appenv-${activeEnv}`}
-              title={`"${activeEnv}" overrides`}
-              description={`Variables that apply only when the app runs in ${activeEnv}. Overrides all upper levels.`}
+              title="Variables"
+              description={`Apply only when the app runs in ${activeEnv}. Override all upper levels.`}
               fetchFn={fetchEnvCfg}
               saveFn={saveEnvCfg}
             />
             <SecretEditor
               key={`secrets-${activeEnv}`}
-              title={`"${activeEnv}" secrets`}
+              title="Secrets"
               description={`Secrets for the ${activeEnv} environment (env scope). Override global secrets; overridden by cluster-scoped secrets.`}
               fetchFn={() => listAppEnvSecretKeys(project, appName, activeEnv)}
               upsertFn={(entries) => upsertAppEnvSecrets(project, appName, activeEnv, entries)}
@@ -6363,6 +6666,35 @@ function EnvVarsTab({
               appName={appName}
               env={activeEnv}
             />
+            {/* Previews of THIS env: previews clone a base env, so their band
+                lives under it — vars via EnvironmentOverride.PreviewEnvConfig,
+                secrets as preview-scoped items in this env's vault. Previews of
+                staging and previews of production can differ. */}
+            <Disclosure title="Previews">
+              <div className="space-y-4">
+                <EnvConfigEditor
+                  key={`preview-vars-${activeEnv}`}
+                  title="Preview variables"
+                  description={`Applied to every preview whose base env is ${activeEnv}, on top of its own variables. Overridden by per-preview values.`}
+                  fetchFn={() => getAppPreviewEnvConfig(project, appName, activeEnv)}
+                  saveFn={(cfg) =>
+                    updateAppPreviewEnvConfig(project, appName, activeEnv, cfg)
+                  }
+                />
+                <SecretEditor
+                  key={`preview-secrets-${activeEnv}`}
+                  title="Preview secrets"
+                  description={`Applied to every preview whose base env is ${activeEnv}. Stored as the "${appName}-env-preview" item in the "${activeEnv}" env vault.`}
+                  fetchFn={() => listAppPreviewSecretKeys(project, appName, activeEnv)}
+                  upsertFn={(entries) =>
+                    upsertAppPreviewSecrets(project, appName, activeEnv, entries)
+                  }
+                  deleteFn={(key) =>
+                    deleteAppPreviewSecretKey(project, appName, activeEnv, key)
+                  }
+                />
+              </div>
+            </Disclosure>
             <ResolvedEnvPanel
               key={`resolved-${activeEnv}`}
               project={project}
@@ -6376,12 +6708,8 @@ function EnvVarsTab({
               envName={activeEnv}
             />
           </>
-        ) : (
-          <p className="text-sm text-gray-400 italic">
-            No stable environments found. Deploy the app first.
-          </p>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
