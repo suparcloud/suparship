@@ -1,17 +1,18 @@
 # Local DNS for suparship Development
 
-> **Optional — only needed for the ingress path.** The default Tilt dev loop
-> (`task up`) reaches every service via localhost port-forwards and needs **no**
-> DNS setup. You only need the wildcard DNS below if you opt into ingress with
-> `task up:ingress` (or the legacy `*.localhost:8880` routing). See
-> [contributor-guide/hacking-on-suparship.md](contributor-guide/hacking-on-suparship.md).
+> **`task dev:dns` automates all of this** — it's a no-op where `*.localhost`
+> already resolves (systemd-resolved distros: Ubuntu 18.04+, Fedora 33+
+> synthesize it natively), configures Homebrew dnsmasq on macOS, and dnsmasq
+> via apt/dnf on other Linux setups. This page is the reference for what it
+> does and the manual fallbacks. The ingress is part of the default `task up`,
+> so app URLs (`http://<app>.<env>.localhost`) depend on this resolving.
 
 Without wildcard DNS you need a manual `/etc/hosts` entry for every ingress
 hostname — which is unworkable for preview environments like
-`pr-123.hello.preview.localhost`.
+`pr-<n>.<app>.preview.localhost`.
 
 The solution is a local dnsmasq rule that resolves all `*.localhost` addresses
-to `127.0.0.1`.
+to `127.0.0.1` (unless your resolver already does it natively).
 
 ## macOS (automated)
 
@@ -105,26 +106,26 @@ sudo systemctl restart systemd-resolved
 ## Why `*.localhost` and not a custom TLD?
 
 suparship ingresses already use `*.localhost` hostnames (e.g. `argocd.localhost`,
-`gitea.localhost`, `hello-staging.localhost`). Keeping that convention means:
+`gitea.localhost`, `hello.staging.localhost`). Keeping that convention means:
 
 - No extra configuration when deploying to a real cluster (hostnames change
   to real domains).
 - Browsers treat `.localhost` as a secure context, so cookies work without
   HTTPS.
 - The pattern scales to preview environments:
-  `pr-123.hello.preview.localhost:8880`
+  `pr-<n>.<app>.preview.localhost`
 
 ## Port note
 
-The kind cluster maps `container:80 → host:8880` to avoid requiring root
-privileges. URLs therefore include `:8880` even after DNS is configured.
+The kind cluster maps ingress port 80 to **host port 80** (Docker's helper
+binds it unprivileged on macOS; on Linux the rootful docker daemon does), so
+URLs need no port suffix:
 
 ```
-http://argocd.localhost:8880
-http://gitea.localhost:8880
-http://pr-123.hello.preview.localhost:8880
+http://argocd.localhost
+http://gitea.localhost
+http://pr-<n>.<app>.preview.localhost
 ```
 
-If you want clean port-80 URLs, you can add a `pf` rule on macOS to forward
-`localhost:80 → localhost:8880` — but this is optional and requires sudo at
-boot.
+The legacy `:8880` mapping is kept alongside for muscle memory; both reach
+the same ingress.

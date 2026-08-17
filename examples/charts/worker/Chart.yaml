@@ -1,0 +1,15 @@
+apiVersion: v2
+name: worker
+description: >-
+  Production-ready background worker: headless Deployment (no Service) for
+  queue consumers and processors, with PodDisruptionBudget, optional HPA,
+  hardened pod security defaults, and a generous drain window for in-flight
+  work. Plain Helm — no platform dependencies.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - worker
+  - background
+maintainers:
+  - name: suparcloud

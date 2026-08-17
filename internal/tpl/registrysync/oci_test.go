@@ -170,7 +170,7 @@ func TestEngine_DispatchesByType(t *testing.T) {
 		RepoURL: "https://charts.example.com",
 		Chart:   "c",
 		Version: "1.0.0",
-	})
+	}, nil)
 	if res.Err == nil {
 		t.Fatal("expected dispatch error for unsupported source type")
 	}

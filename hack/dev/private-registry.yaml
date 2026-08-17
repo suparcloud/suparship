@@ -1,0 +1,124 @@
+# hack/dev/private-registry.yaml — an AUTHENTICATED local registry for dev.
+#
+# The ctlptl kind registry (localhost:5001 / kind-registry:5000) stays the
+# unauthenticated workhorse: Tilt pushes dev images through it and kind nodes
+# pull from it. This one is different — it stands in for a REAL private
+# registry (ghcr/ECR/Harbor) so credential flows can be exercised locally:
+# docker login, suparship registry settings with creds, Kargo warehouse auth.
+#
+# Login: admin / admin123 (the standard dev password — see
+# hack/dev/endpoints.sh). The htpasswd hash is a FIXED bcrypt of "admin123",
+# hardcoded for the same reason as the Kargo hash in the Tiltfile: generating
+# one per apply would churn the Secret on every reload. Regenerate with:
+#   htpasswd -nbBC 10 admin <pw> | sed 's/^\$2y\$/\$2a\$/'
+#
+# Reachable at:
+#   host:        localhost:5010 (Tilt port-forward; plain HTTP is fine —
+#                Docker treats localhost registries as insecure-allowed)
+#   in-cluster:  private-registry.registry.svc.cluster.local:5000
+#                (HTTP + basic auth)
+#
+# NOTE: kind nodes' containerd is NOT wired to trust this HTTP registry, so
+# cluster workloads can't pull images from it — it exists to test the
+# credential paths, not to serve workload images (kind-registry does that).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: registry
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-htpasswd
+  namespace: registry
+type: Opaque
+stringData:
+  # admin / admin123 (bcrypt, $2a$ prefix)
+  htpasswd: "admin:$2a$10$neYoAax4aaQRd6HyEdDf9uH0nMFdBJe8IktiNI9Utya59cTxGU96W"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-data
+  namespace: registry
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: private-registry
+  namespace: registry
+  labels:
+    app: private-registry
+spec:
+  replicas: 1
+  # The PVC is RWO on a single-node kind cluster: never surge a second pod.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: private-registry
+  template:
+    metadata:
+      labels:
+        app: private-registry
+    spec:
+      containers:
+        - name: registry
+          image: registry:2.8.3
+          ports:
+            - name: http
+              containerPort: 5000
+          env:
+            - name: REGISTRY_AUTH
+              value: htpasswd
+            - name: REGISTRY_AUTH_HTPASSWD_REALM
+              value: "suparship dev private registry"
+            - name: REGISTRY_AUTH_HTPASSWD_PATH
+              value: /auth/htpasswd
+            # Dev convenience: allow DELETE of manifests (GC-able).
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: auth
+              mountPath: /auth
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/registry
+          readinessProbe:
+            # TCP, not httpGet /v2/: that endpoint 401s without creds and
+            # kubelet treats any >= 400 as probe failure.
+            tcpSocket:
+              port: http
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: auth
+          secret:
+            secretName: registry-htpasswd
+        - name: data
+          persistentVolumeClaim:
+            claimName: registry-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: private-registry
+  namespace: registry
+  labels:
+    app: private-registry
+spec:
+  selector:
+    app: private-registry
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http

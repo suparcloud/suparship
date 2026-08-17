@@ -1,0 +1,89 @@
+# Default values for the gateway chart.
+#
+# A shared edge Gateway (Gateway API) that many apps route through. Deploy it
+# once per cluster, point wildcard DNS at its address, and let each app attach
+# its own HTTPRoute (allowedRoutes defaults to all namespaces below).
+#
+# Works with any Gateway API implementation (Envoy Gateway, Istio, Cilium,
+# NGINX Gateway Fabric, …) — set gatewayClassName to yours.
+
+# Required: the GatewayClass installed in your cluster (e.g. "eg" for
+# Envoy Gateway, "istio", "cilium", "nginx").
+gatewayClassName: eg
+
+# Gateway name (empty = release fullname).
+nameOverride: ""
+fullnameOverride: ""
+
+# The wildcard domain this edge serves, e.g. "apps.example.com". Used for the
+# default listeners' hostname ("*.<domain>") and the default certificate
+# dnsNames. Ignored by any listener you define explicitly.
+domain: example.com
+
+# Annotations on the Gateway. With cert-manager's gateway-shim enabled you can
+# alternatively drop the Certificate below and set:
+#   cert-manager.io/cluster-issuer: letsencrypt-prod
+annotations: {}
+
+# Attributes for the provisioned load balancer (implementation-specific), e.g.
+#   annotations:
+#     service.beta.kubernetes.io/aws-load-balancer-type: nlb
+infrastructure: {}
+
+# Listeners, passed through verbatim when set. Empty = a production default
+# pair derived from `domain`:
+#   http  :80  — kept open only for the HTTP→HTTPS redirect route
+#   https :443 — TLS terminated with the certificate below, routes allowed
+#                from every namespace
+listeners: []
+#  - name: http
+#    port: 80
+#    protocol: HTTP
+#    hostname: "*.apps.example.com"
+#    allowedRoutes:
+#      namespaces: { from: All }
+#  - name: https
+#    port: 443
+#    protocol: HTTPS
+#    hostname: "*.apps.example.com"
+#    tls:
+#      mode: Terminate
+#      certificateRefs:
+#        - name: edge-wildcard-tls
+#    allowedRoutes:
+#      namespaces: { from: All }
+
+# HTTP→HTTPS redirect: an HTTPRoute on the "http" listener returning 301 to
+# https. Disable if you terminate TLS upstream or need plain HTTP.
+httpsRedirect: true
+
+# cert-manager wildcard Certificate for the https listener.
+certificate:
+  enabled: true
+  # Secret the Gateway's https listener references (default listeners use it).
+  secretName: edge-wildcard-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  # Empty = ["*.<domain>", "<domain>"]. Wildcards require a DNS-01 solver on
+  # the issuer.
+  dnsNames: []
+
+# Extra HTTPRoutes rendered next to the Gateway — for routing to services that
+# aren't platform-managed apps (dashboards, legacy services, canaries). Rules
+# are passed through verbatim (Gateway API HTTPRouteRule schema).
+routes: []
+#  - name: grafana
+#    hostnames: ["grafana.apps.example.com"]
+#    sectionName: https
+#    rules:
+#      - backendRefs:
+#          - name: grafana
+#            namespace: monitoring
+#            port: 80
+# Cross-namespace backendRefs additionally need a ReferenceGrant in the
+# backend's namespace; see referenceGrants below.
+
+# ReferenceGrants rendered INTO the listed namespaces, allowing this chart's
+# HTTPRoutes to target Services there.
+referenceGrantNamespaces: []

@@ -41,6 +41,15 @@ configs:
   params:
     server.insecure: "true"
 
+  # ── Fixed dev admin password: admin123 ───────────────────────────────────
+  # bcrypt of "admin123" ($2a$ prefix — ArgoCD's Go bcrypt rejects $2y$),
+  # so the dev login is deterministic instead of the generated
+  # argocd-initial-admin-secret lookup. Same password as every other dev
+  # service (see hack/dev/endpoints.sh). Regenerate with:
+  #   htpasswd -nbBC 10 "" <pw> | cut -d: -f2 | sed 's/^\$2y\$/\$2a\$/'
+  secret:
+    argocdServerAdminPassword: "$2a$10$neYoAax4aaQRd6HyEdDf9uH0nMFdBJe8IktiNI9Utya59cTxGU96W"
+
   # ── RBAC ─────────────────────────────────────────────────────────────────
   # Explicit policy so the built-in admin account has full access to all
   # ArgoCD resources including applications in user-created AppProjects

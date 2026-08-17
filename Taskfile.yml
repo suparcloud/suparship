@@ -39,25 +39,32 @@ tasks:
   # hacking-on-suparship.md.
 
   up:
-    desc: "Start the full dev cluster with Tilt — cluster + prereqs + suparship (hot-reload). Tilt UI: http://localhost:10350"
+    desc: "Start the full dev cluster with Tilt — cluster + ingress (*.localhost) + Vault + registries + suparship (hot-reload). Tilt UI: http://localhost:10350"
     cmds:
       - hack/preflight.sh tilt
       - ctlptl apply -f hack/dev/cluster.yaml
+      - 'echo "Endpoints once resources go green (also on the endpoints resource in the Tilt UI):"'
+      - hack/dev/endpoints.sh
       - tilt up
 
-  up:ingress:
-    desc: "Like `task up`, plus NGINX ingress + *.localhost routing"
+  up:lean:
+    desc: "Like `task up` but without Vault and ingress (org backend = deprecated k8s; leanest loop)"
     cmds:
       - hack/preflight.sh tilt
       - ctlptl apply -f hack/dev/cluster.yaml
-      - tilt up -- --ingress
+      - 'echo "Endpoints once resources go green (also on the endpoints resource in the Tilt UI):"'
+      - SUPARSHIP_VAULT=0 SUPARSHIP_INGRESS=0 hack/dev/endpoints.sh
+      - tilt up -- --no-vault --no-ingress
+
+  up:ingress:
+    desc: "DEPRECATED alias of `task up` — ingress is on by default now"
+    cmds:
+      - task: up
 
   up:vault:
-    desc: "Like `task up`, plus a dev-mode HashiCorp Vault wired in as the org's secret backend"
+    desc: "DEPRECATED alias of `task up` — Vault is the default secrets backend now"
     cmds:
-      - hack/preflight.sh tilt
-      - ctlptl apply -f hack/dev/cluster.yaml
-      - tilt up -- --vault
+      - task: up
 
   up:multi:
     desc: "Like `task up`, plus kind-staging + kind-prod workload clusters (real multi-cluster; ~+2 GiB RAM)"
@@ -69,6 +76,8 @@ tasks:
       # here is a workload cluster — and the Tiltfile refuses to load unless the
       # context is the tooling cluster. Switch back explicitly.
       - kubectl config use-context kind-suparship-dev
+      - 'echo "Endpoints once resources go green (also on the endpoints resource in the Tilt UI):"'
+      - hack/dev/endpoints.sh
       - tilt up -- --multi
 
   down:
@@ -92,7 +101,7 @@ tasks:
   # does not own.
 
   dev:dns:
-    desc: "Set up wildcard *.localhost DNS via dnsmasq — macOS only, run once per machine (only needed for `task up:ingress`)"
+    desc: "Wildcard *.localhost → 127.0.0.1, once per machine (no-op where it already resolves; macOS + Ubuntu/Debian + RHEL/Fedora)"
     cmds:
       - hack/setup-dns.sh
 
@@ -169,6 +178,11 @@ tasks:
     desc: "Seed the color-app demo via the suparship API (requires a running server)"
     cmds:
       - hack/seed-color-app.sh
+
+  demo:shipnotes:
+    desc: "One command → working demo: mirror suparship-demo into Gitea, CI to the local registry, composed app (frontend+api+db) deployed to staging with previews + promotion wired"
+    cmds:
+      - hack/dev/demo-shipnotes.sh
 
   # ── Build & test ───────────────────────────────────────────────────────
 

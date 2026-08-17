@@ -132,7 +132,7 @@ Secrets, Replicator, Reloader), and deploy suparShip **in-cluster with
 hot-reload**. Edit `cmd/` or `internal/` and Tilt rebuilds in seconds; edit
 `ui/src` and Vite HMR updates the browser. Tilt UI is at
 <http://localhost:10350>; the app at <http://localhost:5173>
-(login `admin` / `devpass`).
+(login `admin@local` / `admin123`).
 
 The full walkthrough — prerequisites, port map, the inner loop, optional
 ingress, troubleshooting — lives in

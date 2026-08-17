@@ -10,6 +10,13 @@
 # ── Single replicas / minimal resources ──────────────────────────────────
 replicaCount: 1
 
+# Recreate, not RollingUpdate: sqlite + the level queue live on the one PVC,
+# and a surged replacement pod deadlocks on the old pod's leveldb lock
+# ("unable to lock level db at /data/queues/common") — the upgrade never
+# completes. Kill the old pod first; a moment of Gitea downtime is fine in dev.
+strategy:
+  type: Recreate
+
 # ── Disable unused components ────────────────────────────────────────────
 redis-cluster:
   enabled: false
@@ -42,6 +49,12 @@ gitea:
       # Publicly reachable URL — matches the ingress host + kind port mapping.
       ROOT_URL: "http://gitea.localhost:8880"
       HTTP_PORT: 3000
+    actions:
+      # Gitea Actions for the CI-driven golden path (shipnotes demo): the
+      # host-docker act_runner (Tilt resource `act-runner`) picks up jobs.
+      ENABLED: true
+      # Resolve unprefixed `uses:` actions (actions/checkout@v4) from GitHub.
+      DEFAULT_ACTIONS_URL: "https://github.com"
 
 # ── Bootstrap admin account ──────────────────────────────────────────────
 # Dev-only credentials. Clearly fake — do NOT use in production.

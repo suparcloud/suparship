@@ -1,0 +1,93 @@
+# Default values for the cronjob chart.
+#
+# A plain, production-ready CronJob. Defaults favor correctness for periodic
+# work: runs never overlap (Forbid), a missed window is skipped rather than
+# fired hours late (startingDeadlineSeconds), failures retry a bounded number
+# of times, and history is kept for debugging without unbounded growth.
+
+image:
+  # Demo image; set your own job image and command.
+  repository: busybox
+  tag: "stable"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Cron schedule (standard five-field syntax).
+schedule: "0 * * * *"
+# IANA time zone for the schedule (empty = cluster default, i.e. UTC).
+timeZone: ""
+# Pause the schedule without deleting the object.
+suspend: false
+
+# Never let two runs overlap; most periodic jobs are not concurrency-safe.
+concurrencyPolicy: Forbid
+# If the controller misses the window by more than this many seconds
+# (downtime, Forbid backlog), the run is skipped and COUNTS AS MISSED —
+# visible in events — instead of firing arbitrarily late.
+startingDeadlineSeconds: 300
+
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 5
+
+# Per-run retry budget before the Job is marked failed.
+backoffLimit: 2
+# Hard wall-clock cap per run; 0 leaves it unset.
+activeDeadlineSeconds: 0
+# Never (each retry = fresh pod, cleaner logs) or OnFailure.
+restartPolicy: Never
+
+# Override the image entrypoint (empty = image default). The demo default
+# prints a line and exits 0 so a fresh install visibly succeeds.
+command: ["sh", "-c", "echo \"job ran at $(date)\""]
+args: []
+
+# Environment variables as a map (rendered sorted for stable diffs).
+env: {}
+
+# envFrom sources by name. When deployed by a platform, point these at the
+# managed objects (e.g. ["((platform.configMapName))"]).
+envFrom:
+  configMaps: []
+  secrets: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # Defaults to the fullname when empty.
+  name: ""
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  # The busybox demo image has no non-root user baked in; a real job image
+  # should set its own USER and this can be dropped.
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+# Extra pod scheduling controls, passed through verbatim.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra volumes / mounts, passed through verbatim.
+volumes: []
+volumeMounts: []

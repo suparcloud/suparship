@@ -34,10 +34,18 @@ kindV1Alpha4Cluster:
           nodeRegistration:
             kubeletExtraArgs:
               node-labels: "ingress-ready=true"
-      # Pre-wire host ports so the OPTIONAL ingress path works without root:
-      #   http  -> http://localhost:8880   https -> https://localhost:8443
-      # (Default dev loop uses Tilt port-forwards and does not need these.)
+      # Pre-wire host ports for the ingress (default-on since ingress became
+      # part of plain `task up`):
+      #   http  -> http://localhost:80  (so app URLs like
+      #            http://<app>.<env>.localhost need no port suffix)
+      #   plus the legacy 8880/8443 pair kept for muscle memory and docs.
+      # Docker's helper binds 80 unprivileged on macOS/Linux Desktop engines.
+      # NOTE: changing these requires a cluster recreate
+      # (`task cluster:delete` && `task up`) — kind can't add mappings live.
       extraPortMappings:
+        - containerPort: 80
+          hostPort: 80
+          protocol: TCP
         - containerPort: 80
           hostPort: 8880
           protocol: TCP

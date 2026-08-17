@@ -14,7 +14,7 @@
 # Env:       staging
 # Namespace: hello-staging
 # Image:     nginx:alpine  (port 80, health at /)
-# Ingress:   http://hello.localhost:8880
+# Ingress:   http://hello.localhost
 #
 # Prerequisites:
 #   task up
@@ -27,7 +27,7 @@
 #   task demo:deploy
 set -euo pipefail
 
-GITEA_HOST_URL="http://gitea.localhost:8880"
+GITEA_HOST_URL="${GITEA_HOST_URL:-http://localhost:3000}"
 GITEA_ADMIN_USER="gitops"
 GITEA_ADMIN_PASS="gitops-dev-only"
 GITOPS_REPO_ORG="gitops"
@@ -165,7 +165,7 @@ Project:   ${PROJECT}
 Env:       ${ENV_NAME}
 Namespace: ${NAMESPACE}
 Image:     nginx:alpine
-Ingress:   http://hello.localhost:8880"
+Ingress:   http://hello.localhost"
 
   git push --quiet origin main
   ok "pushed ${APP_FILE}"
@@ -216,7 +216,7 @@ cat <<EOF
   Image      nginx:alpine
 
   App URL (requires /etc/hosts entry):
-    http://hello.localhost:8880
+    http://hello.localhost
 
   ArgoCD Application:
     kubectl get application ${APP_NAME}-${ENV_NAME} -n ${ARGOCD_NAMESPACE}

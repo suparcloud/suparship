@@ -35,8 +35,8 @@ ESO_VERSION="2.2.0"
 SEALED_SECRETS_VERSION="2.18.6"
 
 API="${SUPARSHIP_API:-http://localhost:8080}"
-USER="${SUPARSHIP_DEV_USER:-admin}"
-PASS="${SUPARSHIP_DEV_PASSWORD:-devpass}"
+USER="${SUPARSHIP_DEV_USER:-admin@local}"
+PASS="${SUPARSHIP_DEV_PASSWORD:-admin123}"
 
 info() { printf "  \033[0;36m%s\033[0m\n" "$*"; }
 ok()   { printf "  \033[0;32m✓\033[0m  %s\n" "$*"; }

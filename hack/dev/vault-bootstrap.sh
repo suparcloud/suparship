@@ -138,6 +138,21 @@ fi
 # Every later step authenticates with the generated root token.
 VAULT_DEV_TOKEN="${SUPARSHIP_VAULT_TOKEN:-$ROOT_TOKEN}"
 
+# ── 0b. Fixed dev login token: admin123 ────────────────────────────────────
+# The generated root token is unmemorable; mint a fixed root-policy token so
+# the Vault UI login matches every other dev service's password (see
+# hack/dev/endpoints.sh). Custom -id needs sudo — the root token has it.
+# DEV ONLY, obviously. Idempotent: skip if the token already resolves.
+FIXED_TOKEN="admin123"
+if vault_exec env VAULT_TOKEN="$FIXED_TOKEN" vault token lookup >/dev/null 2>&1; then
+  ok "fixed dev token '$FIXED_TOKEN' already exists"
+else
+  vault_exec env VAULT_TOKEN="$VAULT_DEV_TOKEN" \
+    vault token create -id="$FIXED_TOKEN" -policy=root -orphan >/dev/null \
+    || die "could not create fixed dev token"
+  ok "fixed dev token '$FIXED_TOKEN' created (root policy — Vault UI login)"
+fi
+
 # ── 1. KV v2 mount ─────────────────────────────────────────────────────────
 
 # `vault secrets enable` is not idempotent (errors on an existing mount), so
@@ -194,10 +209,36 @@ kubectl -n "$ESO_NS" create secret generic vault-token \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 ok "read-token Secret vault-token in $ESO_NS"
 
+# ── 3b. The unified ClusterSecretStore — dev shortcut for the seal pipeline ─
+# On a real install the per-cluster store arrives via the seal-and-publish
+# flow (paste a token in cluster settings → SealedSecret + store.yaml under
+# _secret-stores/{cluster}/). Dev has no pasted tokens and no sealing, so
+# app ExternalSecrets (which reference this fixed store name) would dangle
+# forever. Apply the store directly — same shape as
+# gitops.BuildVaultClusterSecretStoreYAML renders.
+kubectl apply -f - >/dev/null <<STORE
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: suparship-store
+spec:
+  provider:
+    vault:
+      server: ${VAULT_ADDR}
+      path: ${VAULT_MOUNT}
+      version: v2
+      auth:
+        tokenSecretRef:
+          name: vault-token
+          key: token
+          namespace: ${ESO_NS}
+STORE
+ok "ClusterSecretStore suparship-store → ${VAULT_ADDR} (mount '${VAULT_MOUNT}')"
+
 # ── 4. Point the org at the vault backend (API merge, not a CM rewrite) ────
 API="${SUPARSHIP_API:-http://localhost:8080}"
-USER="${SUPARSHIP_DEV_USER:-admin}"
-PASS="${SUPARSHIP_DEV_PASSWORD:-devpass}"
+USER="${SUPARSHIP_DEV_USER:-admin@local}"
+PASS="${SUPARSHIP_DEV_PASSWORD:-admin123}"
 
 COOKIE="$(curl -s -c - -X POST "$API/api/v1/auth/login" \
   -H 'Content-Type: application/json' \

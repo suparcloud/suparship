@@ -2,6 +2,12 @@
 
 suparship templates are the primary mechanism for creating and deploying **apps**. When a developer picks a template and fills in the form, suparship creates an **app** backed by that template's rendering configuration. The template does not create a raw Kubernetes Service or Deployment directly — it creates an app that suparship then renders into the appropriate GitOps manifests.
 
+> **You don't have to author a template to use suparship.** Plain Helm charts
+> registered through a chart source are imported as passthrough templates
+> automatically — see [Bring your own Helm charts](byo-charts.md) and the
+> production-ready starters in [`examples/charts/`](../examples/charts/).
+> This page is the reference for the optional authored-template layer.
+
 ## What a template creates
 
 A template creates an **app** — the primary user-facing deployment object in suparship. See [ADR-0001](adr/0001-app-as-primary-deployment-object.md) for the rationale behind the app-first model.

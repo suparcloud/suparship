@@ -93,6 +93,18 @@ task dev                      # backend (fake) on :8080 + UI on :5173
 Open the UI and sign in with **`admin@local` / `admin123`**. Details in
 [Local Fake Mode](#local-fake-mode-contributor-default).
 
+Want the real thing — a kind cluster with GitOps, CI, previews, and promotion,
+plus a **working demo app** to poke at? (macOS and Linux)
+
+```bash
+task dev:dns          # once per machine: *.localhost → 127.0.0.1 (no-op if it already resolves)
+task up               # full dev cluster (Tilt) — ingress, Vault, CI runner
+task demo:shipnotes   # second terminal: deploys the shipnotes demo end-to-end
+# → http://shipnotes-frontend.staging.localhost  (PR → preview, promote → prod)
+```
+
+The guided tour lives in [**docs/try-suparship.md**](docs/try-suparship.md).
+
 ### B. Install on a cluster (Helm)
 
 suparship runs in a **hub** cluster and deploys your apps there — or to registered
@@ -591,6 +603,8 @@ Significant design decisions are recorded as Architecture Decision Records (ADRs
 | [`docs/sso.md`](docs/sso.md) | OIDC single sign-on setup (Google Workspace, Okta, …) and group/team RBAC |
 | [`docs/acceptance.md`](docs/acceptance.md) | Golden-path acceptance: automated smoke test + manual real-cluster checklist |
 | [`docs/templates-components.md`](docs/templates-components.md) | How templates define component topology |
+| [`docs/try-suparship.md`](docs/try-suparship.md) | First-time tour: local cluster + the shipnotes demo end-to-end (macOS + Linux) |
+| [`docs/byo-charts.md`](docs/byo-charts.md) | Bring your own Helm charts — chart sources, `((platform.*))` tokens, UI-mapped developer values (+ [`examples/charts/`](examples/charts/)) |
 | [`docs/templates.md`](docs/templates.md) | Full template authoring reference |
 | [`docs/migration-app-model.md`](docs/migration-app-model.md) | Service → app migration guide |
 

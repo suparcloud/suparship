@@ -99,7 +99,7 @@ func TestSyncOne_ImportsChartsFromGitPath(t *testing.T) {
 		RepoURL: repoDir,
 		Ref:     "main",
 		Path:    "charts",
-	})
+	}, nil)
 	if res.Err != nil {
 		t.Fatalf("SyncOne returned error: %v", res.Err)
 	}
@@ -141,7 +141,7 @@ func TestSyncOne_RootPathIsValid(t *testing.T) {
 		RepoURL: repoDir,
 		Ref:     "main",
 		Path:    "",
-	})
+	}, nil)
 	if res.Err != nil {
 		t.Fatalf("SyncOne: %v", res.Err)
 	}
@@ -172,7 +172,7 @@ func TestSyncOne_PartialFailureKeepsGoing(t *testing.T) {
 		RepoURL: repoDir,
 		Ref:     "main",
 		Path:    "charts",
-	})
+	}, nil)
 
 	// Partial success: the good chart should land, the bad one should be
 	// surfaced via Err but not abort the loop.
@@ -193,7 +193,7 @@ func TestSyncOne_BadRepoURL(t *testing.T) {
 		RepoURL: "/nonexistent/path/to/repo",
 		Ref:     "main",
 		Path:    "charts",
-	})
+	}, nil)
 	if res.Err == nil {
 		t.Fatal("expected error for missing repo")
 	}
@@ -242,7 +242,7 @@ func TestSyncOne_ImportsExternalTemplateWithoutChartDir(t *testing.T) {
 		RepoURL: repoDir,
 		Ref:     "main",
 		Path:    "templates",
-	})
+	}, nil)
 	if res.Err != nil {
 		t.Fatalf("SyncOne returned error: %v", res.Err)
 	}
@@ -297,7 +297,7 @@ spec:
 	eng := &registrysync.Engine{Client: client}
 	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
 		Name: "demo", RepoURL: repoDir, Ref: "main", Path: "templates",
-	})
+	}, nil)
 	// Top-level err carries the most-recent partial err — but the valid
 	// template still imports.
 	if res.Err == nil {
@@ -325,7 +325,7 @@ func TestSyncOne_MixedInlineAndExternal(t *testing.T) {
 	eng := &registrysync.Engine{Client: client}
 	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
 		Name: "demo", RepoURL: repoDir, Ref: "main", Path: "templates",
-	})
+	}, nil)
 	if res.Err != nil {
 		t.Fatalf("SyncOne: %v", res.Err)
 	}
@@ -388,7 +388,7 @@ func TestSyncOne_GitCharts(t *testing.T) {
 		Type:    tpl.SourceTypeGitCharts,
 		RepoURL: repoDir,
 		Ref:     "main",
-	})
+	}, nil)
 	if res.Err != nil {
 		t.Fatalf("SyncOne returned error: %v", res.Err)
 	}
@@ -426,5 +426,85 @@ func TestSyncOne_GitCharts(t *testing.T) {
 	}
 	if len(bar.Spec.Inputs) != 1 || bar.Spec.Inputs[0].Name != "greeting" {
 		t.Errorf("bar should keep its authored input, got %+v", bar.Spec.Inputs)
+	}
+}
+
+// TestSyncOne_CollisionGuard verifies the template-name collision guard:
+// names are global, so a synced chart shadowing a disk built-in or a
+// template owned by ANOTHER source is skipped (with an error naming the
+// owner), while names this source already owns re-sync normally.
+func TestSyncOne_CollisionGuard(t *testing.T) {
+	requireGit(t)
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, "charts/worker/Chart.yaml"),
+		"apiVersion: v2\nname: worker\nversion: 1.0.0\n")
+	writeFile(t, filepath.Join(repoDir, "charts/web/Chart.yaml"),
+		"apiVersion: v2\nname: web\nversion: 1.0.0\n")
+	writeFile(t, filepath.Join(repoDir, "charts/mine/Chart.yaml"),
+		"apiVersion: v2\nname: mine\nversion: 1.0.0\n")
+	gitCommit(t, repoDir, "initial")
+
+	client := k8sfake.NewClientset()
+	eng := &registrysync.Engine{Client: client, Builtins: []string{"worker"}}
+	reg := &tpl.TemplateRegistry{Sources: []tpl.TemplateSource{
+		// "web" belongs to a different source → conflict.
+		{Name: "web", Origin: "external", ExternalRepo: "other-source"},
+		// "mine" was previously synced by THIS source → re-sync allowed.
+		{Name: "mine", Origin: "external", ExternalRepo: "demo"},
+	}}
+
+	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
+		Name:    "demo",
+		Type:    "gitcharts",
+		RepoURL: repoDir,
+		Ref:     "main",
+	}, reg)
+
+	if len(res.Templates) != 1 || res.Templates[0] != "mine" {
+		t.Fatalf("expected only [mine] imported, got %v", res.Templates)
+	}
+	if res.Err == nil {
+		t.Fatal("expected a conflict error surfaced on the result")
+	}
+	// Skipped charts must not be persisted.
+	for _, name := range []string{"worker", "web"} {
+		if _, err := client.CoreV1().ConfigMaps("suparship-system").Get(
+			context.Background(), "suparship-template-"+name, metav1.GetOptions{}); err == nil {
+			t.Errorf("conflicting template %s was persisted; guard failed", name)
+		}
+	}
+	if _, err := client.CoreV1().ConfigMaps("suparship-system").Get(
+		context.Background(), "suparship-template-mine", metav1.GetOptions{}); err != nil {
+		t.Errorf("non-conflicting template mine should be persisted: %v", err)
+	}
+}
+
+// TestSyncOne_CollisionGuard_NilRegistry: a nil registry disables source
+// ownership checks (nothing to consult) but built-ins stay protected.
+func TestSyncOne_CollisionGuard_NilRegistry(t *testing.T) {
+	requireGit(t)
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, "charts/cronjob/Chart.yaml"),
+		"apiVersion: v2\nname: cronjob\nversion: 1.0.0\n")
+	gitCommit(t, repoDir, "initial")
+
+	client := k8sfake.NewClientset()
+	eng := &registrysync.Engine{Client: client, Builtins: []string{"cronjob"}}
+	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
+		Name:    "demo",
+		Type:    "gitcharts",
+		RepoURL: repoDir,
+		Ref:     "main",
+	}, nil)
+
+	if len(res.Templates) != 0 {
+		t.Fatalf("expected no templates imported, got %v", res.Templates)
+	}
+	if res.Err == nil {
+		t.Fatal("expected a conflict error for the built-in name")
 	}
 }

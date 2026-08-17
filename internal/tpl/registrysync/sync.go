@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -66,18 +67,33 @@ type Engine struct {
 	// CloneDepth caps the git clone depth to keep transfers small. Zero
 	// means full history (only useful for branches that move quickly).
 	CloneDepth int
+	// Builtins lists the names of the disk-loaded built-in templates
+	// (--templates-dir). Template names are global, so a synced chart whose
+	// name matches a built-in would silently shadow it; the sync guard skips
+	// such charts instead. Retired built-ins stay listed (and stay protected)
+	// — retirement disables new apps, it doesn't free the name.
+	Builtins []string
 }
 
 // SyncOne pulls one external repo at its pinned Ref, packages every chart
 // found under repo.Path, and persists each as a cluster template ConfigMap.
 //
+// reg (optional, nil-safe) supplies template ownership for the collision
+// guard: template names are global, and without the guard two sources
+// shipping same-named charts overwrite each other's latest pointer on every
+// sync interval — a silent flip-flop. A chart whose name is owned by a
+// DIFFERENT source (per reg.Sources) or by a disk built-in (Engine.Builtins)
+// is skipped with an error naming the owner; names this source already owns
+// re-sync normally.
+//
 // Returns SyncResult.Err only for catastrophic failures (clone failed, no
 // directory at Path, etc.). Per-chart failures are logged and the loop
 // continues — partial syncs are better than all-or-nothing because one
 // broken Chart.yaml in a multi-chart repo shouldn't block the rest.
-func (e *Engine) SyncOne(ctx context.Context, repo tpl.ExternalTemplateRepo) SyncResult {
+func (e *Engine) SyncOne(ctx context.Context, repo tpl.ExternalTemplateRepo, reg *tpl.TemplateRegistry) SyncResult {
 	res := SyncResult{SourceName: repo.Name, SyncedAt: time.Now().UTC()}
 	logger := e.logger()
+	owners := e.templateOwners(repo, reg)
 
 	// Phase 1 — fetch: route to the right fetcher based on source type.
 	// Per-template parse failures land in result.PartialErrs;
@@ -108,6 +124,19 @@ func (e *Engine) SyncOne(ctx context.Context, repo tpl.ExternalTemplateRepo) Syn
 	// kube.SaveTemplate accepts nil chartTGZ for templates whose chart
 	// is shipped out-of-band (today: never; future: registry-ref mode).
 	for _, rt := range result.Templates {
+		if owner, taken := owners[rt.Template.Metadata.Name]; taken {
+			err := fmt.Errorf("chart %q not imported: the template name is already provided by %s — rename the chart or remove the conflicting template",
+				rt.Template.Metadata.Name, owner)
+			logger.Warn("registrysync: template name conflict; skipping",
+				"source", repo.Name,
+				"template", rt.Template.Metadata.Name,
+				"owner", owner,
+			)
+			// Join rather than overwrite so a multi-conflict sync surfaces
+			// every skipped chart, not just the last one.
+			res.Err = errors.Join(res.Err, err)
+			continue
+		}
 		if err := kube.SaveTemplate(ctx, e.Client, rt.Template, rt.ChartBytes); err != nil {
 			logger.Warn("registrysync: persist template failed; skipping",
 				"source", repo.Name,
@@ -123,6 +152,29 @@ func (e *Engine) SyncOne(ctx context.Context, repo tpl.ExternalTemplateRepo) Syn
 	return res
 }
 
+// templateOwners maps every template name this source must NOT claim to a
+// human-readable owner: disk built-ins first, then names the registry
+// attributes to a different source. Names already owned by repo itself are
+// excluded so re-syncs proceed. Wizard-imported templates (cluster-stored,
+// no registry row) are not protected here — they're admin-authored and have
+// no owner record to check against.
+func (e *Engine) templateOwners(repo tpl.ExternalTemplateRepo, reg *tpl.TemplateRegistry) map[string]string {
+	owners := make(map[string]string, len(e.Builtins))
+	if reg != nil {
+		for _, s := range reg.Sources {
+			if s.ExternalRepo != "" && s.ExternalRepo != repo.Name {
+				owners[s.Name] = fmt.Sprintf("source %q", s.ExternalRepo)
+			}
+		}
+	}
+	// Built-ins last so a (mis)claimed built-in name still reports as
+	// built-in — that's the stronger, more actionable owner.
+	for _, n := range e.Builtins {
+		owners[n] = "the built-in templates"
+	}
+	return owners
+}
+
 // SyncAll fans out across every ExternalTemplateRepo in the registry and
 // returns one SyncResult per source. Callers are expected to fold the
 // results back into reg.Sources via ApplyResult before persisting.
@@ -132,7 +184,7 @@ func (e *Engine) SyncAll(ctx context.Context, reg *tpl.TemplateRegistry) []SyncR
 	}
 	out := make([]SyncResult, 0, len(reg.External))
 	for _, repo := range reg.External {
-		out = append(out, e.SyncOne(ctx, repo))
+		out = append(out, e.SyncOne(ctx, repo, reg))
 	}
 	return out
 }

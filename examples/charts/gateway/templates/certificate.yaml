@@ -1,0 +1,18 @@
+{{- if .Values.certificate.enabled }}
+{{- $dnsNames := .Values.certificate.dnsNames | default (list (printf "*.%s" .Values.domain) .Values.domain) }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.certificate.secretName }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.certificate.secretName }}
+  issuerRef:
+    name: {{ .Values.certificate.issuerRef.name }}
+    kind: {{ .Values.certificate.issuerRef.kind }}
+  dnsNames:
+    {{- range $dnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+{{- end }}

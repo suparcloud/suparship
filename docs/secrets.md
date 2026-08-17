@@ -182,7 +182,7 @@ model with a different provider stanza.
    plain TTL and rotate by re-pasting before expiry — **not** `-period`
    tokens, which expire unless actively renewed and nothing in this pipeline
    renews them. Leave Vault's `default` policy attached: suparship's connection
-   probe is a token self-lookup, which `default` grants. (In the `task up:vault`
+   probe is a token self-lookup, which `default` grants. (In the `task up`
    dev loop both tokens are simply Vault's generated root token, stashed in
    `vault/vault-dev-keys` — convenient, and deliberately not least-privilege.)
 4. **Settings → Secrets Backend → HashiCorp Vault**: enter the server address

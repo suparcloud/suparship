@@ -423,7 +423,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			// routes per-app files to envs-external/... and skips the
 			// charts/ extract step. Inline-mode templates pass through
 			// unchanged.
-			pubCfg.TemplateLoader = templateLoaderFromClient(kubeClient)
+			pubCfg.TemplateLoader = publisherTemplateLoader(templates, kubeClient)
 			// The secret backend decides which ClusterSecretStore every app's
 			// ExternalSecret names, and whether Vault remoteRef keys carry their
 			// container path. Read it LIVE rather than snapshotting at boot: the
@@ -607,7 +607,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				SyncAutomated:     true,
 				TemplatesDir:      templatesDir,
 				ChartFetcher:      chartFetcherFromClient(kubeClient),
-				TemplateLoader:    templateLoaderFromClient(kubeClient),
+				TemplateLoader:    publisherTemplateLoader(templates, kubeClient),
 			})
 			if err != nil {
 				return fmt.Errorf("rebuild gitops publisher: %w", err)
@@ -649,7 +649,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		OrgProvider:           orgProvider,
 		Templates:             templates,
 		ClusterTemplateLoader: clusterTemplateLoaderFromClient(kubeClient),
-		RegistrySyncEngine:    registrySyncEngine(kubeClient, logger),
+		RegistrySyncEngine:    registrySyncEngine(kubeClient, logger, builtinTemplateNames(templates)),
 		ProjectStore:          projectStore,
 		TokenStore:            tokenStore,
 		RuntimeProvider:       runtimeProvider,
@@ -701,7 +701,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	startPeriodicTemplateSync(
 		cmd.Context(),
-		registrySyncEngine(kubeClient, logger),
+		registrySyncEngine(kubeClient, logger, builtinTemplateNames(templates)),
 		templateRegistryStore,
 		logger,
 	)
@@ -2689,8 +2689,10 @@ func envConfigReaderFromClient(client kubernetes.Interface, brand branding.Confi
 
 // registrySyncEngine builds the external-template sync engine, or returns
 // nil when the cluster client is unavailable (fake/local-dev mode). Kept
-// in a helper so the wiring at server.New stays narrow.
-func registrySyncEngine(client kubernetes.Interface, logger *slog.Logger) *registrysync.Engine {
+// in a helper so the wiring at server.New stays narrow. builtins carries the
+// disk built-in template names so the sync collision guard can refuse
+// external charts that would shadow them.
+func registrySyncEngine(client kubernetes.Interface, logger *slog.Logger, builtins []string) *registrysync.Engine {
 	if client == nil {
 		return nil
 	}
@@ -2698,7 +2700,21 @@ func registrySyncEngine(client kubernetes.Interface, logger *slog.Logger) *regis
 		Client:     client,
 		Logger:     logger,
 		CloneDepth: 1,
+		Builtins:   builtins,
 	}
+}
+
+// builtinTemplateNames extracts the names of the disk-loaded built-in
+// templates (empty when running without --templates-dir — cluster templates
+// are served live and are NOT built-ins).
+func builtinTemplateNames(templates []*tpl.Template) []string {
+	names := make([]string, 0, len(templates))
+	for _, t := range templates {
+		if t != nil {
+			names = append(names, t.Metadata.Name)
+		}
+	}
+	return names
 }
 
 // templateCredStore wires the SealedSecret-backed credentials writer for
@@ -2900,4 +2916,43 @@ func templateLoaderFromClient(client kubernetes.Interface) gitops.TemplateLoader
 		return nil
 	}
 	return &kubeTemplateLoader{client: client}
+}
+
+// diskFirstTemplateLoader resolves templates with the SAME precedence the
+// serving path uses: disk built-ins (--templates-dir) first, cluster
+// ConfigMaps second. The publisher previously consulted only the cluster
+// loader, so an app created from a disk template published with the
+// component-key fallback (values emitted under the component's user-facing
+// name instead of the chart's canonical key) — the chart then silently
+// rendered no ingress/env for that component.
+type diskFirstTemplateLoader struct {
+	disk map[string]*tpl.Template
+	next gitops.TemplateLoader
+}
+
+func (l *diskFirstTemplateLoader) LoadTemplate(ctx context.Context, name string) (*tpl.Template, error) {
+	if t, ok := l.disk[name]; ok {
+		return t, nil
+	}
+	if l.next != nil {
+		return l.next.LoadTemplate(ctx, name)
+	}
+	return nil, fmt.Errorf("template %q not found", name)
+}
+
+// publisherTemplateLoader builds the publisher's template loader from the
+// disk-loaded built-ins plus the cluster loader. Returns nil when neither
+// exists (fake mode) so callers keep the inline-only behaviour.
+func publisherTemplateLoader(templates []*tpl.Template, client kubernetes.Interface) gitops.TemplateLoader {
+	next := templateLoaderFromClient(client)
+	if len(templates) == 0 {
+		return next
+	}
+	disk := make(map[string]*tpl.Template, len(templates))
+	for _, t := range templates {
+		if t != nil {
+			disk[t.Metadata.Name] = t
+		}
+	}
+	return &diskFirstTemplateLoader{disk: disk, next: next}
 }

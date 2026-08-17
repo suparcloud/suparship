@@ -1,0 +1,16 @@
+apiVersion: v2
+name: gateway
+description: >-
+  Standalone edge routing: a Gateway API Gateway (shared entry point for many
+  apps), an optional cert-manager wildcard Certificate, an HTTP→HTTPS redirect
+  route, and optional extra HTTPRoutes. Deploy once per cluster; app charts
+  attach their own HTTPRoutes to it. Plain Helm — no platform dependencies.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - gateway
+  - routing
+  - gateway-api
+maintainers:
+  - name: suparcloud

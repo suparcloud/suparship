@@ -31,10 +31,19 @@ data:
         activeClusterRef: prod-cluster
         baseDomain: localhost
         namespacePattern: "{app}-{env}"
+    # Without routing profiles, exposed components silently render NO Ingress
+    # (helmvalues.resolveIngress drops the route on an unknown profile), so a
+    # freshly created app has no URL at all. The dev loop runs the NGINX
+    # ingress by default, plain HTTP — so wire both tiers to it.
+    routingProfiles:
+      external:
+        ingressClassName: nginx
+      internal:
+        ingressClassName: nginx
     teams:
       - name: admins
         displayName: Administrators
-        members: [admin]
+        members: [admin, admin@local]
     roleBindings:
       - project: "*"
         team: admins

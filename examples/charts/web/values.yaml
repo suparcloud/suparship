@@ -1,0 +1,144 @@
+# Default values for the web chart.
+#
+# A plain, production-ready web service. Every key here is ordinary Helm —
+# nothing platform-specific. Defaults favor safety: non-root, zero-downtime
+# rollouts, a PodDisruptionBudget, and probes on by default.
+
+replicaCount: 2
+
+image:
+  # Unprivileged demo image so the chart runs out of the box as non-root.
+  # Set your own image; port 8080 matches containerPort below.
+  repository: nginxinc/nginx-unprivileged
+  tag: "stable"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Override the image entrypoint (empty = image default).
+command: []
+args: []
+
+# TCP port the container listens on.
+containerPort: 8080
+
+# Environment variables as a map (rendered sorted for stable diffs).
+env: {}
+
+# envFrom sources by name. When deployed by a platform, point these at the
+# managed objects (e.g. ["((platform.configMapName))"]).
+envFrom:
+  configMaps: []
+  secrets: []
+
+service:
+  type: ClusterIP
+  port: 80
+
+# HTTP probes; livenessProbe/readinessProbe/startupProbe below override
+# the generated spec wholesale when set.
+healthCheck:
+  path: /
+livenessProbe: {}
+readinessProbe: {}
+startupProbe: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  path: /
+  pathType: Prefix
+  # Additional hosts routed to the same service.
+  extraHosts: []
+  tls:
+    enabled: true
+    # Defaults to "<fullname>-tls" when empty.
+    secretName: ""
+    # Sets the cert-manager.io/cluster-issuer annotation when non-empty.
+    clusterIssuer: ""
+
+# Gateway API alternative to Ingress (both can be enabled during migration).
+httpRoute:
+  enabled: false
+  annotations: {}
+  hostnames: []
+  # Gateway(s) to attach to.
+  parentRefs: []
+  #  - name: edge
+  #    namespace: gateways
+  #    sectionName: https
+  # Full HTTPRoute rules override; when empty a single PathPrefix "/" rule
+  # to this chart's Service is rendered.
+  rules: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  # 0 disables the memory metric.
+  targetMemoryUtilizationPercentage: 0
+
+# Keep rollouts and node drains from taking the whole service down.
+# maxUnavailable (never minAvailable) so a single-replica release can still
+# be drained.
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+# Zero-downtime rollout: surge a new pod before taking one away.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 0
+
+# Graceful shutdown: keep serving while load balancers drop the pod from
+# rotation (0 disables the preStop sleep). terminationGracePeriodSeconds
+# must exceed the sleep plus the app's own drain time.
+preStopSleepSeconds: 5
+terminationGracePeriodSeconds: 30
+
+revisionHistoryLimit: 3
+priorityClassName: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # Defaults to the fullname when empty.
+  name: ""
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+# Extra pod scheduling controls, passed through verbatim.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# Extra volumes / mounts, passed through verbatim.
+volumes: []
+volumeMounts: []

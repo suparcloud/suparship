@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hack/dev/admin-secret.sh — create the dev admin Secret the suparship chart
-# expects (it does not create it). Login becomes:  admin / devpass
+# expects (it does not create it). Login becomes:  admin@local / admin123 (same as fake mode)
 #
 # `suparship admin bootstrap` generates a RANDOM password, so it can't give a
 # fixed dev login — we derive the bcrypt hash deterministically here.
@@ -17,8 +17,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 require_dev_context
 
 NS="${SUPARSHIP_SYSTEM_NAMESPACE:-suparship-system}"
-USER="${SUPARSHIP_DEV_USER:-admin}"
-PW="${SUPARSHIP_DEV_PASSWORD:-devpass}"
+USER="${SUPARSHIP_DEV_USER:-admin@local}"
+PW="${SUPARSHIP_DEV_PASSWORD:-admin123}"
 SECRET_NAME="suparship-admin-auth"
 
 if ! command -v htpasswd >/dev/null 2>&1; then

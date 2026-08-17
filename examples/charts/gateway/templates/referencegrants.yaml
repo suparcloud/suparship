@@ -1,0 +1,20 @@
+{{- range .Values.referenceGrantNamespaces }}
+---
+# Allows this chart's HTTPRoutes (in {{ $.Release.Namespace }}) to target
+# Services in {{ . }}.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ include "gateway.fullname" $ }}-routes
+  namespace: {{ . }}
+  labels:
+    {{- include "gateway.labels" $ | nindent 4 }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: {{ $.Release.Namespace }}
+  to:
+    - group: ""
+      kind: Service
+{{- end }}

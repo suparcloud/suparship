@@ -1,0 +1,16 @@
+apiVersion: v2
+name: postgres
+description: >-
+  Small single-instance PostgreSQL for dev/demo stacks: Deployment (Recreate)
+  + PVC + Service, demo credentials via values, pg_isready probes. Plain Helm
+  — no platform dependencies. Mark the component STATEFUL when composing it
+  into an app so it gets its own prune-safe Application. Not an HA database —
+  bring an operator or managed Postgres for production data.
+type: application
+version: 0.1.0
+appVersion: "16"
+keywords:
+  - postgres
+  - database
+maintainers:
+  - name: suparcloud

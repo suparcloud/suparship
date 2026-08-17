@@ -30,18 +30,32 @@ if k8s_context() != EXPECTED_CONTEXT:
           "Create/select the dev cluster first:  ctlptl apply -f hack/dev/cluster.yaml  (or run `task up`).")
          % (k8s_context(), EXPECTED_CONTEXT))
 
-# ── Config: optional ingress + *.localhost routing, optional workload clusters ─
+# ── Config: ingress + vault on by default, optional workload clusters ─────
+# --ingress / --vault are accepted for muscle-memory back-compat but are now
+# the defaults; --no-ingress / --no-vault opt out for the leanest loop.
 config.define_bool('ingress')
+config.define_bool('no-ingress')
 config.define_bool('multi')
 config.define_bool('vault')
+config.define_bool('no-vault')
 cfg = config.parse()
-INGRESS = cfg.get('ingress', False) or os.getenv('SUPARSHIP_INGRESS') == '1'
+# INGRESS (NGINX + *.localhost routing) is ON BY DEFAULT: without it no app
+# has a browsable URL, which made every first-run demo a port-forward hunt.
+# The kind cluster maps host port 80, so http://<app>.<env>.localhost just
+# works once `task dev:dns` has run (one-time, macOS; docs/local-dns.md for
+# Linux). Opt out with --no-ingress / SUPARSHIP_INGRESS=0.
+INGRESS = not (cfg.get('no-ingress', False) or os.getenv('SUPARSHIP_INGRESS') == '0')
 # MULTI adds two kind WORKLOAD clusters (kind-staging, kind-prod) and rebinds the
 # seeded environments onto them, so the tooling/workload split is real. Off by
 # default: it costs a couple of GiB, and nothing about UI or API work needs it.
 MULTI = cfg.get('multi', False) or os.getenv('SUPARSHIP_MULTI') == '1'
-# VAULT adds a HashiCorp Vault and switches the org's secret backend to it, for
-# working on the vault secrets backend. Off by default. Composes with --multi.
+# VAULT adds a HashiCorp Vault and switches the org's secret backend to it.
+# ON BY DEFAULT: Vault is the recommended production backend and the k8s
+# backend is deprecated (demo-only; its ClusterSecretStores never reach the
+# --multi workload clusters, so ExternalSecrets there would never resolve).
+# Defaulting keeps the dev loop on the same secrets path as a real install.
+# Opt out with `--no-vault` (or SUPARSHIP_VAULT=0) for the leanest loop.
+# Composes with --multi.
 #
 # The Vault it brings up PERSISTS: standalone mode with file storage on a PVC, so
 # secrets you enter survive a pod restart, a `tilt down`/`tilt up`, and an image
@@ -53,10 +67,12 @@ MULTI = cfg.get('multi', False) or os.getenv('SUPARSHIP_MULTI') == '1'
 # The cost of persistence is that Vault is no longer auto-unsealed: it comes up
 # uninitialised the first time and SEALED after every restart, so vault-bootstrap
 # does init + unseal (see hack/dev/vault-bootstrap.sh).
-VAULT = cfg.get('vault', False) or os.getenv('SUPARSHIP_VAULT') == '1'
+VAULT = not (cfg.get('no-vault', False) or os.getenv('SUPARSHIP_VAULT') == '0')
 
-# Host-reachable Gitea URL the init script clones from.
-GITEA_HOST_URL = 'http://gitea.localhost:8880' if INGRESS else 'http://localhost:3000'
+# Host-reachable Gitea URL the init script clones from. Always the Tilt
+# port-forward: the ingress URL would drag the one-time dnsmasq setup into
+# the git-init path now that ingress defaults on.
+GITEA_HOST_URL = 'http://localhost:3000'
 
 # ── Helm repos ─────────────────────────────────────────────────────────────
 helm_repo('jetstack',   'https://charts.jetstack.io', labels=['prereq'])
@@ -112,8 +128,8 @@ helm_resource(
 #   api.tls.enabled=false      plain HTTP over the port-forward, no cert warning.
 #                              cert-manager is still required and still used:
 #                              Kargo's webhook servers keep their Certificates.
-#   api.adminAccount.*         login admin / devpass. The hash is a FIXED dev
-#                              bcrypt of "devpass" — hardcoded on purpose, since
+#   api.adminAccount.*         login admin / admin123 (password-only). Hash is a FIXED
+#                              bcrypt of "admin123" — hardcoded on purpose, since
 #                              generating one per Tiltfile load would change the
 #                              Helm value every reload and churn the release.
 #                              htpasswd emits $2y$, which Go's bcrypt rejects, so
@@ -123,7 +139,7 @@ helm_resource(
 # Dev-only credentials, never reachable off localhost. Override the password by
 # regenerating the hash:
 #   htpasswd -nbBC 10 "" <pw> | cut -d: -f2 | sed 's/^\$2y\$/\$2a\$/'
-KARGO_ADMIN_PASSWORD_HASH = '$2a$10$6NDmBYvv6UZvUOERfebonupDuqNVUr8Y5Tj6pgYwODQcaXsYttaJq'
+KARGO_ADMIN_PASSWORD_HASH = '$2a$10$neYoAax4aaQRd6HyEdDf9uH0nMFdBJe8IktiNI9Utya59cTxGU96W'
 helm_resource(
     'kargo', 'oci://ghcr.io/akuity/kargo-charts/kargo', namespace='kargo',
     flags=['--create-namespace', '--version=1.9.5',
@@ -161,7 +177,7 @@ local_resource(
                'kubectl --context %s -n kargo port-forward deploy/kargo-api 8083:8080; ' % EXPECTED_CONTEXT +
                'echo "port-forward dropped (pod replaced?) — reconnecting in 2s"; sleep 2; done'),
     resource_deps=['kargo'],
-    links=[link('http://localhost:8083', 'Kargo UI (admin / devpass)')],
+    links=[link('http://localhost:8083', 'Kargo UI (password: admin123)')],
     labels=['prereq'],
 )
 
@@ -176,7 +192,7 @@ local_resource(
     resource_deps=['external-secrets', 'namespaces'], labels=['prereq'],
 )
 
-# ── Optional: HashiCorp Vault secrets backend (`task up:vault`) ────────────
+# ── HashiCorp Vault secrets backend (default; skip with --no-vault) ────────
 # Standalone Vault with file storage on a PVC, so its data survives pod restarts
 # (see the VAULT comment above). The injector is disabled because suparship's
 # delivery path is ESO, not agent injection.
@@ -281,7 +297,54 @@ local_resource(
     resource_deps=['gitea'], labels=['prereq'],
 )
 
-# ── Dev admin Secret (login: admin / devpass) ──────────────────────────────
+# ── Shipnotes demo (manual ▶ in the Tilt UI, or `task demo:shipnotes`) ─────
+# One click → the full working demo: mirror suparship-demo into Gitea, wire
+# its CI, register the example-charts source (postgres), wait for the first
+# images, create the composed app, set DATABASE_URL, print the tour.
+local_resource(
+    'demo-shipnotes',
+    cmd='hack/dev/demo-shipnotes.sh',
+    auto_init=False,
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    resource_deps=['suparship', 'init-gitops', 'act-runner', 'seed'],
+    labels=['demo'],
+    links=[link('http://shipnotes-frontend.staging.localhost', 'Shipnotes (staging)')],
+)
+
+# ── Gitea Actions runner (host docker) ─────────────────────────────────────
+# Powers the CI-driven golden path (`task demo:shipnotes`): workflows in
+# mirrored repos build images straight into the kind registry. Runs on the
+# HOST daemon — no privileged dind pods; see hack/dev/act-runner.sh for the
+# full rationale and the reset procedure after a cluster recreate.
+local_resource(
+    'act-runner',
+    serve_cmd='hack/dev/act-runner.sh',
+    resource_deps=['gitea'],
+    labels=['prereq'],
+)
+
+# ── Private (authenticated) registry ───────────────────────────────────────
+# Stands in for a real private registry (ghcr/ECR/Harbor) so credential flows
+# can be exercised locally — docker login, suparship registry settings with
+# creds, Kargo warehouse auth. The ctlptl kind registry stays the
+# unauthenticated workhorse for Tilt builds and kind-node pulls; see the
+# header of hack/dev/private-registry.yaml for the full division of labor.
+# Login: admin / admin123.  Host: localhost:5010; in-cluster:
+# private-registry.registry.svc.cluster.local:5000 (HTTP + basic auth).
+k8s_yaml('hack/dev/private-registry.yaml')
+k8s_resource(
+    'private-registry',
+    objects=[
+        'registry:namespace',
+        'registry-htpasswd:secret',
+        'registry-data:persistentvolumeclaim',
+    ],
+    port_forwards=['5010:5000'],
+    links=[link('http://localhost:5010/v2/_catalog', 'Private registry catalog (admin / admin123)')],
+    labels=['prereq'],
+)
+
+# ── Dev admin Secret (login: admin@local / admin123) ──────────────────────────────
 local_resource(
     'suparship-admin-secret', cmd='hack/dev/admin-secret.sh',
     resource_deps=['namespaces'], labels=['app'],
@@ -426,13 +489,36 @@ local_resource(
     labels=['ui'],
 )
 
-print("""
-suparShip dev cluster is starting.  Tilt UI: http://localhost:10350
-  UI (Vite HMR) : http://localhost:5173      login: admin / devpass
-  API (pod)     : http://localhost:8080
-  ArgoCD        : http://localhost:8081
-  Gitea         : http://localhost:3000       gitops / gitops-dev-only
-  Kargo API     : https://localhost:8083
-%s%s""" % (
-    "  Vault         : http://localhost:8200       token: root (dev mode)\n" if VAULT else "",
-    "  Ingress ON: also at http://suparship.localhost:8880" if INGRESS else "  (run `task up:ingress` for *.localhost routing)"))
+# ── Endpoints summary ──────────────────────────────────────────────────────
+# The table itself lives in hack/dev/endpoints.sh (single source of truth,
+# also echoed by `task up*` in the terminal). This resource re-prints it once
+# the user-facing services are ready and carries every endpoint as a clickable
+# link, so the Tilt UI has ONE row that answers "where is everything?".
+_endpoint_links = [
+    link('http://localhost:5173', 'suparShip UI (admin@local / admin123)'),
+    link('http://localhost:8080', 'suparShip API'),
+    link('http://localhost:8081', 'ArgoCD'),
+    link('http://localhost:3000', 'Gitea (gitops / gitops-dev-only)'),
+    link('http://localhost:8083', 'Kargo UI (password: admin123)'),
+    link('http://localhost:5010/v2/_catalog', 'Private registry (admin / admin123)'),
+]
+_endpoint_deps = ['suparship', 'ui-dev', 'gitea', 'argocd', 'kargo-api-forward', 'private-registry']
+if VAULT:
+    _endpoint_links.append(link('http://localhost:8200', 'Vault UI (token: see vault-bootstrap logs)'))
+    _endpoint_deps.append('vault-bootstrap')
+if INGRESS:
+    _endpoint_links.append(link('http://suparship.localhost', 'suparShip via ingress'))
+    _endpoint_deps.append('ingress-nginx')
+local_resource(
+    'endpoints',
+    cmd='SUPARSHIP_VAULT=%s SUPARSHIP_INGRESS=%s hack/dev/endpoints.sh' % (
+        '1' if VAULT else '0', '1' if INGRESS else '0'),
+    resource_deps=_endpoint_deps,
+    links=_endpoint_links,
+    labels=['cluster'],
+)
+
+print("suparShip dev cluster is starting.  Tilt UI: http://localhost:10350\n" +
+      "Endpoints: see the `endpoints` resource once green (links + table).\n" +
+      str(local('SUPARSHIP_VAULT=%s SUPARSHIP_INGRESS=%s hack/dev/endpoints.sh' % (
+          '1' if VAULT else '0', '1' if INGRESS else '0'), quiet=True)))

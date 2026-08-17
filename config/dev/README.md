@@ -42,13 +42,13 @@ anything else                 → real Kubernetes
 
 ## Login credentials differ by mode
 
-This trips people up, because `.env` sits in front of you and describes only
-one of the two cases:
+Both modes use the SAME login — `admin@local` / `admin123` — but it comes
+from different places:
 
 | Command | Mode | Credentials | Source |
 |---------|------|-------------|--------|
 | `task dev` | fake | `admin@local` / `admin123` | the env vars above (`internal/fake/adapters.go`) |
-| `task up` | Kubernetes | `admin` / `devpass` | Secret `suparship-system/suparship-admin-auth` |
+| `task up` | Kubernetes | `admin@local` / `admin123` | Secret `suparship-system/suparship-admin-auth` (created by `hack/dev/admin-secret.sh` with the same defaults) |
 
 In Kubernetes mode the admin env vars are ignored entirely. The Secret holds a
 username and a **bcrypt** `password-hash`, created by `hack/dev/admin-secret.sh`

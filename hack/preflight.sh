@@ -25,8 +25,13 @@ need() {
 }
 
 # ── Always required ───────────────────────────────────────────────────────
-need go  "https://go.dev/dl/"
 need npm "https://nodejs.org/en/download/  (npm is bundled with Node.js)"
+
+# tilt mode does NOT need go on the host — suparship compiles inside the dev
+# container; the other modes build the binary locally.
+if [ "$MODE" != "tilt" ]; then
+  need go "https://go.dev/dl/"
+fi
 
 # ── Cluster mode additionally requires ───────────────────────────────────
 if [ "$MODE" = "cluster" ]; then
@@ -37,12 +42,14 @@ fi
 
 # ── Tilt mode (task up) additionally requires ────────────────────────────
 if [ "$MODE" = "tilt" ]; then
-  need docker   "https://docs.docker.com/get-docker/  (or OrbStack / Docker Desktop)"
-  need ctlptl   "https://github.com/tilt-dev/ctlptl#how-do-i-install-it  (brew install tilt-dev/tap/ctlptl)"
-  need tilt     "https://docs.tilt.dev/install.html  (brew install tilt-dev/tap/tilt)"
+  need docker   "https://docs.docker.com/get-docker/  (macOS: OrbStack/Docker Desktop · Linux: rootful docker engine — the ingress binds host port 80)"
+  need kind     "https://kind.sigs.k8s.io/docs/user/quick-start/#installation  (macOS: brew install kind · Linux: release binary)"
+  need ctlptl   "https://github.com/tilt-dev/ctlptl#how-do-i-install-it  (macOS: brew install tilt-dev/tap/ctlptl · Linux: release binary)"
+  need tilt     "https://docs.tilt.dev/install.html  (macOS: brew install tilt-dev/tap/tilt · Linux: curl installer)"
   need kubectl  "https://kubernetes.io/docs/tasks/tools/"
   need helm     "https://helm.sh/docs/intro/install/"
-  need htpasswd "ships with apache2-utils / httpd-tools  (macOS: preinstalled, or 'brew install httpd')"
+  need htpasswd "macOS: preinstalled · Ubuntu/Debian: apache2-utils · RHEL/Fedora: httpd-tools"
+  need git      "https://git-scm.com/downloads"
 fi
 
 # ── All present — nothing to do ──────────────────────────────────────────

@@ -77,7 +77,7 @@ func TestSyncOne_GitTgzPullsAndPersists(t *testing.T) {
 		RepoURL: repoDir,
 		Ref:     "main",
 		Path:    "charts/" + chartName + "-" + version + ".tgz",
-	})
+	}, nil)
 	if res.Err != nil {
 		t.Fatalf("SyncOne: %v", res.Err)
 	}
@@ -106,7 +106,7 @@ func TestSyncOne_GitTgz_RejectsMissingPath(t *testing.T) {
 		Type:    tpl.SourceTypeGitTgz,
 		RepoURL: "https://example.com/repo.git",
 		// Path intentionally empty.
-	})
+	}, nil)
 	if res.Err == nil {
 		t.Fatal("expected validation error for missing Path")
 	}

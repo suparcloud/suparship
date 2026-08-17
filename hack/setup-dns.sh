@@ -2,39 +2,27 @@
 # hack/setup-dns.sh — configure wildcard DNS for suparship local development.
 #
 # Without this, every new ingress hostname (argocd.localhost, gitea.localhost,
-# pr-123.hello.preview.localhost, …) must be added manually to /etc/hosts.
+# pr-<n>.<app>.preview.localhost, …) must be added manually to /etc/hosts.
 # That quickly becomes unmanageable for preview environments.
 #
-# This script installs and configures dnsmasq so that ALL *.localhost addresses
-# resolve to 127.0.0.1 automatically — zero /etc/hosts entries needed.
+# Makes ALL *.localhost addresses resolve to 127.0.0.1 automatically — zero
+# /etc/hosts entries. Cross-platform, detect-first:
 #
-# ─────────────────────────────────────────────────────────────────────────────
-# What it does (macOS only):
-#   1. Installs dnsmasq via Homebrew if absent.
-#   2. Appends `address=/.localhost/127.0.0.1` to $(brew --prefix)/etc/dnsmasq.conf
-#      if not already present.
-#   3. Starts (or restarts) the dnsmasq service as root so it can bind port 53.
-#   4. Creates /etc/resolver/localhost so macOS routes *.localhost queries to
-#      the local dnsmasq (127.0.0.1:53) instead of the upstream resolver.
-#   5. Flushes the mDNS cache so the new resolver is picked up immediately.
+#   any OS   → if *.localhost already resolves, exit 0 (systemd-resolved
+#              distros — Ubuntu 18.04+, Fedora 33+ — synthesize it natively).
+#   Linux    → dnsmasq via apt/dnf/yum + a wildcard rule in /etc/dnsmasq.d;
+#              with systemd-resolved active, a ~localhost routing drop-in;
+#              without it, dnsmasq on 127.0.0.1 (plus a resolv.conf hint for
+#              NetworkManager setups). Verifies at the end.
+#   macOS    → Homebrew dnsmasq + /etc/resolver/localhost (steps below).
 #
 # Idempotent: safe to re-run. Each step is skipped if already applied.
-#
-# After running this script, these URLs all work without /etc/hosts:
-#   http://argocd.localhost:8880
-#   http://gitea.localhost:8880
-#   http://hello-staging.localhost:8880
-#   http://pr-123.hello.preview.localhost:8880
-#
-# Note: port :8880 is still required (kind maps container:80 → host:8880).
-# Run `task dev:dns:port-forward` to get clean :80/:443 URLs (optional, macOS).
-#
-# Linux users:
-#   Use systemd-resolved or NetworkManager dnsmasq plugin instead.
-#   See: docs/local-dns.md
+# The dev ingress binds host port 80, so after this these all work as-is:
+#   http://argocd.localhost   http://<app>.<env>.localhost
+#   http://pr-<n>.<app>-<component>.preview.localhost
 #
 # Usage:
-#   ./hack/setup-dns.sh             # run directly
+#   ./hack/setup-dns.sh     # run directly
 #   task dev:dns            # preferred: via Taskfile
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -50,28 +38,84 @@ skip()  { printf "  \033[0;33m–\033[0m  %s\n" "$*"; }
 warn()  { printf "  \033[0;33mWARN:\033[0m %s\n" "$*"; }
 die()   { printf "  \033[0;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
-# ── OS gate ───────────────────────────────────────────────────────────────
-OS="$(uname -s)"
-if [ "${OS}" != "Darwin" ]; then
-  warn "This script only automates setup on macOS."
-  echo ""
-  echo "  On Linux, configure dnsmasq via your distro's package manager:"
-  echo "    Ubuntu/Debian:  sudo apt install dnsmasq"
-  echo "    Fedora/RHEL:    sudo dnf install dnsmasq"
-  echo ""
-  echo "  Then add to /etc/dnsmasq.conf (or /etc/dnsmasq.d/suparship.conf):"
-  echo "    address=/.localhost/127.0.0.1"
-  echo ""
-  echo "  Or, with systemd-resolved:"
-  echo "    sudo mkdir -p /etc/systemd/resolved.conf.d/"
-  echo "    echo -e '[Resolve]\nDNS=127.0.0.1\nDomains=~localhost' | \\"
-  echo "      sudo tee /etc/systemd/resolved.conf.d/suparship.conf"
-  echo "    sudo systemctl restart systemd-resolved"
-  echo ""
-  echo "  For more details: docs/local-dns.md"
-  echo ""
+# ── Already working? (any OS) ─────────────────────────────────────────────
+# systemd-resolved distros (Ubuntu 18.04+, Fedora 33+) synthesize
+# `*.localhost → 127.0.0.1` natively (RFC 6761), so many Linux machines need
+# nothing at all. Check through the same path applications use.
+resolves() {
+  if command -v getent >/dev/null 2>&1; then
+    getent hosts test.localhost >/dev/null 2>&1
+  else
+    # macOS has no getent; curl exit 6 = could-not-resolve.
+    local rc=0
+    curl -s -o /dev/null --max-time 2 http://test.localhost/ 2>/dev/null || rc=$?
+    [ "$rc" -ne 6 ]
+  fi
+}
+if resolves; then
+  ok "*.localhost already resolves — nothing to do."
   exit 0
 fi
+
+# ── Linux: dnsmasq via the standard per-distro path ───────────────────────
+OS="$(uname -s)"
+if [ "${OS}" = "Linux" ]; then
+  echo ""
+  echo "  suparship — local DNS setup (wildcard *.localhost, Linux)"
+  echo "  ──────────────────────────────────────────────────────────────────"
+  echo ""
+  [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null 2>&1 \
+    || die "needs root (or sudo) to configure DNS"
+  SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+
+  # Install dnsmasq (Ubuntu/Debian: apt; RHEL/CentOS/Fedora: dnf/yum).
+  if ! command -v dnsmasq >/dev/null 2>&1; then
+    info "installing dnsmasq..."
+    if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get install -y dnsmasq
+    elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y dnsmasq
+    elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y dnsmasq
+    else die "no apt-get/dnf/yum found — install dnsmasq manually (docs/local-dns.md)"
+    fi
+  fi
+  ok "dnsmasq present"
+
+  # Wildcard rule. Bind only loopback so we never serve the network.
+  $SUDO mkdir -p /etc/dnsmasq.d
+  printf '%s\naddress=/.localhost/127.0.0.1\nlisten-address=127.0.0.1\nbind-interfaces\n' \
+    "${DNS_MARK}" | $SUDO tee /etc/dnsmasq.d/suparship-localhost.conf >/dev/null
+  ok "wildcard rule in /etc/dnsmasq.d/suparship-localhost.conf"
+
+  if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    # resolved owns :53 on 127.0.0.53 — run dnsmasq beside it on 127.0.0.1
+    # and route only the localhost domain there via a drop-in.
+    $SUDO mkdir -p /etc/systemd/resolved.conf.d
+    printf '[Resolve]\nDNS=127.0.0.1\nDomains=~localhost\n' \
+      | $SUDO tee /etc/systemd/resolved.conf.d/suparship-localhost.conf >/dev/null
+    $SUDO systemctl enable --now dnsmasq >/dev/null 2>&1 || $SUDO systemctl restart dnsmasq
+    $SUDO systemctl restart systemd-resolved
+    ok "systemd-resolved routes ~localhost → dnsmasq (drop-in applied)"
+  else
+    # No resolved (Debian default, RHEL with plain NetworkManager): dnsmasq
+    # on loopback + make sure the resolver actually asks 127.0.0.1 first.
+    $SUDO systemctl enable --now dnsmasq >/dev/null 2>&1 || $SUDO systemctl restart dnsmasq
+    if ! grep -q "^nameserver 127.0.0.1" /etc/resolv.conf 2>/dev/null; then
+      warn "add 'nameserver 127.0.0.1' as the FIRST entry in /etc/resolv.conf"
+      warn "(with NetworkManager: set [main] dns=dnsmasq in NetworkManager.conf"
+      warn " and move the rule to /etc/NetworkManager/dnsmasq.d/ — docs/local-dns.md)"
+    fi
+    ok "dnsmasq running on 127.0.0.1"
+  fi
+
+  if resolves; then
+    ok "*.localhost → 127.0.0.1 verified"
+  else
+    warn "*.localhost still does not resolve — see docs/local-dns.md for your distro's resolver specifics"
+    exit 1
+  fi
+  exit 0
+fi
+
+[ "${OS}" = "Darwin" ] || die "unsupported OS: ${OS} (see docs/local-dns.md)"
 
 # ── Banner ────────────────────────────────────────────────────────────────
 echo ""
@@ -205,11 +249,11 @@ cat <<EOF
   All *.localhost addresses now resolve to 127.0.0.1 automatically.
   No /etc/hosts entries needed — including preview environments.
 
-  Example URLs (port :8880 required — kind maps container:80 → host:8880):
-    http://argocd.localhost:8880       ArgoCD UI
-    http://gitea.localhost:8880        Gitea UI
-    http://hello-staging.localhost:8880       Demo app (staging)
-    http://pr-123.hello.preview.localhost:8880   Preview environments
+  Example URLs:
+    http://argocd.localhost             ArgoCD UI
+    http://gitea.localhost               Gitea UI
+    http://hello.staging.localhost       Demo app (staging)
+    http://pr-<n>.<app>.preview.localhost   Preview environments
 
   Next step:
     task up                   provision the full dev cluster

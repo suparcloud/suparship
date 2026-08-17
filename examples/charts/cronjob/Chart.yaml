@@ -1,0 +1,15 @@
+apiVersion: v2
+name: cronjob
+description: >-
+  Production-ready scheduled job: CronJob with Forbid concurrency, a starting
+  deadline so missed runs surface instead of silently piling up, bounded
+  history, and hardened pod security defaults. Plain Helm — no platform
+  dependencies.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - cronjob
+  - scheduled
+maintainers:
+  - name: suparcloud

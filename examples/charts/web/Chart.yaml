@@ -1,0 +1,15 @@
+apiVersion: v2
+name: web
+description: >-
+  Production-ready web service: Deployment + Service with optional Ingress or
+  Gateway API HTTPRoute, HPA, PodDisruptionBudget, hardened pod security
+  defaults, and zero-downtime rollout settings. Plain Helm — no platform
+  dependencies.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - web
+  - http
+maintainers:
+  - name: suparcloud

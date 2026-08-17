@@ -1,0 +1,104 @@
+# Default values for the worker chart.
+#
+# A plain, production-ready background worker: a Deployment with no Service.
+# Defaults favor safety for queue consumers — non-root, a PodDisruptionBudget,
+# Recreate-free rolling updates, and a long termination grace period so
+# in-flight work can finish on shutdown (SIGTERM → drain → exit).
+
+replicaCount: 1
+
+image:
+  # Demo image that idles; set your own worker image and command.
+  repository: busybox
+  tag: "stable"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Override the image entrypoint (empty = image default). The demo default
+# just sleeps so a fresh install is visibly healthy.
+command: ["sh", "-c", "while true; do sleep 30; done"]
+args: []
+
+# Environment variables as a map (rendered sorted for stable diffs).
+env: {}
+
+# envFrom sources by name. When deployed by a platform, point these at the
+# managed objects (e.g. ["((platform.configMapName))"]).
+envFrom:
+  configMaps: []
+  secrets: []
+
+# Optional probes, passed through verbatim (workers often expose none, or an
+# exec/tcp check).
+livenessProbe: {}
+readinessProbe: {}
+startupProbe: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  # 0 disables the memory metric. Queue-depth scaling (KEDA/custom metrics)
+  # is deliberately out of scope for a plain chart.
+  targetMemoryUtilizationPercentage: 0
+
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 0
+
+# Workers get a longer drain window than web pods: SIGTERM should let the
+# current job finish. Raise to cover your longest task.
+terminationGracePeriodSeconds: 60
+
+revisionHistoryLimit: 3
+priorityClassName: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # Defaults to the fullname when empty.
+  name: ""
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  # The busybox demo image has no non-root user baked in; a real worker image
+  # should set its own USER and this can be dropped.
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+# Extra pod scheduling controls, passed through verbatim.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# Extra volumes / mounts, passed through verbatim.
+volumes: []
+volumeMounts: []

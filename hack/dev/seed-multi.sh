@@ -52,10 +52,19 @@ environments:
     activeClusterRef: prod
     baseDomain: localhost
     namespacePattern: "{app}"
+# Both tiers on the nginx class — without profiles exposed components render
+# no Ingress at all (see config/seed/org.yaml for the fuller note). The
+# workload clusters carry no ingress controller, so routes only materialise
+# where one exists — but the profile must resolve for publish to emit them.
+routingProfiles:
+  external:
+    ingressClassName: nginx
+  internal:
+    ingressClassName: nginx
 teams:
   - name: admins
     displayName: Administrators
-    members: [admin]
+    members: [admin, admin@local]
 roleBindings:
   - project: "*"
     team: admins
@@ -92,8 +101,8 @@ done
 # (internal/gitops/publisher.go), so the dead per-cluster entry disappears and
 # the ApplicationSet prunes the Application that was generated from it.
 API="${SUPARSHIP_API:-http://localhost:8080}"
-USER="${SUPARSHIP_DEV_USER:-admin}"
-PASS="${SUPARSHIP_DEV_PASSWORD:-devpass}"
+USER="${SUPARSHIP_DEV_USER:-admin@local}"
+PASS="${SUPARSHIP_DEV_PASSWORD:-admin123}"
 
 COOKIE="$(curl -s -c - -X POST "$API/api/v1/auth/login" \
   -H 'Content-Type: application/json' \

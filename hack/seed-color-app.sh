@@ -121,9 +121,9 @@ if [ "$CHECK_CODE" = "200" ]; then
   ──────────────────────────────────────────────────────────────────
   color-app already seeded.
 
-  Staging:  http://color-app.staging.localhost:8880
-  Prod:     http://color-app.prod.localhost:8880
-  API:      http://color-app.staging.localhost:8880/api/color
+  Staging:  http://color-app.staging.localhost
+  Prod:     http://color-app.prod.localhost
+  API:      http://color-app.staging.localhost/api/color
 
 EOF
   exit 0
@@ -171,9 +171,10 @@ cat <<EOF
   The publisher has committed Kargo CRs and ArgoCD manifests to
   the gitops repo. ArgoCD will sync them to the cluster.
 
-  Staging:  http://color-app.staging.localhost:8880
-  Prod:     http://color-app.prod.localhost:8880
-  JSON API: http://color-app.staging.localhost:8880/api/color
+  Staging:  http://color-app.staging.localhost
+  Prod:     http://color-app.prod.localhost
+  JSON API: http://color-app.staging.localhost/api/color
+  (*.localhost needs the one-time \`task dev:dns\` on macOS — docs/local-dns.md)
 
   Test the promotion pipeline:
 
@@ -181,12 +182,12 @@ cat <<EOF
     task demo:color-app:push VERSION=0.2.0 COLOR=green
 
     # Kargo detects the new tag → creates Freight → auto-promotes to staging
-    curl http://color-app.staging.localhost:8880/api/color
+    curl http://color-app.staging.localhost/api/color
 
     # Promote to prod via the API:
     curl -X POST http://localhost:8080/api/v1/projects/demo/apps/color-app/promote \\
       -H "Content-Type: application/json" \\
       -b <(cat $COOKIE_JAR) \\
-      -d '{"toEnvironment":"prod"}'
+      -d '{"targetEnvironment":"prod"}'
 
 EOF

@@ -274,7 +274,7 @@ func (h *templateRegistryHandler) handleSyncOne(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	result := h.engine.SyncOne(r.Context(), *target)
+	result := h.engine.SyncOne(r.Context(), *target, reg)
 	registrysync.ApplyResult(reg, *target, result)
 	if err := h.store.Save(r.Context(), reg); err != nil {
 		h.logger.Error("sync: save registry", "error", err)

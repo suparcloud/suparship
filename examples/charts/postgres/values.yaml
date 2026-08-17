@@ -1,0 +1,44 @@
+# Default values for the postgres chart.
+#
+# A deliberately small single-instance Postgres for dev/demo composed apps.
+# Auth is plain values (visible in git) — fine for demo data; a real install
+# points DATABASE_URL at an operator-managed or cloud database instead.
+
+image:
+  repository: postgres
+  tag: "16-alpine"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+auth:
+  database: app
+  username: app
+  # Demo-grade. Rotate by changing here + updating consumers' DATABASE_URL.
+  password: app
+
+service:
+  port: 5432
+
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Extra environment for the container (e.g. POSTGRES_INITDB_ARGS).
+env: {}
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
