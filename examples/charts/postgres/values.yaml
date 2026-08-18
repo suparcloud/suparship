@@ -13,11 +13,20 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Inline auth values — every field is OPTIONAL. Anything left empty is
+# expected to arrive as POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD via
+# envFrom below instead (e.g. from a platform-managed Secret), which keeps
+# credentials out of git.
 auth:
   database: app
-  username: app
-  # Demo-grade. Rotate by changing here + updating consumers' DATABASE_URL.
-  password: app
+  username: ""
+  password: ""
+
+# envFrom sources by name. When deployed by a platform, point these at the
+# managed objects (e.g. ["((platform.secretName))"]).
+envFrom:
+  configMaps: []
+  secrets: []
 
 service:
   port: 5432

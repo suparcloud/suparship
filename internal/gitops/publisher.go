@@ -3171,7 +3171,21 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 	if err := p.writeFile(p.outputDir(repoDir, "_infra", "previews-composed-appset.yaml"), rootBytes); err != nil {
 		return err
 	}
-	return nil
+	// The root app's source path must exist from birth — see
+	// ensureComposedPreviewsRoot.
+	return p.ensureComposedPreviewsRoot(repoDir)
+}
+
+// ensureComposedPreviewsRoot keeps the previews-composed root Application's
+// source directory present in git even when no preview exists. Git cannot
+// track an empty directory, so removing the last preview's files (or
+// publishing the root app before the first preview) leaves the Application
+// pointing at a missing path — ArgoCD strands it in Unknown, it can never
+// sync, and with prune-on-sync never running the last preview's workloads
+// leak as zombies. A .gitkeep renders zero manifests (directory sources only
+// read *.yaml/json), so an "empty" sync correctly prunes everything.
+func (p *Publisher) ensureComposedPreviewsRoot(repoDir string) error {
+	return p.writeFile(p.outputDir(repoDir, composedAppsDir, composedPreviewsSubdir, ".gitkeep"), nil)
 }
 
 // PreviewPublishSpec carries the parameters for publishing a preview environment.
@@ -3271,6 +3285,13 @@ func (p *Publisher) deletePreviewFiles(repoDir, projectName, previewName, appNam
 	// previews-composed root app once removed.
 	if err := u.rm(p.outputDir(repoDir, composedAppsDir, composedPreviewsSubdir, baseEnv, projectName, previewName, appName)); err != nil {
 		return false, err
+	}
+	if u.removed {
+		// Keep the root app's source path alive so the prune actually runs —
+		// see ensureComposedPreviewsRoot.
+		if err := p.ensureComposedPreviewsRoot(repoDir); err != nil {
+			return u.removed, err
+		}
 	}
 	return u.removed, nil
 }
@@ -3410,6 +3431,13 @@ func (p *Publisher) unpublishAppFiles(repoDir, projectName, appName string) (boo
 			if err := u.rm(m); err != nil {
 				return u.removed, err
 			}
+		}
+	}
+	if u.removed {
+		// Keep the previews-composed root app's source path alive so its
+		// prune runs — see ensureComposedPreviewsRoot.
+		if err := p.ensureComposedPreviewsRoot(repoDir); err != nil {
+			return u.removed, err
 		}
 	}
 

@@ -68,19 +68,25 @@ done.
    platform-specific code.
 2. **The app in suparship** — <http://localhost:5173> → `demo` → `shipnotes`:
    the environment pipeline, per-component status, deployments, logs.
-   Settings → Variables & secrets is where `DATABASE_URL` lives.
-3. **Preview environments** — open a PR in the Gitea mirror
+3. **Variables & secrets** — Settings → Variables & secrets: `POSTGRES_DB`
+   is an app *variable*; `DATABASE_URL`, `POSTGRES_USER`, and
+   `POSTGRES_PASSWORD` are Vault-backed *secrets* (values never shown, never
+   in git). The db component maps the credentials into its own curated
+   `shipnotes-db-config` / `shipnotes-db-secrets` objects — see the db card's
+   **Variables** panel — and its chart just `envFrom`s two names. Nothing
+   sensitive lives in chart values.
+4. **Preview environments** — open a PR in the Gitea mirror
    (<http://localhost:3000/gitops/suparship-demo>, `gitops` /
    `gitops-dev-only`): edit any file on a branch → open the PR → CI builds
    both images at `pr-<n>-<7sha>` and a preview appears at
    `http://pr-<n>.shipnotes-frontend.preview.localhost`. Every push re-points
    it; closing the PR tears it down.
-4. **Staging follows main** — merge the PR: CI builds `main-<7sha>`, the
+5. **Staging follows main** — merge the PR: CI builds `main-<7sha>`, the
    app's Warehouse discovers the tag, and staging rolls to it (CD managed).
-5. **Promote to prod** — in the app UI hit **Promote** (staging → prod).
+6. **Promote to prod** — in the app UI hit **Promote** (staging → prod).
    <http://shipnotes-frontend.prod.localhost> then serves the *same immutable
    tag* — promotion moves the artifact, it never rebuilds.
-6. **Keep going** — per-component values and variables (the component cards),
+7. **Keep going** — per-component values and variables (the component cards),
    rollback (re-promote a previous freight from the deployment history), the
    Kargo UI's freight timeline (<http://localhost:8083>), ArgoCD's view of
    the composed app (<http://localhost:8081>), and

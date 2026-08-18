@@ -30,7 +30,8 @@
 //
 // App and App-Env writes are asynchronous (202 Accepted): the domain store is
 // updated immediately and a background goroutine triggers GitOps re-publish.
-// The publisher re-renders values.yaml, which picks up the new EnvLayers.
+// The publisher re-renders the platform env objects (env-configmap.yaml /
+// external-secret.yaml), which pick up the new config.
 package server
 
 import (

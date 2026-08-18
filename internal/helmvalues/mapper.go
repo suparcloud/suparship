@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/suparcloud/suparship/internal/domain"
-	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
@@ -235,10 +234,6 @@ func MapToHelmValuesForEnv(
 			Host:      routingHost,
 			Component: routingComponent,
 		},
-		EnvLayers: envconfig.ToHelmEnvLayers(envconfig.EnvLayers{
-			App:    app.Spec.EnvConfig,
-			AppEnv: envOverride.EnvConfig,
-		}),
 		// App config/secret are the platform contract (platform.configMapName /
 		// secretName); per-component EnvFrom extras are applied per component.
 		Suparship: SuparshipValues{},

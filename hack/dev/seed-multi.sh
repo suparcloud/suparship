@@ -44,14 +44,22 @@ environments:
     # {app} alone is enough here: staging and prod are separate clusters, so the
     # cluster boundary provides the isolation {app}-{env} was compensating for
     # on a shared cluster.
-    namespacePattern: "{app}"
+    appNamespacePattern: "{app}"
   - name: prod
     displayName: Production
     order: 2
     clusterRefs: [prod]
     activeClusterRef: prod
     baseDomain: localhost
-    namespacePattern: "{app}"
+    appNamespacePattern: "{app}"
+# Org-wide resource naming. Multi-cluster: staging and prod are SEPARATE
+# clusters, so project namespaces need no env suffix — the cluster boundary
+# provides the isolation (same reasoning as the {app} app-namespace pattern
+# above). ArgoCD Applications stay {project}-{app}-{cluster} in every
+# topology.
+resourceNaming:
+  projectNamespace: "{project}"
+  argoAppName: "{project}-{app}-{cluster}"
 # Both tiers on the nginx class — without profiles exposed components render
 # no Ingress at all (see config/seed/org.yaml for the fuller note). The
 # workload clusters carry no ingress controller, so routes only materialise

@@ -23,14 +23,26 @@ data:
         # the same cluster (common in dev/single-cluster setups). In a true
         # multi-cluster setup where each env has its own cluster, {app} alone
         # is sufficient because the cluster boundary provides isolation.
-        namespacePattern: "{app}-{env}"
+        appNamespacePattern: "{app}-{env}"
       - name: prod
         displayName: Production
         order: 2
         clusterRefs: [prod-cluster]
         activeClusterRef: prod-cluster
         baseDomain: localhost
-        namespacePattern: "{app}-{env}"
+        appNamespacePattern: "{app}-{env}"
+    # Org-wide resource naming (Settings → Organization → Namespace Naming).
+    # Single shared cluster: project-scoped namespaces need the env suffix to
+    # keep staging/prod apart. App namespaces come from the per-env
+    # appNamespacePattern above ({app}-{env}) — NOT the topology default: the
+    # seed models each env as its own cluster record on one physical cluster,
+    # which the topology detector reads as "dedicated" and would collapse
+    # both envs into one namespace. The ArgoCD Application pattern is the
+    # platform default, stated explicitly so the convention is visible: one
+    # Application per (app, cluster).
+    resourceNaming:
+      projectNamespace: "{project}-{env}"
+      argoAppName: "{project}-{app}-{cluster}"
     # Without routing profiles, exposed components silently render NO Ingress
     # (helmvalues.resolveIngress drops the route on an unknown profile), so a
     # freshly created app has no URL at all. The dev loop runs the NGINX

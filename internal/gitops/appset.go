@@ -640,7 +640,12 @@ type PlatformAppMeta struct {
 
 // platformResourcesInclude is the directory-source filter listing the
 // platform-generated manifests ArgoCD should apply (plain-manifest mode).
-const platformResourcesInclude = "{env-configmap.yaml,external-secret.yaml}"
+// component-*.yaml covers the per-component curated projections
+// (component-<name>-configmap.yaml / component-<name>-externalsecret.yaml) —
+// without it those files sit in git unapplied and a curated component's
+// envFrom references dangle (CreateContainerConfigError). meta.yaml stays
+// excluded on purpose: it's AppSet generator data, not a K8s object.
+const platformResourcesInclude = "{env-configmap.yaml,external-secret.yaml,component-*.yaml}"
 
 func platformSyncPolicy(opts AppSetOptions) *SyncPolicy {
 	if opts.SyncAutomated {

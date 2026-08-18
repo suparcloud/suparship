@@ -50,7 +50,6 @@ package helmvalues
 
 import (
 	"github.com/suparcloud/suparship/internal/domain"
-	"github.com/suparcloud/suparship/internal/envconfig"
 )
 
 // HelmValues is the root of the canonical Helm values document for a
@@ -70,12 +69,6 @@ type HelmValues struct {
 	Components map[string]*ComponentValues `json:"components" yaml:"components"`
 	// Routing declares the primary ingress entry point for this deployment.
 	Routing RoutingValues `json:"routing" yaml:"routing"`
-	// EnvLayers holds the App and App Environment env config layers baked in
-	// at GitOps publish time. Upper levels (Org, Environment, Project) are
-	// replicated into app namespaces automatically via Stakater Replicator and
-	// are not included here to avoid mass re-publish on upper-level changes.
-	// Omitted when both App and AppEnv layers are empty.
-	EnvLayers envconfig.HelmEnvLayers `json:"envLayers,omitempty" yaml:"envLayers,omitempty"`
 	// Suparship holds well-known resource names that templates can reference
 	// for secret and config injection via envFrom.
 	Suparship SuparshipValues `json:"suparship" yaml:"suparship"`

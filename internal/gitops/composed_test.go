@@ -884,7 +884,7 @@ func (l canonicalityLoader) LoadTemplate(_ context.Context, name string) (*tpl.T
 // a composed component whose template is passthrough (InjectCanonicalValues:false)
 // gets ONLY its own overlay in values.yaml — with ((platform.*)) tokens resolved —
 // and NONE of the assumed canonical schema (app/components/routing/platform/
-// containerPort/envLayers/suparship). A canonical sibling still gets the full doc.
+// containerPort/suparship). A canonical sibling still gets the full doc.
 func TestComposedPassthroughComponentOmitsCanonicalSchema(t *testing.T) {
 	dir := t.TempDir()
 	app := &domain.App{
@@ -934,7 +934,7 @@ func TestComposedPassthroughComponentOmitsCanonicalSchema(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(byo), &byoDoc); err != nil {
 		t.Fatalf("unmarshal byo values: %v", err)
 	}
-	for _, k := range []string{"app", "components", "routing", "platform", "containerPort", "envLayers", "suparship"} {
+	for _, k := range []string{"app", "components", "routing", "platform", "containerPort", "suparship"} {
 		if _, present := byoDoc[k]; present {
 			t.Errorf("BYO passthrough values must NOT contain %q, got:\n%s", k, byo)
 		}

@@ -193,8 +193,31 @@ db = {
     "name": "db", "type": "worker", "enabled": True, "stateful": True,
     "inheritAppVars": False,
     "template": {"name": "postgres"},
-    # Deterministic Service name for DATABASE_URL below.
-    "values": {"fullnameOverride": "shipnotes-db"},
+    # Stateful components default OUT of previews; the demo promises "the
+    # env's own database", so opt the db IN — each preview gets its own
+    # throwaway Postgres, torn down with the PR.
+    "previewEnabled": True,
+    # The secrets & variables showcase: the db's credentials come from the
+    # platform, not from chart values in git. POSTGRES_DB maps from an app
+    # VARIABLE, POSTGRES_USER/PASSWORD from app SECRETS — the curation below
+    # renders per-component shipnotes-db-config / shipnotes-db-secrets
+    # objects holding exactly these keys, which the chart envFroms via
+    # ((platform.*)) tokens.
+    "envVars": [
+        {"name": "POSTGRES_DB", "fromConfig": "POSTGRES_DB"},
+        {"name": "POSTGRES_USER", "fromSecret": "POSTGRES_USER"},
+        {"name": "POSTGRES_PASSWORD", "fromSecret": "POSTGRES_PASSWORD"},
+    ],
+    "values": {
+        # Deterministic Service name for DATABASE_URL below.
+        "fullnameOverride": "shipnotes-db",
+        # Blank the inline auth so everything arrives via envFrom.
+        "auth": {"database": "", "username": "", "password": ""},
+        "envFrom": {
+            "configMaps": ["((platform.configMapName))"],
+            "secrets": ["((platform.secretName))"],
+        },
+    },
 }
 print(json.dumps({
     "name": "shipnotes",
@@ -211,13 +234,30 @@ PY
   ok "app $APP created (staging deploys via GitOps now)"
 fi
 
-# ── 7. DATABASE_URL app secret (vault-backed; idempotent upsert) ───────────
+# ── 7. Variables & secrets showcase (vault-backed; idempotent upserts) ─────
+# The db credentials live in the PLATFORM, not in chart values in git:
+#   variable POSTGRES_DB            → app-level config (shipnotes-config)
+#   secrets  POSTGRES_USER/PASSWORD → app secrets (Vault), curated into the
+#                                     db component's shipnotes-db-secrets
+#   secret   DATABASE_URL           → consumed by the api via inherit-all
+# Fixed demo password on purpose: postgres only reads credentials at initdb,
+# so rotating it on re-runs would strand an existing PVC.
+DB_USER="app"; DB_PASS="shipnotes-demo-pw"; DB_NAME="app"
+var_code="$(curl -sS -b "$cookies" -o /dev/null -w '%{http_code}' \
+  -X PUT "$API/projects/$PROJECT/apps/$APP/envconfig" \
+  -H 'Content-Type: application/json' \
+  -d "{\"vars\":{\"POSTGRES_DB\":\"$DB_NAME\"}}")"
+case "$var_code" in 200|202) ok "app variable POSTGRES_DB=$DB_NAME" ;; *) warn "setting POSTGRES_DB returned HTTP $var_code" ;; esac
 sec_code="$(curl -sS -b "$cookies" -o /dev/null -w '%{http_code}' \
   -X POST "$API/projects/$PROJECT/apps/$APP/secrets/global" \
   -H 'Content-Type: application/json' \
-  -d '{"entries":{"DATABASE_URL":"postgresql://app:app@shipnotes-db:5432/app"}}')"
-[ "$sec_code" = "200" ] || warn "setting DATABASE_URL returned HTTP $sec_code (set it in the UI: App → Settings → Variables & secrets)"
-[ "$sec_code" = "200" ] && ok "app secret DATABASE_URL set"
+  -d "{\"entries\":{\"DATABASE_URL\":\"postgresql://$DB_USER:$DB_PASS@shipnotes-db:5432/$DB_NAME\",\"POSTGRES_USER\":\"$DB_USER\",\"POSTGRES_PASSWORD\":\"$DB_PASS\"}}")"
+[ "$sec_code" = "200" ] || warn "setting app secrets returned HTTP $sec_code (set them in the UI: App → Settings → Variables & secrets)"
+[ "$sec_code" = "200" ] && ok "app secrets DATABASE_URL, POSTGRES_USER, POSTGRES_PASSWORD set"
+# Republish so the rendered config/secret objects pick up everything above
+# in one pass (the envconfig PUT schedules its own async republish; this
+# makes the seed deterministic instead).
+curl -sS -b "$cookies" -o /dev/null -X POST "$API/projects/$PROJECT/apps/$APP/sync" || true
 
 # ── 8. The tour ────────────────────────────────────────────────────────────
 printf '\n'
@@ -226,6 +266,12 @@ info "app (staging):    http://shipnotes-frontend.staging.localhost   (ArgoCD sy
 info "suparship UI:     http://localhost:5173  →  demo / shipnotes   (admin@local / admin123)"
 info "the code:         $GITEA/$GITEA_USER/$REPO_NAME   (gitops / gitops-dev-only)"
 info "CI runs:          $GITEA/$GITEA_USER/$REPO_NAME/actions"
+info ""
+info "variables & secrets showcase: App → Settings → Variables & secrets —"
+info "  POSTGRES_DB is an app VARIABLE; DATABASE_URL, POSTGRES_USER and"
+info "  POSTGRES_PASSWORD are Vault-backed SECRETS. The db component maps the"
+info "  credentials into its own curated shipnotes-db-config/-secrets (see"
+info "  the db card → Variables); nothing sensitive lives in chart values."
 info ""
 info "try the loop:"
 info "  1. edit something, push a branch, open a PR in Gitea → CI builds pr-<n>-<sha>"

@@ -235,6 +235,12 @@ type AutomatedSyncPolicy struct {
 	Prune bool `json:"prune" yaml:"prune"`
 	// SelfHeal causes ArgoCD to re-sync when live state drifts from Git.
 	SelfHeal bool `json:"selfHeal" yaml:"selfHeal"`
+	// AllowEmpty permits automated sync when the desired state has ZERO
+	// resources. ArgoCD's default refuses ("auto-sync will wipe out all
+	// resources") — right for app manifests, wrong for container apps whose
+	// normal lifecycle includes going empty (the previews root: closing the
+	// last PR must prune the last preview's workloads, not strand them).
+	AllowEmpty bool `json:"allowEmpty,omitempty" yaml:"allowEmpty,omitempty"`
 }
 
 // BuildOptions carries the gitops and ArgoCD configuration needed by

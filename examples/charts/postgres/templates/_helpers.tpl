@@ -47,3 +47,20 @@ Selector labels (immutable — keep minimal).
 app.kubernetes.io/name: {{ include "postgres.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
+
+{{/*
+envFrom block from the configMaps / secrets name lists (empty = omitted).
+*/}}
+{{- define "postgres.envFrom" -}}
+{{- if or .Values.envFrom.configMaps .Values.envFrom.secrets }}
+envFrom:
+{{- range .Values.envFrom.configMaps }}
+  - configMapRef:
+      name: {{ . | quote }}
+{{- end }}
+{{- range .Values.envFrom.secrets }}
+  - secretRef:
+      name: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

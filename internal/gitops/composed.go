@@ -283,7 +283,11 @@ func BuildComposedPreviewRootApp(repoURL string, opts AppSetOptions) *Applicatio
 
 	var syncPolicy *SyncPolicy
 	if opts.SyncAutomated {
-		syncPolicy = &SyncPolicy{Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true}}
+		// AllowEmpty: an empty previews dir is this app's normal state (no
+		// open PRs) — without it ArgoCD refuses the sync that prunes the
+		// last preview and its workloads zombie. Pairs with the .gitkeep
+		// that keeps the source path present (ensureComposedPreviewsRoot).
+		syncPolicy = &SyncPolicy{Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true, AllowEmpty: true}}
 	}
 
 	return &Application{
