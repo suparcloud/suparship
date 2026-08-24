@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import {
@@ -574,11 +575,31 @@ function OrgEnvironmentsSection() {
 // ── Environment-type env config section ───────────────────────────────────────
 
 function EnvironmentTypeEnvConfigSection({
-  environments,
+  environments: environmentsProp,
 }: {
-  environments: OrgEnvironment[];
+  environments?: OrgEnvironment[];
 }) {
   const [selectedEnvType, setSelectedEnvType] = useState<string>("");
+  const [fetched, setFetched] = useState<OrgEnvironment[]>([]);
+  const environments = environmentsProp ?? fetched;
+
+  // Self-fetch when no list is provided (the tabbed page renders this
+  // section standalone; loading the env list here keeps the top component
+  // free of data only this tab needs).
+  useEffect(() => {
+    if (environmentsProp) return;
+    let cancelled = false;
+    listOrgEnvironments()
+      .then((r) => {
+        if (!cancelled) setFetched(r.environments);
+      })
+      .catch(() => {
+        /* selector stays empty; editors are still reachable via other tabs */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [environmentsProp]);
 
   // Initialise selector once environments load.
   useEffect(() => {
@@ -2610,183 +2631,246 @@ function MigrationPanel(_props: { config: SecretBackendConfig }) {
 
 // ── Main OrgSettings page ─────────────────────────────────────────────────────
 
-export function OrgSettings() {
+type OrgTab =
+  | "general"
+  | "environments"
+  | "secrets"
+  | "variables"
+  | "routing"
+  | "naming"
+  | "bindings";
+
+const ORG_TABS: Array<{ id: OrgTab; label: string }> = [
+  { id: "general", label: "General" },
+  { id: "environments", label: "Environments" },
+  { id: "secrets", label: "Secrets backend" },
+  { id: "variables", label: "Variables & secrets" },
+  { id: "routing", label: "Routing" },
+  { id: "naming", label: "Naming" },
+  { id: "bindings", label: "Role bindings" },
+];
+
+function isOrgTab(v: string | null): v is OrgTab {
+  return ORG_TABS.some((t) => t.id === v);
+}
+
+// GeneralTab — the read-only org identity card. Owns its own fetch so the
+// page shell never blocks on it.
+function GeneralTab() {
   const [org, setOrg] = useState<OrgInfo | null>(null);
-  const [bindings, setBindings] = useState<RoleBinding[]>([]);
-  const [environments, setEnvironments] = useState<OrgEnvironment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-
-    async function load() {
-      try {
-        const [orgData, bindingsData, envsData] = await Promise.all([
-          fetchOrg(),
-          fetchAllRoleBindings(),
-          listOrgEnvironments(),
-        ]);
-        if (cancelled) return;
-        setOrg(orgData);
-        setBindings(bindingsData);
-        setEnvironments(envsData.environments);
-      } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Failed to load");
-      } finally {
+    fetchOrg()
+      .then((o) => {
+        if (!cancelled) setOrg(o);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load");
+      })
+      .finally(() => {
         if (!cancelled) setLoading(false);
-      }
-    }
-
-    load();
+      });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  if (loading) {
+  if (loading) return <div className="h-32 animate-pulse rounded-lg bg-gray-50" />;
+  if (error || !org) {
     return (
-      <div className="space-y-4">
-        <div className="h-8 w-48 animate-pulse rounded bg-gray-100" />
-        <div className="h-32 animate-pulse rounded-lg bg-gray-50" />
-        <div className="h-48 animate-pulse rounded-lg bg-gray-50" />
+      <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+        <p className="text-sm text-red-700">Failed to load organization: {error}</p>
       </div>
     );
   }
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-6 py-4">
+        <h2 className="text-sm font-medium text-gray-900">Organization Details</h2>
+      </div>
+      <dl className="divide-y divide-gray-100">
+        <div className="grid grid-cols-3 px-6 py-3">
+          <dt className="text-sm font-medium text-gray-500">Name</dt>
+          <dd className="col-span-2 text-sm text-gray-900">{org.name}</dd>
+        </div>
+        <div className="grid grid-cols-3 px-6 py-3">
+          <dt className="text-sm font-medium text-gray-500">Display Name</dt>
+          <dd className="col-span-2 text-sm text-gray-900">{org.displayName}</dd>
+        </div>
+        {org.createdAt && (
+          <div className="grid grid-cols-3 px-6 py-3">
+            <dt className="text-sm font-medium text-gray-500">Created</dt>
+            <dd className="col-span-2 text-sm text-gray-900">
+              {new Date(org.createdAt).toLocaleDateString(undefined, {
+                year: "numeric",
+                month: "long",
+                day: "numeric",
+              })}
+            </dd>
+          </div>
+        )}
+      </dl>
+    </div>
+  );
+}
 
+// RoleBindingsTab — read-only view of project role bindings; editing lives
+// in Team settings.
+function RoleBindingsTab() {
+  const [bindings, setBindings] = useState<RoleBinding[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAllRoleBindings()
+      .then((b) => {
+        if (!cancelled) setBindings(b);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (loading) return <div className="h-32 animate-pulse rounded-lg bg-gray-50" />;
   if (error) {
     return (
       <div className="rounded-lg border border-red-200 bg-red-50 p-4">
-        <p className="text-sm text-red-700">
-          Failed to load organization settings: {error}
-        </p>
+        <p className="text-sm text-red-700">Failed to load role bindings: {error}</p>
       </div>
     );
   }
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
+        <h2 className="text-sm font-medium text-gray-900">Project Role Bindings</h2>
+        <Link to="/settings/teams" className="text-xs font-medium text-indigo-600 hover:text-indigo-500">
+          Manage teams and bindings →
+        </Link>
+      </div>
+      {bindings.length === 0 ? (
+        <div className="px-6 py-12 text-center">
+          <p className="text-sm text-gray-400">No role bindings configured yet.</p>
+          <p className="mt-1 text-xs text-gray-400">
+            Create teams and bind them to projects in Team settings.
+          </p>
+        </div>
+      ) : (
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+              <th className="px-6 py-3">Project</th>
+              <th className="px-6 py-3">Team</th>
+              <th className="px-6 py-3">Role</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-50">
+            {bindings.map((rb, i) => (
+              <tr key={i} className="hover:bg-gray-50">
+                <td className="px-6 py-3 text-sm text-gray-900">
+                  {rb.project === "*" ? (
+                    <span className="text-gray-400 italic">All projects</span>
+                  ) : (
+                    rb.project
+                  )}
+                </td>
+                <td className="px-6 py-3 text-sm text-gray-900">{rb.team}</td>
+                <td className="px-6 py-3">
+                  <RoleBadge role={rb.role} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+export function OrgSettings() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawTab = searchParams.get("tab");
+  const tab: OrgTab = isOrgTab(rawTab) ? rawTab : "general";
+
+  const selectTab = (next: OrgTab) => {
+    // Deep-linkable and back-button friendly; the sidebar highlight matches
+    // on pathname only, so the query param never breaks it.
+    setSearchParams(next === "general" ? {} : { tab: next });
+  };
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">Organization</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Organization details, deployment pipeline, and project role bindings.
+          Organization details, environments, secrets, routing, and access.
         </p>
       </div>
 
-      {org && (
-        <div className="rounded-lg border border-gray-200 bg-white">
-          <div className="border-b border-gray-100 px-6 py-4">
-            <h2 className="text-sm font-medium text-gray-500">
-              Organization Details
-            </h2>
-          </div>
-          <dl className="divide-y divide-gray-100">
-            <div className="grid grid-cols-3 px-6 py-3">
-              <dt className="text-sm font-medium text-gray-500">Name</dt>
-              <dd className="col-span-2 text-sm text-gray-900">{org.name}</dd>
-            </div>
-            <div className="grid grid-cols-3 px-6 py-3">
-              <dt className="text-sm font-medium text-gray-500">
-                Display Name
-              </dt>
-              <dd className="col-span-2 text-sm text-gray-900">
-                {org.displayName}
-              </dd>
-            </div>
-            {org.createdAt && (
-              <div className="grid grid-cols-3 px-6 py-3">
-                <dt className="text-sm font-medium text-gray-500">Created</dt>
-                <dd className="col-span-2 text-sm text-gray-900">
-                  {new Date(org.createdAt).toLocaleDateString(undefined, {
-                    year: "numeric",
-                    month: "long",
-                    day: "numeric",
-                  })}
-                </dd>
-              </div>
-            )}
-          </dl>
-        </div>
-      )}
+      <div className="flex flex-wrap gap-1 border-b border-gray-200">
+        {ORG_TABS.map((t) => {
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => selectTab(t.id)}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
+                active
+                  ? "border-gray-900 text-gray-900"
+                  : "border-transparent text-gray-500 hover:text-gray-800"
+              }`}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
 
-      {/* Canonical deployment pipeline — org-level environments */}
-      <OrgEnvironmentsSection />
+      <div className="space-y-6">
+        {tab === "general" && <GeneralTab />}
 
-      {/* Secrets backend configuration — org_admin only */}
-      <SecretsBackendSection />
+        {tab === "environments" && <OrgEnvironmentsSection />}
 
-      {/* Org-wide namespace naming patterns — org_admin only */}
-      <NamespaceNamingSection />
+        {tab === "secrets" && <SecretsBackendSection />}
 
-      {/* URL scheme for generated app endpoints — org_admin only */}
-      <SecureEndpointsSection />
-
-      {/* Ingress class + cert-manager ClusterIssuer per routing tier */}
-      <RoutingProfilesSection />
-
-      {/* Org-wide environment variables */}
-      <EnvConfigEditor
-        title="Org-wide variables"
-        description="Applied to every app in the org. Lower hierarchy levels override these."
-        fetchFn={getOrgEnvConfig}
-        saveFn={updateOrgEnvConfig}
-      />
-
-      {/* Shared global secrets */}
-      <SecretEditor
-        title="Shared global secrets"
-        description="Shared secrets applied to every app in every environment (global scope). App-level global secrets override these."
-        fetchFn={listSharedGlobalSecretKeys}
-        upsertFn={upsertSharedGlobalSecrets}
-        deleteFn={deleteSharedGlobalSecretKey}
-      />
-
-      {/* Per-environment-type variables and secrets */}
-      <EnvironmentTypeEnvConfigSection environments={environments} />
-
-      <div className="rounded-lg border border-gray-200 bg-white">
-        <div className="border-b border-gray-100 px-6 py-4">
-          <h2 className="text-sm font-medium text-gray-500">
-            Project Role Bindings
-          </h2>
-        </div>
-        {bindings.length === 0 ? (
-          <div className="px-6 py-12 text-center">
-            <p className="text-sm text-gray-400">
-              No role bindings configured yet.
-            </p>
-          </div>
-        ) : (
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
-                <th className="px-6 py-3">Project</th>
-                <th className="px-6 py-3">Team</th>
-                <th className="px-6 py-3">Role</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {bindings.map((rb, i) => (
-                <tr key={i} className="hover:bg-gray-50">
-                  <td className="px-6 py-3 text-sm text-gray-900">
-                    {rb.project === "*" ? (
-                      <span className="text-gray-400 italic">All projects</span>
-                    ) : (
-                      rb.project
-                    )}
-                  </td>
-                  <td className="px-6 py-3 text-sm text-gray-900">
-                    {rb.team}
-                  </td>
-                  <td className="px-6 py-3">
-                    <RoleBadge role={rb.role} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {tab === "variables" && (
+          <>
+            <EnvConfigEditor
+              title="Org-wide variables"
+              description="Applied to every app in the org. Lower hierarchy levels override these."
+              fetchFn={getOrgEnvConfig}
+              saveFn={updateOrgEnvConfig}
+            />
+            <SecretEditor
+              title="Shared global secrets"
+              description="Shared secrets applied to every app in every environment (global scope). App-level global secrets override these."
+              fetchFn={listSharedGlobalSecretKeys}
+              upsertFn={upsertSharedGlobalSecrets}
+              deleteFn={deleteSharedGlobalSecretKey}
+            />
+            <EnvironmentTypeEnvConfigSection />
+          </>
         )}
+
+        {tab === "routing" && (
+          <>
+            <SecureEndpointsSection />
+            <RoutingProfilesSection />
+          </>
+        )}
+
+        {tab === "naming" && <NamespaceNamingSection />}
+
+        {tab === "bindings" && <RoleBindingsTab />}
       </div>
     </div>
   );
