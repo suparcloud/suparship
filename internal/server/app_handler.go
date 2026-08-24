@@ -55,6 +55,7 @@ type appHandler struct {
 	gitOpsPublisher         GitOpsPublisher         // optional: commits argocd manifests to gitops repo on create
 	kargoPromoter           KargoPromoter           // optional: creates Kargo Promotion CRs on promote
 	argoAppGate             ArgoAppGate             // optional: refuses Kargo promotions until the target Application exists
+	argoChainNudger         ArgoChainNudger         // optional: nudges ArgoCD's lazy generators during the gate wait
 	argoAppWaitTimeout      time.Duration           // how long promoteAppEnv polls the gate (defaulted in newAppHandler)
 	kargoStatusReader       KargoStatusReader       // optional: reads live Kargo Promotion status
 	kargoPipelineReader     KargoPipelineReader     // optional: reads live Kargo Stage pipeline status
@@ -145,10 +146,12 @@ func newAppHandler(store domain.AppStore, templates []*tpl.Template, clusterLoad
 // generate the target env's Application before giving up with a retryable
 // error. Long enough to cover the common case (the Application already exists,
 // or a webhook-triggered appset reconcile lands quickly); deliberately shorter
-// than the ApplicationSet git generator's default requeue (~3 min) — a
-// first-ever promotion to an env may need one retry, which beats holding an
-// HTTP request open for minutes.
-const defaultArgoAppWaitTimeout = 20 * time.Second
+// than the ApplicationSet git generator's default requeue (~3 min). With the
+// ArgoChainNudger actively refreshing the generator chain the Application
+// materializes in seconds on a first promotion, so this bound is a backstop —
+// generous enough that a healthy first promotion never surfaces the retryable
+// 409, small enough that a broken ArgoCD doesn't hold the request for minutes.
+const defaultArgoAppWaitTimeout = 90 * time.Second
 
 // templateDisabled reports whether the template is retired via its sync-safe
 // override. Gates NEW app creation only — existing apps keep every other
@@ -340,13 +343,6 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	if values == nil {
 		values = map[string]any{}
 	}
-	if repo, ok := values["image_repository"].(string); ok {
-		if err := domain.ValidateImageRepository(repo); err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
-			return
-		}
-	}
-
 	imageBindings := appImageBindingsFromDTO(req.Images)
 	if err := validateImageBindings(imageBindings); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
@@ -367,8 +363,8 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// NB: CD-managed apps are NOT required to have an image source at creation.
-	// Image discovery needs the app's effective values (the canonical base is only
-	// computed for an existing app+env), so a canonical template's component images
+	// Image discovery reads the app's effective values (chart defaults ⊕
+	// overlays), which are only computed for an existing app+env — so images
 	// can't be discovered or selected until the app exists. The operator selects
 	// which images Kargo manages from the app's Overview after create, where
 	// discovery is live; validateCDImageSource still guards that selection on the
@@ -396,13 +392,10 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Template:           tmpl,
 		Values:             values,
 		SecretRefs:         domainSecretRefs,
-		ComponentToggles:   req.ComponentToggles,
 		ExplicitComponents: explicitComponents,
 		NamespaceScope:     domain.NamespaceScope(req.NamespaceScope),
 		NamespacePattern:   req.NamespacePattern,
 		RawValues:          req.RawValues,
-		ComponentConfigs:   req.ComponentConfigs,
-		EnvComponents:      req.EnvComponents,
 		EnvConfig:          envConfig,
 		EnvConfigByEnv:     envConfigByEnv,
 		CD:                 cdConfigFromDTO(req.CD),
@@ -602,12 +595,6 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		if newValues == nil {
 			newValues = map[string]any{}
 		}
-		if repo, ok := newValues["image_repository"].(string); ok {
-			if err := domain.ValidateImageRepository(repo); err != nil {
-				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
-				return
-			}
-		}
 		tmpl, ok := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
 		if !ok {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{
@@ -796,16 +783,6 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if req.PreviewsEnabled != nil {
 		app.Spec.PreviewsEnabled = *req.PreviewsEnabled
 	}
-	if req.ComponentConfigs != nil {
-		// Apply app-level per-component config onto the matching ComponentSpec.
-		for i := range app.Spec.Components {
-			cfg, ok := req.ComponentConfigs[app.Spec.Components[i].Name]
-			if !ok {
-				continue
-			}
-			applyComponentConfig(&app.Spec.Components[i], cfg)
-		}
-	}
 	// Set of valid component names, used to reject unknown names in the
 	// per-component values updates below.
 	compNames := make(map[string]bool, len(app.Spec.Components))
@@ -856,22 +833,6 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			}
 			if len(ov.ComponentValues) == 0 {
 				ov.ComponentValues = nil
-			}
-			ed[envName] = ov
-		}
-		app.Spec.EnvironmentDefaults = ed
-	}
-	if req.EnvComponents != nil {
-		ed := app.Spec.EnvironmentDefaults
-		if ed == nil {
-			ed = map[string]domain.EnvironmentOverride{}
-		}
-		for envName, byComp := range req.EnvComponents {
-			ov := ed[envName]
-			if len(byComp) == 0 {
-				ov.Components = nil
-			} else {
-				ov.Components = byComp
 			}
 			ed[envName] = ov
 		}
@@ -1413,7 +1374,7 @@ var errPreviewsDisabled = errors.New("previews disabled")
 // publish), the saved env, and the prior env + existed flag (for rollback). No
 // git. Shared by the single-app upsert and the batched stack-preview path so the
 // spec/store prep can run concurrently across members before one batch publish.
-func (ah *appHandler) prepAppPreview(ctx context.Context, a *domain.App, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride string) (inst *domain.EnvironmentInstance, env, prior *domain.AppEnvironment, existed bool, err error) {
+func (ah *appHandler) prepAppPreview(ctx context.Context, a *domain.App, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride string, secure bool) (inst *domain.EnvironmentInstance, env, prior *domain.AppEnvironment, existed bool, err error) {
 	if !a.Spec.PreviewsEnabled {
 		return nil, nil, nil, false, fmt.Errorf("app %q: %w", a.Name, errPreviewsDisabled)
 	}
@@ -1422,6 +1383,7 @@ func (ah *appHandler) prepAppPreview(ctx context.Context, a *domain.App, preview
 		PreviewName:      previewName,
 		BaseDomain:       baseDomain,
 		NamespacePattern: namespacePattern,
+		Secure:           secure,
 	})
 	if err != nil {
 		return nil, nil, nil, false, err
@@ -1494,8 +1456,8 @@ func (ah *appHandler) publishPreviewsBatch(ctx context.Context, targets []Previe
 	return nil
 }
 
-func (ah *appHandler) upsertAppPreview(ctx context.Context, a *domain.App, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride string) (bool, *domain.AppEnvironment, error) {
-	inst, env, prior, existed, err := ah.prepAppPreview(ctx, a, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride)
+func (ah *appHandler) upsertAppPreview(ctx context.Context, a *domain.App, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride string, secure bool) (bool, *domain.AppEnvironment, error) {
+	inst, env, prior, existed, err := ah.prepAppPreview(ctx, a, previewName, baseEnv, imageTag, baseDomain, namespacePattern, namespaceOverride, secure)
 	if err != nil {
 		return existed, nil, err
 	}
@@ -1574,8 +1536,9 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 	// clones/commits/pushes the gitops repo, so it's deferred when the caller opts
 	// into async (Prefer: respond-async / ?async=1) to avoid a gateway 504.
 	op := func(ctx context.Context) (int, any, error) {
+		baseDomain, secure := ah.previewRoutingForEnv(ctx, baseEnv)
 		existed, env, err := ah.upsertAppPreview(ctx, a, sanitized, baseEnv, req.ImageTag,
-			ah.baseDomainForEnv(ctx, baseEnv), ah.previewNamespacePattern(ctx, projectName), "")
+			baseDomain, ah.previewNamespacePattern(ctx, projectName), "", secure)
 		if err != nil {
 			code := http.StatusInternalServerError
 			if errors.Is(err, errPreviewsDisabled) {
@@ -1841,13 +1804,13 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// A BYO/passthrough app stores no components at all (creator.go returns nil
-	// for a template with no declared components that opts out of the canonical
-	// schema). There AppSpec.Template is not a mirror — it is the only pin there
-	// is, and the single-source path renders straight from it. Do NOT synthesize a
-	// component to carry it: persisting one would trip the publisher's
-	// len(Components)==1 canonical-key remap, changing how the app renders as a
-	// side effect of an upgrade.
+	// A plain single-chart app stores no components at all (components are
+	// user-declared only; creator.go keeps the list empty unless the user
+	// declared some). There AppSpec.Template is not a mirror — it is the only
+	// pin there is, and the single-source path renders straight from it. Do NOT
+	// synthesize a component to carry it: persisting one would change the
+	// publisher's single-component handling (component Values overlay, opt-out
+	// env projections) as a side effect of an upgrade.
 	if len(app.Spec.Components) == 0 {
 		ah.upgradeTemplatelessApp(w, r, app, wantVersion, req.Components, envScope)
 		return
@@ -2480,24 +2443,27 @@ func (ah *appHandler) baseStableEnvName(ctx context.Context, app *domain.App) st
 	return stable[0].EnvName
 }
 
-// baseDomainForEnv returns the ingress DNS zone configured for the named org
-// environment, or "localhost" when none is set (or no org provider). This
-// mirrors the publisher's preview base-domain resolution (orgEnv.BaseDomain →
-// localhost), so a preview's stored routing host matches what the chart renders.
-func (ah *appHandler) baseDomainForEnv(ctx context.Context, envName string) string {
+// previewRoutingForEnv returns the ingress DNS zone configured for the named
+// org environment ("localhost" when none is set or no org provider — mirroring
+// the publisher's preview base-domain resolution so a preview's stored routing
+// host matches what the chart renders) together with the org's effective
+// secure-endpoints flag (absent/unreadable org → true, i.e. https).
+func (ah *appHandler) previewRoutingForEnv(ctx context.Context, envName string) (baseDomain string, secure bool) {
 	if ah.orgProvider == nil {
-		return "localhost"
+		return "localhost", true
 	}
 	org, err := ah.orgProvider.GetOrg(ctx)
-	if err != nil || org == nil {
-		return "localhost"
+	if err != nil {
+		return "localhost", true
 	}
+	baseDomain = "localhost"
 	for _, e := range org.Environments {
 		if e.Name == envName && e.BaseDomain != "" {
-			return e.BaseDomain
+			baseDomain = e.BaseDomain
+			break
 		}
 	}
-	return "localhost"
+	return baseDomain, org.EffectiveSecureEndpoints()
 }
 
 // previewNamespacePattern returns the project's configured preview namespace
@@ -2730,16 +2696,6 @@ type kargoFreightHistorian interface {
 // does) without naming a source preview. "Resume CD" is the existing unpin.
 const rollbackPinnedFrom = "rollback"
 
-// appImageRepoSubstr returns the app's image repository (when set on the app),
-// used to pick the right image within a multi-image freight. Empty for
-// template-image apps, where the per-app freight is matched by warehouse origin.
-func appImageRepoSubstr(app *domain.App) string {
-	if repo, ok := app.Spec.Values["image_repository"].(string); ok {
-		return strings.TrimSpace(repo)
-	}
-	return ""
-}
-
 // Sentinels let the per-app HTTP handler map pinAppEnv/unpinAppEnv failures back
 // to status codes, and let the stack batch path classify a failure as
 // "skip this member" (not applicable) vs a real error.
@@ -2879,7 +2835,7 @@ func (ah *appHandler) pinAppEnvSpec(ctx context.Context, projectName, appName, e
 		// (unpin has its own restore fallback when this is empty).
 		if fr, ok := ah.kargoPromoter.(kargoFreightReader); ok {
 			frCtx, cancel := context.WithTimeout(ctx, liveReadTimeout)
-			if tag, ferr := fr.CurrentFreightImageTag(frCtx, projectName, appName, envName, appImageRepoSubstr(app)); ferr == nil {
+			if tag, ferr := fr.CurrentFreightImageTag(frCtx, projectName, appName, envName, ""); ferr == nil {
 				prePin = tag
 			}
 			cancel()
@@ -2942,7 +2898,9 @@ func (ah *appHandler) unpinAppEnvSpec(ctx context.Context, projectName, appName,
 	// app's freight from the shared project namespace. Falls through to a plain
 	// clear if Kargo can't tell us — then Kargo reasserts on the next promote.
 	if restore == "" {
-		repo := appImageRepoSubstr(app)
+		// Image bindings carry no repository (discovered at publish), so the
+		// app's freight is matched by warehouse origin, not a repo substring.
+		repo := ""
 		if fr, ok := ah.kargoPromoter.(kargoFreightReader); ok {
 			// Bound the Kargo freight reads so a slow tooling cluster can't hang a
 			// stack unpin fan-out (best-effort restore; falls through to a plain clear).
@@ -3130,7 +3088,7 @@ func (ah *appHandler) rollbackAppEnvSpec(ctx context.Context, projectName, appNa
 	if app.Spec.EnvironmentDefaults[envName].PinnedFrom == "" {
 		if fr, ok := ah.kargoPromoter.(kargoFreightReader); ok {
 			frCtx, cancel := context.WithTimeout(ctx, liveReadTimeout)
-			if tag, ferr := fr.CurrentFreightImageTag(frCtx, projectName, appName, envName, appImageRepoSubstr(app)); ferr == nil {
+			if tag, ferr := fr.CurrentFreightImageTag(frCtx, projectName, appName, envName, ""); ferr == nil {
 				prePin = tag
 			}
 			cancel()
@@ -3530,7 +3488,21 @@ func (ah *appHandler) waitForTargetArgoApp(ctx context.Context, projectName, app
 		timeout = defaultArgoAppWaitTimeout
 	}
 	deadline := time.Now().Add(timeout)
-	for {
+	for i := 0; ; i++ {
+		// Nudge ArgoCD's lazy generator chain instead of waiting out its poll
+		// cycles: the root app must sync _infra to create {env}-composed, which
+		// must sync to create the composed Application, and the env's
+		// ApplicationSets must re-scan git for the platform / single-source
+		// Applications. Re-annotate every few ticks — each hop only becomes
+		// nudgeable once the previous one has materialized it.
+		if ah.argoChainNudger != nil && i%3 == 0 {
+			if err := ah.argoChainNudger.RefreshAppsByName(ctx, []string{"suparship-apps", envName + "-composed"}); err != nil {
+				slog.Debug("promote: argocd chain nudge (apps) failed", "env", envName, "err", err)
+			}
+			if err := ah.argoChainNudger.RefreshAppSets(ctx, []string{envName, envName + "-platform"}); err != nil {
+				slog.Debug("promote: argocd chain nudge (appsets) failed", "env", envName, "err", err)
+			}
+		}
 		exists, err := ah.argoAppGate.HasAppForEnv(ctx, projectName, appName, envName)
 		if err != nil {
 			slog.Warn("promote: ArgoCD application check failed — proceeding without the gate",
@@ -3541,7 +3513,7 @@ func (ah *appHandler) waitForTargetArgoApp(ctx context.Context, projectName, app
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%w: %s manifests are published, but ArgoCD has not generated the %s Application yet (the ApplicationSet can take up to its poll interval, ~3 min, on a first promotion) — retry shortly; nothing was promoted",
+			return fmt.Errorf("%w: %s manifests are published, but ArgoCD has not generated the %s Application yet — retry shortly; nothing was promoted",
 				errPromoteTargetNotReady, envName, envName)
 		}
 		select {
@@ -3598,14 +3570,43 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 	// proceeding used to "succeed" while the target env had no manifests in
 	// git — Kargo updated nothing deployable and the UI reported a green
 	// promotion. Failing loudly here is the fix for that silent green.
+	srcTag := ""
+	if sourceEnv.Release != nil {
+		srcTag = sourceEnv.Release.Tag
+	}
+	// publishedSrcTag: the publish below wrote the source env's running tag
+	// into the target's values — the promoted release is deployable from git
+	// alone, which is what makes the no-freight fallback further down honest.
+	publishedSrcTag := false
 	if ah.gitOpsPublisher != nil {
 		ah.ensureAppNamespace(ctx, app, targetEnv)
-		if pubErr := ah.gitOpsPublisher.PublishAppEnv(ctx, app, targetEnv); pubErr != nil {
+		// Publish the target env with the SOURCE's current tag transiently
+		// pinned (clone only — never persisted; PinnedFrom stays empty so the
+		// env is not "pinned"). On a FIRST promotion the env has no committed
+		// values yet, and without this the publish materializes the app's
+		// create-time seed tag: ArgoCD would deploy that stale image in the
+		// window before Kargo's promotion commit lands. Kargo writes the same
+		// tag right after, so the pinned write never diverges from the
+		// promotion.
+		pubApp := app
+		if srcTag != "" {
+			clone := *app
+			clone.Spec.EnvironmentDefaults = make(map[string]domain.EnvironmentOverride, len(app.Spec.EnvironmentDefaults)+1)
+			for k, v := range app.Spec.EnvironmentDefaults {
+				clone.Spec.EnvironmentDefaults[k] = v
+			}
+			ov := clone.Spec.EnvironmentDefaults[targetEnvName]
+			ov.PinnedImageTag = srcTag
+			clone.Spec.EnvironmentDefaults[targetEnvName] = ov
+			pubApp = &clone
+		}
+		if pubErr := ah.gitOpsPublisher.PublishAppEnv(ctx, pubApp, targetEnv); pubErr != nil {
 			slog.Error("promote: failed to publish env files — aborting promotion",
 				"project", projectName, "app", appName,
 				"env", targetEnvName, "err", pubErr)
 			return nil, fmt.Errorf("failed to publish %s manifests to gitops — promotion aborted (nothing was promoted): %w", targetEnvName, pubErr)
 		}
+		publishedSrcTag = srcTag != ""
 	}
 
 	// When Kargo is configured, create a Kargo Promotion CR. The Promotion CR
@@ -3625,6 +3626,40 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 		}
 		kargoResult, err := ah.kargoPromoter.CreatePromotion(ctx, projectName, appName, sourceEnv.EnvName, targetEnvName)
 		if err != nil {
+			// The user's promotion must not depend on CD-pipeline internals.
+			// The publish above already wrote the source env's running tag
+			// into the target's values, so whenever that pinned publish
+			// happened the promoted release is fully deployable from git —
+			// ArgoCD ships exactly the right image no matter why Kargo
+			// declined. Degrade to a successful git-mechanism promotion and
+			// surface the pipeline problem as a human-friendly warning
+			// (expected on an initial deployment, reportable otherwise)
+			// rather than failing the user's release.
+			if publishedSrcTag {
+				resp := &AppPromoteResponse{
+					Project:     projectName,
+					App:         appName,
+					Source:      sourceEnv.EnvName,
+					Destination: targetEnvName,
+					Namespace:   targetEnv.Namespace,
+					Mechanism:   "gitops",
+				}
+				if errors.Is(err, kube.ErrKargoNoFreight) {
+					// Initial deployment: nothing has flowed through the
+					// pipeline yet — expected, not a warning.
+					slog.Info("promote: no Kargo freight in source stage — promoted via published tag pin (initial deployment)",
+						"project", projectName, "app", appName,
+						"from", sourceEnv.EnvName, "to", targetEnvName, "tag", srcTag)
+					resp.Message = fmt.Sprintf("Promoted %s's release %s to %s directly via GitOps — no CD run has reached %s yet, so there is no Kargo freight; Kargo tracking begins with the next release", sourceEnv.EnvName, srcTag, targetEnvName, sourceEnv.EnvName)
+					return resp, nil
+				}
+				slog.Error("promote: kargo promotion failed — degraded to published tag pin",
+					"project", projectName, "app", appName,
+					"from", sourceEnv.EnvName, "to", targetEnvName, "tag", srcTag, "error", err)
+				resp.Message = fmt.Sprintf("Promoted %s's release %s to %s directly via GitOps — the CD pipeline could not run this promotion", sourceEnv.EnvName, srcTag, targetEnvName)
+				resp.Warning = friendlyKargoIssue(err.Error())
+				return resp, nil
+			}
 			slog.Error("kargo promotion failed",
 				"project", projectName, "app", appName,
 				"from", sourceEnv.EnvName, "to", targetEnvName, "error", err)
@@ -3907,7 +3942,17 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	perCluster := make([]map[string]*runtime.RuntimeInfo, len(clients))
 	runBounded(len(clients), appEnrichConcurrency, func(i int) {
 		nc := clients[i]
-		perCluster[i] = runtimeByComponent(ctx, runtime.NewK8sProvider(nc.client, nc.dyn), env.Namespace, instances)
+		prov := runtime.NewK8sProvider(nc.client, nc.dyn)
+		if ah.orgProvider != nil {
+			prov.SetSecureEndpointsFunc(func() bool {
+				org, err := ah.orgProvider.GetOrg(ctx)
+				if err != nil {
+					return true
+				}
+				return org.EffectiveSecureEndpoints()
+			})
+		}
+		perCluster[i] = runtimeByComponent(ctx, prov, env.Namespace, instances)
 	})
 
 	// compAgg: component name → RuntimeInfo aggregated across all reachable clusters.
@@ -4133,7 +4178,17 @@ func (ah *appHandler) applyRuntimeInfo(env *domain.AppEnvironment, info *runtime
 		env.URLs = info.IngressURLs
 	}
 	if info.Image != "" && env.Release == nil {
-		env.Release = &domain.AppReleaseRef{Image: info.Image}
+		ref := &domain.AppReleaseRef{Image: info.Image}
+		// Derive the tag from the running image ref: everything after the last
+		// ':' PROVIDED it follows the last '/' (a ':' before that is the
+		// registry port, e.g. kind-registry:5000/demo/app). Without this the
+		// runtime-derived release has no tag, and everything gated on
+		// release.tag — the Promote button, pin/rollback affordances — stays
+		// disabled even though the env is deployed and healthy.
+		if i := strings.LastIndex(info.Image, ":"); i > strings.LastIndex(info.Image, "/") {
+			ref.Tag = info.Image[i+1:]
+		}
+		env.Release = ref
 	}
 }
 
@@ -4399,7 +4454,7 @@ func validateImageBindings(bindings []domain.AppImageBinding) error {
 // rather than a quietly broken Warehouse.
 //
 // The check mirrors every source the PUBLISHER actually watches, in order:
-// the app-level image selection, the legacy app image_repository value, any
+// the app-level image selection, any
 // component's stored selection (composed apps keep images per component —
 // checking only the app level rejected every composed app, the bug this
 // rewrite fixes), and finally — when the selection was never explicitly
@@ -4412,9 +4467,6 @@ func validateImageBindings(bindings []domain.AppImageBinding) error {
 // nothing" and auto-bind no longer applies, so template images stop counting.
 func (ah *appHandler) validateCDImageSource(ctx context.Context, app *domain.App, imagesConfigured bool) error {
 	if len(app.Spec.Images) > 0 {
-		return nil
-	}
-	if repo, ok := app.Spec.Values["image_repository"].(string); ok && strings.TrimSpace(repo) != "" {
 		return nil
 	}
 	for i := range app.Spec.Components {
@@ -4443,7 +4495,7 @@ func (ah *appHandler) validateCDImageSource(ctx context.Context, app *domain.App
 			}
 		}
 	}
-	return fmt.Errorf("continuous delivery (cd.managed) needs an image for Kargo to watch: select at least one image under Images (on the app or a component), or set image_repository on the app")
+	return fmt.Errorf("continuous delivery (cd.managed) needs an image for Kargo to watch: select at least one image under Images (on the app or a component)")
 }
 
 func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO {
@@ -4481,62 +4533,12 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		TargetClusters:      targetClustersDTO(app.Spec.EnvironmentDefaults),
 		RawValues:           app.Spec.RawValues,
 		EnvRawValues:        envRawValuesDTO(app.Spec.EnvironmentDefaults),
-		ComponentConfigs:    componentConfigsDTO(app.Spec.Components),
-		EnvComponents:       envComponentsDTO(app.Spec.EnvironmentDefaults),
 		EnvTemplateVersions: envTemplateVersionsDTO(app.Spec.EnvironmentDefaults),
 		CD:                  CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured},
 		Images:              appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:        string(app.Spec.DeliveryMode),
 		PreviewsEnabled:     app.Spec.PreviewsEnabled,
 	}
-}
-
-// applyComponentConfig writes per-component config (resources, envFrom, scaling,
-// env) onto an app-level ComponentSpec. Env replaces the component's Config.
-func applyComponentConfig(spec *domain.ComponentSpec, cfg domain.ComponentConfig) {
-	spec.Resources = cfg.Resources
-	spec.EnvFromSecrets = cfg.EnvFromSecrets
-	spec.EnvFromConfigMaps = cfg.EnvFromConfigMaps
-	spec.Scaling = cfg.Scaling
-	if cfg.Env != nil {
-		spec.Config = cfg.Env
-	}
-}
-
-// componentConfigsDTO projects each ComponentSpec into the editable
-// ComponentConfig shape (env mirrors the spec's Config). Returns nil when there
-// are no components.
-func componentConfigsDTO(specs []domain.ComponentSpec) map[string]domain.ComponentConfig {
-	if len(specs) == 0 {
-		return nil
-	}
-	out := make(map[string]domain.ComponentConfig, len(specs))
-	for _, c := range specs {
-		out[c.Name] = domain.ComponentConfig{
-			Resources:         c.Resources,
-			EnvFromSecrets:    c.EnvFromSecrets,
-			EnvFromConfigMaps: c.EnvFromConfigMaps,
-			Scaling:           c.Scaling,
-			Env:               c.Config,
-		}
-	}
-	return out
-}
-
-// envComponentsDTO extracts per-(env, component) overrides from
-// EnvironmentDefaults. Returns nil when no env has any.
-func envComponentsDTO(defaults map[string]domain.EnvironmentOverride) map[string]map[string]domain.ComponentConfig {
-	var out map[string]map[string]domain.ComponentConfig
-	for envName, ov := range defaults {
-		if len(ov.Components) == 0 {
-			continue
-		}
-		if out == nil {
-			out = map[string]map[string]domain.ComponentConfig{}
-		}
-		out[envName] = ov.Components
-	}
-	return out
 }
 
 // envRawValuesDTO extracts per-env raw-values overlays from EnvironmentDefaults,
@@ -4772,20 +4774,6 @@ func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []Componen
 				FromSecret: e.FromSecret,
 			})
 		}
-		// Carry forward the fields this DTO cannot express from the prior
-		// same-name spec. req.Components replaces the list wholesale, so
-		// without this a manage save silently WIPED per-component config
-		// (env defaults, envFrom extras, resources, scaling) set via the
-		// componentConfigs API or template defaults.
-		if p, ok := prev[c.Name]; ok {
-			cs.Config = p.Config
-			cs.EnvFromSecrets = p.EnvFromSecrets
-			cs.EnvFromConfigMaps = p.EnvFromConfigMaps
-			cs.Resources = p.Resources
-			cs.Scaling = p.Scaling
-			cs.Replicas = p.Replicas
-			cs.SizePreset = p.SizePreset
-		}
 		if c.Template != nil && c.Template.Name != "" {
 			ctmpl, ok := ah.lookupTemplate(ctx, c.Template.Name)
 			if !ok {
@@ -5018,6 +5006,10 @@ func (ah *appHandler) handleGetKargoStages(w http.ResponseWriter, r *http.Reques
 
 	dtos := make([]KargoStageStatusDTO, 0, len(stages))
 	for _, s := range stages {
+		issue := s.Issue
+		if benignCDCondition(issue) {
+			issue = ""
+		}
 		dtos = append(dtos, KargoStageStatusDTO{
 			StageName:             s.StageName,
 			EnvName:               s.EnvName,
@@ -5025,10 +5017,89 @@ func (ah *appHandler) handleGetKargoStages(w http.ResponseWriter, r *http.Reques
 			Health:                s.Health,
 			CurrentFreight:        s.CurrentFreight,
 			AvailableFreightCount: s.AvailableFreightCount,
+			Issue:                 friendlyKargoIssue(issue),
 		})
 	}
 
-	writeJSON(w, http.StatusOK, KargoAppPipelineResponse{Available: true, Stages: dtos})
+	resp := KargoAppPipelineResponse{Available: true, Stages: dtos}
+	if wr, ok := ah.kargoPipelineReader.(KargoWarehouseReader); ok {
+		if wh, whErr := wr.GetWarehouseStatus(r.Context(), projectName, appName); whErr == nil {
+			whIssue := wh.Issue
+			if benignCDCondition(whIssue) {
+				whIssue = ""
+			}
+			resp.Warehouse = &KargoWarehouseDTO{
+				Exists: wh.Exists,
+				Ready:  wh.Ready,
+				Issue:  friendlyKargoIssue(whIssue),
+			}
+		}
+	}
+	resp.Summary = summarizeCDPipeline(resp.Warehouse, dtos)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// summarizeCDPipeline rolls warehouse + stage states into the one badge the
+// app page shows: "attention" when anything is broken (first friendly issue
+// as the message), "setting_up" while the pipeline is provisioning or no
+// release has flowed through any stage yet, "active" otherwise. Stages
+// without freight are normal when a sibling has some (prod before its first
+// promotion), so only a fully-freightless pipeline reads as setting up.
+func summarizeCDPipeline(wh *KargoWarehouseDTO, stages []KargoStageStatusDTO) *KargoCDSummaryDTO {
+	if wh != nil && wh.Issue != "" {
+		return &KargoCDSummaryDTO{State: "attention", Message: wh.Issue}
+	}
+	for _, st := range stages {
+		if st.Issue != "" {
+			return &KargoCDSummaryDTO{State: "attention", Message: st.Issue}
+		}
+	}
+	if wh != nil && !wh.Exists {
+		return &KargoCDSummaryDTO{State: "setting_up", Message: "Setting up continuous delivery for this app — almost there."}
+	}
+	// A promotion mid-flight, or a freshly promoted stage whose health hasn't
+	// been assessed yet (ArgoCD still syncing), is progress — celebrate it,
+	// don't alarm the user.
+	for _, st := range stages {
+		if st.Phase == "Promoting" || (st.CurrentFreight != "" && st.Health != "Healthy" && st.Health != "Unhealthy") {
+			return &KargoCDSummaryDTO{State: "deploying", Message: "Deploying your release — waiting for it to report healthy. This usually takes a minute."}
+		}
+	}
+	anyFreight := false
+	for _, st := range stages {
+		if st.CurrentFreight != "" {
+			anyFreight = true
+			break
+		}
+	}
+	if len(stages) > 0 && !anyFreight {
+		return &KargoCDSummaryDTO{State: "setting_up", Message: "Your first release is on its way — it will be deployed automatically as soon as the build lands."}
+	}
+	return &KargoCDSummaryDTO{State: "active"}
+}
+
+// benignCDCondition reports whether a raw Kargo condition message describes a
+// NORMAL or transient state rather than a problem: a stage before its first
+// promotion, a promotion in flight, or health not yet assessed while ArgoCD
+// syncs. These must never surface as issues — on every fresh app they would
+// greet a new user with a red "needs attention" banner during a perfectly
+// healthy first deployment.
+func benignCDCondition(raw string) bool {
+	lower := strings.ToLower(raw)
+	for _, benign := range []string{
+		"no current freight",
+		"health evaluated to unknown",
+		"being promoted",
+		"promotion is running",
+		"promotion in progress",
+		"verification in progress",
+		"waiting for",
+	} {
+		if strings.Contains(lower, benign) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleGetAppDeploymentHistory handles

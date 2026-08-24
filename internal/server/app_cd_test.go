@@ -70,7 +70,7 @@ func TestUpdateApp_CDConfigPersists(t *testing.T) {
 	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)
 	app := promoteTestApp(testProject)
 	// Give the app a watchable image source so enabling CD passes validation.
-	app.Spec.Values = map[string]any{"image_repository": "ghcr.io/acme/my-app"}
+	app.Spec.Images = []domain.AppImageBinding{{Name: "web", TagKey: "image.tag"}}
 	store.addApp(app)
 
 	rec := patchAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
@@ -151,7 +151,7 @@ func TestUpdateApp_CDOnlyEditPreservesImagesConfigured(t *testing.T) {
 	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)
 	app := promoteTestApp(testProject)
 	// Watchable source so enabling cd.managed passes validation.
-	app.Spec.Values = map[string]any{"image_repository": "ghcr.io/acme/my-app"}
+	app.Spec.Images = []domain.AppImageBinding{{Name: "web", TagKey: "image.tag"}}
 	app.Spec.CD.ImagesConfigured = true // user already configured images earlier
 	store.addApp(app)
 

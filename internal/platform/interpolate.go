@@ -25,7 +25,6 @@ import (
 	"strings"
 
 	"github.com/suparcloud/suparship/internal/helmvalues"
-	"github.com/suparcloud/suparship/internal/secrets"
 )
 
 // Context is the interpolation context for one (app, env, cluster): the platform
@@ -133,25 +132,16 @@ func (c Context) replacer() *strings.Replacer {
 		"platform.externalGatewayNamespace", p.ExternalGatewayNamespace,
 		"platform.externalGatewaySectionName", p.ExternalGatewaySectionName,
 	}
-	// Platform-managed per-app ConfigMap/Secret names, derived from the app name
-	// (single source of truth: secrets.AppConfigMapName/AppSecretName). Exposed so
-	// BYO/passthrough charts can wire envFrom to the platform-managed env without
-	// hardcoding. Guarded on App so an empty context doesn't emit "-config".
+	// Platform-managed per-app ConfigMap/Secret names, exposed so charts can wire
+	// envFrom to the platform-managed env without hardcoding. Used VERBATIM: the
+	// publisher resolves them (app-wide convention names, preview-suffixed names,
+	// or a component's curated projection), and an explicitly empty name must
+	// survive as "" — it is how an opt-out component signals "no app secrets".
+	// Guarded on App so an empty context leaves the tokens untouched.
 	if p.App != "" {
-		// Prefer the explicitly resolved names (set for shared-namespace previews,
-		// where they carry the preview-name suffix); fall back to the {app}-config
-		// / {app}-secrets convention.
-		cmName := p.ConfigMapName
-		if cmName == "" {
-			cmName = secrets.AppConfigMapName(p.App)
-		}
-		secName := p.SecretName
-		if secName == "" {
-			secName = secrets.AppSecretName(p.App)
-		}
 		named = append(named,
-			"platform.configMapName", cmName,
-			"platform.secretName", secName,
+			"platform.configMapName", p.ConfigMapName,
+			"platform.secretName", p.SecretName,
 		)
 	}
 	// ((platform.imageTag)) is ALWAYS replaced — to the resolved tag, or to "" when
@@ -159,8 +149,9 @@ func (c Context) replacer() *strings.Replacer {
 	// promoted). It must never survive as a literal: charts stamp the tag into
 	// metadata.labels (app.kubernetes.io/version) and image refs, and "((...))" is
 	// an invalid label value (k8s rejects the whole apply). An empty tag is safe —
-	// the canonical chart defaults it to .Chart.AppVersion (see suparship-common
-	// _labels.tpl), and CD overwrites the real tag on its first promotion.
+	// charts conventionally fall back to .Chart.AppVersion (the example charts
+	// use `.Values.image.tag | default .Chart.AppVersion`), and CD overwrites the
+	// real tag on its first promotion.
 	named = append(named, "platform.imageTag", p.ImageTag)
 	for k, v := range c.Vars {
 		named = append(named, "vars."+k, v)

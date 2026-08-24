@@ -1,0 +1,11 @@
+# CI smoke values: the platform contract, as an app overlay would express it.
+# Credentials arrive via the platform-managed objects; inline auth stays
+# blank. Tokens are literal strings here; the platform interpolates them at
+# publish.
+auth:
+  database: ""
+  username: ""
+  password: ""
+envFrom:
+  configMaps: ["((platform.configMapName))"]
+  secrets: ["((platform.secretName))"]

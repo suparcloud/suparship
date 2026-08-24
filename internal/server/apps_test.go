@@ -591,8 +591,7 @@ func TestGetApp_ComposedComponentsNotSuppressedForBYOPrimary(t *testing.T) {
 	}
 	ah.registerRoutes(mux)
 	store := newMemAppStore()
-	no := false
-	byo := &tpl.Template{Metadata: tpl.Metadata{Name: "web"}, Spec: tpl.TemplateSpec{InjectCanonicalValues: &no}}
+	byo := &tpl.Template{Metadata: tpl.Metadata{Name: "web"}}
 	appH := newAppHandler(store, []*tpl.Template{byo}, nil, nil)
 	rh := &rbacHandler{auth: ah, orgStore: &staticOrgProvider{org: testRBACOrg()}, appHandler: appH}
 	rh.registerRoutes(mux)
@@ -634,8 +633,7 @@ func TestGetApp_SingleSourceBYOComponentSurfaced(t *testing.T) {
 	}
 	ah.registerRoutes(mux)
 	store := newMemAppStore()
-	no := false
-	byo := &tpl.Template{Metadata: tpl.Metadata{Name: "gw"}, Spec: tpl.TemplateSpec{InjectCanonicalValues: &no}}
+	byo := &tpl.Template{Metadata: tpl.Metadata{Name: "gw"}}
 	appH := newAppHandler(store, []*tpl.Template{byo}, nil, nil)
 	rh := &rbacHandler{auth: ah, orgStore: &staticOrgProvider{org: testRBACOrg()}, appHandler: appH}
 	rh.registerRoutes(mux)
@@ -914,8 +912,8 @@ func TestCreateAppValid(t *testing.T) {
 	if len(resp.App.Environments) != 2 {
 		t.Errorf("expected 2 default environments, got %d", len(resp.App.Environments))
 	}
-	if len(resp.App.Components) != 1 || resp.App.Components[0].Name != "web" {
-		t.Errorf("expected default web component, got %v", resp.App.Components)
+	if len(resp.App.Components) != 1 || resp.App.Components[0].Name != "my-app" {
+		t.Errorf("expected the synthesized display component (named after the app), got %v", resp.App.Components)
 	}
 
 	// Verify persisted in store.

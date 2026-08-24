@@ -6,6 +6,11 @@
 
 replicaCount: 2
 
+# Written by the platform when the environment is suspended: scales the
+# workload to zero (and omits the HPA so it can't scale back up). Absent /
+# false otherwise.
+suspend: false
+
 image:
   # Unprivileged demo image so the chart runs out of the box as non-root.
   # Set your own image; port 8080 matches containerPort below.

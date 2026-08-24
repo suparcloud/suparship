@@ -19,31 +19,6 @@ func indexByTagKey(imgs []KargoImage) map[string]KargoImage {
 	return m
 }
 
-// resolveKargoImages returns the resolved selection verbatim when present.
-func TestResolveKargoImages_UsesSelection(t *testing.T) {
-	sel := []KargoImage{{Name: "web", Repository: "ghcr.io/acme/web", TagKey: "components.web.image.tag"}}
-	got := resolveKargoImages(appWithSelection("a", nil, nil), sel)
-	if len(got) != 1 || got[0].Repository != "ghcr.io/acme/web" {
-		t.Fatalf("expected selection passthrough, got %+v", got)
-	}
-}
-
-// With no selection, fall back to the legacy single image from image_repository.
-func TestResolveKargoImages_LegacyFallback(t *testing.T) {
-	app := appWithSelection("a", nil, map[string]any{"image_repository": "ghcr.io/acme/legacy"})
-	got := resolveKargoImages(app, nil)
-	if len(got) != 1 || got[0].Repository != "ghcr.io/acme/legacy" || got[0].TagKey != DefaultImageTagKey {
-		t.Fatalf("legacy fallback wrong: %+v", got)
-	}
-}
-
-// No selection and no image_repository → nil.
-func TestResolveKargoImages_None(t *testing.T) {
-	if got := resolveKargoImages(appWithSelection("a", nil, nil), nil); got != nil {
-		t.Fatalf("expected nil, got %+v", got)
-	}
-}
-
 // SelectKargoImages keeps only the selected images, reading repo + tagKey from
 // the discovered set — the core "exclude the sidecar" behaviour.
 func TestSelectKargoImages_ExcludesUnselected(t *testing.T) {

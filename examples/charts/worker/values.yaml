@@ -7,6 +7,11 @@
 
 replicaCount: 1
 
+# Written by the platform when the environment is suspended: scales the
+# workload to zero (and omits the HPA so it can't scale back up). Absent /
+# false otherwise.
+suspend: false
+
 image:
   # Demo image that idles; set your own worker image and command.
   repository: busybox

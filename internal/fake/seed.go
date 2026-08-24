@@ -55,34 +55,36 @@ func seedClusters(r *DevRuntime) {
 }
 
 func seedTemplates(r *DevRuntime) {
+	// Mirrors the generic examples/charts catalog the real dev loop imports
+	// through the template registry — plain BYO Helm charts, no built-ins.
 	for _, t := range []*domain.Template{
 		{
-			Name:        "web-service",
+			Name:        "web",
 			Version:     "1.0.0",
-			Title:       "Web Service",
-			Description: "Deploy a containerized HTTP service with ingress.",
+			Title:       "Web",
+			Description: "Plain web-service Helm chart: Deployment, Service, optional Ingress.",
 			Category:    "web",
 		},
 		{
 			Name:        "worker",
 			Version:     "1.0.0",
 			Title:       "Worker",
-			Description: "Deploy a long-running background worker process.",
+			Description: "Plain background-worker Helm chart (headless Deployment).",
 			Category:    "worker",
 		},
 		{
-			Name:        "cron-job",
+			Name:        "cronjob",
 			Version:     "1.0.0",
 			Title:       "Cron Job",
-			Description: "Run a containerized task on a cron schedule.",
+			Description: "Plain CronJob Helm chart for scheduled tasks.",
 			Category:    "cron",
 		},
 		{
-			Name:        "color-app",
+			Name:        "postgres",
 			Version:     "1.0.0",
-			Title:       "Color App (Demo)",
-			Description: "A demo app that displays a color — for Kargo promotion demos.",
-			Category:    "demo",
+			Title:       "Postgres",
+			Description: "Single-instance PostgreSQL for demo stacks (stateful component).",
+			Category:    "database",
 		},
 	} {
 		r.templates[t.Name] = t
@@ -120,44 +122,40 @@ func seedProjects(r *DevRuntime) {
 }
 
 func seedServices(r *DevRuntime) {
-	hello := &domain.Service{
-		Name:         "hello",
+	notes := &domain.Service{
+		Name:         "notes-web",
 		ProjectName:  "demo",
-		TemplateName: "web-service",
-		DisplayName:  "Hello Service",
-		Description:  "A simple hello-world HTTP service.",
+		TemplateName: "web",
+		DisplayName:  "Notes Web",
+		Description:  "A simple notes web application.",
 	}
-	r.services["demo"][hello.Name] = hello
+	r.services["demo"][notes.Name] = notes
 }
 
 func seedApps(r *DevRuntime) {
-	hello := &domain.App{
-		Name:        "hello",
+	// notes-web: a plain single-chart app on the generic `web` chart. All
+	// workload shape lives in the chart's own values (RawValues overlay).
+	notesWeb := &domain.App{
+		Name:        "notes-web",
 		ProjectName: "demo",
 		Spec: domain.AppSpec{
-			DisplayName: "Hello App",
-			Description: "A simple hello-world web application.",
+			DisplayName: "Notes Web",
+			Description: "A simple notes web application.",
 			Template: domain.AppTemplateRef{
-				Name:    "web-service",
+				Name:    "web",
 				Version: "1.0.0",
 			},
-			Values: map[string]any{
-				"image_repository": "ghcr.io/suparcloud/hello",
-				"image_tag":        "v1.0.0",
+			RawValues: map[string]any{
+				"image":         map[string]any{"repository": "ghcr.io/suparcloud/notes-web", "tag": "v1.0.0"},
+				"containerPort": 8080,
 			},
-			Components: []domain.ComponentSpec{
-				{
-					Name:       "web",
-					Type:       domain.ComponentWeb,
-					Enabled:    true,
-					ExposeMode: domain.ExposeExternal,
-				},
-			},
+			Images:          []domain.AppImageBinding{{Name: "web", TagKey: "image.tag"}},
 			PreviewsEnabled: true,
 		},
 	}
 
-	// api-gateway demonstrates a multi-component app (web + worker + cron).
+	// api-gateway demonstrates a COMPOSED app: three components, each its own
+	// generic chart source with its own values.
 	apiGateway := &domain.App{
 		Name:        "api-gateway",
 		ProjectName: "demo",
@@ -165,57 +163,39 @@ func seedApps(r *DevRuntime) {
 			DisplayName: "API Gateway",
 			Description: "REST API with background worker and scheduled jobs.",
 			Template: domain.AppTemplateRef{
-				Name:    "web-service",
+				Name:    "web",
 				Version: "1.0.0",
-			},
-			Values: map[string]any{
-				"image_repository": "ghcr.io/suparcloud/api-gateway",
-				"image_tag":        "v2.3.1",
-				"port":             "3000",
 			},
 			Components: []domain.ComponentSpec{
 				{
-					Name:       "web",
+					Name:       "api",
 					Type:       domain.ComponentWeb,
 					Enabled:    true,
 					ExposeMode: domain.ExposeExternal,
+					Template:   &domain.AppTemplateRef{Name: "web", Version: "1.0.0"},
+					Values: map[string]any{
+						"image":         map[string]any{"repository": "ghcr.io/suparcloud/api-gateway", "tag": "v2.3.1"},
+						"containerPort": 3000,
+					},
 				},
 				{
-					Name:    "worker",
-					Type:    domain.ComponentWorker,
-					Enabled: true,
+					Name:     "worker",
+					Type:     domain.ComponentWorker,
+					Enabled:  true,
+					Template: &domain.AppTemplateRef{Name: "worker", Version: "1.0.0"},
+					Values: map[string]any{
+						"image": map[string]any{"repository": "ghcr.io/suparcloud/api-gateway", "tag": "v2.3.1"},
+					},
 				},
 				{
-					Name:    "scheduler",
-					Type:    domain.ComponentCron,
-					Enabled: true,
-				},
-			},
-			PreviewsEnabled: true,
-		},
-	}
-
-	colorApp := &domain.App{
-		Name:        "color-app",
-		ProjectName: "demo",
-		Spec: domain.AppSpec{
-			DisplayName: "Color App",
-			Description: "Demo app that displays a color — for Kargo promotion demos.",
-			Template: domain.AppTemplateRef{
-				Name:    "color-app",
-				Version: "1.0.0",
-			},
-			Values: map[string]any{
-				"image_repository": "kind-registry:5000/demo/color-app",
-				"image_tag":        "0.1.0",
-				"color":            "blue",
-			},
-			Components: []domain.ComponentSpec{
-				{
-					Name:       "web",
-					Type:       domain.ComponentWeb,
-					Enabled:    true,
-					ExposeMode: domain.ExposeExternal,
+					Name:     "scheduler",
+					Type:     domain.ComponentCron,
+					Enabled:  true,
+					Template: &domain.AppTemplateRef{Name: "cronjob", Version: "1.0.0"},
+					Values: map[string]any{
+						"image":    map[string]any{"repository": "ghcr.io/suparcloud/api-gateway", "tag": "v2.3.1"},
+						"schedule": "*/15 * * * *",
+					},
 				},
 			},
 			PreviewsEnabled: true,
@@ -223,9 +203,8 @@ func seedApps(r *DevRuntime) {
 	}
 
 	r.apps["demo"] = map[string]*domain.App{
-		hello.Name:      hello,
+		notesWeb.Name:   notesWeb,
 		apiGateway.Name: apiGateway,
-		colorApp.Name:   colorApp,
 	}
 }
 
@@ -251,8 +230,8 @@ func seedAppEnvironments(r *DevRuntime) {
 		LastDeployed: lastDeployed,
 	}
 
-	helloRel := &domain.AppReleaseRef{
-		Image: "ghcr.io/suparcloud/hello:v1.0.0",
+	notesRel := &domain.AppReleaseRef{
+		Image: "ghcr.io/suparcloud/notes-web:v1.0.0",
 		Tag:   "v1.0.0",
 	}
 	gwRel := &domain.AppReleaseRef{
@@ -260,35 +239,35 @@ func seedAppEnvironments(r *DevRuntime) {
 		Tag:   "v2.3.1",
 	}
 
-	helloEnvs := []*domain.AppEnvironment{
+	notesEnvs := []*domain.AppEnvironment{
 		{
-			AppName:     "hello",
+			AppName:     "notes-web",
 			ProjectName: "demo",
 			EnvName:     "staging",
 			EnvType:     domain.AppEnvStaging,
-			Namespace:   "hello-staging",
-			Release:     helloRel,
-			URLs:        []string{"http://hello.staging.localhost"},
+			Namespace:   "notes-web-staging",
+			Release:     notesRel,
+			URLs:        []string{"http://notes-web.staging.localhost"},
 			Status:      healthyFull,
 		},
 		{
-			AppName:     "hello",
+			AppName:     "notes-web",
 			ProjectName: "demo",
 			EnvName:     "prod",
 			EnvType:     domain.AppEnvProd,
-			Namespace:   "hello-prod",
-			Release:     helloRel,
-			URLs:        []string{"http://hello.prod.localhost"},
+			Namespace:   "notes-web-prod",
+			Release:     notesRel,
+			URLs:        []string{"http://notes-web.prod.localhost"},
 			Status:      healthyFull,
 		},
 		{
-			AppName:     "hello",
+			AppName:     "notes-web",
 			ProjectName: "demo",
 			EnvName:     "pr-42",
 			EnvType:     domain.AppEnvPreview,
-			Namespace:   "hello-pr-42",
-			Release:     helloRel,
-			URLs:        []string{"http://pr-42.hello.preview.localhost"},
+			Namespace:   "notes-web-pr-42",
+			Release:     notesRel,
+			URLs:        []string{"http://pr-42.notes-web.preview.localhost"},
 			Status:      healthyPreview,
 		},
 	}
@@ -316,46 +295,15 @@ func seedAppEnvironments(r *DevRuntime) {
 		},
 	}
 
-	colorRel := &domain.AppReleaseRef{
-		Image: "kind-registry:5000/demo/color-app:0.1.0",
-		Tag:   "0.1.0",
-	}
-	colorEnvs := []*domain.AppEnvironment{
-		{
-			AppName:     "color-app",
-			ProjectName: "demo",
-			EnvName:     "staging",
-			EnvType:     domain.AppEnvStaging,
-			Namespace:   "color-app-staging",
-			Release:     colorRel,
-			URLs:        []string{"http://color-app.staging.localhost:8880"},
-			Status:      healthyFull,
-		},
-		{
-			AppName:     "color-app",
-			ProjectName: "demo",
-			EnvName:     "prod",
-			EnvType:     domain.AppEnvProd,
-			Namespace:   "color-app-prod",
-			Release:     colorRel,
-			URLs:        []string{"http://color-app.prod.localhost:8880"},
-			Status:      healthyFull,
-		},
-	}
-
 	r.appEnvs["demo"] = map[string]map[string]*domain.AppEnvironment{
-		"hello":       {},
+		"notes-web":   {},
 		"api-gateway": {},
-		"color-app":   {},
 	}
-	for _, e := range helloEnvs {
-		r.appEnvs["demo"]["hello"][e.EnvName] = e
+	for _, e := range notesEnvs {
+		r.appEnvs["demo"]["notes-web"][e.EnvName] = e
 	}
 	for _, e := range gwEnvs {
 		r.appEnvs["demo"]["api-gateway"][e.EnvName] = e
-	}
-	for _, e := range colorEnvs {
-		r.appEnvs["demo"]["color-app"][e.EnvName] = e
 	}
 }
 
@@ -364,10 +312,10 @@ func seedPreviews(r *DevRuntime) {
 		{
 			Name:        "pr-42",
 			ProjectName: "demo",
-			ServiceName: "hello",
+			ServiceName: "notes-web",
 			Namespace:   "demo-preview-pr-42",
 			Status:      domain.StatusHealthy,
-			URL:         "http://hello.demo-preview-pr-42.localhost",
+			URL:         "http://notes-web.demo-preview-pr-42.localhost",
 			CreatedAt:   seedCreatedAt,
 		},
 	} {
@@ -382,8 +330,8 @@ func seedStatuses(r *DevRuntime) {
 			Environment:  "staging",
 			Replicas:     2,
 			Available:    2,
-			Image:        "ghcr.io/suparcloud/hello:v1.0.0",
-			IngressURLs:  []string{"http://hello.staging.demo.localhost"},
+			Image:        "ghcr.io/suparcloud/notes-web:v1.0.0",
+			IngressURLs:  []string{"http://notes-web.staging.demo.localhost"},
 			Namespace:    "demo-staging",
 			LastDeployed: "2026-01-01T00:00:00Z",
 		},
@@ -392,27 +340,27 @@ func seedStatuses(r *DevRuntime) {
 			Environment:  "prod",
 			Replicas:     2,
 			Available:    2,
-			Image:        "ghcr.io/suparcloud/hello:v1.0.0",
-			IngressURLs:  []string{"http://hello.prod.demo.localhost"},
+			Image:        "ghcr.io/suparcloud/notes-web:v1.0.0",
+			IngressURLs:  []string{"http://notes-web.prod.demo.localhost"},
 			Namespace:    "demo-prod",
 			LastDeployed: "2026-01-01T00:00:00Z",
 		},
 	} {
-		r.statuses[statusKey("demo", "hello", s.Environment)] = s
+		r.statuses[statusKey("demo", "notes-web", s.Environment)] = s
 	}
 }
 
 func seedLogs(r *DevRuntime) {
 	r.logLines = []domain.LogLine{
-		{Timestamp: "2026-01-01T00:00:00Z", Text: `INFO  starting hello service...`, Pod: "hello-abc12", Container: "hello"},
-		{Timestamp: "2026-01-01T00:00:01Z", Text: `INFO  listening on :8080`, Pod: "hello-abc12", Container: "hello"},
-		{Timestamp: "2026-01-01T00:00:02Z", Text: `INFO  GET /healthz → 200 OK (0ms)`, Pod: "hello-abc12", Container: "hello"},
-		{Timestamp: "2026-01-01T00:00:03Z", Text: `INFO  GET / → 200 OK (2ms)`, Pod: "hello-abc12", Container: "hello"},
-		{Timestamp: "2026-01-01T00:00:04Z", Text: `INFO  GET /api/items → 200 OK (5ms)`, Pod: "hello-abc12", Container: "hello"},
-		{Timestamp: "2026-01-01T00:00:05Z", Text: `INFO  GET /healthz → 200 OK (0ms)`, Pod: "hello-abc12", Container: "hello"},
-		{Timestamp: "2026-01-01T00:00:06Z", Text: `INFO  GET /api/items → 200 OK (4ms)`, Pod: "hello-abc12", Container: "hello"},
-		{Timestamp: "2026-01-01T00:00:07Z", Text: `WARN  slow query detected (120ms)`, Pod: "hello-abc12", Container: "hello"},
-		{Timestamp: "2026-01-01T00:00:08Z", Text: `INFO  GET /healthz → 200 OK (0ms)`, Pod: "hello-abc12", Container: "hello"},
-		{Timestamp: "2026-01-01T00:00:09Z", Text: `INFO  GET /api/items → 200 OK (6ms)`, Pod: "hello-abc12", Container: "hello"},
+		{Timestamp: "2026-01-01T00:00:00Z", Text: `INFO  starting notes-web service...`, Pod: "notes-web-abc12", Container: "notes-web"},
+		{Timestamp: "2026-01-01T00:00:01Z", Text: `INFO  listening on :8080`, Pod: "notes-web-abc12", Container: "notes-web"},
+		{Timestamp: "2026-01-01T00:00:02Z", Text: `INFO  GET /healthz → 200 OK (0ms)`, Pod: "notes-web-abc12", Container: "notes-web"},
+		{Timestamp: "2026-01-01T00:00:03Z", Text: `INFO  GET / → 200 OK (2ms)`, Pod: "notes-web-abc12", Container: "notes-web"},
+		{Timestamp: "2026-01-01T00:00:04Z", Text: `INFO  GET /api/items → 200 OK (5ms)`, Pod: "notes-web-abc12", Container: "notes-web"},
+		{Timestamp: "2026-01-01T00:00:05Z", Text: `INFO  GET /healthz → 200 OK (0ms)`, Pod: "notes-web-abc12", Container: "notes-web"},
+		{Timestamp: "2026-01-01T00:00:06Z", Text: `INFO  GET /api/items → 200 OK (4ms)`, Pod: "notes-web-abc12", Container: "notes-web"},
+		{Timestamp: "2026-01-01T00:00:07Z", Text: `WARN  slow query detected (120ms)`, Pod: "notes-web-abc12", Container: "notes-web"},
+		{Timestamp: "2026-01-01T00:00:08Z", Text: `INFO  GET /healthz → 200 OK (0ms)`, Pod: "notes-web-abc12", Container: "notes-web"},
+		{Timestamp: "2026-01-01T00:00:09Z", Text: `INFO  GET /api/items → 200 OK (6ms)`, Pod: "notes-web-abc12", Container: "notes-web"},
 	}
 }

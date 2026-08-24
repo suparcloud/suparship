@@ -12,7 +12,6 @@ import (
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
-	"github.com/suparcloud/suparship/internal/helmvalues"
 )
 
 // PreviewRequest carries the inputs required to create a new preview
@@ -43,6 +42,11 @@ type PreviewRequest struct {
 	// domain.DefaultPreviewNamespacePattern. Validate with
 	// domain.ValidatePreviewNamespacePattern before passing it here.
 	NamespacePattern string
+
+	// Secure selects https (true) vs http (false) for the generated preview
+	// URL. Handlers supply it from the org's EffectiveSecureEndpoints so this
+	// pipeline stays free of org I/O.
+	Secure bool
 }
 
 // PreviewResult holds the pure-function outputs of CreatePreview.
@@ -51,11 +55,6 @@ type PreviewResult struct {
 	// Its namespace and URL are deterministically derived from the app name
 	// and preview name.
 	Instance *domain.EnvironmentInstance
-
-	// HelmValues is the generated Helm values for the preview environment.
-	// Non-preview-enabled components are disabled in the output regardless
-	// of their ComponentSpec.Enabled state.
-	HelmValues helmvalues.HelmValues
 
 	// ArgoApp is the generated ArgoCD Application manifest for this preview.
 	// Callers that commit to a GitOps repository should serialise this to
@@ -77,9 +76,7 @@ type PreviewResult struct {
 //  2. Verify that the app has previews enabled.
 //  3. Build the EnvironmentInstance with a deterministic namespace and URL
 //     (via domain.GenerateNamespace / domain.GenerateURL).
-//  4. Generate Helm values using helmvalues.MapToHelmValues — the same mapping
-//     the base env uses.
-//  5. Generate the ArgoCD Application manifest using
+//  4. Generate the ArgoCD Application manifest using
 //     gitops.BuildArgoApplicationFromInstance.
 //
 // Returns an error when the app has previews disabled or the request is
@@ -109,7 +106,7 @@ func CreatePreview(req PreviewRequest) (*PreviewResult, error) {
 		if base == "" {
 			base = "localhost"
 		}
-		url = domain.GenerateURLWithDomain(req.App.Name, req.PreviewName, domain.AppEnvPreview, base)
+		url = domain.GenerateURLWithDomain(req.App.Name, req.PreviewName, domain.AppEnvPreview, base, req.Secure)
 	}
 
 	inst := &domain.EnvironmentInstance{
@@ -122,13 +119,10 @@ func CreatePreview(req PreviewRequest) (*PreviewResult, error) {
 		Status:      domain.AppRuntimeStatus{Phase: domain.StatusNotDeployed},
 	}
 
-	hv := helmvalues.MapToHelmValues(req.App, req.PreviewName, domain.AppEnvPreview)
-
 	argoApp := gitops.BuildArgoApplicationFromInstance(req.App, inst, req.BuildOpts)
 
 	return &PreviewResult{
-		Instance:   inst,
-		HelmValues: hv,
-		ArgoApp:    argoApp,
+		Instance: inst,
+		ArgoApp:  argoApp,
 	}, nil
 }

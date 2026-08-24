@@ -10,8 +10,8 @@ import (
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
-// A pipeline app with no image source (no bindings, no template-declared images, no
-// image_repository) must NOT get a placeholder Warehouse — that unreachable
+// A pipeline app with no image source (no bindings, no template-declared
+// images) must NOT get a placeholder Warehouse — that unreachable
 // ghcr.io/{project}/{app} subscription thrashes Kargo in a failing refresh loop.
 // The Warehouse is skipped (and a stale one pruned) until an image appears.
 func TestPublishKargoCRs_NoImageSkipsWarehouse(t *testing.T) {
@@ -37,9 +37,9 @@ func TestPublishKargoCRs_NoImageSkipsWarehouse(t *testing.T) {
 		t.Errorf("expected staging Stage even without an image: %v", err)
 	}
 
-	// Now give the app a real image source and republish — the Warehouse materializes
-	// and any stale one would be replaced.
-	app.Spec.Values = map[string]any{"image_repository": "ghcr.io/demo/hello"}
+	// Now give the app a real image binding and republish — the Warehouse
+	// materializes and any stale one would be replaced.
+	envs[0].TemplateImages = []gitops.KargoImage{{Repository: "ghcr.io/demo/hello", TagKey: "image.tag"}}
 	if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
 		t.Fatalf("republish with image: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestPublishKargoCRs_NoImageSkipsWarehouse(t *testing.T) {
 	}
 
 	// And back to no image prunes the stale Warehouse.
-	app.Spec.Values = nil
+	envs[0].TemplateImages = nil
 	if err := p.PublishKargoCRsForTest(dir, app, envs); err != nil {
 		t.Fatalf("republish without image: %v", err)
 	}

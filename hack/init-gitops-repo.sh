@@ -7,10 +7,7 @@
 # Monorepo layout after this script:
 #
 #   charts/
-#     web-service/          ← Helm chart, copied from templates/web-service/chart/
-#       Chart.yaml
-#       values.yaml
-#       templates/
+#     .gitkeep              ← the publisher syncs chart bytes here per app
 #   gitops-output/
 #     .gitkeep              ← placeholder; suparship writes per-app dirs here
 #   README.md
@@ -144,14 +141,11 @@ git config user.name  "suparship Dev Bot"
 # ── Build the monorepo skeleton ───────────────────────────────────────────
 info "Creating gitops repo skeleton..."
 
-# 1. charts/ — copy Helm charts from the suparship templates dir.
+# 1. charts/ placeholder — the publisher syncs each app's chart bytes here
+#    from the template registry (there are no built-in charts to pre-seed).
 mkdir -p charts
-cp -r "${REPO_ROOT}/templates/web-service/chart" charts/web-service
-ok "charts/web-service  (copied from templates/web-service/chart)"
-if [ -d "${REPO_ROOT}/templates/color-app/chart" ]; then
-  cp -r "${REPO_ROOT}/templates/color-app/chart" charts/color-app
-  ok "charts/color-app    (copied from templates/color-app/chart)"
-fi
+touch charts/.gitkeep
+ok "charts/.gitkeep"
 
 # 2. gitops-output placeholder — suparship writes per-app dirs here.
 mkdir -p gitops-output

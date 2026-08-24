@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -55,10 +54,6 @@ type PublisherConfig struct {
 	CommitAuthorEmail string
 	// SyncAutomated enables automated sync (prune + selfHeal) on generated Applications.
 	SyncAutomated bool
-	// TemplatesDir is the local filesystem path to suparship templates.
-	// When set, PublishApp syncs the Helm chart from templates/{name}/chart/
-	// into charts/{name}/ in the gitops repo so ArgoCD can resolve them.
-	TemplatesDir string
 	// KargoGitRepoURL is the HTTPS Git URL Kargo uses for gitRepoUpdates.
 	// Kargo v0.9+ requires HTTPS for credential-based git operations.
 	// Falls back to ArgoCDRepoURL when empty.
@@ -93,10 +88,10 @@ type PublisherConfig struct {
 	// BackendConfig, then to BackendK8s.
 	BackendConfigFunc func() secrets.BackendConfig
 	// ChartFetcher resolves a packaged Helm chart (chart.tgz) by template
-	// name when no local TemplatesDir entry exists. Used for templates
+	// name. Used for templates
 	// imported via the BYO-chart flow, where the chart bytes live in a
 	// cluster ConfigMap rather than on the suparship pod's filesystem.
-	// Optional — when nil and TemplatesDir lacks the chart, syncChart is a
+	// Optional — when nil, syncChart is a
 	// no-op (preserves prior behaviour).
 	ChartFetcher ChartFetcher
 	// TemplateLoader resolves a template's metadata (engine.chart shape,
@@ -751,20 +746,11 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 	// Sync each component's chart into charts/{template}/{versionDir}/ so the
 	// rendered Application's chart sources resolve. syncChart dedups an
 	// already-present immutable version (dirNonEmpty), so two components sharing
-	// a template@version copy the bytes once. Resolve each component's canonical
-	// values key (the fixed key its chart reads, e.g. web-service→"web") once
-	// here, where the context is available, and pass the map down.
-	componentKeys := make(map[string]string, len(app.Spec.Components))
-	// Per-component values mode: a canonical (suparship-common) component gets the
-	// full canonical doc; a BYO/passthrough component gets only its overlay +
-	// ((platform.*)) tokens — resolved here where the template loader is available.
-	componentCanonical := make(map[string]bool, len(app.Spec.Components))
+	// a template@version copy the bytes once.
 	for _, c := range app.Spec.ComposedComponents() {
 		if err := p.syncChart(ctx, repoDir, c.Template.Name, c.Template.Version); err != nil {
 			return fmt.Errorf("sync chart for component %s (%s@%s): %w", c.Name, c.Template.Name, c.Template.Version, err)
 		}
-		componentKeys[c.Name] = p.resolveComponentKey(ctx, c.Template.Name, c.Name)
-		componentCanonical[c.Name] = p.resolveComponentCanonical(ctx, c.Template.Name)
 	}
 	// Env-scoped template pins: sync any per-env component versions that differ
 	// from the app-wide pins (syncChart dedups already-present versions).
@@ -780,7 +766,7 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 		}
 	}
 
-	if err := p.publishComposedAppFiles(repoDir, app, deployEnvs, componentKeys, componentCanonical); err != nil {
+	if err := p.publishComposedAppFiles(repoDir, app, deployEnvs); err != nil {
 		return err
 	}
 
@@ -796,39 +782,6 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 		return fmt.Errorf("write kargo CRs for %s/%s: %w", app.ProjectName, app.Name, err)
 	}
 	return nil
-}
-
-// resolveComponentKey returns the values key a component template's chart reads
-// its config under — its first declared component name (web-service → "web").
-// Falls back to fallback (the component's own name) when no TemplateLoader is
-// configured or the template declares no components, so a chart authored to read
-// components.<its-own-name> works without a loader.
-func (p *Publisher) resolveComponentKey(ctx context.Context, templateName, fallback string) string {
-	if p.cfg.TemplateLoader == nil {
-		return fallback
-	}
-	tmpl, err := p.cfg.TemplateLoader.LoadTemplate(ctx, templateName)
-	if err != nil || tmpl == nil || len(tmpl.Spec.Components) == 0 {
-		return fallback
-	}
-	return tmpl.Spec.Components[0].Name
-}
-
-// resolveComponentCanonical reports whether a composed component's template wants
-// the canonical suparship-common values injected (default), or is a BYO/passthrough
-// chart (InjectCanonicalValues:false) that gets ONLY its own overlay + ((platform.*))
-// tokens — mirroring the single-source path's AppPublishEnv.SkipCanonicalBase. When
-// no TemplateLoader is configured or the load fails, defaults to canonical (true) so
-// a canonical chart is never wrongly stripped of its values.
-func (p *Publisher) resolveComponentCanonical(ctx context.Context, templateName string) bool {
-	if p.cfg.TemplateLoader == nil {
-		return true
-	}
-	tmpl, err := p.cfg.TemplateLoader.LoadTemplate(ctx, templateName)
-	if err != nil || tmpl == nil {
-		return true
-	}
-	return tmpl.Spec.CanonicalValues()
 }
 
 // pruneSingleSourceArtifacts removes the single-chart tree an app leaves behind
@@ -886,22 +839,52 @@ func (p *Publisher) composedAppDir(repoDir string, env AppPublishEnv, parts ...s
 }
 
 // publishComposedAppFiles writes, for each deployable stable env: one
-// values.yaml per component (a single-component projection of the canonical
-// values), the rendered multi-source Application manifest for the env's active
-// cluster, the app's platform resources (ConfigMap + ExternalSecret), and the
-// per-env composed App-of-Apps into _infra/. Preview and unbound envs are
-// skipped with a warning.
-// componentConfigProjection returns, for a component that opts OUT of the app-wide
-// vars (InheritAppVars=false), the name of its curated ConfigMap and the resolved
-// vars to put in it: each EnvVar is a literal Value or the value of the selected
-// app-config key (FromConfig). FromSecret is reserved for a future secret-subset
-// increment and is skipped here. Returns ("", nil) when the component inherits.
-func componentConfigProjection(appName string, c domain.ComponentSpec, appVars map[string]string) (string, map[string]string) {
-	if c.InheritAppVars == nil || *c.InheritAppVars {
-		return "", nil
+// values.yaml per component (the component's own interpolated overlay — the
+// chart's values.yaml is the Helm base), the rendered multi-source Application
+// manifest for the env's active cluster, the app's platform resources
+// (ConfigMap + ExternalSecret), and the per-env composed App-of-Apps into
+// _infra/. Preview and unbound envs are skipped with a warning.
+// componentConfigProjection returns the name of a component's own ConfigMap and
+// the resolved vars to put in it, for the two postures that need one:
+//
+//   - curated (InheritAppVars=false): each EnvVar is a literal Value or the
+//     value of the selected app-config key (FromConfig); FromSecret entries are
+//     handled by the ExternalSecret projection, not here.
+//   - inherit + extend/override (inheriting, ≥1 literal EnvVar): ALL app/env
+//     resolved vars merged with the component's literals — the literal wins on
+//     collision — so the component keeps inheriting everything while adding or
+//     overriding its own keys. inheritExtras=true signals the caller to keep
+//     platform.secretName pointed at the APP-WIDE secret (literals are
+//     non-secret; nothing else changed).
+//
+// Returns ("", nil, false) for a plain inheriting component with no literals —
+// it keeps the app-wide objects.
+func componentConfigProjection(appName string, c domain.ComponentSpec, appVars map[string]string) (name string, vars map[string]string, inheritExtras bool) {
+	inheriting := c.InheritAppVars == nil || *c.InheritAppVars
+	if inheriting {
+		hasLiteral := false
+		for _, e := range c.EnvVars {
+			if e.FromConfig == "" && e.FromSecret == "" {
+				hasLiteral = true
+				break
+			}
+		}
+		if !hasLiteral {
+			return "", nil, false
+		}
+		vars = make(map[string]string, len(appVars)+len(c.EnvVars))
+		for k, v := range appVars {
+			vars[k] = v
+		}
+		for _, e := range c.EnvVars {
+			if e.FromConfig == "" && e.FromSecret == "" {
+				vars[e.Name] = e.Value
+			}
+		}
+		return secrets.AppComponentConfigMapName(appName, c.Name), vars, true
 	}
-	name := secrets.AppComponentConfigMapName(appName, c.Name)
-	vars := make(map[string]string, len(c.EnvVars))
+	name = secrets.AppComponentConfigMapName(appName, c.Name)
+	vars = make(map[string]string, len(c.EnvVars))
 	for _, e := range c.EnvVars {
 		switch {
 		case e.FromConfig != "":
@@ -909,12 +892,12 @@ func componentConfigProjection(appName string, c domain.ComponentSpec, appVars m
 				vars[e.Name] = v
 			}
 		case e.FromSecret != "":
-			// deferred (secret subset/rename) — see the plan.
+			// handled by componentSecretRenames / the ExternalSecret projection.
 		default:
 			vars[e.Name] = e.Value
 		}
 	}
-	return name, vars
+	return name, vars, false
 }
 
 // writeComponentConfigMap writes a curated per-component ConfigMap (the object
@@ -994,7 +977,7 @@ func (p *Publisher) pruneComponentProjections(repoDir string, env AppPublishEnv,
 	return nil
 }
 
-func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv, componentKeys map[string]string, componentCanonical map[string]bool) error {
+func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	orgName := p.cfg.OrgName
 	if orgName == "" {
 		orgName = "default"
@@ -1124,7 +1107,7 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		type componentProjection struct{ configName, secretName string }
 		projections := map[string]componentProjection{}
 		for _, c := range app.Spec.ComposedComponents() {
-			projName, projVars := componentConfigProjection(app.Name, c, resolvedVars)
+			projName, projVars, inheritExtras := componentConfigProjection(app.Name, c, resolvedVars)
 			if projName == "" {
 				continue // inherits the app-wide config/secret — hv keeps the mapper defaults
 			}
@@ -1132,10 +1115,16 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			if err := p.writeComponentConfigMap(repoDir, env, app, c.Name, projName, ns, projVars); err != nil {
 				return fmt.Errorf("writing component config for %s env %s: %w", c.Name, env.EnvName, err)
 			}
-			// A component may curate a SUBSET of app secret keys (renamed) into its
-			// own <app>-<component>-secrets, which platform.secretName then points at;
-			// suparship renders the ExternalSecret data[] projection.
-			if renames := componentSecretRenames(c); renames != nil {
+			if inheritExtras {
+				// Extend/override posture: the component ConfigMap already carries
+				// every inherited var (merged), and the app-wide secret keeps
+				// flowing untouched.
+				proj.secretName = secrets.AppSecretName(app.Name)
+			} else if renames := componentSecretRenames(c); renames != nil {
+				// A curated component may select a SUBSET of app secret keys
+				// (renamed) into its own <app>-<component>-secrets, which
+				// platform.secretName then points at; suparship renders the
+				// ExternalSecret data[] projection.
 				if esCfg := p.buildComponentExternalSecret(env, app, c.Name, ns, renames); esCfg != nil {
 					if err := p.writeComponentExternalSecret(repoDir, env, app, c.Name, esCfg); err != nil {
 						return fmt.Errorf("writing component secret for %s env %s: %w", c.Name, env.EnvName, err)
@@ -1159,9 +1148,9 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		}
 
 		// Fan out over the env's target clusters: each writes its own per-component
-		// values (single-component projection of the canonical values, with the
-		// component's own Values overlay + this cluster's platform-value overlay +
-		// preserved tag) and its own rendered multi-source Application manifest.
+		// values (the component's own Values overlay + this cluster's platform-value
+		// overlay + preserved tag, interpolated) and its own rendered multi-source
+		// Application manifest.
 		for _, target := range targets {
 			baseDomain := env.BaseDomain
 			if target.BaseDomain != "" {
@@ -1178,13 +1167,13 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 
 			componentValues := make(map[string]string, len(app.Spec.Components))
 			for _, c := range app.Spec.ComposedComponents() {
-				hv := helmvalues.MapComponentHelmValuesForEnv(app, c, componentKeys[c.Name], env.EnvName, env.EnvType, baseDomain, ns, target.Name, orgName,
+				pv := helmvalues.MapComponentPlatformValuesForEnv(app, c, env.EnvName, env.EnvType, baseDomain, ns, target.Name, orgName,
 					p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
 				// Curated component: point the two platform names at the env-level
 				// projection objects rendered above. The chart just envFroms them.
 				if proj, ok := projections[c.Name]; ok {
-					hv.Platform.ConfigMapName = proj.configName
-					hv.Platform.SecretName = proj.secretName
+					pv.ConfigMapName = proj.configName
+					pv.SecretName = proj.secretName
 				}
 				// Component overlay, layered low→high (each later layer wins):
 				//  1. the Platform-Engineer value overlays for THIS component's template —
@@ -1205,9 +1194,8 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 					overlay = deepMerge(overlay, deepCopyMap(ov.ComponentValues[c.Name]))
 				}
 				// Re-apply this cluster's Kargo-committed tag(s) captured above so a
-				// promoted tag survives republish (setStringAtPath on the overlay: for
-				// a passthrough component the overlay IS the values; for a canonical
-				// one it deep-merges over the generated doc, so the preserved tag wins).
+				// promoted tag survives republish (the overlay IS the published
+				// values, so the preserved tag wins).
 				if tags := preservedTags[target.Name][c.Name]; len(tags) > 0 {
 					o := deepCopyMap(overlay)
 					if o == nil {
@@ -1239,17 +1227,10 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 						setValueAtPath(overlay, suspendKey, true)
 					}
 				}
-				// A BYO/passthrough component gets ONLY its own overlay (the chart's own
-				// values.yaml is the Helm base); platform.* is available via ((platform.*))
-				// tokens. suparship injects no canonical app/components/routing/image
-				// schema. A canonical component gets the full suparship-common doc.
-				var hvBytes []byte
-				var err error
-				if componentCanonical[c.Name] {
-					hvBytes, err = marshalValuesWithOverlay(hv, overlay, env.EnvVars)
-				} else {
-					hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, env.EnvVars)
-				}
+				// Every component gets ONLY its own overlay (the chart's own
+				// values.yaml is the Helm base); platform.* is available via
+				// ((platform.*)) tokens. suparship injects no schema into user charts.
+				hvBytes, err := marshalPassthroughValues(pv, overlay, env.EnvVars)
 				if err != nil {
 					return fmt.Errorf("marshal values.yaml for component %s env %s cluster %s: %w", c.Name, env.EnvName, targetName, err)
 				}
@@ -1355,13 +1336,10 @@ func (p *Publisher) PublishAppEnv(ctx context.Context, app *domain.App, env AppP
 }
 
 // publishComposedAppEnv writes a single env's composed tree (per-component values
-// + rendered multi-source Application + per-env composed App-of-Apps), resolving
-// each component's values key/canonical mode and syncing its chart. It's
-// writeComposedAppTree scoped to one env and without the Kargo CR write — the
-// promotion path that materializes a higher env on promote.
+// + rendered multi-source Application + per-env composed App-of-Apps), syncing
+// each component's chart. It's writeComposedAppTree scoped to one env and without
+// the Kargo CR write — the promotion path that materializes a higher env on promote.
 func (p *Publisher) publishComposedAppEnv(ctx context.Context, repoDir string, app *domain.App, env AppPublishEnv) error {
-	componentKeys := make(map[string]string, len(app.Spec.Components))
-	componentCanonical := make(map[string]bool, len(app.Spec.Components))
 	// Sync THIS env's effective chart versions (env-scoped template pins) so a
 	// promotion into an env that pins a different version finds its bytes.
 	envApp := domain.AppForEnvTemplateVersions(app, env.EnvName)
@@ -1369,10 +1347,8 @@ func (p *Publisher) publishComposedAppEnv(ctx context.Context, repoDir string, a
 		if err := p.syncChart(ctx, repoDir, c.Template.Name, c.Template.Version); err != nil {
 			return fmt.Errorf("sync chart for component %s (%s@%s): %w", c.Name, c.Template.Name, c.Template.Version, err)
 		}
-		componentKeys[c.Name] = p.resolveComponentKey(ctx, c.Template.Name, c.Name)
-		componentCanonical[c.Name] = p.resolveComponentCanonical(ctx, c.Template.Name)
 	}
-	return p.publishComposedAppFiles(repoDir, app, []AppPublishEnv{env}, componentKeys, componentCanonical)
+	return p.publishComposedAppFiles(repoDir, app, []AppPublishEnv{env})
 }
 
 // publishEnvFiles writes ONE env's tree for an app into an already-cloned repo,
@@ -1548,10 +1524,9 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		}
 		// The tag keys Kargo owns for this app — one per image source. Preserve
 		// each on republish so we never roll a CD-managed deployment back to the
-		// create-time seed. Falls back to the canonical single key when the
-		// template declares no Images mapping.
+		// create-time seed. No bindings means no CD-owned keys.
 		var tagKeys []string
-		for _, img := range resolveKargoImages(app, env.TemplateImages) {
+		for _, img := range env.TemplateImages {
 			tagKeys = append(tagKeys, img.TagKey)
 		}
 
@@ -1578,33 +1553,20 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			if c.BaseDomain != "" {
 				baseDomain = c.BaseDomain
 			}
-			hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles)
-			// Unified model: a single-component app's component name is user-chosen
-			// (e.g. "api"), but its chart reads a fixed values key (web-service →
-			// components.web). Remap the one component's values onto the chart's
-			// canonical key so renaming the component never breaks rendering — the
-			// same projection the composed path does.
+			pv := helmvalues.MapPlatformValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles)
+			// Per-component env scoping: a single-component app with its own
+			// projection points platform.configMapName at it (written below) —
+			// same as the composed path.
 			if len(app.Spec.Components) == 1 {
-				name := app.Spec.Components[0].Name
-				key := p.resolveComponentKey(context.Background(), app.Spec.Template.Name, name)
-				if key != name {
-					if cv, ok := hv.Components[name]; ok {
-						delete(hv.Components, name)
-						hv.Components[key] = cv
+				if projName, _, inheritExtras := componentConfigProjection(app.Name, app.Spec.Components[0], nil); projName != "" {
+					pv.ConfigMapName = projName
+					if !inheritExtras {
+						// Opt-out: no app-wide secrets. If the component curates a
+						// secret subset, point platform.secretName at its projection
+						// (written with the platform resources); else "" (no secrets).
+						// Extend/override keeps the app-wide secret token instead.
+						pv.SecretName = componentSecretName
 					}
-					if hv.Routing.Component == name {
-						hv.Routing.Component = key
-					}
-				}
-				// Per-component env scoping: a single-component app that opts out of
-				// the app vars points platform.configMapName at its curated projection
-				// (written below) and gets no app secrets — same as the composed path.
-				if projName, _ := componentConfigProjection(app.Name, app.Spec.Components[0], nil); projName != "" {
-					hv.Platform.ConfigMapName = projName
-					// Opt-out: no app-wide secrets. If the component curates a
-					// secret subset, point platform.secretName at its projection
-					// (written with the platform resources); else "" (no secrets).
-					hv.Platform.SecretName = componentSecretName
 				}
 			}
 			overlay := envOverlay(app, env, c.Name)
@@ -1633,12 +1595,10 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			if suspended && env.SuspendKey != "" {
 				setValueAtPath(overlay, env.SuspendKey, true)
 			}
-			if env.SkipCanonicalBase {
-				// BYO/passthrough: emit only the overlay; hv.Platform still drives
-				// token resolution. The chart's own values.yaml is the base (Helm).
-				return marshalPassthroughValues(hv.Platform, overlay, env.EnvVars)
-			}
-			return marshalValuesWithOverlay(hv, overlay, env.EnvVars)
+			// The published values are ONLY the interpolated overlay: the chart's
+			// own values.yaml is the base (Helm); pv drives token resolution.
+			// suparship never injects a schema into user charts.
+			return marshalPassthroughValues(pv, overlay, env.EnvVars)
 		}
 		if env.EnvType == domain.AppEnvPreview {
 			// Previews keep the flat single app.yaml + values.yaml layout: a
@@ -1751,11 +1711,12 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			return fmt.Errorf("prune component projections for env %s: %w", env.EnvName, err)
 		}
 
-		// Single-component opt-out: write its curated <app>-<component>-config
-		// projection (resolved from the interpolated env vars).
+		// Single-component projection: write its <app>-<component>-config —
+		// curated list, or the inherit+extras merge (resolved env vars with the
+		// component's literals winning).
 		if len(app.Spec.Components) == 1 {
 			c0 := app.Spec.Components[0]
-			if projName, projVars := componentConfigProjection(app.Name, c0, envVars); projName != "" {
+			if projName, projVars, _ := componentConfigProjection(app.Name, c0, envVars); projName != "" {
 				if err := p.writeComponentConfigMap(repoDir, env, app, c0.Name, projName, ns, projVars); err != nil {
 					return fmt.Errorf("writing component config for %s env %s: %w", c0.Name, env.EnvName, err)
 				}
@@ -1781,6 +1742,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 //  3. org PlatformClusterValues[cluster] (PE, this cluster — env-agnostic)
 //  4. stack RawValues + StackEnvRawValues (shared by the app's stack)
 //  5. app + env developer RawValues      (rawValuesOverlay)
+//  6. app per-(env, cluster) ClusterOverrides[cluster].Values (fan-out only)
 //
 // cluster is the target cluster ref for the values.yaml being written (the active
 // cluster in active mode, or one fan-out member); "" applies no cluster layer.
@@ -1794,7 +1756,17 @@ func envOverlay(app *domain.App, env AppPublishEnv, cluster string) map[string]a
 	// below the developer's app/app-env RawValues.
 	overlay = deepMerge(overlay, deepCopyMap(env.StackRawValues))
 	overlay = deepMerge(overlay, deepCopyMap(env.StackEnvRawValues))
-	return deepMerge(overlay, rawValuesOverlay(app, env.EnvName))
+	overlay = deepMerge(overlay, rawValuesOverlay(app, env.EnvName))
+	// App-level per-(env, cluster) overlay: this cluster's own values win over
+	// everything env-wide when the env fans out to multiple clusters.
+	if cluster != "" {
+		if ov, ok := app.Spec.EnvironmentDefaults[env.EnvName]; ok {
+			if co, ok := ov.ClusterOverrides[cluster]; ok && len(co.Values) > 0 {
+				overlay = deepMerge(overlay, deepCopyMap(co.Values))
+			}
+		}
+	}
+	return overlay
 }
 
 // rawValuesOverlay returns the freeform Helm values overlay for an env: the
@@ -1808,11 +1780,6 @@ func rawValuesOverlay(app *domain.App, envName string) map[string]any {
 	}
 	return base
 }
-
-// imageTagValuesKey is the AppSpec.Values key the canonical mapper reads the
-// image tag from (mirrors helmvalues' internal imageTagKey). Overriding it for a
-// preview re-tags every component image.
-const imageTagValuesKey = "image_tag"
 
 // previewRawValuesOverlay returns the freeform Helm values overlay for a
 // preview: the base env's overlay (app + base-env RawValues) with the reserved
@@ -1865,8 +1832,8 @@ func (p *Publisher) platformVarsContext(app *domain.App, env AppPublishEnv, orgN
 	if target.BaseDomain != "" {
 		baseDomain = target.BaseDomain
 	}
-	hv := helmvalues.MapToHelmValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, target.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
-	return platform.Context{Platform: hv.Platform, Vars: env.EnvVars}
+	pv := helmvalues.MapPlatformValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, target.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
+	return platform.Context{Platform: pv, Vars: env.EnvVars}
 }
 
 // hasInterpToken reports whether any value in m contains an interpolation token,
@@ -1880,41 +1847,12 @@ func hasInterpToken(m map[string]string) bool {
 	return false
 }
 
-// marshalValuesWithOverlay serializes hv to YAML, applying platform/((vars.*))
-// interpolation and the raw-values overlay only when needed. When there is no
-// overlay and no interpolation token anywhere in the values, it returns the
-// struct-marshalled bytes unchanged (stable, declaration-order keys) so existing
-// apps see no churn. Otherwise it round-trips hv to a map, interpolates every
-// string leaf against the platform context, deep-merges the (interpolated)
-// overlay on top, and marshals the result.
-func marshalValuesWithOverlay(hv helmvalues.HelmValues, overlay map[string]any, vars map[string]string) ([]byte, error) {
-	raw, err := yaml.Marshal(hv)
-	if err != nil {
-		return nil, err
-	}
-	needsInterp := len(overlay) > 0 || platform.HasToken(string(raw))
-	if !needsInterp {
-		return raw, nil
-	}
-
-	ctx := platform.Context{Platform: hv.Platform, Vars: vars}
-	var base map[string]any
-	if err := yaml.Unmarshal(raw, &base); err != nil {
-		return nil, err
-	}
-	base, _ = ctx.InterpolateTree(base).(map[string]any)
-	if len(overlay) > 0 {
-		ov, _ := ctx.InterpolateTree(overlay).(map[string]any)
-		base = deepMerge(base, ov)
-	}
-	return yaml.Marshal(base)
-}
-
-// marshalPassthroughValues is the BYO/passthrough counterpart: it emits ONLY the
-// (interpolated) overlay — no canonical suparship-common base — so the chart's own
-// values.yaml (applied by Helm underneath) is the foundation. The platform values
-// are used solely for ((platform.*))/((vars.*)) token resolution, not injected as a
-// values block. Returns "{}" when the overlay is empty.
+// marshalPassthroughValues emits ONLY the (interpolated) overlay, so the chart's
+// own values.yaml (applied by Helm underneath) is the foundation. The platform
+// values are used solely for ((platform.*))/((vars.*)) token resolution, never
+// injected as a values block — the whole platform↔chart contract is those tokens
+// plus the env ConfigMap/Secret names they resolve to. Returns "{}" when the
+// overlay is empty.
 func marshalPassthroughValues(pv helmvalues.PlatformValues, overlay map[string]any, vars map[string]string) ([]byte, error) {
 	if len(overlay) == 0 {
 		return []byte("{}\n"), nil
@@ -2086,7 +2024,6 @@ func (p *Publisher) pruneLegacyPlatformFiles(appDir string) error {
 // ApplicationSet can resolve "charts/{{chartPath}}".
 //
 // Resolution order:
-//  1. Local disk: TemplatesDir/{templateName}/chart/ (built-ins & dev mode).
 //  2. Cluster bundle: ChartFetcher.LoadChartBundle(templateName, version),
 //     the packaged .tgz stored alongside templates imported via the
 //     BYO-chart flow. When version is empty (legacy apps without a pinned
@@ -2132,25 +2069,12 @@ func chartPathFor(templateName, version string) string {
 func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName, version string) error {
 	dstDir := p.outputDir(repoDir, "charts", templateName, chartVersionDir(version))
 
-	if p.cfg.TemplatesDir != "" {
-		srcDir := filepath.Join(p.cfg.TemplatesDir, templateName, "chart")
-		if _, err := os.Stat(srcDir); err == nil {
-			// Disk-based templates are dev-mode only; we don't keep
-			// per-version snapshots on disk. Whatever's at templatesDir
-			// is what gets copied — version arg is informational here.
-			return p.copyChartDir(srcDir, dstDir)
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("stat chart dir %s: %w", srcDir, err)
-		}
-	}
-
 	// A versioned chart is immutable, so if it's already synced in the (freshly
 	// cloned) repo, skip the fetch + extract. This is a large win for fan-outs
 	// that republish many apps of the same template in one commit (e.g. a stack
 	// pin re-publishing 6 members): the charts are already committed, so
 	// re-extracting them per member is pure waste. Only the first publish of a
-	// new template@version fetches. (Dev-mode disk templates above always copy,
-	// so local chart edits still take effect.)
+	// new template@version fetches.
 	if dirNonEmpty(dstDir) {
 		return nil
 	}
@@ -2175,30 +2099,6 @@ func (p *Publisher) syncChart(ctx context.Context, repoDir, templateName, versio
 func dirNonEmpty(path string) bool {
 	entries, err := os.ReadDir(path)
 	return err == nil && len(entries) > 0
-}
-
-// copyChartDir copies a chart from a local directory into the gitops repo,
-// preserving subdirectory structure. Extracted from syncChart so the cluster
-// fallback path can reuse the writeFile machinery without duplicating walks.
-func (p *Publisher) copyChartDir(srcDir, dstDir string) error {
-	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		dst := filepath.Join(dstDir, rel)
-		if d.IsDir() {
-			return os.MkdirAll(dst, 0o755)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read chart file %s: %w", path, err)
-		}
-		return p.writeFile(dst, data)
-	})
 }
 
 // extractChartTGZ untars a packaged Helm chart into dstDir, stripping the
@@ -2271,29 +2171,6 @@ const maxChartEntrySize = 4 * 1024 * 1024
 // Environments are sorted by Order (then Name for tie-breaking); each stage
 // declares the previous stage as its upstream gate. The first stage (lowest
 // Order) pulls directly from the Warehouse with auto-promotion enabled.
-// resolveKargoImages returns the image sources the Kargo CRs should target.
-//
-// images is the app's CD-selected image set, already discovered from the app's
-// effective Helm values and resolved to concrete Repository + TagKey by the
-// publish adapter (one per image the user chose to manage; sidecars and other
-// unselected images are absent). When non-empty it is used verbatim.
-//
-// When the app has selected no images, it falls back to a single legacy image
-// derived from the app's image_repository value (canonical tag key), preserving
-// behaviour for suparship-common charts that predate explicit selection.
-func resolveKargoImages(app *domain.App, images []KargoImage) []KargoImage {
-	if len(images) > 0 {
-		return images
-	}
-	if repo, ok := app.Spec.Values["image_repository"].(string); ok {
-		if repo = strings.TrimSpace(repo); repo != "" {
-			return []KargoImage{{Repository: repo, TagKey: DefaultImageTagKey, TagPattern: ".*"}}
-		}
-	}
-	// No selection and no image set — caller decides whether to warn.
-	return nil
-}
-
 // collectComponentImages returns the composed Warehouse's image sources: the
 // per-component RESOLVED images the publish adapter discovered from each
 // component's own values (env.ComponentTemplateImages), in component spec order.
@@ -2492,7 +2369,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	// Composed apps: one image per component from its declared bindings, each
 	// carrying its owning component so the promotion writes into that component's
 	// values.yaml. Single-source: the template's per-service Images mapping (via
-	// TemplateImages) or the legacy image_repository fallback.
+	// TemplateImages) — no legacy fallback; no bindings means no Warehouse.
 	composed := app.Spec.IsComposed()
 	var images []KargoImage
 	if composed {
@@ -2502,17 +2379,24 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		}
 		images = collectComponentImages(app, resolved)
 	} else {
-		var tmplImages []KargoImage
-		if len(stableEnvs) > 0 {
-			tmplImages = stableEnvs[0].TemplateImages
+		// TemplateImages are app-level (identical across envs); read them from any
+		// non-preview env so the env-independent Warehouse still publishes when
+		// every env is unbound.
+		for _, env := range envs {
+			if env.EnvType == domain.AppEnvPreview {
+				continue
+			}
+			if len(env.TemplateImages) > 0 {
+				images = env.TemplateImages
+				break
+			}
 		}
-		images = resolveKargoImages(app, tmplImages)
 	}
 	// ── Warehouse ──────────────────────────────────────────────────────────────
 	whPath := filepath.Join(kargoDir, projectNS+"-"+app.Name+"-warehouse.yaml")
 	if len(images) == 0 {
-		// No image source — no user bindings, no template-declared images, and no
-		// image_repository. Do NOT write a placeholder Warehouse: an unreachable
+		// No image source — no user bindings and no template-declared images.
+		// Do NOT write a placeholder Warehouse: an unreachable
 		// ghcr.io/{project}/{app} subscription just thrashes Kargo in a failing
 		// refresh loop. Prune any stale Warehouse and skip; the Stages still publish,
 		// and the Warehouse materializes healthy once an image is detected/bound
@@ -2773,12 +2657,6 @@ type AppPublishEnv struct {
 	// the publish adapter from the stack record.
 	StackRawValues    map[string]any
 	StackEnvRawValues map[string]any
-	// SkipCanonicalBase, when true, omits the canonical suparship-common values
-	// base (app/platform/components/suparship/routing) from the published
-	// values.yaml — for BYO/passthrough templates (Spec.CanonicalValues()==false).
-	// The platform context is still built so ((platform.*))/((vars.*)) tokens in the
-	// overlay resolve; only the injected schema is dropped.
-	SkipCanonicalBase bool
 	// TemplateImages are the app's resolved image sources (one per service),
 	// derived from the template's Images mapping by the publish adapter. They
 	// drive the Kargo Warehouse subscriptions + Stage image updates, and the
@@ -2889,30 +2767,16 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	// overrides don't make sense for ephemeral preview envs (their
 	// names are PR-specific and have no static config).
 	//
-	// A per-preview image tag is surfaced two ways, so any chart shape works:
-	//   - ((platform.imageTag)): set on hv.Platform below, so an override like
-	//     `image.tag: "((platform.imageTag))"` resolves to the PR build at publish
-	//     (overlay tokens interpolate against hv.Platform). Chart-agnostic — the
-	//     recommended way for BYO/passthrough charts whose image key varies.
-	//   - canonical fold: for canonical templates the tag is also folded into the
-	//     app's image_tag so the mapper bakes it into each component's image.tag.
-	mapApp := app
+	// The per-PR image tag is surfaced as ((platform.imageTag)): set on
+	// hv.Platform below, so an override like `image.tag: "((platform.imageTag))"`
+	// resolves to the PR build at publish (overlay tokens interpolate against
+	// hv.Platform). Chart-agnostic — the image key is the chart's own.
 	overlay := previewRawValuesOverlay(app, preview)
-	if preview.ImageTag != "" && !preview.SkipCanonicalBase {
-		clone := *app
-		vals := make(map[string]any, len(app.Spec.Values)+1)
-		for k, v := range app.Spec.Values {
-			vals[k] = v
-		}
-		vals[imageTagValuesKey] = preview.ImageTag
-		clone.Spec.Values = vals
-		mapApp = &clone
-	}
-	hv := helmvalues.MapToHelmValuesForEnv(mapApp, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil)
+	pv := helmvalues.MapPlatformValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil)
 	// Expose the per-PR tag as ((platform.imageTag)) for overlay/raw-values token
 	// interpolation, independent of the chart's image-mapping shape.
 	if preview.ImageTag != "" {
-		hv.Platform.ImageTag = preview.ImageTag
+		pv.ImageTag = preview.ImageTag
 	}
 	// Shared-namespace previews put every preview of the project into one
 	// namespace (the namespace pattern omits {name}), so the resolved namespace
@@ -2927,15 +2791,10 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	if !strings.Contains(preview.Namespace, preview.PreviewName) {
 		resBase = app.Name + "-" + preview.PreviewName
 	}
-	hv.Platform.PreviewName = preview.PreviewName
-	hv.Platform.ConfigMapName = secrets.AppConfigMapName(resBase)
-	hv.Platform.SecretName = secrets.AppSecretName(resBase)
-	var hvBytes []byte
-	if preview.SkipCanonicalBase {
-		hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, preview.EnvVars)
-	} else {
-		hvBytes, err = marshalValuesWithOverlay(hv, overlay, preview.EnvVars)
-	}
+	pv.PreviewName = preview.PreviewName
+	pv.ConfigMapName = secrets.AppConfigMapName(resBase)
+	pv.SecretName = secrets.AppSecretName(resBase)
+	hvBytes, err := marshalPassthroughValues(pv, overlay, preview.EnvVars)
 	if err != nil {
 		return fmt.Errorf("marshal preview values.yaml: %w", err)
 	}
@@ -2946,7 +2805,7 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	// Interpolate preview env-var values against the preview's platform context.
 	previewEnvVars := preview.EnvVars
 	if hasInterpToken(previewEnvVars) {
-		previewEnvVars = platform.Context{Platform: hv.Platform, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
+		previewEnvVars = platform.Context{Platform: pv, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
 	}
 
 	// Platform-managed ConfigMap + ExternalSecret go to the platform-owned
@@ -3034,18 +2893,16 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 	componentValues := make(map[string]string, len(included))
 	var appPlatform helmvalues.PlatformValues
 	for i, c := range included {
-		key := p.resolveComponentKey(ctx, c.Template.Name, c.Name)
-		canonical := p.resolveComponentCanonical(ctx, c.Template.Name)
-		hv := helmvalues.MapComponentHelmValuesForEnv(app, c, key, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, ns, "", previewOrgName,
+		pv := helmvalues.MapComponentPlatformValuesForEnv(app, c, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, ns, "", previewOrgName,
 			p.cfg.RoutingProfiles, nil, nil)
-		hv.Platform.PreviewName = preview.PreviewName
-		hv.Platform.ConfigMapName = configMapName
-		hv.Platform.SecretName = secretName
+		pv.PreviewName = preview.PreviewName
+		pv.ConfigMapName = configMapName
+		pv.SecretName = secretName
 		if preview.ImageTag != "" {
-			hv.Platform.ImageTag = preview.ImageTag
+			pv.ImageTag = preview.ImageTag
 		}
 		if i == 0 {
-			appPlatform = hv.Platform // app-wide identity for env-var interpolation
+			appPlatform = pv // app-wide identity for env-var interpolation
 		}
 
 		// Overlay, low→high: PE component-template base-env overlays (Default+Env; no
@@ -3053,32 +2910,16 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 		// template's PREVIEW defaults ⊕ the app's per-component preview band. Mirrors
 		// the single-source order (previewRawValuesOverlay): template preview defaults
 		// sit above the developer base overlay and below the app's own preview band.
-		pv := preview.ComponentPlatformValues[c.Name]
-		overlay := deepMerge(deepCopyMap(pv.Default), deepCopyMap(pv.Env))
+		cpv := preview.ComponentPlatformValues[c.Name]
+		overlay := deepMerge(deepCopyMap(cpv.Default), deepCopyMap(cpv.Env))
 		overlay = deepMerge(overlay, deepCopyMap(c.Values))
-		overlay = deepMerge(overlay, deepCopyMap(pv.Preview))
+		overlay = deepMerge(overlay, deepCopyMap(cpv.Preview))
 		if len(previewBand.ComponentValues[c.Name]) > 0 {
 			overlay = deepMerge(overlay, deepCopyMap(previewBand.ComponentValues[c.Name]))
 		}
-		// Pin the per-PR image tag: a canonical component folds it into
-		// components.<key>.image.tag; a passthrough component relies on the
-		// ((platform.imageTag)) token in its own overlay.
-		if preview.ImageTag != "" && canonical {
-			o := deepCopyMap(overlay)
-			if o == nil {
-				o = map[string]any{}
-			}
-			setStringAtPath(o, "components."+key+".image.tag", preview.ImageTag)
-			overlay = o
-		}
-
-		var hvBytes []byte
-		var err error
-		if canonical {
-			hvBytes, err = marshalValuesWithOverlay(hv, overlay, preview.EnvVars)
-		} else {
-			hvBytes, err = marshalPassthroughValues(hv.Platform, overlay, preview.EnvVars)
-		}
+		// The per-PR image tag reaches the chart via the ((platform.imageTag))
+		// token in the component's own overlay (set on pv above).
+		hvBytes, err := marshalPassthroughValues(pv, overlay, preview.EnvVars)
 		if err != nil {
 			return fmt.Errorf("marshal preview values for component %s: %w", c.Name, err)
 		}
@@ -3209,15 +3050,11 @@ type PreviewPublishSpec struct {
 	EnvVars map[string]string
 	// ImageTag, when non-empty, overrides the image tag in the preview's values:
 	// it is exposed as ((platform.imageTag)) (for `image.tag: "((platform.imageTag))"`
-	// style overrides) and, for canonical templates, folded into each component's
-	// image.tag. Empty inherits the base env's image tag.
+	// style overrides). Empty inherits the base env's image tag.
 	ImageTag string
 	// ScopeKeys reports which (scope, tier) items have keys, so PublishPreview
 	// emits only the ExternalSecrets that resolve.
 	ScopeKeys ScopePresence
-	// SkipCanonicalBase mirrors AppPublishEnv.SkipCanonicalBase for previews of
-	// BYO/passthrough templates.
-	SkipCanonicalBase bool
 
 	// The fields below are the BASE env's resolved value overlays, so the preview
 	// inherits exactly what the base env deploys (the preview band layers on top).

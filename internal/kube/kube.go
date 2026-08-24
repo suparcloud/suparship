@@ -72,7 +72,7 @@ var (
 //	    // Auth + org provider are separate because they need credentials:
 //	    Authenticator: auth.NewK8sAuthenticator(client),
 //	    OrgProvider:   rbac.NewK8sOrgProvider(client, fallbackOrg),
-//	    // Templates: use kube.LoadTemplates(ctx, client) or tpl.LoadDir.
+//	    // Templates: use kube.LoadTemplates(ctx, client).
 //	})
 type ServerDeps struct {
 	// ProjectStore reads and persists project + service definitions from

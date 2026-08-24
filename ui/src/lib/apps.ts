@@ -2,7 +2,6 @@ import { api, ApiError } from "./api";
 import type {
   AppImageBinding,
   CDConfig,
-  ComponentConfig,
   ComponentCreate,
   ComponentEnvVar,
   ComponentImage,
@@ -104,17 +103,12 @@ export interface UpdateAppRequest {
   // components REPLACES the app's component list (edit-composed: add / remove /
   // retemplate). Each carries its own template; ≥2 makes the app composed.
   components?: ComponentCreate[];
-  // componentConfigs replaces app-level per-component config keyed by name.
-  componentConfigs?: Record<string, ComponentConfig>;
   // componentValues sets the base (all-env) Helm values overlay for the named
   // composed components. Only the named components change; {} clears one.
   componentValues?: Record<string, Record<string, unknown>>;
   // envComponentValues sets per-(env, component) overlay overrides keyed
   // env → component → overlay. Only the named pairs change; {} clears one.
   envComponentValues?: Record<string, Record<string, Record<string, unknown>>>;
-  // envComponents replaces per-(env, component) overrides keyed env → component.
-  // Only the envs named in the map are replaced.
-  envComponents?: Record<string, Record<string, ComponentConfig>>;
   // componentEnvVars patches the named components' env-var settings
   // (inheritAppVars + envVars) without touching component structure — the
   // component-variables drawer's write path.

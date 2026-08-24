@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apitypes "k8s.io/apimachinery/pkg/types"
@@ -57,6 +58,27 @@ func (r *ArgoCDStatusReader) RefreshApps(ctx context.Context, project string, ap
 		if _, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).Patch(
 			ctx, name, apitypes.MergePatchType, patch, metav1.PatchOptions{},
 		); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("refresh application %q: %w", name, err)
+		}
+	}
+	return firstErr
+}
+
+// RefreshAppsByName annotates the NAMED Applications with the ArgoCD refresh
+// annotation, regardless of labels — for parent/root apps (suparship-apps,
+// {env}-composed) that don't carry an app's project/app labels. Missing
+// Applications are skipped (a first promotion nudges {env}-composed before the
+// root app has created it). Best-effort like RefreshApps.
+func (r *ArgoCDStatusReader) RefreshAppsByName(ctx context.Context, names []string) error {
+	if r == nil || r.dynamic == nil || len(names) == 0 {
+		return nil
+	}
+	patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, argoRefreshAnnotation, argoRefreshNormal))
+	var firstErr error
+	for _, name := range names {
+		if _, err := r.dynamic.Resource(argoCDAppGVR).Namespace(r.namespace).Patch(
+			ctx, name, apitypes.MergePatchType, patch, metav1.PatchOptions{},
+		); err != nil && !apierrors.IsNotFound(err) && firstErr == nil {
 			firstErr = fmt.Errorf("refresh application %q: %w", name, err)
 		}
 	}

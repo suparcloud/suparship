@@ -8,6 +8,9 @@ metadata:
   annotations:
     # Survive a helm uninstall / component removal — this is a database.
     helm.sh/resource-policy: keep
+    # And survive ArgoCD's cascade delete / prune too (ArgoCD does not honor
+    # the helm resource-policy; it needs its own sync-options).
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
 spec:
   accessModes: ["ReadWriteOnce"]
   {{- with .Values.persistence.storageClass }}

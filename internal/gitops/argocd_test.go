@@ -385,7 +385,7 @@ func TestDefaultRepoPath(t *testing.T) {
 // previewInst returns a minimal EnvironmentInstance for a preview environment.
 func previewInst(appName, projectName, previewName string) *domain.EnvironmentInstance {
 	ns := domain.GenerateNamespace(appName, previewName, domain.AppEnvPreview)
-	url := domain.GenerateURL(appName, previewName, domain.AppEnvPreview)
+	url := domain.GenerateURL(appName, previewName, domain.AppEnvPreview, false)
 	return &domain.EnvironmentInstance{
 		AppName:     appName,
 		ProjectName: projectName,

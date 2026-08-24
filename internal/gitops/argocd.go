@@ -132,7 +132,17 @@ type ObjectMeta struct {
 	Namespace   string            `json:"namespace"             yaml:"namespace"`
 	Labels      map[string]string `json:"labels,omitempty"      yaml:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty" yaml:"annotations,omitempty"`
+	Finalizers  []string          `json:"finalizers,omitempty"  yaml:"finalizers,omitempty"`
 }
+
+// ArgoCDResourcesFinalizer makes deleting an Application CASCADE to its
+// deployed resources. Rendered composed Application manifests must carry it:
+// they are pruned by a parent directory app when their file disappears
+// (component removal, preview teardown, undeploy), and without the finalizer
+// ArgoCD deletes only the Application object, orphaning every workload in the
+// namespace. ApplicationSet-generated apps get the same finalizer from the
+// AppSet controller — this keeps both paths' delete semantics identical.
+const ArgoCDResourcesFinalizer = "resources-finalizer.argocd.argoproj.io"
 
 // ApplicationSpec is the spec section of an ArgoCD Application.
 type ApplicationSpec struct {

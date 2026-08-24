@@ -99,6 +99,11 @@ dependencies:
 org:
   name: default
   displayName: "My Organization"
+  # -- URL scheme for suparship-generated app endpoints (preview/env URLs,
+  # Gateway-API links): true → https:// (default), false → http:// for
+  # TLS-less ingress (local/dev). TLS termination itself is configured via
+  # routing profiles / your charts.
+  secureEndpoints: true
 
 # -- Admin credentials. The chart does NOT create the Secret — provision it
 # externally (manually, via SealedSecrets / External Secrets, included via

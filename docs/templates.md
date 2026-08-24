@@ -1,12 +1,35 @@
 # Templates
 
-suparship templates are the primary mechanism for creating and deploying **apps**. When a developer picks a template and fills in the form, suparship creates an **app** backed by that template's rendering configuration. The template does not create a raw Kubernetes Service or Deployment directly — it creates an app that suparship then renders into the appropriate GitOps manifests.
+A suparship **template** is a Helm chart served from the template registry,
+optionally carrying platform-authored metadata (`template.yaml`). When a
+developer picks a template, suparship creates an **app** backed by that
+chart. The template does not create a raw Kubernetes Service or Deployment
+directly — it creates an app that suparship then renders into the appropriate
+GitOps manifests.
 
-> **You don't have to author a template to use suparship.** Plain Helm charts
-> registered through a chart source are imported as passthrough templates
-> automatically — see [Bring your own Helm charts](byo-charts.md) and the
-> production-ready starters in [`examples/charts/`](../examples/charts/).
-> This page is the reference for the optional authored-template layer.
+Every template is a plain, bring-your-own Helm chart — there are no built-in
+templates and no platform values schema. See
+[Bring your own Helm charts](byo-charts.md) for the chart-side story and the
+production-ready starters in [`examples/charts/`](../examples/charts/). This
+page is the reference for the registry and the optional `template.yaml`
+metadata layer.
+
+## Day one: register a template source
+
+A fresh install has an empty template gallery — every template arrives
+through the registry (a `git` / `gitcharts` / `oci` source) or a one-off BYO
+chart upload, and is served live from cluster ConfigMaps. Under
+**Settings → Templates → Sources**, add a source; the copy-paste starter is
+this repo's example catalog as a **Git charts repo** (`gitcharts`):
+
+- Repo URL: `https://github.com/suparcloud/suparship.git`
+- Path: `examples/charts`
+
+Sync it and `web`, `worker`, `cronjob`, `job`, `gateway`, and `postgres`
+appear as templates. (The dev loop does this automatically: the Tilt
+`seed-templates` resource runs `hack/dev/seed-example-charts.sh`, which
+mirrors `examples/charts/` into the local Gitea and registers it as a
+`gitcharts` source.)
 
 ## What a template creates
 
@@ -16,98 +39,35 @@ An app:
 
 - belongs to a **project** (the team/product boundary)
 - runs across one or more **environments** (`staging`, `prod`, ephemeral `preview-*`)
-- is composed of one or more internal **runtime components** (e.g. `web`, `worker`, `cron`)
+- deploys one chart directly (the common case, zero components), or — as a
+  **composed app** — declares several **components**, each pinned to its own
+  template with its own values overlay
 
-The template controls the default component topology. Most templates define a single implicit `web` component; more advanced templates may define multiple components.
+Templates declare no components: components are **user-declared on the app**.
+A single-chart app has none; a composed app lists each component with its own
+template ref and Values. See
+[templates-components.md](templates-components.md) for the app-component
+model.
 
 ```
 org
 └── project
     └── app              ← what the template creates
         ├── environment  (staging | prod | preview-*)
-        └── component    (web | worker | cron — advanced / hidden by default)
+        └── component    (composed apps only — each with its own template + values)
 ```
 
-## Component topology
+## Configuring apps: values, not form inputs
 
-### MVP guidance
+Apps are configured through **Helm values overlays** in the chart's own
+shape — there is no input/mapping layer between the form and the chart. The
+legacy `inputs` / `advancedInputs` / `mappings` / `presets` blocks are
+retired; the developer-facing form is declared with
+[`developerValues`](#developervalues--the-values-projection), and
+platform-engineer defaults ship as `defaultValues` / `envValues` /
+`previewDefaultValues` overlays.
 
-**Most templates should produce a single `web` component.** This is the default for any template with `category: web`. The `web` component:
-
-- is of type `web` (`ComponentType = "web"` in the domain model)
-- is enabled in preview environments (`enabledInPreview: true`)
-- maps to a Kubernetes Deployment + Service + optional Ingress
-
-Some templates may define a `web` + `worker` pair when the workload naturally splits into an HTTP server and a background queue consumer. Example:
-
-```yaml
-# Derived automatically from template category; callers may override
-components:
-  - name: web
-    type: web
-    enabledInPreview: true
-  - name: worker
-    type: worker
-    enabledInPreview: false   # workers are expensive; skip in previews
-```
-
-Workers and cron jobs are **not enabled in preview environments by default** to keep preview costs low. This behaviour is controlled by the `enabledInPreview` field on each component and can be overridden by the caller.
-
-### Category → default component mapping
-
-suparship derives the default component list from the template's `category` field when no explicit component list is provided:
-
-| Template `category` | Default component | Preview enabled |
-|---------------------|-------------------|-----------------|
-| `web` (or any other) | `web` (type: web) | ✅ yes |
-| `worker` | `worker` (type: worker) | ❌ no |
-| `cron` | `cron` (type: cron) | ❌ no |
-
-Templates that need custom topology (e.g. `web` + `worker`) should document this in their `spec.description` and set `category: web`; the component list is then specified explicitly at app-creation time or in a future `components` block on the template spec.
-
-### Validation rules
-
-- An app must have at least one component.
-- Component names must be valid DNS labels.
-- Component names must be unique within an app.
-- At most one `web` component is allowed unless the template explicitly permits multiple HTTP endpoints.
-
-## App inputs and template values
-
-Template inputs are the curated parameters exposed in the UI form. They map to Helm values (or equivalent rendering engine values) via the `mappings` block in `template.yaml`. Inputs intentionally hide raw Helm complexity from the developer.
-
-Supported input types:
-
-| Type | Description |
-|------|-------------|
-| `string` | Free-form text; may have a `pattern` constraint |
-| `number` | Numeric value; optional `min` / `max` |
-| `boolean` | Toggle |
-| `enum` | Dropdown from a fixed `options` list |
-
-Secret inputs are a separate category — see [Secrets](#secrets) below.
-
-### Presets
-
-A preset is a named shortcut that pre-fills a set of input values. Presets are optional but strongly recommended for common configurations:
-
-```yaml
-presets:
-  - name: starter
-    title: Starter
-    description: Single replica, small resources, no ingress.
-    values:
-      replicas: 1
-      size: small
-      ingress_enabled: false
-  - name: production
-    title: Production
-    description: Multiple replicas, larger resources, ingress enabled.
-    values:
-      replicas: 3
-      size: large
-      ingress_enabled: true
-```
+Secret inputs remain a separate category — see [Secrets](#secrets) below.
 
 ## Environment overrides in the app model
 
@@ -177,11 +137,10 @@ metadata:
 spec:
   title: <string>            # human-readable name shown in UI
   description: <string>      # optional one-paragraph description
-  category: <string>         # web | worker | cron (controls default component)
+  category: <string>         # catalog metadata (e.g. web | worker | cron | database)
   engine:
     type: helm               # only "helm" is supported in MVP
     chart: ./chart           # path relative to the template directory
-  components: [...]          # named runtime units (optional; see templates-components.md)
   # Platform-Engineer-authored Helm values overlays, layered below the
   # developer's own overrides. Free-form; string leaves may use
   # ((platform.*)) / ((vars.*)) tokens resolved at publish.
@@ -190,7 +149,6 @@ spec:
   previewDefaultValues: {...}  # previews only
   developerValues: [...]     # the values projection a developer sees + edits
   images: [...]              # declared image slots for external-CD (Kargo) wiring
-  injectCanonicalValues: <bool>  # false = passthrough/BYO chart
   deliveryMode: <string>     # pipeline (default) | direct
   secretInputs: [...]        # secret-reference parameters (no literal values)
   inputs: [...]              # RETIRED — superseded by developerValues
@@ -212,15 +170,17 @@ to read. `developerValues` declares the small, ordered subset that is theirs:
 
 ```yaml
   developerValues:
-    - path: components.web.image.repository   # dotted Helm values path
+    - path: image.repository                  # dotted Helm values path — the CHART's own shape
       title: Image Repository
       type: string                            # string | number | boolean | enum
       required: true
       description: Container image, e.g. ghcr.io/org/app
-    - path: components.web.resources.size
-      title: Resource Size
-      type: enum
-      options: [small, medium, large]
+    - path: containerPort
+      title: Port
+      type: number
+    - path: schedule                          # e.g. for a cronjob chart
+      title: Schedule
+      type: string
 ```
 
 The app-creation editor seeds from exactly these paths, prefilled with each key's
@@ -251,101 +211,58 @@ REPLACES the template's own list.
 - `developerValues[].path` is required and unique; an `enum` entry needs at least
   one `options` entry; `min` must not exceed `max`; `pattern` must compile
 - `images[]` entries need `name`, `repository`, and `tagKey`; names are unique
-- Input names must be unique across `inputs` and `advancedInputs`
-- `enum` inputs must have at least one `options` entry
 - `secretRef` fields must be in `secret-name.key` format
-- Preset values may only reference declared input names
 
-## Built-in templates
+## The example charts catalog
 
-### `web-service`
+[`examples/charts/`](../examples/charts/) is the reference catalog — plain
+Helm charts registered like any other source (see
+[Day one](#day-one-register-a-template-source)). Highlights beyond the table
+in [`examples/charts/README.md`](../examples/charts/README.md):
 
-A general-purpose template for HTTP apps. Creates a single `web` component (Deployment, Service, optional Ingress, optional HPA). Suitable for APIs, frontends, and general HTTP workloads.
-
-**Category:** `web`  
-**Default component topology:** single `web` component, preview-enabled  
-**Engine:** Helm (`./chart`)
-
-Key inputs:
-
-| Input | Description |
-|-------|-------------|
-| `service_name` | App name; used in Kubernetes resource names and selectors |
-| `image_repository` | Container image repository |
-| `image_tag` | Container image tag |
-| `port` | TCP port the container listens on |
-| `ingress_enabled` | Expose the app via an Ingress resource |
-| `size` | Resource profile: `small` / `medium` / `large` |
-| `health_path` | HTTP path for liveness and readiness probes |
-
-Secret inputs:
-
-| Input | Description |
-|-------|-------------|
-| `database_url` | Database connection string; injected from a Kubernetes Secret |
-
-Presets: `starter` (single replica, small, no ingress) and `production` (three replicas, large, ingress enabled).
-
-Production hardening (v1.1.0): zero-downtime `RollingUpdate` (surge 1 /
-unavailable 0), a `preStop` sleep so rollouts don't 502 while load balancers
-drop pods from rotation, and a default-on `PodDisruptionBudget`
-(`maxUnavailable: 1`, so single-replica apps still drain).
-
-### `worker`
-
-A long-running background worker — queue consumer, event processor, outbox
-relay. No Service, no Ingress, no ports: a worker is defined by what it
-consumes, not what it serves.
-
-**Category:** `worker`  
-**Default component topology:** single `worker` component (Deployment + PDB, optional KEDA ScaledObject)  
-**Engine:** Helm (`./chart`)
-
-Developer values: image repository, replica count, resource size. Set the
-worker's entrypoint via the values editor (`components.worker.command`/`args`)
-when the image's own entrypoint isn't the worker loop. For autoscaling, wire a
-**queue-length KEDA trigger** through `autoscaling.triggers` — the cpu/memory
-default is only a fallback that tracks pull-based work poorly. Shutdown is a
-drain: SIGTERM, then a 60s grace budget (`terminationGracePeriodSeconds`).
-
-### `cronjob`
-
-A task on a cron schedule — reports, syncs, cleanups. Unlike `job` (a one-shot
-ArgoCD PreSync hook that gates a release), `cronjob` is a long-lived CronJob
-that runs independent of deploys.
-
-**Category:** `cron`  
-**Default component topology:** single `cron` component (CronJob)  
-**Engine:** Helm (`./chart`)
-
-Developer values: image repository, schedule (cron expression), resource size.
-Defaults chosen for safety: `concurrencyPolicy: Forbid` (a slow run never
-overlaps the next), missed runs skipped after 300s rather than fired late,
-failed runs kept for debugging (`failedJobsHistoryLimit: 3`). The platform
-suspend flag maps directly onto `CronJob.spec.suspend`, so suspending the app
-pauses the schedule without deleting anything.
+- **`web`** — Deployment, Service, optional Ingress **or** Gateway API
+  HTTPRoute, optional HPA. Production hardening built in: zero-downtime
+  `RollingUpdate` (surge 1 / unavailable 0), a `preStop` sleep so rollouts
+  don't 502 while load balancers drop pods from rotation, and a default-on
+  `PodDisruptionBudget` (`maxUnavailable: 1`, so single-replica apps still
+  drain).
+- **`worker`** — a long-running background worker: no Service, no Ingress, no
+  ports. Set the entrypoint via `command`/`args` in the values overlay when
+  the image's own entrypoint isn't the worker loop. Shutdown is a drain:
+  SIGTERM, then a 60s grace budget (`terminationGracePeriodSeconds`).
+- **`cronjob`** — a task on a cron schedule (`schedule` in values). Unlike
+  `job` (a one-shot ArgoCD PreSync hook that gates a release), `cronjob` runs
+  independent of deploys. Defaults chosen for safety: `concurrencyPolicy:
+  Forbid`, missed runs skipped after 300s rather than fired late, failed runs
+  kept for debugging (`failedJobsHistoryLimit: 3`). The platform suspend flag
+  maps onto `CronJob.spec.suspend`, so suspending the app pauses the schedule
+  without deleting anything.
 
 ## Disabling a template
 
-Org admins can retire any template — including built-ins, which ship on disk
-and cannot be deleted — with `PATCH /api/v1/templates/{name}` `{"disabled":
-true}` (or the Disable button on the template detail page). A disabled
-template stays listed (marked) so it can be found and re-enabled, but the
-create flow doesn't offer it and the server refuses new apps from it with a
-422. **Existing apps are untouched**: they pin chart versions, not gallery
-entries, and keep publishing/editing/upgrading. The flag lives in the
-template's sync-safe override, so re-syncs and image rebuilds can't resurrect
-a retired template.
+Org admins can retire any template — including read-only synced ones — with
+`PATCH /api/v1/templates/{name}` `{"disabled": true}` (or the Disable button
+on the template detail page). A disabled template stays listed (marked) so it
+can be found and re-enabled, but the create flow doesn't offer it and the
+server refuses new apps from it with a 422. **Existing apps are untouched**:
+they pin chart versions, not gallery entries, and keep publishing/editing/
+upgrading. The flag lives in the template's sync-safe override, so re-syncs
+can't resurrect a retired template.
 
 ## Writing a new template
 
-1. Create `templates/<name>/template.yaml` following the schema above.
-2. Add the Helm chart under `templates/<name>/chart/`.
-3. Test loading with `go test ./internal/tpl/...`.
-4. Add the template to the `LoadDir` path used at startup (no code change required — the loader picks up all subdirectories automatically).
-5. Document the template in this file under [Built-in templates](#built-in-templates).
+1. Put your Helm chart in the repo your chart source scans (or package it as
+   a `.tgz` for **Templates → Import**).
+2. Optionally add a `template.yaml` next to the chart, following the schema
+   above, to ship curated metadata (overlays, `developerValues`, `images`)
+   with it. Without one, the chart imports with its own `values.yaml` as the
+   base and everything is curated from the UI.
+3. Test loading with `go test ./internal/tpl/...` if you're developing
+   against this repo; otherwise push and hit **Sync now** on the source.
 
-> **Tip:** Keep templates focused. A template that does one thing well is better than a template with 30 inputs. Use presets to cover the common cases; advanced users can override via `advancedInputs`.
+> **Tip:** Keep the developer-facing surface small. A `developerValues`
+> projection with a handful of well-titled paths beats exposing the whole
+> values document.
 
 ## Roadmap
 
@@ -357,14 +274,14 @@ not dependency.
 - **BYO Helm chart wizard** — operators upload a `.tgz` via `/templates/import`; the chart is introspected (`Chart.yaml` + `values.schema.json`, with `values.yaml` fallback) and turned into a starter `template.yaml` they can edit before saving. Backend in `internal/tpl/chartimport`, UI at `/templates/import`.
 - **External chart registries** — Git-hosted chart libraries are pulled and indexed on a configurable interval (`SUPARSHIP_TEMPLATE_SYNC_INTERVAL`, default 5m). Backend in `internal/tpl/registrysync`, UI at `/templates/sources`.
 
-### Env vars as template inputs
+### Env vars from template defaults
 
-Today inputs feed `helm template` values. Two natural extensions:
+Two natural extensions of the values overlays:
 
-- **Render-into-envconfig inputs** — let a template declare an input that materialises into the merged env-config map (org → env-type → project → app → app-env → cluster), so a chart can declare `LOG_LEVEL` once and bind it across scopes.
+- **Render-into-envconfig defaults** — let a template declare a value that materialises into the merged env-config map (org → env-type → project → app → app-env → cluster), so a chart can declare `LOG_LEVEL` once and bind it across scopes.
 - **`${envvar:KEY}` references in defaults** — resolve at publish time so a template default can read an upper-scope env var.
 
-**Before implementing:** decide whether to surface inputs in two distinct categories (`buildtime` vs `runtime`) or stay flat. Mixing the two paths under one Input shape will confuse operators.
+**Before implementing:** decide whether to surface these in two distinct categories (`buildtime` vs `runtime`) or stay flat. Mixing the two paths under one shape will confuse operators.
 
 ### Catalog UX
 
@@ -380,7 +297,7 @@ The gallery is currently a flat grid. Worth adding:
 
 **Where an upgrade is applied: at component level, mirrored to the app.** Every
 component carries its own `template: {name, version}` pin (`ComponentSpec.Template`),
-because a composed app mixes charts — api→web-service, worker→worker,
+because a composed app mixes charts — api→web, worker→worker,
 migrate→job — and two components can even sit on different versions of the same
 template. That per-component pin is what the composed publisher renders from.
 `AppSpec.Template` is the mirror of the primary component, and it is what the
@@ -417,11 +334,11 @@ Still open:
   a values key the new chart renamed or removed leaves the developer's overlay
   inert and deploys the chart default instead. `kube.LoadChartBundleVersion` +
   `chartimport.ParseArchive` already give both sides of that comparison.
-- Schema-migration rules for inputs that change between template versions
-  (rename/removal/type-change).
+- Schema-migration rules for `developerValues` paths that change between
+  template versions (rename/removal/type-change).
 - **Only the chart is pinned.** Template *metadata* — `defaultValues`,
-  `envValues`, `previewDefaultValues`, `images`, `suspendKey`,
-  `injectCanonicalValues` — is resolved by NAME at latest on every publish
+  `envValues`, `previewDefaultValues`, `images`, `suspendKey` — is resolved
+  by NAME at latest on every publish
   (`server.ResolveTemplates`), so a pinned app already tracks the newest
   template's overlays. Making that version-aware needs a
   `kube.LoadTemplateVersion` and is a behaviour change for every running app.
@@ -431,10 +348,7 @@ Still open:
 
 ### Smaller follow-ups
 
-- **Validation hooks** — let templates declare a CEL/Go validator for cross-input rules (e.g. `enable_db=true ⇒ db_size required`). Today `Required`/`Min`/`Max`/`Pattern` only validate one input at a time.
-- **Component composition** — multi-component templates today are flat. A "compose templates" mechanism (web + worker + cron in one app, each declaring its own component) would keep individual charts smaller.
-- **Test fixtures** — let a template ship example-input JSONs + golden rendered manifests so CI verifies the chart still renders cleanly. Plug into `go test ./internal/tpl/...`.
+- **Validation hooks** — let templates declare a CEL/Go validator for cross-value rules (e.g. `enable_db=true ⇒ db_size required`). Today `required`/`min`/`max`/`pattern` only validate one `developerValues` field at a time.
+- **Test fixtures** — let a template ship example-values YAMLs + golden rendered manifests so CI verifies the chart still renders cleanly. Plug into `go test ./internal/tpl/...` (`task charts:verify` covers the in-repo example charts already).
 - **Engine pluralism** — `engine.type` already hints at this. Kustomize, raw-manifest, and Crossplane Composition engines are credible alternatives for non-Helm shops.
-- **OCI-backed registries** — `registrysync` is Git-only today. Adding an OCI source would let suparship pull from ArtifactHub-indexed OCI registries directly.
-- **Built-in/external name collisions** — built-ins win in the live-merge today; a synced chart with a colliding name silently disappears. Surface this as a warning on the gallery + a server log entry.
 - **Sync error persistence** — periodic-sync errors are logged but not stored. Add per-source error fields to the registry document so `/templates/sources` can show "last sync failed: <reason>" days later.

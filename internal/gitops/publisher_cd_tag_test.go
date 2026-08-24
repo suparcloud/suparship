@@ -269,7 +269,6 @@ func TestPublishPreview_TokenImageTagResolvesToPR(t *testing.T) {
 		Namespace:         "demo-hello-preview-pr-42",
 		BaseDomain:        "localhost",
 		ImageTag:          prTag,
-		SkipCanonicalBase: true, // BYO/passthrough
 	}
 	if err := p.PublishPreviewForTest(dir, tokenImageApp(), spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
@@ -294,7 +293,6 @@ func TestDeletePreview_RemovesPlatformResources(t *testing.T) {
 		ClusterServer:     "https://kubernetes.default.svc",
 		Namespace:         "demo-hello-preview-pr-42",
 		BaseDomain:        "localhost",
-		SkipCanonicalBase: true,
 	}
 	if err := p.PublishPreviewForTest(dir, tokenImageApp(), spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
@@ -334,7 +332,6 @@ func TestPublishPreview_MultipleAppsSamePreviewNoCollision(t *testing.T) {
 		ClusterServer:     "https://kubernetes.default.svc",
 		Namespace:         "demo-preview-pr-42",
 		BaseDomain:        "localhost",
-		SkipCanonicalBase: true,
 	}
 	for _, name := range []string{"web", "worker"} {
 		app := &domain.App{
@@ -395,7 +392,6 @@ func TestPublishPreview_TemplateDefaultsBelowAppBand(t *testing.T) {
 		ClusterServer:     "https://kubernetes.default.svc",
 		Namespace:         "demo-preview-pr-1",
 		BaseDomain:        "localhost",
-		SkipCanonicalBase: true,
 		TemplatePreviewValues: map[string]any{
 			"replicas":     1,     // overrides app base-env (5) for previews
 			"templateOnly": "t",   // survives
@@ -457,7 +453,6 @@ func TestPublishPreview_SharedNamespaceSuffixesPlatformNames(t *testing.T) {
 		ClusterServer:     "https://kubernetes.default.svc",
 		Namespace:         "demo-previews", // shared: no preview name in it
 		BaseDomain:        "localhost",
-		SkipCanonicalBase: true,
 	}
 	if err := p.PublishPreviewForTest(dir, platformNameApp(), spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
@@ -483,7 +478,6 @@ func TestPublishPreview_PerPreviewNamespaceNoSuffix(t *testing.T) {
 		ClusterServer:     "https://kubernetes.default.svc",
 		Namespace:         "demo-hello-preview-pr-42", // carries the preview name
 		BaseDomain:        "localhost",
-		SkipCanonicalBase: true,
 	}
 	if err := p.PublishPreviewForTest(dir, platformNameApp(), spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
@@ -521,7 +515,6 @@ func TestPublishPreview_InheritsBaseEnvOverlay(t *testing.T) {
 		ClusterServer:     "https://kubernetes.default.svc",
 		Namespace:         "demo-hello-preview-pr-42",
 		BaseDomain:        "localhost",
-		SkipCanonicalBase: true,
 		// The base env's resolved template/org platform overrides — the layer the
 		// preview was dropping.
 		PlatformDefaultValues: map[string]any{

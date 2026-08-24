@@ -3,17 +3,19 @@
 # docker daemon (started by the Tiltfile `act-runner` resource).
 #
 # Why host docker and not an in-cluster runner: no privileged dind pods, and
-# workflow `docker build/push` reuses the exact registry path the color-app
-# demo uses — the runner mounts the host daemon socket, act_runner mounts it
+# workflow `docker build/push` reuses the exact registry path the dev loop
+# uses — the runner mounts the host daemon socket, act_runner mounts it
 # into job containers (container.docker_host: "" in act-runner-config.yaml),
 # and `docker push localhost:5001/...` resolves from the DAEMON to the ctlptl
 # kind registry (localhost registries are insecure-allowed, no daemon config).
 #
 # Registration: a token is minted via the gitea CLI inside the gitea pod and
 # handed to the official act_runner image, whose entrypoint registers ONCE
-# (state persists in the named volume) and then polls. RE-TRIGGER THIS after
-# `task cluster:delete` + recreate — the old registration points at a dead
-# instance; wipe with:  docker volume rm suparship-act-runner-data
+# (state persists in the named volume) and then polls. After
+# `task cluster:delete` + recreate the stored registration points at a dead
+# Gitea instance and the daemon dies with "unregistered runner" — the script
+# detects that, wipes the volume, and re-registers fresh (self-healing; no
+# manual volume rm needed).
 #
 # The runner and job containers reach Gitea at host.docker.internal:3000
 # (the Tilt port-forward). That name resolves inside containers on Docker
@@ -54,14 +56,35 @@ ok "runner registration token minted"
 docker rm -f "$RUNNER_NAME" >/dev/null 2>&1 || true
 docker volume create "$RUNNER_VOLUME" >/dev/null
 
+run_runner() {
+  docker run --rm --name "$RUNNER_NAME" \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v "$RUNNER_VOLUME":/data \
+    -v "$CONFIG":/config.yaml:ro \
+    --add-host=host.docker.internal:host-gateway \
+    -e CONFIG_FILE=/config.yaml \
+    -e GITEA_INSTANCE_URL="$GITEA_URL" \
+    -e GITEA_RUNNER_REGISTRATION_TOKEN="$TOKEN" \
+    -e GITEA_RUNNER_NAME="$RUNNER_NAME" \
+    "$RUNNER_IMAGE"
+}
+
 info "starting $RUNNER_NAME ($RUNNER_IMAGE) against $GITEA_URL"
-exec docker run --rm --name "$RUNNER_NAME" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "$RUNNER_VOLUME":/data \
-  -v "$CONFIG":/config.yaml:ro \
-  --add-host=host.docker.internal:host-gateway \
-  -e CONFIG_FILE=/config.yaml \
-  -e GITEA_INSTANCE_URL="$GITEA_URL" \
-  -e GITEA_RUNNER_REGISTRATION_TOKEN="$TOKEN" \
-  -e GITEA_RUNNER_NAME="$RUNNER_NAME" \
-  "$RUNNER_IMAGE"
+runner_log="$(mktemp)"
+trap 'rm -f "$runner_log"' EXIT
+if run_runner 2>&1 | tee "$runner_log"; then
+  exit 0
+fi
+# Self-heal the classic post-`task cluster:delete` failure: the volume's
+# stored .runner registration belongs to the previous Gitea instance, so the
+# daemon dies immediately with "unregistered runner". Wipe the volume and
+# register fresh against the current instance (the token minted above is
+# still valid — the entrypoint only consumed it if .runner was absent).
+if grep -q "unregistered runner" "$runner_log"; then
+  info "stale registration (cluster was recreated) — wiping $RUNNER_VOLUME and re-registering"
+  docker volume rm "$RUNNER_VOLUME" >/dev/null
+  docker volume create "$RUNNER_VOLUME" >/dev/null
+  run_runner
+  exit $?
+fi
+exit 1

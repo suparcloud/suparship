@@ -138,8 +138,8 @@ func TestListServicesSeeded(t *testing.T) {
 		t.Fatal("expected at least one seeded service in demo")
 	}
 	names := serviceNames(services)
-	if !contains(names, "hello") {
-		t.Errorf("expected seeded service %q, got %v", "hello", names)
+	if !contains(names, "notes-web") {
+		t.Errorf("expected seeded service %q, got %v", "notes-web", names)
 	}
 }
 
@@ -153,12 +153,12 @@ func TestListServicesUnknownProject(t *testing.T) {
 
 func TestGetServiceFound(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	svc, err := r.GetService(ctx, "demo", "hello")
+	svc, err := r.GetService(ctx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("GetService: %v", err)
 	}
 	if svc.TemplateName == "" {
-		t.Error("hello service should have a TemplateName")
+		t.Error("notes-web service should have a TemplateName")
 	}
 }
 
@@ -217,8 +217,8 @@ func TestListAppsSeeded(t *testing.T) {
 		t.Fatal("expected at least one seeded app in demo")
 	}
 	names := appNames(apps)
-	if !contains(names, "hello") {
-		t.Errorf("expected seeded app %q, got %v", "hello", names)
+	if !contains(names, "notes-web") {
+		t.Errorf("expected seeded app %q, got %v", "notes-web", names)
 	}
 }
 
@@ -232,18 +232,20 @@ func TestListAppsUnknownProject(t *testing.T) {
 
 func TestGetAppFound(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	app, err := r.GetApp(ctx, "demo", "hello")
+	app, err := r.GetApp(ctx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("GetApp: %v", err)
 	}
 	if app.Spec.Template.Name == "" {
-		t.Error("hello app should have a template name")
+		t.Error("notes-web app should have a template name")
 	}
-	if len(app.Spec.Components) == 0 {
-		t.Error("hello app should have at least one component")
+	// A plain single-chart app declares no components; the display row is
+	// synthesized.
+	if len(app.Spec.Components) != 0 {
+		t.Errorf("notes-web app should declare no components, got %+v", app.Spec.Components)
 	}
-	if app.Spec.Components[0].Type != domain.ComponentWeb {
-		t.Errorf("first component type = %q, want %q", app.Spec.Components[0].Type, domain.ComponentWeb)
+	if eff := app.EffectiveComponents(); len(eff) != 1 || eff[0].Type != domain.ComponentWeb {
+		t.Errorf("EffectiveComponents = %+v, want one synthesized web row", eff)
 	}
 }
 
@@ -257,7 +259,7 @@ func TestGetAppNotFound(t *testing.T) {
 
 func TestListAppEnvironmentsSeeded(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	envs, err := r.ListAppEnvironments(ctx, "demo", "hello")
+	envs, err := r.ListAppEnvironments(ctx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("ListAppEnvironments: %v", err)
 	}
@@ -290,7 +292,7 @@ func TestGetAppEnvironmentFound(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
 	for _, envName := range []string{"staging", "prod"} {
 		t.Run(envName, func(t *testing.T) {
-			env, err := r.GetAppEnvironment(ctx, "demo", "hello", envName)
+			env, err := r.GetAppEnvironment(ctx, "demo", "notes-web", envName)
 			if err != nil {
 				t.Fatalf("GetAppEnvironment(%q): %v", envName, err)
 			}
@@ -315,7 +317,7 @@ func TestGetAppEnvironmentFound(t *testing.T) {
 
 func TestGetAppEnvironmentNotFound(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	_, err := r.GetAppEnvironment(ctx, "demo", "hello", "dev")
+	_, err := r.GetAppEnvironment(ctx, "demo", "notes-web", "dev")
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found' error, got: %v", err)
 	}
@@ -325,14 +327,14 @@ func TestAppSeedIsDeterministic(t *testing.T) {
 	r1 := fake.NewSeededDevRuntime()
 	r2 := fake.NewSeededDevRuntime()
 
-	a1, _ := r1.GetApp(ctx, "demo", "hello")
-	a2, _ := r2.GetApp(ctx, "demo", "hello")
+	a1, _ := r1.GetApp(ctx, "demo", "notes-web")
+	a2, _ := r2.GetApp(ctx, "demo", "notes-web")
 	if a1.Spec.Template.Name != a2.Spec.Template.Name {
 		t.Error("app seed data should be identical across runs")
 	}
 
-	e1, _ := r1.GetAppEnvironment(ctx, "demo", "hello", "staging")
-	e2, _ := r2.GetAppEnvironment(ctx, "demo", "hello", "staging")
+	e1, _ := r1.GetAppEnvironment(ctx, "demo", "notes-web", "staging")
+	e2, _ := r2.GetAppEnvironment(ctx, "demo", "notes-web", "staging")
 	if e1.Namespace != e2.Namespace || e1.Status.Phase != e2.Status.Phase {
 		t.Error("app environment seed data should be identical across runs")
 	}
@@ -372,16 +374,16 @@ func TestListAppPreviewsByProject(t *testing.T) {
 
 func TestListAppPreviewsByApp(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	previews, err := r.ListAppPreviews(ctx, "demo", "hello")
+	previews, err := r.ListAppPreviews(ctx, "demo", "notes-web")
 	if err != nil {
-		t.Fatalf("ListAppPreviews(demo, hello): %v", err)
+		t.Fatalf("ListAppPreviews(demo, notes-web): %v", err)
 	}
 	if len(previews) == 0 {
-		t.Fatal("expected at least one seeded preview for hello")
+		t.Fatal("expected at least one seeded preview for notes-web")
 	}
 	for _, p := range previews {
-		if p.AppName != "hello" {
-			t.Errorf("expected AppName %q, got %q", "hello", p.AppName)
+		if p.AppName != "notes-web" {
+			t.Errorf("expected AppName %q, got %q", "notes-web", p.AppName)
 		}
 		if p.EnvType != domain.AppEnvPreview {
 			t.Errorf("expected EnvType %q, got %q", domain.AppEnvPreview, p.EnvType)
@@ -432,7 +434,7 @@ func TestListAppPreviewsIsDeterministic(t *testing.T) {
 
 func TestListAppPreviewsOnlyPreviewType(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	all, _ := r.ListAppEnvironments(ctx, "demo", "hello")
+	all, _ := r.ListAppEnvironments(ctx, "demo", "notes-web")
 	var nonPreviews int
 	for _, e := range all {
 		if e.EnvType != domain.AppEnvPreview {
@@ -443,7 +445,7 @@ func TestListAppPreviewsOnlyPreviewType(t *testing.T) {
 		t.Fatal("seed data must contain non-preview environments to make this test meaningful")
 	}
 
-	previews, err := r.ListAppPreviews(ctx, "demo", "hello")
+	previews, err := r.ListAppPreviews(ctx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("ListAppPreviews: %v", err)
 	}
@@ -464,7 +466,7 @@ func TestListTemplatesSeeded(t *testing.T) {
 		t.Fatal("expected at least one seeded template")
 	}
 	names := templateNames(templates)
-	for _, want := range []string{"web-service", "worker", "cron-job"} {
+	for _, want := range []string{"web", "worker", "cronjob", "postgres"} {
 		if !contains(names, want) {
 			t.Errorf("expected template %q in list, got %v", want, names)
 		}
@@ -473,12 +475,12 @@ func TestListTemplatesSeeded(t *testing.T) {
 
 func TestGetTemplateFound(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	tmpl, err := r.GetTemplate(ctx, "web-service")
+	tmpl, err := r.GetTemplate(ctx, "web")
 	if err != nil {
 		t.Fatalf("GetTemplate: %v", err)
 	}
 	if tmpl.Title == "" {
-		t.Error("web-service template should have a Title")
+		t.Error("web template should have a Title")
 	}
 }
 
@@ -534,7 +536,7 @@ func TestCreatePreview(t *testing.T) {
 	p := &domain.Preview{
 		Name:        "pr-99",
 		ProjectName: "demo",
-		ServiceName: "hello",
+		ServiceName: "notes-web",
 		Namespace:   "demo-preview-pr-99",
 		Status:      domain.StatusNotDeployed,
 		CreatedAt:   time.Now().UTC(),
@@ -546,14 +548,14 @@ func TestCreatePreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPreview after Create: %v", err)
 	}
-	if got.ServiceName != "hello" {
-		t.Errorf("ServiceName = %q, want %q", got.ServiceName, "hello")
+	if got.ServiceName != "notes-web" {
+		t.Errorf("ServiceName = %q, want %q", got.ServiceName, "notes-web")
 	}
 }
 
 func TestCreatePreviewDuplicate(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	p := &domain.Preview{Name: "pr-42", ProjectName: "demo", ServiceName: "hello", CreatedAt: time.Now().UTC()}
+	p := &domain.Preview{Name: "pr-42", ProjectName: "demo", ServiceName: "notes-web", CreatedAt: time.Now().UTC()}
 	err := r.CreatePreview(ctx, p)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("expected 'already exists' error, got: %v", err)
@@ -592,7 +594,7 @@ func TestGetServiceStatusSeeded(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.env, func(t *testing.T) {
-			s, err := r.GetServiceStatus(ctx, "demo", "hello", tc.env)
+			s, err := r.GetServiceStatus(ctx, "demo", "notes-web", tc.env)
 			if err != nil {
 				t.Fatalf("GetServiceStatus: %v", err)
 			}
@@ -608,7 +610,7 @@ func TestGetServiceStatusSeeded(t *testing.T) {
 
 func TestGetServiceStatusUnknown(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	s, err := r.GetServiceStatus(ctx, "demo", "hello", "unknown-env")
+	s, err := r.GetServiceStatus(ctx, "demo", "notes-web", "unknown-env")
 	if err != nil {
 		t.Fatalf("GetServiceStatus: %v", err)
 	}
@@ -619,7 +621,7 @@ func TestGetServiceStatusUnknown(t *testing.T) {
 
 func TestGetServiceStatusUnknownProject(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	s, err := r.GetServiceStatus(ctx, "nope", "hello", "staging")
+	s, err := r.GetServiceStatus(ctx, "nope", "notes-web", "staging")
 	if err != nil {
 		t.Fatalf("GetServiceStatus should not error for unknown project: %v", err)
 	}
@@ -632,7 +634,7 @@ func TestGetServiceStatusUnknownProject(t *testing.T) {
 
 func TestGetLogsAll(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	lines, err := r.GetLogs(ctx, "demo", "hello", "staging", 0)
+	lines, err := r.GetLogs(ctx, "demo", "notes-web", "staging", 0)
 	if err != nil {
 		t.Fatalf("GetLogs: %v", err)
 	}
@@ -651,7 +653,7 @@ func TestGetLogsAll(t *testing.T) {
 
 func TestGetLogsTailLines(t *testing.T) {
 	r := fake.NewSeededDevRuntime()
-	all, _ := r.GetLogs(ctx, "demo", "hello", "staging", 0)
+	all, _ := r.GetLogs(ctx, "demo", "notes-web", "staging", 0)
 
 	cases := []struct {
 		tail int
@@ -662,7 +664,7 @@ func TestGetLogsTailLines(t *testing.T) {
 		{999, len(all)}, // more than available → return all
 	}
 	for _, tc := range cases {
-		got, err := r.GetLogs(ctx, "demo", "hello", "staging", tc.tail)
+		got, err := r.GetLogs(ctx, "demo", "notes-web", "staging", tc.tail)
 		if err != nil {
 			t.Fatalf("GetLogs(tail=%d): %v", tc.tail, err)
 		}
@@ -676,7 +678,7 @@ func TestGetLogsIsolated(t *testing.T) {
 	// logs should be identical regardless of project/service/env arguments
 	// (the fake returns the same fixture for any service)
 	r := fake.NewSeededDevRuntime()
-	a, _ := r.GetLogs(ctx, "demo", "hello", "staging", 0)
+	a, _ := r.GetLogs(ctx, "demo", "notes-web", "staging", 0)
 	b, _ := r.GetLogs(ctx, "other", "svc", "prod", 0)
 	if len(a) != len(b) {
 		t.Errorf("expected same log count for any service, got %d vs %d", len(a), len(b))
@@ -695,8 +697,8 @@ func TestSeedIsDeterministic(t *testing.T) {
 		t.Error("seed data should be identical across runs")
 	}
 
-	s1, _ := r1.GetServiceStatus(ctx, "demo", "hello", "staging")
-	s2, _ := r2.GetServiceStatus(ctx, "demo", "hello", "staging")
+	s1, _ := r1.GetServiceStatus(ctx, "demo", "notes-web", "staging")
+	s2, _ := r2.GetServiceStatus(ctx, "demo", "notes-web", "staging")
 	if s1.Status != s2.Status || s1.Image != s2.Image {
 		t.Error("seeded status should be identical across runs")
 	}

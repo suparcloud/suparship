@@ -17,6 +17,9 @@ func TestTemplateOverride_IsEmpty(t *testing.T) {
 		{"default set", &TemplateOverride{DefaultValues: map[string]any{"a": 1}}, false},
 		{"env set", &TemplateOverride{EnvValues: map[string]map[string]any{"prod": {"a": 1}}}, false},
 		{"cluster set", &TemplateOverride{ClusterValues: map[string]map[string]any{"c1": {"a": 1}}}, false},
+		// Regression: an override carrying ONLY preview defaults was judged
+		// empty, so Save deleted the ConfigMap instead of storing it.
+		{"preview defaults set", &TemplateOverride{PreviewDefaultValues: map[string]any{"image": map[string]any{"tag": "((platform.imageTag))"}}}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

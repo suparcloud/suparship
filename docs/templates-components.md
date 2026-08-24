@@ -1,294 +1,137 @@
-# Templates and components
+# Apps and components
 
-Templates are the golden-path mechanism for creating apps in suparship. A
-template defines:
+Components are **user-declared on the app** — templates declare none. A
+template is a Helm chart (plus optional metadata); how many workloads an app
+runs is decided by the person creating the app:
 
-- The rendering engine and chart (Helm in MVP).
-- The **component topology** — which runtime processes the app contains.
-- The input schema rendered into a UI form.
-- Secret input declarations (references only, never literals).
-- Mappings from input values to Helm values.
-- Preset bundles for common configurations.
+- **Plain app (the common case): zero components.** The app pins one
+  template (`AppSpec.Template`) and renders that single chart. Whatever the
+  chart deploys — a Deployment, a Deployment + CronJob, anything — is the
+  chart's business; suparship publishes one values overlay for it.
+- **Composed app: one component per chart.** Each component declares its own
+  `template: {name, version}` pin and its own `values` overlay, and the app
+  renders as **one multi-source ArgoCD Application** (one source per
+  component, all sharing the app's namespace and sync policy). Composition is
+  all-or-nothing: either every component carries a template ref, or none do
+  (`domain.ValidateComposedComponents`).
 
-This document focuses on the relationship between templates and components.
-For the full template authoring guide see [`docs/templates.md`](templates.md).
-For the app model see [`docs/app-model.md`](app-model.md).
+The shipnotes demo (`task demo:shipnotes`) is the reference composed app:
+`frontend` (web chart, exposed externally) + `api` (web chart, internal) +
+`db` (postgres chart, stateful, curated env vars).
 
----
-
-## How templates define component topology
-
-Every template can declare a `components` block listing the runtime units the
-app contains. When a user creates an app from the template, these component
-declarations seed the `AppSpec.Components` slice.
-
-```yaml
-# template.yaml — web-service
-spec:
-  components:
-    - name: web
-      type: web
-      required: true
-      defaultEnabled: true
-      previewEnabled: true
-      exposed: true
-```
-
-If the `components` block is absent the platform derives a single default
-component from the template's `category` field for backward compatibility:
-
-| `category` | Derived component name | Derived type |
-|------------|----------------------|--------------|
-| `web` | `web` | `web` |
-| `worker` | `worker` | `worker` |
-| `cron` | `cron` | `cron` |
-
-A template with multiple components explicitly lists each one:
-
-```yaml
-spec:
-  components:
-    - name: web
-      type: web
-      required: true
-      defaultEnabled: true
-      previewEnabled: true
-      exposed: true
-
-    - name: worker
-      type: worker
-      required: false
-      defaultEnabled: true
-      previewEnabled: false   # skip heavy worker in preview environments
-      exposed: false
-```
+For the full app model see [`docs/app-model.md`](app-model.md); for the
+template registry see [`docs/templates.md`](templates.md).
 
 ---
 
-## TemplateComponent fields
+## ComponentSpec fields
 
-| Field | Type | Default | Purpose |
-|-------|------|---------|---------|
-| `name` | string | — | Unique identifier within the template (DNS label) |
-| `type` | `web` \| `worker` \| `cron` | — | Runtime role |
-| `required` | bool | `false` | When true, users cannot disable this component |
-| `defaultEnabled` | bool | `true` | Whether the component is on by default |
-| `previewEnabled` | bool | `false` | Whether this component deploys in preview environments |
-| `exposed` | bool | `false` | Whether the component receives an ingress endpoint *by default* (UI initial state) |
-| `produces` | `[]string` | `[]` | Resource Kinds the chart MUST render for this component (asserted by chart-validate) |
-| `optionallyProduces` | `[]string` | `[]` | Kinds the chart MAY render based on values (informational) |
-| `capabilities` | `ComponentCapabilities` | per type — see below | Which UI input groups apply to this component |
-
-`defaultEnabled` uses a pointer in Go (`*bool`) so an omitted YAML field is
-treated as `true` by `IsDefaultEnabled()`. Write `defaultEnabled: false`
-explicitly to opt a component out by default.
-
-### Capabilities
-
-`capabilities` declares which UI input groups apply to a component, replacing
-the prior frontend hardcoding ("every web has autoscaling, every cron has
-schedule"). Authors override only the fields that differ from the type-based
-defaults; the API resolves and serves the fully filled-in shape (no nils) at
-`GET /api/v1/templates/{name}` under `components[].capabilities`.
+```
+internal/domain/app.go — ComponentSpec
+```
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `expose` | `*bool` | Show the externally-expose toggle |
-| `routing` | `"" \| "none" \| "ingress" \| "gateway"` | Which routing fabric to surface inputs for |
-| `autoscaling` | `"" \| "none" \| "hpa" \| "keda"` | Which scaling backend (drives input shape) |
-| `pdb` | `*bool` | Show PodDisruptionBudget inputs (advanced) |
-| `resources` | `*bool` | Show the small/medium/large size dropdown |
-| `replicas` | `*bool` | Show the replicas slider |
-| `schedule` | `*bool` | Show the cron schedule input |
+| `name` | string | Unique within the app (DNS label) |
+| `type` | `web` \| `worker` \| `cron` \| `job` | Runtime role — drives UI grouping and the preview default |
+| `enabled` | bool | Disabled components render nothing |
+| `exposeMode` | `disabled` \| `internal` \| `external` | Which org routing profile the component's route resolves through (feeds the `((platform.routingHost))` / ingress tokens) |
+| `template` | `{name, version}` | The component's own chart pin (composed apps) |
+| `values` | map | The component's Helm values overlay, in **its chart's own shape** — image, port, command, resources, autoscaling, everything |
+| `inheritAppVars` | `*bool` | `nil`/`true`: envFrom the app-wide config/secrets; `false`: curate (below) |
+| `envVars` | list | The component's own variables: literal extend/override entries while inheriting, or the curated list when `inheritAppVars: false` |
+| `images` | list | This component's CD image bindings, keyed by the chart's tag path (`tagKey`, e.g. `image.tag`) |
+| `stateful` | bool | Renders as its own prune-disabled ArgoCD Application (databases/caches) |
+| `previewEnabled` | `*bool` | Overrides whether the component deploys in previews |
 
-Type-based defaults (used when a field is omitted):
-
-| Type | expose | routing | autoscaling | pdb | resources | replicas | schedule |
-|------|--------|---------|-------------|-----|-----------|----------|----------|
-| `web` | true | ingress | keda | true | true | true | false |
-| `worker` | false | none | keda | true | true | true | false |
-| `cron` | false | none | none | false | true | false | true |
-
-Pointer-typed bool fields distinguish "not declared" (use type default) from
-"explicitly false" (override). String fields use the empty string for
-"not declared".
-
-Examples:
-
-```yaml
-# Web with HTTPRoute instead of Ingress
-components:
-  - name: web
-    type: web
-    capabilities:
-      routing: gateway      # surfaces parentRef inputs
-
-# Stateful worker with hardcoded resources
-components:
-  - name: livekit-agent
-    type: worker
-    capabilities:
-      resources: false      # chart owns sizing; suppress dropdown
-
-# Demo template — strip the form down
-components:
-  - name: web
-    type: web
-    capabilities:
-      autoscaling: none
-      pdb: false
-      replicas: false
-```
+There are no workload-shape fields (replicas, size presets, resources,
+scaling, config) on a component — **all workload shape lives in the
+component's `values`**, in whatever paths its chart defines. This is what
+keeps bring-your-own charts first-class: suparship never has to understand a
+chart's schema to configure it.
 
 ---
 
-## Component types
+## Per-component environment variables
 
-```
-internal/tpl/model.go  — TemplateComponentType constants
-internal/domain/app.go — ComponentType constants (runtime)
-```
+A component's environment takes one of three postures — all delivered through
+platform-rendered objects (the chart only ever `envFrom`s the two token
+names):
 
-The three MVP component types:
+- **Inherit (default, `inheritAppVars` unset or `true`, no `envVars`).** The
+  component `envFrom`s the app-wide `<app>-config` ConfigMap and
+  `<app>-secrets` Secret — every app variable, exactly like a plain app.
+- **Inherit + extend/override (inheriting, with literal `envVars`).**
+  suparship renders `<app>-<component>-config` as the app/env resolved
+  variables **merged with the component's literals (literal wins)** and
+  points that component's `((platform.configMapName))` at it;
+  `((platform.secretName))` keeps pointing at the app-wide secret. App
+  variable changes keep flowing — the merge re-renders on every publish.
+  Two limits: a literal overrides inherited *variables*, not secret-delivered
+  keys (charts list secrets after configMaps in `envFrom`, and Kubernetes
+  gives later sources precedence); and previews currently point every
+  component at the app-level preview objects, so the extras don't apply
+  inside previews. Source-mapped entries (`fromConfig`/`fromSecret`) are
+  rejected in this posture — renaming while inheriting is ambiguous.
+- **Curate (`inheritAppVars: false` + `envVars`).** suparship renders
+  per-component objects — `<app>-<component>-config` and (when secret keys
+  are selected) `<app>-<component>-secrets` — holding only the curated
+  entries, and points `((platform.configMapName))` /
+  `((platform.secretName))` at them for that component. Each entry is either
+  a literal `value`, or a selected (optionally renamed) key of the app's
+  config (`fromConfig`) or secrets (`fromSecret`). With no secret keys
+  selected, `((platform.secretName))` resolves to `""` — no app secrets reach
+  the component.
 
-### `web`
-
-An HTTP server that receives external traffic. Typical defaults:
-- `exposed: true` — an Ingress or Service is created.
-- `previewEnabled: true` — preview environments include this component.
-- `required: true` on single-component templates.
-
-### `worker`
-
-A background process that consumes from a queue or processes async work.
-- `exposed: false` — no ingress.
-- `previewEnabled: false` recommended — preview environments skip it to save resources.
-
-### `cron`
-
-A scheduled job that runs on a time interval.
-- `exposed: false` — no ingress.
-- `previewEnabled: false` recommended — scheduled jobs typically do not need to
-  run in short-lived preview environments.
-
----
-
-## Input scoping to a component
-
-By default, template inputs apply at the app level. When a template has
-multiple components, an input can be scoped to a specific component by setting
-its `component` field:
-
-```yaml
-inputs:
-  - name: image_repository
-    title: Image Repository
-    type: string
-    required: true
-    # no component field — applies to the whole app / shared chart values
-
-  - name: worker_concurrency
-    title: Worker Concurrency
-    type: number
-    default: 4
-    component: worker   # scoped to the worker component only
-```
-
-The `component` value must match a name declared in `spec.components`. The
-loader rejects templates where the `component` reference is unresolved.
+The shipnotes `db` component is the worked example: it curates
+`POSTGRES_DB` from the app's variables (`fromConfig`) and
+`POSTGRES_USER`/`POSTGRES_PASSWORD` from the app's secrets (`fromSecret`)
+instead of inheriting every app variable.
 
 ---
 
-## Size presets
+## Stateful components (addons)
 
-Size presets abstract CPU/memory requests into named t-shirt sizes. They are
-surfaced as an `enum` input in templates and map to a `SizePreset` value on the
-`ComponentSpec`:
-
-| Preset | CPU request | Memory request | Typical use |
-|--------|------------|---------------|-------------|
-| `small` | 250m | 256Mi | Development, low traffic |
-| `medium` | 500m | 512Mi | Moderate production workloads |
-| `large` | 1 | 1Gi | High-throughput services |
-
-Use `size` as the input name to match the mapping convention:
-
-```yaml
-inputs:
-  - name: size
-    title: Resource Size
-    type: enum
-    options: [small, medium, large]
-    default: small
-```
-
-`SizePreset` and `Replicas` are mutually exclusive on a `ComponentSpec`. Setting
-both is a validation error.
+`stateful: true` marks a component (a database/cache — an "addon") whose
+lifecycle must be decoupled from the app's shared auto-sync. Instead of a
+source in the composed multi-source Application (one Application-level
+`prune: true` policy), it renders as its **own** ArgoCD Application with
+prune disabled. That protects against sync-time prune/drift — surviving PVCs
+across component deletion additionally require the chart to mark them
+`helm.sh/resource-policy: keep` (the example `postgres` chart does). Typically
+paired with `inheritAppVars: false` and no `images` (deploys pinned/direct,
+not Kargo-promoted).
 
 ---
 
-## Preview opt-out per component
+## Previews
 
-Mark non-essential components with `previewEnabled: false` to keep preview
-environments lightweight:
-
-```yaml
-spec:
-  components:
-    - name: web
-      type: web
-      previewEnabled: true    # always included in previews
-
-    - name: worker
-      type: worker
-      previewEnabled: false   # omitted from previews — saves cluster resources
-```
-
-When suparship creates a preview environment it skips every component whose
-`previewEnabled` is false. This is checked at the `ComponentSpec` level in
-`internal/domain/app.go`.
+Preview support is an **app-level** switch (`AppSpec.PreviewsEnabled`); a
+preview mirrors what the base env deploys. Within a composed app,
+`previewEnabled` tunes which components are included — an explicit value
+wins, otherwise the type default applies: long-running services (`web`,
+`worker`) preview by default; one-shot (`job`, `cron`) and stateful
+components do not (no throwaway DBs or re-run migrations per PR). Composed
+previews build every included component at the **same** image tag. See
+[`docs/previews.md`](previews.md).
 
 ---
 
-## App creation flow: template → AppSpec
+## Images and CD
 
-When a user creates an app from a template via the UI or API:
-
-1. The template is loaded from `templates/{name}/template.yaml`.
-2. The user's input values are validated against `spec.inputs`.
-3. An `AppSpec` is constructed:
-   - `AppSpec.Template` ← template name + version.
-   - `AppSpec.Values` ← validated user input values (no secrets).
-   - `AppSpec.SecretRefs` ← user-supplied secret references.
-   - `AppSpec.Components` ← seeded from `spec.components` in the template, with
-     the user's per-component overrides applied on top. If the user did not
-     customise any component defaults, `Components` may be left empty (the
-     template topology is re-derived at render time).
-4. The `App` is persisted to the project store.
-5. At render time, the Helm values mapper (`internal/helmvalues`) applies
-   `spec.mappings` to produce the final `values.yaml` passed to the chart.
-
-See `internal/app/creator.go` for the creation orchestration and
-`internal/helmvalues/mapper.go` for the values mapping.
-
----
-
-## Adding a new template
-
-1. Create a directory under `templates/{name}/`.
-2. Write `templates/{name}/template.yaml` following the schema above.
-3. Include the Helm chart under `templates/{name}/chart/`.
-4. Declare `spec.components` explicitly if the app has more than one runtime
-   process.
-5. Validate with `tpl.Parse` in a test — see `internal/tpl/validate_test.go`.
-
-The template loader discovers templates by scanning the directory tree; no
-registration step is required.
+Image bindings are explicit and live where the values live: app-level
+`AppSpec.Images` for a plain app, per-component `images` for a composed one.
+Images are *discovered* from the effective values (chart defaults ⊕
+overlays); a binding selects one by its `tagKey` — the dotted path in that
+chart's own values where the promoted tag is written (`image.tag` in the
+example charts). No bindings = no Kargo Warehouse. See
+[`docs/apps-and-images.md`](apps-and-images.md).
 
 ---
 
 ## Related documents
 
 - [`docs/app-model.md`](app-model.md) — App, Environment, and Component concepts
-- [`docs/templates.md`](templates.md) — full template authoring reference
+- [`docs/templates.md`](templates.md) — the template registry and `template.yaml` reference
+- [`docs/byo-charts.md`](byo-charts.md) — the chart-side contract
 - [`docs/adr/0001-app-as-primary-deployment-object.md`](adr/0001-app-as-primary-deployment-object.md) — decision record

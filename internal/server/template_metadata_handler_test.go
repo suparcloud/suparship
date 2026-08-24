@@ -50,11 +50,9 @@ func TestUpdateTemplateMetadata_ImportedEditable(t *testing.T) {
 		},
 	}
 
-	passthrough := false
 	rec := httptest.NewRecorder()
 	th.handleUpdateTemplateMetadata(rec, patchReq("voiceai-livekit-agent", templateMetadataPatch{
-		Category:              strptr("voiceai"),
-		InjectCanonicalValues: &passthrough,
+		Category: strptr("voiceai"),
 	}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -63,12 +61,6 @@ func TestUpdateTemplateMetadata_ImportedEditable(t *testing.T) {
 	_ = json.NewDecoder(rec.Body).Decode(&dto)
 	if dto.Category != "voiceai" {
 		t.Errorf("category = %q, want voiceai", dto.Category)
-	}
-	if dto.InjectCanonicalValues == nil || *dto.InjectCanonicalValues {
-		t.Errorf("expected passthrough (injectCanonicalValues false), got %v", dto.InjectCanonicalValues)
-	}
-	if len(dto.Inputs) != 0 {
-		t.Errorf("passthrough should clear inputs, got %d", len(dto.Inputs))
 	}
 	if !dto.Editable || dto.Source == nil || dto.Source.Origin != "imported" {
 		t.Errorf("expected editable imported template, got editable=%v source=%+v", dto.Editable, dto.Source)
@@ -274,25 +266,6 @@ func TestUpdateTemplateMetadata_SyncedSavesImageOverride(t *testing.T) {
 	_ = json.NewDecoder(getRec.Body).Decode(&detail)
 	if len(detail.Images) != 1 || detail.Images[0].TagKey != "image.tag" {
 		t.Errorf("detail GET images = %+v, want override mapping applied", detail.Images)
-	}
-}
-
-func TestUpdateTemplateMetadata_SyncedRejectsValuesMode(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	_ = kube.SaveTemplate(context.Background(), client, metadataTestTemplate(), nil)
-	regStore := tpl.NewRegistryStore(client)
-	reg := &tpl.TemplateRegistry{}
-	reg.UpsertSource(tpl.TemplateSource{Name: "voiceai-livekit-agent", Origin: "external", ExternalRepo: "https://x/y.git"})
-	_ = regStore.Save(context.Background(), reg)
-	th := &templateHandler{
-		kubeClient: client, registryStore: regStore,
-		clusterLoader: func(ctx context.Context) ([]*tpl.Template, error) { return kube.LoadTemplates(ctx, client) },
-	}
-	passthrough := false
-	rec := httptest.NewRecorder()
-	th.handleUpdateTemplateMetadata(rec, patchReq("voiceai-livekit-agent", templateMetadataPatch{InjectCanonicalValues: &passthrough}))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected 409 rejecting values-mode override on synced template, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

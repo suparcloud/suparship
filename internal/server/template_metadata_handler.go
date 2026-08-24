@@ -13,10 +13,9 @@ import (
 // templateMetadataPatch is the PATCH body for editing template metadata. All
 // fields are pointers so only the provided ones are applied (partial update).
 type templateMetadataPatch struct {
-	Title                 *string `json:"title,omitempty"`
-	Category              *string `json:"category,omitempty"`
-	Description           *string `json:"description,omitempty"`
-	InjectCanonicalValues *bool   `json:"injectCanonicalValues,omitempty"`
+	Title       *string `json:"title,omitempty"`
+	Category    *string `json:"category,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// Images, when non-nil, replaces the template's per-service image mapping
 	// (external-CD wiring). Only honored for editable (imported) templates; send
 	// an empty array to clear it. Read-only/synced templates reject it.
@@ -43,20 +42,15 @@ type templateMetadataPatch struct {
 
 // handleUpdateTemplateMetadata serves PATCH /api/v1/templates/{name}.
 //
-// Edits a template's metadata (title/category/description, and the passthrough
-// toggle for imported templates). org_admin only. The persistence path depends
-// on provenance:
+// Edits a template's metadata (title/category/description, plus the curation
+// fields documented on templateMetadataPatch). org_admin only. The persistence
+// path depends on provenance:
 //   - imported/BYO (cluster ConfigMap, no external repo): edited IN PLACE by
-//     re-writing the stored template.yaml; chart bytes preserved. The
-//     injectCanonicalValues toggle is allowed here.
-//   - synced (external repo) or built-in (disk): the template body is read-only
-//     (a sync / new build would clobber an in-place edit), so title/category/
-//     description are saved to the sync-safe override ConfigMap instead and
-//     merged over the template at read time. injectCanonicalValues is rejected
-//     for these — it changes values semantics and belongs at the source.
-//
-// Setting injectCanonicalValues:false (passthrough) also clears the inferred
-// inputs/advancedInputs/mappings — a BYO chart doesn't use them.
+//     re-writing the stored template.yaml; chart bytes preserved.
+//   - synced (external repo): the template body is read-only (a sync would
+//     clobber an in-place edit), so title/category/description are saved to
+//     the sync-safe override ConfigMap instead and merged over the template
+//     at read time.
 func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if name == "" {
@@ -121,15 +115,6 @@ func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r
 	if patch.Description != nil {
 		updated.Spec.Description = *patch.Description
 	}
-	if patch.InjectCanonicalValues != nil {
-		updated.Spec.InjectCanonicalValues = patch.InjectCanonicalValues
-		// Passthrough/BYO charts don't use template inputs — drop the inferred ones.
-		if !*patch.InjectCanonicalValues {
-			updated.Spec.Inputs = nil
-			updated.Spec.AdvancedInputs = nil
-			updated.Spec.Mappings = nil
-		}
-	}
 	if patch.Images != nil {
 		updated.Spec.Images = imagesFromDTO(*patch.Images)
 	}
@@ -176,25 +161,13 @@ func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r
 }
 
 // updateMetadataViaOverride persists title/category/description and the image
-// mapping for a read-only (synced or built-in) template into the sync-safe
-// override ConfigMap, leaving the template body untouched. Returns the template
-// DTO with the override applied. injectCanonicalValues is refused here — it
-// changes values semantics, not display metadata, and a re-sync/rebuild would
-// not honor it from an override. Image mappings ARE allowed: they're CD wiring,
-// stored sync-safe so a re-sync can't drop them.
+// mapping for a read-only (synced) template into the sync-safe override
+// ConfigMap, leaving the template body untouched. Returns the template DTO with
+// the override applied. Image mappings ARE allowed: they're CD wiring, stored
+// sync-safe so a re-sync can't drop them.
 func (th *templateHandler) updateMetadataViaOverride(
 	w http.ResponseWriter, r *http.Request, name string, src *TemplateSourceDTO, t *tpl.Template, patch templateMetadataPatch,
 ) {
-	if patch.InjectCanonicalValues != nil {
-		where := "the source repo"
-		if src.Origin == "builtin" {
-			where = "an imported copy"
-		}
-		writeJSON(w, http.StatusConflict, errorResponse{
-			Error: "values mode for template " + name + " can only be changed at " + where + " — it isn't a display-metadata override",
-		})
-		return
-	}
 	if patch.DeliveryMode != nil {
 		mode := strings.TrimSpace(*patch.DeliveryMode)
 		if mode != "" && mode != string(domain.DeliveryPipeline) && mode != string(domain.DeliveryDirect) {

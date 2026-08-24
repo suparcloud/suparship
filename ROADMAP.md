@@ -11,7 +11,7 @@ This document tracks the plan to complete the suparship MVP and add the platform
 - Go HTTP API: auth, org/project/env RBAC, app CRUD, previews, logs, sync, onboarding
 - ArgoCD-oriented GitOps publisher (clone → commit → push into Gitea)
 - React UI with all MVP route shells (dashboard, apps, templates, previews, settings)
-- `web-service` Helm template with a single `web` component
+- Template registry (git / gitcharts / OCI sources + BYO chart upload) serving plain Helm charts; `examples/charts/` starter catalog
 - Dev cluster tooling: kind + ArgoCD + Gitea + seed via Taskfile
 - Fake/in-memory dev mode for local iteration without a cluster
 
@@ -21,7 +21,6 @@ This document tracks the plan to complete the suparship MVP and add the platform
 - **Promotions**: API handlers exist but do not trigger real stage promotions
 - **ExternalSecrets Operator**: not installed or integrated
 - **Env/secret hierarchy**: no domain model, no API
-- **Worker templates**: only `web-service` exists; no worker or cron built-ins
 - **No GitHub Actions CI**: Makefile/Taskfile only
 - **`readyz`**: returns a static string, no real health probing
 
@@ -117,7 +116,7 @@ Key capabilities delivered:
 
 ### Generic `worker` Helm chart base
 
-`templates/worker/chart/` — derived from `web-service` but:
+A generic worker chart (shipped as `examples/charts/worker/`) — derived from the `web` chart but:
 - No `Ingress` by default
 - `Service` is optional
 - Adds configurable `command`, `args`, and `env` overrides
@@ -125,7 +124,7 @@ Key capabilities delivered:
 
 ### Template: `voiceai-capacity-manager`
 
-Path: `templates/voiceai-capacity-manager/template.yaml`
+Delivered via the company's own chart source (chart `voiceai-capacity-manager`)
 Category: `voiceai`
 
 Inputs:
@@ -139,7 +138,7 @@ Inputs:
 
 ### Template: `voiceai-livekit-agent`
 
-Path: `templates/voiceai-livekit-agent/template.yaml`
+Delivered via the company's own chart source (chart `voiceai-livekit-agent`)
 Category: `voiceai`
 
 Inputs:
@@ -389,29 +388,19 @@ and (eventually) live status from ArgoCD's resource-tree API.
   surfaced).
 - Live-status piece pulls from ArgoCD's resource-tree API —
   separate integration track that also benefits Components view.
-- Per-component / per-addon labels (`suparship.io/component`,
-  `suparship.io/addon-type`) already shipped as the selector hooks.
+- Selector labels for log walking come from the chart itself (nothing is
+  mandated by the platform), so this leans on ArgoCD's resource tree rather
+  than a fixed label contract.
 - Effort: 1 day basic, ~3+ days with live status.
 
-### Capability-driven form generation (the unfinished tail of Phase 5/UI work)
+### Form generation from `developerValues` (the unfinished tail of Phase 5/UI work)
 
-Today the UI hardcodes "web has autoscaling sliders, cron has
-schedule input" inside React. The capability data we ship at
-`GET /api/v1/templates/{name}` (`components[].capabilities`) lets
-the form render input groups dynamically:
-
-```ts
-template.components.forEach(c => {
-  if (c.capabilities.autoscaling !== "none") renderScalingInputs(c);
-  if (c.capabilities.pdb)                    renderPDBInputs(c);
-  if (c.capabilities.expose)                 renderExposeToggle(c);
-  // ...
-});
-```
-
-Adding a 6th template becomes "free" UI-wise — the form generates
-from metadata. Without it, every new template requires a hand-written
-form component.
+> Superseded in shape: the retired per-component "capabilities" metadata is
+> gone with template-declared components. Form generation now hangs off the
+> template's `developerValues` projection (see docs/templates.md) — each
+> declared path renders as a typed field, so adding a template needs no
+> hand-written form component. The remaining tail is widening the field types
+> the form renders (enums with labels, grouped sections).
 
 - Effort: 2–3 days.
 

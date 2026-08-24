@@ -29,6 +29,16 @@ type ClusterClientPool struct {
 	clients    map[string]kubernetes.Interface
 	dynClients map[string]dynamic.Interface
 	getter     KubeconfigGetter
+
+	// Local fallback (optional): when a cluster has NO stored kubeconfig but
+	// isLocal reports it is the cluster suparship itself runs in (its record's
+	// API server is the in-cluster URL), serve the local clients instead of
+	// failing. This is what makes the dev-loop seed work, where staging/prod
+	// are records on the one kind cluster and no kubeconfig Secret exists.
+	// Never applied when a kubeconfig IS stored, and never across clusters.
+	local    kubernetes.Interface
+	localDyn dynamic.Interface
+	isLocal  func(ctx context.Context, clusterName string) bool
 }
 
 // NewClusterClientPool returns a ClusterClientPool backed by getter for
@@ -39,6 +49,18 @@ func NewClusterClientPool(getter KubeconfigGetter) *ClusterClientPool {
 		dynClients: make(map[string]dynamic.Interface),
 		getter:     getter,
 	}
+}
+
+// SetLocalFallback registers the pool's own-cluster clients and the predicate
+// deciding whether a named cluster IS this cluster (typically: its registered
+// API server equals the in-cluster URL). Used only when no kubeconfig is
+// stored for the cluster.
+func (p *ClusterClientPool) SetLocalFallback(client kubernetes.Interface, dyn dynamic.Interface, isLocal func(ctx context.Context, clusterName string) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.local = client
+	p.localDyn = dyn
+	p.isLocal = isLocal
 }
 
 // Get returns a Kubernetes client for clusterName, building and caching it
@@ -63,6 +85,10 @@ func (p *ClusterClientPool) Get(ctx context.Context, clusterName string) (kubern
 
 	kc, err := p.getter.GetKubeconfig(ctx, clusterName)
 	if err != nil {
+		if p.local != nil && p.isLocal != nil && p.isLocal(ctx, clusterName) {
+			p.clients[clusterName] = p.local
+			return p.local, nil
+		}
 		return nil, fmt.Errorf("cluster %q: fetching kubeconfig: %w", clusterName, err)
 	}
 
@@ -99,6 +125,10 @@ func (p *ClusterClientPool) GetDynamic(ctx context.Context, clusterName string) 
 
 	kc, err := p.getter.GetKubeconfig(ctx, clusterName)
 	if err != nil {
+		if p.localDyn != nil && p.isLocal != nil && p.isLocal(ctx, clusterName) {
+			p.dynClients[clusterName] = p.localDyn
+			return p.localDyn, nil
+		}
 		return nil, fmt.Errorf("cluster %q: fetching kubeconfig: %w", clusterName, err)
 	}
 	cfg, err := clientcmd.RESTConfigFromKubeConfig(kc)

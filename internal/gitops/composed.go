@@ -139,6 +139,8 @@ func BuildComposedApplication(app *domain.App, opts ComposedBuildOptions) *Appli
 				labelCluster: opts.ClusterName,
 			},
 			Annotations: annotations,
+			// Cascade on prune: see ArgoCDResourcesFinalizer.
+			Finalizers: []string{ArgoCDResourcesFinalizer},
 		},
 		Spec: ApplicationSpec{
 			// Reuse the per-project AppProject the platform already writes
@@ -212,6 +214,10 @@ func BuildComponentApplication(app *domain.App, c domain.ComponentSpec, opts Com
 				labelEnv:     opts.EnvName,
 				labelCluster: opts.ClusterName,
 			},
+			// Cascade on prune (Prune:false below only guards SYNC-time
+			// pruning; deletion still removes resources — data survival is the
+			// chart's PVC annotations). See ArgoCDResourcesFinalizer.
+			Finalizers: []string{ArgoCDResourcesFinalizer},
 		},
 		Spec: ApplicationSpec{
 			Project:     app.ProjectName,

@@ -410,20 +410,15 @@ func TestSyncOne_GitCharts(t *testing.T) {
 		return parsed
 	}
 
-	// foo: passthrough — no canonical base, no inferred inputs.
+	// foo: chart-only import — the legacy inferred inputs/mappings are dropped
+	// (they described the retired canonical schema).
 	foo := load("foo")
-	if foo.Spec.CanonicalValues() {
-		t.Errorf("foo should be passthrough (CanonicalValues false), got injectCanonicalValues=%v", foo.Spec.InjectCanonicalValues)
-	}
 	if len(foo.Spec.Inputs) != 0 || len(foo.Spec.Mappings) != 0 {
-		t.Errorf("foo passthrough should have no inputs/mappings, got %d inputs / %d mappings", len(foo.Spec.Inputs), len(foo.Spec.Mappings))
+		t.Errorf("foo should have no inferred inputs/mappings, got %d inputs / %d mappings", len(foo.Spec.Inputs), len(foo.Spec.Mappings))
 	}
 
-	// bar: authored template.yaml honored — canonical (default) + its input kept.
+	// bar: authored template.yaml honored — its input kept.
 	bar := load("bar")
-	if !bar.Spec.CanonicalValues() {
-		t.Errorf("bar shipped a template.yaml and should stay canonical, got injectCanonicalValues=%v", bar.Spec.InjectCanonicalValues)
-	}
 	if len(bar.Spec.Inputs) != 1 || bar.Spec.Inputs[0].Name != "greeting" {
 		t.Errorf("bar should keep its authored input, got %+v", bar.Spec.Inputs)
 	}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/session"
 )
 
@@ -553,6 +554,9 @@ func TestAppPromoteThreeEnvChain(t *testing.T) {
 // recordingPublisher is a GitOpsPublisher stub that records PublishAppEnv calls.
 type recordingPublisher struct {
 	publishedEnvs []string
+	// publishedEnvApps records the app value passed to each PublishAppEnv call
+	// (the promote path passes a transient clone carrying the source-tag pin).
+	publishedEnvApps []*domain.App
 	removedEnvs   []string
 	// batchCalls counts PublishAppsEnv invocations; batchTargets records the
 	// number of targets in each, so a test can assert one batched git op.
@@ -604,8 +608,9 @@ func (r *recordingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*d
 	r.publishAppCalls++
 	return nil
 }
-func (r *recordingPublisher) PublishAppEnv(_ context.Context, _ *domain.App, env *domain.AppEnvironment) error {
+func (r *recordingPublisher) PublishAppEnv(_ context.Context, app *domain.App, env *domain.AppEnvironment) error {
 	r.publishedEnvs = append(r.publishedEnvs, env.EnvName)
+	r.publishedEnvApps = append(r.publishedEnvApps, app)
 	return nil
 }
 func (r *recordingPublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _, _ string) error {
@@ -728,10 +733,14 @@ func (g *fakeArgoAppGate) HasAppForEnv(_ context.Context, _, _, _ string) (bool,
 type recordingPromoter struct {
 	calls  int
 	result KargoPromotionResult
+	err    error // returned instead of a result when set (e.g. kube.ErrKargoNoFreight)
 }
 
 func (p *recordingPromoter) CreatePromotion(_ context.Context, _, appName, fromStage, toStage string) (KargoPromotionResult, error) {
 	p.calls++
+	if p.err != nil {
+		return KargoPromotionResult{}, p.err
+	}
 	if p.result.Name == "" {
 		p.result = KargoPromotionResult{Name: appName + "-to-" + toStage, Stage: toStage, Freight: "f-1", Phase: "Pending"}
 	}
@@ -864,5 +873,203 @@ func TestPromote_NoGateWiredProceeds(t *testing.T) {
 	}
 	if promoter.calls != 1 {
 		t.Errorf("expected one promotion, got %d", promoter.calls)
+	}
+}
+
+
+// fakeChainNudger records ArgoCD chain-nudge calls during the gate wait.
+type fakeChainNudger struct {
+	appNames    [][]string
+	appSetNames [][]string
+}
+
+func (n *fakeChainNudger) RefreshAppsByName(_ context.Context, names []string) error {
+	n.appNames = append(n.appNames, names)
+	return nil
+}
+func (n *fakeChainNudger) RefreshAppSets(_ context.Context, names []string) error {
+	n.appSetNames = append(n.appSetNames, names)
+	return nil
+}
+
+// A first promotion must not wait out ArgoCD's poll cycles: while the gate
+// polls for the target Application, the handler nudges the generator chain —
+// the root app + {env}-composed by name, and the env's ApplicationSets.
+func TestPromote_NudgesArgoChainWhileWaiting(t *testing.T) {
+	rec := &recordingPublisher{}
+	promoter := &recordingPromoter{}
+	gate := &fakeArgoAppGate{exists: false}
+	nudger := &fakeChainNudger{}
+	mux := http.NewServeMux()
+	ah := &authHandler{
+		authenticator: &fakeAuthenticator{username: "admin", password: "pass"},
+		sessions:      session.NewStore(time.Hour),
+	}
+	ah.registerRoutes(mux)
+	store := newMemAppStore()
+	store.mu.Lock()
+	store.apps[testProject] = make(map[string]*domain.App)
+	store.mu.Unlock()
+	appH := newAppHandler(store, nil, nil, nil)
+	appH.gitOpsPublisher = rec
+	appH.kargoPromoter = promoter
+	appH.argoAppGate = gate
+	appH.argoChainNudger = nudger
+	appH.argoAppWaitTimeout = 10 * time.Millisecond
+	rh := &rbacHandler{auth: ah, orgStore: &staticOrgProvider{org: testRBACOrg()}, appHandler: appH}
+	rh.registerRoutes(mux)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(nudger.appNames) == 0 || len(nudger.appSetNames) == 0 {
+		t.Fatalf("expected chain nudges during the gate wait, got apps=%v appsets=%v", nudger.appNames, nudger.appSetNames)
+	}
+	wantApps := []string{"suparship-apps", "prod-composed"}
+	for i, n := range nudger.appNames[0] {
+		if n != wantApps[i] {
+			t.Errorf("nudged apps = %v, want %v", nudger.appNames[0], wantApps)
+			break
+		}
+	}
+	wantSets := []string{"prod", "prod-platform"}
+	for i, n := range nudger.appSetNames[0] {
+		if n != wantSets[i] {
+			t.Errorf("nudged appsets = %v, want %v", nudger.appSetNames[0], wantSets)
+			break
+		}
+	}
+}
+
+// The promote publish must carry the SOURCE env's current tag as a transient
+// pin — never the create-time seed — so a first materialization of the target
+// env deploys the promoted image, not a stale one. The stored app spec must
+// stay unmutated (the pin is a publish-time clone, not state).
+func TestPromote_PublishesTargetWithSourceTagPinned(t *testing.T) {
+	rec := &recordingPublisher{}
+	promoter := &recordingPromoter{}
+	gate := &fakeArgoAppGate{exists: true}
+	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, rec, promoter, gate)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject) // staging release tag: v0.9.0
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(rec.publishedEnvApps) != 1 {
+		t.Fatalf("expected exactly one PublishAppEnv, got %d", len(rec.publishedEnvApps))
+	}
+	got := rec.publishedEnvApps[0].Spec.EnvironmentDefaults["prod"]
+	if got.PinnedImageTag != "v0.9.0" {
+		t.Errorf("published prod PinnedImageTag = %q, want v0.9.0 (the staging tag)", got.PinnedImageTag)
+	}
+	if got.PinnedFrom != "" {
+		t.Errorf("transient pin must not set PinnedFrom (env is not user-pinned), got %q", got.PinnedFrom)
+	}
+	stored, _ := store.GetApp(context.Background(), testProject, "my-app")
+	if stored.Spec.EnvironmentDefaults["prod"].PinnedImageTag != "" {
+		t.Error("stored app spec must be unmutated by the transient publish pin")
+	}
+}
+
+
+// An initial promotion where NOTHING has flowed through the CD pipeline yet:
+// the source Stage has no Freight, but the publish already pinned the source
+// env's running tag into the target's values — so the promotion succeeds via
+// the git mechanism instead of failing with a Kargo error.
+func TestPromote_NoFreightFallsBackToPublishedPin(t *testing.T) {
+	rec := &recordingPublisher{}
+	promoter := &recordingPromoter{err: kube.ErrKargoNoFreight}
+	gate := &fakeArgoAppGate{exists: true}
+	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, rec, promoter, gate)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject) // staging release tag: v0.9.0
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var out AppPromoteResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if out.Mechanism != "gitops" {
+		t.Errorf("mechanism = %q, want gitops", out.Mechanism)
+	}
+	if out.KargoPromotion != nil {
+		t.Error("no Kargo promotion should be reported when freight was absent")
+	}
+	if len(rec.publishedEnvs) != 1 {
+		t.Fatalf("expected the target env publish to have happened, got %v", rec.publishedEnvs)
+	}
+	if got := rec.publishedEnvApps[0].Spec.EnvironmentDefaults["prod"].PinnedImageTag; got != "v0.9.0" {
+		t.Errorf("published pin = %q, want the staging tag v0.9.0", got)
+	}
+}
+
+// Without a publisher there is no pinned publish to fall back on, so the
+// no-freight error must surface instead of a false-green promotion.
+func TestPromote_NoFreightWithoutPublisherStillFails(t *testing.T) {
+	promoter := &recordingPromoter{err: kube.ErrKargoNoFreight}
+	gate := &fakeArgoAppGate{exists: true}
+	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, nil, promoter, gate)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+	if resp.Code == http.StatusOK {
+		t.Fatalf("expected an error status, got 200: %s", resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "no current freight") {
+		t.Errorf("expected the no-freight error to surface, got: %s", resp.Body.String())
+	}
+}
+
+
+// ANY Kargo failure — not just missing freight — degrades to the git-pin
+// mechanism when the pinned publish happened: the user's release ships, and
+// the platform problem surfaces as a human-friendly warning instead of a
+// failed promotion.
+func TestPromote_KargoErrorDegradesWithWarning(t *testing.T) {
+	rec := &recordingPublisher{}
+	promoter := &recordingPromoter{err: fmt.Errorf("Argo CD integration is disabled on this controller; cannot update Argo CD Application resources")}
+	gate := &fakeArgoAppGate{exists: true}
+	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, rec, promoter, gate)
+
+	store.addApp(promoteTestApp(testProject))
+	seedFullPromotionChain(store, testProject)
+
+	resp := postAppPromoteJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		AppPromoteRequest{TargetEnvironment: "prod"})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var out AppPromoteResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if out.Mechanism != "gitops" {
+		t.Errorf("mechanism = %q, want gitops", out.Mechanism)
+	}
+	if out.Warning == "" {
+		t.Fatal("expected a human-friendly warning naming the platform issue")
+	}
+	if !strings.Contains(out.Warning, "platform") {
+		t.Errorf("warning should frame it as a platform issue, got %q", out.Warning)
+	}
+	if !strings.Contains(out.Warning, "Argo CD integration is disabled") {
+		t.Errorf("warning should retain the raw detail for bug reports, got %q", out.Warning)
 	}
 }

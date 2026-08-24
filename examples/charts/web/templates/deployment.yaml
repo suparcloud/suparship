@@ -5,7 +5,10 @@ metadata:
   labels:
     {{- include "web.labels" . | nindent 4 }}
 spec:
-  {{- if not .Values.autoscaling.enabled }}
+  {{- if .Values.suspend }}
+  # Suspended: scaled to zero (the HPA is also omitted while suspended).
+  replicas: 0
+  {{- else if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}

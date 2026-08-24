@@ -1,7 +1,7 @@
 package helmvalues
 
 import (
-	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -15,11 +15,7 @@ func webApp(name string, components ...domain.ComponentSpec) *domain.App {
 		Name:        name,
 		ProjectName: "demo",
 		Spec: domain.AppSpec{
-			Template: domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"},
-			Values: map[string]any{
-				imageRepositoryKey: "ghcr.io/org/" + name,
-				imageTagKey:        "v1.0.0",
-			},
+			Template:   domain.AppTemplateRef{Name: "web-service", Version: "1.0.0"},
 			Components: components,
 		},
 	}
@@ -34,57 +30,17 @@ func webComponent(name string) domain.ComponentSpec {
 	}
 }
 
-func workerComponent(name string) domain.ComponentSpec {
-	return domain.ComponentSpec{
-		Name:    name,
-		Type:    domain.ComponentWorker,
-		Enabled: true,
-	}
-}
+// ── platform block ────────────────────────────────────────────────────────────
 
-func cronComponent(name string) domain.ComponentSpec {
-	return domain.ComponentSpec{
-		Name:    name,
-		Type:    domain.ComponentCron,
-		Enabled: true,
-	}
-}
-
-// ── app.name / app.env ────────────────────────────────────────────────────────
-
-func TestMapToHelmValues_AppContext(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-
-	if hv.App.Name != "hello" {
-		t.Errorf("App.Name = %q, want %q", hv.App.Name, "hello")
-	}
-	if hv.App.Env != "staging" {
-		t.Errorf("App.Env = %q, want %q", hv.App.Env, "staging")
-	}
-}
-
-func TestMapToHelmValues_AppContext_Preview(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
-
-	if hv.App.Env != "pr-42" {
-		t.Errorf("App.Env = %q, want %q", hv.App.Env, "pr-42")
-	}
-}
-
-// ── platform metadata block ─────────────────────────────────────────────────
-
-func TestMapToHelmValuesForEnv_PlatformBlock(t *testing.T) {
+func TestMapPlatformValuesForEnv_PlatformBlock(t *testing.T) {
 	app := webApp("hello", webComponent("web"))
 	orgProfiles := domain.RoutingProfiles{
 		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt"},
 	}
-	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd,
+	p := MapPlatformValuesForEnv(app, "prod", domain.AppEnvProd,
 		"acme.com", "hello-prod", "prod-eks", "acme",
 		orgProfiles, nil, nil)
 
-	p := hv.Platform
 	if p.Org != "acme" || p.Project != "demo" || p.App != "hello" {
 		t.Errorf("identity = %+v, want org=acme project=demo app=hello", p)
 	}
@@ -94,21 +50,37 @@ func TestMapToHelmValuesForEnv_PlatformBlock(t *testing.T) {
 	if p.BaseDomain != "acme.com" {
 		t.Errorf("BaseDomain = %q, want acme.com", p.BaseDomain)
 	}
-	if p.RoutingHost != hv.Routing.Host {
-		t.Errorf("RoutingHost %q != Routing.Host %q", p.RoutingHost, hv.Routing.Host)
+	if p.RoutingHost == "" || !strings.Contains(p.RoutingHost, "acme.com") {
+		t.Errorf("RoutingHost = %q, want a host on acme.com", p.RoutingHost)
 	}
 	if p.IngressClassName != "nginx" || p.ClusterIssuer != "letsencrypt" {
 		t.Errorf("ingress = %q/%q, want nginx/letsencrypt", p.IngressClassName, p.ClusterIssuer)
 	}
+	if p.ConfigMapName != "hello-config" || p.SecretName != "hello-secrets" {
+		t.Errorf("env object names = %q/%q, want hello-config/hello-secrets", p.ConfigMapName, p.SecretName)
+	}
+	// The mapper never resolves an image tag — previews set it on the publisher.
+	if p.ImageTag != "" {
+		t.Errorf("ImageTag = %q, want empty (publisher-owned)", p.ImageTag)
+	}
 }
 
-// TestMapToHelmValuesForEnv_PerTierRoutingTokens pins the per-tier routing
+func TestMapPlatformValuesForEnv_Deterministic(t *testing.T) {
+	app := webApp("hello", webComponent("web"))
+	a := MapPlatformValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "hello-prod", "c1", "acme", nil, nil, nil)
+	b := MapPlatformValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "hello-prod", "c1", "acme", nil, nil, nil)
+	if !reflect.DeepEqual(a, b) {
+		t.Errorf("MapPlatformValuesForEnv is not deterministic:\n%+v\n%+v", a, b)
+	}
+}
+
+// TestMapPlatformValuesForEnv_PerTierRoutingTokens pins the per-tier routing
 // context exposed as ((platform.{internal,external}*)). It is the regression
 // guard for the reported bug: a per-cluster base-domain override must reach the
 // tier base-domain tokens even when the tier's own RoutingProfile.baseDomain is
 // blank — the tier base domain falls back profile → (env, cluster) base. It also
 // covers cluster→env→org precedence for ingress class / issuer / gateway.
-func TestMapToHelmValuesForEnv_PerTierRoutingTokens(t *testing.T) {
+func TestMapPlatformValuesForEnv_PerTierRoutingTokens(t *testing.T) {
 	app := webApp("tts", webComponent("web"))
 	org := domain.RoutingProfiles{
 		string(domain.ExposeInternal): {IngressClassName: "nginx-internal", ClusterIssuer: "internal-ca"},
@@ -124,10 +96,9 @@ func TestMapToHelmValuesForEnv_PerTierRoutingTokens(t *testing.T) {
 			Gateway:          &domain.GatewayRef{Name: "envoy-internal", Namespace: "envoy-gateway-system", SectionName: "https"},
 		},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
+	p := MapPlatformValuesForEnv(app, "staging", domain.AppEnvStaging,
 		"aws.example.com", "tts-staging", "eks-aws", "acme",
 		org, nil, cluster)
-	p := hv.Platform
 
 	// Bug fix: cluster base-domain override reaches BOTH tier base-domain tokens.
 	if p.InternalBaseDomain != "aws.example.com" || p.ExternalBaseDomain != "aws.example.com" {
@@ -151,19 +122,18 @@ func TestMapToHelmValuesForEnv_PerTierRoutingTokens(t *testing.T) {
 	}
 }
 
-// TestMapToHelmValuesForEnv_TierBaseDomainProfileWins verifies a profile's own
+// TestMapPlatformValuesForEnv_TierBaseDomainProfileWins verifies a profile's own
 // baseDomain still wins over the (env, cluster) base for that tier, and that the
 // two tiers can resolve to different domains.
-func TestMapToHelmValuesForEnv_TierBaseDomainProfileWins(t *testing.T) {
+func TestMapPlatformValuesForEnv_TierBaseDomainProfileWins(t *testing.T) {
 	app := webApp("tts", webComponent("web"))
 	org := domain.RoutingProfiles{
 		string(domain.ExposeInternal): {IngressClassName: "nginx-internal", BaseDomain: "svc.internal.acme"},
 		string(domain.ExposeExternal): {IngressClassName: "nginx"},
 	}
-	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd,
+	p := MapPlatformValuesForEnv(app, "prod", domain.AppEnvProd,
 		"acme.com", "tts-prod", "", "acme",
 		org, nil, nil)
-	p := hv.Platform
 	if p.InternalBaseDomain != "svc.internal.acme" {
 		t.Errorf("internal base = %q, want svc.internal.acme (profile baseDomain wins)", p.InternalBaseDomain)
 	}
@@ -172,625 +142,98 @@ func TestMapToHelmValuesForEnv_TierBaseDomainProfileWins(t *testing.T) {
 	}
 }
 
-func TestMapToHelmValuesForEnv_PlatformBlock_Preview(t *testing.T) {
+func TestMapPlatformValuesForEnv_Preview(t *testing.T) {
 	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValuesForEnv(app, "pr-42", domain.AppEnvPreview,
+	p := MapPlatformValuesForEnv(app, "pr-42", domain.AppEnvPreview,
 		"acme.com", "hello-pr-42", "", "acme", nil, nil, nil)
 
-	if hv.Platform.EnvType != "preview" {
-		t.Errorf("EnvType = %q, want preview", hv.Platform.EnvType)
+	if p.EnvType != "preview" {
+		t.Errorf("EnvType = %q, want preview", p.EnvType)
 	}
 	// Preview host has the {env}.{app}.preview.{domain} shape.
-	if !strings.Contains(hv.Platform.RoutingHost, "preview.acme.com") {
-		t.Errorf("preview RoutingHost = %q, want *.preview.acme.com", hv.Platform.RoutingHost)
+	if !strings.Contains(p.RoutingHost, "preview.acme.com") {
+		t.Errorf("preview RoutingHost = %q, want *.preview.acme.com", p.RoutingHost)
 	}
-	if hv.Platform.Cluster != "" {
-		t.Errorf("Cluster = %q, want empty (active mode)", hv.Platform.Cluster)
-	}
-}
-
-// ── per-component resources / envFrom / autoscaling ──────────────────────────
-
-func i32p(n int32) *int32 { return &n }
-
-func TestBuildComponent_RawResources_OmitSize(t *testing.T) {
-	c := webComponent("web")
-	c.SizePreset = "large" // should be ignored when raw resources present
-	c.Resources = &domain.ComponentResources{
-		Requests: map[string]string{"cpu": "1700m", "memory": "5260Mi"},
-		Limits:   map[string]string{"memory": "5260Mi"},
-	}
-	app := webApp("hello", c)
-	hv := MapToHelmValues(app, "prod", domain.AppEnvProd)
-	r := hv.Components["web"].Resources
-	if r == nil || r.Size != "" {
-		t.Fatalf("expected raw resources with no size, got %+v", r)
-	}
-	if r.Requests["cpu"] != "1700m" || r.Limits["memory"] != "5260Mi" {
-		t.Errorf("raw resources wrong: %+v", r)
+	if p.Cluster != "" {
+		t.Errorf("Cluster = %q, want empty (active mode)", p.Cluster)
 	}
 }
 
-func TestBuildComponent_SizeWhenNoRaw(t *testing.T) {
-	c := webComponent("web")
-	c.SizePreset = "medium"
-	hv := MapToHelmValues(webApp("hello", c), "prod", domain.AppEnvProd)
-	if r := hv.Components["web"].Resources; r == nil || r.Size != "medium" || len(r.Requests) != 0 {
-		t.Errorf("expected size preset, got %+v", r)
-	}
-}
+// ── ingress resolution ────────────────────────────────────────────────────────
 
-func TestBuildComponent_EnvFrom(t *testing.T) {
-	c := webComponent("web")
-	c.EnvFromConfigMaps = []string{"cm1"}
-	c.EnvFromSecrets = []string{"sec1"}
-	hv := MapToHelmValues(webApp("hello", c), "prod", domain.AppEnvProd)
-	ef := hv.Components["web"].EnvFrom
-	if len(ef) != 2 || ef[0].ConfigMapRef == nil || ef[0].ConfigMapRef.Name != "cm1" || !ef[0].ConfigMapRef.Optional {
-		t.Fatalf("configMapRef wrong: %+v", ef)
-	}
-	if ef[1].SecretRef == nil || ef[1].SecretRef.Name != "sec1" {
-		t.Errorf("secretRef wrong: %+v", ef)
-	}
-}
-
-func TestBuildComponent_Autoscaling(t *testing.T) {
-	c := webComponent("web")
-	c.Scaling = &domain.ComponentScaling{
-		MinReplicas: i32p(0), MaxReplicas: i32p(60),
-		Triggers: []domain.KEDATrigger{{Type: "cpu", MetricType: "Utilization", Metadata: map[string]string{"value": "80"}}},
-	}
-	hv := MapToHelmValues(webApp("hello", c), "prod", domain.AppEnvProd)
-	a := hv.Components["web"].Autoscaling
-	if a == nil || a.MaxReplicaCount == nil || *a.MaxReplicaCount != 60 || len(a.Triggers) != 1 || a.Triggers[0].Type != "cpu" {
-		t.Fatalf("autoscaling wrong: %+v", a)
-	}
-}
-
-func TestBuildComponent_PerEnvOverrideWins(t *testing.T) {
-	c := webComponent("web")
-	c.Resources = &domain.ComponentResources{Requests: map[string]string{"cpu": "1"}}
-	c.EnvFromSecrets = []string{"base-secret"}
-	c.Config = map[string]string{"LOG": "info"}
-	app := webApp("hello", c)
-	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
-		"prod": {Components: map[string]domain.ComponentConfig{
-			"web": {
-				Resources:      &domain.ComponentResources{Requests: map[string]string{"cpu": "4"}},
-				EnvFromSecrets: []string{"prod-secret"},
-				Env:            map[string]string{"LOG": "warn", "EXTRA": "1"},
-			},
-		}},
-	}
-	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "localhost", "", "", "", nil, nil, nil)
-	w := hv.Components["web"]
-	if w.Resources.Requests["cpu"] != "4" {
-		t.Errorf("per-env resources should win: %+v", w.Resources)
-	}
-	if len(w.EnvFrom) != 1 || w.EnvFrom[0].SecretRef.Name != "prod-secret" {
-		t.Errorf("per-env envFrom should replace: %+v", w.EnvFrom)
-	}
-	if w.Env["LOG"] != "warn" || w.Env["EXTRA"] != "1" {
-		t.Errorf("per-env env merge wrong: %+v", w.Env)
-	}
-}
-
-// ── image extraction ──────────────────────────────────────────────────────────
-
-func TestMapToHelmValues_ImageFromValues(t *testing.T) {
-	app := webApp("myapp", webComponent("web"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-
-	wc := hv.Components["web"]
-	if wc == nil {
-		t.Fatal("component 'web' missing from output")
-	}
-	if wc.Image.Repository != "ghcr.io/org/myapp" {
-		t.Errorf("Image.Repository = %q, want %q", wc.Image.Repository, "ghcr.io/org/myapp")
-	}
-	if wc.Image.Tag != "v1.0.0" {
-		t.Errorf("Image.Tag = %q, want %q", wc.Image.Tag, "v1.0.0")
-	}
-}
-
-func TestMapToHelmValues_PlatformImageTag(t *testing.T) {
-	app := webApp("myapp", webComponent("web"))
-	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
-	if hv.Platform.ImageTag != "v1.0.0" {
-		t.Errorf("Platform.ImageTag = %q, want v1.0.0 (mirrors image_tag)", hv.Platform.ImageTag)
-	}
-}
-
-func TestMapToHelmValues_PlatformImageTagEmpty(t *testing.T) {
-	app := &domain.App{
-		Name:        "bare",
-		ProjectName: "demo",
-		Spec: domain.AppSpec{
-			Components: []domain.ComponentSpec{webComponent("web")},
-		},
-	}
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Platform.ImageTag != "" {
-		t.Errorf("Platform.ImageTag = %q, want empty when no image_tag", hv.Platform.ImageTag)
-	}
-}
-
-func TestMapToHelmValues_ImageMissingFromValues(t *testing.T) {
-	app := &domain.App{
-		Name:        "bare",
-		ProjectName: "demo",
-		Spec: domain.AppSpec{
-			Components: []domain.ComponentSpec{webComponent("web")},
-		},
-	}
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	wc := hv.Components["web"]
-	if wc.Image.Repository != "" || wc.Image.Tag != "" {
-		t.Errorf("expected empty image for app with no values, got repo=%q tag=%q",
-			wc.Image.Repository, wc.Image.Tag)
-	}
-}
-
-// ── enabled flag ──────────────────────────────────────────────────────────────
-
-func TestMapToHelmValues_EnabledTrue(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if !hv.Components["web"].Enabled {
-		t.Error("web component should be enabled in staging")
-	}
-}
-
-func TestMapToHelmValues_DisabledComponent(t *testing.T) {
-	c := webComponent("web")
-	c.Enabled = false
-	app := webApp("hello", c)
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Components["web"].Enabled {
-		t.Error("disabled component should remain disabled in staging")
-	}
-}
-
-func TestMapToHelmValues_PreviewRendersAllEnabledComponents(t *testing.T) {
-	// A preview now deploys the same enabled components its base env does — the
-	// per-component preview gate is gone.
-	app := webApp("hello", webComponent("web"), workerComponent("worker"))
-	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
-
-	if !hv.Components["web"].Enabled {
-		t.Error("web should be enabled in preview")
-	}
-	if !hv.Components["worker"].Enabled {
-		t.Error("worker should be enabled in preview (no per-component gate)")
-	}
-}
-
-func TestMapToHelmValues_PreviewWorkerOnlyApp(t *testing.T) {
-	// A worker-only app (no web component) still produces a valid preview.
-	app := webApp("agent", workerComponent("worker"))
-	hv := MapToHelmValues(app, "pr-7", domain.AppEnvPreview)
-	if !hv.Components["worker"].Enabled {
-		t.Error("worker-only app: worker should be enabled in preview")
-	}
-}
-
-func TestMapToHelmValues_PreviewBandOverrideApplies(t *testing.T) {
-	// The reserved EnvironmentDefaults["preview"] band overrides preview values
-	// (here: replicas) on top of the preview default of 1.
-	app := webApp("hello", webComponent("web"))
-	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
-		domain.PreviewOverrideKey: {Replicas: 3},
-	}
-	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
-	if got := hv.Components["web"].Replicas; got != 3 {
-		t.Errorf("preview-band Replicas = %d, want 3 (band overrides preview default)", got)
-	}
-	// A preview whose name collides with a stable env key must still read the
-	// reserved "preview" band, not EnvironmentDefaults["staging"].
-	app.Spec.EnvironmentDefaults["staging"] = domain.EnvironmentOverride{Replicas: 9}
-	hv = MapToHelmValues(app, "staging", domain.AppEnvPreview)
-	if got := hv.Components["web"].Replicas; got != 3 {
-		t.Errorf("preview override key = %d, want 3 (must ignore staging override)", got)
-	}
-}
-
-// ── replicas ──────────────────────────────────────────────────────────────────
-
-func TestMapToHelmValues_ReplicasDefaultStaging(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Components["web"].Replicas != defaultReplicas {
-		t.Errorf("Replicas = %d, want %d (staging default)", hv.Components["web"].Replicas, defaultReplicas)
-	}
-}
-
-func TestMapToHelmValues_ReplicasDefaultPreview(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
-	if hv.Components["web"].Replicas != defaultPreviewReplicas {
-		t.Errorf("Replicas = %d, want %d (preview default)", hv.Components["web"].Replicas, defaultPreviewReplicas)
-	}
-}
-
-func TestMapToHelmValues_ReplicasFromComponentSpec(t *testing.T) {
-	c := webComponent("web")
-	c.Replicas = 5
-	app := webApp("hello", c)
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Components["web"].Replicas != 5 {
-		t.Errorf("Replicas = %d, want 5", hv.Components["web"].Replicas)
-	}
-}
-
-func TestMapToHelmValues_ReplicasEnvOverride(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
-		"prod": {Replicas: 4},
-	}
-	hv := MapToHelmValues(app, "prod", domain.AppEnvProd)
-	if hv.Components["web"].Replicas != 4 {
-		t.Errorf("Replicas = %d, want 4 (env override)", hv.Components["web"].Replicas)
-	}
-}
-
-func TestMapToHelmValues_ComponentReplicasTakesPrecedenceOverEnvOverride(t *testing.T) {
-	c := webComponent("web")
-	c.Replicas = 3
-	app := webApp("hello", c)
-	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
-		"prod": {Replicas: 4},
-	}
-	hv := MapToHelmValues(app, "prod", domain.AppEnvProd)
-	if hv.Components["web"].Replicas != 3 {
-		t.Errorf("Replicas = %d, want 3 (component spec wins over env override)", hv.Components["web"].Replicas)
-	}
-}
-
-// ── expose ────────────────────────────────────────────────────────────────────
-
-func TestMapToHelmValues_IngressOnlyOnRoutingComponent(t *testing.T) {
-	// The legacy shim populates IngressValues for the routing component
-	// when no profiles are configured (mapper falls back to nginx-no-TLS).
-	// The worker component has ExposeMode=disabled (zero-value) and gets
-	// no Ingress regardless of profiles.
-	app := webApp("hello", webComponent("web"), workerComponent("worker"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-
-	if hv.Components["worker"].Ingress != nil {
-		t.Errorf("worker should not have Ingress, got %+v", hv.Components["worker"].Ingress)
-	}
-}
-
-// ── env (config) ──────────────────────────────────────────────────────────────
-
-func TestMapToHelmValues_EnvFromComponentConfig(t *testing.T) {
-	c := webComponent("web")
-	c.Config = map[string]string{"LOG_LEVEL": "debug", "PORT": "8080"}
-	app := webApp("hello", c)
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-
-	env := hv.Components["web"].Env
-	if env["LOG_LEVEL"] != "debug" {
-		t.Errorf("LOG_LEVEL = %q, want %q", env["LOG_LEVEL"], "debug")
-	}
-	if env["PORT"] != "8080" {
-		t.Errorf("PORT = %q, want %q", env["PORT"], "8080")
-	}
-}
-
-func TestMapToHelmValues_EnvOverrideMergesWithComponentConfig(t *testing.T) {
-	c := webComponent("web")
-	c.Config = map[string]string{"LOG_LEVEL": "debug", "BASE": "value"}
-	app := webApp("hello", c)
-	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
-		"prod": {Config: map[string]string{"LOG_LEVEL": "warn", "EXTRA": "yes"}},
-	}
-	hv := MapToHelmValues(app, "prod", domain.AppEnvProd)
-	env := hv.Components["web"].Env
-
-	if env["LOG_LEVEL"] != "warn" {
-		t.Errorf("LOG_LEVEL = %q, want %q (env override should win)", env["LOG_LEVEL"], "warn")
-	}
-	if env["BASE"] != "value" {
-		t.Errorf("BASE = %q, want %q (component value should survive)", env["BASE"], "value")
-	}
-	if env["EXTRA"] != "yes" {
-		t.Errorf("EXTRA = %q, want %q (env override key should appear)", env["EXTRA"], "yes")
-	}
-}
-
-func TestMapToHelmValues_NoEnvWhenConfigEmpty(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Components["web"].Env != nil {
-		t.Errorf("Env should be nil when no config is set, got %v", hv.Components["web"].Env)
-	}
-}
-
-// ── resources (size preset) ───────────────────────────────────────────────────
-
-func TestMapToHelmValues_ResourcesOmittedWhenNoPreset(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Components["web"].Resources != nil {
-		t.Errorf("Resources should be nil when no size preset is set, got %v", hv.Components["web"].Resources)
-	}
-}
-
-func TestMapToHelmValues_ResourcesFromComponentSizePreset(t *testing.T) {
-	c := webComponent("web")
-	c.SizePreset = domain.SizeLarge
-	app := webApp("hello", c)
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-
-	if hv.Components["web"].Resources == nil {
-		t.Fatal("Resources should be set when SizePreset is configured")
-	}
-	if hv.Components["web"].Resources.Size != "large" {
-		t.Errorf("Resources.Size = %q, want %q", hv.Components["web"].Resources.Size, "large")
-	}
-}
-
-func TestMapToHelmValues_ResourcesEnvOverridePreset(t *testing.T) {
-	c := webComponent("web")
-	c.SizePreset = domain.SizeSmall
-	app := webApp("hello", c)
-	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
-		"prod": {SizePreset: domain.SizeLarge},
-	}
-	hv := MapToHelmValues(app, "prod", domain.AppEnvProd)
-	if hv.Components["web"].Resources.Size != "large" {
-		t.Errorf("Resources.Size = %q, want %q (env override)", hv.Components["web"].Resources.Size, "large")
-	}
-}
-
-// ── routing ───────────────────────────────────────────────────────────────────
-
-func TestMapToHelmValues_RoutingHostStaging(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	want := "hello.staging.localhost"
-	if hv.Routing.Host != want {
-		t.Errorf("Routing.Host = %q, want %q", hv.Routing.Host, want)
-	}
-}
-
-func TestMapToHelmValues_RoutingHostProd(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "prod", domain.AppEnvProd)
-	want := "hello.prod.localhost"
-	if hv.Routing.Host != want {
-		t.Errorf("Routing.Host = %q, want %q", hv.Routing.Host, want)
-	}
-}
-
-func TestMapToHelmValues_RoutingHostPreview(t *testing.T) {
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "pr-42", domain.AppEnvPreview)
-	want := "pr-42.hello.preview.localhost"
-	if hv.Routing.Host != want {
-		t.Errorf("Routing.Host = %q, want %q", hv.Routing.Host, want)
-	}
-}
-
-func TestMapToHelmValues_RoutingComponentFromExposedComponent(t *testing.T) {
-	app := webApp("hello", webComponent("web"), workerComponent("worker"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Routing.Component != "web" {
-		t.Errorf("Routing.Component = %q, want %q", hv.Routing.Component, "web")
-	}
-}
-
-func TestMapToHelmValues_RoutingComponentFallsBackToWebType(t *testing.T) {
-	c := webComponent("web")
-	c.ExposeMode = domain.ExposeDisabled // not explicitly exposed
-	app := webApp("hello", c, workerComponent("worker"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Routing.Component != "web" {
-		t.Errorf("Routing.Component = %q, want %q (fallback to web type)", hv.Routing.Component, "web")
-	}
-}
-
-func TestMapToHelmValues_RoutingComponentFallsBackToFirstAlphabetically(t *testing.T) {
-	w := workerComponent("worker")
-	c := cronComponent("cron")
-	app := webApp("hello", w, c)
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Routing.Component != "cron" {
-		t.Errorf("Routing.Component = %q, want %q (first alphabetically)", hv.Routing.Component, "cron")
-	}
-}
-
-func TestMapToHelmValues_RoutingComponentPicksFirstExposedAlphabetically(t *testing.T) {
-	api := webComponent("api")
-	frontend := webComponent("frontend")
-	app := webApp("hello", frontend, api)
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Routing.Component != "api" {
-		t.Errorf("Routing.Component = %q, want %q (first exposed alphabetically)", hv.Routing.Component, "api")
-	}
-}
-
-// ── multi-component ───────────────────────────────────────────────────────────
-
-func TestMapToHelmValues_MultiComponentAllPresent(t *testing.T) {
-	app := webApp("api-gw", webComponent("web"), workerComponent("worker"), cronComponent("cron"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-
-	for _, name := range []string{"web", "worker", "cron"} {
-		if hv.Components[name] == nil {
-			t.Errorf("component %q missing from output", name)
-		}
-	}
-	if len(hv.Components) != 3 {
-		t.Errorf("expected 3 components, got %d", len(hv.Components))
-	}
-}
-
-func TestMapToHelmValues_EmptyComponentsProducesEmptyMap(t *testing.T) {
-	app := &domain.App{Name: "bare", ProjectName: "demo"}
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-	if hv.Components == nil {
-		t.Error("Components should not be nil")
-	}
-	if len(hv.Components) != 0 {
-		t.Errorf("expected 0 components, got %d", len(hv.Components))
-	}
-}
-
-// ── determinism ───────────────────────────────────────────────────────────────
-
-func TestMapToHelmValues_IsDeterministic(t *testing.T) {
-	app := webApp("hello",
-		webComponent("web"),
-		workerComponent("worker"),
-		cronComponent("cron"),
-	)
-	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
-		"staging": {Replicas: 3, Config: map[string]string{"ENV": "staging"}},
-	}
-
-	first := marshal(t, MapToHelmValues(app, "staging", domain.AppEnvStaging))
-	for i := 0; i < 5; i++ {
-		got := marshal(t, MapToHelmValues(app, "staging", domain.AppEnvStaging))
-		if got != first {
-			t.Errorf("run %d: non-deterministic output", i+1)
-		}
-	}
-}
-
-// marshal serializes v to a canonical JSON string for comparison.
-func marshal(t *testing.T, v any) string {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal failed: %v", err)
-	}
-	return string(b)
-}
-
-// ── stripScheme ───────────────────────────────────────────────────────────────
-
-// ── ingress / routing profiles ────────────────────────────────────────────────
-
-func TestResolveIngress_NoProfilesYieldsNoIngress(t *testing.T) {
-	// ExposeMode set but no profiles configured: the mapper drops the
-	// ingress silently. Validation lives in domain.ValidateExposeModes,
-	// which the publisher and app-save handlers run before reaching here.
-	app := webApp("hello", webComponent("web"))
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-
-	if hv.Components["web"].Ingress != nil {
-		t.Errorf("no profiles should yield nil Ingress, got %+v", hv.Components["web"].Ingress)
-	}
-}
-
-func TestResolveIngress_NeverAppliedToWorker(t *testing.T) {
-	// Worker has ExposeMode=disabled (zero value): never gets an Ingress
-	// regardless of profiles. Only the routing component receives one.
-	c := workerComponent("worker")
-	app := webApp("hello", c)
-	org := domain.RoutingProfiles{
-		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
-	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil)
-
-	if hv.Components["worker"].Ingress != nil {
-		t.Errorf("worker should not have Ingress, got %+v", hv.Components["worker"].Ingress)
-	}
-}
-
-func TestResolveIngress_DisabledMode(t *testing.T) {
+func TestMapPlatformValuesForEnv_DisabledExposeYieldsNoIngress(t *testing.T) {
 	c := webComponent("web")
 	c.ExposeMode = domain.ExposeDisabled
 	app := webApp("hello", c)
-	hv := MapToHelmValues(app, "staging", domain.AppEnvStaging)
-
-	if hv.Components["web"].Ingress != nil {
-		t.Errorf("disabled mode should produce nil Ingress, got %+v", hv.Components["web"].Ingress)
-	}
-}
-
-func TestResolveIngress_FromOrgProfile_NoTLS(t *testing.T) {
-	c := webComponent("web")
-	c.ExposeMode = domain.ExposeInternal
-	app := webApp("hello", c)
 	org := domain.RoutingProfiles{
-		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
+		string(domain.ExposeExternal): {IngressClassName: "nginx"},
 	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil)
-
-	got := hv.Components["web"].Ingress
-	if got == nil {
-		t.Fatal("expected Ingress from internal profile")
-	}
-	if got.ClassName != "nginx-internal" {
-		t.Errorf("ClassName = %q, want nginx-internal", got.ClassName)
-	}
-	if got.ClusterIssuer != "" {
-		t.Errorf("internal profile has no TLS; ClusterIssuer = %q, want empty", got.ClusterIssuer)
+	p := MapPlatformValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil)
+	if p.IngressClassName != "" || p.ClusterIssuer != "" {
+		t.Errorf("disabled expose should yield empty ingress tokens, got %q/%q", p.IngressClassName, p.ClusterIssuer)
 	}
 }
 
-func TestResolveIngress_FromOrgProfile_WithTLS(t *testing.T) {
-	c := webComponent("web")
-	c.ExposeMode = domain.ExposeExternal
-	app := webApp("hello", c)
+func TestMapPlatformValuesForEnv_ZeroComponents(t *testing.T) {
+	// No components (a plain single-chart BYO app): routing host derives from
+	// the app name on the plain base domain, ingress tokens stay empty.
+	app := webApp("solo")
+	p := MapPlatformValuesForEnv(app, "staging", domain.AppEnvStaging, "acme.com", "solo-staging", "", "", nil, nil, nil)
+	if p.RoutingHost == "" || !strings.Contains(p.RoutingHost, "acme.com") {
+		t.Errorf("RoutingHost = %q, want a host on acme.com", p.RoutingHost)
+	}
+	if p.IngressClassName != "" || p.Component != "" {
+		t.Errorf("zero-component app: ingressClassName=%q component=%q, want empty", p.IngressClassName, p.Component)
+	}
+}
+
+// TestMapPlatformValuesForEnv_ClusterRoutingOverride proves per-cluster routing:
+// two clusters with different routing profiles yield different routing hosts +
+// ingress classes for the same app/env.
+func TestMapPlatformValuesForEnv_ClusterRoutingOverride(t *testing.T) {
+	app := &domain.App{
+		Name:        "web",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template:   domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal}},
+		},
+	}
 	org := domain.RoutingProfiles{
-		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
+		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "le-prod", BaseDomain: "example.com"},
 	}
-	hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", "", "", org, nil, nil)
+	aks := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "webapprouting.kubernetes.azure.com", ClusterIssuer: "le-azure", BaseDomain: "azure.example.com"},
+	}
+	eks := domain.RoutingProfiles{
+		string(domain.ExposeExternal): {IngressClassName: "alb", ClusterIssuer: "le-aws", BaseDomain: "aws.example.com"},
+	}
 
-	got := hv.Components["web"].Ingress
-	if got == nil {
-		t.Fatal("expected Ingress from external profile")
+	pAKS := MapPlatformValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "aks", "", org, nil, aks)
+	pEKS := MapPlatformValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "eks", "", org, nil, eks)
+
+	if pAKS.RoutingHost == pEKS.RoutingHost {
+		t.Fatalf("hosts should differ per cluster, both = %q", pAKS.RoutingHost)
 	}
-	if got.ClusterIssuer != "letsencrypt-prod" {
-		t.Errorf("ClusterIssuer = %q, want letsencrypt-prod", got.ClusterIssuer)
+	if !strings.Contains(pAKS.RoutingHost, "azure.example.com") {
+		t.Errorf("AKS host = %q, want azure.example.com", pAKS.RoutingHost)
+	}
+	if !strings.Contains(pEKS.RoutingHost, "aws.example.com") {
+		t.Errorf("EKS host = %q, want aws.example.com", pEKS.RoutingHost)
+	}
+	if pAKS.IngressClassName != "webapprouting.kubernetes.azure.com" {
+		t.Errorf("AKS ingress class = %q, want webapprouting.kubernetes.azure.com", pAKS.IngressClassName)
+	}
+	if pEKS.IngressClassName != "alb" {
+		t.Errorf("EKS ingress class = %q, want alb", pEKS.IngressClassName)
 	}
 }
 
-func TestResolveIngress_EnvProfileOverridesOrg(t *testing.T) {
-	c := webComponent("web")
-	c.ExposeMode = domain.ExposeExternal
-	app := webApp("hello", c)
-	org := domain.RoutingProfiles{
-		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "letsencrypt-prod"},
-	}
-	env := domain.RoutingProfiles{
-		string(domain.ExposeExternal): {IngressClassName: "nginx-staging", ClusterIssuer: "letsencrypt-staging"},
-	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "staging.acme.com", "", "", "", org, env, nil)
-
-	got := hv.Components["web"].Ingress
-	if got == nil {
-		t.Fatal("expected Ingress; got nil")
-	}
-	if got.ClusterIssuer != "letsencrypt-staging" {
-		t.Errorf("env should win: ClusterIssuer = %q, want letsencrypt-staging", got.ClusterIssuer)
-	}
-}
-
-func TestResolveIngress_UnknownModeYieldsNoIngress(t *testing.T) {
-	// Validation is the caller's responsibility — the mapper drops the
-	// ingress silently rather than blocking chart render. Documents the
-	// contract: bad config → no ingress, never a panic.
-	c := webComponent("web")
-	c.ExposeMode = domain.ExposeExternal
-	app := webApp("hello", c)
-	org := domain.RoutingProfiles{
-		string(domain.ExposeInternal): {IngressClassName: "nginx-internal"},
-	}
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging, "localhost", "", "", "", org, nil, nil)
-
-	if hv.Components["web"].Ingress != nil {
-		t.Errorf("unknown mode should yield nil Ingress, got %+v", hv.Components["web"].Ingress)
-	}
-}
+// ── routing component selection ───────────────────────────────────────────────
 
 func TestResolveRoutingComponent_PrefersExternalOverInternal(t *testing.T) {
 	// admin (alphabetically first, internal) should NOT win against api
-	// (alphabetically later, external). Documents the new tier preference.
+	// (alphabetically later, external). Documents the tier preference.
 	admin := domain.ComponentSpec{Name: "admin", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeInternal}
 	api := domain.ComponentSpec{Name: "api", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal}
 	got := resolveRoutingComponent([]domain.ComponentSpec{admin, api})
@@ -814,131 +257,5 @@ func TestStripScheme(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("stripScheme(%q) = %q, want %q", tt.input, got, tt.want)
 		}
-	}
-}
-
-// TestMapToHelmValuesForEnv_ClusterOverride proves per-cluster value overrides:
-// the cluster with an override gets the overridden replica count, while a
-// cluster without one (and the active/no-cluster case) keep the env value.
-func TestMapToHelmValuesForEnv_ClusterOverride(t *testing.T) {
-	app := &domain.App{
-		Name:        "web",
-		ProjectName: "demo",
-		Spec: domain.AppSpec{
-			Template:   domain.AppTemplateRef{Name: "web-service"},
-			Components: []domain.ComponentSpec{{Name: "web", Type: domain.ComponentWeb}},
-			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
-				"prod": {
-					Replicas: 2,
-					ClusterOverrides: map[string]domain.ClusterValueOverride{
-						"aks": {Replicas: 5},
-					},
-				},
-			},
-		},
-	}
-
-	replicasFor := func(cluster string) int32 {
-		hv := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "acme.com", "", cluster, "", nil, nil, nil)
-		return hv.Components["web"].Replicas
-	}
-
-	if got := replicasFor("aks"); got != 5 {
-		t.Errorf("aks (overridden) replicas = %d, want 5", got)
-	}
-	if got := replicasFor("eks"); got != 2 {
-		t.Errorf("eks (no override) replicas = %d, want the env value 2", got)
-	}
-	if got := replicasFor(""); got != 2 {
-		t.Errorf("no-cluster replicas = %d, want the env value 2", got)
-	}
-}
-
-// TestMapToHelmValuesForEnv_ClusterRoutingOverride proves per-cluster routing:
-// two clusters with different routing profiles yield different ingress hosts +
-// classes for the same app/env.
-func TestMapToHelmValuesForEnv_ClusterRoutingOverride(t *testing.T) {
-	app := &domain.App{
-		Name:        "web",
-		ProjectName: "demo",
-		Spec: domain.AppSpec{
-			Template:   domain.AppTemplateRef{Name: "web-service"},
-			Components: []domain.ComponentSpec{{Name: "web", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal}},
-		},
-	}
-	org := domain.RoutingProfiles{
-		string(domain.ExposeExternal): {IngressClassName: "nginx", ClusterIssuer: "le-prod", BaseDomain: "example.com"},
-	}
-	aks := domain.RoutingProfiles{
-		string(domain.ExposeExternal): {IngressClassName: "webapprouting.kubernetes.azure.com", ClusterIssuer: "le-azure", BaseDomain: "azure.example.com"},
-	}
-	eks := domain.RoutingProfiles{
-		string(domain.ExposeExternal): {IngressClassName: "alb", ClusterIssuer: "le-aws", BaseDomain: "aws.example.com"},
-	}
-
-	hvAKS := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "aks", "", org, nil, aks)
-	hvEKS := MapToHelmValuesForEnv(app, "prod", domain.AppEnvProd, "example.com", "", "eks", "", org, nil, eks)
-
-	if hvAKS.Routing.Host == hvEKS.Routing.Host {
-		t.Fatalf("hosts should differ per cluster, both = %q", hvAKS.Routing.Host)
-	}
-	if !contains(hvAKS.Routing.Host, "azure.example.com") {
-		t.Errorf("AKS host = %q, want azure.example.com", hvAKS.Routing.Host)
-	}
-	if !contains(hvEKS.Routing.Host, "aws.example.com") {
-		t.Errorf("EKS host = %q, want aws.example.com", hvEKS.Routing.Host)
-	}
-	if hvAKS.Components["web"].Ingress == nil || hvAKS.Components["web"].Ingress.ClassName != "webapprouting.kubernetes.azure.com" {
-		t.Errorf("AKS ingress class wrong: %+v", hvAKS.Components["web"].Ingress)
-	}
-	if hvEKS.Components["web"].Ingress == nil || hvEKS.Components["web"].Ingress.ClassName != "alb" {
-		t.Errorf("EKS ingress class wrong: %+v", hvEKS.Components["web"].Ingress)
-	}
-}
-
-func contains(s, sub string) bool { return strings.Contains(s, sub) }
-
-// While INHERITING app vars, a component's EnvVars literal entries render as
-// explicit env[] (the extend/override channel that beats envFrom); source-mapped
-// entries are curated-mode-only and must not leak into env[] here.
-func TestBuildComponentValues_InheritModeEnvVarLiterals(t *testing.T) {
-	c := webComponent("web")
-	c.Config = map[string]string{"BASE": "from-config"}
-	c.EnvVars = []domain.ComponentEnvVar{
-		{Name: "EXTRA", Value: "added"},
-		{Name: "BASE", Value: "overridden"},
-		{Name: "MAPPED", FromConfig: "SOME_KEY"}, // inert while inheriting
-	}
-	app := webApp("hello", c)
-
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
-		"acme.com", "hello-staging", "", "acme", nil, nil, nil)
-
-	env := hv.Components["web"].Env
-	if env["EXTRA"] != "added" {
-		t.Errorf("EXTRA = %q, want added", env["EXTRA"])
-	}
-	if env["BASE"] != "overridden" {
-		t.Errorf("BASE = %q, want overridden (EnvVars literal beats Config)", env["BASE"])
-	}
-	if _, ok := env["MAPPED"]; ok {
-		t.Error("source-mapped entry must not render as env[] while inheriting")
-	}
-}
-
-// When the component opts OUT (curated mode), EnvVars keeps driving the
-// projection, not env[] — the literals must NOT double-render as env[] entries.
-func TestBuildComponentValues_CuratedModeEnvVarsNotInEnv(t *testing.T) {
-	off := false
-	c := webComponent("web")
-	c.InheritAppVars = &off
-	c.EnvVars = []domain.ComponentEnvVar{{Name: "ONLY_IN_PROJECTION", Value: "v"}}
-	app := webApp("hello", c)
-
-	hv := MapToHelmValuesForEnv(app, "staging", domain.AppEnvStaging,
-		"acme.com", "hello-staging", "", "acme", nil, nil, nil)
-
-	if _, ok := hv.Components["web"].Env["ONLY_IN_PROJECTION"]; ok {
-		t.Error("curated-mode EnvVars must not render as env[] (they live in the projection)")
 	}
 }

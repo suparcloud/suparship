@@ -1,37 +1,28 @@
 // Package tpl defines the suparship template metadata schema.
 //
-// Templates describe golden paths for creating apps. Each template
-// lives in its own directory and is defined by a template.yaml file.
-// When a user picks a template and submits the form, suparship creates
-// an app — not a raw Kubernetes resource — that is then rendered into
-// GitOps manifests by the appropriate engine (Helm in MVP).
+// A template is a plain Helm chart (registered through the template registry
+// or a BYO chart upload) plus optional metadata described by a template.yaml.
+// When a user picks a template, suparship creates an app — not a raw
+// Kubernetes resource — that is then rendered into GitOps manifests by the
+// appropriate engine (Helm in MVP).
 //
-// A template implicitly defines the app's component topology via its
-// category field: a "web" template produces a single web component by
-// default; "worker" and "cron" templates produce their respective
-// components. More complex topologies (e.g. web + worker) are supported
-// by specifying components explicitly at app-creation time.
+// Templates declare no components and no values schema: components are
+// user-declared on the app, and all configuration is Helm values overlays in
+// the chart's own shape. template.yaml carries curated metadata only —
+// platform-authored value overlays (defaultValues / envValues /
+// previewDefaultValues), the developerValues projection, image slots for CD
+// wiring, and secret-reference inputs.
 //
-// Component visibility: components are internal runtime units and are hidden
-// from the default UI. Only the app-level health is surfaced by default;
-// individual components appear in advanced views only.
-//
-// See docs/templates-components.md for how templates define component topology.
-// See docs/templates.md for the full template authoring guide.
+// See docs/templates.md for the template.yaml reference.
+// See docs/byo-charts.md for the chart-side contract.
 // See docs/app-model.md for the App / Environment / Component model.
 //
-//	templates/
-//	├── web-service/
-//	│   └── template.yaml
-//	└── worker/
-//	    └── template.yaml
-//
-// Example template.yaml:
+// Example template.yaml (shipped next to the chart in a chart source):
 //
 //	apiVersion: suparship.io/v1alpha1
 //	kind: Template
 //	metadata:
-//	  name: web-service
+//	  name: web
 //	  version: "1.0.0"
 //	spec:
 //	  title: Web App
@@ -40,16 +31,11 @@
 //	  engine:
 //	    type: helm
 //	    chart: ./chart
-//	  inputs:
-//	    - name: image
-//	      title: Container Image
+//	  developerValues:
+//	    - path: image.repository
+//	      title: Image Repository
 //	      type: string
 //	      required: true
-//	  presets:
-//	    - name: starter
-//	      title: Starter
-//	      values:
-//	        replicas: 1
 package tpl
 
 import (
@@ -106,20 +92,15 @@ type Metadata struct {
 
 // TemplateSpec defines the template's behavior and user-facing configuration.
 type TemplateSpec struct {
-	Title       string `yaml:"title"`
-	Description string `yaml:"description,omitempty"`
-	Category    string `yaml:"category"`
-	Engine      Engine `yaml:"engine"`
-	// Components declares the named runtime units this template produces.
-	// When absent, the platform derives a single default component from
-	// Category (backwards-compatible behaviour). When present, each entry
-	// defines defaults that the user can override at app-creation time.
-	Components     []TemplateComponent `yaml:"components,omitempty"`
-	Inputs         []Input             `yaml:"inputs,omitempty"`
-	AdvancedInputs []Input             `yaml:"advancedInputs,omitempty"`
-	SecretInputs   []SecretInput       `yaml:"secretInputs,omitempty"`
-	Mappings       map[string]string   `yaml:"mappings,omitempty"`
-	Presets        []Preset            `yaml:"presets,omitempty"`
+	Title          string            `yaml:"title"`
+	Description    string            `yaml:"description,omitempty"`
+	Category       string            `yaml:"category"`
+	Engine         Engine            `yaml:"engine"`
+	Inputs         []Input           `yaml:"inputs,omitempty"`
+	AdvancedInputs []Input           `yaml:"advancedInputs,omitempty"`
+	SecretInputs   []SecretInput     `yaml:"secretInputs,omitempty"`
+	Mappings       map[string]string `yaml:"mappings,omitempty"`
+	Presets        []Preset          `yaml:"presets,omitempty"`
 	// DefaultValues is a Platform-Engineer-authored Helm values overlay applied
 	// to EVERY environment, layered on top of the chart's own default values
 	// (and below per-env EnvValues and developer overrides). Arbitrary Helm
@@ -135,13 +116,6 @@ type TemplateSpec struct {
 	// composition and below the app's own preview override. Preview-only — does
 	// not affect stable envs. String leaves may use ((platform.*))/((vars.*)) tokens.
 	PreviewDefaultValues map[string]any `yaml:"previewDefaultValues,omitempty"`
-	// InjectCanonicalValues controls whether the publisher injects the canonical
-	// suparship-common values base (app/platform/components/suparship/routing)
-	// into the published values.yaml. nil/true (default) = canonical, for charts
-	// built on suparship-common. Set false for BYO/passthrough charts that bring
-	// their own values structure: the platform then emits only the overlays +
-	// resolved ((platform.*))/((vars.*)) tokens, no injected schema.
-	InjectCanonicalValues *bool `yaml:"injectCanonicalValues,omitempty"`
 	// Images declares the container images this chart deploys, one entry per
 	// service, so external-CD (Kargo) can be wired generically: each entry says
 	// which image repository to watch and which Helm values key holds its tag.
@@ -196,15 +170,9 @@ type TemplateImage struct {
 	Declared bool `yaml:"-"`
 }
 
-// CanonicalValues reports whether the canonical suparship-common values base is
-// injected for this template. Defaults to true (back-compat) when unset.
-func (s TemplateSpec) CanonicalValues() bool {
-	return s.InjectCanonicalValues == nil || *s.InjectCanonicalValues
-}
-
 // DefaultSuspendKey is the convention Helm values key the platform toggles for
-// suspend/resume when a template does not declare its own. Charts built on
-// suparship-common honor a top-level `suspend: true` to scale the workload down.
+// suspend/resume when a template does not declare its own. Generic charts honor
+// a top-level `suspend: true` to scale the workload down.
 const DefaultSuspendKey = "suspend"
 
 // TemplateFeatures declares optional platform operations this template's chart
@@ -232,247 +200,6 @@ func (s TemplateSpec) SuspendKey() string {
 		return s.Features.Suspend.ValuesKey
 	}
 	return DefaultSuspendKey
-}
-
-// TemplateComponent declares one runtime unit within a template.
-// It sets the defaults that feed into the app's ComponentSpec at creation
-// time, while leaving per-app overrides to the user.
-//
-// DefaultEnabled uses a pointer so the YAML author can explicitly write
-// "defaultEnabled: false" to opt out, distinguishing it from a field that
-// was simply omitted (which defaults to true via IsDefaultEnabled).
-type TemplateComponent struct {
-	// Name uniquely identifies the component within this template.
-	// Must be a lowercase alphanumeric-and-hyphen string (DNS label).
-	Name string `yaml:"name"`
-	// Type is the runtime role: web, worker, or cron.
-	Type TemplateComponentType `yaml:"type"`
-	// Required marks the component as non-removable: users cannot disable it
-	// when creating an app from this template.
-	Required bool `yaml:"required,omitempty"`
-	// DefaultEnabled controls whether the component is enabled by default.
-	// nil (omitted in YAML) is treated as true by IsDefaultEnabled.
-	DefaultEnabled *bool `yaml:"defaultEnabled,omitempty"`
-	// Exposed declares whether this component should receive an ingress
-	// endpoint by default. Typically true only for web components. This
-	// controls the *initial state* of the expose toggle; whether the toggle
-	// is rendered at all is governed by Capabilities.Expose.
-	Exposed bool `yaml:"exposed,omitempty"`
-	// Produces lists Kubernetes resource kinds (e.g. "Deployment",
-	// "Service", "CronJob") that this component MUST render when enabled.
-	// Chart-validation at template import asserts the rendered chart
-	// produces at least one of each kind for this component.
-	//
-	// Empty omits the assertion — useful for components where the
-	// produced shape varies (e.g. an addon wrapper that delegates to
-	// different upstream charts depending on env binding). New web /
-	// worker / cron components SHOULD declare this; absence is tolerated
-	// for backwards compatibility.
-	Produces []string `yaml:"produces,omitempty"`
-	// OptionallyProduces lists kinds the chart MAY render based on
-	// values (Ingress / HTTPRoute / ScaledObject / PodDisruptionBudget).
-	// Documents what's possible without enforcing presence. Used by the
-	// UI to render capability-aware input groups.
-	OptionallyProduces []string `yaml:"optionallyProduces,omitempty"`
-	// Capabilities declares which UI input groups apply to this
-	// component. Templates declare only the capabilities they want to
-	// *override* from the type-based defaults; ResolvedCapabilities()
-	// fills in the rest. See ComponentCapabilities for the vocabulary.
-	Capabilities ComponentCapabilities `yaml:"capabilities,omitempty"`
-	// Defaults seeds the per-component config (raw resources, envFrom, KEDA
-	// scaling, env overrides) into the app's ComponentSpec at creation.
-	// Operators override per app / per environment afterward in the UI.
-	Defaults *ComponentDefaults `yaml:"defaults,omitempty"`
-}
-
-// ComponentDefaults are the per-component config defaults a template declares.
-// Copied into domain.ComponentSpec at app creation. Mirrors the per-component
-// knobs (resources / envFrom / scaling / env).
-type ComponentDefaults struct {
-	Resources         *ComponentResources `yaml:"resources,omitempty"`
-	EnvFromSecrets    []string            `yaml:"envFromSecrets,omitempty"`
-	EnvFromConfigMaps []string            `yaml:"envFromConfigMaps,omitempty"`
-	Scaling           *ComponentScaling   `yaml:"scaling,omitempty"`
-	Env               map[string]string   `yaml:"env,omitempty"`
-}
-
-// ComponentResources mirrors domain.ComponentResources for template YAML.
-type ComponentResources struct {
-	Requests map[string]string `yaml:"requests,omitempty"`
-	Limits   map[string]string `yaml:"limits,omitempty"`
-}
-
-// KEDATrigger mirrors domain.KEDATrigger for template YAML.
-type KEDATrigger struct {
-	Type       string            `yaml:"type"`
-	MetricType string            `yaml:"metricType,omitempty"`
-	Metadata   map[string]string `yaml:"metadata,omitempty"`
-}
-
-// ComponentScaling mirrors domain.ComponentScaling for template YAML.
-type ComponentScaling struct {
-	Triggers    []KEDATrigger `yaml:"triggers,omitempty"`
-	MinReplicas *int32        `yaml:"minReplicas,omitempty"`
-	MaxReplicas *int32        `yaml:"maxReplicas,omitempty"`
-}
-
-// ComponentCapabilities declares which input groups the UI should
-// render for a component, replacing the prior "every web has
-// autoscaling, every cron has schedule" hardcoding in the frontend.
-//
-// Bool fields are pointers so chart authors can distinguish "not
-// declared (use type default)" from "explicitly off / on". String
-// fields use the empty string for "not declared".
-//
-// Type-based defaults (filled in by ResolvedCapabilities when fields
-// are unset):
-//
-//	web    — expose=true, routing=ingress, autoscaling=keda, pdb=true,
-//	         resources=true, replicas=true, schedule=false
-//	worker — expose=false, routing=none, autoscaling=keda, pdb=true,
-//	         resources=true, replicas=true, schedule=false
-//	cron   — expose=false, routing=none, autoscaling=none, pdb=false,
-//	         resources=true, replicas=false, schedule=true
-type ComponentCapabilities struct {
-	// Expose controls whether the UI shows the externally-expose toggle
-	// for this component. Default-on for type=web; off for worker / cron.
-	Expose *bool `yaml:"expose,omitempty" json:"expose,omitempty"`
-	// Routing declares which routing fabric the chart wires up when
-	// the component is exposed. UI surfaces fabric-specific inputs
-	// (gateway name+namespace, ingress class, …) based on this.
-	//
-	// "" → use type default. "none" → suppress host input even when
-	// expose=true (e.g. internal-only services). "ingress" / "gateway".
-	Routing string `yaml:"routing,omitempty" json:"routing,omitempty"`
-	// Autoscaling declares which autoscaling backend the chart wires
-	// for this component. Drives whether the UI shows the scaling input
-	// group and which fields (HPA = CPU% only; KEDA = cpu+memory + free-
-	// form triggers list).
-	//
-	// "" → use type default. "none" → no input group rendered. "hpa" /
-	// "keda".
-	Autoscaling string `yaml:"autoscaling,omitempty" json:"autoscaling,omitempty"`
-	// PDB declares whether the chart renders a PodDisruptionBudget for
-	// this component. UI shows minAvailable / maxUnavailable inputs
-	// (advanced) when true.
-	PDB *bool `yaml:"pdb,omitempty" json:"pdb,omitempty"`
-	// Resources declares whether the chart honors
-	// components.<name>.resources.size. UI shows the small/medium/large
-	// dropdown when true. Stateful workloads with explicit
-	// requests/limits set this false.
-	Resources *bool `yaml:"resources,omitempty" json:"resources,omitempty"`
-	// Replicas declares whether the chart honors
-	// components.<name>.replicas. UI shows the replicas slider when
-	// true. Components with policy-driven replica counts (always 1,
-	// quorum-bound) set this false.
-	Replicas *bool `yaml:"replicas,omitempty" json:"replicas,omitempty"`
-	// Schedule declares whether the component takes a cron schedule
-	// input. Default-on for type=cron; off otherwise.
-	Schedule *bool `yaml:"schedule,omitempty" json:"schedule,omitempty"`
-}
-
-// ResolvedCapabilities returns the component's capabilities with
-// type-based defaults filled in. Authors only declare what they want
-// to override; everything else falls back to the per-type default.
-//
-// Returned values use bool (not *bool), so the UI gets a fully
-// resolved view ready to drive form rendering.
-func (c TemplateComponent) ResolvedCapabilities() ResolvedCapabilities {
-	d := defaultCapabilities(c.Type)
-
-	out := ResolvedCapabilities{
-		Expose:      d.Expose,
-		Routing:     d.Routing,
-		Autoscaling: d.Autoscaling,
-		PDB:         d.PDB,
-		Resources:   d.Resources,
-		Replicas:    d.Replicas,
-		Schedule:    d.Schedule,
-	}
-	if c.Capabilities.Expose != nil {
-		out.Expose = *c.Capabilities.Expose
-	}
-	if c.Capabilities.Routing != "" {
-		out.Routing = c.Capabilities.Routing
-	}
-	if c.Capabilities.Autoscaling != "" {
-		out.Autoscaling = c.Capabilities.Autoscaling
-	}
-	if c.Capabilities.PDB != nil {
-		out.PDB = *c.Capabilities.PDB
-	}
-	if c.Capabilities.Resources != nil {
-		out.Resources = *c.Capabilities.Resources
-	}
-	if c.Capabilities.Replicas != nil {
-		out.Replicas = *c.Capabilities.Replicas
-	}
-	if c.Capabilities.Schedule != nil {
-		out.Schedule = *c.Capabilities.Schedule
-	}
-	return out
-}
-
-// ResolvedCapabilities is the UI-facing flat view: every field set,
-// no nils. Pure values, deterministic serialisation.
-type ResolvedCapabilities struct {
-	Expose      bool   `json:"expose"`
-	Routing     string `json:"routing"`
-	Autoscaling string `json:"autoscaling"`
-	PDB         bool   `json:"pdb"`
-	Resources   bool   `json:"resources"`
-	Replicas    bool   `json:"replicas"`
-	Schedule    bool   `json:"schedule"`
-}
-
-// defaultCapabilities returns the baseline capability set for a given
-// component type. Templates override individual fields via
-// TemplateComponent.Capabilities.
-func defaultCapabilities(t TemplateComponentType) ResolvedCapabilities {
-	switch t {
-	case TemplateComponentWeb:
-		return ResolvedCapabilities{
-			Expose:      true,
-			Routing:     "ingress",
-			Autoscaling: "keda",
-			PDB:         true,
-			Resources:   true,
-			Replicas:    true,
-		}
-	case TemplateComponentWorker:
-		return ResolvedCapabilities{
-			Routing:     "none",
-			Autoscaling: "keda",
-			PDB:         true,
-			Resources:   true,
-			Replicas:    true,
-		}
-	case TemplateComponentCron:
-		return ResolvedCapabilities{
-			Routing:   "none",
-			Resources: true,
-			Schedule:  true,
-		}
-	case TemplateComponentJob:
-		// A one-shot Job: no ingress, no replicas, no autoscaling, no schedule —
-		// it runs once to completion. Resources still apply to the pod.
-		return ResolvedCapabilities{
-			Routing:   "none",
-			Resources: true,
-		}
-	}
-	// Unknown type: permissive default so authors of new types aren't
-	// stuck behind a code change.
-	return ResolvedCapabilities{
-		Resources: true,
-		Replicas:  true,
-	}
-}
-
-// IsDefaultEnabled returns true when the component is enabled by default.
-// A nil DefaultEnabled (field omitted in YAML) is treated as true.
-func (c TemplateComponent) IsDefaultEnabled() bool {
-	return c.DefaultEnabled == nil || *c.DefaultEnabled
 }
 
 // Engine specifies the rendering backend for the template.

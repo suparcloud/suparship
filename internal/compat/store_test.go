@@ -99,7 +99,7 @@ func TestServiceBackedAppStore_ListApps_FallsBackToServices(t *testing.T) {
 	if len(apps) == 0 {
 		t.Fatal("expected at least one app from fallback service mapping")
 	}
-	if !sliceHas(appNames(apps), "hello") {
+	if !sliceHas(appNames(apps), "notes-web") {
 		t.Errorf("expected 'hello' app in fallback list, got %v", appNames(apps))
 	}
 }
@@ -143,7 +143,7 @@ func TestServiceBackedAppStore_ListApps_FallbackUnknownProject(t *testing.T) {
 
 func TestServiceBackedAppStore_GetApp_PrimaryDataUsed(t *testing.T) {
 	store := newPrimaryStore()
-	app, err := store.GetApp(storeCtx, "demo", "hello")
+	app, err := store.GetApp(storeCtx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("GetApp: %v", err)
 	}
@@ -154,15 +154,15 @@ func TestServiceBackedAppStore_GetApp_PrimaryDataUsed(t *testing.T) {
 
 func TestServiceBackedAppStore_GetApp_FallsBackToService(t *testing.T) {
 	store := newFallbackStore()
-	app, err := store.GetApp(storeCtx, "demo", "hello")
+	app, err := store.GetApp(storeCtx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("GetApp fallback: %v", err)
 	}
-	if app.Name != "hello" {
-		t.Errorf("Name = %q, want %q", app.Name, "hello")
+	if app.Name != "notes-web" {
+		t.Errorf("Name = %q, want %q", app.Name, "notes-web")
 	}
-	if app.Spec.Template.Name != "web-service" {
-		t.Errorf("Template.Name = %q, want %q", app.Spec.Template.Name, "web-service")
+	if app.Spec.Template.Name != "web" {
+		t.Errorf("Template.Name = %q, want %q", app.Spec.Template.Name, "web")
 	}
 	if len(app.Spec.Components) == 0 {
 		t.Error("fallback app must have at least one component")
@@ -181,7 +181,7 @@ func TestServiceBackedAppStore_GetApp_FallbackNotFound(t *testing.T) {
 
 func TestServiceBackedAppStore_ListAppEnvironments_PrimaryDataUsed(t *testing.T) {
 	store := newPrimaryStore()
-	envs, err := store.ListAppEnvironments(storeCtx, "demo", "hello")
+	envs, err := store.ListAppEnvironments(storeCtx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("ListAppEnvironments: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestServiceBackedAppStore_ListAppEnvironments_PrimaryDataUsed(t *testing.T)
 
 func TestServiceBackedAppStore_ListAppEnvironments_FallbackHasStableEnvs(t *testing.T) {
 	store := newFallbackStore()
-	envs, err := store.ListAppEnvironments(storeCtx, "demo", "hello")
+	envs, err := store.ListAppEnvironments(storeCtx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("ListAppEnvironments fallback: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestServiceBackedAppStore_ListAppEnvironments_FallbackHasStableEnvs(t *test
 
 func TestServiceBackedAppStore_ListAppEnvironments_FallbackIncludesPreviews(t *testing.T) {
 	store := newFallbackStore()
-	envs, _ := store.ListAppEnvironments(storeCtx, "demo", "hello")
+	envs, _ := store.ListAppEnvironments(storeCtx, "demo", "notes-web")
 	var previewCount int
 	for _, e := range envs {
 		if e.EnvType == domain.AppEnvPreview {
@@ -220,7 +220,7 @@ func TestServiceBackedAppStore_ListAppEnvironments_FallbackIncludesPreviews(t *t
 
 func TestServiceBackedAppStore_ListAppEnvironments_FallbackEnvTypesCorrect(t *testing.T) {
 	store := newFallbackStore()
-	envs, _ := store.ListAppEnvironments(storeCtx, "demo", "hello")
+	envs, _ := store.ListAppEnvironments(storeCtx, "demo", "notes-web")
 	for _, e := range envs {
 		if !e.EnvType.Valid() {
 			t.Errorf("environment %q has invalid EnvType %q", e.EnvName, e.EnvType)
@@ -232,7 +232,7 @@ func TestServiceBackedAppStore_ListAppEnvironments_FallbackEnvTypesCorrect(t *te
 
 func TestServiceBackedAppStore_GetAppEnvironment_PrimaryDataUsed(t *testing.T) {
 	store := newPrimaryStore()
-	env, err := store.GetAppEnvironment(storeCtx, "demo", "hello", "staging")
+	env, err := store.GetAppEnvironment(storeCtx, "demo", "notes-web", "staging")
 	if err != nil {
 		t.Fatalf("GetAppEnvironment: %v", err)
 	}
@@ -249,15 +249,15 @@ func TestServiceBackedAppStore_GetAppEnvironment_FallbackStableEnvs(t *testing.T
 	store := newFallbackStore()
 	for _, envName := range []string{"staging", "prod"} {
 		t.Run(envName, func(t *testing.T) {
-			env, err := store.GetAppEnvironment(storeCtx, "demo", "hello", envName)
+			env, err := store.GetAppEnvironment(storeCtx, "demo", "notes-web", envName)
 			if err != nil {
 				t.Fatalf("GetAppEnvironment(%q) fallback: %v", envName, err)
 			}
 			if env.EnvName != envName {
 				t.Errorf("EnvName = %q, want %q", env.EnvName, envName)
 			}
-			if env.AppName != "hello" {
-				t.Errorf("AppName = %q, want %q", env.AppName, "hello")
+			if env.AppName != "notes-web" {
+				t.Errorf("AppName = %q, want %q", env.AppName, "notes-web")
 			}
 		})
 	}
@@ -266,7 +266,7 @@ func TestServiceBackedAppStore_GetAppEnvironment_FallbackStableEnvs(t *testing.T
 func TestServiceBackedAppStore_GetAppEnvironment_FallbackPreview(t *testing.T) {
 	// "pr-42" is seeded in the DevRuntime preview store.
 	store := newFallbackStore()
-	env, err := store.GetAppEnvironment(storeCtx, "demo", "hello", "pr-42")
+	env, err := store.GetAppEnvironment(storeCtx, "demo", "notes-web", "pr-42")
 	if err != nil {
 		t.Fatalf("GetAppEnvironment(pr-42) fallback: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestServiceBackedAppStore_GetAppEnvironment_FallbackPreview(t *testing.T) {
 
 func TestServiceBackedAppStore_ListAppPreviews_PrimaryDataUsed(t *testing.T) {
 	store := newPrimaryStore()
-	previews, err := store.ListAppPreviews(storeCtx, "demo", "hello")
+	previews, err := store.ListAppPreviews(storeCtx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("ListAppPreviews: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestServiceBackedAppStore_ListAppPreviews_PrimaryDataUsed(t *testing.T) {
 
 func TestServiceBackedAppStore_ListAppPreviews_FallsBackToLegacyPreviews(t *testing.T) {
 	store := newFallbackStore()
-	previews, err := store.ListAppPreviews(storeCtx, "demo", "hello")
+	previews, err := store.ListAppPreviews(storeCtx, "demo", "notes-web")
 	if err != nil {
 		t.Fatalf("ListAppPreviews fallback: %v", err)
 	}
@@ -309,8 +309,8 @@ func TestServiceBackedAppStore_ListAppPreviews_FallsBackToLegacyPreviews(t *test
 		if p.EnvType != domain.AppEnvPreview {
 			t.Errorf("EnvType = %q, want %q", p.EnvType, domain.AppEnvPreview)
 		}
-		if p.AppName != "hello" {
-			t.Errorf("AppName = %q, want %q (ServiceName must map to AppName)", p.AppName, "hello")
+		if p.AppName != "notes-web" {
+			t.Errorf("AppName = %q, want %q (ServiceName must map to AppName)", p.AppName, "notes-web")
 		}
 	}
 }

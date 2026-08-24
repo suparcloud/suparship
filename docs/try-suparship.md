@@ -90,8 +90,11 @@ done.
    rollback (re-promote a previous freight from the deployment history), the
    Kargo UI's freight timeline (<http://localhost:8083>), ArgoCD's view of
    the composed app (<http://localhost:8081>), and
-   [bring-your-own-charts](byo-charts.md) — the demo's Postgres is itself a
-   plain chart imported from `examples/charts/`.
+   [bring-your-own-charts](byo-charts.md) — that IS the model: every one of
+   the demo's components (the `web` chart behind frontend/api, the Postgres
+   behind db) is a plain Helm chart imported from `examples/charts/` via the
+   template registry, configured purely through its own values with
+   `((platform.*))` tokens.
 
 ## When something doesn't look right
 

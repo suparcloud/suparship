@@ -394,11 +394,6 @@ export interface TemplatePreset {
   values: Record<string, unknown>;
 }
 
-export interface TemplateComponentInfo {
-  name: string;
-  type: string;
-}
-
 export interface TemplateDetail {
   name: string;
   version: string;
@@ -410,7 +405,6 @@ export interface TemplateDetail {
   advancedInputs: TemplateInput[];
   secretInputs: TemplateSecretInput[];
   presets: TemplatePreset[];
-  components?: TemplateComponentInfo[];
   /** Retired: refuses new apps; existing apps keep working. Toggled via
    *  PATCH {disabled} by org admins. */
   disabled?: boolean;
@@ -418,9 +412,6 @@ export interface TemplateDetail {
   // layered above chart defaults and below developer overrides.
   defaultValues?: Record<string, unknown>;
   envValues?: Record<string, Record<string, unknown>>;
-  // Values mode: undefined/true = canonical suparship-common base; false =
-  // passthrough/BYO.
-  injectCanonicalValues?: boolean;
   // Per-service image mapping for external-CD (Kargo) wiring.
   images?: TemplateImage[];
   // The developer-facing values projection (org override applied). Empty/absent =
@@ -446,7 +437,6 @@ export interface TemplateMetadataPatch {
   title?: string;
   category?: string;
   description?: string;
-  injectCanonicalValues?: boolean;
   // images, when present, replaces the per-service image mapping (editable
   // templates only). Send [] to clear.
   images?: TemplateImage[];
@@ -737,9 +727,7 @@ export interface AppDetail {
   // only while envs diverge.
   envTemplateVersions?: Record<string, Record<string, string>>;
   // App-level per-component config keyed by component name.
-  componentConfigs?: Record<string, ComponentConfig>;
   // Per-(env, component) overrides keyed env → component.
-  envComponents?: Record<string, Record<string, ComponentConfig>>;
   // Continuous-delivery settings (external-CD tag ownership). Always present.
   cd: CDConfig;
   // Per-slot image repository bindings (keyed by template slot name). Omitted
@@ -795,16 +783,6 @@ export interface ComponentScaling {
   triggers?: KEDATrigger[];
   minReplicas?: number;
   maxReplicas?: number;
-}
-
-// ComponentConfig is the per-component knob set (resources / envFrom / scaling /
-// env) editable at app level and per environment.
-export interface ComponentConfig {
-  resources?: ComponentResources;
-  envFromSecrets?: string[];
-  envFromConfigMaps?: string[];
-  scaling?: ComponentScaling;
-  env?: Record<string, string>;
 }
 
 // ClusterValueOverrideDTO mirrors the backend per-(env, cluster) override.
@@ -877,6 +855,22 @@ export interface KargoStageStatus {
   health: string;
   currentFreight?: string;
   availableFreightCount: number;
+  /** Human-friendly explanation (with raw detail) when the stage needs attention. */
+  issue?: string;
+}
+
+/** Image-discovery (Warehouse) side of the CD pipeline. */
+export interface KargoWarehouseStatus {
+  exists: boolean;
+  ready: boolean;
+  /** Human-friendly explanation (with raw detail) when discovery is failing. */
+  issue?: string;
+}
+
+/** One-line rollup of the app's CD pipeline state. */
+export interface KargoCDSummary {
+  state: "active" | "setting_up" | "deploying" | "attention";
+  message?: string;
 }
 
 /** Response from GET .../kargo/stages */
@@ -884,6 +878,8 @@ export interface KargoAppPipeline {
   /** False when no Kargo pipeline reader is wired; stages is then empty. */
   available?: boolean;
   stages: KargoStageStatus[];
+  warehouse?: KargoWarehouseStatus;
+  summary?: KargoCDSummary;
 }
 
 export interface PromoteResponse {
@@ -900,6 +896,9 @@ export interface PromoteResponse {
   mechanism?: "kargo" | "in-store";
   /** Populated when Kargo is configured — describes the created Promotion CR. */
   kargoPromotion?: KargoPromotion;
+  /** Set when the release shipped via GitOps because the CD pipeline could not
+   *  run the promotion — human-friendly, raw platform error appended. */
+  warning?: string;
   /** Populated when Kargo is NOT configured — in-store release copy result. */
   release?: AppReleaseRef;
 }
@@ -1009,9 +1008,7 @@ export interface CreateAppRequest {
    *  publish. String leaves may reference ((platform.*))/((vars.*)) tokens. No secrets. */
   rawValues?: Record<string, unknown>;
   /** App-level per-component config keyed by component name. */
-  componentConfigs?: Record<string, ComponentConfig>;
   /** Per-(env, component) overrides keyed env → component. */
-  envComponents?: Record<string, Record<string, ComponentConfig>>;
   /** Continuous-delivery settings (external-CD tag ownership). */
   cd?: CDConfig;
   /** Per-slot image repository bindings (keyed by template slot name). */

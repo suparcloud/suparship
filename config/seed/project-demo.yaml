@@ -1,6 +1,7 @@
 # Seed: demo project (environments are inherited from org config — see org.yaml).
 # Applied by: hack/seed.sh  (kubectl apply -f config/seed/)
-# Matches the fake/in-memory seed in internal/fake/seed.go.
+# The project seeds EMPTY — apps are created via the API/UI (the shipnotes
+# demo comes from `task demo:shipnotes`).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -22,26 +23,3 @@ data:
       # pipeline (staging → prod) from the org config. Add entries here only when
       # you need project-specific overrides or additional environments.
       environments: []
-      services:
-        - name: hello
-          template:
-            name: web-service
-            version: "1.0.0"
-          values:
-            image_repository: ghcr.io/suparcloud/hello
-            image_tag: v1.0.0
-      apps:
-        - name: hello
-          spec:
-            displayName: Hello App
-            description: A simple hello-world web application.
-            template:
-              name: web-service
-              version: "1.0.0"
-            values:
-              image_repository: ghcr.io/suparcloud/hello
-              image_tag: v1.0.0
-            components:
-              - name: web
-                type: web
-                enabledInPreview: true

@@ -30,7 +30,6 @@
 //	            name: web-service
 //	            version: "1.0.0"
 //	          values:
-//	            image_repository: ghcr.io/org/api
 //	            size: small
 //	          secretRefs:
 //	            - name: database_url

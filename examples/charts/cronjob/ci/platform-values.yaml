@@ -1,0 +1,10 @@
+# CI smoke values: the platform contract, as an app overlay would express it.
+# Tokens are literal strings here; the platform interpolates them at publish.
+image:
+  repository: busybox
+  tag: "((platform.imageTag))"
+envFrom:
+  configMaps: ["((platform.configMapName))"]
+  secrets: ["((platform.secretName))"]
+# Asserts spec.suspend: true renders (the platform's suspend convention key).
+suspend: true

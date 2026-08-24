@@ -144,13 +144,37 @@ helm_resource(
     'kargo', 'oci://ghcr.io/akuity/kargo-charts/kargo', namespace='kargo',
     flags=['--create-namespace', '--version=1.9.5',
            '--set=api.tls.enabled=false',
+           # Dev-only: the gitops repo lives in the in-cluster Gitea over plain
+           # HTTP, and Kargo refuses to hand promotion steps credentials for
+           # http:// endpoints by default ("refused to get credentials for
+           # insecure HTTP endpoint") — git-push then fails with "could not
+           # read Username". Never enable off-localhost.
+           '--set=controller.allowCredentialsOverHTTP=true',
            '--set=api.adminAccount.enabled=true',
            '--set=api.adminAccount.passwordHash=' + KARGO_ADMIN_PASSWORD_HASH,
            '--set=api.adminAccount.tokenSigningKey=suparship-dev-only-kargo-signing-key',
            '--wait', '--timeout=10m0s'],
-    resource_deps=['cert-manager', 'argo-rollouts'],
+    # argocd must precede kargo: kargo-controller checks for the Argo CD CRDs
+    # ONCE at startup and, if absent, permanently disables its ArgoCD
+    # integration for the life of the pod — every promotion's argocd-update
+    # step then fails with "Argo CD integration is disabled on this
+    # controller". (Observed on fresh `task up`: controller started ~90s
+    # before the CRDs landed.)
+    resource_deps=['cert-manager', 'argo-rollouts', 'argocd'],
     labels=['prereq'],
 )
+# Kargo can't speak plain HTTP to the kind registry (it always dials HTTPS;
+# insecureSkipTLSVerify only skips cert verification), so warehouse image
+# discovery — and with it every promotion — fails without this shim: an
+# in-cluster TLS-terminating proxy plus a hostAliases patch scoped to
+# kargo-controller. See hack/dev/kargo-registry-shim.sh.
+local_resource(
+    'kargo-registry-shim',
+    cmd='hack/dev/kargo-registry-shim.sh',
+    resource_deps=['kargo'],
+    labels=['prereq'],
+)
+
 # NOTE: no port_forwards on the helm_resource above — deliberately.
 #
 # Kargo's chart ships an hourly garbage-collector CronJob whose pods carry the
@@ -297,6 +321,17 @@ local_resource(
     resource_deps=['gitea'], labels=['prereq'],
 )
 
+# ── Template catalog (examples/charts via the registry) ────────────────────
+# There are no built-in templates: the dev loop gets its catalog the same way
+# a real install does — a gitcharts source. This pushes examples/charts into
+# Gitea and registers/syncs the example-charts source.
+local_resource(
+    'seed-templates',
+    cmd='hack/dev/seed-example-charts.sh',
+    resource_deps=['suparship', 'init-gitops', 'seed'],
+    labels=['app'],
+)
+
 # ── Shipnotes demo (manual ▶ in the Tilt UI, or `task demo:shipnotes`) ─────
 # One click → the full working demo: mirror suparship-demo into Gitea, wire
 # its CI, register the example-charts source (postgres), wait for the first
@@ -306,7 +341,7 @@ local_resource(
     cmd='hack/dev/demo-shipnotes.sh',
     auto_init=False,
     trigger_mode=TRIGGER_MODE_MANUAL,
-    resource_deps=['suparship', 'init-gitops', 'act-runner', 'seed'],
+    resource_deps=['suparship', 'init-gitops', 'act-runner', 'seed', 'seed-templates'],
     labels=['demo'],
     links=[link('http://shipnotes-frontend.staging.localhost', 'Shipnotes (staging)')],
 )
@@ -370,21 +405,15 @@ docker_build_with_restart(
     # live here. The rest is covered by env (SUPARSHIP_CLUSTER_MODE=kubernetes
     # from the chart; SUPARSHIP_ADDR/SUPARSHIP_UI_DIR from Dockerfile.dev) and
     # flag defaults (admin-secret-* default to the chart's values).
-    # --templates-dir: without it the server starts with ZERO templates, so
-    # `POST /apps` fails with `template "web-service" not found` and the golden
-    # path is unreachable. In-cluster suparship otherwise reads templates from
-    # ConfigMaps, which only an external template-repo sync populates; the
-    # built-ins live on disk in this repo, so point at them directly (the same
-    # thing the old host-process loop did with SUPARSHIP_TEMPLATES_DIR).
-    entrypoint='/usr/local/bin/suparship server --log-level=debug --templates-dir=/src/templates',
-    only=['go.mod', 'go.sum', 'cmd', 'internal', 'templates', 'ui/dist'],
+    # There are no built-in templates: the server starts with zero and serves
+    # cluster templates live; the `seed-templates` resource registers the
+    # example-charts registry source so the catalog exists out of the box.
+    entrypoint='/usr/local/bin/suparship server --log-level=debug',
+    only=['go.mod', 'go.sum', 'cmd', 'internal', 'ui/dist'],
     live_update=[
         fall_back_on(['go.mod', 'go.sum']),   # dep change -> full image rebuild
         sync('./cmd', '/src/cmd'),
         sync('./internal', '/src/internal'),
-        # Editing a template.yaml or its chart takes effect on the next sync —
-        # no rebuild, since templates are read from disk at request time.
-        sync('./templates', '/src/templates'),
     ] + ui_sync + [                            # all sync steps must precede run steps
         run('go build -o /usr/local/bin/suparship ./cmd/suparship',
             trigger=['./cmd', './internal']),

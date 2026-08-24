@@ -68,7 +68,7 @@ type DevServerDeps struct {
 	RuntimeProvider *FakeRuntimeProvider
 	LogsProvider    *FakeLogsProvider
 	// AppStore provides in-memory app and environment data seeded with the demo
-	// hello app.  It implements domain.AppStore via DevRuntime.
+	// seeded apps.  It implements domain.AppStore via DevRuntime.
 	AppStore domain.AppStore
 	// ClusterStore provides in-memory cluster registry seeded with staging-cluster
 	// and prod-cluster. It implements domain.ClusterStore via DevRuntime.
@@ -160,10 +160,14 @@ func newFakeOrgProvider() *FakeOrgProvider {
 }
 
 func defaultFakeOrg() *rbac.Org {
+	// Fake mode mirrors the dev seed: plain-HTTP endpoints (the seeded demo
+	// URLs in seed.go are all http://localhost).
+	insecure := false
 	return &rbac.Org{
-		Name:        "default",
-		DisplayName: "My Organization",
-		CreatedAt:   seedCreatedAt.Format(time.RFC3339),
+		Name:            "default",
+		DisplayName:     "My Organization",
+		CreatedAt:       seedCreatedAt.Format(time.RFC3339),
+		SecureEndpoints: &insecure,
 		Environments: []rbac.OrgEnvironment{
 			{
 				Name:             "staging",
@@ -213,7 +217,7 @@ func (p *FakeOrgProvider) SaveOrg(_ context.Context, org *rbac.Org) error {
 // ── FakeProjectStore ─────────────────────────────────────────────────────────
 
 // FakeProjectStore implements project.Store with an in-memory map.  It is
-// seeded with the demo project (two environments, one hello service).
+// seeded with the demo project (two environments, one notes-web service).
 // Mutations (Save, Delete) are transient — data resets when
 // NewDevServerDeps is called again.
 type FakeProjectStore struct {
@@ -236,12 +240,8 @@ func newFakeProjectStore() *FakeProjectStore {
 		Environments: []project.Environment{},
 			Services: []project.Service{
 				{
-					Name:     "hello",
-					Template: project.TemplateRef{Name: "web-service", Version: "1.0.0"},
-					Values: map[string]any{
-						"image_repository": "ghcr.io/suparcloud/hello",
-						"image_tag":        "v1.0.0",
-					},
+					Name:     "notes-web",
+					Template: project.TemplateRef{Name: "web", Version: "1.0.0"},
 				},
 			},
 		},
@@ -299,7 +299,7 @@ func (s *FakeProjectStore) Delete(_ context.Context, name string) error {
 // ── FakePreviewStore ─────────────────────────────────────────────────────────
 
 // FakePreviewStore implements preview.Store with an in-memory map.  It is
-// seeded with a single demo preview (pr-42 for the hello service).
+// seeded with a single demo preview (pr-42 for the notes-web service).
 // Save performs an upsert; Delete removes the entry.
 type FakePreviewStore struct {
 	mu       sync.RWMutex
@@ -318,7 +318,7 @@ func newFakePreviewStore() *FakePreviewStore {
 		},
 		Spec: preview.PreviewSpec{
 			Project: "demo",
-			Service: "hello",
+			Service: "notes-web",
 		},
 	}
 	s.previews[pr42.Metadata.Name] = pr42
@@ -384,18 +384,18 @@ func newFakeRuntimeProvider() *FakeRuntimeProvider {
 	ts := seedCreatedAt.Format(time.RFC3339)
 
 	seeded := map[string]string{
-		"demo-staging":          "http://hello.staging.demo.localhost",
-		"demo-prod":             "http://hello.prod.demo.localhost",
-		"demo-preview-pr-42":    "http://hello.demo-preview-pr-42.localhost",
+		"demo-staging":       "http://notes-web.staging.demo.localhost",
+		"demo-prod":          "http://notes-web.prod.demo.localhost",
+		"demo-preview-pr-42": "http://notes-web.demo-preview-pr-42.localhost",
 	}
 	for ns, url := range seeded {
 		replicas := int32(2)
 		if strings.Contains(ns, "preview") {
 			replicas = 1
 		}
-		p.runtimes[ns+"/hello"] = &runtime.RuntimeInfo{
+		p.runtimes[ns+"/notes-web"] = &runtime.RuntimeInfo{
 			Status:       runtime.StatusHealthy,
-			Image:        "ghcr.io/suparcloud/hello:v1.0.0",
+			Image:        "ghcr.io/suparcloud/notes-web:v1.0.0",
 			Replicas:     replicas,
 			Available:    replicas,
 			IngressURLs:  []string{url},
@@ -464,7 +464,7 @@ func (p *FakeLogsProvider) GetLogs(_ context.Context, req runtime.LogsRequest) (
 // Values are deterministic and match the timestamps in seedLogs.
 func fakeLogLines() []string {
 	return []string{
-		"2026-01-01T00:00:00Z INFO  starting hello service...",
+		"2026-01-01T00:00:00Z INFO  starting notes-web service...",
 		"2026-01-01T00:00:01Z INFO  listening on :8080",
 		"2026-01-01T00:00:02Z INFO  GET /healthz → 200 OK (0ms)",
 		"2026-01-01T00:00:03Z INFO  GET / → 200 OK (2ms)",

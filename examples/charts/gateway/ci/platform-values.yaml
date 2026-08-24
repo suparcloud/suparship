@@ -1,0 +1,5 @@
+# CI smoke values: a shared edge gateway serving a platform base domain.
+# The gateway is cluster infrastructure — it takes no envFrom/app tokens;
+# this just exercises the default listener pair + redirect + certificate.
+gatewayClassName: eg
+domain: apps.example.test

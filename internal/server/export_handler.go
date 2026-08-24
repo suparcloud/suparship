@@ -48,8 +48,9 @@ type helmValues struct {
 }
 
 type helmOrg struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName"`
+	Name            string `json:"name"`
+	DisplayName     string `json:"displayName"`
+	SecureEndpoints bool   `json:"secureEndpoints"`
 }
 
 type helmEnvironment struct {
@@ -196,8 +197,9 @@ func (h *exportHandler) collectOrg(ctx context.Context, vals *helmValues) {
 		return
 	}
 	vals.Org = helmOrg{
-		Name:        org.Name,
-		DisplayName: org.DisplayName,
+		Name:            org.Name,
+		DisplayName:     org.DisplayName,
+		SecureEndpoints: org.EffectiveSecureEndpoints(),
 	}
 
 	for _, env := range org.Environments {

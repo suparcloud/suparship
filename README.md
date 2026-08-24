@@ -56,11 +56,12 @@ org
 - **Environment** – a runtime context for an app (`staging`, `prod`, or an
   ephemeral `preview-*`). An environment is a lens on an app, not a top-level
   container. Environments are defined at the org level and shared by all projects.
-- **Component** – an internal runtime process within an app (`web`, `worker`,
-  `cron`). Hidden from the default UI; surfaced in advanced views only.
+- **Component** – a chart-backed workload within a *composed* app, declared by
+  the user with its own template and values. A plain single-chart app has none.
 - **Project** – a team / product boundary that groups apps. All projects inherit
   the org's ordered environment list for their promotion pipelines.
-- **Template** – a golden path (Helm chart + input schema) for creating apps.
+- **Template** – a plain Helm chart (plus optional curated metadata) served
+  from the template registry; apps are created from templates.
 
 Developers think in:
 > *app → environment → preview → promote*
@@ -148,7 +149,6 @@ suparship server --addr :9090 # custom address
 | `--addr` | `SUPARSHIP_ADDR` | `:8080` | Listen address |
 | `--ui-dir` | `SUPARSHIP_UI_DIR` | | Path to built frontend assets |
 | `--cors-origins` | `SUPARSHIP_CORS_ORIGINS` | | Comma-separated allowed origins |
-| `--templates-dir` | `SUPARSHIP_TEMPLATES_DIR` | | Path to templates directory |
 | `--cookie-secure` | `SUPARSHIP_COOKIE_SECURE` | `false` | Set `Secure` flag on session cookies (enable behind HTTPS) |
 
 ### Endpoints
@@ -268,8 +268,9 @@ custom dev identity.
 | Org | `default` — My Organization |
 | Project | `demo` — Demo Project |
 | Environments | `staging` (Order=1), `prod` (Order=2) — seeded from org config |
-| Service | `hello` (web-service template) |
-| Preview | `pr-42` |
+| Templates | `web`, `worker`, `cronjob`, `postgres` (mirroring `examples/charts/`) |
+| Apps | `notes-web` (single `web` chart), `api-gateway` (composed) |
+| Preview | `pr-42` (on `notes-web`) |
 | Runtime status | `healthy` with fake ingress URLs |
 | Logs | Sample log lines (deterministic) |
 
@@ -473,18 +474,18 @@ spec:
   services:
     - name: api
       template:
-        name: web-service
+        name: web
         version: "1.0.0"
       values:
-        image_repository: ghcr.io/org/api
-        size: small
+        image:
+          repository: ghcr.io/org/api
       secretRefs:
         - name: database_url
           secretRef: api-db.url
       environmentOverrides:
         prod:
           values:
-            size: large
+            replicas: 3
           secretRefs:
             - name: database_url
               secretRef: api-db-prod.url
@@ -506,7 +507,7 @@ spec:
 | `name` | yes | DNS-compatible service name |
 | `template.name` | yes | Template to use for rendering |
 | `template.version` | no | Pin to a specific template version |
-| `values` | no | Input values matching template inputs |
+| `values` | no | Helm values overlay in the chart's own shape |
 | `secretRefs` | no | Secret references (written to vault, pulled by ESO) |
 | `environmentOverrides` | no | Per-environment value and secret overrides |
 
@@ -602,7 +603,7 @@ Significant design decisions are recorded as Architecture Decision Records (ADRs
 | [`docs/secrets.md`](docs/secrets.md) | Secrets architecture: 1Password integration, provisioning, audit policy |
 | [`docs/sso.md`](docs/sso.md) | OIDC single sign-on setup (Google Workspace, Okta, …) and group/team RBAC |
 | [`docs/acceptance.md`](docs/acceptance.md) | Golden-path acceptance: automated smoke test + manual real-cluster checklist |
-| [`docs/templates-components.md`](docs/templates-components.md) | How templates define component topology |
+| [`docs/templates-components.md`](docs/templates-components.md) | App components: composed apps, per-component values and env vars |
 | [`docs/try-suparship.md`](docs/try-suparship.md) | First-time tour: local cluster + the shipnotes demo end-to-end (macOS + Linux) |
 | [`docs/byo-charts.md`](docs/byo-charts.md) | Bring your own Helm charts — chart sources, `((platform.*))` tokens, UI-mapped developer values (+ [`examples/charts/`](examples/charts/)) |
 | [`docs/templates.md`](docs/templates.md) | Full template authoring reference |

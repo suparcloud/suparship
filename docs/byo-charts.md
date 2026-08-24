@@ -1,16 +1,18 @@
 # Bring your own Helm charts
 
-suparship does not require charts to know anything about suparship. You can
-deploy the Helm charts you already have — unmodified — and do all of the
-platform wiring from the outside: in the app's values overlay and in the UI.
-This is how we run suparship in production, and it is the recommended starting
-point; authoring [templates](templates.md) is an optional layer you can add
-later, not an entry fee.
+Bring-your-own charts is not a mode of suparship — it is **the** model. There
+are no built-in templates and no values schema the platform injects: every
+chart on the platform is a plain Helm chart you (or your platform team)
+registered, and charts never need to know anything about suparship. You deploy
+the Helm charts you already have — unmodified — and do all of the platform
+wiring from the outside: in the app's values overlay and in the UI. Authoring
+a [`template.yaml`](templates.md) is an optional metadata layer on top, not an
+entry fee.
 
 Three things make this work:
 
 1. **Chart sources** — point suparship at a directory of plain charts (git or
-   OCI); each chart is imported as a *passthrough* template automatically.
+   OCI); each chart is imported as a template automatically.
 2. **`((platform.*))` tokens** — put them in an app's values overlay and the
    publisher resolves them per environment at publish time. The chart just
    sees ordinary strings.
@@ -20,9 +22,10 @@ Three things make this work:
 
 A set of production-ready starting points lives in
 [`examples/charts/`](../examples/charts/): `web` (Ingress or Gateway API),
-`worker`, `cronjob`, and a standalone `gateway` edge chart. They are plain
-Helm — installable with `helm install` on any cluster — and double as the
-reference for the conventions below.
+`worker`, `cronjob`, `job` (release-gating PreSync hook), a standalone
+`gateway` edge chart, and a single-instance `postgres` for demo stacks. They
+are plain Helm — installable with `helm install` on any cluster — and double
+as the reference for the conventions below.
 
 ## Registering a chart source
 
@@ -36,20 +39,18 @@ reference for the conventions below.
 | Credentials | token or username/password for private repos | anonymous |
 
 Every directory under *Path* containing a `Chart.yaml` is imported as a
-template. Charts without a bundled `template.yaml` (the normal case) come in
-as **passthrough**: suparship publishes *only your overlay values plus
-resolved tokens* — it never injects its own values schema into your chart.
-Sources re-sync on an interval (`SUPARSHIP_TEMPLATE_SYNC_INTERVAL`, default
-5m), so pushing a chart change to the repo rolls it out to new publishes.
+template. suparship publishes *only your overlay values plus resolved
+tokens* — it never injects its own values into your chart; the chart's own
+`values.yaml` stays the Helm base. Sources re-sync on an interval
+(`SUPARSHIP_TEMPLATE_SYNC_INTERVAL`, default 5m), so pushing a chart change
+to the repo rolls it out to new publishes.
 
 > **Template names are global.** The imported template is named after the
-> chart (`Chart.yaml` `name`), across *all* sources and built-ins. A chart
-> whose name is already provided by a different source or by a built-in
-> template is **refused at sync** — the source's sync result names the owner
-> ("rename the chart or remove the conflicting template") while the rest of
-> the repo imports normally. Give your charts names that are unique across
-> everything you register (e.g. the built-in templates already claim
-> `worker` and `cronjob`).
+> chart (`Chart.yaml` `name`), across *all* sources. A chart whose name is
+> already provided by a different source is **refused at sync** — the
+> source's sync result names the owner ("rename the chart or remove the
+> conflicting template") while the rest of the repo imports normally. Give
+> your charts names that are unique across everything you register.
 
 For example, to make this repo's example charts available:
 
@@ -92,8 +93,8 @@ httpRoute:
       sectionName: ((platform.externalGatewaySectionName))
 ```
 
-Commonly used tokens (see `internal/helmvalues/values.go` `PlatformContext`
-for the full list):
+Commonly used tokens (see `internal/platform/interpolate.go` `PlatformTokens`
+for the full catalog):
 
 | Token | Resolves to |
 | --- | --- |
@@ -103,7 +104,7 @@ for the full list):
 | `((platform.externalGatewayName/Namespace/SectionName))` (+ `internal…`) | the Gateway API parentRef of the resolved routing profile |
 | `((platform.env))` / `((platform.envType))` | environment name / classification (`staging`, `prod`, `preview`) |
 | `((platform.namespace))` / `((platform.cluster))` | target namespace / cluster |
-| `((platform.imageTag))` | the app's resolved image tag (pin sidecars to the same build) |
+| `((platform.imageTag))` | the resolved image tag — the per-PR tag in previews, `""` in stable envs (where CD owns the tag) |
 | `((platform.previewName))` | the PR id in previews (suffix resource names in shared-namespace previews) |
 | `((vars.KEY))` | the resolved value of app/env variable `KEY` |
 
@@ -141,11 +142,12 @@ configure it as a routing profile. App charts then attach HTTPRoutes to it
 through the `((platform.externalGateway*))` tokens — no app ever hardcodes
 the edge.
 
-## When to graduate to a template
+## When to add a `template.yaml`
 
-Passthrough charts cover the whole lifecycle: envs, previews, promotion,
+A plain chart covers the whole lifecycle: envs, previews, promotion,
 rollback, per-component variables. Author a `template.yaml`
-([reference](templates.md)) only when you want the extra layer it buys:
-org-curated presets and inputs, canonical values injection for
-`suparship-common` charts, or per-env template defaults maintained by a
-platform team.
+([reference](templates.md)) only when you want to ship curated metadata
+*with* the chart: platform-authored default/per-env values overlays,
+a declared developer-values projection, or image slots for CD wiring —
+things an org can otherwise also layer on from the UI without touching the
+chart repo.

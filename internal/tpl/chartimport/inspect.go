@@ -249,8 +249,8 @@ func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 	if arc.Chart.Name == "" {
 		return nil, fmt.Errorf("chart name is empty")
 	}
-	// A library chart (e.g. suparship-common) has no deployable manifests — it
-	// must never become an app template, on any import/sync path.
+	// A library chart (Chart.yaml type: library) has no deployable manifests —
+	// it must never become an app template, on any import/sync path.
 	if strings.EqualFold(strings.TrimSpace(arc.Chart.Type), "library") {
 		return nil, fmt.Errorf("%s: %w", arc.Chart.Name, ErrLibraryChart)
 	}
@@ -322,14 +322,6 @@ func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 				// .tgz) takes a different path and never reaches here.
 				Chart: tpl.ChartLocator{Path: "./chart"},
 			},
-			Components: []tpl.TemplateComponent{
-				{
-					Name:     "web",
-					Type:     tpl.TemplateComponentWeb,
-					Required: true,
-					Exposed:  true,
-				},
-			},
 			Inputs:   inputs,
 			Mappings: mappings,
 			Images:   DetectImageMappings(arc.Values),
@@ -347,9 +339,9 @@ func ToTemplate(arc *ChartArchive) (*tpl.Template, error) {
 // image block carries a "repository" string, so the generated template stays
 // valid; tag-only image blocks are left for the operator to complete manually.
 //
-// Recognised shapes: a root `image` block, `components.<name>.image` (canonical
-// suparship layout), and any top-level service map containing an `image` block
-// (e.g. `agent.image`, `caller.image` in multi-service BYO charts).
+// Recognised shapes: a root `image` block, a `components.<name>.image` block,
+// and any top-level service map containing an `image` block (e.g.
+// `agent.image`, `caller.image` in multi-service charts).
 func DetectImageMappings(values map[string]any) []tpl.TemplateImage {
 	if values == nil {
 		return nil

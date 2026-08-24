@@ -25,26 +25,27 @@ registry, renders the Kubernetes manifests into the GitOps repo, and ArgoCD
 delivers them. Promotion between environments is gated and explicit (except the
 first environment, which auto-promotes new freight).
 
-## 1. Create the app
+## 1. Create the app and point it at your image
 
-App → New, pick a template, and set the **image repository** — the bare image
-reference, no scheme and no tag:
+App → New, pick a template, and set the image **in the chart's own values** —
+typically `image.repository` (bare reference: host + path, **no** `https://`,
+**no** `:tag`, **no** `@sha256:…`) via the values editor or the template's
+developer-values form. There is no separate image field on the app: the chart
+defines where its image lives, and suparship reads it from the values.
 
-| Field | Example | Notes |
-|---|---|---|
-| `image_repository` | `ghcr.io/acme/web` | host + path only. **No** `https://`, **no** `:tag`, **no** `@sha256:…`. |
-| `image_tag` | `1.4.2` | optional; the running tag. CI updates this via new images, not by editing here. |
+Then bind it for CD: on the app's Overview, image settings list every image
+**discovered** in the effective values (chart defaults ⊕ template/org
+overlays ⊕ your own overlay — every image block with a repository). Pick the
+ones CD should manage; each binding is keyed by the chart's own **tag path**
+(`image.tag` in the example charts), which is where suparship writes the
+promoted tag. Unbound images (sidecars, init containers) are simply left
+alone. For a composed app, bindings live per component, against that
+component's chart. No bindings = no CD: suparship writes no Kargo Warehouse
+and promotions stay paused until you bind an image.
 
-suparship rejects a malformed `image_repository` at creation time (a scheme, a
-tag, a digest, or whitespace) so you find out immediately rather than seeing
-pods stuck in `InvalidImageName` later.
-
-> If you leave `image_repository` empty, the app uses a non-resolving
-> placeholder (`ghcr.io/{project}/{app}`) and its pods will sit in
-> `InvalidImageName` / `ErrImagePull`. The app's status page shows this as a
-> diagnostic with a suggested fix, and the server logs a warning on publish.
-> Some templates ship their own image (e.g. a stock nginx) — those don't need
-> one.
+> The example charts default to public demo images, so an app with no image
+> configured still deploys something runnable — set `image.repository` to
+> your build when you're ready.
 
 ## 2. Make sure the registry is reachable
 
@@ -61,14 +62,15 @@ The registry URL there is also a bare host (`ghcr.io`,
 Your pipeline builds and pushes a tagged image to that repository:
 
 ```bash
-docker build -t ghcr.io/acme/web:1.4.2 .
-docker push ghcr.io/acme/web:1.4.2
+docker build -t ghcr.io/acme/web:$(git rev-parse --short=7 HEAD) .
+docker push ghcr.io/acme/web:$(git rev-parse --short=7 HEAD)
 ```
 
-By default the Kargo Warehouse only treats **SemVer** tags (`1.4.2`,
-`2.0.0`) as new freight. When you set a concrete `image_repository` on the app,
-suparship relaxes the Warehouse to accept any tag — tighten the tag pattern on
-the Warehouse directly if you want stricter matching.
+By default a binding's Warehouse subscription accepts **7-character git SHA**
+tags (`^[0-9a-f]{7}$`) and promotes the most recently pushed one
+(`NewestBuild`). Both are per-binding settings in the image editor — set a
+`tagPattern` and/or a `selectionStrategy` (`SemVer`, `Digest`, `Lexical`) to
+match your CI's tag scheme.
 
 No webhook is required: Kargo polls the registry. A newly pushed tag appears as
 freight within the Warehouse's polling interval.
@@ -105,7 +107,8 @@ Set them per scope on the app's Secrets/Variables tabs. See
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Pods `InvalidImageName` / `ErrImagePull` | no/placeholder `image_repository`, or missing pull secret | set a real image repository; have the platform team configure the registry |
+| Pods `InvalidImageName` / `ErrImagePull` | bad `image.repository` in the values, or missing pull secret | fix the image repository in the app's values; have the platform team configure the registry |
 | App "Not deployed", diagnostic shows a destination/appproject error | env not bound to a registered cluster | platform team binds the env to a cluster (Settings → Environments) |
 | Secret keys don't reach pods; diagnostic "store not ready" | cluster's secret backend not finished | platform team completes the secret-backend gate on the setup checklist |
-| New image tag doesn't show as freight | tag isn't SemVer (default pattern) | push a SemVer tag, or loosen the Warehouse tag pattern |
+| New image tag doesn't show as freight | tag doesn't match the binding's pattern (default: 7-char git SHA) | push a matching tag, or change the binding's `tagPattern`/`selectionStrategy` |
+| Promote does nothing, no Warehouse exists | no image binding on the app/component | bind an image in the app's image settings |

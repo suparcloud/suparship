@@ -253,7 +253,7 @@ Written once per app per environment directory:
 ```yaml
 name: hello
 project: demo
-template: web-service
+template: web
 ```
 
 The ApplicationSet's Git File generator reads these files to discover all apps
@@ -338,7 +338,7 @@ typically go to the staging cluster):
 appName: hello
 project: demo
 previewName: pr-42
-template: web-service
+template: web
 clusterServer: "https://staging-api:6443"
 namespace: hello-pr-42
 ```
@@ -487,5 +487,5 @@ manually written Application CRs.
 ## Related docs
 
 - [app-model.md](app-model.md) — the org/project/app/environment hierarchy
-- [templates.md](templates.md) — Helm chart templates and the values schema
+- [templates.md](templates.md) — the template registry and `template.yaml` reference
 - [local-dns.md](local-dns.md) — setting up local ingress DNS for development

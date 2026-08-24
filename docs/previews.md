@@ -121,17 +121,21 @@ Content-Type: application/json
 { "name": "pr-42", "imageTag": "sha-abc1234" }   # deploy a specific image tag
 ```
 
-**`imageTag`** overrides the tag for every image the app's template maps (omit it
-to inherit the base env's image). Create is an **upsert**: re-POSTing an existing
+**`imageTag`** overrides the tag for every **CD-bound** image — each binding's
+`tagKey` in the app's (or, composed, each component's) values (omit it to
+inherit the base env's image). Create is an **upsert**: re-POSTing an existing
 preview re-publishes it with the new tag — `201` on first create, `200` on
 update — so CI can push a fresh image and re-point the preview on every commit.
 
-**Secondary images (sidecars, init containers).** `imageTag` only reaches images
-the template *maps* (the canonical `image.repository`/`image.tag`). A chart with a
-second image the mapping doesn't cover — e.g. a sidecar — would otherwise fall
-back to its chart default (often `:latest`) and fail to pull in a preview. Pin it
-to the resolved tag with the **`((platform.imageTag))`** token in the app's values
-(or preview overrides), which resolves to the per-PR tag at deploy:
+**Everything else pins via `((platform.imageTag))`.** `imageTag` only reaches
+the bound tag keys. Any other image in the values — a sidecar, an init
+container, or a chart with no binding at all — would otherwise fall back to
+its chart default (often `:latest`) and fail to pull in a preview. Pin it with
+the **`((platform.imageTag))`** token in the app's values, its preview
+overrides, or the template's `previewDefaultValues` (the dev seeder sets the
+`web` template's org override to `image: {tag: ((platform.imageTag))}` for
+exactly this). The token is always resolved: the per-PR tag in previews, `""`
+in stable envs (where CD owns the tag and the chart default applies):
 
 ```yaml
 sidecar:
@@ -226,4 +230,4 @@ one-directional — a preview can be promoted *to* a stable env, never the rever
 
 - [secrets.md](secrets.md) — the scope/vault model the preview band reuses.
 - [app-model.md](app-model.md) — `AppSpec`, `EnvironmentDefaults`, environments.
-- [templates-components.md](templates-components.md) — components and `enabled`.
+- [templates-components.md](templates-components.md) — composed-app components and `previewEnabled`.

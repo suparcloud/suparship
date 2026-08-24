@@ -100,46 +100,6 @@ func TestSyncChart_SkipsWhenAlreadyPresent(t *testing.T) {
 	}
 }
 
-func TestSyncChart_LocalDiskTakesPrecedence(t *testing.T) {
-	repoDir := t.TempDir()
-	templatesDir := t.TempDir()
-	// Local chart: charts/{name}/ should mirror this directory.
-	chartDir := filepath.Join(templatesDir, "demo", "chart")
-	if err := os.MkdirAll(chartDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte("name: demo\n"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	// Fetcher returns DIFFERENT bytes — if the local path is preferred we
-	// should never see these in the result.
-	fetcher := &fakeChartFetcher{
-		templateName: "demo",
-		data:         buildPackagedChart(t, "demo", map[string]string{"Chart.yaml": "from: cluster\n"}),
-	}
-
-	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL: "http://localhost/fake.git",
-		TemplatesDir: templatesDir,
-		ChartFetcher: fetcher,
-	})
-	if err != nil {
-		t.Fatalf("NewPublisher: %v", err)
-	}
-	if err := p.SyncChartForTest(context.Background(), repoDir, "demo", ""); err != nil {
-		t.Fatalf("SyncChart: %v", err)
-	}
-
-	got, err := os.ReadFile(filepath.Join(repoDir, "charts", "demo", "latest", "Chart.yaml"))
-	if err != nil {
-		t.Fatalf("read result: %v", err)
-	}
-	if string(got) != "name: demo\n" {
-		t.Errorf("expected local-disk content, got: %q", got)
-	}
-}
-
 func TestSyncChart_FallsBackToClusterBundle(t *testing.T) {
 	repoDir := t.TempDir()
 

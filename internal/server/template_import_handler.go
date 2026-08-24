@@ -133,7 +133,7 @@ func (h *templateImportHandler) handlePreview(w http.ResponseWriter, r *http.Req
 // handleImport validates the (optionally edited) template.yaml, persists it
 // to the cluster as a ConfigMap, and stores the chart bytes alongside it as
 // binaryData["chart.tgz"] so the GitOps publisher can later untar the chart
-// into the rendered repo without needing a local SUPARSHIP_TEMPLATES_DIR.
+// into the rendered repo straight from the cluster.
 func (h *templateImportHandler) handleImport(w http.ResponseWriter, r *http.Request) {
 	chartBytes, err := readChartUpload(r)
 	if err != nil {

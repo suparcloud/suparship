@@ -29,25 +29,47 @@ func webServiceTemplate() *tpl.Template {
 	}
 }
 
-// keyedTemplateLoader maps a template name to the canonical component key its
-// chart reads, so composed rendering can project each component onto the key
-// an off-the-shelf chart expects (web-service → "web", worker → "worker").
+// keyedTemplateLoader is a minimal TemplateLoader stub: the publisher no
+// longer reads component keys or values modes from templates, so the loader
+// just resolves known names to an empty template.
 type keyedTemplateLoader map[string]string
 
 func (l keyedTemplateLoader) LoadTemplate(_ context.Context, name string) (*tpl.Template, error) {
-	key, ok := l[name]
-	if !ok {
+	if _, ok := l[name]; !ok {
 		return nil, nil
 	}
-	return &tpl.Template{
-		Spec: tpl.TemplateSpec{
-			Components: []tpl.TemplateComponent{{Name: key}},
-		},
-	}, nil
+	return &tpl.Template{}, nil
 }
 
 // composedApp is a two-component composed app: api (web-service) + worker
 // (worker), each carrying its own Template — so AppSpec.IsComposed() is true.
+// envFromTokenValues is the BYO envFrom wiring: the platform object names reach
+// the chart only as resolved ((platform.*)) tokens in the component's overlay.
+func envFromTokenValues() map[string]any {
+	return map[string]any{
+		"envCfg": "((platform.configMapName))",
+		"envSec": "((platform.secretName))",
+	}
+}
+
+// readEnvFromTokens reads back the resolved envCfg/envSec tokens from a composed
+// component's published values.yaml.
+func readEnvFromTokens(t *testing.T, dir, app, comp string) (cm, sec string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", app, "components", comp, "values.yaml"))
+	if err != nil {
+		t.Fatalf("read %s values.yaml: %v", comp, err)
+	}
+	var v struct {
+		EnvCfg string `yaml:"envCfg"`
+		EnvSec string `yaml:"envSec"`
+	}
+	if err := yaml.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("unmarshal %s: %v", comp, err)
+	}
+	return v.EnvCfg, v.EnvSec
+}
+
 func composedApp() *domain.App {
 	return &domain.App{
 		Name:        "bigly",
@@ -55,7 +77,12 @@ func composedApp() *domain.App {
 		Spec: domain.AppSpec{
 			Components: []domain.ComponentSpec{
 				{Name: "api", Type: domain.ComponentType("web"), Enabled: true,
-					Template: &domain.AppTemplateRef{Name: "web-service"}},
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					// Platform wiring the BYO way: a token in the component's own
+					// values overlay, resolved at publish.
+					Values: map[string]any{
+						"ingress": map[string]any{"host": "((platform.routingHost))"},
+					}},
 				{Name: "worker", Type: domain.ComponentType("worker"), Enabled: true,
 					Template: &domain.AppTemplateRef{Name: "worker"}},
 			},
@@ -196,33 +223,34 @@ func TestWriteComposedAppTree_RendersFiles(t *testing.T) {
 		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
 	}
 
-	// Per-component values: emitted under each chart's canonical key, with a
-	// per-component fullname (app.name = {app}-{component}).
-	cases := []struct {
-		comp, key, fullname string
-	}{
-		{"api", "web", "bigly-api"},
-		{"worker", "worker", "bigly-worker"},
-	}
-	for _, c := range cases {
-		vpath := filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", c.comp, "values.yaml")
+	// Per-component values: ONLY the component's own overlay, tokens resolved,
+	// never an injected schema.
+	for _, comp := range []string{"api", "worker"} {
+		vpath := filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", comp, "values.yaml")
 		raw, err := os.ReadFile(vpath)
 		if err != nil {
-			t.Fatalf("read %s values.yaml: %v", c.comp, err)
+			t.Fatalf("read %s values.yaml: %v", comp, err)
 		}
-		var v struct {
-			App        struct{ Name string } `yaml:"app"`
-			Components map[string]any        `yaml:"components"`
-		}
+		var v map[string]any
 		if err := yaml.Unmarshal(raw, &v); err != nil {
-			t.Fatalf("unmarshal %s values.yaml: %v", c.comp, err)
+			t.Fatalf("unmarshal %s values.yaml: %v", comp, err)
 		}
-		if v.App.Name != c.fullname {
-			t.Errorf("%s: app.name = %q, want %q", c.comp, v.App.Name, c.fullname)
+		for _, k := range []string{"app", "platform", "components", "routing", "suparship"} {
+			if _, present := v[k]; present {
+				t.Errorf("%s: published values must not contain injected key %q:\n%s", comp, k, raw)
+			}
 		}
-		if _, ok := v.Components[c.key]; !ok {
-			t.Errorf("%s: values.components missing canonical key %q, got keys %v", c.comp, c.key, keysOf(v.Components))
-		}
+	}
+	// api's overlay token resolves to the per-component routing host.
+	apiRaw, _ := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", "api", "values.yaml"))
+	var api struct {
+		Ingress struct{ Host string } `yaml:"ingress"`
+	}
+	if err := yaml.Unmarshal(apiRaw, &api); err != nil {
+		t.Fatalf("unmarshal api values.yaml: %v", err)
+	}
+	if api.Ingress.Host != "bigly-api.staging.localhost" {
+		t.Errorf("api ingress.host = %q, want bigly-api.staging.localhost (resolved ((platform.routingHost)))", api.Ingress.Host)
 	}
 
 	// Rendered Application manifest for the (app, cluster) target.
@@ -260,6 +288,27 @@ func TestWriteComposedAppTree_RendersFiles(t *testing.T) {
 	}
 	if !strings.HasSuffix(root.Spec.Source.Path, "_composed-apps/staging") {
 		t.Errorf("composed App-of-Apps path = %q, want …/_composed-apps/staging", root.Spec.Source.Path)
+	}
+}
+
+// TestComposedApplicationsCarryResourcesFinalizer: rendered composed
+// Application manifests are pruned by a parent directory app when their file
+// disappears (component removal, preview teardown, undeploy) — without the
+// resources finalizer that prune deletes only the Application object and
+// orphans every workload in the namespace (the pr-close teardown bug).
+func TestComposedApplicationsCarryResourcesFinalizer(t *testing.T) {
+	app := composedApp()
+	opts := gitops.ComposedBuildOptions{
+		RepoURL: "https://git/repo.git", AppName: "demo-shipnotes-staging",
+		EnvName: "staging", ClusterServer: "https://c1", Namespace: "ns",
+		ComponentValues: map[string]string{"api": "a.yaml", "worker": "b.yaml"},
+	}
+	if m := gitops.BuildComposedApplication(app, opts); len(m.Metadata.Finalizers) != 1 || m.Metadata.Finalizers[0] != gitops.ArgoCDResourcesFinalizer {
+		t.Errorf("composed Application finalizers = %v, want [%s]", m.Metadata.Finalizers, gitops.ArgoCDResourcesFinalizer)
+	}
+	c := app.Spec.Components[0]
+	if m := gitops.BuildComponentApplication(app, c, opts); len(m.Metadata.Finalizers) != 1 || m.Metadata.Finalizers[0] != gitops.ArgoCDResourcesFinalizer {
+		t.Errorf("component Application finalizers = %v, want [%s]", m.Metadata.Finalizers, gitops.ArgoCDResourcesFinalizer)
 	}
 }
 
@@ -366,7 +415,7 @@ func TestWriteComposedAppTree_FanOut(t *testing.T) {
 		},
 		ComponentPlatformValues: map[string]gitops.ComponentPlatformValues{
 			"api": {Cluster: map[string]map[string]any{
-				"c1": {"components": map[string]any{"web": map[string]any{"replicaCount": 3}}},
+				"c1": {"replicaCount": 3},
 			}},
 		},
 	}}
@@ -392,25 +441,22 @@ func TestWriteComposedAppTree_FanOut(t *testing.T) {
 			t.Fatalf("read %s api values.yaml: %v", w.cluster, err)
 		}
 		var v struct {
-			Routing    struct{ Host string } `yaml:"routing"`
-			Components map[string]struct {
-				ReplicaCount int `yaml:"replicaCount"`
-			} `yaml:"components"`
+			Ingress      struct{ Host string } `yaml:"ingress"`
+			ReplicaCount int                   `yaml:"replicaCount"`
 		}
 		if err := yaml.Unmarshal(raw, &v); err != nil {
 			t.Fatalf("unmarshal %s api values.yaml: %v", w.cluster, err)
 		}
-		if v.Routing.Host != w.host {
-			t.Errorf("%s: routing.host = %q, want %q", w.cluster, v.Routing.Host, w.host)
+		if v.Ingress.Host != w.host {
+			t.Errorf("%s: ingress.host = %q, want %q (resolved ((platform.routingHost)))", w.cluster, v.Ingress.Host, w.host)
 		}
 		// The cluster-scoped platform overlay (replicaCount:3) lands ONLY on c1.
-		got := v.Components["web"].ReplicaCount
 		wantReplicas := 0
 		if w.cluster == "c1" {
 			wantReplicas = 3
 		}
-		if got != wantReplicas {
-			t.Errorf("%s: web.replicaCount = %d, want %d (cluster-scoped overlay)", w.cluster, got, wantReplicas)
+		if v.ReplicaCount != wantReplicas {
+			t.Errorf("%s: replicaCount = %d, want %d (cluster-scoped overlay)", w.cluster, v.ReplicaCount, wantReplicas)
 		}
 
 		// Worker component values also fan out per cluster.
@@ -569,58 +615,6 @@ func TestSingleSourceAppliesComponentValues(t *testing.T) {
 	}
 }
 
-// TestSingleSourceRemapsComponentKey verifies a 1-component app whose component
-// is named differently from the chart's canonical key still renders under the
-// canonical key (web-service reads components.web) — so renaming the sole
-// component never breaks single-source rendering.
-func TestSingleSourceRemapsComponentKey(t *testing.T) {
-	dir := t.TempDir()
-	app := &domain.App{
-		Name:        "hello",
-		ProjectName: "demo",
-		Spec: domain.AppSpec{
-			Template: domain.AppTemplateRef{Name: "web-service"},
-			Components: []domain.ComponentSpec{
-				{Name: "api", Type: domain.ComponentWeb, Enabled: true, // renamed from "web"
-					Template: &domain.AppTemplateRef{Name: "web-service"}},
-			},
-		},
-	}
-	if app.Spec.IsComposed() {
-		t.Fatal("1-component app must not be composed")
-	}
-	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL:        "https://git/repo.git",
-		TemplateLoader: keyedTemplateLoader{"web-service": "web"},
-	})
-	if err != nil {
-		t.Fatalf("NewPublisher: %v", err)
-	}
-	envs := []gitops.AppPublishEnv{{
-		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost",
-		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
-	}}
-	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
-		t.Fatalf("PublishAppFilesForTest: %v", err)
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "hello", "values.yaml"))
-	if err != nil {
-		t.Fatalf("read values.yaml: %v", err)
-	}
-	var v struct {
-		Components map[string]any `yaml:"components"`
-	}
-	if err := yaml.Unmarshal(raw, &v); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if _, ok := v.Components["web"]; !ok {
-		t.Errorf("values.components missing canonical key %q; got %v", "web", keysOf(v.Components))
-	}
-	if _, ok := v.Components["api"]; ok {
-		t.Error("values.components must not use the source component name 'api'")
-	}
-}
-
 // TestComposedPerComponentConfigProjection verifies per-component env scoping: a
 // component that opts out of app vars (InheritAppVars=false) points its
 // platform.configMapName at a curated <app>-<component>-config (built from its
@@ -636,10 +630,12 @@ func TestComposedPerComponentConfigProjection(t *testing.T) {
 			Template: domain.AppTemplateRef{Name: "web-service"},
 			Components: []domain.ComponentSpec{
 				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
-					Template: &domain.AppTemplateRef{Name: "web-service"}},
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					Values:   envFromTokenValues()},
 				{Name: "db", Type: domain.ComponentWorker, Enabled: true,
 					Template:       &domain.AppTemplateRef{Name: "web-service"},
 					InheritAppVars: &no,
+					Values:         envFromTokenValues(),
 					EnvVars: []domain.ComponentEnvVar{
 						{Name: "DB_URL", FromConfig: "DATABASE_URL"},
 						{Name: "POOL", Value: "10"},
@@ -664,30 +660,16 @@ func TestComposedPerComponentConfigProjection(t *testing.T) {
 		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
 	}
 
-	readPlatform := func(comp string) (cm, sec string) {
-		raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", comp, "values.yaml"))
-		if err != nil {
-			t.Fatalf("read %s values.yaml: %v", comp, err)
-		}
-		var v struct {
-			Platform struct {
-				ConfigMapName string `yaml:"configMapName"`
-				SecretName    string `yaml:"secretName"`
-			} `yaml:"platform"`
-		}
-		if err := yaml.Unmarshal(raw, &v); err != nil {
-			t.Fatalf("unmarshal %s: %v", comp, err)
-		}
-		return v.Platform.ConfigMapName, v.Platform.SecretName
-	}
-
+	// The curated names are observable only through the resolved
+	// ((platform.configMapName))/((platform.secretName)) tokens in each
+	// component's own overlay (envFromTokenValues).
 	// Inheriting component → app-wide objects.
-	if cm, sec := readPlatform("api"); cm != "bigly-config" || sec != "bigly-secrets" {
-		t.Errorf("api platform = %q/%q, want bigly-config/bigly-secrets", cm, sec)
+	if cm, sec := readEnvFromTokens(t, dir, "bigly", "api"); cm != "bigly-config" || sec != "bigly-secrets" {
+		t.Errorf("api tokens = %q/%q, want bigly-config/bigly-secrets", cm, sec)
 	}
 	// Opt-out component → its projection ConfigMap, no app secrets.
-	if cm, sec := readPlatform("db"); cm != "bigly-db-config" || sec != "" {
-		t.Errorf("db platform = %q/%q, want bigly-db-config/\"\"", cm, sec)
+	if cm, sec := readEnvFromTokens(t, dir, "bigly", "db"); cm != "bigly-db-config" || sec != "" {
+		t.Errorf("db tokens = %q/%q, want bigly-db-config/\"\"", cm, sec)
 	}
 	// The projection ConfigMap has the curated, resolved keys.
 	raw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-db-configmap.yaml"))
@@ -711,6 +693,85 @@ func TestComposedPerComponentConfigProjection(t *testing.T) {
 	}
 }
 
+// TestComposedInheritExtrasProjection verifies the inherit + extend/override
+// posture: an INHERITING component with literal envVars gets its own
+// <app>-<component>-config holding the app/env vars MERGED with the literals
+// (literal wins), its ((platform.configMapName)) points there, and its
+// ((platform.secretName)) keeps pointing at the APP-WIDE secret. A sibling
+// without extras keeps the app-wide objects for both.
+func TestComposedInheritExtrasProjection(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name:        "bigly",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					Values:   envFromTokenValues()},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "worker"},
+					Values:   envFromTokenValues(),
+					// Inheriting (no InheritAppVars set) + literals: one new
+					// key, one override of an inherited key.
+					EnvVars: []domain.ComponentEnvVar{
+						{Name: "WORKER_ONLY", Value: "yes"},
+						{Name: "LOG_LEVEL", Value: "debug"},
+					}},
+			},
+		},
+	}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{RepoURL: "https://git/repo.git"})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true,
+		Namespace: "bigly-staging", BaseDomain: "localhost",
+		Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+		EnvVars:  map[string]string{"LOG_LEVEL": "info", "SHARED": "app"},
+	}}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
+	}
+
+	// worker → its merged ConfigMap for config, the APP-WIDE secret for secrets.
+	if cm, sec := readEnvFromTokens(t, dir, "bigly", "worker"); cm != "bigly-worker-config" || sec != "bigly-secrets" {
+		t.Errorf("worker tokens = %q/%q, want bigly-worker-config/bigly-secrets", cm, sec)
+	}
+	// api (no extras) → app-wide both.
+	if cm, sec := readEnvFromTokens(t, dir, "bigly", "api"); cm != "bigly-config" || sec != "bigly-secrets" {
+		t.Errorf("api tokens = %q/%q, want bigly-config/bigly-secrets", cm, sec)
+	}
+
+	// The merged ConfigMap: inherited keys present, literal added, literal
+	// override wins over the inherited value.
+	raw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-worker-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("read component-worker-configmap: %v", err)
+	}
+	var cm struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(raw, &cm); err != nil {
+		t.Fatalf("unmarshal worker configmap: %v", err)
+	}
+	if cm.Data["SHARED"] != "app" {
+		t.Errorf("SHARED = %q, want app (inherited key must flow through)", cm.Data["SHARED"])
+	}
+	if cm.Data["WORKER_ONLY"] != "yes" {
+		t.Errorf("WORKER_ONLY = %q, want yes (literal addition)", cm.Data["WORKER_ONLY"])
+	}
+	if cm.Data["LOG_LEVEL"] != "debug" {
+		t.Errorf("LOG_LEVEL = %q, want debug (literal override wins)", cm.Data["LOG_LEVEL"])
+	}
+	// No secret projection for the extend/override posture.
+	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-worker-externalsecret.yaml")); !os.IsNotExist(err) {
+		t.Errorf("inherit+extras must not render an ExternalSecret projection (err=%v)", err)
+	}
+}
+
 // TestComposedPerComponentSecretProjection verifies the secret subset/rename: an
 // opt-out component that selects app secret keys (FromSecret) points its
 // platform.secretName at a curated <app>-<component>-secrets ExternalSecret whose
@@ -725,10 +786,12 @@ func TestComposedPerComponentSecretProjection(t *testing.T) {
 			Template: domain.AppTemplateRef{Name: "web-service"},
 			Components: []domain.ComponentSpec{
 				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
-					Template: &domain.AppTemplateRef{Name: "web-service"}},
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					Values:   envFromTokenValues()},
 				{Name: "db", Type: domain.ComponentWorker, Enabled: true,
 					Template:       &domain.AppTemplateRef{Name: "web-service"},
 					InheritAppVars: &no,
+					Values:         envFromTokenValues(),
 					EnvVars: []domain.ComponentEnvVar{
 						{Name: "DB_PASS", FromSecret: "DATABASE_PASSWORD"},
 					}},
@@ -753,27 +816,11 @@ func TestComposedPerComponentSecretProjection(t *testing.T) {
 		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
 	}
 
-	readSecretName := func(comp string) string {
-		raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "bigly", "components", comp, "values.yaml"))
-		if err != nil {
-			t.Fatalf("read %s values.yaml: %v", comp, err)
-		}
-		var v struct {
-			Platform struct {
-				SecretName string `yaml:"secretName"`
-			} `yaml:"platform"`
-		}
-		if err := yaml.Unmarshal(raw, &v); err != nil {
-			t.Fatalf("unmarshal %s: %v", comp, err)
-		}
-		return v.Platform.SecretName
+	if _, sec := readEnvFromTokens(t, dir, "bigly", "api"); sec != "bigly-secrets" {
+		t.Errorf("api ((platform.secretName)) = %q, want bigly-secrets", sec)
 	}
-
-	if sec := readSecretName("api"); sec != "bigly-secrets" {
-		t.Errorf("api platform.secretName = %q, want bigly-secrets", sec)
-	}
-	if sec := readSecretName("db"); sec != "bigly-db-secrets" {
-		t.Errorf("db platform.secretName = %q, want bigly-db-secrets", sec)
+	if _, sec := readEnvFromTokens(t, dir, "bigly", "db"); sec != "bigly-db-secrets" {
+		t.Errorf("db ((platform.secretName)) = %q, want bigly-db-secrets", sec)
 	}
 
 	esRaw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-db-externalsecret.yaml"))
@@ -813,6 +860,7 @@ func TestSingleSourceOptOut(t *testing.T) {
 				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
 					Template:       &domain.AppTemplateRef{Name: "web-service"},
 					InheritAppVars: &no,
+					Values:         envFromTokenValues(),
 					EnvVars: []domain.ComponentEnvVar{
 						{Name: "DB_URL", FromConfig: "DATABASE_URL"},
 					}},
@@ -833,16 +881,14 @@ func TestSingleSourceOptOut(t *testing.T) {
 		t.Fatalf("read values.yaml: %v", err)
 	}
 	var v struct {
-		Platform struct {
-			ConfigMapName string `yaml:"configMapName"`
-			SecretName    string `yaml:"secretName"`
-		} `yaml:"platform"`
+		EnvCfg string `yaml:"envCfg"`
+		EnvSec string `yaml:"envSec"`
 	}
 	if err := yaml.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if v.Platform.ConfigMapName != "solo-web-config" || v.Platform.SecretName != "" {
-		t.Errorf("platform = %q/%q, want solo-web-config/\"\"", v.Platform.ConfigMapName, v.Platform.SecretName)
+	if v.EnvCfg != "solo-web-config" || v.EnvSec != "" {
+		t.Errorf("tokens = %q/%q, want solo-web-config/\"\"", v.EnvCfg, v.EnvSec)
 	}
 	cmRaw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "solo", "component-web-configmap.yaml"))
 	if err != nil {
@@ -862,30 +908,11 @@ func TestSingleSourceOptOut(t *testing.T) {
 	}
 }
 
-// canonicalityLoader returns a template whose values mode is keyed by name:
-// true = canonical (suparship-common), false = BYO/passthrough. The component key
-// is the template name itself.
-type canonicalityLoader map[string]bool
-
-func (l canonicalityLoader) LoadTemplate(_ context.Context, name string) (*tpl.Template, error) {
-	canonical, ok := l[name]
-	if !ok {
-		return nil, nil
-	}
-	spec := tpl.TemplateSpec{Components: []tpl.TemplateComponent{{Name: name}}}
-	if !canonical {
-		no := false
-		spec.InjectCanonicalValues = &no
-	}
-	return &tpl.Template{Spec: spec}, nil
-}
-
-// TestComposedPassthroughComponentOmitsCanonicalSchema is the core BYO guarantee:
-// a composed component whose template is passthrough (InjectCanonicalValues:false)
-// gets ONLY its own overlay in values.yaml — with ((platform.*)) tokens resolved —
-// and NONE of the assumed canonical schema (app/components/routing/platform/
-// containerPort/suparship). A canonical sibling still gets the full doc.
-func TestComposedPassthroughComponentOmitsCanonicalSchema(t *testing.T) {
+// TestComposedComponentValuesOverlayOnly is the core BYO guarantee, universal
+// since the canonical schema retirement: EVERY component gets ONLY its own
+// overlay in values.yaml — with ((platform.*)) tokens resolved — and never an
+// injected schema (app/components/routing/platform/containerPort/suparship).
+func TestComposedComponentValuesOverlayOnly(t *testing.T) {
 	dir := t.TempDir()
 	app := &domain.App{
 		Name: "bigly", ProjectName: "demo",
@@ -904,8 +931,7 @@ func TestComposedPassthroughComponentOmitsCanonicalSchema(t *testing.T) {
 		},
 	}
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL:        "https://git/repo.git",
-		TemplateLoader: canonicalityLoader{"web-service": true, "byo-chart": false},
+		RepoURL: "https://git/repo.git",
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -946,10 +972,14 @@ func TestComposedPassthroughComponentOmitsCanonicalSchema(t *testing.T) {
 		t.Errorf("expected the overlay image to survive, got:\n%s", byo)
 	}
 
-	// Canonical sibling still gets the full doc.
-	api := read("api")
-	if !strings.Contains(api, "components:") || !strings.Contains(api, "platform:") {
-		t.Errorf("canonical component should keep the full schema, got:\n%s", api)
+	// The sibling with no overlay of its own publishes an empty doc — never an
+	// injected schema.
+	var apiDoc map[string]any
+	if err := yaml.Unmarshal([]byte(read("api")), &apiDoc); err != nil {
+		t.Fatalf("unmarshal api values: %v", err)
+	}
+	if len(apiDoc) != 0 {
+		t.Errorf("component without an overlay must publish {}, got keys %v", keysOf(apiDoc))
 	}
 }
 
@@ -980,7 +1010,6 @@ func TestComposedPerEnvComponentValues(t *testing.T) {
 	}
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
 		RepoURL:        "https://git/repo.git",
-		TemplateLoader: canonicalityLoader{"byo-chart": false},
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1020,7 +1049,6 @@ func TestComposedComponentIncludesPlatformOverrides(t *testing.T) {
 	dir := t.TempDir()
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
 		RepoURL:        "https://git/repo.git",
-		TemplateLoader: canonicalityLoader{"byo": false}, // passthrough → values.yaml IS the overlay
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1156,7 +1184,6 @@ func TestComposedPublishesStatefulComponentManifest(t *testing.T) {
 		RepoURL:        "https://git/repo.git",
 		ArgoCDRepoURL:  "https://git/repo.git",
 		SyncAutomated:  true,
-		TemplateLoader: canonicalityLoader{"byo-chart": false},
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1298,7 +1325,6 @@ func TestComposedPublishesKargoCRsAndAnnotation(t *testing.T) {
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
 		RepoURL:        "https://git/repo.git",
 		ArgoCDRepoURL:  "https://git/repo.git",
-		TemplateLoader: canonicalityLoader{"byo-chart": false},
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1359,7 +1385,6 @@ func TestComposedTagPreservedOnRepublish(t *testing.T) {
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
 		RepoURL:        "https://git/repo.git",
 		ArgoCDRepoURL:  "https://git/repo.git",
-		TemplateLoader: canonicalityLoader{"byo-chart": false},
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1428,7 +1453,6 @@ func TestComposedPromoteMaterializesEnv(t *testing.T) {
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
 		RepoURL:        "https://git/repo.git",
 		ArgoCDRepoURL:  "https://git/repo.git",
-		TemplateLoader: canonicalityLoader{"byo-chart": false},
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1577,7 +1601,6 @@ func TestSingleToComposedTransitionPrunesTree(t *testing.T) {
 	dir := t.TempDir()
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
 		RepoURL:        "https://git/repo.git",
-		TemplateLoader: canonicalityLoader{"byo-chart": false},
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1743,6 +1766,7 @@ func TestPreviewOfOptOutAppIsAppLevel(t *testing.T) {
 						{Name: "TOKEN", FromSecret: "API_TOKEN"},
 					}},
 			},
+			RawValues: envFromTokenValues(),
 		},
 	}
 	p := newTestPublisher(t)
@@ -1764,17 +1788,15 @@ func TestPreviewOfOptOutAppIsAppLevel(t *testing.T) {
 		t.Fatalf("read preview values.yaml: %v", err)
 	}
 	var v struct {
-		Platform struct {
-			ConfigMapName string `yaml:"configMapName"`
-			SecretName    string `yaml:"secretName"`
-		} `yaml:"platform"`
+		EnvCfg string `yaml:"envCfg"`
+		EnvSec string `yaml:"envSec"`
 	}
 	if err := yaml.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if v.Platform.ConfigMapName != "hello-config" || v.Platform.SecretName != "hello-secrets" {
-		t.Errorf("preview platform = %q/%q, want hello-config/hello-secrets (app-level, not the per-component projection)",
-			v.Platform.ConfigMapName, v.Platform.SecretName)
+	if v.EnvCfg != "hello-config" || v.EnvSec != "hello-secrets" {
+		t.Errorf("preview tokens = %q/%q, want hello-config/hello-secrets (app-level, not the per-component projection)",
+			v.EnvCfg, v.EnvSec)
 	}
 
 	// The app-wide ConfigMap the preview references is actually written.
@@ -1867,6 +1889,7 @@ func TestSingleSourceSecretProjection(t *testing.T) {
 				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
 					Template:       &domain.AppTemplateRef{Name: "web-service"},
 					InheritAppVars: &no,
+					Values:         envFromTokenValues(),
 					EnvVars: []domain.ComponentEnvVar{
 						{Name: "TOKEN", FromSecret: "API_TOKEN"},
 					}},
@@ -1888,15 +1911,13 @@ func TestSingleSourceSecretProjection(t *testing.T) {
 		t.Fatalf("read values.yaml: %v", err)
 	}
 	var v struct {
-		Platform struct {
-			SecretName string `yaml:"secretName"`
-		} `yaml:"platform"`
+		EnvSec string `yaml:"envSec"`
 	}
 	if err := yaml.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if v.Platform.SecretName != "solo-web-secrets" {
-		t.Errorf("platform.secretName = %q, want solo-web-secrets", v.Platform.SecretName)
+	if v.EnvSec != "solo-web-secrets" {
+		t.Errorf("((platform.secretName)) = %q, want solo-web-secrets", v.EnvSec)
 	}
 	esRaw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "solo", "component-web-externalsecret.yaml"))
 	if err != nil {
@@ -1909,6 +1930,75 @@ func TestSingleSourceSecretProjection(t *testing.T) {
 	// env-app item under project demo, app solo, env staging.
 	if !strings.Contains(es, `key: "demo-solo-env-staging"`) {
 		t.Errorf("expected resolution to the env-app item, got:\n%s", es)
+	}
+}
+
+// TestSingleSourceInheritExtras is the 1-component variant of the inherit +
+// extend/override posture: the sole component's merged ConfigMap backs
+// ((platform.configMapName)) while ((platform.secretName)) stays app-wide.
+func TestSingleSourceInheritExtras(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name:        "solo",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					Values:   envFromTokenValues(),
+					EnvVars: []domain.ComponentEnvVar{
+						{Name: "EXTRA", Value: "1"},
+						{Name: "LOG_LEVEL", Value: "debug"},
+					}},
+			},
+		},
+	}
+	envs := []gitops.AppPublishEnv{{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost",
+		Namespace: "solo-staging",
+		Clusters:  []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+		EnvVars:   map[string]string{"LOG_LEVEL": "info", "SHARED": "app"},
+	}}
+	p := newTestPublisher(t)
+	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishAppFilesForTest: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "envs", "staging", "demo", "solo", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read values.yaml: %v", err)
+	}
+	var v struct {
+		EnvCfg string `yaml:"envCfg"`
+		EnvSec string `yaml:"envSec"`
+	}
+	if err := yaml.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if v.EnvCfg != "solo-web-config" || v.EnvSec != "solo-secrets" {
+		t.Errorf("tokens = %q/%q, want solo-web-config/solo-secrets", v.EnvCfg, v.EnvSec)
+	}
+	cmRaw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "solo", "component-web-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("read component config: %v", err)
+	}
+	var cm struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(cmRaw, &cm); err != nil {
+		t.Fatalf("unmarshal cm: %v", err)
+	}
+	if cm.Data["SHARED"] != "app" || cm.Data["EXTRA"] != "1" || cm.Data["LOG_LEVEL"] != "debug" {
+		t.Errorf("merged data wrong: %+v", cm.Data)
+	}
+
+	// Reverting to no extras prunes the projection on republish.
+	app.Spec.Components[0].EnvVars = nil
+	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+		t.Fatalf("republish without extras: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "staging", "demo", "solo", "component-web-configmap.yaml")); !os.IsNotExist(err) {
+		t.Errorf("expected component configmap pruned after extras removed (err=%v)", err)
 	}
 }
 

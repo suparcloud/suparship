@@ -125,34 +125,6 @@ type AppSecretRef struct {
 	SecretRef string `json:"secretRef" yaml:"secretRef"`
 }
 
-// SizePreset is a coarse resource-sizing hint that abstracts CPU/memory
-// requests into a named t-shirt size. Mutually exclusive with an explicit
-// Replicas override on the same ComponentSpec.
-type SizePreset string
-
-const (
-	SizeSmall  SizePreset = "small"
-	SizeMedium SizePreset = "medium"
-	SizeLarge  SizePreset = "large"
-)
-
-// ParseSizePreset converts a raw string into a SizePreset, returning an error
-// if the value is not one of the known values.
-func ParseSizePreset(s string) (SizePreset, error) {
-	switch SizePreset(s) {
-	case SizeSmall, SizeMedium, SizeLarge:
-		return SizePreset(s), nil
-	default:
-		return "", fmt.Errorf("unknown size preset %q: must be one of small, medium, large", s)
-	}
-}
-
-// Valid reports whether p is a recognised SizePreset.
-func (p SizePreset) Valid() bool {
-	_, err := ParseSizePreset(string(p))
-	return err == nil
-}
-
 // ExposeMode declares how a component is reachable from outside the cluster.
 // The exact ingress class and TLS issuer come from the org's RoutingProfiles
 // keyed by the mode name; the component only declares its tier.
@@ -191,11 +163,11 @@ func (m ExposeMode) Valid() bool {
 }
 
 // ComponentSpec describes a single runtime unit within an app (e.g. web
-// server, background worker, or scheduled job). Component topology is derived
-// from the template by default; this struct allows explicit overrides.
-//
-// Replicas and SizePreset are mutually exclusive: set at most one.
-// Secret values MUST NOT appear in Config; use AppSpec.SecretRefs instead.
+// server, background worker, or scheduled job). Components are user-declared:
+// a plain single-chart app has none (the chart defines its own workloads); a
+// composed app declares one per chart source. Everything workload-shaped
+// (image, replicas, resources, scaling, ports) lives in the component's own
+// Values overlay, in the shape ITS chart expects.
 type ComponentSpec struct {
 	// Name uniquely identifies the component within the app (e.g. "web", "worker").
 	Name string `json:"name" yaml:"name"`
@@ -204,31 +176,11 @@ type ComponentSpec struct {
 	// Enabled controls whether this component is active. Disabled components
 	// are not deployed to any environment.
 	Enabled bool `json:"enabled" yaml:"enabled"`
-	// Replicas is the desired replica count. Zero means use the platform
-	// default. Mutually exclusive with SizePreset.
-	Replicas int32 `json:"replicas,omitempty" yaml:"replicas,omitempty"`
-	// SizePreset selects a named resource tier (small, medium, large).
-	// Mutually exclusive with Replicas.
-	SizePreset SizePreset `json:"sizePreset,omitempty" yaml:"sizePreset,omitempty"`
 	// ExposeMode selects which routing profile (disabled/internal/external)
 	// the chart should use for this component. The exact ingress class and
 	// TLS issuer come from the org's RoutingProfiles map keyed by this name;
 	// ExposeDisabled (the zero value) means no ingress is created.
 	ExposeMode ExposeMode `json:"exposeMode,omitempty" yaml:"exposeMode,omitempty"`
-	// Config holds non-secret key/value configuration for the component
-	// (e.g. environment variable defaults, feature flags). Secret values
-	// MUST NOT appear here; use AppSpec.SecretRefs instead.
-	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
-	// Resources sets raw CPU/memory requests+limits for the component
-	// container. Set instead of (or alongside, taking precedence over)
-	// SizePreset when a chart consumes raw resources.
-	Resources *ComponentResources `json:"resources,omitempty" yaml:"resources,omitempty"`
-	// EnvFromSecrets / EnvFromConfigMaps are extra Secret / ConfigMap names the
-	// component should envFrom, appended after the platform envFrom hierarchy.
-	EnvFromSecrets    []string `json:"envFromSecrets,omitempty" yaml:"envFromSecrets,omitempty"`
-	EnvFromConfigMaps []string `json:"envFromConfigMaps,omitempty" yaml:"envFromConfigMaps,omitempty"`
-	// Scaling holds per-component KEDA autoscaling (triggers + min/max).
-	Scaling *ComponentScaling `json:"scaling,omitempty" yaml:"scaling,omitempty"`
 	// Template, when set, gives this component its OWN chart — the app is then a
 	// composition of heterogeneous components, each rendered by its own template
 	// as a separate Helm source in one multi-source ArgoCD Application (e.g.
@@ -239,9 +191,9 @@ type ComponentSpec struct {
 	// Values is this component's own Helm values overlay, deep-merged onto its
 	// chart's values at publish (the value-based, schema-agnostic config, mirroring
 	// the app-level RawValues). It is how a composed component sets its image, port,
-	// command, resources, etc. — in the shape ITS chart expects, so a bring-your-own
-	// chart works as naturally as a canonical one. Only meaningful for composed
-	// components (those with a Template); the publisher applies it per component.
+	// command, resources, etc. — always in the shape ITS chart expects. Only
+	// meaningful for composed components (those with a Template); the publisher
+	// applies it per component.
 	Values map[string]any `json:"values,omitempty" yaml:"values,omitempty"`
 	// InheritAppVars controls whether this component blanket-envFroms the two
 	// app-wide objects <app>-config + <app>-secrets (getting EVERY app var). nil or
@@ -249,10 +201,17 @@ type ComponentSpec struct {
 	// in EnvVars (plus addon connection secrets and any EnvFrom* extras) — so a db
 	// component need not be exposed to every web var.
 	InheritAppVars *bool `json:"inheritAppVars,omitempty" yaml:"inheritAppVars,omitempty"`
-	// EnvVars is the component's curated environment: each entry either a literal
-	// value or a specific key selected (and optionally renamed) from the app's
-	// <app>-config / <app>-secrets. Rendered by the chart as env[] (literals as
-	// value, selections as valueFrom.configMapKeyRef/secretKeyRef).
+	// EnvVars is the component's own variable list. Its meaning follows
+	// InheritAppVars:
+	//   - inheriting (nil/true) + literal entries: extend/override — the
+	//     publisher renders <app>-<component>-config as the app/env resolved
+	//     vars MERGED with these literals (literal wins) and points the
+	//     component's ((platform.configMapName)) at it; the secret token
+	//     stays app-wide. Source-mapped entries are rejected in this mode.
+	//   - curated (false): the explicit list — each entry a literal or a key
+	//     selected (and optionally renamed) from the app's <app>-config /
+	//     <app>-secrets, rendered into the component's own curated
+	//     <app>-<component>-config / -secrets objects.
 	EnvVars []ComponentEnvVar `json:"envVars,omitempty" yaml:"envVars,omitempty"`
 	// Images binds this component's container image(s) for Kargo: the repository to
 	// watch and the tag-key path (in this component's own values overlay) where the
@@ -299,8 +258,8 @@ type ComponentImage struct {
 	// TagKey). Optional.
 	Name string `json:"name,omitempty" yaml:"name,omitempty"`
 	// TagKey is the dotted Helm values path — in this component's own values.yaml —
-	// where the promoted tag is written (e.g. "components.web.image.tag"). This is
-	// the selection key matched against the discovered images.
+	// where the promoted tag is written (e.g. "image.tag"). This is the selection
+	// key matched against the discovered images.
 	TagKey string `json:"tagKey" yaml:"tagKey"`
 	// Repository is normally derived from discovery. It is retained only as a
 	// legacy/BYO fallback: when a stored image's TagKey no longer matches any
@@ -345,45 +304,6 @@ func (s AppSpec) CuratesSecrets() bool {
 	return false
 }
 
-// ComponentResources holds raw Kubernetes resource quantities for a component
-// container — set directly rather than via a size preset. Keys are resource
-// names (cpu, memory, ephemeral-storage) mapped to quantity strings.
-type ComponentResources struct {
-	Requests map[string]string `json:"requests,omitempty" yaml:"requests,omitempty"`
-	Limits   map[string]string `json:"limits,omitempty" yaml:"limits,omitempty"`
-}
-
-// KEDATrigger is one KEDA ScaledObject trigger. Metadata values are all strings
-// (KEDA's contract). Advanced fields (authenticationRef, fallback, …) are out of
-// scope here — use the raw-values overlay for those.
-type KEDATrigger struct {
-	Type       string            `json:"type" yaml:"type"`
-	MetricType string            `json:"metricType,omitempty" yaml:"metricType,omitempty"`
-	Metadata   map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-}
-
-// ComponentScaling holds per-component KEDA autoscaling config. A non-empty
-// Triggers list replaces the chart's defaults for that component.
-type ComponentScaling struct {
-	Triggers    []KEDATrigger `json:"triggers,omitempty" yaml:"triggers,omitempty"`
-	MinReplicas *int32        `json:"minReplicas,omitempty" yaml:"minReplicas,omitempty"`
-	MaxReplicas *int32        `json:"maxReplicas,omitempty" yaml:"maxReplicas,omitempty"`
-}
-
-// ComponentConfig carries the per-component knobs that can be overridden per
-// environment (EnvironmentOverride.Components) and declared as template defaults
-// (ComponentDefaults). All fields optional; only set ones apply over the
-// app-level ComponentSpec values.
-type ComponentConfig struct {
-	Resources         *ComponentResources `json:"resources,omitempty" yaml:"resources,omitempty"`
-	EnvFromSecrets    []string            `json:"envFromSecrets,omitempty" yaml:"envFromSecrets,omitempty"`
-	EnvFromConfigMaps []string            `json:"envFromConfigMaps,omitempty" yaml:"envFromConfigMaps,omitempty"`
-	Scaling           *ComponentScaling   `json:"scaling,omitempty" yaml:"scaling,omitempty"`
-	// Env is a key/value env-override map for this component, merged over the
-	// component's app-level Config (env override wins per key).
-	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-}
-
 // AppMetadata carries optional labelling and annotation data attached to an
 // app spec. Both maps are optional; nil and empty are treated equivalently.
 type AppMetadata struct {
@@ -395,18 +315,9 @@ type AppMetadata struct {
 
 // EnvironmentOverride holds per-environment tuning applied on top of the
 // app-level defaults. Only non-zero fields override the app-level value.
-//
-// Replicas and SizePreset are mutually exclusive: set at most one.
 type EnvironmentOverride struct {
-	// Replicas overrides the replica count for this environment.
-	// Zero means inherit the component or platform default.
-	Replicas int32 `json:"replicas,omitempty" yaml:"replicas,omitempty"`
-	// SizePreset overrides the resource tier for this environment.
-	SizePreset SizePreset `json:"sizePreset,omitempty" yaml:"sizePreset,omitempty"`
 	// Values overrides specific template input values for this environment.
 	Values map[string]any `json:"values,omitempty" yaml:"values,omitempty"`
-	// Config overrides non-secret key/value configuration for this environment.
-	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
 	// EnvConfig holds env vars and secret refs specific to this app+environment
 	// combination (App Environment level of the hierarchy — wins all other levels).
 	EnvConfig envconfig.EnvConfig `json:"envConfig,omitempty" yaml:"envConfig,omitempty"`
@@ -421,10 +332,6 @@ type EnvironmentOverride struct {
 	// time (env wins). String leaves may reference ((platform.*))/((vars.*)) tokens,
 	// resolved per (env, cluster). No secrets.
 	RawValues map[string]any `json:"rawValues,omitempty" yaml:"rawValues,omitempty"`
-	// Components holds per-component overrides for this environment, keyed by
-	// component name — resources, envFrom, scaling, and env — overriding the
-	// app-level ComponentSpec values for this env only.
-	Components map[string]ComponentConfig `json:"components,omitempty" yaml:"components,omitempty"`
 	// ComponentValues holds per-component freeform Helm values overlays for this
 	// environment, keyed by component name — deep-merged on top of each composed
 	// component's base ComponentSpec.Values for this env only (env wins). String
@@ -485,14 +392,11 @@ type EnvironmentOverride struct {
 	Suspend *bool `json:"suspend,omitempty" yaml:"suspend,omitempty"`
 }
 
-// ClusterValueOverride holds per-(env, cluster) value overrides, applied on top
-// of the environment override. Same shape as the value-bearing subset of
-// EnvironmentOverride; wins over env-level values for that cluster only.
+// ClusterValueOverride holds a per-(env, cluster) Helm values overlay, applied
+// on top of the environment's overlay when publishing that cluster (fan-out
+// deployMode "all"). String leaves may use ((platform.*))/((vars.*)) tokens.
 type ClusterValueOverride struct {
-	Replicas   int32             `json:"replicas,omitempty" yaml:"replicas,omitempty"`
-	SizePreset SizePreset        `json:"sizePreset,omitempty" yaml:"sizePreset,omitempty"`
-	Values     map[string]any    `json:"values,omitempty" yaml:"values,omitempty"`
-	Config     map[string]string `json:"config,omitempty" yaml:"config,omitempty"`
+	Values map[string]any `json:"values,omitempty" yaml:"values,omitempty"`
 }
 
 // AllClustersSentinel is the EnvironmentOverride.TargetClusters value meaning
@@ -621,7 +525,7 @@ type AppSpec struct {
 	// should watch/promote, so unrelated images (sidecars, init, proxy) are simply
 	// left out. Each entry identifies a discovered image by its tag key; the
 	// repository is read from the Helm values at publish (not stored here, so it
-	// never drifts). Empty = no image is CD-managed (legacy single-image fallback).
+	// never drifts). Empty = no image is CD-managed (no Kargo Warehouse).
 	Images []AppImageBinding `json:"images,omitempty" yaml:"images,omitempty"`
 	// DeliveryMode controls how the app is delivered across environments:
 	// "pipeline" (default) uses Kargo + staging→prod promotion; "direct" deploys
@@ -819,7 +723,7 @@ type AppImageBinding struct {
 //
 // Which values tag-keys Kargo manages is declared by the template's image slots
 // (tpl.TemplateSpec.Images); which repository each slot watches is bound per-app
-// via AppSpec.Images (falling back to the legacy image_repository value). Not
+// via AppSpec.Images. Not
 // configured here, so a chart with one or many services is handled uniformly.
 type CDConfig struct {
 	// Managed enables external-CD tag ownership (see CDConfig docs). Default

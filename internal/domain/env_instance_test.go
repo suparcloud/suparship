@@ -257,7 +257,7 @@ func TestGenerateURL(t *testing.T) {
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			got := GenerateURL(tt.appName, tt.envName, tt.envType)
+			got := GenerateURL(tt.appName, tt.envName, tt.envType, false)
 			if got != tt.want {
 				t.Errorf("GenerateURL(%q, %q, %q) = %q, want %q",
 					tt.appName, tt.envName, tt.envType, got, tt.want)
@@ -268,18 +268,20 @@ func TestGenerateURL(t *testing.T) {
 
 func TestGenerateURLIsDeterministic(t *testing.T) {
 	for i := 0; i < 3; i++ {
-		got := GenerateURL("hello", "pr-42", AppEnvPreview)
+		got := GenerateURL("hello", "pr-42", AppEnvPreview, false)
 		if got != "http://pr-42.hello.preview.localhost" {
 			t.Errorf("run %d: GenerateURL not deterministic, got %q", i, got)
 		}
 	}
 }
 
-func TestGenerateURLHasHTTPScheme(t *testing.T) {
+func TestGenerateURLScheme(t *testing.T) {
 	for _, envType := range []AppEnvironmentType{AppEnvStaging, AppEnvProd, AppEnvPreview} {
-		url := GenerateURL("app", "pr-1", envType)
-		if !strings.HasPrefix(url, "http://") {
-			t.Errorf("GenerateURL for %q: expected http:// prefix, got %q", envType, url)
+		if url := GenerateURL("app", "pr-1", envType, false); !strings.HasPrefix(url, "http://") {
+			t.Errorf("GenerateURL(secure=false) for %q: expected http:// prefix, got %q", envType, url)
+		}
+		if url := GenerateURL("app", "pr-1", envType, true); !strings.HasPrefix(url, "https://") {
+			t.Errorf("GenerateURL(secure=true) for %q: expected https:// prefix, got %q", envType, url)
 		}
 	}
 }
@@ -325,14 +327,14 @@ func TestGenerateURLWithDomain(t *testing.T) {
 			envName: "staging",
 			envType: AppEnvStaging,
 			domain:  "localhost",
-			want:    GenerateURL("hello", "staging", AppEnvStaging),
+			want:    GenerateURL("hello", "staging", AppEnvStaging, false),
 		},
 	}
 
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			got := GenerateURLWithDomain(tt.appName, tt.envName, tt.envType, tt.domain)
+			got := GenerateURLWithDomain(tt.appName, tt.envName, tt.envType, tt.domain, false)
 			if got != tt.want {
 				t.Errorf("GenerateURLWithDomain(%q, %q, %q, %q) = %q, want %q",
 					tt.appName, tt.envName, tt.envType, tt.domain, got, tt.want)
@@ -366,7 +368,7 @@ func TestEnvironmentInstanceFields(t *testing.T) {
 		EnvType:     AppEnvStaging,
 		EnvName:     "staging",
 		Namespace:   GenerateNamespace("hello", "staging", AppEnvStaging),
-		URL:         GenerateURL("hello", "staging", AppEnvStaging),
+		URL:         GenerateURL("hello", "staging", AppEnvStaging, false),
 		Release:     rel,
 		Status:      AppRuntimeStatus{Phase: StatusHealthy, Replicas: 2, Available: 2},
 		CreatedAt:   now,
@@ -396,7 +398,7 @@ func TestEnvironmentInstancePreviewFields(t *testing.T) {
 		EnvType:     AppEnvPreview,
 		EnvName:     "pr-42",
 		Namespace:   GenerateNamespace("hello", "pr-42", AppEnvPreview),
-		URL:         GenerateURL("hello", "pr-42", AppEnvPreview),
+		URL:         GenerateURL("hello", "pr-42", AppEnvPreview, false),
 		Status:      AppRuntimeStatus{Phase: StatusNotDeployed},
 		CreatedAt:   time.Now(),
 	}
@@ -442,7 +444,7 @@ func TestGenerateNamespaceDefaultContainsAppAndEnv(t *testing.T) {
 
 	for _, c := range cases {
 		ns := GenerateNamespace(c.appName, c.envName, c.envType)
-		url := GenerateURL(c.appName, c.envName, c.envType)
+		url := GenerateURL(c.appName, c.envName, c.envType, false)
 
 		if !strings.Contains(ns, c.appName) {
 			t.Errorf("GenerateNamespace(%q, %q, %q) = %q: missing app name",

@@ -28,33 +28,6 @@ func TestValidateAPIServerURL(t *testing.T) {
 	}
 }
 
-func TestValidateImageRepository(t *testing.T) {
-	good := []string{
-		"",                                // empty allowed (template ships its own)
-		"ghcr.io/acme/web",
-		"registry.example.com:5000/team/web",
-		"docker.io/library/nginx",
-	}
-	for _, s := range good {
-		if err := ValidateImageRepository(s); err != nil {
-			t.Errorf("ValidateImageRepository(%q) = %v, want nil", s, err)
-		}
-	}
-
-	bad := []string{
-		" ghcr.io/acme/web",            // leading space
-		"https://ghcr.io/acme/web",     // scheme
-		"ghcr.io/acme/web:1.2.3",       // tag belongs in image_tag
-		"ghcr.io/acme/web@sha256:abcd", // digest
-		"ghcr.io/acme web",             // space
-	}
-	for _, s := range bad {
-		if err := ValidateImageRepository(s); err == nil {
-			t.Errorf("ValidateImageRepository(%q) = nil, want error", s)
-		}
-	}
-}
-
 func TestValidateConnectEndpoint(t *testing.T) {
 	good := []string{
 		"", // empty allowed (falls back to org/built-in default)

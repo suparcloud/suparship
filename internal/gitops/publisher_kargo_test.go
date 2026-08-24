@@ -29,12 +29,11 @@ func newTestPublisher(t *testing.T) *gitops.Publisher {
 func TestPublishKargoCRs_WritesExpectedFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	app := &domain.App{Name: "hello", ProjectName: "demo", Spec: domain.AppSpec{
-		Values: map[string]any{"image_repository": "ghcr.io/demo/hello"},
-	}}
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	imgs := []gitops.KargoImage{{Repository: "ghcr.io/demo/hello", TagKey: "image.tag"}}
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
-		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, TemplateImages: imgs},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, TemplateImages: imgs},
 		{EnvName: "pr-42", EnvType: domain.AppEnvPreview}, // should be skipped
 	}
 
@@ -203,27 +202,26 @@ func TestPublishKargoCRs_PerProjectNamespaceAndAggregation(t *testing.T) {
 	dir := t.TempDir()
 	p := newTestPublisher(t)
 
-	twoEnvs := func() []gitops.AppPublishEnv {
+	// Each app's envs carry a real image binding so a Warehouse is produced.
+	twoEnvs := func(project, name string) []gitops.AppPublishEnv {
+		imgs := []gitops.KargoImage{{Repository: "ghcr.io/" + project + "/" + name, TagKey: "image.tag"}}
 		return []gitops.AppPublishEnv{
-			{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
-			{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
+			{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, TemplateImages: imgs},
+			{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, TemplateImages: imgs},
 		}
 	}
 
-	// Each app has a real image source so a Warehouse is produced (no placeholder).
 	imgApp := func(project, name string) *domain.App {
-		return &domain.App{Name: name, ProjectName: project, Spec: domain.AppSpec{
-			Values: map[string]any{"image_repository": "ghcr.io/" + project + "/" + name},
-		}}
+		return &domain.App{Name: name, ProjectName: project}
 	}
 	// Project "alpha": two apps "web" and "api" (must aggregate in one ProjectConfig).
 	for _, appName := range []string{"web", "api"} {
-		if err := p.PublishKargoCRsForTest(dir, imgApp("alpha", appName), twoEnvs()); err != nil {
+		if err := p.PublishKargoCRsForTest(dir, imgApp("alpha", appName), twoEnvs("alpha", appName)); err != nil {
 			t.Fatalf("publish alpha/%s: %v", appName, err)
 		}
 	}
 	// Project "beta": also has an app "web" — must not collide with alpha's.
-	if err := p.PublishKargoCRsForTest(dir, imgApp("beta", "web"), twoEnvs()); err != nil {
+	if err := p.PublishKargoCRsForTest(dir, imgApp("beta", "web"), twoEnvs("beta", "web")); err != nil {
 		t.Fatalf("publish beta/web: %v", err)
 	}
 
@@ -578,16 +576,15 @@ func TestPublishKargoCRs_UnboundEnvSkipped(t *testing.T) {
 
 func TestPublishKargoCRs_AllUnboundProducesWarehouseOnly(t *testing.T) {
 	dir := t.TempDir()
-	// A real image source (legacy image_repository) so a Warehouse is produced —
-	// the Warehouse is env-independent, but it now requires an image source (no
-	// more placeholder). This test's focus is the unbound-env Stage handling.
-	app := &domain.App{Name: "hello", ProjectName: "demo", Spec: domain.AppSpec{
-		Values: map[string]any{"image_repository": "ghcr.io/demo/hello"},
-	}}
+	// A real image binding so a Warehouse is produced — the Warehouse is
+	// env-independent (read from any non-preview env, bound or not). This
+	// test's focus is the unbound-env Stage handling.
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	imgs := []gitops.KargoImage{{Repository: "ghcr.io/demo/hello", TagKey: "image.tag"}}
 	// Both envs are unbound — only Warehouse + Project CR should be written, no Stage files.
 	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: false},
-		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: false},
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: false, TemplateImages: imgs},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: false, TemplateImages: imgs},
 	}
 
 	p := newTestPublisher(t)

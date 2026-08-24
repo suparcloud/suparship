@@ -105,6 +105,19 @@ type ArgoAppGate interface {
 	HasAppForEnv(ctx context.Context, projectName, appName, envName string) (bool, error)
 }
 
+// ArgoChainNudger triggers immediate ArgoCD reconciliation of the lazy
+// generators between a publish and a materialized Application: the root app
+// syncing _infra (which creates {env}-composed), the {env}-composed root
+// (which creates the composed Application), and the per-env ApplicationSets
+// ({env}, {env}-platform — the single-source Application and the platform
+// env objects). Without nudging, a FIRST promotion to an env waits on up to
+// three independent ~3-minute poll cycles. Implemented by
+// kube.ArgoCDStatusReader. Best-effort; must be safe for concurrent use.
+type ArgoChainNudger interface {
+	RefreshAppsByName(ctx context.Context, names []string) error
+	RefreshAppSets(ctx context.Context, appSetNames []string) error
+}
+
 // KargoPromoter creates Kargo Promotion CRs to advance freight through the
 // promotion pipeline. When nil the app promotion endpoint falls back to the
 // in-store release copy (MVP stub). Implementations must be safe for concurrent use.
@@ -150,6 +163,28 @@ type KargoStageStatusResult struct {
 	// AvailableFreightCount is how many new Freight items are waiting to be
 	// promoted into this stage. >0 means a new image/commit is available.
 	AvailableFreightCount int
+	// Issue is the raw Kargo condition message when the stage needs attention
+	// (failed promotion step, health problem). Empty when fine.
+	Issue string
+}
+
+// KargoWarehouseReader is an optional extension of KargoPipelineReader: reads
+// the app Warehouse's observed status so the pipeline endpoint can report
+// image-discovery problems (registry unreachable, bad credentials) before a
+// user ever hits Promote. Detected via type assertion on the pipeline reader.
+type KargoWarehouseReader interface {
+	// GetWarehouseStatus reports the Warehouse for appName in projectNS.
+	GetWarehouseStatus(ctx context.Context, projectNS, appName string) (KargoWarehouseStatusResult, error)
+}
+
+// KargoWarehouseStatusResult is the DTO returned by KargoWarehouseReader.
+type KargoWarehouseStatusResult struct {
+	// Exists reports whether the Warehouse CR is present.
+	Exists bool
+	// Ready is false while artifact discovery is failing.
+	Ready bool
+	// Issue is the raw condition message when not ready.
+	Issue string
 }
 
 // KargoPromotionResult is the DTO returned by KargoPromoter.CreatePromotion.
@@ -550,6 +585,7 @@ type Config struct {
 	GitOpsPublisher         GitOpsPublisher         // optional: commits app manifests to gitops repo on create
 	KargoPromoter           KargoPromoter           // optional: enables real Kargo-backed promotions
 	ArgoAppGate             ArgoAppGate             // optional: blocks Kargo promotions until the target env's Application exists
+	ArgoChainNudger         ArgoChainNudger         // optional: nudges ArgoCD's lazy generators so a first promotion converges in seconds
 	KargoStatusReader       KargoStatusReader       // optional: enables GET promotion-status endpoint
 	KargoPipelineReader     KargoPipelineReader     // optional: enables GET pipeline-stages endpoint
 	DeploymentHistoryReader DeploymentHistoryReader // optional: enables GET .../environments/{env}/history endpoint
@@ -798,6 +834,9 @@ func New(cfg Config) *Server {
 			if cfg.ArgoAppGate != nil {
 				rh.appHandler.argoAppGate = cfg.ArgoAppGate
 				cfg.Logger.Info("argocd application gate enabled — promotions wait for the target env's Application")
+			}
+			if cfg.ArgoChainNudger != nil {
+				rh.appHandler.argoChainNudger = cfg.ArgoChainNudger
 			}
 			if cfg.KargoStatusReader != nil {
 				rh.appHandler.kargoStatusReader = cfg.KargoStatusReader

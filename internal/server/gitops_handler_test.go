@@ -244,8 +244,14 @@ func TestInjectCredentials(t *testing.T) {
 			"https://x-access-token:ghp_abc@github.com/org/repo.git",
 		},
 		{
+			// http gets credentials too — the publisher pushes with embedded
+			// creds over http (dev Gitea), so Test connection must match.
 			"http://notssl.com/repo", "user", "pass",
-			"http://notssl.com/repo",
+			"http://user:pass@notssl.com/repo",
+		},
+		{
+			"ssh://git@host/repo.git", "user", "pass",
+			"ssh://git@host/repo.git",
 		},
 	}
 	for _, tt := range tests {

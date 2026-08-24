@@ -26,16 +26,23 @@ func (testHistoryReader) GetAppDeploymentHistory(_ context.Context, _, app, env 
 }
 
 // newAppServer wires the fully assembled server with the in-memory dev deps
-// AND real on-disk templates, so the app-model endpoints (create/list/promote/
-// logs/history) are enabled — the smoke harness alone omits them.
+// AND a statically-injected template (there are no on-disk built-ins — every
+// template arrives via the registry in production), so the app-model endpoints
+// (create/list/promote/logs/history) are enabled.
 func newAppServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	deps := fake.NewDevServerDeps()
 
-	templates, err := tpl.LoadDir("../../templates")
-	if err != nil {
-		t.Fatalf("load templates: %v", err)
-	}
+	templates := []*tpl.Template{{
+		APIVersion: tpl.CurrentAPIVersion,
+		Kind:       tpl.TemplateKind,
+		Metadata:   tpl.Metadata{Name: "web-service", Version: "1.0.0"},
+		Spec: tpl.TemplateSpec{
+			Title:    "Web Service",
+			Category: "web",
+			Engine:   tpl.Engine{Type: tpl.EngineHelm, Chart: tpl.ChartLocator{Path: "./chart"}},
+		},
+	}}
 
 	srv := server.New(server.Config{
 		Addr:                    ":0",
@@ -99,10 +106,8 @@ func TestGoldenPath(t *testing.T) {
 		"name":        appName,
 		"displayName": "Golden Web",
 		"template":    "web-service",
-		"values": map[string]any{
-			"service_name":     appName,
-			"image_repository": "nginx",
-			"image_tag":        "1.27",
+		"rawValues": map[string]any{
+			"image": map[string]any{"repository": "nginx", "tag": "1.27"},
 		},
 	}
 	status, body := req(t, ts, cookie, http.MethodPost, "/api/v1/projects/"+project+"/apps", createBody)
@@ -154,12 +159,11 @@ func TestGoldenPath(t *testing.T) {
 		t.Error("app detail should have at least one environment")
 	}
 
-	// 4. Edit the app config (PATCH) — change the image tag.
+	// 4. Edit the app config (PATCH) — change the image tag via the values
+	// overlay (the chart's own keys; there are no template inputs).
 	patchBody := map[string]any{
-		"values": map[string]any{
-			"service_name":     appName,
-			"image_repository": "nginx",
-			"image_tag":        "1.28",
+		"rawValues": map[string]any{
+			"image": map[string]any{"repository": "nginx", "tag": "1.28"},
 		},
 	}
 	status, body = req(t, ts, cookie, http.MethodPatch, "/api/v1/projects/"+project+"/apps/"+appName, patchBody)

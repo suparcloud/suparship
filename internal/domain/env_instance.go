@@ -153,15 +153,17 @@ func GeneratePreviewNamespaceFromPattern(appName, previewName, projectName, patt
 //
 // URL patterns (using the default "localhost" base domain for local/demo):
 //
-//	staging  →  http://{appName}.staging.localhost
-//	prod     →  http://{appName}.prod.localhost
-//	preview  →  http://{envName}.{appName}.preview.localhost
+//	staging  →  {scheme}://{appName}.staging.localhost
+//	prod     →  {scheme}://{appName}.prod.localhost
+//	preview  →  {scheme}://{envName}.{appName}.preview.localhost
 //
-// The localhost domain is the MVP default for demo and local development
-// clusters. Production deployments override this at the ingress layer, so
-// callers that need a configurable domain should call GenerateURLWithDomain.
-func GenerateURL(appName, envName string, envType AppEnvironmentType) string {
-	return GenerateURLWithDomain(appName, envName, envType, "localhost")
+// secure selects the scheme: https when true, http when false (the org's
+// EffectiveSecureEndpoints). The localhost domain is the MVP default for demo
+// and local development clusters. Production deployments override this at the
+// ingress layer, so callers that need a configurable domain should call
+// GenerateURLWithDomain.
+func GenerateURL(appName, envName string, envType AppEnvironmentType, secure bool) string {
+	return GenerateURLWithDomain(appName, envName, envType, "localhost", secure)
 }
 
 // GenerateURLWithDomain is like GenerateURL but accepts an explicit base
@@ -169,19 +171,24 @@ func GenerateURL(appName, envName string, envType AppEnvironmentType) string {
 //
 // URL patterns:
 //
-//	staging  →  http://{appName}.staging.{domain}
-//	prod     →  http://{appName}.prod.{domain}
-//	preview  →  http://{envName}.{appName}.preview.{domain}
+//	staging  →  {scheme}://{appName}.staging.{domain}
+//	prod     →  {scheme}://{appName}.prod.{domain}
+//	preview  →  {scheme}://{envName}.{appName}.preview.{domain}
 //
 // baseDomain is the ROOT domain (e.g. "localhost", "acme.com"). The
 // environment tier is always prepended so that staging and prod are
-// reachable at different hostnames within the same root domain.
-func GenerateURLWithDomain(appName, envName string, envType AppEnvironmentType, domain string) string {
+// reachable at different hostnames within the same root domain. secure
+// selects https vs http (org SecureEndpoints setting).
+func GenerateURLWithDomain(appName, envName string, envType AppEnvironmentType, domain string, secure bool) string {
+	scheme := "http://"
+	if secure {
+		scheme = "https://"
+	}
 	switch envType {
 	case AppEnvPreview:
-		return "http://" + envName + "." + appName + ".preview." + domain
+		return scheme + envName + "." + appName + ".preview." + domain
 	default:
-		return "http://" + appName + "." + string(envType) + "." + domain
+		return scheme + appName + "." + string(envType) + "." + domain
 	}
 }
 

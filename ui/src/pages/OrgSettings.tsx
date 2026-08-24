@@ -10,12 +10,15 @@ import {
   deleteOrgEnvironment,
   getOrgNaming,
   updateOrgNaming,
+  getOrgEndpoints,
+  updateOrgEndpoints,
   listOrgRoutingProfiles,
   upsertOrgRoutingProfile,
   deleteOrgRoutingProfile,
 } from "../lib/settings";
 import type {
   OrgNaming,
+  OrgEndpoints,
   RoutingProfile,
   ExposeMode,
 } from "../lib/settings";
@@ -898,6 +901,99 @@ function NamespaceNamingSection() {
                 {saving ? "Saving…" : "Save naming patterns"}
               </button>
             </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Secure endpoints section ──────────────────────────────────────────────────
+//
+// One org-wide switch for the scheme of suparship-generated app URLs
+// (preview/env links, Gateway-API routes). It does not configure TLS itself —
+// that stays with routing profiles (ClusterIssuer) and the app charts.
+
+function SecureEndpointsSection() {
+  const [endpoints, setEndpoints] = useState<OrgEndpoints>({ secureEndpoints: true });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getOrgEndpoints()
+      .then((e) => { if (!cancelled) setEndpoints(e); })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function handleToggle(next: boolean) {
+    setSaving(true);
+    setSaveError(null);
+    setSaved(false);
+    const prev = endpoints;
+    setEndpoints({ secureEndpoints: next });
+    try {
+      const updated = await updateOrgEndpoints({ secureEndpoints: next });
+      setEndpoints(updated);
+      setSaved(true);
+    } catch (err) {
+      setEndpoints(prev);
+      setSaveError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 px-6 py-4">
+        <h2 className="text-sm font-medium text-gray-900">Secure Endpoints</h2>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Generate application URLs with <code className="font-mono">https://</code>.
+          Turn off for local or dev clusters whose ingress serves plain HTTP.
+        </p>
+      </div>
+
+      <div className="px-6 py-4">
+        {loading ? (
+          <div className="h-10 animate-pulse rounded bg-gray-100" />
+        ) : error ? (
+          <p className="text-sm text-red-600">{error}</p>
+        ) : (
+          <div className="space-y-3">
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={endpoints.secureEndpoints}
+                disabled={saving}
+                onChange={(e) => handleToggle(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-gray-300"
+              />
+              <span className="text-sm text-gray-700">
+                Use <code className="font-mono">https://</code> in generated app,
+                preview, and Gateway-API URLs
+                <span className="block text-xs text-gray-400">
+                  Applies to newly generated links (existing preview URLs update on
+                  their next publish). TLS termination itself is configured via
+                  routing profiles and your charts.
+                </span>
+              </span>
+            </label>
+            {saveError && (
+              <p className="rounded bg-red-50 px-3 py-2 text-xs text-red-700">
+                {saveError}
+              </p>
+            )}
+            {saved && (
+              <p className="rounded bg-green-50 px-3 py-2 text-xs text-green-700">
+                Endpoint scheme saved.
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -2622,6 +2718,9 @@ export function OrgSettings() {
 
       {/* Org-wide namespace naming patterns — org_admin only */}
       <NamespaceNamingSection />
+
+      {/* URL scheme for generated app endpoints — org_admin only */}
+      <SecureEndpointsSection />
 
       {/* Ingress class + cert-manager ClusterIssuer per routing tier */}
       <RoutingProfilesSection />

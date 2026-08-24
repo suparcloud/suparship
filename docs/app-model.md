@@ -31,11 +31,11 @@ An app is described by `domain.App` + `domain.AppSpec` in
 
 | Field | Purpose |
 |-------|---------|
-| `template` | The golden-path template this app was created from |
-| `values` | Curated template input values (no secrets) |
+| `template` | The template (chart) this app renders — the only pin for a plain single-chart app |
+| `values` | The app's Helm values overlay, in the chart's own shape (no secrets) |
 | `secretRefs` | Secret references resolved at runtime from Kubernetes Secrets |
-| `components` | Runtime units inside the app (derived from template by default) |
-| `environmentDefaults` | Per-environment overrides (replicas, size, values) |
+| `components` | User-declared chart-backed workloads (composed apps only; empty for a plain app) |
+| `environmentDefaults` | Per-environment overlays (values + env vars) |
 
 ### What an app is NOT
 
@@ -43,8 +43,8 @@ An app is described by `domain.App` + `domain.AppSpec` in
   implementation details that an app renders into.
 - An app is **not** an environment. Environments are runtime views of the same
   app, not separate containers of apps.
-- An app is **not** a component. Components are the internal processes that make
-  up an app; they are hidden from the default UI.
+- An app is **not** a component. Components are the chart-backed workloads a
+  composed app declares; a plain single-chart app has none.
 
 ### Guardrails
 
@@ -166,59 +166,54 @@ derived from live cluster observations and MUST NOT be stored as desired config.
 
 ---
 
-## Component — internal runtime unit
+## Component — a chart-backed workload in a composed app
 
-A **component** is a distinct runtime process within an app. Common types:
+A **component** is a user-declared, chart-backed workload inside a composed
+app. Common types (`ComponentType`): `web` (HTTP server), `worker`
+(background consumer), `cron` (scheduled), `job` (one-shot).
 
-| `ComponentType` | Constant | Typical use |
-|----------------|----------|-------------|
-| `web` | `ComponentWeb` | HTTP server, exposed via ingress |
-| `worker` | `ComponentWorker` | Background queue consumer |
-| `cron` | `ComponentCron` | Scheduled job |
+### Components are user-declared, not template-derived
 
-### Component visibility rules
-
-Components are **hidden from the default UI**. The developer sees app-level
-health, not component-level detail. Components are surfaced only in advanced
-views when the template or operator exposes them explicitly.
-
-There is no `/components` list page. Components appear inside an app's
-environment view when relevant.
-
-### Component topology derivation
-
-When `AppSpec.Components` is empty, the template defines the topology. A simple
-template produces one implicit `web` component. A more complex template can
-define multiple components; the UI exposes them progressively.
-
-When `AppSpec.Components` is non-empty, those entries override the template
-defaults. Only components that need explicit customisation need to appear here.
+Templates declare no components. A plain single-chart app stores **zero**
+components — `AppSpec.Template` is its only pin and the single-source
+publisher renders straight from it. A composed app declares every component
+explicitly, each with its own `template: {name, version}` pin and its own
+`values` overlay, and renders as one multi-source ArgoCD Application.
+Composition is all-or-nothing (`domain.ValidateComposedComponents`): either
+every component carries a template ref, or none do.
 
 ### ComponentSpec fields
 
 | Field | Purpose |
 |-------|---------|
-| `name` | Unique identifier within the app (e.g. `web`, `worker`) |
-| `type` | Runtime role (`web`, `worker`, `cron`) |
+| `name` | Unique identifier within the app (e.g. `api`, `db`) |
+| `type` | Runtime role (`web`, `worker`, `cron`, `job`) |
 | `enabled` | Whether this component is active across all environments |
-| `replicas` | Desired replica count (mutually exclusive with `sizePreset`) |
-| `sizePreset` | Named resource tier: `small`, `medium`, `large` |
-| `expose` | Whether the component has an ingress endpoint |
+| `exposeMode` | Routing profile: `disabled`, `internal`, or `external` |
+| `template` | The component's own chart pin |
+| `values` | The component's Helm values overlay, in its chart's own shape — image, port, replicas, resources, everything |
+| `inheritAppVars` | `true`/unset: envFrom the app-wide config/secrets; `false`: curated `envVars` only |
+| `envVars` | Curated per-component env (literals or selected/renamed app config/secret keys) |
+| `images` | Per-component CD image bindings (by the chart's tag path) |
+| `stateful` | Renders as its own prune-disabled Application (databases/caches) |
 | `previewEnabled` | Whether this component deploys in preview environments |
-| `config` | Non-secret key/value config — **no secrets here** |
+
+All workload shape (replicas, resources, scaling, config) lives in the
+component's `values`, in whatever paths its chart defines — there are no
+typed workload fields. See
+[templates-components.md](templates-components.md) for the full model.
 
 ### Preview opt-out
 
-Heavy or non-essential components (e.g. a resource-intensive worker) can opt out
-of preview deployments by setting `previewEnabled: false` in the `ComponentSpec`.
-This keeps preview environments lean.
+Heavy or non-essential components can opt out of preview deployments with
+`previewEnabled: false`. Unset, the type default applies: `web`/`worker`
+preview, `cron`/`job` and stateful components don't.
 
 ### Guardrails
 
-- Secret values MUST NOT appear in `ComponentSpec.Config`. Use
-  `AppSpec.SecretRefs` and reference format (`ref:secret-name.key`) instead.
-- `Replicas` and `SizePreset` are mutually exclusive. Setting both on the same
-  component is a validation error.
+- Secret values MUST NOT appear in component `values` or `envVars` literals.
+  Use `AppSpec.SecretRefs` / the secrets vault and curate keys with
+  `fromSecret` instead.
 
 ---
 
@@ -316,4 +311,4 @@ compatibility but emit `Deprecation: true` in every response. See
 - [`docs/adr/0001-app-as-primary-deployment-object.md`](adr/0001-app-as-primary-deployment-object.md) — decision record
 - [`docs/migration-app-model.md`](migration-app-model.md) — service → app migration guide
 - [`docs/templates.md`](templates.md) — template system overview
-- [`docs/templates-components.md`](templates-components.md) — how templates define component topology
+- [`docs/templates-components.md`](templates-components.md) — app components: composed apps, per-component values and env vars

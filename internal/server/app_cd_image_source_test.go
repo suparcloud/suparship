@@ -9,11 +9,11 @@ import (
 )
 
 // validateCDImageSource must accept every source the publisher actually
-// watches — app selection, legacy image_repository, COMPONENT selections
-// (composed apps keep images per component; checking only the app level
-// rejected every composed app), and template-declared images while the
-// selection was never explicitly configured (publish auto-binds them) — and
-// reject an app with none of those.
+// watches — app selection, COMPONENT selections (composed apps keep images
+// per component; checking only the app level rejected every composed app),
+// and template-declared images while the selection was never explicitly
+// configured (publish auto-binds them) — and reject an app with none of
+// those. The retired image_repository legacy input no longer counts.
 func TestValidateCDImageSource(t *testing.T) {
 	imageTemplate := &tpl.Template{
 		APIVersion: tpl.CurrentAPIVersion,
@@ -48,8 +48,9 @@ func TestValidateCDImageSource(t *testing.T) {
 			spec: domain.AppSpec{Images: []domain.AppImageBinding{{Name: "web", TagKey: "components.web.image.tag"}}},
 		},
 		{
-			name: "legacy image_repository value",
-			spec: domain.AppSpec{Values: map[string]any{"image_repository": "ghcr.io/acme/legacy"}},
+			name:    "retired image_repository value counts for nothing",
+			spec:    domain.AppSpec{Values: map[string]any{"image_repository": "ghcr.io/acme/legacy"}},
+			wantErr: true,
 		},
 		{
 			name:    "blank image_repository is not a source",

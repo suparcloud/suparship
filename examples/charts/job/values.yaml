@@ -1,0 +1,87 @@
+# Default values for the job chart.
+#
+# A plain, one-shot Job for release-gating work — schema migrations, seed
+# scripts, smoke checks. Defaults favor gating semantics: the Job runs as an
+# ArgoCD PreSync hook (completes before the app's long-running components
+# sync), each sync re-runs it from scratch, and a failed run fails the sync
+# instead of retrying the failure into place.
+
+image:
+  # Demo image; set your own job image and command.
+  repository: busybox
+  tag: "stable"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# ArgoCD hook wiring. Disable to render a plain Job (applied once, immutable —
+# useful outside ArgoCD or for fire-and-forget work).
+hook:
+  enabled: true
+  # PreSync: the Job must succeed BEFORE the rest of the app syncs.
+  type: PreSync
+  # BeforeHookCreation deletes the previous run's Job first, so every sync
+  # re-runs it cleanly (Jobs are otherwise immutable).
+  deletePolicy: BeforeHookCreation
+
+# Fail fast: a failed migration must gate the release, not retry into place.
+backoffLimit: 0
+# Hard wall-clock cap per run; 0 leaves it unset.
+activeDeadlineSeconds: 600
+# Optional TTL for finished Jobs (null leaves it unset; the hook deletePolicy
+# already cleans up before each re-run).
+ttlSecondsAfterFinished: null
+restartPolicy: Never
+
+# Override the image entrypoint (empty = image default). The demo default
+# prints a line and exits 0 so a fresh install visibly succeeds.
+command: ["sh", "-c", "echo \"job ran at $(date)\""]
+args: []
+
+# Environment variables as a map (rendered sorted for stable diffs).
+env: {}
+
+# envFrom sources by name. When deployed by a platform, point these at the
+# managed objects (e.g. ["((platform.configMapName))"]).
+envFrom:
+  configMaps: []
+  secrets: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+# No ServiceAccount on purpose: a PreSync hook runs BEFORE the sync wave that
+# would create one, so a chart-owned SA would not exist on first install. The
+# pod runs on the namespace default SA with no token mounted.
+automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  # The busybox demo image has no non-root user baked in; a real job image
+  # should set its own USER and this can be dropped.
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+# Extra pod scheduling controls, passed through verbatim.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra volumes / mounts, passed through verbatim.
+volumes: []
+volumeMounts: []

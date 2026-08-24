@@ -95,8 +95,8 @@ func TestCreatePreview_WorkerOnlyApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error for worker-only app: %v", err)
 	}
-	if !result.HelmValues.Components["worker"].Enabled {
-		t.Error("worker should be enabled in a worker-only app preview")
+	if result.Instance == nil {
+		t.Error("expected a preview instance for a worker-only app")
 	}
 }
 
@@ -127,6 +127,29 @@ func TestCreatePreview_URLUsesBaseDomain(t *testing.T) {
 	want := "http://pr-42.hello.preview.staging.acme.com"
 	if result.Instance.URL != want {
 		t.Errorf("URL = %q, want %q", result.Instance.URL, want)
+	}
+}
+
+func TestCreatePreview_SecureSchemeOnURL(t *testing.T) {
+	// Secure (the org's secure-endpoints setting) picks the URL scheme:
+	// https for TLS installs, http for local/dev ingress.
+	secure, err := CreatePreview(PreviewRequest{
+		App: previewApp(), PreviewName: "pr-42", BuildOpts: defaultBuildOpts(), Secure: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "https://pr-42.hello.preview.localhost"; secure.Instance.URL != want {
+		t.Errorf("secure URL = %q, want %q", secure.Instance.URL, want)
+	}
+	insecure, err := CreatePreview(PreviewRequest{
+		App: previewApp(), PreviewName: "pr-42", BuildOpts: defaultBuildOpts(), Secure: false,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "http://pr-42.hello.preview.localhost"; insecure.Instance.URL != want {
+		t.Errorf("insecure URL = %q, want %q", insecure.Instance.URL, want)
 	}
 }
 
@@ -203,7 +226,7 @@ func TestCreatePreview_URL(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	wantURL := domain.GenerateURL("hello", "pr-42", domain.AppEnvPreview)
+	wantURL := domain.GenerateURL("hello", "pr-42", domain.AppEnvPreview, false)
 	if result.Instance.URL != wantURL {
 		t.Errorf("URL = %q, want %q", result.Instance.URL, wantURL)
 	}
@@ -214,78 +237,6 @@ func TestCreatePreview_URL(t *testing.T) {
 }
 
 // --- CreatePreview Helm values: all enabled components render ---
-
-func TestCreatePreview_HelmValues_AllEnabledComponents(t *testing.T) {
-	result, err := CreatePreview(PreviewRequest{
-		App: previewApp(), PreviewName: "pr-42", BuildOpts: defaultBuildOpts(),
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	hv := result.HelmValues
-	webComp, ok := hv.Components["web"]
-	if !ok {
-		t.Fatal("web component missing from HelmValues")
-	}
-	if !webComp.Enabled {
-		t.Error("web component should be enabled in preview")
-	}
-
-	workerComp, ok := hv.Components["worker"]
-	if !ok {
-		t.Fatal("worker component missing from HelmValues")
-	}
-	if !workerComp.Enabled {
-		t.Error("worker component should be enabled in preview (no per-component gate)")
-	}
-}
-
-func TestCreatePreview_HelmValues_AppContext(t *testing.T) {
-	result, err := CreatePreview(PreviewRequest{
-		App: previewApp(), PreviewName: "pr-42", BuildOpts: defaultBuildOpts(),
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.HelmValues.App.Name != "hello" {
-		t.Errorf("HelmValues.App.Name = %q, want hello", result.HelmValues.App.Name)
-	}
-	if result.HelmValues.App.Env != "pr-42" {
-		t.Errorf("HelmValues.App.Env = %q, want pr-42", result.HelmValues.App.Env)
-	}
-}
-
-func TestCreatePreview_HelmValues_RoutingHost(t *testing.T) {
-	result, err := CreatePreview(PreviewRequest{
-		App: previewApp(), PreviewName: "pr-42", BuildOpts: defaultBuildOpts(),
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Routing host should be the preview hostname without scheme.
-	wantHost := "pr-42.hello.preview.localhost"
-	if result.HelmValues.Routing.Host != wantHost {
-		t.Errorf("Routing.Host = %q, want %q", result.HelmValues.Routing.Host, wantHost)
-	}
-}
-
-func TestCreatePreview_HelmValues_PreviewReplicas(t *testing.T) {
-	result, err := CreatePreview(PreviewRequest{
-		App: previewApp(), PreviewName: "pr-1", BuildOpts: defaultBuildOpts(),
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	webComp := result.HelmValues.Components["web"]
-	// Preview environments use 1 replica by default.
-	if webComp.Replicas != 1 {
-		t.Errorf("web replicas = %d, want 1 (preview default)", webComp.Replicas)
-	}
-}
 
 // --- CreatePreview ArgoCD application ---
 

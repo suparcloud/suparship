@@ -49,10 +49,11 @@ spec:
   services:
     - name: hello
       template:
-        name: web-service
+        name: web
         version: "1.0.0"
       values:
-        service_name: hello
+        image:
+          repository: ghcr.io/acme/hello
 ```
 
 ### Domain types (deprecated)
@@ -167,11 +168,11 @@ POST /api/v1/projects/myapi/apps/hello/previews
 ```bash
 # Old
 POST /api/v1/projects/myapi/services
-{ "name": "hello", "template": "web-service", "values": { ... } }
+{ "name": "hello", "template": "web", "values": { ... } }
 
 # New
 POST /api/v1/projects/myapi/apps
-{ "name": "hello", "template": "web-service", "values": { ... } }
+{ "name": "hello", "template": "web", "values": { ... } }
 ```
 
 The `values` and `secretRefs` shapes are identical. The response changes the

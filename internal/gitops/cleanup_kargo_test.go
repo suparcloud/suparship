@@ -17,22 +17,20 @@ func TestCleanupKargoCRs_RemovesAppKargoArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	p := newTestPublisher(t)
 
-	envs := []gitops.AppPublishEnv{
-		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
-		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
+	envsFor := func(name string) []gitops.AppPublishEnv {
+		imgs := []gitops.KargoImage{{Repository: "ghcr.io/demo/" + name, TagKey: "image.tag"}}
+		return []gitops.AppPublishEnv{
+			{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, TemplateImages: imgs},
+			{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true, TemplateImages: imgs},
+		}
 	}
-	// Real image sources so each app produces a Warehouse (no placeholder).
-	valkey := &domain.App{Name: "valkey", ProjectName: "demo", Spec: domain.AppSpec{
-		Values: map[string]any{"image_repository": "ghcr.io/demo/valkey"},
-	}}
-	api := &domain.App{Name: "api", ProjectName: "demo", Spec: domain.AppSpec{ // sibling pipeline app
-		Values: map[string]any{"image_repository": "ghcr.io/demo/api"},
-	}}
+	valkey := &domain.App{Name: "valkey", ProjectName: "demo"}
+	api := &domain.App{Name: "api", ProjectName: "demo"} // sibling pipeline app
 
-	if err := p.PublishKargoCRsForTest(dir, valkey, envs); err != nil {
+	if err := p.PublishKargoCRsForTest(dir, valkey, envsFor("valkey")); err != nil {
 		t.Fatalf("publish valkey kargo: %v", err)
 	}
-	if err := p.PublishKargoCRsForTest(dir, api, envs); err != nil {
+	if err := p.PublishKargoCRsForTest(dir, api, envsFor("api")); err != nil {
 		t.Fatalf("publish api kargo: %v", err)
 	}
 

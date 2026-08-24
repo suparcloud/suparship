@@ -11,6 +11,9 @@ data:
   org.yaml: |
     name: {{ .Values.org.name | quote }}
     displayName: {{ .Values.org.displayName | quote }}
+    {{- if hasKey .Values.org "secureEndpoints" }}
+    secureEndpoints: {{ .Values.org.secureEndpoints }}
+    {{- end }}
     {{- if .Values.environments }}
     environments:
       {{- range $i, $env := .Values.environments }}

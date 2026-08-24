@@ -455,6 +455,11 @@ function PromoteSuccessView({
         Promotion initiated
       </h3>
       <p className="mt-1 text-sm text-gray-500">{result.message}</p>
+      {result.warning && (
+        <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {result.warning}
+        </p>
+      )}
 
       <dl className="mt-4 space-y-2 text-sm">
         <div className="flex justify-between">
@@ -594,8 +599,31 @@ function EnvPipelineBar({
     (previewsByBase[base] ??= []).push(p);
   }
 
+  const cdSummary = pipeline?.summary;
   return (
     <div className="space-y-2">
+      {/* CD pipeline rollup: quiet while active; an encouraging progress line
+          while setting up or deploying; red plain language only when the
+          platform genuinely needs attention. */}
+      {cdSummary && cdSummary.state !== "active" && (
+        <div
+          className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs ${
+            cdSummary.state === "attention"
+              ? "border-red-200 bg-red-50 text-red-700"
+              : "border-blue-100 bg-blue-50/60 text-blue-700"
+          }`}
+        >
+          {cdSummary.state === "attention" ? (
+            <span className="font-medium whitespace-nowrap">Delivery needs attention</span>
+          ) : (
+            <svg className="h-3 w-3 flex-shrink-0 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+          )}
+          {cdSummary.message && <span className="break-words">{cdSummary.message}</span>}
+        </div>
+      )}
       {/* Pipeline row: stable envs connected by promotion arrows; each env
           carries its previews stacked beneath it. */}
       <div className="flex flex-wrap items-start gap-0">
@@ -2076,20 +2104,9 @@ function Disclosure({
 // by the backend but no longer editable here — shown read-only for discovery.
 function LegacyConfigNotice({ data }: { data: AppDetailType }) {
   const hasValues = Object.keys(data.values ?? {}).length > 0;
-  const hasComponents =
-    Object.keys(data.componentConfigs ?? {}).length > 0 ||
-    Object.keys(data.envComponents ?? {}).length > 0;
-  if (!hasValues && !hasComponents) return null;
+  if (!hasValues) return null;
 
-  const legacy = {
-    ...(hasValues ? { values: data.values } : {}),
-    ...(data.componentConfigs && Object.keys(data.componentConfigs).length > 0
-      ? { componentConfigs: data.componentConfigs }
-      : {}),
-    ...(data.envComponents && Object.keys(data.envComponents).length > 0
-      ? { envComponents: data.envComponents }
-      : {}),
-  };
+  const legacy = { values: data.values };
 
   return (
     <Disclosure title="Legacy structured config (read-only)">
@@ -5266,11 +5283,7 @@ function ComponentsTable({
                       Object.values(comp.envValues ?? {}).some(
                         (v) => Object.keys(v ?? {}).length > 0,
                       );
-                  const envOverrideCount = envPanelEnv
-                    ? Object.keys(
-                        data.envComponents?.[envPanelEnv]?.[comp.name]?.env ?? {},
-                      ).length
-                    : 0;
+                  const envOverrideCount = comp.envVars?.length ?? 0;
                   const pick = (s: "values" | "env") =>
                     setCardSection((cur) => ({
                       ...cur,
@@ -5347,12 +5360,6 @@ function ComponentsTable({
                             envVars: comp.envVars ?? [],
                           }}
                           appCtx={{ project, appName: data.name, env: panelEnv }}
-                          envOverride={
-                            (panelEnv &&
-                              data.envComponents?.[panelEnv]?.[comp.name]?.env) ||
-                            {}
-                          }
-                          envName={panelEnv}
                           saving={envSavingFor === comp.name}
                           onSave={async (next) => {
                             setEnvSavingFor(comp.name);
@@ -5368,21 +5375,6 @@ function ComponentsTable({
                                   },
                                 },
                               };
-                              if (next.envOverride !== undefined && panelEnv) {
-                                // The handler replaces the named env's whole
-                                // component map — send the merged map, preserving
-                                // other components' entries and this component's
-                                // non-env fields.
-                                const envMap = {
-                                  ...(data.envComponents?.[panelEnv] ?? {}),
-                                };
-                                const existing = envMap[comp.name] ?? {};
-                                envMap[comp.name] = {
-                                  ...existing,
-                                  env: next.envOverride,
-                                };
-                                req.envComponents = { [panelEnv]: envMap };
-                              }
                               await updateApp(project, data.name, req);
                               toast.success(
                                 "Component variables saved and published.",

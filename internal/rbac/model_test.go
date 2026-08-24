@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/suparcloud/suparship/internal/domain"
 )
 
@@ -439,5 +441,68 @@ func TestValidate_DeployModeAllRequiresCluster(t *testing.T) {
 	o.Environments[0].DeployMode = "bogus"
 	if err := o.Validate(); err == nil {
 		t.Fatal("expected validation error for invalid deployMode")
+	}
+}
+
+
+// SecureEndpoints is a tri-state: absent = secure (https), explicit false
+// survives a marshal/parse round-trip, and nil stays omitted from the YAML.
+func TestOrgSecureEndpointsRoundTrip(t *testing.T) {
+	base := `
+name: acme
+displayName: Acme Corp
+teams:
+  - name: admins
+    displayName: Admins
+    members: [alice]
+roleBindings:
+  - project: "*"
+    team: admins
+    role: org_admin
+`
+	org, err := ParseOrg([]byte(base))
+	if err != nil {
+		t.Fatalf("ParseOrg: %v", err)
+	}
+	if org.SecureEndpoints != nil {
+		t.Fatal("absent secureEndpoints should parse as nil")
+	}
+	if !org.EffectiveSecureEndpoints() {
+		t.Fatal("absent secureEndpoints must be effectively true (https)")
+	}
+
+	out, err := yaml.Marshal(org)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(out), "secureEndpoints") {
+		t.Errorf("nil secureEndpoints must be omitted from the YAML, got:\n%s", out)
+	}
+
+	org2, err := ParseOrg([]byte(base + "secureEndpoints: false\n"))
+	if err != nil {
+		t.Fatalf("ParseOrg with secureEndpoints: %v", err)
+	}
+	if org2.SecureEndpoints == nil || *org2.SecureEndpoints {
+		t.Fatal("explicit false should parse as *false")
+	}
+	if org2.EffectiveSecureEndpoints() {
+		t.Fatal("effective value should be false")
+	}
+	out2, err := yaml.Marshal(org2)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	reparsed, err := ParseOrg(out2)
+	if err != nil {
+		t.Fatalf("re-ParseOrg: %v", err)
+	}
+	if reparsed.SecureEndpoints == nil || *reparsed.SecureEndpoints {
+		t.Fatal("explicit false must survive the round-trip")
+	}
+
+	var nilOrg *Org
+	if !nilOrg.EffectiveSecureEndpoints() {
+		t.Fatal("nil org must be effectively secure")
 	}
 }

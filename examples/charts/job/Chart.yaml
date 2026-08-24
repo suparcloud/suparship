@@ -1,0 +1,17 @@
+apiVersion: v2
+name: job
+description: >-
+  One-shot release-gating job: runs as an ArgoCD PreSync hook so it completes
+  before the long-running components sync (the classic DB-migration gate), is
+  deleted and re-run cleanly on every sync, and fails fast so a broken run
+  blocks the release instead of retrying it into place. Plain Helm — no
+  platform dependencies.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - job
+  - migration
+  - hook
+maintainers:
+  - name: suparcloud

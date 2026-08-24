@@ -1,0 +1,19 @@
+# CI smoke values: the platform contract, as an app overlay would express it.
+# The ((platform.*)) tokens are literal strings here — charts-verify renders
+# with them and asserts they land in the output verbatim (the platform, not
+# helm, interpolates them at publish time).
+image:
+  repository: nginxinc/nginx-unprivileged
+  tag: "((platform.imageTag))"
+envFrom:
+  configMaps: ["((platform.configMapName))"]
+  secrets: ["((platform.secretName))"]
+ingress:
+  enabled: true
+  className: "((platform.ingressClassName))"
+  host: "((platform.routingHost))"
+# Suspended + autoscaling on: asserts replicas: 0 renders and the HPA is
+# omitted while suspended.
+suspend: true
+autoscaling:
+  enabled: true

@@ -27,8 +27,9 @@ You should immediately see seeded demo data — no empty state:
 | Org             | `default` — My Organization |
 | Project         | `demo` — Demo Project |
 | Environments    | `staging`, `prod` |
-| Service         | `hello` (web-service template) |
-| Preview         | `pr-42` |
+| Templates       | `web`, `worker`, `cronjob`, `postgres` (mirroring `examples/charts/`) |
+| Apps            | `notes-web` (single `web` chart), `api-gateway` (composed) |
+| Preview         | `pr-42` (on `notes-web`) |
 | Runtime status  | `healthy` with fake ingress URLs |
 | Logs            | Sample log lines |
 

@@ -251,7 +251,7 @@ func (rh *rbacHandler) handleCreateStackPreview(w http.ResponseWriter, r *http.R
 // record is rolled back.
 func (rh *rbacHandler) createStackPreviewExec(ctx context.Context, project, name string, members []*domain.App, preview, ns, baseEnv, imageTag string) stackBatchResponse {
 	ah := rh.appHandler
-	baseDomain := ah.baseDomainForEnv(ctx, baseEnv)
+	baseDomain, secure := ah.previewRoutingForEnv(ctx, baseEnv)
 
 	type previewPrep struct {
 		app     *domain.App
@@ -266,7 +266,7 @@ func (rh *rbacHandler) createStackPreviewExec(ctx context.Context, project, name
 		if !a.Spec.PreviewsEnabled {
 			return previewPrep{app: a, skip: "previews disabled"}
 		}
-		inst, _, prior, existed, err := ah.prepAppPreview(ctx, a, preview, baseEnv, imageTag, baseDomain, "", ns)
+		inst, _, prior, existed, err := ah.prepAppPreview(ctx, a, preview, baseEnv, imageTag, baseDomain, "", ns, secure)
 		return previewPrep{app: a, inst: inst, prior: prior, existed: existed, err: err}
 	})
 	prepDur := time.Since(prepStart)

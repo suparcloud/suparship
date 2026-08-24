@@ -162,6 +162,11 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/org/naming", rh.auth.requireAuth(rh.handleGetOrgNaming))
 	mux.HandleFunc("PUT /api/v1/org/naming", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgNaming)))
 
+	// Org-level endpoint scheme (secure endpoints: https vs http on generated
+	// app URLs) — reads for all; writes require org_admin.
+	mux.HandleFunc("GET /api/v1/org/endpoints", rh.auth.requireAuth(rh.handleGetOrgEndpoints))
+	mux.HandleFunc("PUT /api/v1/org/endpoints", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgEndpoints)))
+
 	// Org-level routing profiles (ingress class + cert-manager ClusterIssuer
 	// per ExposeMode tier) — reads for all; writes require org_admin.
 	mux.HandleFunc("GET /api/v1/org/routing-profiles", rh.auth.requireAuth(rh.handleListOrgRoutingProfiles))

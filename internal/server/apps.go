@@ -227,11 +227,6 @@ type AppDetailDTO struct {
 	// EnvRawValues surfaces per-environment overlays keyed by env name, for envs
 	// that have one. Mirrors what the edit PATCH accepts.
 	EnvRawValues map[string]map[string]any `json:"envRawValues,omitempty"`
-	// ComponentConfigs surfaces app-level per-component config (resources,
-	// envFrom, scaling, env) keyed by component name, so the UI can edit it.
-	ComponentConfigs map[string]domain.ComponentConfig `json:"componentConfigs,omitempty"`
-	// EnvComponents surfaces per-(env, component) overrides keyed env → component.
-	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
 	// CD surfaces the app's continuous-delivery settings (external-CD tag
 	// ownership) so the UI can render and edit the toggle. Always present.
 	CD CDConfigDTO `json:"cd"`
@@ -339,8 +334,8 @@ type ComponentCreateDTO struct {
 	Template *ComponentTemplateDTO `json:"template,omitempty"`
 	// Values is this component's Helm values overlay, deep-merged onto its chart's
 	// values at publish (value-based, schema-agnostic config — image, port,
-	// command, resources, etc. in the shape THIS chart expects, so BYO charts work
-	// the same as canonical ones). Mirrors the app-level rawValues.
+	// command, resources, etc. in the shape THIS chart expects). Mirrors the
+	// app-level rawValues.
 	Values map[string]any `json:"values,omitempty"`
 	// InheritAppVars controls whether the component blanket-envFroms the app-wide
 	// <app>-config + <app>-secrets. nil/true = inherit (default); false = the
@@ -436,12 +431,6 @@ type createAppRequest struct {
 	// generated chart values at publish. String leaves may reference
 	// ((platform.*))/((vars.*)) tokens. No secrets.
 	RawValues map[string]any `json:"rawValues,omitempty"`
-	// ComponentConfigs holds app-level per-component config (resources, envFrom,
-	// scaling, env) keyed by component name, applied over the template defaults.
-	ComponentConfigs map[string]domain.ComponentConfig `json:"componentConfigs,omitempty"`
-	// EnvComponents holds per-(env, component) overrides keyed env → component,
-	// for setting staging≠prod tuning at creation.
-	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
 	// TargetClusters selects, per environment, which of the env's clusters this
 	// app deploys to, keyed by environment name → cluster names. A value of
 	// ["*"] means all of the env's clusters (tracks the env); an explicit list
@@ -517,9 +506,6 @@ type updateAppRequest struct {
 	// (≥2 components) or back to single flips the render mode; the publisher prunes
 	// the stale-mode tree. Omit to leave components unchanged.
 	Components []ComponentCreateDTO `json:"components,omitempty"`
-	// ComponentConfigs, when non-nil, replaces app-level per-component config
-	// (resources, envFrom, scaling, env) keyed by component name.
-	ComponentConfigs map[string]domain.ComponentConfig `json:"componentConfigs,omitempty"`
 	// ComponentValues, when non-nil, sets the base (all-env) Helm values overlay
 	// for the named composed components (keyed by component name). Only the named
 	// components are changed; others are left intact. Unknown names are rejected.
@@ -529,10 +515,6 @@ type updateAppRequest struct {
 	// component's base Values for that env only. Only the named (env, component)
 	// pairs are changed; an empty overlay clears that pair's override.
 	EnvComponentValues map[string]map[string]map[string]any `json:"envComponentValues,omitempty"`
-	// EnvComponents, when non-nil, replaces per-(env, component) overrides keyed
-	// env → component. Each entry overrides the app-level component config for
-	// that environment only.
-	EnvComponents map[string]map[string]domain.ComponentConfig `json:"envComponents,omitempty"`
 	// ComponentEnvVars patches the named components' env-var settings
 	// (inheritAppVars + curated/added envVars) without touching component
 	// structure — the component-variables drawer's write path.
@@ -662,6 +644,10 @@ type AppPromoteResponse struct {
 	Release *AppReleaseRefDTO `json:"release,omitempty"`
 	// KargoPromotion is populated when a Kargo Promotion CR was created.
 	KargoPromotion *KargoPromotionDTO `json:"kargoPromotion,omitempty"`
+	// Warning is set when the promotion succeeded but the CD pipeline could
+	// not run it (the release shipped via GitOps directly). Human-friendly,
+	// with the raw platform error appended for bug reports.
+	Warning string `json:"warning,omitempty"`
 }
 
 // KargoPromotionStatusResponse is the JSON body for
@@ -700,6 +686,30 @@ type KargoStageStatusDTO struct {
 	// promoted into this stage. A non-zero value means a new image/commit
 	// is available but has not yet been promoted.
 	AvailableFreightCount int `json:"availableFreightCount"`
+	// Issue is a human-friendly explanation (with raw detail) of why this
+	// stage needs attention — e.g. a failed promotion step. Empty when fine.
+	Issue string `json:"issue,omitempty"`
+}
+
+// KargoWarehouseDTO is the warehouse (image discovery) view on the pipeline.
+type KargoWarehouseDTO struct {
+	// Exists reports whether the app's Warehouse has been provisioned.
+	Exists bool `json:"exists"`
+	// Ready is false while artifact discovery is failing.
+	Ready bool `json:"ready"`
+	// Issue is a human-friendly explanation (with raw detail) when not ready.
+	Issue string `json:"issue,omitempty"`
+}
+
+// KargoCDSummaryDTO is the one-line rollup of the app's CD pipeline state the
+// UI can badge without interpreting stages itself.
+type KargoCDSummaryDTO struct {
+	// State is "active" (pipeline flowing), "setting_up" (provisioning /
+	// waiting for the first release), or "attention" (something is broken —
+	// Message says what, in human terms).
+	State string `json:"state"`
+	// Message explains setting_up/attention states in plain language.
+	Message string `json:"message,omitempty"`
 }
 
 // KargoAppPipelineResponse is the JSON body for
@@ -711,6 +721,11 @@ type KargoAppPipelineResponse struct {
 	Available bool `json:"available"`
 	// Stages is ordered staging → prod (matches the promotion chain).
 	Stages []KargoStageStatusDTO `json:"stages"`
+	// Warehouse is the image-discovery side of the pipeline (nil when the
+	// reader cannot report it).
+	Warehouse *KargoWarehouseDTO `json:"warehouse,omitempty"`
+	// Summary is the rollup badge state for the app page.
+	Summary *KargoCDSummaryDTO `json:"summary,omitempty"`
 }
 
 // --- Rollback DTOs ---

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -72,6 +73,20 @@ type KargoStageStatus struct {
 	// for promotion into this Stage but have not yet been promoted. A value > 0
 	// means Kargo has detected new images/commits that are ready to promote.
 	AvailableFreightCount int
+	// Issue is the raw Kargo condition message explaining why the Stage is not
+	// ready/healthy (e.g. a failed promotion step). Empty when the Stage is fine.
+	Issue string
+}
+
+// KargoWarehouseStatus holds the observed status of a Kargo Warehouse.
+type KargoWarehouseStatus struct {
+	// Exists reports whether the Warehouse CR is present.
+	Exists bool
+	// Ready reports whether the Warehouse's Ready/Healthy condition is True.
+	Ready bool
+	// Issue is the raw condition message when the Warehouse is not ready
+	// (e.g. an artifact discovery failure). Empty when healthy or absent.
+	Issue string
 }
 
 // KargoPromotionInfo describes a Kargo Promotion CR that was created or observed.
@@ -471,6 +486,30 @@ func (s *KargoStore) CheckWarehouseReady(ctx context.Context, projectName, wareh
 	return true, nil
 }
 
+// GetWarehouseStatus returns the observed status of the app's Warehouse in the
+// project's kargo-{project} namespace: existence, readiness, and the raw
+// condition message when artifact discovery is failing. A missing Warehouse is
+// not an error — it reports Exists=false (CD not provisioned / no image
+// bindings).
+func (s *KargoStore) GetWarehouseStatus(ctx context.Context, projectName, warehouseName string) (*KargoWarehouseStatus, error) {
+	ns := kargoNamespaceForProject(projectName)
+	obj, err := s.dynamic.Resource(kargoWarehouseGVR).Namespace(ns).Get(ctx, warehouseName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return &KargoWarehouseStatus{}, nil
+		}
+		return nil, fmt.Errorf("get kargo warehouse %s/%s: %w", ns, warehouseName, err)
+	}
+	st := &KargoWarehouseStatus{Exists: true, Ready: true}
+	if statusRaw, ok := obj.Object["status"].(map[string]any); ok {
+		if msg := unreadyConditionMessage(statusRaw); msg != "" {
+			st.Ready = false
+			st.Issue = msg
+		}
+	}
+	return st, nil
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 // getCurrentFreight returns the name of the Freight currently committed to stageName.
@@ -753,7 +792,39 @@ func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 		s.AvailableFreightCount = len(available)
 	}
 
+	s.Issue = unreadyConditionMessage(statusRaw)
+
 	return s
+}
+
+// unreadyConditionMessage extracts the most user-relevant condition message
+// from a Kargo resource status: the Ready=False condition's message, falling
+// back to a non-True Healthy condition. Returns "" when nothing is wrong (or
+// the resource just hasn't reported yet — an absent Ready condition is not an
+// issue).
+func unreadyConditionMessage(statusRaw map[string]any) string {
+	conds, _ := statusRaw["conditions"].([]any)
+	healthyMsg := ""
+	for _, c := range conds {
+		cm, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ, _, _ := unstructuredString(cm, "type")
+		status, _, _ := unstructuredString(cm, "status")
+		msg, _, _ := unstructuredString(cm, "message")
+		switch typ {
+		case "Ready":
+			if status == "False" && msg != "" {
+				return msg
+			}
+		case "Healthy":
+			if status == "False" && msg != "" {
+				healthyMsg = msg
+			}
+		}
+	}
+	return healthyMsg
 }
 
 // approveFreightForStage patches the Freight's status.approvedFor field to

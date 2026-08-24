@@ -119,6 +119,9 @@ func (o *TemplateOverride) IsEmpty() bool {
 			return false
 		}
 	}
+	if len(o.PreviewDefaultValues) > 0 {
+		return false
+	}
 	if len(o.Images) > 0 {
 		return false
 	}

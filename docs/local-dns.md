@@ -106,7 +106,7 @@ sudo systemctl restart systemd-resolved
 ## Why `*.localhost` and not a custom TLD?
 
 suparship ingresses already use `*.localhost` hostnames (e.g. `argocd.localhost`,
-`gitea.localhost`, `hello.staging.localhost`). Keeping that convention means:
+`gitea.localhost`, `shipnotes-frontend.staging.localhost`). Keeping that convention means:
 
 - No extra configuration when deploying to a real cluster (hostnames change
   to real domains).

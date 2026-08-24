@@ -67,11 +67,13 @@ type Engine struct {
 	// CloneDepth caps the git clone depth to keep transfers small. Zero
 	// means full history (only useful for branches that move quickly).
 	CloneDepth int
-	// Builtins lists the names of the disk-loaded built-in templates
-	// (--templates-dir). Template names are global, so a synced chart whose
-	// name matches a built-in would silently shadow it; the sync guard skips
-	// such charts instead. Retired built-ins stay listed (and stay protected)
-	// — retirement disables new apps, it doesn't free the name.
+	// Builtins lists template names reserved outside the registry. Template
+	// names are global, so a synced chart whose name matches one would
+	// silently shadow it; the sync guard skips such charts instead. Always
+	// empty in the BYO model (there are no built-in templates); retained for
+	// embedded/test callers that pre-load templates. Retired names stay
+	// listed (and stay protected) — retirement disables new apps, it doesn't
+	// free the name.
 	Builtins []string
 }
 
@@ -372,12 +374,12 @@ func (f *gitFetcher) resolveChart(chartDir string) (fetcher.ResolvedTemplate, er
 		return fetcher.ResolvedTemplate{}, fmt.Errorf("to template: %w", err)
 	}
 	// In charts-repo mode, a chart that didn't ship its own template.yaml
-	// got best-effort inferred metadata assuming the suparship-common
-	// schema. That's wrong for an arbitrary Helm chart — import it as
-	// passthrough/BYO so its own values.yaml is the base. A chart that DID
-	// ship a template.yaml (arc.TemplateYAML != nil) is honored as-authored.
+	// gets best-effort inferred legacy metadata (inputs/mappings) from
+	// ToTemplate. That's wrong for an arbitrary Helm chart — clear it so the
+	// chart's own values.yaml is the base. A chart that DID ship a
+	// template.yaml (arc.TemplateYAML != nil) is honored as-authored.
 	if f.chartsRepo && arc.TemplateYAML == nil {
-		makePassthrough(tmpl)
+		clearInferredCanonicalMetadata(tmpl)
 		if err := tmpl.Validate(); err != nil {
 			return fetcher.ResolvedTemplate{}, fmt.Errorf("passthrough template invalid: %w", err)
 		}
@@ -385,19 +387,15 @@ func (f *gitFetcher) resolveChart(chartDir string) (fetcher.ResolvedTemplate, er
 	return fetcher.ResolvedTemplate{Template: tmpl, ChartBytes: bundle}, nil
 }
 
-// makePassthrough converts an inferred (canonical) template into a passthrough/
-// BYO one: the platform injects no canonical values base and exposes only
-// ((platform.*))/((vars.*)) tokens, with the chart's own values.yaml as the base.
-// The inferred inputs/mappings/components describe the canonical schema the
-// chart doesn't use, so they're dropped. Mirrors the clearing in
-// internal/server/template_metadata_handler.go.
-func makePassthrough(t *tpl.Template) {
-	no := false
-	t.Spec.InjectCanonicalValues = &no
+// clearInferredCanonicalMetadata drops the legacy inferred inputs/mappings a
+// chart-only import used to synthesize — they described the retired canonical
+// schema the chart never read. Every chart is BYO: the platform publishes only
+// values overlays with resolved ((platform.*))/((vars.*)) tokens, on top of
+// the chart's own values.yaml.
+func clearInferredCanonicalMetadata(t *tpl.Template) {
 	t.Spec.Inputs = nil
 	t.Spec.AdvancedInputs = nil
 	t.Spec.Mappings = nil
-	t.Spec.Components = nil
 }
 
 // resolveExternalTemplate parses a template.yaml file that has no sibling

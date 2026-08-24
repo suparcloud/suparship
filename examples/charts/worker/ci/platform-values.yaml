@@ -1,0 +1,13 @@
+# CI smoke values: the platform contract, as an app overlay would express it.
+# Tokens are literal strings here; the platform interpolates them at publish.
+image:
+  repository: busybox
+  tag: "((platform.imageTag))"
+envFrom:
+  configMaps: ["((platform.configMapName))"]
+  secrets: ["((platform.secretName))"]
+# Suspended + autoscaling on: asserts replicas: 0 renders and the HPA is
+# omitted while suspended.
+suspend: true
+autoscaling:
+  enabled: true

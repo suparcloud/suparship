@@ -266,23 +266,6 @@ func TestUpdateApp_MetadataEditPersistsAndPublishes(t *testing.T) {
 	}
 }
 
-func TestUpdateApp_RejectsBadImageRepository(t *testing.T) {
-	pub := &updatePublisher{}
-	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)
-	store.addApp(promoteTestApp(testProject))
-
-	// image_repository with a scheme is invalid — rejected before any publish.
-	rec := patchAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
-		updateAppRequest{Values: ptr(map[string]any{"image_repository": "https://ghcr.io/acme/web"})})
-
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for bad image repo, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if pub.publishApps != 0 {
-		t.Error("publish must not run on validation failure")
-	}
-}
-
 func TestUpdateApp_RollsBackOnPublishFailure(t *testing.T) {
 	pub := &updatePublisher{failPublish: true}
 	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)

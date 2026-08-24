@@ -47,6 +47,11 @@ type K8sProvider struct {
 	// dyn lists Gateway-API HTTPRoutes (a CRD, not in the typed clientset).
 	// Optional: nil disables HTTPRoute endpoint discovery (Ingress still works).
 	dyn dynamic.Interface
+	// secure reports whether generated HTTPRoute endpoint URLs use https.
+	// Read live per call (the org setting is editable at runtime); nil means
+	// true. Ingress URLs are unaffected — their scheme is derived from the
+	// live spec.tls.
+	secure func() bool
 }
 
 // NewK8sProvider creates a Kubernetes-backed runtime provider. dyn may be nil to
@@ -54,6 +59,13 @@ type K8sProvider struct {
 func NewK8sProvider(client kubernetes.Interface, dyn dynamic.Interface) *K8sProvider {
 	return &K8sProvider{client: client, dyn: dyn}
 }
+
+// SetSecureEndpointsFunc installs a live getter for the org's secure-endpoints
+// flag, consulted on every HTTPRoute URL build. Nil (or never calling this)
+// keeps the https default.
+func (p *K8sProvider) SetSecureEndpointsFunc(f func() bool) { p.secure = f }
+
+func (p *K8sProvider) secureEndpoints() bool { return p.secure == nil || p.secure() }
 
 func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceName string) (*RuntimeInfo, error) {
 	info := &RuntimeInfo{
@@ -84,7 +96,7 @@ func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceN
 	if ingList != nil {
 		for i := range ingList.Items {
 			if ingressReferencesService(ingList.Items[i].Name, serviceName) {
-				info.IngressURLs = append(info.IngressURLs, ingressHostURLs(&ingList.Items[i])...)
+				info.IngressURLs = append(info.IngressURLs, ingressHostURLs(&ingList.Items[i], p.secureEndpoints())...)
 			}
 		}
 	}
@@ -93,7 +105,7 @@ func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceN
 	// service contribute their host URLs too (e.g. a co-located "routes" app).
 	for _, rt := range p.listHTTPRoutes(ctx, namespace, "") {
 		if httpRouteReferencesService(rt, serviceName) {
-			info.IngressURLs = append(info.IngressURLs, httpRouteHostURLs(rt)...)
+			info.IngressURLs = append(info.IngressURLs, httpRouteHostURLs(rt, p.secureEndpoints())...)
 		}
 	}
 	info.IngressURLs = dedupeStrings(info.IngressURLs)
@@ -114,7 +126,7 @@ func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceN
 // app — but owns labelled routing resources is reported Healthy (it's deployed;
 // there are simply no pods to count). When nothing is found by label at all it
 // falls back to the name-based GetServiceRuntime(namespace, fallbackName) so
-// canonical apps predating instance labels keep working.
+// apps published before instance labels keep working.
 func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fallbackName string) (*RuntimeInfo, error) {
 	selector := instanceLabel + "=" + instance
 
@@ -216,7 +228,7 @@ func (p *K8sProvider) labelledRoutes(ctx context.Context, namespace, selector st
 		if ingList != nil {
 			for i := range ingList.Items {
 				ingFound = true
-				ingURLs = append(ingURLs, ingressHostURLs(&ingList.Items[i])...)
+				ingURLs = append(ingURLs, ingressHostURLs(&ingList.Items[i], p.secureEndpoints())...)
 			}
 		}
 	}()
@@ -225,7 +237,7 @@ func (p *K8sProvider) labelledRoutes(ctx context.Context, namespace, selector st
 		if routes := p.listHTTPRoutes(ctx, namespace, selector); len(routes) > 0 {
 			rtFound = true
 			for _, rt := range routes {
-				rtURLs = append(rtURLs, httpRouteHostURLs(rt)...)
+				rtURLs = append(rtURLs, httpRouteHostURLs(rt, p.secureEndpoints())...)
 			}
 		}
 	}()
@@ -412,25 +424,31 @@ func formatTime(t metav1.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05Z")
 }
 
-// ingressHostURLs returns scheme://host for each rule host of an Ingress. A host
-// is https unless some TLS block omits it (matching the prior per-service logic).
-func ingressHostURLs(ing *networkingv1.Ingress) []string {
+// ingressHostURLs returns scheme://host for each rule host of an Ingress.
+// With TLS blocks present, a host is https iff some block covers it. With no
+// spec.tls at all the Ingress itself is scheme-blind — TLS may still terminate
+// upstream (LB, CDN) or nowhere (dev) — so secure (the org's secure-endpoints
+// setting) decides.
+func ingressHostURLs(ing *networkingv1.Ingress, secure bool) []string {
+	noTLSScheme := "http"
+	if secure {
+		noTLSScheme = "https"
+	}
 	var urls []string
 	for _, rule := range ing.Spec.Rules {
 		if rule.Host == "" {
 			continue
 		}
-		scheme := "https"
-		for _, tls := range ing.Spec.TLS {
-			found := false
-			for _, h := range tls.Hosts {
-				if h == rule.Host {
-					found = true
-					break
+		scheme := noTLSScheme
+		if len(ing.Spec.TLS) > 0 {
+			scheme = "http"
+			for _, tls := range ing.Spec.TLS {
+				for _, h := range tls.Hosts {
+					if h == rule.Host {
+						scheme = "https"
+						break
+					}
 				}
-			}
-			if !found {
-				scheme = "http"
 			}
 		}
 		urls = append(urls, scheme+"://"+rule.Host)
@@ -461,10 +479,14 @@ func (p *K8sProvider) listHTTPRoutes(ctx context.Context, namespace, labelSelect
 }
 
 // httpRouteHostURLs returns the endpoint URLs of an HTTPRoute: every spec.hostname
-// crossed with each rule's path match (default "/"), as https://host[path].
-// Scheme defaults to https — gateways typically terminate TLS, and the HTTPRoute
-// itself carries no scheme (it's a property of the parent Gateway's listeners).
-func httpRouteHostURLs(rt unstructured.Unstructured) []string {
+// crossed with each rule's path match (default "/"). The HTTPRoute itself
+// carries no scheme (that's a property of the parent Gateway's listeners), so
+// secure — the org's secure-endpoints setting — picks https vs http.
+func httpRouteHostURLs(rt unstructured.Unstructured, secure bool) []string {
+	scheme := "http://"
+	if secure {
+		scheme = "https://"
+	}
 	hosts, _, _ := unstructured.NestedStringSlice(rt.Object, "spec", "hostnames")
 	if len(hosts) == 0 {
 		return nil
@@ -478,9 +500,9 @@ func httpRouteHostURLs(rt unstructured.Unstructured) []string {
 		}
 		for _, path := range paths {
 			if path == "/" {
-				urls = append(urls, "https://"+h)
+				urls = append(urls, scheme+h)
 			} else {
-				urls = append(urls, "https://"+h+path)
+				urls = append(urls, scheme+h+path)
 			}
 		}
 	}

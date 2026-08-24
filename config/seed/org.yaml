@@ -12,6 +12,9 @@ data:
     name: default
     displayName: My Organization
     createdAt: "2026-01-01T00:00:00Z"
+    # Dev ingress serves plain HTTP on localhost — generate http:// URLs.
+    # Absent (the production default) means true → https://.
+    secureEndpoints: false
     environments:
       - name: staging
         displayName: Staging

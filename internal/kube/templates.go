@@ -24,7 +24,7 @@ const (
 
 	// templateChartBundleKey is the binaryData key inside the template
 	// ConfigMap that holds a packaged Helm chart (chart.tgz). Optional —
-	// templates whose charts come from SUPARSHIP_TEMPLATES_DIR don't ship one.
+	// external-mode templates (chart in a Helm registry) don't ship one.
 	templateChartBundleKey = "chart.tgz"
 
 	// templateConfigMapPrefix is the "suparship-template-{name}" naming
@@ -183,9 +183,8 @@ func sanitizeVersionForName(version string) string {
 //     persistence path can enforce immutability (refuse to overwrite
 //     an existing archive whose content differs).
 //
-// chartTGZ may be nil for templates whose charts ship out-of-band (e.g.
-// pre-existing built-ins loaded from SUPARSHIP_TEMPLATES_DIR, or future
-// external-mode templates whose chart lives in a Helm registry).
+// chartTGZ may be nil for templates whose charts ship out-of-band
+// (external-mode templates whose chart lives in a Helm registry).
 //
 // When the template has no Metadata.Version set, only the alias is
 // written — there's no meaningful version axis to archive against.
@@ -297,10 +296,8 @@ type typedConfigMaps interface {
 
 // DeleteTemplate removes the cluster ConfigMaps for a template — both
 // the alias and any per-version archives. Returns (false, nil) when no
-// matching ConfigMaps exist (built-in templates loaded from
-// --templates-dir live on disk, not in the cluster, and have nothing
-// to remove). Other errors propagate so handlers can distinguish
-// "not deletable" from "delete failed".
+// matching ConfigMaps exist. Other errors propagate so handlers can
+// distinguish "not deletable" from "delete failed".
 //
 // Implemented as List + per-item Delete rather than DeleteCollection
 // because the testing/fake clientset's DeleteCollection ignores label
@@ -341,9 +338,9 @@ func DeleteTemplate(ctx context.Context, client kubernetes.Interface, templateNa
 }
 
 // LoadChartBundle returns the packaged Helm chart bytes stored alongside the
-// template ConfigMap, or nil when the template has no bundle (i.e. chart is
-// shipped via SUPARSHIP_TEMPLATES_DIR or hasn't been imported through the
-// BYO-chart flow). Returns an error only on unexpected API failures —
+// template ConfigMap, or nil when the template has no bundle (an
+// external-mode template, or one saved without chart bytes). Returns an
+// error only on unexpected API failures —
 // "ConfigMap not found" is treated as "no bundle" to keep callers simple.
 //
 // Reads the unversioned alias (always-latest pointer). Callers that need

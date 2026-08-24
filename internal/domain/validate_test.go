@@ -289,16 +289,13 @@ func TestValidateComponents(t *testing.T) {
 			components: []ComponentSpec{web, worker, cron},
 		},
 		{
+			// A plain single-chart app declares no components.
 			name:       "empty list",
 			components: []ComponentSpec{},
-			wantErr:    true,
-			errFrag:    "at least one component",
 		},
 		{
 			name:       "nil list",
 			components: nil,
-			wantErr:    true,
-			errFrag:    "at least one component",
 		},
 		{
 			name:       "duplicate component name",
@@ -559,144 +556,6 @@ func TestValidatePreviewName(t *testing.T) {
 	}
 }
 
-// ── ParseSizePreset ───────────────────────────────────────────────────────────
-
-func TestParseSizePreset(t *testing.T) {
-	tests := []struct {
-		input   string
-		want    SizePreset
-		wantErr bool
-	}{
-		{input: "small", want: SizeSmall},
-		{input: "medium", want: SizeMedium},
-		{input: "large", want: SizeLarge},
-		{input: "", wantErr: true},
-		{input: "xl", wantErr: true},
-		{input: "SMALL", wantErr: true},
-		{input: "tiny", wantErr: true},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.input, func(t *testing.T) {
-			got, err := ParseSizePreset(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ParseSizePreset(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && got != tt.want {
-				t.Errorf("ParseSizePreset(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestSizePresetValid(t *testing.T) {
-	tests := []struct {
-		input SizePreset
-		want  bool
-	}{
-		{SizeSmall, true},
-		{SizeMedium, true},
-		{SizeLarge, true},
-		{"", false},
-		{"XL", false},
-		{"SMALL", false},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(string(tt.input), func(t *testing.T) {
-			if got := tt.input.Valid(); got != tt.want {
-				t.Errorf("SizePreset(%q).Valid() = %v, want %v", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-// ── ValidateComponentSpec ─────────────────────────────────────────────────────
-
-func TestValidateComponentSpec(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   ComponentSpec
-		wantErr bool
-		errFrag string
-	}{
-		{
-			name:  "valid web enabled exposed",
-			input: ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, ExposeMode: ExposeExternal},
-		},
-		{
-			name:  "valid worker with replicas",
-			input: ComponentSpec{Name: "worker", Type: ComponentWorker, Enabled: true, Replicas: 3},
-		},
-		{
-			name:  "valid cron with size preset",
-			input: ComponentSpec{Name: "cron", Type: ComponentCron, Enabled: true, SizePreset: SizeSmall},
-		},
-		{
-			name:  "valid with config map",
-			input: ComponentSpec{Name: "web", Type: ComponentWeb, Enabled: true, Config: map[string]string{"KEY": "value"}},
-		},
-		{
-			name:    "invalid name - empty",
-			input:   ComponentSpec{Name: "", Type: ComponentWeb},
-			wantErr: true,
-			errFrag: "must not be empty",
-		},
-		{
-			name:    "invalid name - uppercase",
-			input:   ComponentSpec{Name: "Web", Type: ComponentWeb},
-			wantErr: true,
-			errFrag: "DNS label",
-		},
-		{
-			name:    "invalid type",
-			input:   ComponentSpec{Name: "svc", Type: "gateway"},
-			wantErr: true,
-			errFrag: "unsupported type",
-		},
-		{
-			name:    "negative replicas",
-			input:   ComponentSpec{Name: "web", Type: ComponentWeb, Replicas: -1},
-			wantErr: true,
-			errFrag: "replicas must be non-negative",
-		},
-		{
-			name:    "invalid size preset",
-			input:   ComponentSpec{Name: "web", Type: ComponentWeb, SizePreset: "xl"},
-			wantErr: true,
-			errFrag: "unknown size preset",
-		},
-		{
-			name:    "replicas and sizePreset both set",
-			input:   ComponentSpec{Name: "web", Type: ComponentWeb, Replicas: 2, SizePreset: SizeMedium},
-			wantErr: true,
-			errFrag: "mutually exclusive",
-		},
-		{
-			name:  "zero replicas with size preset is valid",
-			input: ComponentSpec{Name: "web", Type: ComponentWeb, SizePreset: SizeLarge},
-		},
-		{
-			name:  "replicas with no size preset is valid",
-			input: ComponentSpec{Name: "web", Type: ComponentWeb, Replicas: 5},
-		},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateComponentSpec(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ValidateComponentSpec() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if tt.wantErr && tt.errFrag != "" && !strings.Contains(err.Error(), tt.errFrag) {
-				t.Errorf("ValidateComponentSpec() error = %q, want substring %q", err.Error(), tt.errFrag)
-			}
-		})
-	}
-}
-
 // ── AppPreviewNamespace ───────────────────────────────────────────────────────
 
 func TestAppPreviewNamespace(t *testing.T) {
@@ -928,10 +787,11 @@ func TestValidateComponents_SourceMappedEnvVarsRequireCuration(t *testing.T) {
 		entry   ComponentEnvVar
 		wantErr bool
 	}{
-		{"literal while inheriting ok", nil, ComponentEnvVar{Name: "A", Value: "1"}, false},
+		{"literal while inheriting ok (extend/override)", nil, ComponentEnvVar{Name: "A", Value: "1"}, false},
 		{"fromConfig while inheriting rejected", nil, ComponentEnvVar{Name: "A", FromConfig: "X"}, true},
 		{"fromSecret while inheriting rejected", nil, ComponentEnvVar{Name: "A", FromSecret: "Y"}, true},
 		{"fromConfig when curated ok", &off, ComponentEnvVar{Name: "A", FromConfig: "X"}, false},
+		{"literal when curated ok", &off, ComponentEnvVar{Name: "A", Value: "1"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

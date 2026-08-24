@@ -58,7 +58,7 @@ func TestLegacyServiceRoutes_DeprecationHeader(t *testing.T) {
 			name:   "POST /previews",
 			method: http.MethodPost,
 			path:   "/api/v1/previews",
-			body:   CreatePreviewRequest{Name: "pr-1", Project: "myapi", Service: "hello"},
+			body:   CreatePreviewRequest{Name: "pr-1", Project: "myapi", Service: "notes-web"},
 		},
 		{
 			name:   "GET /projects/{project}/services/{service}/previews",
@@ -199,7 +199,7 @@ func newCompatTestMux(t *testing.T) (*http.ServeMux, *http.Cookie) {
 			},
 			Services: []project.Service{
 				{
-					Name:     "hello",
+					Name:     "notes-web",
 					Template: project.TemplateRef{Name: "web-service"},
 				},
 			},

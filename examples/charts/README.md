@@ -45,12 +45,26 @@ around:
 | [`web`](./web) | Deployment + Service, optional Ingress **or** Gateway API HTTPRoute | 2 replicas, zero-downtime rollout (surge/0), PDB, HPA, probes, non-root, preStop drain |
 | [`worker`](./worker) | Headless Deployment (queue consumers, background processors) | PDB, optional HPA, long termination grace for in-flight work, non-root |
 | [`cronjob`](./cronjob) | CronJob | `Forbid` concurrency, starting deadline, bounded history, non-root |
+| [`job`](./job) | One-shot release-gating Job (DB migrations, seed scripts) | ArgoCD `PreSync` hook re-run on every sync, `backoffLimit: 0` so a failed run gates the release, non-root |
 | [`gateway`](./gateway) | Standalone edge routing: Gateway API `Gateway`, optional wildcard Certificate, HTTP→HTTPS redirect, extra routes | cross-namespace routes allowed, cert-manager integration |
 | [`postgres`](./postgres) | Single-instance PostgreSQL for dev/demo stacks (mark the component **Stateful**) | Recreate + RWO PVC (`resource-policy: keep`), `pg_isready` probes — not HA; bring an operator for production data |
 
-The `web`, `worker`, and `cronjob` charts default to public demo images so
-a fresh install renders something runnable; set `image.repository`/`tag`
-to your own build.
+The `web`, `worker`, `cronjob`, and `job` charts default to public demo
+images so a fresh install renders something runnable; set
+`image.repository`/`tag` to your own build.
+
+Two more conventions the platform relies on:
+
+- **Suspend**: `web`, `worker`, and `cronjob` honor a top-level
+  `suspend: true` (the platform writes it when an environment is
+  suspended) — Deployments scale to zero and their HPA is omitted;
+  CronJobs set `spec.suspend`.
+- **CI smoke values**: each chart carries `ci/platform-values.yaml`, the
+  platform contract expressed as an app overlay with literal
+  `((platform.*))` token strings. `task charts:verify` renders every
+  chart with defaults and with these values and asserts the contract
+  (tokens land in envFrom/ingress output, suspend scales to zero, the
+  job hook annotations render).
 
 ## Using them with suparship
 

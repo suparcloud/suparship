@@ -325,8 +325,8 @@ func TestFakePreviewStore_GetSeeded(t *testing.T) {
 	if p.Spec.Project != "demo" {
 		t.Errorf("Spec.Project = %q, want %q", p.Spec.Project, "demo")
 	}
-	if p.Spec.Service != "hello" {
-		t.Errorf("Spec.Service = %q, want %q", p.Spec.Service, "hello")
+	if p.Spec.Service != "notes-web" {
+		t.Errorf("Spec.Service = %q, want %q", p.Spec.Service, "notes-web")
 	}
 	if p.Metadata.CreatedAt == "" {
 		t.Error("preview CreatedAt must not be empty")
@@ -343,7 +343,7 @@ func TestFakePreviewStore_GetNotFound(t *testing.T) {
 
 func TestFakePreviewStore_Save(t *testing.T) {
 	deps := fake.NewDevServerDeps()
-	p := preview.New("pr-99", "demo", "hello")
+	p := preview.New("pr-99", "demo", "notes-web")
 	if err := deps.PreviewStore.Save(context.Background(), p); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -351,8 +351,8 @@ func TestFakePreviewStore_Save(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after Save: %v", err)
 	}
-	if got.Spec.Service != "hello" {
-		t.Errorf("Service = %q, want %q", got.Spec.Service, "hello")
+	if got.Spec.Service != "notes-web" {
+		t.Errorf("Service = %q, want %q", got.Spec.Service, "notes-web")
 	}
 }
 
@@ -383,9 +383,9 @@ func TestFakeRuntimeProvider_SeededNamespaces(t *testing.T) {
 		ns      string
 		service string
 	}{
-		{"demo-staging", "hello"},
-		{"demo-prod", "hello"},
-		{"demo-preview-pr-42", "hello"},
+		{"demo-staging", "notes-web"},
+		{"demo-prod", "notes-web"},
+		{"demo-preview-pr-42", "notes-web"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.ns, func(t *testing.T) {
@@ -424,8 +424,8 @@ func TestFakeRuntimeProvider_Deterministic(t *testing.T) {
 	d1 := fake.NewDevServerDeps()
 	d2 := fake.NewDevServerDeps()
 
-	i1, _ := d1.RuntimeProvider.GetServiceRuntime(context.Background(), "demo-staging", "hello")
-	i2, _ := d2.RuntimeProvider.GetServiceRuntime(context.Background(), "demo-staging", "hello")
+	i1, _ := d1.RuntimeProvider.GetServiceRuntime(context.Background(), "demo-staging", "notes-web")
+	i2, _ := d2.RuntimeProvider.GetServiceRuntime(context.Background(), "demo-staging", "notes-web")
 
 	if i1.Status != i2.Status || i1.Image != i2.Image || i1.LastDeployed != i2.LastDeployed {
 		t.Error("runtime seed data must be identical across calls")
@@ -436,7 +436,7 @@ func TestFakeRuntimeProvider_Deterministic(t *testing.T) {
 
 func TestFakeLogsProvider_ListPods(t *testing.T) {
 	deps := fake.NewDevServerDeps()
-	pods, err := deps.LogsProvider.ListPods(context.Background(), "demo-staging", "hello")
+	pods, err := deps.LogsProvider.ListPods(context.Background(), "demo-staging", "notes-web")
 	if err != nil {
 		t.Fatalf("ListPods: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestFakeLogsProvider_GetLogsAll(t *testing.T) {
 	deps := fake.NewDevServerDeps()
 	result, err := deps.LogsProvider.GetLogs(context.Background(), runtime.LogsRequest{
 		Namespace: "demo-staging",
-		Pod:       "hello-abc12",
+		Pod:       "notes-web-abc12",
 	})
 	if err != nil {
 		t.Fatalf("GetLogs: %v", err)

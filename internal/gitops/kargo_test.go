@@ -13,7 +13,13 @@ func TestBuildKargoWarehouse(t *testing.T) {
 		ProjectName: "demo",
 	}
 
-	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{})
+	wh := gitops.BuildKargoWarehouse(app, gitops.KargoBuildOptions{
+		Images: []gitops.KargoImage{{
+			Repository: "ghcr.io/demo/hello",
+			TagKey:     "image.tag",
+			TagPattern: gitops.DefaultImageTagPattern,
+		}},
+	})
 
 	if wh.APIVersion != "kargo.akuity.io/v1alpha1" {
 		t.Errorf("APIVersion: got %q want %q", wh.APIVersion, "kargo.akuity.io/v1alpha1")
@@ -112,7 +118,9 @@ func TestBuildKargoWarehouse_DedupesSharedImage(t *testing.T) {
 
 func TestBuildKargoWarehouse_Deterministic(t *testing.T) {
 	app := &domain.App{Name: "hello", ProjectName: "demo"}
-	opts := gitops.KargoBuildOptions{}
+	opts := gitops.KargoBuildOptions{
+		Images: []gitops.KargoImage{{Repository: "ghcr.io/demo/hello", TagKey: "image.tag"}},
+	}
 
 	w1 := gitops.BuildKargoWarehouse(app, opts)
 	w2 := gitops.BuildKargoWarehouse(app, opts)
@@ -355,13 +363,6 @@ func TestMergeKargoPromotionPolicies(t *testing.T) {
 		if p.Stage == "web-staging" || p.Stage == "web-prod" {
 			t.Errorf("web policy %q should have been removed", p.Stage)
 		}
-	}
-}
-
-func TestDefaultImageRepoURL(t *testing.T) {
-	got := gitops.DefaultImageRepoURL("demo", "hello")
-	if got != "ghcr.io/demo/hello" {
-		t.Errorf("got %q want %q", got, "ghcr.io/demo/hello")
 	}
 }
 

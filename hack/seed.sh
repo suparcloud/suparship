@@ -3,7 +3,7 @@
 #
 # Creates (or updates) three ConfigMaps in the suparship-system namespace:
 #   suparship-org-config      — default org (admins team, org_admin binding)
-#   suparship-project-demo    — demo project (hello service, staging + prod)
+#   suparship-project-demo    — demo project (staging + prod)
 #
 # Idempotent: uses kubectl apply, safe to run multiple times.
 # The seeded data mirrors internal/fake/seed.go so the UI looks consistent
@@ -70,7 +70,7 @@ else
 fi
 
 ok "suparship-org-config          (default org, admins team)"
-ok "suparship-project-demo        (hello service, staging + prod)"
+ok "suparship-project-demo        (staging + prod)"
 
 # ── Create ArgoCD AppProject for the demo project ─────────────────────────
 # Each suparship project needs a matching ArgoCD AppProject so that Application

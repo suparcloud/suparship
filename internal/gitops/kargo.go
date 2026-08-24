@@ -152,12 +152,13 @@ type FreightSources struct {
 
 // KargoImage is one resolved image source for an app: the repository the
 // Warehouse watches and the values key the Stage rewrites on promotion. It is
-// the resolved, publish-time form of a tpl.TemplateImage (or a single legacy
-// image derived from the app's image_repository).
+// the resolved, publish-time form of an explicit image binding
+// (app.Spec.Images / a component's Images) or a template-declared image slot.
 type KargoImage struct {
 	// Name is the logical image slot (matches tpl.TemplateImage.Name), used to
-	// overlay per-app repository bindings onto the template's slots. Empty for the
-	// single legacy image. Not emitted into any CR — internal resolution only.
+	// overlay per-app repository bindings onto the template's slots. May be
+	// empty for a discovery-selected binding. Not emitted into any CR —
+	// internal resolution only.
 	Name string
 	// Repository is the container image repository to watch (no tag).
 	Repository string
@@ -735,11 +736,6 @@ func KargoStageName(appName, envName string) string {
 	return appName + "-" + envName
 }
 
-// DefaultImageTagKey is the canonical Helm-values key for the deploy image tag,
-// used as the legacy single-image fallback when a template declares no Images
-// mapping (charts built on suparship-common).
-const DefaultImageTagKey = "components.web.image.tag"
-
 // Default Kargo tag-selection settings for a CD-managed image when the app's
 // selection doesn't override them. The platform convention is to tag images with
 // the 7-char git commit SHA and promote the newest build, so a CD-managed app
@@ -751,29 +747,12 @@ const (
 	DefaultImageSelectionStrategy = "NewestBuild"
 )
 
-// DefaultImageRepoURL derives a placeholder container image repository URL
-// for an app when no explicit override is provided in KargoBuildOptions.
-// The returned URL is a template placeholder; operators must update it to
-// their actual registry before Kargo can detect new images.
-func DefaultImageRepoURL(projectName, appName string) string {
-	return fmt.Sprintf("ghcr.io/%s/%s", projectName, appName)
-}
-
 // applyKargoDefaults fills zero-valued KargoBuildOptions with sensible defaults.
-// When the caller supplies no Images it seeds a single placeholder image so the
-// generated CRs are still well-formed (the placeholder repo won't resolve —
-// operators are expected to supply real images via the template mapping).
+// Images are NOT defaulted: an app with no bindings gets no Warehouse at all
+// (the publisher prunes and warns), never a placeholder subscription.
 func applyKargoDefaults(opts KargoBuildOptions, app *domain.App) KargoBuildOptions {
 	if opts.KargoNamespace == "" {
 		opts.KargoNamespace = KargoNamespaceForProject(app.ProjectName)
-	}
-	if len(opts.Images) == 0 {
-		opts.Images = []KargoImage{{
-			Repository: DefaultImageRepoURL(app.ProjectName, app.Name),
-			TagKey:     DefaultImageTagKey,
-			// Match SemVer tags: 1.0.0, 2.3.14, etc.
-			TagPattern: `^\d+\.\d+\.\d+$`,
-		}}
 	}
 	return opts
 }

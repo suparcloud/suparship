@@ -549,7 +549,7 @@ func runGitTestConnection(ctx context.Context, repoURL string, creds basicAuthCr
 		return tplTestResult{Success: false, Message: "source has no repoURL configured"}
 	}
 	url := repoURL
-	if creds.user != "" && creds.pass != "" && strings.HasPrefix(url, "https://") {
+	if creds.user != "" && creds.pass != "" {
 		url = injectCredentials(url, creds.user, creds.pass)
 	}
 	start := time.Now()

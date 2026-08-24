@@ -1,0 +1,10 @@
+# CI smoke values: the platform contract, as an app overlay would express it.
+# Tokens are literal strings here; the platform interpolates them at publish.
+# hook.enabled stays default-on: charts-verify asserts the ArgoCD PreSync
+# annotations render.
+image:
+  repository: busybox
+  tag: "((platform.imageTag))"
+envFrom:
+  configMaps: ["((platform.configMapName))"]
+  secrets: ["((platform.secretName))"]

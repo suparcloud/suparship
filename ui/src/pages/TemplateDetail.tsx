@@ -539,12 +539,6 @@ function PlatformOverridesEditor({ templateName }: { templateName: string }) {
   );
 }
 
-function valuesModeLabel(t: TemplateDetailType): string {
-  return t.injectCanonicalValues === false
-    ? "Passthrough (BYO chart)"
-    : "Canonical values";
-}
-
 const IMAGE_STRATEGIES = ["", "NewestBuild", "SemVer", "Digest", "Lexical"];
 
 // ImagesSection shows + edits the template's per-service image mapping, which
@@ -770,9 +764,6 @@ function MetadataSection({
   const [title, setTitle] = useState(template.title);
   const [category, setCategory] = useState(template.category);
   const [description, setDescription] = useState(template.description ?? "");
-  const [passthrough, setPassthrough] = useState(
-    template.injectCanonicalValues === false,
-  );
   const [deliveryMode, setDeliveryMode] = useState(
     template.deliveryMode === "direct" ? "direct" : "pipeline",
   );
@@ -781,7 +772,6 @@ function MetadataSection({
     setTitle(template.title);
     setCategory(template.category);
     setDescription(template.description ?? "");
-    setPassthrough(template.injectCanonicalValues === false);
     setDeliveryMode(template.deliveryMode === "direct" ? "direct" : "pipeline");
     setEditing(false);
   }
@@ -793,10 +783,8 @@ function MetadataSection({
         title,
         category,
         description,
-        // The passthrough toggle only applies to in-place edits (it rewrites the
-        // chart body). Delivery mode is supported on both paths — in place for
-        // imported templates, as a sync-safe override for synced/built-in ones.
-        ...(inPlace ? { injectCanonicalValues: !passthrough } : {}),
+        // Delivery mode is supported on both paths — in place for imported
+        // templates, as a sync-safe override for synced ones.
         deliveryMode,
       });
       onUpdated(updated);
@@ -871,23 +859,6 @@ function MetadataSection({
               className="mt-1 w-full max-w-2xl rounded-md border border-gray-300 px-3 py-1.5 text-sm"
             />
           </label>
-          {inPlace && (
-            <label className="flex items-start gap-2">
-              <input
-                type="checkbox"
-                checked={passthrough}
-                onChange={(e) => setPassthrough(e.target.checked)}
-                className="mt-0.5"
-              />
-              <span className="text-sm text-gray-700">
-                Passthrough — this chart brings its own values (no canonical
-                schema injected).{" "}
-                <span className="text-xs text-gray-400">
-                  Turning this on clears the auto-generated chart parameters.
-                </span>
-              </span>
-            </label>
-          )}
           <label className="block">
             <span className="text-xs font-medium text-gray-500">
               Delivery mode
@@ -920,10 +891,9 @@ function MetadataSection({
       </div>
       <div className="mt-2 flex items-center justify-between gap-3">
         <span className="text-xs text-gray-400">
-          {valuesModeLabel(template)}
           {template.deliveryMode === "direct"
-            ? " · direct delivery"
-            : " · pipeline delivery"}
+            ? "direct delivery"
+            : "pipeline delivery"}
           {template.source?.origin === "synced" && template.source.externalRepo
             ? ` · managed by ${template.source.externalRepo}`
             : template.source?.origin === "builtin"

@@ -49,7 +49,6 @@ type TemplateDetailDTO struct {
 	Description    string                 `json:"description,omitempty"`
 	Category       string                 `json:"category"`
 	Engine         string                 `json:"engine"`
-	Components     []TemplateComponentDTO `json:"components"`
 	Inputs         []InputDTO             `json:"inputs"`
 	AdvancedInputs []InputDTO             `json:"advancedInputs"`
 	SecretInputs   []SecretInputDTO       `json:"secretInputs"`
@@ -59,10 +58,6 @@ type TemplateDetailDTO struct {
 	// seed the effective-values preview without a second round-trip.
 	DefaultValues map[string]any            `json:"defaultValues,omitempty"`
 	EnvValues     map[string]map[string]any `json:"envValues,omitempty"`
-	// InjectCanonicalValues is the values-mode flag (nil/true = canonical
-	// suparship-common base; false = passthrough/BYO). Surfaced so the UI can
-	// show + edit the passthrough toggle.
-	InjectCanonicalValues *bool `json:"injectCanonicalValues,omitempty"`
 	// Images is the per-service image mapping that drives external-CD (Kargo)
 	// wiring: which repo to watch and which values key holds each tag. Editable
 	// in template settings; auto-detected at import.
@@ -124,20 +119,6 @@ type TemplateSourceDTO struct {
 	// ExternalRepo + SyncedAt are set for synced templates.
 	ExternalRepo string `json:"externalRepo,omitempty"`
 	SyncedAt     string `json:"syncedAt,omitempty"`
-}
-
-// TemplateComponentDTO mirrors tpl.TemplateComponent for the wire,
-// with capabilities resolved (no pointers, type-based defaults
-// already filled in) so the UI can drive form rendering directly.
-type TemplateComponentDTO struct {
-	Name               string                   `json:"name"`
-	Type               string                   `json:"type"`
-	Required           bool                     `json:"required"`
-	DefaultEnabled     bool                     `json:"defaultEnabled"`
-	Exposed            bool                     `json:"exposed"`
-	Produces           []string                 `json:"produces,omitempty"`
-	OptionallyProduces []string                 `json:"optionallyProduces,omitempty"`
-	Capabilities       tpl.ResolvedCapabilities `json:"capabilities"`
 }
 
 // InputDTO represents a template input for form generation.
@@ -458,7 +439,7 @@ func (th *templateHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		// A library chart (category "library") is a Helm helper chart, not a
 		// launchable app — never offer it in the gallery. New imports are
 		// rejected at chartimport.ToTemplate; this de-lists any previously-synced
-		// library template (e.g. suparship-common) without a re-sync.
+		// library template without a re-sync.
 		if strings.EqualFold(strings.TrimSpace(category), "library") {
 			continue
 		}
@@ -566,14 +547,12 @@ func templateToDetail(t *tpl.Template) TemplateDetailDTO {
 		Description:           t.Spec.Description,
 		Category:              t.Spec.Category,
 		Engine:                t.Spec.Engine.Type,
-		Components:            componentsToTemplateDTO(t.Spec.Components),
 		Inputs:                inputsToDTO(t.Spec.Inputs),
 		AdvancedInputs:        inputsToDTO(t.Spec.AdvancedInputs),
 		SecretInputs:          secretInputsToDTO(t.Spec.SecretInputs),
 		Presets:               presetsToDTO(t.Spec.Presets),
 		DefaultValues:         t.Spec.DefaultValues,
 		EnvValues:             t.Spec.EnvValues,
-		InjectCanonicalValues: t.Spec.InjectCanonicalValues,
 		Images:                imagesToDTO(t.Spec.Images),
 		DeveloperValues:       developerValuesToDTO(t.Spec.DeveloperValues),
 		DeliveryMode:          t.Spec.DeliveryMode,
@@ -745,26 +724,6 @@ func developerValuesOverrideToDTO(ovs []domain.ValueFieldOverride) []ValueFieldD
 			Min:         o.Min,
 			Max:         o.Max,
 			Pattern:     o.Pattern,
-		}
-	}
-	return out
-}
-
-func componentsToTemplateDTO(components []tpl.TemplateComponent) []TemplateComponentDTO {
-	if len(components) == 0 {
-		return []TemplateComponentDTO{}
-	}
-	out := make([]TemplateComponentDTO, len(components))
-	for i, c := range components {
-		out[i] = TemplateComponentDTO{
-			Name:               c.Name,
-			Type:               string(c.Type),
-			Required:           c.Required,
-			DefaultEnabled:     c.IsDefaultEnabled(),
-			Exposed:            c.Exposed,
-			Produces:           c.Produces,
-			OptionallyProduces: c.OptionallyProduces,
-			Capabilities:       c.ResolvedCapabilities(),
 		}
 	}
 	return out

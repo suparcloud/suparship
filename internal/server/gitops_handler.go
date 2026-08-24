@@ -187,7 +187,7 @@ func (h *gitopsHandler) handleTestConnection(w http.ResponseWriter, r *http.Requ
 	}
 
 	repoURL := req.RepoURL
-	if username != "" && password != "" && strings.HasPrefix(repoURL, "https://") {
+	if username != "" && password != "" {
 		repoURL = injectCredentials(repoURL, username, password)
 	}
 
@@ -225,14 +225,18 @@ type gitopsConfigResponse struct {
 	ActivationWarning string `json:"activationWarning,omitempty"`
 }
 
-// injectCredentials embeds username:password into an HTTPS URL for git operations.
+// injectCredentials embeds username:password into an HTTP(S) URL for git
+// operations. Both schemes are handled — the publisher pushes with embedded
+// credentials over http too (dev Gitea), so "Test connection" must exercise
+// the same auth path or it fails against repos the publisher can reach.
+// Non-HTTP URLs (ssh://, git@…) are returned unchanged.
 func injectCredentials(repoURL, username, password string) string {
-	const prefix = "https://"
-	if !strings.HasPrefix(repoURL, prefix) {
-		return repoURL
+	for _, prefix := range []string{"https://", "http://"} {
+		if rest, ok := strings.CutPrefix(repoURL, prefix); ok {
+			return prefix + username + ":" + password + "@" + rest
+		}
 	}
-	rest := repoURL[len(prefix):]
-	return prefix + username + ":" + password + "@" + rest
+	return repoURL
 }
 
 // sanitizeGitError removes embedded credentials from git error messages.

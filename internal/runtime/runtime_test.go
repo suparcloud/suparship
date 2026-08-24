@@ -541,3 +541,81 @@ func TestGetServiceRuntime_FindsStatefulSetByName(t *testing.T) {
 		t.Errorf("image = %s, want valkey:9.0.2", info.Image)
 	}
 }
+
+
+// An Ingress with no spec.tls carries no scheme information of its own, so the
+// secure-endpoints setting decides: default (nil getter) → https (TLS may
+// terminate upstream), explicit false (dev) → http. A host covered by ONE of
+// several TLS blocks stays https.
+func TestIngressURLScheme_NoTLSFollowsSecureEndpoints(t *testing.T) {
+	pathType := networkingv1.PathTypePrefix
+	mkIngress := func(tls []networkingv1.IngressTLS) *networkingv1.Ingress {
+		return &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{Name: "web-ingress", Namespace: "ns"},
+			Spec: networkingv1.IngressSpec{
+				TLS: tls,
+				Rules: []networkingv1.IngressRule{
+					{
+						Host: "web.example.com",
+						IngressRuleValue: networkingv1.IngressRuleValue{
+							HTTP: &networkingv1.HTTPIngressRuleValue{
+								Paths: []networkingv1.HTTPIngressPath{
+									{Path: "/", PathType: &pathType, Backend: networkingv1.IngressBackend{
+										Service: &networkingv1.IngressServiceBackend{Name: "web"},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	// No TLS, default (nil secure func) → https.
+	p := NewK8sProvider(fake.NewSimpleClientset(mkIngress(nil)), nil)
+	info, err := p.GetServiceRuntime(context.Background(), "ns", "web")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(info.IngressURLs) != 1 || info.IngressURLs[0] != "https://web.example.com" {
+		t.Fatalf("no-TLS default should be https, got %v", info.IngressURLs)
+	}
+
+	// No TLS, secure=false (dev) → http.
+	p.SetSecureEndpointsFunc(func() bool { return false })
+	info, err = p.GetServiceRuntime(context.Background(), "ns", "web")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(info.IngressURLs) != 1 || info.IngressURLs[0] != "http://web.example.com" {
+		t.Fatalf("no-TLS with secure=false should be http, got %v", info.IngressURLs)
+	}
+
+	// Host covered by one of two TLS blocks → https even with secure=false
+	// (live spec.tls beats the org setting).
+	p2 := NewK8sProvider(fake.NewSimpleClientset(mkIngress([]networkingv1.IngressTLS{
+		{Hosts: []string{"other.example.com"}},
+		{Hosts: []string{"web.example.com"}},
+	})), nil)
+	p2.SetSecureEndpointsFunc(func() bool { return false })
+	info, err = p2.GetServiceRuntime(context.Background(), "ns", "web")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(info.IngressURLs) != 1 || info.IngressURLs[0] != "https://web.example.com" {
+		t.Fatalf("host covered by a TLS block should be https, got %v", info.IngressURLs)
+	}
+
+	// TLS blocks present but none covering the host → http regardless of secure.
+	p3 := NewK8sProvider(fake.NewSimpleClientset(mkIngress([]networkingv1.IngressTLS{
+		{Hosts: []string{"other.example.com"}},
+	})), nil)
+	info, err = p3.GetServiceRuntime(context.Background(), "ns", "web")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(info.IngressURLs) != 1 || info.IngressURLs[0] != "http://web.example.com" {
+		t.Fatalf("host omitted from all TLS blocks should be http, got %v", info.IngressURLs)
+	}
+}

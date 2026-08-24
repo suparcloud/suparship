@@ -55,15 +55,12 @@ func ValidateComponentName(name string) error {
 }
 
 // ValidateComponents checks a component list for structural correctness:
-//   - at least one component is required
+//   - an empty list is valid (a plain single-chart app declares no
+//     components; the chart defines its own workloads)
 //   - each component name must be a valid DNS label
 //   - component names must be unique within the list
 //   - each component type must be one of the recognised MVP values
 func ValidateComponents(components []ComponentSpec) error {
-	if len(components) == 0 {
-		return fmt.Errorf("app must have at least one component")
-	}
-
 	seen := make(map[string]bool, len(components))
 	for i, c := range components {
 		if err := ValidateComponentName(c.Name); err != nil {
@@ -85,11 +82,12 @@ func ValidateComponents(components []ComponentSpec) error {
 			if err := validateComponentEnvVar(c.Name, e); err != nil {
 				return fmt.Errorf("components[%d]: %w", i, err)
 			}
-			// Source-mapped entries (fromConfig/fromSecret) only mean anything
-			// in the curated projection — while INHERITING app vars, the key
-			// already arrives via envFrom, so a mapping would silently do
-			// nothing. Literal Value entries are the inherit-mode
-			// extend/override channel and are always fine.
+			// While INHERITING app vars, literal entries are the component's
+			// extend/override channel (the publisher renders a merged
+			// per-component ConfigMap where the literal wins). Source-mapped
+			// entries (fromConfig/fromSecret) stay curate-only: a selection or
+			// rename while inheriting is ambiguous — the original key would
+			// still arrive via the inherited set — so reject them loudly.
 			if inheriting && (e.FromConfig != "" || e.FromSecret != "") {
 				return fmt.Errorf(
 					"components[%d] %q env %q: fromConfig/fromSecret require inheritAppVars=false (a curated variable list); while inheriting, add a literal value or configure the variable at app/env scope",
@@ -252,32 +250,6 @@ func ValidateExposeModes(components []ComponentSpec, orgProfiles, envProfiles Ro
 				"give each component its own template (composed app) for multiple HTTP surfaces, or split them into separate apps grouped in a stack",
 			exposed,
 		)
-	}
-	return nil
-}
-
-// ValidateComponentSpec checks a single ComponentSpec for field-level
-// correctness beyond name and type:
-//   - Replicas must be non-negative
-//   - SizePreset, when set, must be one of small, medium, large
-//   - Replicas and SizePreset are mutually exclusive
-func ValidateComponentSpec(c ComponentSpec) error {
-	if err := ValidateComponentName(c.Name); err != nil {
-		return err
-	}
-	if !c.Type.Valid() {
-		return fmt.Errorf("component %q: unsupported type %q (must be one of web, worker, cron)", c.Name, c.Type)
-	}
-	if c.Replicas < 0 {
-		return fmt.Errorf("component %q: replicas must be non-negative, got %d", c.Name, c.Replicas)
-	}
-	if c.SizePreset != "" {
-		if _, err := ParseSizePreset(string(c.SizePreset)); err != nil {
-			return fmt.Errorf("component %q: %w", c.Name, err)
-		}
-	}
-	if c.Replicas > 0 && c.SizePreset != "" {
-		return fmt.Errorf("component %q: replicas and sizePreset are mutually exclusive", c.Name)
 	}
 	return nil
 }
@@ -502,34 +474,6 @@ func ValidateAPIServerURL(raw string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("API server URL must include a host (e.g. https://10.0.0.1:6443)")
-	}
-	return nil
-}
-
-// ValidateImageRepository checks that an app's image_repository value is a
-// bare image reference (e.g. "ghcr.io/acme/web", "registry.example.com:5000/web"),
-// not a scheme'd URL and without a tag or whitespace. A malformed value yields
-// pods stuck in InvalidImageName/ErrImagePull that only surface at deploy time.
-// Empty is allowed — many templates ship their own image.
-func ValidateImageRepository(raw string) error {
-	if raw == "" {
-		return nil
-	}
-	if strings.TrimSpace(raw) != raw {
-		return fmt.Errorf("image_repository %q has leading or trailing whitespace", raw)
-	}
-	if strings.ContainsAny(raw, " \t") {
-		return fmt.Errorf("image_repository %q must not contain spaces", raw)
-	}
-	if strings.Contains(raw, "://") {
-		return fmt.Errorf("image_repository must be a bare image reference without a scheme (e.g. \"ghcr.io/acme/web\", not %q)", raw)
-	}
-	if strings.Contains(raw, "@") {
-		return fmt.Errorf("image_repository %q must not include a digest; set the tag/digest at deploy time", raw)
-	}
-	// A tag belongs in image_tag, not the repository.
-	if i := strings.LastIndex(raw, ":"); i > strings.LastIndex(raw, "/") && i != -1 {
-		return fmt.Errorf("image_repository %q must not include a tag — use the separate image tag field", raw)
 	}
 	return nil
 }

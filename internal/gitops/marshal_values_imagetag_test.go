@@ -12,16 +12,12 @@ import (
 // into metadata.labels (app.kubernetes.io/version) + image refs, and "{...}" is
 // an invalid label value that fails the whole apply. It must resolve to empty so
 // the chart can default it to .Chart.AppVersion.
-func TestMarshalValuesWithOverlay_NoLiteralImageTag(t *testing.T) {
-	hv := helmvalues.HelmValues{Platform: helmvalues.PlatformValues{App: "lk-sh"}} // ImageTag empty
+func TestMarshalPassthroughValues_NoLiteralImageTag(t *testing.T) {
+	pv := helmvalues.PlatformValues{App: "lk-sh"} // ImageTag empty
 	overlay := map[string]any{
-		"components": map[string]any{
-			"web": map[string]any{
-				"image": map[string]any{"tag": "[[platform.imageTag]]"},
-			},
-		},
+		"image": map[string]any{"tag": "[[platform.imageTag]]"},
 	}
-	out, err := marshalValuesWithOverlay(hv, overlay, nil)
+	out, err := marshalPassthroughValues(pv, overlay, nil)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

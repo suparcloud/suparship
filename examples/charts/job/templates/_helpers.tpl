@@ -1,0 +1,66 @@
+{{/*
+Expand the name of the chart.
+*/}}
+{{- define "job.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Create a default fully qualified app name, truncated to the 63-char DNS limit.
+*/}}
+{{- define "job.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if contains $name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Chart label value.
+*/}}
+{{- define "job.chart" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Common labels.
+*/}}
+{{- define "job.labels" -}}
+helm.sh/chart: {{ include "job.chart" . }}
+{{ include "job.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
+Selector labels.
+*/}}
+{{- define "job.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "job.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+envFrom block from the configMaps / secrets name lists (empty = omitted).
+*/}}
+{{- define "job.envFrom" -}}
+{{- if or .Values.envFrom.configMaps .Values.envFrom.secrets }}
+envFrom:
+{{- range .Values.envFrom.configMaps }}
+  - configMapRef:
+      name: {{ . | quote }}
+{{- end }}
+{{- range .Values.envFrom.secrets }}
+  - secretRef:
+      name: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

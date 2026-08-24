@@ -143,6 +143,22 @@ export function updateOrgNaming(naming: OrgNaming): Promise<OrgNaming> {
   return api.put<OrgNaming>("/org/naming", naming);
 }
 
+// ── Org Endpoints (URL scheme) ────────────────────────────────────────────────
+
+export interface OrgEndpoints {
+  /** true → generated app URLs use https:// (default); false → http:// for
+   *  TLS-less local/dev ingress. */
+  secureEndpoints: boolean;
+}
+
+export function getOrgEndpoints(): Promise<OrgEndpoints> {
+  return api.get<OrgEndpoints>("/org/endpoints");
+}
+
+export function updateOrgEndpoints(e: OrgEndpoints): Promise<OrgEndpoints> {
+  return api.put<OrgEndpoints>("/org/endpoints", e);
+}
+
 // ── Org Routing Profiles ──────────────────────────────────────────────────────
 //
 // A routing profile maps an ExposeMode (internal/external) to the ingress

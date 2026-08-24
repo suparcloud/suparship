@@ -223,6 +223,12 @@ type Org struct {
 	// SRE contractors who white-label suparship can set their own platform
 	// name without touching individual generators.
 	Branding branding.Config `yaml:"branding,omitempty"`
+	// SecureEndpoints controls the URL scheme of suparship-generated app
+	// endpoints (preview/env URLs, Gateway-API HTTPRoute URLs). Absent means
+	// true (https). Set false for TLS-less local/dev ingress so generated
+	// links use http://. TLS termination itself is the routing profile's /
+	// chart's concern; this flag only governs how suparship writes URLs.
+	SecureEndpoints *bool `yaml:"secureEndpoints,omitempty"`
 	// RoutingProfiles maps ExposeMode names to the ingress class + cert-manager
 	// ClusterIssuer the chart should use for components targeting that tier.
 	// Per-env overrides live on OrgEnvironment.RoutingProfiles and replace
@@ -245,6 +251,13 @@ type Org struct {
 // loaded with ("" for a fresh/never-persisted org). Used by the store for
 // optimistic concurrency.
 func (o *Org) ResourceVersion() string { return o.resourceVersion }
+
+// EffectiveSecureEndpoints resolves the SecureEndpoints tri-state: absent (or
+// a nil org, e.g. after a failed load) means true — generated endpoint URLs
+// default to https.
+func (o *Org) EffectiveSecureEndpoints() bool {
+	return o == nil || o.SecureEndpoints == nil || *o.SecureEndpoints
+}
 
 // SetResourceVersion records the backing resourceVersion (provider use).
 func (o *Org) SetResourceVersion(rv string) { o.resourceVersion = rv }

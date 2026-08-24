@@ -11,24 +11,23 @@ import {
 import type { ComponentEnvVar } from "../types";
 
 // ComponentEnvPanel — per-component variables, rendered INLINE in the component
-// card (an "env vars" disclosure, sibling of "values"). The card already lives
-// under the page's selected environment, so there is exactly ONE add/override
-// section and it writes THAT env's per-component overrides — no separate
-// "all environments" section (field feedback: the env is already selected).
+// card (an "env vars" disclosure, sibling of "values").
 //
-//   - Add/override: literal rows for the selected env
-//     (EnvironmentOverride.Components[c].Env) — rendered as explicit env[]
-//     entries, which beat every envFrom source.
-//   - Remove/rename: the collapsed "Inherited from the app" checklist. Any
-//     exclusion or rename derives CURATED mode (`inheritAppVars=false` + one
-//     mapping per included key → the <app>-<component>-config/-secrets
-//     projection), with the freeze tradeoff surfaced. Everything included and
-//     unrenamed = live inherit.
+// Two editing surfaces, both delivered through platform-rendered objects:
 //
-// Secret VALUES are never entered here: literals land in git values files. New
-// secrets are added at app/env scope; inherited secrets can be excluded or
-// renamed. Stored app-level literal EnvVars entries (legacy/API-authored) are
-// preserved untouched across saves and surfaced as a count.
+//   - Add / override rows: literal envVars, applied in EVERY environment.
+//     While inheriting they put the component on the extend/override posture —
+//     the publisher renders <app>-<component>-config as the app/env vars
+//     merged with these literals (literal wins) and points the component's
+//     ((platform.configMapName)) at it; secrets keep flowing app-wide.
+//   - The "Inherited from the app" checklist: excluding or renaming keys
+//     derives CURATED mode (`inheritAppVars=false` + one mapping per included
+//     key → the <app>-<component>-config/-secrets projection), with the
+//     freeze tradeoff surfaced. Everything included and unrenamed = inherit.
+//
+// Secret VALUES are never entered here (literals land in git as ConfigMap
+// data); new secrets are added at app/env scope, and a literal overrides
+// inherited *variables*, not secret-delivered keys.
 
 export interface ComponentEnvValue {
   inheritAppVars: boolean;
@@ -47,8 +46,6 @@ export function ComponentEnvPanel({
   componentName,
   value,
   appCtx,
-  envOverride,
-  envName,
   onSave,
   saveLabel = "Save",
   saving = false,
@@ -58,15 +55,9 @@ export function ComponentEnvPanel({
   value: ComponentEnvValue;
   // When the app exists: enables the inherited-keys checklist.
   appCtx?: { project: string; appName: string; env: string | null };
-  // Live mode: current per-(env, component) literal overrides for envName —
-  // the panel's single add/override section. Absent in draft mode (create/
-  // manage canvas), where only inheritance curation is editable.
-  envOverride?: Record<string, string>;
-  envName?: string | null;
   onSave: (next: {
     inheritAppVars: boolean;
     envVars: ComponentEnvVar[];
-    envOverride?: Record<string, string>;
   }) => void | Promise<void>;
   saveLabel?: string;
   saving?: boolean;
@@ -83,8 +74,8 @@ export function ComponentEnvPanel({
   // no longer exists in the app config, and app-level literal entries
   // (authored via API / legacy UI — this panel adds per-env literals instead).
   const [staleMappings, setStaleMappings] = useState<ComponentEnvVar[]>([]);
-  const [keptLiterals, setKeptLiterals] = useState<ComponentEnvVar[]>([]);
-  const [overrides, setOverrides] = useState<{ name: string; value: string }[]>([]);
+  // Literal add/override rows (component-scoped, all envs), from EnvVars.
+  const [literals, setLiterals] = useState<{ name: string; value: string }[]>([]);
 
   // Fetch the app's inheritable keys: resolved env vars (config + secret-ref
   // keys) plus vault secret key names (global + env scope).
@@ -142,12 +133,12 @@ export function ComponentEnvPanel({
     const inc: Record<string, boolean> = {};
     const ren: Record<string, string> = {};
     const stale: ComponentEnvVar[] = [];
-    const literals: ComponentEnvVar[] = [];
+    const lits: { name: string; value: string }[] = [];
     const keySet = new Set(rows.map((r) => r.key));
     if (value.inheritAppVars) {
       for (const r of rows) inc[r.key] = true;
       for (const e of value.envVars) {
-        if (e.value !== undefined && e.value !== "") literals.push(e);
+        if (!e.fromConfig && !e.fromSecret) lits.push({ name: e.name, value: e.value ?? "" });
       }
     } else {
       for (const r of rows) inc[r.key] = false;
@@ -161,7 +152,7 @@ export function ComponentEnvPanel({
             stale.push(e);
           }
         } else {
-          literals.push(e);
+          lits.push({ name: e.name, value: e.value ?? "" });
         }
       }
       // A stored curated list is worth surfacing immediately.
@@ -170,10 +161,7 @@ export function ComponentEnvPanel({
     setIncluded(inc);
     setRenames(ren);
     setStaleMappings(stale);
-    setKeptLiterals(literals);
-    setOverrides(
-      Object.entries(envOverride ?? {}).map(([name, v]) => ({ name, value: v })),
-    );
+    setLiterals(lits);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, componentName]);
 
@@ -198,24 +186,19 @@ export function ComponentEnvPanel({
       }
       out.push(...staleMappings);
     }
-    // App-level literal entries pass through untouched either way.
-    out.push(...keptLiterals);
+    // Literal rows apply in BOTH postures: while inheriting they become the
+    // extend/override merge; when curated they are part of the explicit list.
+    for (const l of literals) {
+      if (l.name.trim()) out.push({ name: l.name.trim(), value: l.value });
+    }
     return out;
   }
 
   async function handleSave() {
-    const next: Parameters<typeof onSave>[0] = {
+    await onSave({
       inheritAppVars: !curated,
       envVars: buildEnvVars(),
-    };
-    if (envOverride !== undefined) {
-      const ov: Record<string, string> = {};
-      for (const o of overrides) {
-        if (o.name.trim()) ov[o.name.trim()] = o.value;
-      }
-      next.envOverride = ov;
-    }
-    await onSave(next);
+    });
   }
 
   const inputCls =
@@ -223,64 +206,56 @@ export function ComponentEnvPanel({
 
   return (
     <div className="mt-2 space-y-4 rounded-lg border border-gray-200 bg-white p-3">
-      {/* THE add/override section — one, scoped to the env the card already
-          shows. No separate all-environments section. */}
-      {envOverride !== undefined && envName ? (
-        <section>
-          <h3 className="text-xs font-medium uppercase tracking-wider text-gray-400">
-            Component variables — {envName}
-          </h3>
-          <p className="mt-0.5 text-xs text-gray-500">
-            Variables for <span className="font-mono">{componentName}</span> in{" "}
-            <span className="font-mono">{envName}</span>. A name matching an
-            inherited key <strong>overrides</strong> it. Secret values are added
-            at app/env scope — map inherited secrets below.
-          </p>
-          <div className="mt-2 space-y-1.5">
-            {overrides.map((o, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <input
-                  className={`${inputCls} w-44`}
-                  placeholder="NAME"
-                  value={o.name}
-                  onChange={(e) =>
-                    setOverrides((cur) =>
-                      cur.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)),
-                    )
-                  }
-                />
-                <input
-                  className={`${inputCls} flex-1`}
-                  placeholder="value"
-                  value={o.value}
-                  onChange={(e) =>
-                    setOverrides((cur) =>
-                      cur.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)),
-                    )
-                  }
-                />
-                <button
-                  onClick={() => setOverrides((cur) => cur.filter((_, j) => j !== i))}
-                  className="rounded px-1.5 py-0.5 text-xs text-red-600 hover:bg-red-50"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-            <button
-              onClick={() => setOverrides((cur) => [...cur, { name: "", value: "" }])}
-              className="rounded-md border border-dashed border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
-            >
-              + Add variable
-            </button>
-          </div>
-        </section>
-      ) : (
-        <p className="text-xs text-gray-500">
-          Curate what this component inherits below; add its variables from the
-          component card once the app exists.
+      <section>
+        <h3 className="text-xs font-medium uppercase tracking-wider text-gray-400">
+          Component variables
+        </h3>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Variables for <span className="font-mono">{componentName}</span>,
+          applied in <strong>every environment</strong>. A name matching an
+          inherited key <strong>overrides</strong> it (variables, not secrets —
+          secret values are added at app/env scope; map inherited secrets
+          below).
         </p>
-      )}
+        <div className="mt-2 space-y-1.5">
+          {literals.map((o, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input
+                className={`${inputCls} w-44`}
+                placeholder="NAME"
+                value={o.name}
+                onChange={(e) =>
+                  setLiterals((cur) =>
+                    cur.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)),
+                  )
+                }
+              />
+              <input
+                className={`${inputCls} flex-1`}
+                placeholder="value"
+                value={o.value}
+                onChange={(e) =>
+                  setLiterals((cur) =>
+                    cur.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)),
+                  )
+                }
+              />
+              <button
+                onClick={() => setLiterals((cur) => cur.filter((_, j) => j !== i))}
+                className="rounded px-1.5 py-0.5 text-xs text-red-600 hover:bg-red-50"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={() => setLiterals((cur) => [...cur, { name: "", value: "" }])}
+            className="rounded-md border border-dashed border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-500 hover:bg-gray-50"
+          >
+            + Add variable
+          </button>
+        </div>
+      </section>
 
       {appCtx && (
         <div className="rounded-md border border-gray-100">
@@ -295,7 +270,7 @@ export function ComponentEnvPanel({
               ({nVars} variable{nVars === 1 ? "" : "s"}, {nSecrets} secret
               {nSecrets === 1 ? "" : "s"}
               {nExcluded > 0 ? `, ${nExcluded} excluded` : ""}
-              {keptLiterals.length > 0 ? `, +${keptLiterals.length} literal` : ""})
+              {literals.length > 0 ? `, +${literals.length} literal` : ""})
             </span>
           </button>
           {inheritedOpen && (
@@ -385,14 +360,6 @@ export function ComponentEnvPanel({
                   no longer defines (
                   {staleMappings.map((m) => m.fromConfig || m.fromSecret).join(", ")}
                   ) — kept as-is; remove them by re-including everything.
-                </p>
-              )}
-              {keptLiterals.length > 0 && (
-                <p className="mt-2 text-xs text-gray-400">
-                  {keptLiterals.length} app-level literal entr
-                  {keptLiterals.length === 1 ? "y" : "ies"} (
-                  {keptLiterals.map((l) => l.name).join(", ")}) kept — managed
-                  via the API.
                 </p>
               )}
             </div>

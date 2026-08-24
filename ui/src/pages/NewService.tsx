@@ -373,7 +373,7 @@ function ConfigureStep({
       ? [
           newComponentDraft(
             { name: template.name, category: template.category },
-            template.components?.[0]?.name ?? "app",
+            "app",
           ),
         ]
       : [],

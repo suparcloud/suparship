@@ -19,7 +19,6 @@ func TestComposedComponentResolvesPlatformComponentToken(t *testing.T) {
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
 		RepoURL:        "https://git/repo.git",
 		ArgoCDRepoURL:  "https://git/repo.git",
-		TemplateLoader: canonicalityLoader{"byo-chart": false}, // passthrough → overlay IS the values
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)

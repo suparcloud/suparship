@@ -252,7 +252,7 @@ cat <<EOF
   Example URLs:
     http://argocd.localhost             ArgoCD UI
     http://gitea.localhost               Gitea UI
-    http://hello.staging.localhost       Demo app (staging)
+    http://shipnotes-frontend.staging.localhost   Demo app (staging)
     http://pr-<n>.<app>.preview.localhost   Preview environments
 
   Next step:

@@ -146,14 +146,10 @@ The dev loop wires the ctlptl kind registry in as the org registry
 (`hack/dev/values-dev.yaml` sets `registry.url: kind-registry:5000` with
 `insecure: true` — the registry is plain HTTP, and without that flag Kargo's
 Warehouse attempts TLS and never resolves a single tag). That makes the whole
-image-driven flow real:
-
-```bash
-task demo:color-app:release VERSION=0.2.0 COLOR=green
-# → pushes localhost:5001/demo/color-app:0.2.0
-# → the color-app Warehouse (kargo-demo namespace) discovers the tag as Freight
-# → promote staging → prod from the UI (or watch auto-promote, if enabled)
-```
+image-driven flow real: push a tag to `localhost:5001` (by hand with `docker
+push`, or let the [shipnotes demo](#the-shipnotes-demo-ci-driven-golden-path)'s
+CI do it), the app's Warehouse discovers it as Freight, and you promote
+staging → prod from the UI (or watch auto-promote, if enabled).
 
 The host pushes to `localhost:5001`; everything in-cluster (nodes pulling,
 Kargo polling) reaches the same registry as `kind-registry:5000` via ctlptl's
@@ -194,53 +190,36 @@ images (that's the kind registry's job).
 
 ---
 
-## The BYO-chart flow, locally (example charts)
+## The template catalog (example charts, seeded automatically)
 
-[`examples/charts/`](../../examples/charts/) holds plain, production-ready
-charts (web / worker / cronjob / gateway) meant to be registered as a chart
-source — the no-templates path described in
-[docs/byo-charts.md](../byo-charts.md). To try the whole flow against the dev
-cluster, publish them to the in-cluster Gitea and register that repo:
+There are no built-in templates — every template reaches suparship through
+the registry, exactly as a user's own charts would. The dev loop bootstraps
+that model for you: the **`seed-templates`** Tilt resource runs
+[`hack/dev/seed-example-charts.sh`](../../hack/dev/seed-example-charts.sh),
+which mirrors [`examples/charts/`](../../examples/charts/) (`web`, `worker`,
+`cronjob`, `job`, `gateway`, `postgres`) into the in-cluster Gitea as the
+`example-charts` repo, registers it as a `gitcharts` source, waits for the
+sync, and sets the `web` template's org-override `previewDefaultValues` to
+`image: {tag: ((platform.imageTag))}` so previews deploy their PR build.
 
-```bash
-# 1. Push the charts to dev Gitea as a public repo (charts under charts/,
-#    the gitcharts default scan path). Only web + gateway: template names
-#    are global and the dev demo templates repo already claims `worker` and
-#    `cronjob`, so the sync collision guard would refuse those two with a
-#    per-source error (see docs/byo-charts.md). Re-run the git lines to
-#    publish local chart edits.
-tmp=$(mktemp -d) && mkdir -p "$tmp/charts" && cp -R examples/charts/web examples/charts/gateway "$tmp/charts/"
-git -C "$tmp" init -q -b main && git -C "$tmp" add -A && git -C "$tmp" commit -qm "example charts"
-curl -s -u gitops:gitops-dev-only -H 'Content-Type: application/json' \
-  -d '{"name":"example-charts","private":false,"default_branch":"main"}' \
-  http://localhost:3000/api/v1/user/repos >/dev/null
-git -C "$tmp" push -qf http://gitops:gitops-dev-only@localhost:3000/gitops/example-charts.git main
-```
+The script is idempotent — edit a chart under `examples/charts/` and
+re-trigger `seed-templates` (or re-run the script) to push and re-sync it.
+Restrict to a subset with `EXAMPLE_CHARTS="web postgres"`.
 
-2. In the UI: **Templates → Sources → Add source**, type **Git charts repo**:
-   - Name: `example-charts`
-   - Repo URL: `http://gitea-http.gitea.svc.cluster.local:3000/gitops/example-charts.git`
-     (the *in-cluster* URL — the suparship pod does the cloning, so
-     `localhost:3000` won't resolve)
-   - Ref / Path: leave empty (`main` / `charts` defaults)
-
-3. Hit **Sync now** on the source — `web` and `gateway` appear as templates
-   (passthrough: no injected values schema).
-
-4. Create an app from `web`. The chart's defaults deploy a standalone
-   `nginx-unprivileged` demo, so it goes green with no inputs. From there,
-   follow [docs/byo-charts.md](../byo-charts.md): wire `envFrom` /
-   routing with `((platform.*))` tokens in the app's values overlay, author
-   developer values on the template page, and bind the CD image to
-   `image.tag`.
+From there the BYO flow is exactly [docs/byo-charts.md](../byo-charts.md):
+create an app from `web` (its defaults deploy a standalone
+`nginx-unprivileged` demo, so it goes green with no configuration), wire
+`envFrom` / routing with `((platform.*))` tokens in the app's values overlay,
+author developer values on the template page, and bind the CD image to
+`image.tag`.
 
 ---
 
 ## The shipnotes demo (CI-driven golden path)
 
-The color-app loop above pushes images by hand. The full production shape —
-CI from PRs and main driving previews, staging, and promotion, on a real
-composed app — is **one command** on top of `task up`:
+The full production shape — CI from PRs and main driving previews, staging,
+and promotion, on a real composed app — is **one command** on top of
+`task up`:
 
 ```bash
 task demo:shipnotes   # second terminal — or press ▶ on the demo-shipnotes
@@ -270,7 +249,7 @@ How the plumbing works (and what to check when it doesn't):
 - The **runner** (`act-runner` resource) is an `act_runner` container on the
   HOST docker daemon, registered against Gitea automatically. Job containers
   get the host daemon's socket, so workflow `docker push localhost:5001/...`
-  takes the same path as `task demo:color-app:release`. If runs sit queued,
+  lands in the same kind registry Tilt builds into. If runs sit queued,
   re-trigger `act-runner`; after `task cluster:delete` + recreate, first
   `docker volume rm suparship-act-runner-data` (the old registration points
   at a dead instance).
@@ -423,7 +402,8 @@ make test         # go test -race ./...
 make test-smoke   # API smoke tests, no cluster
 make lint         # golangci-lint (if installed)
 make fmt          # gofumpt / gofmt
-task charts:lint  # helm lint the library + template charts
+task charts:lint    # helm lint examples/charts/* + charts/suparship
+task charts:verify  # lint + default render + platform-contract assertions (CI guard)
 ```
 
 ---
@@ -515,7 +495,7 @@ task up
       ├─ helm_resource: argocd, gitea → init-gitops (repo skeleton + root App-of-Apps)
       ├─ docker_build_with_restart: Dockerfile.dev  (live_update: go build in-container)
       ├─ helm(charts/suparship): the suparship Deployment  ◄── your code, hot-reloaded
-      ├─ local_resource: suparship-admin-secret, seed
+      ├─ local_resource: suparship-admin-secret, seed, seed-templates (examples/charts → registry)
       └─ local_resource: ui-dev (Vite HMR), ui-build (opt-in bundled UI)
 ```
 

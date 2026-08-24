@@ -173,27 +173,12 @@ func TestMarshalPassthroughValues_EmptyOverlay(t *testing.T) {
 	}
 }
 
-func TestMarshalValuesWithOverlay_NoOverlayNoToken_Unchanged(t *testing.T) {
-	hv := helmvalues.HelmValues{App: helmvalues.AppContext{Name: "hello", Env: "prod"}}
-	got, err := marshalValuesWithOverlay(hv, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, _ := yaml.Marshal(hv)
-	if string(got) != string(want) {
-		t.Errorf("expected struct-marshalled bytes unchanged when no overlay/token")
-	}
-}
-
-func TestMarshalValuesWithOverlay_MergesAndInterpolates(t *testing.T) {
-	hv := helmvalues.HelmValues{
-		App:      helmvalues.AppContext{Name: "hello", Env: "prod"},
-		Platform: helmvalues.PlatformValues{Env: "prod", RoutingHost: "hello.prod.acme.com"},
-	}
+func TestMarshalPassthroughValues_InterpolatesPlatformAndVars(t *testing.T) {
+	pv := helmvalues.PlatformValues{Env: "prod", RoutingHost: "hello.prod.acme.com"}
 	overlay := map[string]any{
 		"podAnnotations": map[string]any{"host": "[[platform.routingHost]]", "region": "[[vars.REGION]]"},
 	}
-	got, err := marshalValuesWithOverlay(hv, overlay, map[string]string{"REGION": "us-east"})
+	got, err := marshalPassthroughValues(pv, overlay, map[string]string{"REGION": "us-east"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,30 +192,5 @@ func TestMarshalValuesWithOverlay_MergesAndInterpolates(t *testing.T) {
 	}
 	if ann["region"] != "us-east" {
 		t.Errorf("overlay region = %v, want us-east", ann["region"])
-	}
-	// Base platform block survives the merge.
-	plat := out["platform"].(map[string]any)
-	if plat["routingHost"] != "hello.prod.acme.com" {
-		t.Errorf("platform block lost in merge: %v", plat)
-	}
-}
-
-func TestMarshalValuesWithOverlay_InterpolatesBaseTokens(t *testing.T) {
-	// A curated input value that reached hv (image tag) carrying a token.
-	hv := helmvalues.HelmValues{
-		Platform: helmvalues.PlatformValues{Env: "staging"},
-		Components: map[string]*helmvalues.ComponentValues{
-			"web": {Image: helmvalues.ImageValues{Repository: "ghcr.io/org/hello", Tag: "[[platform.env]]-latest"}},
-		},
-	}
-	got, err := marshalValuesWithOverlay(hv, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out map[string]any
-	_ = yaml.Unmarshal(got, &out)
-	tag := out["components"].(map[string]any)["web"].(map[string]any)["image"].(map[string]any)["tag"]
-	if tag != "staging-latest" {
-		t.Errorf("base image tag = %v, want staging-latest", tag)
 	}
 }

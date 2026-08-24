@@ -142,3 +142,28 @@ func TestGetServiceRuntime_NilDynamicNoHTTPRoute(t *testing.T) {
 		t.Fatalf("expected no URLs, got %v", info.IngressURLs)
 	}
 }
+
+
+// The HTTPRoute URL scheme follows the org's secure-endpoints setting: nil
+// getter (never wired) keeps the https default; a false getter yields http.
+func TestHTTPRouteURLScheme_FollowsSecureEndpoints(t *testing.T) {
+	rt := httpRouteObj("ns", "web-route", nil, []string{"web.example.com"}, "", "web")
+
+	p := NewK8sProvider(fake.NewSimpleClientset(), newDynFake(rt))
+	info, err := p.GetServiceRuntime(context.Background(), "ns", "web")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hasURL(info.IngressURLs, "https://web.example.com") {
+		t.Fatalf("nil secure func should default to https, got %v", info.IngressURLs)
+	}
+
+	p.SetSecureEndpointsFunc(func() bool { return false })
+	info, err = p.GetServiceRuntime(context.Background(), "ns", "web")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hasURL(info.IngressURLs, "http://web.example.com") {
+		t.Fatalf("secure=false should yield http, got %v", info.IngressURLs)
+	}
+}

@@ -73,7 +73,6 @@ Environment variables (process-level, always active):
   SUPARSHIP_ADDR           listen address (default ":8080")
   SUPARSHIP_UI_DIR         path to frontend dist directory
   SUPARSHIP_CORS_ORIGINS   comma-separated allowed origins
-  SUPARSHIP_TEMPLATES_DIR  path to templates directory
   SUPARSHIP_COOKIE_SECURE  set to "true" for HTTPS deployments
   SUPARSHIP_LOG_LEVEL      log verbosity: debug, info, warn, error (default "info")
 
@@ -91,7 +90,6 @@ func init() {
 	serverCmd.Flags().String("addr", envOr("SUPARSHIP_ADDR", ":8080"), "listen address (host:port)")
 	serverCmd.Flags().String("ui-dir", envOr("SUPARSHIP_UI_DIR", ""), "path to frontend static files")
 	serverCmd.Flags().String("cors-origins", envOr("SUPARSHIP_CORS_ORIGINS", ""), "comma-separated allowed CORS origins")
-	serverCmd.Flags().String("templates-dir", envOr("SUPARSHIP_TEMPLATES_DIR", ""), "path to templates directory")
 	serverCmd.Flags().Bool("cookie-secure", envOr("SUPARSHIP_COOKIE_SECURE", "false") == "true", "set Secure flag on session cookies (enable behind HTTPS)")
 	serverCmd.Flags().String("log-level", envOr("SUPARSHIP_LOG_LEVEL", "info"), "log verbosity: debug, info, warn, error")
 	rootCmd.AddCommand(serverCmd)
@@ -101,7 +99,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	addr, _ := cmd.Flags().GetString("addr")
 	uiDir, _ := cmd.Flags().GetString("ui-dir")
 	corsRaw, _ := cmd.Flags().GetString("cors-origins")
-	templatesDir, _ := cmd.Flags().GetString("templates-dir")
 	cookieSecure, _ := cmd.Flags().GetBool("cookie-secure")
 	logLevelStr, _ := cmd.Flags().GetString("log-level")
 	kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
@@ -152,6 +149,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		argoAppGate             server.ArgoAppGate
 		stuckAppManager         server.StuckAppManager
 		argoRefresh             argoRefresher // triggers ArgoCD refresh after publish
+		argoChainNudger         server.ArgoChainNudger
 
 		kubeClient            kubernetes.Interface
 		dynClient             dynamic.Interface
@@ -248,6 +246,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			argoAppGate = argoCDReader
 			stuckAppManager = &stuckAppAdapter{reader: argoCDReader}
 			argoRefresh = argoCDReader
+			argoChainNudger = argoCDReader
 			logger.Info("kargo promoter enabled via dynamic client")
 			logger.Info("argocd deployment history reader enabled")
 		}
@@ -283,6 +282,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// Wire all Kubernetes-backed store and runtime implementations
 		// through the consolidated kube.ServerDeps bundle.
 		kubeDeps := kube.NewServerDeps(client, rbac.NewOrgEnvNamesAdapter(orgProvider), dynClient)
+		// Gateway-API HTTPRoute URLs carry no scheme of their own; read the
+		// org's secure-endpoints setting live so toggling it in Settings takes
+		// effect without a restart. One wire covers the deps provider and the
+		// compat runtime adapter (same pointer).
+		kubeDeps.RuntimeProvider.SetSecureEndpointsFunc(secureEndpointsFunc(orgProvider))
 		projectStore = kubeDeps.ProjectStore
 		previewStore = kubeDeps.PreviewStore
 		tokenStore = token.NewKubeStore(client)
@@ -336,6 +340,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// Build the per-cluster client pool so sealing certs can be fetched
 		// directly from each registered cluster's kubeseal controller.
 		clusterPool = k8s.NewClusterClientPool(kubeDeps.ClusterStore)
+		// A registered cluster whose API server is the in-cluster URL IS the
+		// cluster suparship runs in (the dev-loop seed registers staging/prod
+		// this way, with no kubeconfig Secret) — serve it with our own clients
+		// instead of failing runtime reads with "cluster unreachable".
+		clusterPool.SetLocalFallback(client, dynClient, func(ctx context.Context, name string) bool {
+			c, err := kubeDeps.ClusterStore.GetCluster(ctx, name)
+			return err == nil && c != nil && c.APIServer == "https://kubernetes.default.svc"
+		})
 
 		// Bootstrap: reconcile Helm-provided ConfigMaps and log what was found.
 		bootstrapResult := bootstrap.Reconcile(cmd.Context(), client, logger)
@@ -372,32 +384,17 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// Templates stored as ConfigMaps in the cluster (label
 		// suparship.io/type=template, namespace suparship-system) are served
 		// LIVE via cfg.ClusterTemplateLoader / the publisher's clusterLoader —
-		// NOT frozen into the built-in set at startup. Freezing them made
-		// externally-synced templates impossible to update or delete (the stale
-		// startup copy shadowed the live one). With no --templates-dir there are
-		// no disk built-ins; every template resolves live from the cluster.
-		// A best-effort count is logged for operator visibility only.
-		if templatesDir == "" {
-			if clusterTemplates, err := kube.LoadTemplates(cmd.Context(), client); err != nil {
-				logger.Warn("could not list cluster templates at startup (served live regardless)",
-					"error", err,
-				)
-			} else {
-				logger.Info("cluster templates available (served live)", "count", len(clusterTemplates))
-			}
+		// NOT frozen into a static set at startup. There are no built-in
+		// templates: every template arrives via the registry (or a BYO chart
+		// upload) and resolves live from the cluster. A best-effort count is
+		// logged for operator visibility only.
+		if clusterTemplates, err := kube.LoadTemplates(cmd.Context(), client); err != nil {
+			logger.Warn("could not list cluster templates at startup (served live regardless)",
+				"error", err,
+			)
+		} else {
+			logger.Info("cluster templates available (served live)", "count", len(clusterTemplates))
 		}
-	}
-
-	// Disk-based templates (--templates-dir / SUPARSHIP_TEMPLATES_DIR) always
-	// take precedence over cluster-loaded templates, so contributors can
-	// iterate on templates locally without pushing ConfigMaps to the cluster.
-	if templatesDir != "" {
-		loaded, err := tpl.LoadDir(templatesDir)
-		if err != nil {
-			return fmt.Errorf("loading templates from %s: %w", templatesDir, err)
-		}
-		templates = loaded
-		logger.Info("templates loaded", "dir", templatesDir, "count", len(templates))
 	}
 
 	// Wire the GitOps publisher from the ConfigMap (the single source of truth).
@@ -412,11 +409,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			pubCfg.RepoUser = username
 			pubCfg.RepoPassword = password
 			pubCfg.SyncAutomated = true
-			pubCfg.TemplatesDir = templatesDir
-			// ChartFetcher resolves chart bundles for templates imported via
-			// the BYO-chart flow (where the chart .tgz lives in a cluster
-			// ConfigMap rather than on disk). Built-in templates that ship
-			// with the binary still resolve through TemplatesDir first.
+			// ChartFetcher resolves chart bundles: every template's chart .tgz
+			// lives in a cluster ConfigMap (registry-synced or BYO-uploaded).
 			pubCfg.ChartFetcher = chartFetcherFromClient(kubeClient)
 			// TemplateLoader lets the publisher detect external-mode
 			// templates (engine.chart points at a Helm registry) so it
@@ -605,7 +599,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				CommitAuthorName:  repoCfg.CommitAuthorName,
 				CommitAuthorEmail: repoCfg.CommitAuthorEmail,
 				SyncAutomated:     true,
-				TemplatesDir:      templatesDir,
 				ChartFetcher:      chartFetcherFromClient(kubeClient),
 				TemplateLoader:    publisherTemplateLoader(templates, kubeClient),
 			})
@@ -681,6 +674,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		ProjectAppCounter:       projectAppCounter,
 		AppDiagnosticsReader:    appDiagnosticsReader,
 		ArgoAppGate:             argoAppGate,
+		ArgoChainNudger:         argoChainNudger,
 		StuckAppManager:         stuckAppManager,
 		ReadinessProbers:        readinessProbers,
 		CookieSecure:            cookieSecure,
@@ -828,8 +822,6 @@ func setPlatformOverlays(pub *gitops.AppPublishEnv, tmpl *tpl.Template, ov *doma
 	if tmpl == nil {
 		return
 	}
-	// BYO/passthrough templates opt out of the injected canonical values base.
-	pub.SkipCanonicalBase = !tmpl.Spec.CanonicalValues()
 	def, env, cluster := computePlatformOverlays(tmpl, ov, envName)
 	pub.PlatformDefaultValues = def
 	pub.PlatformEnvValues = env
@@ -918,7 +910,12 @@ func (a *gitOpsPublisherAdapter) setComponentPlatformOverlays(ctx context.Contex
 			// the user hasn't configured CD — once they have, an empty selection is an
 			// explicit "watch nothing" (they disabled CD for this component's images),
 			// so leave resolved nil instead of re-binding the template defaults.
-			if !app.Spec.CD.ImagesConfigured {
+			// Stateful components (databases/caches) never auto-bind: they deploy
+			// their chart's stock image pinned/direct, and CD-watching e.g.
+			// docker.io/postgres poisons the Warehouse (a subscription that
+			// discovers nothing blocks freight assembly for the whole app). An
+			// explicit selection on a stateful component still works.
+			if !app.Spec.CD.ImagesConfigured && !c.Stateful {
 				resolved = gitops.SelectDeclaredKargoImages(discovered)
 			}
 		} else {
@@ -966,11 +963,11 @@ func orgNameOf(org *rbac.Org) string {
 // Helm values (so each repository reflects the values, never a stale snapshot),
 // then filtered to the user's selection (app.Spec.Images) by tag key. A selection
 // whose image no longer appears in the values is skipped with a warning. Empty
-// selection → nil, letting the publisher fall back to the legacy single image.
+// selection and no slots → nil: the app genuinely has no CD images (no legacy
+// fallback), so the publisher prunes/skips its Warehouse.
 func (a *gitOpsPublisherAdapter) resolveCDImages(ctx context.Context, tmpl *tpl.Template, ov *domain.TemplateOverride, app *domain.App, env *domain.AppEnvironment, orgName string) []gitops.KargoImage {
 	// Skip discovery entirely when there's no explicit selection AND the template
-	// declares no image slots — nothing to watch (resolveKargoImages still applies
-	// the legacy image_repository fallback downstream).
+	// declares no image slots — nothing to watch.
 	if len(app.Spec.Images) == 0 && len(server.EffectiveTemplateImageSlots(tmpl, ov)) == 0 {
 		return nil
 	}
@@ -1266,6 +1263,16 @@ func (a *kargoPromoterAdapter) GetPromotionStatus(ctx context.Context, projectNa
 // ListAppStageStatuses implements server.KargoPipelineReader.
 // The store scopes the query to the project's kargo-{project} namespace and the
 // app label; here we strip the "{app}-" name prefix to recover the env name.
+// GetWarehouseStatus implements server.KargoWarehouseReader: the Warehouse is
+// named after the app within the project's kargo namespace.
+func (a *kargoPromoterAdapter) GetWarehouseStatus(ctx context.Context, projectName, appName string) (server.KargoWarehouseStatusResult, error) {
+	st, err := a.store.GetWarehouseStatus(ctx, projectName, appName)
+	if err != nil {
+		return server.KargoWarehouseStatusResult{}, err
+	}
+	return server.KargoWarehouseStatusResult{Exists: st.Exists, Ready: st.Ready, Issue: st.Issue}, nil
+}
+
 func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, projectName, appName string) ([]server.KargoStageStatusResult, error) {
 	all, err := a.store.ListAppStageStatuses(ctx, projectName, appName)
 	if err != nil {
@@ -1283,6 +1290,7 @@ func (a *kargoPromoterAdapter) ListAppStageStatuses(ctx context.Context, project
 			Health:                s.Health,
 			CurrentFreight:        s.CurrentFreight,
 			AvailableFreightCount: s.AvailableFreightCount,
+			Issue:                 s.Issue,
 		})
 	}
 
@@ -2109,7 +2117,6 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 		EnvVars:                 envVars,
 		ScopeKeys:               scopeKeys,
 		ImageTag:                imageTag,
-		SkipCanonicalBase:       !tmpl.Spec.CanonicalValues(),
 		PlatformDefaultValues:   basePub.PlatformDefaultValues,
 		PlatformEnvValues:       basePub.PlatformEnvValues,
 		PlatformClusterValues:   basePub.PlatformClusterValues,
@@ -2655,6 +2662,23 @@ func selfHealSealedTokens(
 	}
 }
 
+// secureEndpointsFunc returns a live getter for the org's secure-endpoints
+// flag (drives the scheme of generated HTTPRoute endpoint URLs). Read per call
+// — the setting is editable at runtime. A missing provider or unreadable org
+// yields true: absent = secure, matching Org.EffectiveSecureEndpoints.
+func secureEndpointsFunc(op rbac.OrgProvider) func() bool {
+	return func() bool {
+		if op == nil {
+			return true
+		}
+		org, err := op.GetOrg(context.Background())
+		if err != nil {
+			return true
+		}
+		return org.EffectiveSecureEndpoints()
+	}
+}
+
 // brandingFromOrg fetches Org.Branding once at startup and returns its zero
 // value when the org isn't loadable. Used to seed Branding on writers that
 // embed it; live reload (e.g. on org-config save) requires a server restart
@@ -2704,9 +2728,9 @@ func registrySyncEngine(client kubernetes.Interface, logger *slog.Logger, builti
 	}
 }
 
-// builtinTemplateNames extracts the names of the disk-loaded built-in
-// templates (empty when running without --templates-dir — cluster templates
-// are served live and are NOT built-ins).
+// builtinTemplateNames extracts the names of any disk-loaded templates
+// (always empty in the BYO model — every template arrives via the registry
+// and is served live from cluster ConfigMaps, never frozen at startup).
 func builtinTemplateNames(templates []*tpl.Template) []string {
 	names := make([]string, 0, len(templates))
 	for _, t := range templates {
@@ -2893,8 +2917,7 @@ func (l *kubeTemplateLoader) LoadTemplate(ctx context.Context, name string) (*tp
 		ctx, kube.TemplateConfigMapName(name), metav1.GetOptions{},
 	)
 	if apierrors.IsNotFound(err) {
-		// Template not in cluster (e.g. disk-only built-in via
-		// SUPARSHIP_TEMPLATES_DIR). Silent fall-through — publisher
+		// Template not in cluster. Silent fall-through — publisher
 		// treats unresolvable as inline-mode.
 		return nil, nil
 	}
@@ -2919,12 +2942,10 @@ func templateLoaderFromClient(client kubernetes.Interface) gitops.TemplateLoader
 }
 
 // diskFirstTemplateLoader resolves templates with the SAME precedence the
-// serving path uses: disk built-ins (--templates-dir) first, cluster
-// ConfigMaps second. The publisher previously consulted only the cluster
-// loader, so an app created from a disk template published with the
-// component-key fallback (values emitted under the component's user-facing
-// name instead of the chart's canonical key) — the chart then silently
-// rendered no ingress/env for that component.
+// serving path uses: disk-loaded templates first, cluster ConfigMaps second.
+// In the BYO model no templates are loaded from disk, so this reduces to the
+// cluster loader; the type is kept so a non-empty disk set (tests, embedded
+// use) still resolves consistently with serving.
 type diskFirstTemplateLoader struct {
 	disk map[string]*tpl.Template
 	next gitops.TemplateLoader

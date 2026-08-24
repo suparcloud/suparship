@@ -4,7 +4,9 @@
 #
 #   1. mirrors github.com/suparcloud/suparship-demo into the local Gitea and
 #      wires the Actions secret/vars its .gitea/workflows/ci.yaml needs
-#   2. registers the example-charts template source (adds `postgres`)
+#   2. ensures the example-charts template catalog is seeded (delegates to
+#      hack/dev/seed-example-charts.sh; Tilt's `seed-templates` resource
+#      normally already ran it)
 #   3. waits for CI's first main-<7sha> images in the local registry
 #   4. creates the composed `shipnotes` app (frontend + api + db) with CD
 #      managed and per-component image bindings
@@ -102,47 +104,10 @@ set_var SUPARSHIP_API "$CI_API"
 set_var SUPARSHIP_PROJECT "$PROJECT"
 set_var SUPARSHIP_APP "$APP"
 
-# ── 4. Example-charts template source (provides the `postgres` template) ───
-# Mirrors examples/charts into Gitea under charts/ (the gitcharts default
-# scan path) and registers it. Only the collision-free charts: worker/cronjob
-# names are owned by the built-in templates and the sync guard would refuse
-# them anyway.
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-charts_tmp="$(mktemp -d)"
-mkdir -p "$charts_tmp/charts"
-cp -R "$REPO_ROOT/examples/charts/web" "$REPO_ROOT/examples/charts/gateway" \
-      "$REPO_ROOT/examples/charts/postgres" "$charts_tmp/charts/"
-git -C "$charts_tmp" init -q -b main
-git -C "$charts_tmp" add -A
-git -C "$charts_tmp" -c user.name=dev -c user.email=dev@local commit -qm "example charts"
-gitea_api POST /user/repos '{"name":"example-charts","private":false,"default_branch":"main"}' >/dev/null || true
-git -C "$charts_tmp" push -qf \
-  "http://$GITEA_USER:$GITEA_PASS@$GITEA_HOST/$GITEA_USER/example-charts.git" main
-rm -rf "$charts_tmp"
-ok "example charts pushed to $GITEA/$GITEA_USER/example-charts"
-
-registry_json="$(curl -sS -b "$cookies" "$API/templates/registry")"
-if printf '%s' "$registry_json" | grep -q '"name":"example-charts"'; then
-  ok "template source example-charts already registered"
-else
-  # Preserve existing sources; append ours. jq-free merge: rewrite the
-  # registry with the stored external list + our entry.
-  external="$(printf '%s' "$registry_json" | python3 -c "
-import json,sys
-reg=json.load(sys.stdin).get('registry') or {}
-ext=[e for e in reg.get('external') or [] if e.get('name')!='example-charts']
-ext.append({'name':'example-charts','type':'gitcharts',
-  'repoURL':'http://gitea-http.gitea.svc.cluster.local:3000/$GITEA_USER/example-charts.git',
-  'ref':'main','path':''})
-print(json.dumps({'builtIn': reg.get('builtIn') or [], 'external': ext}))")"
-  curl -sS -b "$cookies" -o /dev/null -X PUT "$API/templates/registry" \
-    -H 'Content-Type: application/json' -d "$external"
-  ok "template source example-charts registered"
-fi
-curl -sS -b "$cookies" -o /dev/null -X POST "$API/templates/registry/sources/example-charts/sync"
-curl -sS -b "$cookies" "$API/templates" | grep -q '"postgres"' \
-  || die "postgres template did not appear after source sync"
-ok "postgres template available"
+# ── 4. Template catalog (examples/charts via the registry) ─────────────────
+# Delegated to the shared seeder — the Tilt `seed-templates` resource runs it
+# on `task up`, so this is just an idempotent safety net for standalone runs.
+"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/seed-example-charts.sh"
 
 # ── 5. Wait for CI's first main-<sha> images ───────────────────────────────
 # The mirror push above triggers .gitea/workflows/ci.yaml; the first run
@@ -173,21 +138,54 @@ else
   python3 - "$MAIN_TAG" "$REGISTRY_HOST" >"$tmp/create.json" <<'PY'
 import json, sys
 tag, registry = sys.argv[1], sys.argv[2]
+# Generic `web` chart, configured entirely through ITS OWN values — the
+# platform contributes only resolved ((platform.*)) tokens and the env
+# ConfigMap/Secret objects behind them.
 def web(name, repo, port, health, expose):
     full = registry + "/" + repo
     return {
         "name": name, "type": "web", "enabled": True, "exposeMode": expose,
-        "template": {"name": "web-service"},
-        "values": {"components": {"web": {
+        "template": {"name": "web"},
+        "values": {
+            # Deterministic Service name (the chart's fullname would append
+            # "-web" to the release name otherwise).
+            "fullnameOverride": "shipnotes-" + name,
             "image": {"repository": full, "tag": tag},
-            "port": port, "healthCheck": {"path": health}}}},
-        "images": [{"name": name, "tagKey": "components.web.image.tag",
+            "containerPort": port,
+            "service": {"port": port},
+            "healthCheck": {"path": health},
+            "envFrom": {
+                "configMaps": ["((platform.configMapName))"],
+                "secrets": ["((platform.secretName))"],
+            },
+            # Demo-grade images (stock nginx / uvicorn) run as root. An empty
+            # map is a NO-OP under deep-merge — the chart's runAsNonRoot
+            # default would survive and the kubelet rejects the container
+            # (CreateContainerConfigError). Override the key explicitly.
+            "podSecurityContext": {"runAsNonRoot": False},
+        },
+        "images": [{"name": name, "tagKey": "image.tag",
                     "repository": full, "tagPattern": "^main-"}],
     }
 frontend = web("frontend", "demo/shipnotes-frontend", 80, "/", "external")
-# The frontend nginx proxies /api to this env var; shipnotes-api is the
-# composed component's Service (publisher names releases <app>-<component>).
-frontend["envVars"] = [{"name": "API_UPSTREAM", "value": "http://shipnotes-api:8000"}]
+# Routing the BYO way: the chart's own ingress values, wired to the
+# platform-resolved host + class via tokens. TLS off — the dev loop serves
+# plain HTTP (no cert-manager) and nginx would otherwise redirect to https.
+frontend["values"]["ingress"] = {
+    "enabled": True,
+    "host": "((platform.routingHost))",
+    "className": "((platform.ingressClassName))",
+    "tls": {"enabled": False},
+}
+# The frontend nginx proxies /api to this env var; shipnotes-api is the api
+# component's Service (fullnameOverride above).
+frontend["values"]["env"] = {"API_UPSTREAM": "http://shipnotes-api:8000"}
+# Root nginx needs these capabilities back (the chart drops ALL): setuid/
+# setgid/chown for its workers + cache dirs, NET_BIND_SERVICE for :80.
+# K8s applies drop before add, so add wins for exactly these.
+frontend["values"]["securityContext"] = {
+    "capabilities": {"add": ["CHOWN", "SETGID", "SETUID", "NET_BIND_SERVICE"]},
+}
 api = web("api", "demo/shipnotes-api", 8000, "/healthz", "disabled")
 db = {
     "name": "db", "type": "worker", "enabled": True, "stateful": True,

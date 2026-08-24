@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"gopkg.in/yaml.v3"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -18,8 +17,8 @@ import (
 // EffectiveValuesDTO is the read-only "what will deploy" preview that backs the
 // values-editor UI. It is the values-document layering (chart defaults ⊕ template
 // platform/env defaults ⊕ developer rawValues), NOT the fully rendered chart:
-// the canonical struct-mapping and ((platform.*))/((vars.*)) interpolation are applied
-// later at publish with per-env cluster/domain context that isn't available here.
+// ((platform.*))/((vars.*)) interpolation is applied later at publish with
+// per-env cluster/domain context that isn't available here.
 type EffectiveValuesDTO struct {
 	// Values is the merged values document.
 	Values map[string]any `json:"values"`
@@ -76,17 +75,10 @@ func chartDefaults(ctx context.Context, kc kubernetes.Interface, t *tpl.Template
 //
 // Inputs are deep-copied so callers' maps (the stored app spec, the template,
 // the org override) are never mutated.
-func computeEffectiveValues(chartVals, canonicalBase map[string]any, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any) map[string]any {
+func computeEffectiveValues(chartVals map[string]any, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any) map[string]any {
 	out := helmvalues.DeepCopyMap(chartVals)
 	if out == nil {
 		out = map[string]any{}
-	}
-	// canonicalBase is the platform↔chart contract (app/components/suparship/
-	// routing) suparship publishes; Helm applies it on top of the chart's own
-	// values.yaml defaults at render. Layer it here so the app preview matches
-	// what deploys. nil for template-level previews (no concrete app).
-	if canonicalBase != nil {
-		out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(canonicalBase))
 	}
 	if t != nil {
 		out = helmvalues.DeepMerge(out, helmvalues.DeepCopyMap(t.Spec.DefaultValues))
@@ -133,13 +125,10 @@ func mergedPreviewDefaults(t *tpl.Template, ov *domain.TemplateOverride) map[str
 	return out
 }
 
-func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any, pv *previewLayer) EffectiveValuesDTO {
+func effectiveValuesDTO(chartVals map[string]any, available bool, t *tpl.Template, ov *domain.TemplateOverride, envName, cluster string, appRaw, envRaw map[string]any, pv *previewLayer) EffectiveValuesDTO {
 	layers := []string{}
 	if available {
 		layers = append(layers, "chart defaults")
-	}
-	if len(canonicalBase) > 0 {
-		layers = append(layers, "platform base")
 	}
 	if t != nil && len(t.Spec.DefaultValues) > 0 {
 		layers = append(layers, "template defaults")
@@ -168,7 +157,7 @@ func effectiveValuesDTO(chartVals, canonicalBase map[string]any, available bool,
 	if pv != nil && len(pv.appOverride) > 0 {
 		layers = append(layers, "preview overrides")
 	}
-	values := computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, cluster, appRaw, envRaw)
+	values := computeEffectiveValues(chartVals, t, ov, envName, cluster, appRaw, envRaw)
 	// Preview band sits above the base-env composition (see previewLayer).
 	if pv != nil {
 		values = helmvalues.DeepMerge(values, helmvalues.DeepCopyMap(pv.templateDefaults))
@@ -204,8 +193,7 @@ func (th *templateHandler) handleEffectiveValues(w http.ResponseWriter, r *http.
 	cluster := r.URL.Query().Get("cluster")
 	chartVals, available := chartDefaults(r.Context(), th.kubeClient, t)
 	ov := loadOverride(r.Context(), th.kubeClient, name)
-	// Template-level preview: no concrete app, so no canonical base.
-	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, nil, nil, nil))
+	writeJSON(w, http.StatusOK, effectiveValuesDTO(chartVals, available, t, ov, env, cluster, nil, nil, nil))
 }
 
 // loadOverride best-effort reads a template's org-level platform override.
@@ -266,10 +254,10 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 	}
 
 	t, _ := ah.lookupTemplate(r.Context(), app.Spec.Template.Name)
-	// skipChart drops the chart defaults AND the canonical struct base so the
-	// response is only the CONCISE platform base (template ⊕ org overrides) for the
-	// env — the seed the single-component editor pre-fills with, without the chart's
-	// hundreds of default keys or the structural app/components/suparship scaffolding.
+	// skipChart drops the chart defaults so the response is only the CONCISE
+	// platform base (template ⊕ org overrides) for the env — the seed the
+	// single-component editor pre-fills with, without the chart's hundreds of
+	// default keys.
 	skipChart := r.URL.Query().Get("skipChart") == "true"
 	var (
 		chartVals map[string]any
@@ -279,13 +267,6 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 		chartVals, available = chartDefaults(r.Context(), ah.kubeClient, t)
 	}
 	ov := loadOverride(r.Context(), ah.kubeClient, app.Spec.Template.Name)
-	// Include the canonical platform↔chart base (app/components/suparship/routing)
-	// so the preview matches what Helm renders — but only for canonical templates.
-	// BYO/passthrough templates emit only their own values + overrides + tokens.
-	var canonicalBase map[string]any
-	if !skipChart && (t == nil || t.Spec.CanonicalValues()) {
-		canonicalBase = ah.canonicalBaseMap(r.Context(), app, envName)
-	}
 	// Resolve envName's workload cluster so cluster-scoped template overrides
 	// (org ClusterValues[cluster]) show in the preview, exactly as they deploy.
 	cluster := ah.envCluster(r.Context(), envName)
@@ -303,7 +284,7 @@ func (ah *appHandler) handleAppValuesPreview(w http.ResponseWriter, r *http.Requ
 		}
 		pv = &previewLayer{templateDefaults: mergedPreviewDefaults(t, ov), appOverride: override}
 	}
-	dto := effectiveValuesDTO(chartVals, canonicalBase, available, t, ov, envName, cluster, appRaw, envRaw, pv)
+	dto := effectiveValuesDTO(chartVals, available, t, ov, envName, cluster, appRaw, envRaw, pv)
 	// Composed app: the primary-template discovery above misses each component's
 	// own chart+overlay, so REPLACE the discovered images with the union of every
 	// component's images (each tagged with its owning component) — the app-level
@@ -364,60 +345,15 @@ func (ah *appHandler) componentDiscoveredImages(ctx context.Context, app *domain
 	return out
 }
 
-// canonicalBaseMap renders the canonical HelmValues base suparship publishes for
-// an app+env (app/components/suparship/routing) into a map, so the effective
-// preview reflects the platform↔chart contract Helm applies — not just chart
-// defaults + overlays. Routing host / cluster resolution is approximate here
-// (nil profiles, empty baseDomain); the structural keys are what matter.
-func (ah *appHandler) canonicalBaseMap(ctx context.Context, app *domain.App, envName string) map[string]any {
-	envType := domain.AppEnvStaging
-	namespace := ""
-	if env, err := ah.appStore.GetAppEnvironment(ctx, app.ProjectName, app.Name, envName); err == nil && env != nil {
-		envType = env.EnvType
-		namespace = env.Namespace
-	}
-	orgName := ""
-	if ah.orgProvider != nil {
-		if org, err := ah.orgProvider.GetOrg(ctx); err == nil && org != nil {
-			orgName = org.Name
-		}
-	}
-	return CanonicalBaseMap(app, envName, envType, namespace, orgName)
-}
-
-// CanonicalBaseMap renders the canonical HelmValues base suparship publishes for
-// an app+env (app/components/suparship/routing) into a map, so callers can layer
-// it under the chart defaults + overrides to match what Helm renders. Routing
-// host / cluster resolution is approximate (nil profiles, empty baseDomain); the
-// structural keys (including each component's image block) are what matter for
-// image discovery. Exported so the publish path discovers the same images the
-// preview shows.
-func CanonicalBaseMap(app *domain.App, envName string, envType domain.AppEnvironmentType, namespace, orgName string) map[string]any {
-	hv := helmvalues.MapToHelmValuesForEnv(app, envName, envType, "", namespace, "", orgName, nil, nil, nil)
-	raw, err := yaml.Marshal(hv)
-	if err != nil {
-		return nil
-	}
-	var out map[string]any
-	if err := yaml.Unmarshal(raw, &out); err != nil {
-		return nil
-	}
-	return out
-}
-
-// DiscoverAppImages returns the container images present in an app+env's effective
-// Helm values (chart defaults ⊕ canonical base ⊕ template/org overlays ⊕ developer
-// rawValues), each with its repository and dotted tag key. It is the publish-time
-// counterpart of the values-preview discovery, so the images CD can manage match
-// exactly what the UI lists. canonicalBase is included only for canonical
-// templates (BYO/passthrough charts deploy their own values verbatim).
+// DiscoverAppImages returns the container images present in an app+env's
+// effective Helm values (chart defaults ⊕ template/org overlays ⊕ developer
+// rawValues), each with its repository and dotted tag key. It is the
+// publish-time counterpart of the values-preview discovery, so the images CD
+// can manage match exactly what the UI lists — the chart's own values plus
+// overlays, never an injected base.
 func DiscoverAppImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Template, ov *domain.TemplateOverride, app *domain.App, envName string, envType domain.AppEnvironmentType, namespace, orgName string, appRaw, envRaw map[string]any) []tpl.TemplateImage {
 	chartVals, _ := chartDefaults(ctx, kc, t)
-	var canonicalBase map[string]any
-	if t == nil || t.Spec.CanonicalValues() {
-		canonicalBase = CanonicalBaseMap(app, envName, envType, namespace, orgName)
-	}
-	values := computeEffectiveValues(chartVals, canonicalBase, t, ov, envName, "", appRaw, envRaw)
+	values := computeEffectiveValues(chartVals, t, ov, envName, "", appRaw, envRaw)
 	return annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))
 }
 
@@ -510,9 +446,8 @@ func annotateDeclaredImages(discovered, slots []tpl.TemplateImage) []tpl.Templat
 // DiscoverComponentImages returns the container images present in ONE composed
 // component's effective Helm values: its template's chart defaults ⊕ the
 // template/org value overlays ⊕ the component's base Values overlay ⊕ its per-env
-// override (envOverlay). No canonical base is layered — for a composed component the
-// platform base carries no image (each component's repository lives in its own
-// overlay), so chart defaults ⊕ overlays is the exact discovery surface. The per-env
+// override (envOverlay). Each component's repository lives in its own overlay, so
+// chart defaults ⊕ overlays is the exact discovery surface. The per-env
 // overlay MUST be included: a component whose image repository is set per env (the
 // common case for a BYO chart whose template declares no image slot and whose base
 // leaves image.repository empty) would otherwise discover a repository-less image and
@@ -521,7 +456,7 @@ func annotateDeclaredImages(discovered, slots []tpl.TemplateImage) []tpl.Templat
 // Warehouse resolution and the UI's per-component image checklist.
 func DiscoverComponentImages(ctx context.Context, kc kubernetes.Interface, t *tpl.Template, ov *domain.TemplateOverride, envName string, overlay, envOverlay map[string]any) []tpl.TemplateImage {
 	chartVals, _ := chartDefaults(ctx, kc, t)
-	values := computeEffectiveValues(chartVals, nil, t, ov, envName, "", overlay, envOverlay)
+	values := computeEffectiveValues(chartVals, t, ov, envName, "", overlay, envOverlay)
 	return annotateDeclaredImages(chartimport.DetectImageMappings(values), effectiveTemplateImageSlots(t, ov))
 }
 

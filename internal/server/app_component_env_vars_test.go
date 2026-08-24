@@ -31,8 +31,7 @@ func envVarsTestApp(projectName string) *domain.App {
 			Components: []domain.ComponentSpec{
 				{
 					Name: "web", Type: domain.ComponentWeb, Enabled: true,
-					Config:            map[string]string{"LEGACY": "keep-me"},
-					EnvFromConfigMaps: []string{"extra-cm"},
+					Values: map[string]any{"replicaCount": 2},
 				},
 				{Name: "worker", Type: domain.ComponentWorker, Enabled: true},
 			},
@@ -71,7 +70,7 @@ func TestUpdateApp_ComponentEnvVarsPatch(t *testing.T) {
 	if len(web.EnvVars) != 2 || web.EnvVars[0].FromSecret != "DATABASE_URL" {
 		t.Errorf("envVars not applied: %+v", web.EnvVars)
 	}
-	if web.Config["LEGACY"] != "keep-me" || len(web.EnvFromConfigMaps) != 1 {
+	if web.Values["replicaCount"] != 2 {
 		t.Error("patch must not touch the component's other fields")
 	}
 	if app.Spec.Components[1].EnvVars != nil {
@@ -108,10 +107,9 @@ func TestUpdateApp_ComponentEnvVarsPatchRejections(t *testing.T) {
 	}
 }
 
-// A manage-components save (req.Components replaces the list) must carry the
-// DTO-inexpressible fields forward from the prior same-name spec — it used to
-// silently wipe legacy Config/envFrom/resources.
-func TestUpdateApp_ComponentsResaveKeepsLegacyFields(t *testing.T) {
+// A manage-components save (req.Components replaces the list) expresses the
+// full component surface in the DTO — nothing legacy to carry forward.
+func TestUpdateApp_ComponentsResave(t *testing.T) {
 	mux, ah, store := newTestAppPromoteMuxWithGate(testProject, &recordingPublisher{}, nil, nil)
 	store.addApp(envVarsTestApp(testProject))
 	cookie := sessionCookieFor(ah, "alice", "org_admin")
@@ -127,11 +125,7 @@ func TestUpdateApp_ComponentsResaveKeepsLegacyFields(t *testing.T) {
 	}
 
 	app, _ := store.GetApp(context.Background(), testProject, "my-app")
-	web := app.Spec.Components[0]
-	if web.Config["LEGACY"] != "keep-me" {
-		t.Errorf("legacy Config wiped by components re-save: %+v", web.Config)
-	}
-	if len(web.EnvFromConfigMaps) != 1 || web.EnvFromConfigMaps[0] != "extra-cm" {
-		t.Errorf("EnvFromConfigMaps wiped: %+v", web.EnvFromConfigMaps)
+	if len(app.Spec.Components) != 2 || app.Spec.Components[0].ExposeMode != domain.ExposeExternal {
+		t.Errorf("components not replaced: %+v", app.Spec.Components)
 	}
 }

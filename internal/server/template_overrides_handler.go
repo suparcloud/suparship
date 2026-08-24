@@ -162,7 +162,6 @@ func (th *templateHandler) handlePostEffectiveValues(w http.ResponseWriter, r *h
 			}
 		}
 	}
-	// Template-level preview: no concrete app, so no canonical base.
-	resp := effectiveValuesDTO(chartVals, nil, available, t, ov, env, cluster, appRaw, envRaw, pv)
+	resp := effectiveValuesDTO(chartVals, available, t, ov, env, cluster, appRaw, envRaw, pv)
 	writeJSON(w, http.StatusOK, resp)
 }

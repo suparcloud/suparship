@@ -16,6 +16,7 @@ func testCtx() Context {
 			Env: "prod", EnvType: "prod", Cluster: "prod-eks",
 			Namespace: "hello-prod", BaseDomain: "acme.com",
 			RoutingHost: "hello.prod.acme.com", IngressClassName: "nginx",
+			ConfigMapName: "hello-config", SecretName: "hello-secrets",
 		},
 		Vars: map[string]string{"REGION": "us-east", "LOG_LEVEL": "info"},
 	}
@@ -155,9 +156,9 @@ func TestInterpolate_PreviewName(t *testing.T) {
 	}
 }
 
-func TestInterpolate_ResolvedPlatformNamesOverrideDefault(t *testing.T) {
-	// Shared-namespace preview: the publisher sets suffixed ConfigMap/Secret
-	// names, which must win over the {app}-config / {app}-secrets default.
+func TestInterpolate_ResolvedPlatformNamesUsedVerbatim(t *testing.T) {
+	// The publisher resolves the names (convention, preview-suffixed, or a
+	// component's curated projection) and the tokens use them VERBATIM.
 	c := Context{Platform: helmvalues.PlatformValues{
 		App:           "hello",
 		ConfigMapName: "hello-pr-42-config",
@@ -169,10 +170,11 @@ func TestInterpolate_ResolvedPlatformNamesOverrideDefault(t *testing.T) {
 	if got := c.Interpolate("[[platform.secretName]]"); got != "hello-pr-42-secrets" {
 		t.Errorf("secretName = %q, want hello-pr-42-secrets", got)
 	}
-	// Unset → fall back to the {app}-* convention.
+	// Explicitly empty resolves to "" — how an opt-out component signals "no
+	// app secrets" — never to a convention fallback.
 	d := Context{Platform: helmvalues.PlatformValues{App: "hello"}}
-	if got := d.Interpolate("[[platform.configMapName]]"); got != "hello-config" {
-		t.Errorf("default configMapName = %q, want hello-config", got)
+	if got := d.Interpolate("[[platform.secretName]]"); got != "" {
+		t.Errorf("empty secretName = %q, want \"\"", got)
 	}
 }
 
