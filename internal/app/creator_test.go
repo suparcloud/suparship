@@ -24,32 +24,6 @@ func webTemplate() *tpl.Template {
 	}
 }
 
-func workerTemplate() *tpl.Template {
-	return &tpl.Template{
-		APIVersion: tpl.CurrentAPIVersion,
-		Kind:       tpl.TemplateKind,
-		Metadata:   tpl.Metadata{Name: "worker", Version: "1.0.0"},
-		Spec: tpl.TemplateSpec{
-			Title:    "Worker",
-			Category: "worker",
-			Engine:   tpl.Engine{Type: tpl.EngineHelm},
-		},
-	}
-}
-
-func cronTemplate() *tpl.Template {
-	return &tpl.Template{
-		APIVersion: tpl.CurrentAPIVersion,
-		Kind:       tpl.TemplateKind,
-		Metadata:   tpl.Metadata{Name: "cron-job", Version: "1.0.0"},
-		Spec: tpl.TemplateSpec{
-			Title:    "Cron Job",
-			Category: "cron",
-			Engine:   tpl.Engine{Type: tpl.EngineHelm},
-		},
-	}
-}
-
 // --- DefaultEnvironments ---
 
 func TestDefaultEnvironmentsProducesStaginAndProd(t *testing.T) {

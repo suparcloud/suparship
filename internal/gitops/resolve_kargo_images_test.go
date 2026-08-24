@@ -7,10 +7,6 @@ import (
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
-func appWithSelection(name string, sel []domain.AppImageBinding, values map[string]any) *domain.App {
-	return &domain.App{Name: name, Spec: domain.AppSpec{Images: sel, Values: values}}
-}
-
 func indexByTagKey(imgs []KargoImage) map[string]KargoImage {
 	m := make(map[string]KargoImage, len(imgs))
 	for _, img := range imgs {
