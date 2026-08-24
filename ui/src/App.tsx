@@ -15,6 +15,7 @@ const named = <M, K extends keyof M>(p: Promise<M>, key: K) =>
 
 const AppDetail = lazy(() => named(import("./pages/AppDetail"), "AppDetail"));
 const AuthSettings = lazy(() => named(import("./pages/AuthSettings"), "AuthSettings"));
+const InviteAccept = lazy(() => named(import("./pages/InviteAccept"), "InviteAccept"));
 const ClusterSettings = lazy(() => named(import("./pages/ClusterSettings"), "ClusterSettings"));
 const Dashboard = lazy(() => named(import("./pages/Dashboard"), "Dashboard"));
 const GitOpsSettings = lazy(() => named(import("./pages/GitOpsSettings"), "GitOpsSettings"));
@@ -51,6 +52,7 @@ export function App() {
         <Suspense fallback={<RouteFallback />}>
           <Routes>
             <Route path="/login" element={<Login />} />
+            <Route path="/invite/:token" element={<InviteAccept />} />
 
             <Route element={<AuthGuard />}>
               <Route path="/onboarding" element={<Onboarding />} />

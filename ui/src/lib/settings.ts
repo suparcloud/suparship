@@ -159,6 +159,40 @@ export function updateOrgEndpoints(e: OrgEndpoints): Promise<OrgEndpoints> {
   return api.put<OrgEndpoints>("/org/endpoints", e);
 }
 
+// ── Local users (invite-provisioned basic auth) ───────────────────────────────
+
+export interface LocalUser {
+  username: string;
+  createdAt: string;
+  /** "active" | "invited" | "invite_expired" */
+  status: string;
+  disabled?: boolean;
+  inviteExpiresAt?: string;
+}
+
+/** Carries the ONE-TIME plaintext invite token — shown once, never again. */
+export interface LocalUserInvite {
+  username: string;
+  inviteToken: string;
+  expiresAt: string;
+}
+
+export function listLocalUsers(): Promise<LocalUser[]> {
+  return api.get<LocalUser[]>("/org/users");
+}
+
+export function createLocalUser(username: string, teams: string[]): Promise<LocalUserInvite> {
+  return api.post<LocalUserInvite>("/org/users", { username, teams });
+}
+
+export function reinviteLocalUser(username: string): Promise<LocalUserInvite> {
+  return api.post<LocalUserInvite>(`/org/users/${encodeURIComponent(username)}/invite`);
+}
+
+export function deleteLocalUser(username: string): Promise<void> {
+  return api.del<void>(`/org/users/${encodeURIComponent(username)}`);
+}
+
 // ── Org Routing Profiles ──────────────────────────────────────────────────────
 //
 // A routing profile maps an ExposeMode (internal/external) to the ingress

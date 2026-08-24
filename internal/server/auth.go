@@ -11,7 +11,10 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 
+	"log/slog"
+
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/localuser"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/token"
@@ -49,6 +52,10 @@ type authHandler struct {
 	// oidcProviders caches discovered *oidc.Provider by issuer URL so each
 	// login doesn't re-run discovery.
 	oidcProviders sync.Map
+	// localUsers manages invite-provisioned basic-auth users. Optional; nil
+	// disables the public invite endpoints (login still works through the
+	// authenticator chain).
+	localUsers localuser.Store
 }
 
 type loginRequest struct {
@@ -75,6 +82,28 @@ func (ah *authHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/auth/providers", ah.handleAuthProviders)
 	mux.HandleFunc("GET /api/v1/auth/oidc/login", ah.handleOIDCLogin)
 	mux.HandleFunc("GET /api/v1/auth/oidc/callback", ah.handleOIDCCallback)
+
+	// Invite redemption. Public like the OIDC routes: the flow itself
+	// establishes the session (the user sets a password on first use).
+	mux.HandleFunc("GET /api/v1/auth/invite/{token}", ah.handleInviteInfo)
+	mux.HandleFunc("POST /api/v1/auth/invite/accept", ah.handleInviteAccept)
+}
+
+// displayRoleFor resolves the session's DISPLAY role for /auth/me from the
+// org's teams/role-bindings; authorization itself is re-derived per request by
+// the RBAC middleware. Defaults to viewer when unmatched or the org is
+// unreadable.
+func (ah *authHandler) displayRoleFor(ctx context.Context, username string, groups []string) string {
+	role := "viewer"
+	if ah.orgProvider == nil {
+		return role
+	}
+	if org, err := ah.orgProvider.GetOrg(ctx); err == nil && org != nil {
+		if eff, found := org.EffectiveRoleForIdentity(username, groups, "*"); found {
+			role = string(eff)
+		}
+	}
+	return role
 }
 
 func (ah *authHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +131,10 @@ func (ah *authHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, err := ah.sessions.Create(creds.Username, roleOrgAdmin)
+	// Local logins used to hardcode org_admin here — correct for the single
+	// break-glass admin, wrong the moment invite-provisioned users exist.
+	role := ah.displayRoleFor(r.Context(), creds.Username, nil)
+	sess, err := ah.sessions.Create(creds.Username, role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "session creation failed"})
 		return
@@ -111,8 +143,72 @@ func (ah *authHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, ah.sessionCookie(sess.ID, sess.ExpiresAt))
 	writeJSON(w, http.StatusOK, userResponse{
 		Username: creds.Username,
-		Role:     roleOrgAdmin,
+		Role:     role,
 	})
+}
+
+// --- invite redemption (public) ---
+
+// inviteInfoResponse greets the set-password page. Invalid/expired invites
+// yield valid=false with no further detail (no token-state oracle).
+type inviteInfoResponse struct {
+	Valid    bool   `json:"valid"`
+	Username string `json:"username,omitempty"`
+}
+
+func (ah *authHandler) handleInviteInfo(w http.ResponseWriter, r *http.Request) {
+	if ah.localUsers == nil {
+		writeJSON(w, http.StatusOK, inviteInfoResponse{Valid: false})
+		return
+	}
+	username, err := ah.localUsers.InviteUsername(r.Context(), r.PathValue("token"))
+	if err != nil {
+		writeJSON(w, http.StatusOK, inviteInfoResponse{Valid: false})
+		return
+	}
+	writeJSON(w, http.StatusOK, inviteInfoResponse{Valid: true, Username: username})
+}
+
+type inviteAcceptRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+
+// handleInviteAccept redeems a one-time invite: sets the user's password and
+// logs them straight in (session cookie), so the invite flow ends inside the
+// product, not at another login form.
+func (ah *authHandler) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
+	if ah.localUsers == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "local users are not enabled"})
+		return
+	}
+	var req inviteAcceptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+	username, err := ah.localUsers.RedeemInvite(r.Context(), req.Token, req.Password)
+	if err != nil {
+		switch {
+		case errors.Is(err, localuser.ErrWeakPassword):
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		case errors.Is(err, localuser.ErrInvalidInvite):
+			writeJSON(w, http.StatusGone, errorResponse{Error: "this invite link is invalid, expired, or already used — ask your admin for a new one"})
+		default:
+			slog.Error("invite redemption failed", "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "could not complete the invite"})
+		}
+		return
+	}
+
+	role := ah.displayRoleFor(r.Context(), username, nil)
+	sess, err := ah.sessions.Create(username, role)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "session creation failed"})
+		return
+	}
+	http.SetCookie(w, ah.sessionCookie(sess.ID, sess.ExpiresAt))
+	writeJSON(w, http.StatusOK, userResponse{Username: username, Role: role})
 }
 
 func (ah *authHandler) handleLogout(w http.ResponseWriter, r *http.Request) {

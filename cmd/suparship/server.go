@@ -17,6 +17,7 @@ import (
 
 	"github.com/suparcloud/suparship/internal/audit"
 	"github.com/suparcloud/suparship/internal/auth"
+	"github.com/suparcloud/suparship/internal/localuser"
 	"github.com/suparcloud/suparship/internal/bootstrap"
 	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/config"
@@ -148,6 +149,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		appDiagnosticsReader    server.AppDiagnosticsReader
 		argoAppGate             server.ArgoAppGate
 		stuckAppManager         server.StuckAppManager
+		localUserStore          localuser.Store
 		argoRefresh             argoRefresher // triggers ArgoCD refresh after publish
 		argoChainNudger         server.ArgoChainNudger
 
@@ -175,7 +177,10 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			"login", deps.AdminUsername,
 			"password_env", "SUPARSHIP_ADMIN_PASSWORD",
 		)
-		authenticator = deps.Authenticator
+		// Chain the fake admin credential with an in-memory local-user store so
+		// the invite flow is fully exercisable without a cluster.
+		localUserStore = localuser.NewMemStore(deps.AdminUsername)
+		authenticator = auth.Chain{deps.Authenticator, localuser.AsAuthenticator(localUserStore)}
 		orgProvider = deps.OrgProvider
 		projectStore = deps.ProjectStore
 		previewStore = deps.PreviewStore
@@ -275,6 +280,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			adminUser = creds.Username
 			logger.Info("admin secret loaded", "username", adminUser)
 		}
+
+		// Local users: the basic-auth escape hatch for orgs without an IdP.
+		// Chained AFTER the admin secret (which also reserves its username so
+		// a local user can never shadow the break-glass credential).
+		localUserStore = localuser.NewKubeStore(client, adminUser)
+		authenticator = auth.Chain{authenticator, localuser.AsAuthenticator(localUserStore)}
 
 		fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
 		orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
@@ -639,6 +650,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		UIDir:                 uiDir,
 		CORSOrigins:           origins,
 		Authenticator:         authenticator,
+		LocalUserStore:        localUserStore,
 		OrgProvider:           orgProvider,
 		Templates:             templates,
 		ClusterTemplateLoader: clusterTemplateLoaderFromClient(kubeClient),

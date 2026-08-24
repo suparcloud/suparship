@@ -122,6 +122,12 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 
 	// Org-level read endpoints — authenticated users only.
 	mux.HandleFunc("GET /api/v1/org", rh.auth.requireAuth(rh.handleGetOrg))
+	// Local users (basic-auth escape hatch, invite-provisioned) — org_admin only.
+	mux.HandleFunc("GET /api/v1/org/users", requireOrgAdmin(rh.requireOrgAdmin(rh.handleListLocalUsers)))
+	mux.HandleFunc("POST /api/v1/org/users", requireOrgAdmin(rh.requireOrgAdmin(rh.handleCreateLocalUser)))
+	mux.HandleFunc("POST /api/v1/org/users/{username}/invite", requireOrgAdmin(rh.requireOrgAdmin(rh.handleReinviteLocalUser)))
+	mux.HandleFunc("DELETE /api/v1/org/users/{username}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteLocalUser)))
+
 	mux.HandleFunc("GET /api/v1/teams", requireOrgAdmin(rh.requireOrgAdmin(rh.handleGetTeams)))
 	mux.HandleFunc("GET /api/v1/projects", rh.auth.requireAuth(rh.handleGetProjects))
 

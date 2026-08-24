@@ -31,6 +31,7 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets/hcvault"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
+	"github.com/suparcloud/suparship/internal/localuser"
 	"github.com/suparcloud/suparship/internal/token"
 	"github.com/suparcloud/suparship/internal/tpl"
 	"github.com/suparcloud/suparship/internal/tpl/credstore"
@@ -579,6 +580,7 @@ type Config struct {
 	LogsProvider            runtime.LogsProvider    // optional: enables logs endpoint when set
 	PreviewStore            preview.Store           // optional: enables preview endpoints when set
 	TokenStore              token.Store             // optional: enables project API tokens + bearer auth when set
+	LocalUserStore          localuser.Store         // optional: enables invite-provisioned local users (basic-auth escape hatch)
 	AppStore                domain.AppStore         // optional: enables app read endpoints when set
 	StackStore              domain.StackStore       // optional: enables stack grouping endpoints when set
 	ClusterStore            domain.ClusterStore     // optional: enables /api/v1/clusters endpoints when set
@@ -722,6 +724,7 @@ func New(cfg Config) *Server {
 			cookieSecure:  cfg.CookieSecure,
 			orgProvider:   cfg.OrgProvider,
 			kubeClient:    cfg.KubeClient,
+			localUsers:    cfg.LocalUserStore,
 		}
 		if cfg.TokenStore != nil {
 			cfg.Logger.Info("API token bearer auth enabled")
