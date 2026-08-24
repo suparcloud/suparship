@@ -95,11 +95,23 @@ type Store interface {
 	Delete(ctx context.Context, username string) error
 }
 
-// userRecord is the persisted per-user document.
+// userRecord is the persisted per-user document. Username lives INSIDE the
+// record because the K8s storage key is a hash of it: Secret data keys are
+// restricted to [-._a-zA-Z0-9]+, which excludes '@' — and usernames are
+// usually emails.
 type userRecord struct {
+	Username     string    `json:"username"`
 	PasswordHash string    `json:"passwordHash,omitempty"`
 	CreatedAt    time.Time `json:"createdAt"`
 	Disabled     bool      `json:"disabled,omitempty"`
+}
+
+// userKey derives the K8s-Secret-safe storage key for a username: "u-" plus
+// 40 hex chars of its SHA-256. Deterministic (O(1) lookup) and always within
+// the allowed key charset regardless of the username's shape.
+func userKey(username string) string {
+	sum := sha256.Sum256([]byte(username))
+	return "u-" + hex.EncodeToString(sum[:])[:40]
 }
 
 // inviteRecord is the persisted per-invite document, keyed by the token id.

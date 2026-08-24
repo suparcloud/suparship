@@ -3,6 +3,7 @@ package localuser
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +172,40 @@ func TestDeleteRemovesUserAndInvite(t *testing.T) {
 			}
 			if err := s.Delete(ctx, "jane"); !errors.Is(err, ErrNotFound) {
 				t.Fatalf("double delete: got %v", err)
+			}
+		})
+	}
+}
+
+// K8s Secret data keys are restricted to [-._a-zA-Z0-9]+; usernames are
+// usually emails ('@'). The storage key must therefore be derived, and the
+// whole lifecycle must work for an email-shaped username.
+func TestEmailUsernames(t *testing.T) {
+	ctx := context.Background()
+	if got := userKey("jane@example.com"); !regexp.MustCompile(`^[-._a-zA-Z0-9]+$`).MatchString(got) {
+		t.Fatalf("userKey %q is not a valid K8s Secret data key", got)
+	}
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			if err := s.CreateUser(ctx, "jane@example.com"); err != nil {
+				t.Fatalf("CreateUser(email): %v", err)
+			}
+			tok, _, err := s.IssueInvite(ctx, "jane@example.com")
+			if err != nil {
+				t.Fatalf("IssueInvite: %v", err)
+			}
+			if u, err := s.RedeemInvite(ctx, tok, "email-pass-1"); err != nil || u != "jane@example.com" {
+				t.Fatalf("RedeemInvite = %q, %v", u, err)
+			}
+			if err := s.Authenticate(ctx, "jane@example.com", "email-pass-1"); err != nil {
+				t.Fatalf("Authenticate: %v", err)
+			}
+			users, _ := s.List(ctx)
+			if len(users) != 1 || users[0].Username != "jane@example.com" {
+				t.Fatalf("List = %+v, want the email username round-tripped", users)
+			}
+			if err := s.Delete(ctx, "jane@example.com"); err != nil {
+				t.Fatalf("Delete: %v", err)
 			}
 		})
 	}

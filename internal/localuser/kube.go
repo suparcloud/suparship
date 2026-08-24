@@ -123,16 +123,16 @@ func (s *KubeStore) CreateUser(ctx context.Context, username string) error {
 	if s.reserved[username] {
 		return ErrReserved
 	}
-	rec := userRecord{CreatedAt: s.now().UTC()}
+	rec := userRecord{Username: username, CreatedAt: s.now().UTC()}
 	blob, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("marshalling user record: %w", err)
 	}
 	return s.mutateSecret(ctx, UsersSecretName, func(data map[string][]byte) error {
-		if _, ok := data[username]; ok {
+		if _, ok := data[userKey(username)]; ok {
 			return ErrExists
 		}
-		data[username] = blob
+		data[userKey(username)] = blob
 		return nil
 	})
 }
@@ -142,7 +142,7 @@ func (s *KubeStore) IssueInvite(ctx context.Context, username string) (string, t
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	if _, ok := users[username]; !ok {
+	if _, ok := users[userKey(username)]; !ok {
 		return "", time.Time{}, ErrNotFound
 	}
 
@@ -244,7 +244,7 @@ func (s *KubeStore) RedeemInvite(ctx context.Context, plaintext, password string
 		return "", fmt.Errorf("hashing password: %w", err)
 	}
 	err = s.mutateSecret(ctx, UsersSecretName, func(data map[string][]byte) error {
-		blob, ok := data[claimed.Username]
+		blob, ok := data[userKey(claimed.Username)]
 		if !ok {
 			// User deleted between claim and write; the invite is spent by
 			// design (never reusable), so surface it as invalid.
@@ -259,7 +259,7 @@ func (s *KubeStore) RedeemInvite(ctx context.Context, plaintext, password string
 		if merr != nil {
 			return fmt.Errorf("marshalling user record: %w", merr)
 		}
-		data[claimed.Username] = out
+		data[userKey(claimed.Username)] = out
 		return nil
 	})
 	if err != nil {
@@ -273,7 +273,7 @@ func (s *KubeStore) Authenticate(ctx context.Context, username, password string)
 	if err != nil {
 		return err
 	}
-	blob, ok := users[username]
+	blob, ok := users[userKey(username)]
 	if !ok {
 		return auth.ErrInvalidCredentials
 	}
@@ -307,18 +307,18 @@ func (s *KubeStore) List(ctx context.Context) ([]User, error) {
 		}
 	}
 	out := make([]User, 0, len(users))
-	for username, blob := range users {
+	for _, blob := range users {
 		var rec userRecord
-		if json.Unmarshal(blob, &rec) != nil {
+		if json.Unmarshal(blob, &rec) != nil || rec.Username == "" {
 			continue // skip corrupt entries rather than failing the listing
 		}
 		u := User{
-			Username:    username,
+			Username:    rec.Username,
 			CreatedAt:   rec.CreatedAt,
 			Disabled:    rec.Disabled,
 			HasPassword: rec.PasswordHash != "",
 		}
-		if exp, ok := inviteExpiry[username]; ok {
+		if exp, ok := inviteExpiry[rec.Username]; ok {
 			e := exp
 			u.InviteExpiresAt = &e
 		}
@@ -330,10 +330,10 @@ func (s *KubeStore) List(ctx context.Context) ([]User, error) {
 
 func (s *KubeStore) Delete(ctx context.Context, username string) error {
 	err := s.mutateSecret(ctx, UsersSecretName, func(data map[string][]byte) error {
-		if _, ok := data[username]; !ok {
+		if _, ok := data[userKey(username)]; !ok {
 			return ErrNotFound
 		}
-		delete(data, username)
+		delete(data, userKey(username))
 		return nil
 	})
 	if err != nil {

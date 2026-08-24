@@ -56,8 +56,10 @@ func TestLoginSuccess(t *testing.T) {
 	if resp.Username != "admin" {
 		t.Fatalf("expected username %q, got %q", "admin", resp.Username)
 	}
-	if resp.Role != roleOrgAdmin {
-		t.Fatalf("expected role %q, got %q", roleOrgAdmin, resp.Role)
+	// The display role is resolved from the org's teams/bindings (no more
+	// hardcoded org_admin); with no org provider wired it defaults to viewer.
+	if resp.Role != "viewer" {
+		t.Fatalf("expected role %q (no org wired), got %q", "viewer", resp.Role)
 	}
 
 	cookies := rec.Result().Cookies()
