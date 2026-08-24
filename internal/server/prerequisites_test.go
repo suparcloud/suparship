@@ -285,7 +285,7 @@ func TestInstallerYAML(t *testing.T) {
 		if yaml == "" {
 			t.Fatal("empty YAML")
 		}
-		for _, want := range []string{"sealed-secrets", "bitnami-labs.github.io", "2.16.2"} {
+		for _, want := range []string{"sealed-secrets", "bitnami.github.io", "2.16.2"} {
 			if !strings.Contains(yaml, want) {
 				t.Errorf("YAML missing %q", want)
 			}

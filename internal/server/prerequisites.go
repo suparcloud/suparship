@@ -239,7 +239,7 @@ spec:
 func SealedSecretsInstallerYAML() string {
 	return buildInstallerArgoApp(
 		"sealed-secrets",
-		"https://bitnami-labs.github.io/sealed-secrets",
+		"https://bitnami.github.io/sealed-secrets",
 		"sealed-secrets",
 		"2.16.2",
 		"kube-system",

@@ -81,6 +81,7 @@ helm_repo('eso',        'https://charts.external-secrets.io', labels=['prereq'])
 helm_repo('mittwald',   'https://helm.mittwald.de', labels=['prereq'])
 helm_repo('stakater',   'https://stakater.github.io/stakater-charts', labels=['prereq'])
 helm_repo('gitea-charts', 'https://dl.gitea.com/charts', labels=['prereq'])
+helm_repo('sealed-secrets-repo', 'https://bitnami.github.io/sealed-secrets', labels=['prereq'])
 if VAULT:
     helm_repo('hashicorp', 'https://helm.releases.hashicorp.com', labels=['prereq'])
 
@@ -282,6 +283,29 @@ if VAULT:
         resource_deps=_vault_bootstrap_deps,
         labels=['prereq'],
     )
+    # Run the REAL per-cluster seal pipeline for the seeded clusters: paste the
+    # dev Vault write token for each cluster so suparship seals a read token
+    # with the cluster's sealed-secrets cert and publishes the unified store.
+    # This is what turns credential health from "no sealed read token" to
+    # green — the same flow an operator drives from Settings in production.
+    local_resource(
+        'seal-cluster-tokens', cmd='hack/dev/seal-cluster-tokens.sh',
+        resource_deps=['vault-bootstrap', 'sealed-secrets'],
+        labels=['prereq'],
+    )
+
+# ── Sealed-secrets: MANDATORY platform prerequisite ────────────────────────
+# suparship's per-cluster secret delivery seals backend read tokens (Vault /
+# 1Password Connect) with each workload cluster's sealed-secrets certificate;
+# without the controller no cluster can ever get a sealed read token and the
+# Platform page stays "Not ready". fullnameOverride matches the upstream
+# default service name the seal cert fetcher expects
+# (internal/seal: kube-system/sealed-secrets-controller).
+helm_resource(
+    'sealed-secrets', 'sealed-secrets-repo/sealed-secrets', namespace='kube-system',
+    flags=['--version=2.16.2', '--set=fullnameOverride=sealed-secrets-controller', '--wait'],
+    resource_deps=['sealed-secrets-repo'], labels=['prereq'],
+)
 
 # ── ConfigMap/Secret replication + reload ──────────────────────────────────
 helm_resource(

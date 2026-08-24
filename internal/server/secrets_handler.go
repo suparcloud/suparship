@@ -818,6 +818,12 @@ func (h *secretsHandler) resealAllClusters(ctx context.Context, org *rbac.Org, r
 	if org.SecretBackend.OnePassword != nil {
 		refs = append(refs, org.SecretBackend.OnePassword.ClusterTokens...)
 	}
+	// Vault shares the seal pipeline — without this its per-cluster seal
+	// statuses were silently dropped and credential health stayed on
+	// "no sealed read token" forever.
+	if org.SecretBackend.Vault != nil {
+		refs = append(refs, org.SecretBackend.Vault.ClusterTokens...)
+	}
 	if len(refs) == 0 {
 		return
 	}
