@@ -229,13 +229,21 @@ function CredentialHealth() {
 function ExportConfig() {
   const [exporting, setExporting] = useState(false);
 
-  async function handleExport(format: "json" | "yaml") {
+  async function handleExport(format: "json" | "yaml", includeSecrets = false) {
     setExporting(true);
     try {
-      const suffix = format === "yaml" ? "?format=yaml" : "";
-      const res = await fetch(`/api/v1/org/export${suffix}`, {
+      const params = new URLSearchParams();
+      if (format === "yaml") params.set("format", "yaml");
+      if (includeSecrets) params.set("includeSecrets", "1");
+      const qs = params.toString();
+      const res = await fetch(`/api/v1/org/export${qs ? `?${qs}` : ""}`, {
         credentials: "include",
       });
+      if (res.status === 412) {
+        throw new Error(
+          "Install the sealed-secrets controller first (see Platform prerequisites above) to export sealed credentials.",
+        );
+      }
       if (!res.ok) {
         throw new Error(`Export failed: ${res.status}`);
       }
@@ -268,22 +276,36 @@ function ExportConfig() {
           <code className="rounded bg-gray-100 px-1 py-0.5 text-xs font-mono">
             values.yaml
           </code>{" "}
-          file. Secret values are never included — only secret reference names.
+          file. The plain export references Secrets by name only; the sealed
+          export additionally embeds the platform&apos;s credential Secrets as{" "}
+          <code className="rounded bg-gray-100 px-1 py-0.5 text-xs font-mono">
+            SealedSecrets
+          </code>{" "}
+          under <code className="rounded bg-gray-100 px-1 py-0.5 text-xs font-mono">extraObjects</code> —
+          encrypted for this cluster&apos;s controller, so the file is safe to
+          commit to git.
         </p>
-        <div className="mt-4 flex gap-3">
+        <div className="mt-4 flex flex-wrap gap-3">
           <button
-            onClick={() => handleExport("yaml")}
+            onClick={() => handleExport("yaml", true)}
             disabled={exporting}
             className="inline-flex items-center rounded-md bg-indigo-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
           >
-            {exporting ? "Exporting..." : "Download values.yaml"}
+            {exporting ? "Exporting..." : "Download values.yaml (sealed credentials)"}
+          </button>
+          <button
+            onClick={() => handleExport("yaml")}
+            disabled={exporting}
+            className="inline-flex items-center rounded-md bg-white px-3.5 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50"
+          >
+            values.yaml only
           </button>
           <button
             onClick={() => handleExport("json")}
             disabled={exporting}
             className="inline-flex items-center rounded-md bg-white px-3.5 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:opacity-50"
           >
-            Download JSON
+            JSON
           </button>
         </div>
       </div>

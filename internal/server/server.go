@@ -581,6 +581,7 @@ type Config struct {
 	PreviewStore            preview.Store           // optional: enables preview endpoints when set
 	TokenStore              token.Store             // optional: enables project API tokens + bearer auth when set
 	LocalUserStore          localuser.Store         // optional: enables invite-provisioned local users (basic-auth escape hatch)
+	AdminAuthSecretName     string                  // optional: the (possibly renamed) admin-auth Secret, for the sealed config export
 	AppStore                domain.AppStore         // optional: enables app read endpoints when set
 	StackStore              domain.StackStore       // optional: enables stack grouping endpoints when set
 	ClusterStore            domain.ClusterStore     // optional: enables /api/v1/clusters endpoints when set
@@ -1034,6 +1035,8 @@ func New(cfg Config) *Server {
 			registryStore:         cfg.RegistryStore,
 			templateRegistryStore: cfg.TemplateRegistryStore,
 			logger:                cfg.Logger,
+			kubeClient:            cfg.KubeClient,
+			adminSecretName:       cfg.AdminAuthSecretName,
 		}
 		eh.registerRoutes(mux)
 		cfg.Logger.Info("config export endpoint enabled")

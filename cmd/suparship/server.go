@@ -150,6 +150,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		argoAppGate             server.ArgoAppGate
 		stuckAppManager         server.StuckAppManager
 		localUserStore          localuser.Store
+		adminAuthSecretName     string
 		argoRefresh             argoRefresher // triggers ArgoCD refresh after publish
 		argoChainNudger         server.ArgoChainNudger
 
@@ -257,6 +258,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 
 		adminSecretRef := adminSecretRefFromFlags(cmd)
+		adminAuthSecretName = adminSecretRef.Name
 		logger.Info("admin auth backend configured",
 			"secret_namespace", adminSecretRef.Namespace,
 			"secret_name", adminSecretRef.Name,
@@ -651,6 +653,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		CORSOrigins:           origins,
 		Authenticator:         authenticator,
 		LocalUserStore:        localUserStore,
+		AdminAuthSecretName:   adminAuthSecretName,
 		OrgProvider:           orgProvider,
 		Templates:             templates,
 		ClusterTemplateLoader: clusterTemplateLoaderFromClient(kubeClient),

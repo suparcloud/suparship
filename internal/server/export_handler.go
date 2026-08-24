@@ -3,15 +3,24 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	sigyaml "sigs.k8s.io/yaml"
 
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/registry"
+	"github.com/suparcloud/suparship/internal/seal"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"github.com/suparcloud/suparship/internal/tpl"
 )
 
@@ -26,10 +35,43 @@ type exportHandler struct {
 	registryStore         *registry.Store
 	templateRegistryStore *tpl.RegistryStore
 	logger                *slog.Logger
+	// kubeClient reads the platform's own credential Secrets for the
+	// includeSecrets=1 sealed export. Optional; nil disables that mode.
+	kubeClient kubernetes.Interface
+	// adminSecretName is the (possibly renamed) admin-auth Secret to include
+	// in the sealed export. Empty falls back to the default name.
+	adminSecretName string
+	// fetchCert fetches the tooling cluster's sealed-secrets certificate.
+	// Injectable for tests; nil uses seal.FetchCert with default options.
+	fetchCert func(ctx context.Context, client kubernetes.Interface) ([]byte, error)
 }
 
 func (h *exportHandler) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/org/export", h.auth.requireAuth(h.handleExport))
+	mux.HandleFunc("GET /api/v1/org/export", h.requireOrgAdmin(h.handleExport))
+}
+
+// requireOrgAdmin gates the export behind the org_admin role: the plain
+// export reveals the full platform topology, and the sealed export carries
+// (encrypted) credentials — neither is viewer material. Mirrors
+// clusterHandler.requireOrgAdmin.
+func (h *exportHandler) requireOrgAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return h.auth.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		if h.orgProvider == nil {
+			next(w, r)
+			return
+		}
+		sess := sessionFromContext(r.Context())
+		org, err := h.orgProvider.GetOrg(r.Context())
+		if err != nil || org == nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to load org config"})
+			return
+		}
+		if !org.HasPermissionForIdentity(sess.Username, sess.Groups, "*", rbac.RoleOrgAdmin) {
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "org_admin role required"})
+			return
+		}
+		next(w, r)
+	})
 }
 
 // helmValues mirrors the onboarding-relevant sections of charts/suparship/values.yaml.
@@ -45,6 +87,14 @@ type helmValues struct {
 	Auth         *helmAuth         `json:"auth,omitempty"`
 	Teams        []helmTeam        `json:"teams,omitempty"`
 	RoleBindings []helmRoleBinding `json:"roleBindings,omitempty"`
+	// ExtraObjects carries the platform's credential Secrets sealed against
+	// the tooling cluster's sealed-secrets certificate (includeSecrets=1).
+	// Safe to commit: only that controller's private key can decrypt them.
+	// Rendered verbatim by the chart's extra-objects.yaml template.
+	ExtraObjects []map[string]any `json:"extraObjects,omitempty"`
+	// skippedSecrets lists enumerated credential Secrets that did not exist
+	// at export time (listed in the YAML banner; never marshalled).
+	skippedSecrets []string
 }
 
 type helmOrg struct {
@@ -172,6 +222,20 @@ func (h *exportHandler) handleExport(w http.ResponseWriter, r *http.Request) {
 	h.collectSecrets(ctx, &vals)
 	h.collectRegistry(ctx, &vals)
 	h.collectTemplates(ctx, &vals)
+
+	if q := r.URL.Query().Get("includeSecrets"); q == "1" || q == "true" {
+		if err := h.collectExtraObjects(ctx, &vals); err != nil {
+			if errors.Is(err, seal.ErrControllerNotFound) {
+				writeJSON(w, http.StatusPreconditionFailed, errorResponse{
+					Error: "sealed-secrets controller not found — install it (see Platform prerequisites) to export sealed credentials",
+				})
+				return
+			}
+			h.logger.Error("export: sealing credentials failed", "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to seal credentials for export"})
+			return
+		}
+	}
 
 	format := r.URL.Query().Get("format")
 	if format == "yaml" {
@@ -313,6 +377,111 @@ func (h *exportHandler) collectSecrets(_ context.Context, vals *helmValues) {
 	// for future backends that store config outside the org ConfigMap.
 }
 
+// credentialSecretNames enumerates the platform's OWN config-credential
+// Secrets (all in suparship-system). This is deliberately a fixed list plus
+// operator-named refs — NOT a name-prefix sweep like the backup command —
+// because the registry auth and OIDC client Secrets carry operator-chosen
+// names, and because identity/runtime state (local users, API tokens,
+// kubeconfigs) is out of scope for a CONFIG export.
+func (h *exportHandler) credentialSecretNames(ctx context.Context) []string {
+	set := map[string]bool{
+		gitops.ManagedCredentialSecretName: true,
+		secrets.VaultTokenSecretName:       true,
+		secrets.SATokenSecretName:          true,
+	}
+	adminName := h.adminSecretName
+	if adminName == "" {
+		adminName = "suparship-admin-auth"
+	}
+	set[adminName] = true
+
+	if h.clusterStore != nil {
+		if clusters, err := h.clusterStore.ListClusters(ctx); err == nil {
+			for _, c := range clusters {
+				set[secrets.VaultTokenStashName(c.Name)] = true
+				set[secrets.ConnectTokenStashName(secrets.ClusterStashKey(c.Name))] = true
+			}
+		}
+	}
+	if h.orgProvider != nil {
+		if org, err := h.orgProvider.GetOrg(ctx); err == nil && org != nil &&
+			org.Auth.OIDC != nil && org.Auth.OIDC.ClientSecretRef.Name != "" {
+			set[org.Auth.OIDC.ClientSecretRef.Name] = true
+		}
+	}
+	if h.registryStore != nil {
+		if cfg, err := h.registryStore.Get(ctx); err == nil && cfg.AuthSecretRef != "" {
+			set[cfg.AuthSecretRef] = true
+		}
+	}
+	if h.templateRegistryStore != nil {
+		if reg, err := h.templateRegistryStore.Get(ctx); err == nil {
+			for _, ext := range reg.External {
+				if ext.ExistingSecret != "" {
+					set[ext.ExistingSecret] = true
+				}
+			}
+		}
+	}
+
+	names := make([]string, 0, len(set))
+	for n := range set {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// collectExtraObjects seals every existing config-credential Secret against
+// the tooling cluster's sealed-secrets certificate and appends the resulting
+// SealedSecret manifests to vals.ExtraObjects. Missing Secrets are skipped
+// (recorded for the YAML banner). Returns seal.ErrControllerNotFound when the
+// controller isn't installed.
+func (h *exportHandler) collectExtraObjects(ctx context.Context, vals *helmValues) error {
+	if h.kubeClient == nil {
+		return fmt.Errorf("kubernetes client not configured")
+	}
+	fetch := h.fetchCert
+	if fetch == nil {
+		fetch = func(ctx context.Context, client kubernetes.Interface) ([]byte, error) {
+			return seal.FetchCert(ctx, client, seal.FetchOptions{})
+		}
+	}
+	certPEM, err := fetch(ctx, h.kubeClient)
+	if err != nil {
+		return err
+	}
+
+	const ns = "suparship-system"
+	for _, name := range h.credentialSecretNames(ctx) {
+		sec, err := h.kubeClient.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			vals.skippedSecrets = append(vals.skippedSecrets, name)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("reading secret %s/%s: %w", ns, name, err)
+		}
+		manifest, err := seal.BuildSealedSecret(certPEM, seal.SealedSecretInput{
+			Name:      name,
+			Namespace: ns,
+			Scope:     seal.ScopeStrict,
+			Data:      sec.Data,
+			Type:      string(sec.Type),
+			Labels:    map[string]string{"suparship.io/managed-by": "suparship"},
+		})
+		if err != nil {
+			return fmt.Errorf("sealing secret %s/%s: %w", ns, name, err)
+		}
+		var obj map[string]any
+		if err := sigyaml.Unmarshal([]byte(manifest), &obj); err != nil {
+			return fmt.Errorf("parsing sealed manifest for %s: %w", name, err)
+		}
+		vals.ExtraObjects = append(vals.ExtraObjects, obj)
+	}
+	return nil
+}
+
 func (h *exportHandler) collectRegistry(ctx context.Context, vals *helmValues) {
 	if h.registryStore == nil {
 		return
@@ -365,7 +534,19 @@ func toYAML(v helmValues) string {
 	var b strings.Builder
 
 	b.WriteString("# suparship Helm values — exported from live config\n")
-	b.WriteString("# Secret values are NOT included. Reference existing Secrets by name.\n\n")
+	if len(v.ExtraObjects) > 0 {
+		b.WriteString("# Includes the platform's credential Secrets SEALED against this\n")
+		b.WriteString("# cluster's sealed-secrets controller key (extraObjects below) — safe\n")
+		b.WriteString("# to commit; only that controller's private key can decrypt them.\n")
+		b.WriteString("# NOTE: back the sealed-secrets key up (or restore it on the target\n")
+		b.WriteString("# cluster) for disaster recovery, and re-export after key rotation.\n")
+		if len(v.skippedSecrets) > 0 {
+			b.WriteString("# Skipped (not present at export time): " + strings.Join(v.skippedSecrets, ", ") + "\n")
+		}
+		b.WriteString("\n")
+	} else {
+		b.WriteString("# Secret values are NOT included. Reference existing Secrets by name.\n\n")
+	}
 
 	b.WriteString("org:\n")
 	b.WriteString(fmt.Sprintf("  name: %s\n", yamlQ(v.Org.Name)))
@@ -572,6 +753,39 @@ func toYAML(v helmValues) string {
 		}
 	}
 
+	if len(v.ExtraObjects) > 0 {
+		b.WriteString("\n# Sealed platform credentials — rendered verbatim by the chart's\n")
+		b.WriteString("# extra-objects template; the sealed-secrets controller unseals them\n")
+		b.WriteString("# back into the Secrets suparship reads.\n")
+		b.WriteString("extraObjects:\n")
+		for _, obj := range v.ExtraObjects {
+			raw, err := sigyaml.Marshal(obj)
+			if err != nil {
+				continue // defensive: the object round-tripped through YAML already
+			}
+			b.WriteString(indentYAMLListItem(string(raw)))
+		}
+	}
+
+	return b.String()
+}
+
+// indentYAMLListItem indents a multi-line YAML document as one entry of a
+// top-level list: "  - " on the first line, four spaces on the rest.
+func indentYAMLListItem(doc string) string {
+	lines := strings.Split(strings.TrimRight(doc, "\n"), "\n")
+	var b strings.Builder
+	for i, line := range lines {
+		if i == 0 {
+			b.WriteString("  - " + line + "\n")
+			continue
+		}
+		if line == "" {
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString("    " + line + "\n")
+	}
 	return b.String()
 }
 
