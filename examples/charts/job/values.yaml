@@ -6,6 +6,10 @@
 # sync), each sync re-runs it from scratch, and a failed run fails the sync
 # instead of retrying the failure into place.
 
+# Written by the platform when the environment is suspended: skips rendering
+# the Job entirely — a scaled-down env should not run migrations or seeds.
+suspend: false
+
 image:
   # Demo image; set your own job image and command.
   repository: busybox

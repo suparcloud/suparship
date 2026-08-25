@@ -4,6 +4,11 @@
 # Auth is plain values (visible in git) — fine for demo data; a real install
 # points DATABASE_URL at an operator-managed or cloud database instead.
 
+# Written by the platform when the environment is suspended: scales the
+# database to zero. The PVC (and the data on it) survives; resume brings the
+# instance back against the same volume.
+suspend: false
+
 image:
   repository: postgres
   tag: "16-alpine"

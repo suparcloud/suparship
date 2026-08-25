@@ -7,6 +7,10 @@
 # Works with any Gateway API implementation (Envoy Gateway, Istio, Cilium,
 # NGINX Gateway Fabric, …) — set gatewayClassName to yours.
 
+# Written by the platform when the environment is suspended: omits the
+# Gateway and its HTTPRoutes so traffic stops; resume restores the edge.
+suspend: false
+
 # Required: the GatewayClass installed in your cluster (e.g. "eg" for
 # Envoy Gateway, "istio", "cilium", "nginx").
 gatewayClassName: eg

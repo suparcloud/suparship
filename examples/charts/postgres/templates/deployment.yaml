@@ -5,7 +5,12 @@ metadata:
   labels:
     {{- include "postgres.labels" . | nindent 4 }}
 spec:
+  {{- if .Values.suspend }}
+  # Suspended: scaled to zero; the PVC (and data) stays.
+  replicas: 0
+  {{- else }}
   replicas: 1
+  {{- end }}
   # Recreate, never surge: single instance on an RWO volume.
   strategy:
     type: Recreate

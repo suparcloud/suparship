@@ -1,3 +1,4 @@
+{{- if not .Values.suspend }}
 {{- $fullName := include "gateway.fullname" . }}
 {{- if .Values.httpsRedirect }}
 apiVersion: gateway.networking.k8s.io/v1
@@ -39,4 +40,5 @@ spec:
   {{- end }}
   rules:
     {{- toYaml .rules | nindent 4 }}
+{{- end }}
 {{- end }}

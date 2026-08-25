@@ -80,6 +80,21 @@ for name in web worker; do
   fi
 done
 grep -q 'suspend: true' "$TMPDIR/cronjob-ci.yaml" || fail "cronjob: suspend must render spec.suspend: true"
+# job/gateway/postgres honor suspend too (their ci values render unsuspended,
+# so give each a dedicated suspended render):
+#   - postgres scales to zero but KEEPS the PVC (data survives),
+#   - job omits the Job entirely (a scaled-down env must not run migrations),
+#   - gateway omits the Gateway and HTTPRoutes (traffic stops until resume).
+helm template t "$CHARTS_DIR/postgres" -f "$CHARTS_DIR/postgres/ci/platform-values.yaml" --set suspend=true >"$TMPDIR/postgres-susp.yaml" \
+  || fail "helm template postgres (suspended)"
+grep -q 'replicas: 0' "$TMPDIR/postgres-susp.yaml" || fail "postgres: suspend must render replicas: 0"
+grep -q 'kind: PersistentVolumeClaim' "$TMPDIR/postgres-susp.yaml" || fail "postgres: suspend must keep the PVC"
+helm template t "$CHARTS_DIR/job" -f "$CHARTS_DIR/job/ci/platform-values.yaml" --set suspend=true >"$TMPDIR/job-susp.yaml" \
+  || fail "helm template job (suspended)"
+if grep -q 'kind: Job' "$TMPDIR/job-susp.yaml"; then fail "job: suspended render must omit the Job"; fi
+helm template t "$CHARTS_DIR/gateway" -f "$CHARTS_DIR/gateway/ci/platform-values.yaml" --set suspend=true >"$TMPDIR/gateway-susp.yaml" \
+  || fail "helm template gateway (suspended)"
+if grep -qE 'kind: (Gateway|HTTPRoute)$' "$TMPDIR/gateway-susp.yaml"; then fail "gateway: suspended render must omit Gateway/HTTPRoutes"; fi
 echo "  OK  suspend contract"
 
 # Job hook contract: PreSync + BeforeHookCreation, backoffLimit 0.

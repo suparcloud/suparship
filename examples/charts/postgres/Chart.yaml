@@ -7,7 +7,7 @@ description: >-
   into an app so it gets its own prune-safe Application. Not an HA database —
   bring an operator or managed Postgres for production data.
 type: application
-version: 0.2.0
+version: 0.2.1
 appVersion: "16"
 keywords:
   - postgres
