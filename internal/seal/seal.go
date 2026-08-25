@@ -12,6 +12,7 @@ package seal
 import (
 	"bytes"
 	"crypto/rsa"
+	"encoding/base64"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -169,9 +170,9 @@ func buildSecretYAML(in SealedSecretInput) string {
 	}
 	sb.WriteString(fmt.Sprintf("type: %s\n", in.Type))
 	if len(in.Data) > 0 {
-		sb.WriteString("stringData:\n")
+		sb.WriteString("data:\n")
 		for _, k := range sortedDataKeys(in.Data) {
-			sb.WriteString(fmt.Sprintf("  %s: %s\n", k, in.Data[k]))
+			sb.WriteString(fmt.Sprintf("  %s: %s\n", k, base64.StdEncoding.EncodeToString(in.Data[k])))
 		}
 	}
 	return sb.String()

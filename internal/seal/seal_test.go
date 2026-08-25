@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"math/big"
 	"os/exec"
@@ -75,12 +76,32 @@ func TestBuildSecretYAML_ContainsExpectedFields(t *testing.T) {
 		"namespace: my-ns",
 		"app: test",
 		"type: Opaque",
-		"stringData:",
-		"token: abc123",
+		"data:",
+		"token: YWJjMTIz",
 	} {
 		if !strings.Contains(yaml, want) {
 			t.Errorf("Secret YAML missing %q:\n%s", want, yaml)
 		}
+	}
+}
+
+func TestBuildSecretYAML_JSONValueStaysString(t *testing.T) {
+	// Regression: a raw JSON value (e.g. .dockerconfigjson) written unencoded
+	// parses as a YAML object and kubeseal rejects the Secret.
+	dockerconfig := `{"auths":{"ghcr.io":{"auth":"dG9rZW4="}}}`
+	in := SealedSecretInput{
+		Name:      "registry-credentials",
+		Namespace: "suparship-system",
+		Type:      "kubernetes.io/dockerconfigjson",
+		Data:      map[string][]byte{".dockerconfigjson": []byte(dockerconfig)},
+	}
+	yaml := buildSecretYAML(in)
+	if strings.Contains(yaml, `{"auths"`) {
+		t.Errorf("Secret YAML leaks raw JSON value, must be base64-encoded:\n%s", yaml)
+	}
+	want := ".dockerconfigjson: " + base64.StdEncoding.EncodeToString([]byte(dockerconfig))
+	if !strings.Contains(yaml, want) {
+		t.Errorf("Secret YAML missing base64 data entry %q:\n%s", want, yaml)
 	}
 }
 
