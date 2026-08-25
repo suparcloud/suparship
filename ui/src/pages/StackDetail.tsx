@@ -156,6 +156,9 @@ export function StackDetail() {
   // getStack is cheap and gates the page; the status-enriched listApps (member
   // summaries) streams into the members table under its own flag.
   const [appsLoading, setAppsLoading] = useState(true);
+  // True while the status-enriched member list is still in flight (the brief
+  // list paints names/links first).
+  const [statusPending, setStatusPending] = useState(true);
   const [addApp, setAddApp] = useState("");
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [busy, setBusy] = useState<string | null>(null);
@@ -189,17 +192,32 @@ export function StackDetail() {
     // enriched listApps. Still await all three so mutation callers that
     // `await reload()` see a fully-refreshed view.
     setAppsLoading(true);
+    setStatusPending(true);
     const p1 = getStack(project, stackName)
       .then(setStack)
       .catch((err) =>
         setError(err instanceof Error ? err.message : "Failed to load stack"),
       );
+    // Two-phase member list: the brief list (store reads only) paints every
+    // member name/link immediately; the enriched list (live member status)
+    // replaces it, with status cells pulsing in between.
+    listApps(project, { stack: stackName, brief: true })
+      .then((apps) => {
+        setAllApps((prev) => (prev.length > 0 ? prev : apps.apps));
+        setAppsLoading(false);
+      })
+      .catch(() => {
+        /* the enriched fetch below is the error path */
+      });
     // Only the stack's members need live status here; non-members come back as
     // names for the "add app" picker without paying the enrichment cost.
     const p2 = listApps(project, { stack: stackName })
       .then((apps) => setAllApps(apps.apps))
       .catch(() => setAllApps([]))
-      .finally(() => setAppsLoading(false));
+      .finally(() => {
+        setAppsLoading(false);
+        setStatusPending(false);
+      });
     const p3 = listProjectEnvironments(project)
       .then(setEnvs)
       .catch(() => setEnvs([]));
@@ -555,6 +573,7 @@ export function StackDetail() {
               <AppTable
                 project={project}
                 apps={memberSummaries}
+                statusPending={statusPending}
                 rowAction={(app) => (
                   <button
                     onClick={() => move(app.name, "")}

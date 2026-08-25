@@ -1160,7 +1160,16 @@ func (ah *appHandler) handleListApps(w http.ResponseWriter, r *http.Request) {
 	// cost. Empty (the default) enriches every app, as the dashboard/project
 	// pages require.
 	stackFilter := r.URL.Query().Get("stack")
+	// Optional ?brief=1 skips live enrichment for EVERY app: names, templates,
+	// env columns, deploy/pin flags and last-known statuses/URLs all come from
+	// the store, so the response is a couple of ConfigMap reads. The project
+	// and stack pages fetch this first to paint names/links immediately, then
+	// follow with the enriched list to fill statuses in.
+	brief := r.URL.Query().Get("brief") == "1" || r.URL.Query().Get("brief") == "true"
 	enrichApp := func(app *domain.App) bool {
+		if brief {
+			return false
+		}
 		return stackFilter == "" || app.Spec.Stack == stackFilter
 	}
 

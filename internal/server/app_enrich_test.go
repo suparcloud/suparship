@@ -204,6 +204,44 @@ func TestListAppsStackFilterEnrichesMembersOnly(t *testing.T) {
 	}
 }
 
+// ?brief=1 skips live enrichment for EVERY app — the project/stack pages fetch
+// this first so names/links paint instantly, then follow with the enriched list.
+func TestListAppsBriefSkipsAllEnrichment(t *testing.T) {
+	store := newMemAppStore()
+	store.addApp(&domain.App{Name: "web", ProjectName: "demo", Spec: domain.AppSpec{Stack: "s1"}})
+	store.addApp(&domain.App{Name: "worker", ProjectName: "demo"})
+	store.addEnv(&domain.AppEnvironment{ProjectName: "demo", AppName: "web", EnvName: "staging", Namespace: "web-staging"})
+	store.addEnv(&domain.AppEnvironment{ProjectName: "demo", AppName: "worker", EnvName: "staging", Namespace: "worker-staging"})
+
+	rec := &recordingRuntime{queried: map[string]bool{}}
+	ah := &appHandler{appStore: store, runtimeProvider: rec, statusCache: newStatusCache(statusCacheTTL)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/demo/apps?brief=1", nil)
+	req.SetPathValue("project", "demo")
+	w := httptest.NewRecorder()
+	ah.handleListApps(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if len(rec.queried) != 0 {
+		t.Errorf("brief list must not enrich anything; queried=%v", rec.queried)
+	}
+	var resp AppListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Apps) != 2 {
+		t.Fatalf("brief list returned %d apps, want 2", len(resp.Apps))
+	}
+	// Everything the table needs for first paint is present without enrichment.
+	for _, a := range resp.Apps {
+		if a.Name == "" || len(a.Environments) != 1 || a.Environments[0].EnvName != "staging" {
+			t.Errorf("brief app %+v missing name/env columns", a)
+		}
+	}
+}
+
 // countingDiagReader implements both the base reader and the optional snapshot
 // capability, counting each so a test can prove the batch path is taken.
 type countingDiagReader struct {

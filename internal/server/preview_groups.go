@@ -35,7 +35,11 @@ func (rh *rbacHandler) handleListPreviewGroups(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusOK, PreviewGroupsResponse{Previews: []PreviewGroupDTO{}})
 		return
 	}
-	ctx := r.Context()
+	// Same enrichment machinery as the app-list path: per-request memos (org,
+	// apps, one diagnostics snapshot), the short-TTL status cache, and a
+	// bounded concurrent fan-out. This endpoint used to enrich every preview
+	// serially with none of that — the slowest call on the stack page.
+	ctx := withEnrichMemos(r.Context())
 	projects, err := rh.projectStore.List(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list projects"})
@@ -47,6 +51,15 @@ func (rh *rbacHandler) handleListPreviewGroups(w http.ResponseWriter, r *http.Re
 	groups := map[string]*PreviewGroupDTO{}
 	order := []string{} // stable insertion order before final sort
 
+	// Collect every (project, app, preview-env) first, then enrich with the
+	// same bounded concurrency + cache as handleListApps.
+	type previewTask struct {
+		project string
+		appName string
+		env     *domain.AppEnvironment
+	}
+	var tasks []previewTask
+	memo := appMemoFrom(ctx)
 	for _, p := range projects {
 		project := p.Metadata.Name
 		if onlyProject != "" && project != onlyProject {
@@ -57,25 +70,33 @@ func (rh *rbacHandler) handleListPreviewGroups(w http.ResponseWriter, r *http.Re
 			continue
 		}
 		for _, app := range apps {
+			memo.seed(project, app)
 			previews, err := rh.appHandler.appStore.ListAppPreviews(ctx, project, app.Name)
 			if err != nil {
 				continue
 			}
 			for _, env := range previews {
-				rh.appHandler.enrichEnvWithLiveStatus(ctx, app.Name, env)
-				key := project + "\x00" + env.EnvName
-				g, ok := groups[key]
-				if !ok {
-					g = &PreviewGroupDTO{Name: env.EnvName, Project: project, BaseEnv: env.BaseEnv}
-					groups[key] = g
-					order = append(order, key)
-				}
-				if g.BaseEnv == "" {
-					g.BaseEnv = env.BaseEnv
-				}
-				g.Apps = append(g.Apps, appPreviewToDTO(env))
+				tasks = append(tasks, previewTask{project: project, appName: app.Name, env: env})
 			}
 		}
+	}
+	runBounded(len(tasks), appEnrichConcurrency, func(i int) {
+		t := tasks[i]
+		rh.appHandler.enrichCachedOrLive(ctx, t.project, t.appName, t.env)
+	})
+	for _, t := range tasks {
+		env := t.env
+		key := t.project + "\x00" + env.EnvName
+		g, ok := groups[key]
+		if !ok {
+			g = &PreviewGroupDTO{Name: env.EnvName, Project: t.project, BaseEnv: env.BaseEnv}
+			groups[key] = g
+			order = append(order, key)
+		}
+		if g.BaseEnv == "" {
+			g.BaseEnv = env.BaseEnv
+		}
+		g.Apps = append(g.Apps, appPreviewToDTO(env))
 	}
 
 	out := make([]PreviewGroupDTO, 0, len(order))

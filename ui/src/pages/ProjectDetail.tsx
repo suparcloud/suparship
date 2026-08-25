@@ -30,22 +30,39 @@ export function ProjectDetail() {
       .catch(() => setStacks([]));
   }, [project]);
 
+  // Two-phase load: the brief list (store reads only) paints every app name,
+  // link, and env column immediately so the user can navigate; the enriched
+  // list (live per-env status — the slow call) replaces it when it lands,
+  // with status cells pulsing in between.
+  const [statusPending, setStatusPending] = useState(true);
+
   useEffect(() => {
     if (!project) return;
     let cancelled = false;
 
-    // listApps returns per-env status inline (the slow call); stream it into the
-    // table area instead of gating the whole page on it.
+    listApps(project, { brief: true })
+      .then((data) => {
+        if (cancelled) return;
+        // Don't clobber the enriched result if it somehow won the race.
+        setApps((prev) => (prev.length > 0 ? prev : data.apps));
+        setAppsLoading(false);
+      })
+      .catch(() => {
+        /* the enriched fetch below is the fallback error path */
+      });
+
     listApps(project)
       .then((data) => {
         if (cancelled) return;
         setApps(data.apps);
         setAppsLoading(false);
+        setStatusPending(false);
       })
       .catch((err) => {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load");
           setAppsLoading(false);
+          setStatusPending(false);
         }
       });
 
@@ -77,7 +94,7 @@ export function ProjectDetail() {
               ) : (
                 <>
                   {totalCt} {totalCt === 1 ? "app" : "apps"}
-                  {healthyCt > 0 && (
+                  {!statusPending && healthyCt > 0 && (
                     <span className="text-emerald-600">
                       {" "}
                       &middot; {healthyCt} healthy
@@ -152,7 +169,7 @@ export function ProjectDetail() {
         <EmptyApps project={project!} />
       ) : (
         <div className="rounded-xl border border-gray-200 bg-white p-5">
-          <AppTable project={project!} apps={apps} stacks={stacks} />
+          <AppTable project={project!} apps={apps} stacks={stacks} statusPending={statusPending} />
         </div>
       )}
     </div>

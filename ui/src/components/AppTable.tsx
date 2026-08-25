@@ -46,6 +46,7 @@ export function AppTable({
   stacks = [],
   emptyText = "No apps yet.",
   rowAction,
+  statusPending = false,
 }: {
   project: string;
   apps: AppSummary[];
@@ -53,6 +54,9 @@ export function AppTable({
   emptyText?: string;
   // Optional trailing per-row action (e.g. a Remove button on the stack page).
   rowAction?: (app: AppSummary) => ReactNode;
+  // True while the status-enriched list is still loading (brief-first
+  // two-phase fetch): names/links render, status + URL cells pulse.
+  statusPending?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -202,6 +206,7 @@ export function AppTable({
                   envCols={envCols}
                   hasEnvData={hasEnvData}
                   rowAction={rowAction}
+                  statusPending={statusPending}
                 />
               ),
             )}
@@ -241,6 +246,7 @@ function AppRowView({
   envCols,
   hasEnvData,
   rowAction,
+  statusPending = false,
 }: {
   project: string;
   app: AppSummary;
@@ -248,6 +254,7 @@ function AppRowView({
   envCols: string[];
   hasEnvData: boolean;
   rowAction?: (app: AppSummary) => ReactNode;
+  statusPending?: boolean;
 }) {
   const url = firstUrl(app);
   const previews = previewCount(app);
@@ -275,6 +282,13 @@ function AppRowView({
         envCols.map((c) => {
           const env = stableEnv(app, c);
           if (!env) return <td key={c} className="py-2 text-gray-300">—</td>;
+          if (statusPending) {
+            return (
+              <td key={c} className="py-2">
+                <span className="inline-block h-5 w-16 animate-pulse rounded-full bg-gray-100" />
+              </td>
+            );
+          }
           // Direct apps that opt out of an env never deploy there.
           const phase = env.deploy ? env.status.phase : "not_deployed";
           return (
@@ -285,11 +299,17 @@ function AppRowView({
         })
       ) : (
         <td className="py-2">
-          <StatusBadge status={app.status.phase} />
+          {statusPending ? (
+            <span className="inline-block h-5 w-16 animate-pulse rounded-full bg-gray-100" />
+          ) : (
+            <StatusBadge status={app.status.phase} />
+          )}
         </td>
       )}
       <td className="py-2">
-        {url ? (
+        {statusPending && !url ? (
+          <span className="inline-block h-4 w-24 animate-pulse rounded bg-gray-100" />
+        ) : url ? (
           <span className="inline-flex items-center gap-1">
             <a
               href={url}

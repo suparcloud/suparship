@@ -26,13 +26,17 @@ import type {
 // detail view doesn't pay to enrich apps it won't show status for.
 export function listApps(
   project: string,
-  opts?: { stack?: string },
+  opts?: { stack?: string; brief?: boolean },
 ): Promise<AppListResponse> {
-  const qs = opts?.stack
-    ? `?stack=${encodeURIComponent(opts.stack)}`
-    : "";
+  const params = new URLSearchParams();
+  if (opts?.stack) params.set("stack", opts.stack);
+  // brief=1 skips live status enrichment server-side: names/templates/env
+  // columns from the store only. Used for the instant first paint; a full
+  // (enriched) fetch follows to fill statuses in.
+  if (opts?.brief) params.set("brief", "1");
+  const qs = params.toString();
   return api.get<AppListResponse>(
-    `/projects/${encodeURIComponent(project)}/apps${qs}`,
+    `/projects/${encodeURIComponent(project)}/apps${qs ? `?${qs}` : ""}`,
   );
 }
 
