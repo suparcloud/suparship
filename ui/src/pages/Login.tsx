@@ -89,7 +89,7 @@ export function Login() {
       <div className="w-full max-w-sm rounded-lg border border-gray-200 bg-white p-8 shadow-sm">
         <img
           src="/logo.png"
-          alt="suparship — you push, it ships"
+          alt="suparship"
           className="mx-auto w-64"
         />
         <p className="mt-4 text-center text-sm text-gray-500">
