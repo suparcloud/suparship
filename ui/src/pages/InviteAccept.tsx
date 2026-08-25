@@ -66,9 +66,7 @@ export function InviteAccept() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50">
       <div className="w-full max-w-sm rounded-lg border border-gray-200 bg-white p-8 shadow-sm">
-        <h1 className="text-center text-2xl font-semibold tracking-tight">
-          suparship
-        </h1>
+        <img src="/logo.png" alt="suparship" className="mx-auto w-64" />
 
         {checking ? (
           <div className="mt-6 h-24 animate-pulse rounded bg-gray-100" />
