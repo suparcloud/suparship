@@ -1,7 +1,11 @@
-# suparship
+<p align="center">
+  <img src="ui/public/logo.png" alt="suparship" width="420" />
+</p>
 
-**Vercel-like developer experience for Kubernetes teams.**  
-Open source. GitOps-native. Built on CNCF projects.
+<p align="center">
+  <strong>Vercel-like developer experience for Kubernetes teams.</strong><br />
+  Open source. GitOps-native. Built on CNCF projects.
+</p>
 
 ---
 
