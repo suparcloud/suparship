@@ -4,7 +4,8 @@
 
 <p align="center">
   <strong>Vercel-like developer experience for Kubernetes teams.</strong><br />
-  Open source. GitOps-native. Built on CNCF projects.
+  Open source. GitOps-native. Built on CNCF projects.<br />
+  <a href="https://suparship.io/">suparship.io</a>
 </p>
 
 ---
