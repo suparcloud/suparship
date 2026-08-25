@@ -15,14 +15,15 @@ bottom; each step ends with a **Verify** you can check before moving on.
 
 suparship is a control plane over ArgoCD + Kargo + External Secrets. These must
 exist on the **tooling cluster** (where suparship and ArgoCD run); workload
-clusters need sealed-secrets + ESO.
+clusters need sealed-secrets + ESO. sealed-secrets on the tooling cluster is
+what makes the config export (step below) able to carry encrypted credentials.
 
 | Component | Where | Required for | Install |
 |---|---|---|---|
 | ArgoCD | tooling cluster | all delivery | your own, or `dependencies.argocd.enabled=true` |
 | Kargo | tooling cluster | promotion pipeline | your own |
 | External Secrets Operator | each workload cluster | secrets delivery | your own, or `dependencies.eso.enabled=true` |
-| sealed-secrets | each workload cluster | 1Password Connect tokens | your own |
+| sealed-secrets | tooling + each workload cluster | per-cluster secret-backend read tokens (Vault / 1Password); sealed config export | your own |
 | 1Password Connect | reachable from workload clusters | only if using the 1Password secret backend | 1Password Helm chart |
 
 Production guidance: install these **independently** and leave the chart's
@@ -198,6 +199,31 @@ suggested fix.
 
 **Verify:** the test app is Healthy and its endpoint serves; **PlatformReady**
 on the onboarding page is true.
+
+---
+
+## Config as code: export with sealed credentials
+
+Once the setup checklist is green, persist the whole configuration in git:
+
+**Platform → Export Configuration → Download values.yaml (sealed
+credentials)** (`GET /api/v1/org/export?includeSecrets=1&format=yaml`,
+org_admin). The file contains the full Helm values for your install — org,
+environments, clusters, gitops, registry, secrets backend, teams, role
+bindings, OIDC — **plus every platform credential as a `SealedSecret` under
+`extraObjects`**: the gitops repo credentials, the secret-backend write token
+and per-cluster stash tokens, registry auth, the OIDC client secret, the
+admin credential, and template-source credentials. The blobs are encrypted
+for this cluster's sealed-secrets controller, so the file is safe to commit.
+
+- `helm upgrade suparship ./charts/suparship -f exported-values.yaml`
+  reproduces the entire setup; the sealed-secrets controller unseals the
+  credentials back into the Secrets suparship reads.
+- **Back up the sealed-secrets controller key.** The blobs decrypt only with
+  it — disaster recovery onto a fresh cluster means restoring the key first.
+  Re-export after any key rotation.
+- Re-export after settings changes you want persisted (the export is always
+  a live snapshot; nothing is stored server-side).
 
 ---
 

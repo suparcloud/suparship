@@ -52,7 +52,7 @@ org
 └── project          (team / product boundary)
     └── app          (primary developer-owned object)
         ├── environment  (staging | prod | preview-*)
-        └── component    (internal; web | worker | cron — advanced view only)
+        └── component    (composed apps only; each a chart + values of its own)
 ```
 
 - **App** – the unit of deployment. What a developer creates, configures,
@@ -110,30 +110,56 @@ task demo:shipnotes   # second terminal: deploys the shipnotes demo end-to-end
 
 The guided tour lives in [**docs/try-suparship.md**](docs/try-suparship.md).
 
-### B. Install on a cluster (Helm)
+### B. Install in production (Helm)
 
-suparship runs in a **hub** cluster and deploys your apps there — or to registered
-**remote** clusters — via ArgoCD. You need a cluster with ArgoCD (+ Kargo, ESO);
-see the prerequisites in [docs/install.md](docs/install.md).
+suparship runs in a **hub** (tooling) cluster and deploys your apps there — or to
+registered **remote** clusters — via ArgoCD. Prerequisites on the tooling
+cluster: ArgoCD, Kargo, External Secrets Operator, and **sealed-secrets** (the
+controller suparship uses to deliver per-cluster secret-backend tokens and to
+export your config with encrypted credentials). Full matrix in
+[docs/install.md](docs/install.md).
+
+The intended flow is **install thin, configure in the UI, then commit the
+exported config to git**:
+
+**1. Basic setup via Helm** — org name, environments, admin secret ref:
 
 ```bash
-# Start from the annotated example and edit it for your org:
-cp examples/values.yaml my-values.yaml
+cp examples/values.yaml my-values.yaml   # annotated example; edit for your org
 
 helm install suparship ./charts/suparship \
   --namespace suparship-system --create-namespace \
   -f my-values.yaml
+
+# one-time break-glass credential (printed once):
+suparship admin bootstrap
 ```
 
-Then follow the day-1 runbook — [**docs/install.md**](docs/install.md) — to connect
-the GitOps repo, register clusters, bind environments, and turn the Platform-setup
-checklist green. Optionally wire [single sign-on](docs/sso.md), and verify the
-install against the [acceptance checklist](docs/acceptance.md).
+**2. Configure the platform in the UI** (Settings, as `org_admin`):
 
-> You can declare the entire setup in values (org, environments, clusters, gitops,
-> registry, secrets backend, teams, role bindings, OIDC) or configure it in the UI
-> and export it back with `GET /api/v1/org/export?format=yaml`. See
-> [`examples/values.yaml`](examples/values.yaml).
+- **GitOps** — connect the gitops repo (URL + credentials, Test connection)
+- **Registry** — container registry the CD pipeline watches
+- **Secrets backend** — HashiCorp Vault or 1Password; paste the per-cluster
+  tokens so suparship seals and publishes each cluster's read credentials
+- **Clusters & environments** — register clusters, bind `staging`/`prod`
+- Optionally [single sign-on](docs/sso.md) and local users with invite links
+
+Work through the day-1 runbook — [**docs/install.md**](docs/install.md) — until
+the Platform page's setup checklist is green, then verify against the
+[acceptance checklist](docs/acceptance.md).
+
+**3. Commit the whole configuration to git** — Platform → *Export
+Configuration* → **Download values.yaml (sealed credentials)** (or
+`GET /api/v1/org/export?includeSecrets=1&format=yaml`). The export is the full
+Helm values for your install **plus every platform credential as a
+`SealedSecret` under `extraObjects`** — encrypted for your cluster's
+sealed-secrets controller, so the file is safe to commit. A
+`helm upgrade -f` of that file reproduces the entire setup, credentials
+included.
+
+> Back up the sealed-secrets controller key (standard practice): the sealed
+> blobs decrypt only with it, so disaster recovery onto a fresh cluster means
+> restoring that key first — and re-export after any key rotation.
 
 ---
 
@@ -197,6 +223,15 @@ suparship server --addr :9090 # custom address
 | DELETE | `/api/v1/clusters/{name}` | org_admin | Remove a registered cluster |
 | GET | `/api/v1/templates` | session | List all available templates |
 | GET | `/api/v1/templates/{name}` | session | Get full template detail for form generation |
+| GET | `/api/v1/org/users` | org_admin | List local (invite-provisioned) users |
+| POST | `/api/v1/org/users` | org_admin | Create a local user + one-time invite link (optionally join teams) |
+| POST | `/api/v1/org/users/{username}/invite` | org_admin | Re-issue an invite (doubles as password reset) |
+| DELETE | `/api/v1/org/users/{username}` | org_admin | Delete a local user (strips team memberships) |
+| GET | `/api/v1/auth/invite/{token}` | — | Validate an invite link (set-password page) |
+| POST | `/api/v1/auth/invite/accept` | — | Redeem a one-time invite: set password, sign in |
+| GET | `/api/v1/org/endpoints` | session | Read the secure-endpoints (https/http URL scheme) setting |
+| PUT | `/api/v1/org/endpoints` | org_admin | Update the secure-endpoints setting |
+| GET | `/api/v1/org/export` | org_admin | Export platform config as Helm values (`?format=yaml`, `?includeSecrets=1` adds SealedSecrets) |
 
 > Legacy `/projects/{project}/services/...` paths remain registered for backward compatibility.
 
