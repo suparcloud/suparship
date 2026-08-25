@@ -5046,6 +5046,16 @@ func (ah *appHandler) handleGetKargoStages(w http.ResponseWriter, r *http.Reques
 // without freight are normal when a sibling has some (prod before its first
 // promotion), so only a fully-freightless pipeline reads as setting up.
 func summarizeCDPipeline(wh *KargoWarehouseDTO, stages []KargoStageStatusDTO) *KargoCDSummaryDTO {
+	// A promotion in flight wins over issue states: mid-flight pipeline
+	// errors are usually transient (retries, stale conditions from the
+	// previous run) and judging them waits until the dust settles. ArgoCD —
+	// not Kargo — is the authority on whether the deployment itself failed,
+	// and the app page overlays that signal separately.
+	for _, st := range stages {
+		if st.Phase == "Promoting" {
+			return &KargoCDSummaryDTO{State: "deploying", Message: "Deploying your release — waiting for it to report healthy. This can take a few minutes."}
+		}
+	}
 	if wh != nil && wh.Issue != "" {
 		return &KargoCDSummaryDTO{State: "attention", Message: wh.Issue}
 	}
@@ -5062,7 +5072,7 @@ func summarizeCDPipeline(wh *KargoWarehouseDTO, stages []KargoStageStatusDTO) *K
 	// don't alarm the user.
 	for _, st := range stages {
 		if st.Phase == "Promoting" || (st.CurrentFreight != "" && st.Health != "Healthy" && st.Health != "Unhealthy") {
-			return &KargoCDSummaryDTO{State: "deploying", Message: "Deploying your release — waiting for it to report healthy. This usually takes a minute."}
+			return &KargoCDSummaryDTO{State: "deploying", Message: "Deploying your release — waiting for it to report healthy. This can take a few minutes."}
 		}
 	}
 	anyFreight := false

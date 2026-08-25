@@ -96,6 +96,12 @@ func TestSummarizeCDPipeline(t *testing.T) {
 	if got := summarizeCDPipeline(wh, []KargoStageStatusDTO{promoting}); got.State != "deploying" {
 		t.Errorf("promotion in flight: want deploying, got %+v", got)
 	}
+	// An in-flight promotion SUPPRESSES issue states — mid-flight pipeline
+	// errors are judged only after the sync settles.
+	promotingWithIssue := KargoStageStatusDTO{EnvName: "staging", Phase: "Promoting", Issue: "step failed (stale)"}
+	if got := summarizeCDPipeline(whBad, []KargoStageStatusDTO{promotingWithIssue}); got.State != "deploying" {
+		t.Errorf("promotion in flight with issues: want deploying (suppressed), got %+v", got)
+	}
 	syncing := KargoStageStatusDTO{EnvName: "staging", CurrentFreight: "f1", Health: "Unknown"}
 	if got := summarizeCDPipeline(wh, []KargoStageStatusDTO{syncing}); got.State != "deploying" {
 		t.Errorf("freight present, health not yet assessed: want deploying, got %+v", got)

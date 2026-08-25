@@ -599,29 +599,59 @@ function EnvPipelineBar({
     (previewsByBase[base] ??= []).push(p);
   }
 
+  // Delivery banner precedence — ArgoCD is the authority on whether the
+  // deployment actually landed:
+  //   1. ArgoCD reports an error (error diagnostic / degraded env) → red.
+  //   2. A sync or promotion is in flight → blue progress line, SUPPRESSING
+  //      any Kargo-side "attention" (mid-flight pipeline errors are usually
+  //      transient and self-resolve; judging them waits until things settle).
+  //   3. Otherwise the Kargo rollup as-is (a pipeline error that persists
+  //      while nothing is syncing is real — e.g. broken image discovery).
   const cdSummary = pipeline?.summary;
+  const argoError = (() => {
+    for (const env of nonPreviewEnvs) {
+      const diag = env.status.diagnostics?.find((d) => d.level === "error");
+      if (diag) {
+        return { env: env.envName, message: `${diag.title}${diag.detail ? ` — ${diag.detail}` : ""}` };
+      }
+      if (env.status.phase === "degraded") {
+        return { env: env.envName, message: "Deployment is degraded — check the environment's status for details." };
+      }
+    }
+    return null;
+  })();
+  const syncing =
+    nonPreviewEnvs.some((e) => e.status.phase === "progressing") ||
+    (pipeline?.stages ?? []).some((s) => s.phase === "Promoting");
+  const banner = argoError
+    ? { tone: "error" as const, label: "Delivery needs attention", message: `${argoError.env}: ${argoError.message}` }
+    : syncing
+      ? { tone: "progress" as const, label: "", message: "Deploying — waiting for the rollout to report healthy. This can take a few minutes." }
+      : cdSummary && cdSummary.state !== "active"
+        ? cdSummary.state === "attention"
+          ? { tone: "error" as const, label: "Delivery needs attention", message: cdSummary.message ?? "" }
+          : { tone: "progress" as const, label: "", message: cdSummary.message ?? "" }
+        : null;
+
   return (
     <div className="space-y-2">
-      {/* CD pipeline rollup: quiet while active; an encouraging progress line
-          while setting up or deploying; red plain language only when the
-          platform genuinely needs attention. */}
-      {cdSummary && cdSummary.state !== "active" && (
+      {banner && (
         <div
           className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs ${
-            cdSummary.state === "attention"
+            banner.tone === "error"
               ? "border-red-200 bg-red-50 text-red-700"
               : "border-blue-100 bg-blue-50/60 text-blue-700"
           }`}
         >
-          {cdSummary.state === "attention" ? (
-            <span className="font-medium whitespace-nowrap">Delivery needs attention</span>
+          {banner.tone === "error" ? (
+            <span className="font-medium whitespace-nowrap">{banner.label}</span>
           ) : (
             <svg className="h-3 w-3 flex-shrink-0 animate-spin" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
           )}
-          {cdSummary.message && <span className="break-words">{cdSummary.message}</span>}
+          {banner.message && <span className="break-words">{banner.message}</span>}
         </div>
       )}
       {/* Pipeline row: stable envs connected by promotion arrows; each env
