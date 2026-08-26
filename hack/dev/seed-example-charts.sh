@@ -11,6 +11,8 @@
 #   2. registers the `example-charts` gitcharts source (preserving any other
 #      sources) and triggers a sync
 #   3. polls /templates until every chart has been indexed
+#   4. sets the web template's preview defaults (image.tag → ((platform.imageTag)))
+#   5. curates developer-values projections for the web + postgres templates
 #
 # Idempotent: re-run to push updated charts and re-sync. Overridables:
 # SUPARSHIP_DEV_USER/PASSWORD, GITEA_ADMIN_USER/PASS, EXAMPLE_CHARTS (space-
@@ -122,3 +124,48 @@ print(json.dumps(ov))")"
 curl -sS -b "$cookies" -o /dev/null -X PUT "$API/templates/web/overrides" \
   -H 'Content-Type: application/json' -d "$merged"
 ok "web template preview defaults set (image.tag → ((platform.imageTag)))"
+
+# ── 5. Developer values projections for web + postgres ─────────────────────
+# Curate the small set of Helm values a DEVELOPER owns in the app editor;
+# everything else stays platform-owned (and reachable via the Advanced
+# toggle). Saved via PATCH /templates/{name} — stored as a sync-safe override
+# for these synced charts, so a re-sync of example-charts can't clobber it.
+patch_dev_values() { # template json
+  local code
+  code="$(curl -sS -b "$cookies" -o /dev/null -w '%{http_code}' \
+    -X PATCH "$API/templates/$1" -H 'Content-Type: application/json' -d "$2")"
+  case "$code" in
+    200|204) ok "developer values set on template $1" ;;
+    *) die "setting developer values on $1 failed (HTTP $code)" ;;
+  esac
+}
+
+# web: the image is yours, the tag belongs to the pipeline (CD/previews own
+# image.tag, so it is deliberately NOT projected). containerPort mirrors
+# service.port — one question, two keys.
+patch_dev_values web '{"developerValues":[
+  {"path":"image.repository","title":"Image repository","type":"string","required":true,
+   "description":"Container image to run (no tag — CD owns the tag)."},
+  {"path":"containerPort","title":"Container port","type":"number","default":8080,
+   "mirrors":["service.port"],"min":1,"max":65535,
+   "description":"Port your process listens on; the Service follows it."},
+  {"path":"healthCheck.path","title":"Health check path","type":"string","default":"/",
+   "description":"HTTP path probed for liveness/readiness."},
+  {"path":"replicaCount","title":"Replicas","type":"number","default":2,"min":1,"max":10},
+  {"path":"env","title":"Environment variables",
+   "description":"Plain key/value env for the container (secrets belong in App → Settings → Variables & secrets)."}
+]}'
+
+# postgres: version pin, initial database, and storage — auth stays out (the
+# platform injects POSTGRES_USER/PASSWORD via envFrom, never chart values).
+patch_dev_values postgres '{"developerValues":[
+  {"path":"image.tag","title":"Postgres version","type":"enum",
+   "options":["15-alpine","16-alpine","17-alpine"],"default":"16-alpine"},
+  {"path":"auth.database","title":"Database name","type":"string","default":"app",
+   "description":"Initial database created at first boot; leave empty when the platform injects POSTGRES_DB."},
+  {"path":"persistence.enabled","title":"Persistent storage","type":"boolean","default":true,
+   "description":"Disable for throwaway data — the database then lives and dies with the pod."},
+  {"path":"persistence.size","title":"Storage size","type":"string","default":"1Gi",
+   "pattern":"^[0-9]+(Ei|Pi|Ti|Gi|Mi|Ki)$",
+   "description":"PVC size (Kubernetes quantity, e.g. 1Gi, 10Gi)."}
+]}'
