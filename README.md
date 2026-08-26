@@ -44,6 +44,91 @@ But they:
 
 ---
 
+## See it in action
+
+What a developer sees, captured from the
+[one-command shipnotes demo](docs/contributor-guide/hacking-on-suparship.md)
+(`task up` + `task demo:shipnotes` — a React + FastAPI + Postgres app through
+the whole golden path).
+
+**A project dashboard, not a wall of YAML.** Apps with live health per environment
+and their URLs:
+
+![Project dashboard](docs/images/ui-project.png)
+
+**Each app is a pipeline.** Staging promotes to prod; the `pr-1` badge is a live
+preview environment from an open pull request. Release tag, endpoints, and
+components on one page:
+
+![App detail](docs/images/ui-app-detail.png)
+
+**Developers configure apps through a curated form, not a values dump.** The
+platform team picks which Helm values each template exposes; untouched fields keep
+inheriting platform defaults, and the Advanced toggle still shows everything.
+`Container port` writes both `containerPort` and `service.port` — one question,
+two keys:
+
+![Developer values form](docs/images/ui-developer-values.png)
+
+**Prefer YAML? The Advanced view is the same contract.** Your override is seeded
+as commented lines — uncomment one to own it, and `((platform.*))` tokens wire
+chart values to platform-managed objects (env ConfigMap/Secret, routing host,
+image tag) without hardcoding anything per environment:
+
+![Advanced values with platform tokens](docs/images/ui-component-advanced.png)
+
+**Secrets stay out of git and out of the way.** App-level variables and
+Vault-backed secrets are mapped per component — the database sees exactly the
+keys it needs, nothing else:
+
+![Component variables](docs/images/ui-component-variables.png)
+
+**One place for variables and secrets, scoped per environment.** App-level
+values apply everywhere (with a guardrail banner reminding you that includes
+production); each environment and even each cluster gets its own overriding
+scope:
+
+![Variables and secrets](docs/images/ui-vars-secrets-app.png)
+
+**And you can always see what actually reaches an environment.** The resolved
+view merges the whole hierarchy (org → environment → project → app → app-env)
+and attributes every key: here staging *extends* the app config with
+`FEATURE_FLAGS`, *overrides* `LOG_LEVEL`, and inherits the rest:
+
+![Resolved variables with source attribution](docs/images/ui-vars-secrets-resolved.png)
+
+**Every pull request gets its own environment**, built at the PR's image tag,
+with its own URL and its own database, torn down on merge:
+
+![Preview environments](docs/images/ui-previews.png)
+
+**Production is one click, and gated.** Merge ships staging; promotion re-tags
+the exact staging release to prod via Kargo — and rollback is one click too:
+
+![Promote to prod](docs/images/ui-promote.png)
+
+**Any Helm chart is a template.** No golden-cage DSL — bring your own charts,
+curate them once, and developers self-serve from the gallery:
+
+![Template gallery](docs/images/ui-templates.png)
+
+**Creating an app is a form, end to end.** Pick a template, name the app, and
+configure the component through the same curated fields — deployment targets,
+namespace strategy, delivery mode, and optional variables/secrets are all one
+page:
+
+![Create app wizard](docs/images/ui-create-app-configure.png)
+
+**Platform engineers curate once, per template.** CD image wiring, the
+developer-values projection, and org value overlays — global, per environment,
+per cluster, and preview-only — with `((platform.*))` tokens and a live
+effective-values pane. Here staging gets a smaller resource baseline than prod,
+and every app inherits the platform's env objects:
+
+![Template platform overlays](docs/images/ui-template-overlays.png)
+
+---
+
 ## Key concepts
 
 suparship is built around a four-level hierarchy:
