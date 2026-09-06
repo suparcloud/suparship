@@ -45,10 +45,23 @@ suparship-backup.yaml`) and roll the chart back.
 
 ### Unreleased (next)
 
-These changes shipped on `main` after the initial `v0.1.0` cut and **require
-one-time operator action** on the 1Password secret backend. The k8s secret
-backend is unaffected. (config-schema unchanged at `v1` — the changes are
-operational, and the config decoder tolerates the removed fields.)
+Nothing yet. Notes for changes landing on `main` after v0.1.0 go here; the
+release PR moves them under the next version heading.
+
+### v0.1.0 — first tagged release
+
+The first release cut through the release pipeline: tag `v0.1.0`, a GitHub
+Release with the generated changelog, `ghcr.io/suparcloud/suparship:0.1.0`, and
+chart `0.1.0`. **Fresh installs start here** — `suparship admin bootstrap`
+creates the admin credential (see [install.md](install.md)) and nothing below
+applies.
+
+If you are running a **pre-release build from `main`** — the `0.1.0-1` /
+`0.1.0-2` charts, or an image pinned by `main-<sha>` — the notes below cover
+your jump. They **require one-time operator action** on the 1Password secret
+backend; the k8s secret backend is unaffected. (config-schema unchanged at `v1`
+— the changes are operational, and the config decoder tolerates the removed
+fields.)
 
 **HashiCorp Vault secret backend; `k8s` backend deprecated.** A new `vault`
 backend (HashiCorp Vault KV v2 via ESO) is the recommended open-source choice.
@@ -129,8 +142,3 @@ vaults) instead of a sealed token per vault.
 failure reasons; cluster API server / Connect URL / registry URL are validated
 at save time; project deletion is two-phase (no more stuck-Terminating apps
 from the delete path), and stuck apps can be unstuck from the dashboard.
-
-### v0.1.0 — initial release
-
-Baseline. New installs start here; `suparship admin bootstrap` creates the
-admin credential (see [install.md](install.md)).
