@@ -107,9 +107,12 @@ first is mechanizable — keep writing the second by hand.
 
 ## One-time setup
 
-`.release-please-manifest.json` was seeded at `0.0.0` before the first release,
-so the first release PR computed `v0.1.0` from the full commit history. From
-then on the manifest tracks the last tag and needs no hand edits.
+The first release was pinned with `"release-as": "0.1.0"` in
+`release-please-config.json`: with no prior tag, release-please ignores the
+manifest baseline and would otherwise start at `1.0.0`. **Remove `release-as`
+after the v0.1.0 release PR merges** — left in place, every later release PR
+would keep proposing `0.1.0`. From then on the manifest tracks the last tag and
+needs no hand edits.
 
 
 `RELEASE_PLEASE_TOKEN` — a PAT with `contents: write` and `pull-requests: write`,
