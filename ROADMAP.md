@@ -6,23 +6,59 @@ This document tracks the plan to complete the suparship MVP and add the platform
 
 ## Current State
 
-### Already Built
+_Verified against `main` for the v0.1.0 release (2026-09-06). Earlier revisions
+of this section predated the Kargo, secrets and CI work and were stale in the
+wrong direction._
 
-- Go HTTP API: auth, org/project/env RBAC, app CRUD, previews, logs, sync, onboarding
-- ArgoCD-oriented GitOps publisher (clone → commit → push into Gitea)
-- React UI with all MVP route shells (dashboard, apps, templates, previews, settings)
-- Template registry (git / gitcharts / OCI sources + BYO chart upload) serving plain Helm charts; `examples/charts/` starter catalog
-- Dev cluster tooling: kind + ArgoCD + Gitea + seed via Taskfile
-- Fake/in-memory dev mode for local iteration without a cluster
+### Shipped in v0.1.0
 
-### Gaps Before Company Use
+- **Apps + components** on bring-your-own Helm charts served from the template
+  registry (git / OCI / upload), with per-component template version pinning and
+  upgrades, developer-values authoring and rollback. `examples/charts/` starter
+  catalog.
+- **GitOps publisher**: deterministic commits into your gitops repo; one Argo CD
+  `ApplicationSet` per app, per-cluster Application naming; everything outside
+  `suparship-system` is tracked by the `app.kubernetes.io/managed-by` label, not
+  a name prefix.
+- **Kargo promotion pipeline**: generated `Warehouse` + `Stage` per app, first
+  environment auto-promotes, downstream environments manual unless AutoPromote;
+  pin/unpin, freight-history rollback, and a server-side auto-promote reconciler
+  gated on the upstream environment's Argo CD health.
+- **Preview environments**: a clone of a base environment per change, driven by
+  a CI-called upsert API (`examples/preview-from-pr.yml`), torn down on close.
+- **Secrets**: scope bands × tiers, values written to an external store
+  (HashiCorp Vault via ESO, 1Password Connect; the `k8s` backend is deprecated),
+  only `ClusterSecretStore` / `ExternalSecret` manifests in Git; sealed-secrets
+  delivers per-cluster tokens and encrypts the config export.
+- **Stacks (beta)**: grouping, override cascade, shared namespace with
+  intra-stack DNS, batch lifecycle, clone with overrides.
+- **Multi-cluster**: tooling cluster plus registered workload clusters,
+  environment-to-cluster binding.
+- **Auth and access**: local admin bootstrap, OIDC single sign-on, local users
+  with one-time invite links, project-scoped API tokens, org/project/env RBAC,
+  audit log.
+- **Operations**: `GET /readyz` with real dependency checks, `suparship backup`
+  / `restore`, sealed config export, upgrade notes tied to the config-schema
+  and generator contract versions (`docs/upgrading.md`).
+- **UI**: dashboard, projects, apps, previews, stacks, templates, tabbed org
+  settings, onboarding setup checklist.
+- **Dev loop and CI**: fake in-memory mode (`task dev`, no cluster), Tilt-based
+  kind loop with Argo CD + Kargo + Gitea, GitHub Actions CI (`go test -race`,
+  golangci-lint, trufflehog), release-please releases, multi-arch images on
+  ghcr.io, chart publishing.
 
-- **Kargo**: narrative and comments only — no install, no API integration
-- **Promotions**: API handlers exist but do not trigger real stage promotions
-- **ExternalSecrets Operator**: not installed or integrated
-- **Env/secret hierarchy**: no domain model, no API
-- **No GitHub Actions CI**: Makefile/Taskfile only
-- **`readyz`**: returns a static string, no real health probing
+### Not in v0.1.0
+
+- **Release trains** (stable + canary variants in one environment, Phase 4) and
+  **weighted Gateway API traffic splitting** (Phase 5) — designed, not
+  implemented. The UI Traffic tab is a stub.
+- **Metric-driven promotion verification** — the promotion gate is Argo CD
+  health, not analysis.
+- **Plain (non-secret) env vars at every scope** and a merged-config view
+  (Phase 2 remaining work).
+- **Managed addons UI** (Phase 7) and the **VoiceAI worker templates** (Phase 3).
+- **A webhook receiver for preview lifecycles** — CI calls the API; there is no
+  safety net below it.
 
 ---
 
@@ -42,7 +78,7 @@ The model decision for 0.1 is recorded in
 
 ---
 
-## Phase 1: MVP Hardening
+## Phase 1: MVP Hardening ✅ (shipped in v0.1.0)
 
 > Foundation that must exist before company workloads can run reliably.
 
@@ -261,7 +297,7 @@ Publisher regenerates the `HTTPRoute` on any weight change.
 
 ---
 
-## Phase 6: Promotion Pipeline (Kargo)
+## Phase 6: Promotion Pipeline (Kargo) ✅ (shipped in v0.1.0 — health-gated; verification steps are follow-up)
 
 > Safe, auditable promotion from staging to production with auto or manual gates.
 
@@ -439,15 +475,15 @@ valkey instance with its connection details — no curl required.
 
 ## Milestone Summary
 
-| Phase | Theme | Unlocks |
-|---|---|---|
-| 1 | MVP Hardening | Real promotions, CI gating |
-| 2 | Env/Secret Hierarchy | Company-safe config management |
-| 3 | VoiceAI Templates | Voice AI workload self-service |
-| 4 | Release Trains | Multi-variant deployments |
-| 5 | Envoy Gateway Routing | Traffic splitting across trains |
-| 6 | Full Kargo Pipeline | Auto + manual promotion gates |
-| 7 | Managed Addons UI | Self-service addon claims (backend already shipped) |
+| Phase | Theme | Unlocks | Status |
+|---|---|---|---|
+| 1 | MVP Hardening | Real promotions, CI gating | ✅ v0.1.0 |
+| 2 | Env/Secret Hierarchy | Company-safe config management | ✅ secrets in v0.1.0; plain env vars pending |
+| 3 | VoiceAI Templates | Voice AI workload self-service | planned |
+| 4 | Release Trains | Multi-variant deployments | post-0.1 |
+| 5 | Envoy Gateway Routing | Traffic splitting across trains | post-0.1 |
+| 6 | Full Kargo Pipeline | Auto + manual promotion gates | ✅ v0.1.0 (health-gated) |
+| 7 | Managed Addons UI | Self-service addon claims (backend already shipped) | planned |
 
 ---
 
