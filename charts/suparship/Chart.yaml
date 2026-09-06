@@ -4,8 +4,12 @@ description: >-
   suparship — GitOps-native platform runtime. Vercel-like developer experience
   on Kubernetes, powered by ArgoCD and Kargo.
 type: application
-version: 0.1.0-2
-appVersion: "0.1.0"
+# Chart version and appVersion are deliberately locked together and owned by
+# release-please: this chart is suparship's install artifact, not an independent
+# library chart, so "which one do I bump" is never a question. Both lines are
+# rewritten when the release PR merges — edit them there, not by hand.
+version: 0.1.0 # x-release-please-version
+appVersion: "0.1.0" # x-release-please-version
 home: https://github.com/suparcloud/suparship
 sources:
   - https://github.com/suparcloud/suparship

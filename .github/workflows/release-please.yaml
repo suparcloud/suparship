@@ -1,0 +1,60 @@
+name: release-please
+
+# Maintains a standing "chore: release X.Y.Z" pull request built from the
+# conventional-commit history on main. Merging that PR writes CHANGELOG.md,
+# bumps charts/suparship/Chart.yaml (version + appVersion), creates the vX.Y.Z
+# tag and publishes the GitHub Release.
+#
+# Downstream, that single merge drives both existing workflows:
+#   - the tag triggers release-image  → ghcr.io semver tags + :latest
+#   - the Chart.yaml bump triggers release-chart → suparcloud/charts
+#
+# The contract versions (version.Schema, version.Generator) are NOT automated —
+# they are judgement calls. The release PR is the checkpoint to make them, along
+# with rolling the "Unreleased (next)" section of docs/upgrading.md. See
+# RELEASING.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Never cancel a release run midway — a half-applied release is worse than a
+# queued one.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Maintain the release PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          # GITHUB_TOKEN works, but tags it pushes do NOT start new workflow
+          # runs — so release-image would never fire for the release tag. Set a
+          # RELEASE_PLEASE_TOKEN PAT (contents: write, pull-requests: write) to
+          # get the fully automatic path; without it, build the versioned image
+          # by dispatching release-image manually against the new tag.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Report
+        if: steps.release.outputs.release_created == 'true'
+        run: |
+          {
+            echo "### Released ${{ steps.release.outputs.tag_name }}"
+            echo
+            if [ -z "${{ secrets.RELEASE_PLEASE_TOKEN }}" ]; then
+              echo "> **RELEASE_PLEASE_TOKEN is not set.** The tag was pushed with"
+              echo "> GITHUB_TOKEN, so \`release-image\` did not start on its own."
+              echo "> Dispatch it manually against \`${{ steps.release.outputs.tag_name }}\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -266,6 +266,22 @@ fix: handle missing kubeconfig gracefully
 docs: update README with install instructions
 ```
 
+These are not a style preference — releases are generated from them.
+`release-please` reads the commits landed on `main` to compute the next version
+(`feat:` → minor, `fix:`/`perf:`/`refactor:` → patch, `feat!:` or a
+`BREAKING CHANGE:` footer → a breaking bump) and to write `CHANGELOG.md`. A
+commit with a non-conventional subject still ships, but it is invisible in the
+release notes.
+
+So write the subject for the person reading the changelog, and put the *why* in
+the body — what was broken, what you verified. See [RELEASING.md](RELEASING.md)
+for how a release is cut.
+
+PRs land on `main` with **rebase and merge**, keeping each commit as its own unit
+of history. Tidy your branch before it lands — reorder, reword and squash fixups
+freely while it is still a topic branch — because once it is on `main` it stays
+as written.
+
 ### Sign-off (Optional)
 
 We appreciate (but don't require) a Developer Certificate of Origin sign-off:

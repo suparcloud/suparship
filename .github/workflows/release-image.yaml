@@ -5,6 +5,10 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  # Escape hatch: when release-please pushes the tag with GITHUB_TOKEN rather
+  # than a PAT, the tag push starts no workflow run. Dispatch this against the
+  # release tag to build the versioned image by hand.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -82,8 +86,12 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            # main branch → latest + main-<short-sha>
-            type=raw,value=latest,enable={{is_default_branch}}
+            # Releases → latest. `latest` must mean "newest RELEASE", not "tip
+            # of main" — an operator running `docker pull …:latest` should get
+            # a released build, not whatever merged an hour ago.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # main branch → edge + main-<short-sha>
+            type=raw,value=edge,enable={{is_default_branch}}
             type=sha,prefix=main-,enable={{is_default_branch}}
             # Pull requests → pr-<n> (default behaviour of type=ref,event=pr)
             type=ref,event=pr
