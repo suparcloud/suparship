@@ -4,12 +4,8 @@ description: >-
   suparship — GitOps-native platform runtime. Vercel-like developer experience
   on Kubernetes, powered by ArgoCD and Kargo.
 type: application
-# Chart version and appVersion are deliberately locked together and owned by
-# release-please: this chart is suparship's install artifact, not an independent
-# library chart, so "which one do I bump" is never a question. Both lines are
-# rewritten when the release PR merges — edit them there, not by hand.
-version: 0.1.0 # x-release-please-version
-appVersion: "0.1.0" # x-release-please-version
+version: 0.1.0
+appVersion: 0.1.0
 home: https://github.com/suparcloud/suparship
 sources:
   - https://github.com/suparcloud/suparship
@@ -22,22 +18,3 @@ keywords:
 maintainers:
   - name: suparCloud
     url: https://github.com/suparcloud
-
-# This chart deploys suparship ONLY. Its prerequisites — ArgoCD, Kargo,
-# cert-manager, Argo Rollouts, External Secrets, Gitea, an ingress controller —
-# are installed separately, by design. Two Helm limitations make bundling them
-# as subcharts the wrong call, and both were hit in practice:
-#
-#  1. Subcharts have no namespace of their own. Every subchart lands in the
-#     release namespace, and Kargo and Gitea expose no `namespaceOverride`
-#     (argo-cd does). Bundling them means one namespace for everything, which
-#     diverges from every upstream install guide.
-#
-#  2. Kargo creates cert-manager Certificate/Issuer custom resources at install
-#     time. Those need cert-manager's webhook to be RUNNING to be admitted, and
-#     Helm does not wait mid-release — so a single umbrella release races and
-#     fails intermittently. Kargo's own docs install cert-manager beforehand.
-#
-# For local development the Tiltfile declares each prerequisite as a
-# helm_resource: its own namespace, a pinned version, and explicit ordering via
-# resource_deps. For production see docs/install.md.
