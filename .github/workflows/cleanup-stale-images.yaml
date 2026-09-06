@@ -49,8 +49,8 @@ jobs:
 
               # Require at least one pr-<digits> tag, and reject if any tag is
               # NOT a pr-<digits> tag (so we never nuke a digest shared with main/latest).
-              HAS_PR=$(jq -r 'any(. ; test("^pr-[0-9]+$"))' <<<"$TAGS_JSON")
-              ALL_PR=$(jq -r 'all(. ; test("^pr-[0-9]+$"))' <<<"$TAGS_JSON")
+              HAS_PR=$(jq -r 'any(.[]; test("^pr-[0-9]+$"))' <<<"$TAGS_JSON")
+              ALL_PR=$(jq -r 'all(.[]; test("^pr-[0-9]+$"))' <<<"$TAGS_JSON")
               if [ "$HAS_PR" != "true" ] || [ "$ALL_PR" != "true" ]; then
                 continue
               fi
