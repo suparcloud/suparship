@@ -12,7 +12,10 @@
       "draft": false,
       "prerelease": false,
       "extra-files": [
-        "charts/suparship/Chart.yaml"
+        {
+          "type": "generic",
+          "path": "charts/suparship/Chart.yaml"
+        }
       ],
       "changelog-sections": [
         {
