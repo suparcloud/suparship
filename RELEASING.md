@@ -107,6 +107,11 @@ first is mechanizable — keep writing the second by hand.
 
 ## One-time setup
 
+`.release-please-manifest.json` was seeded at `0.0.0` before the first release,
+so the first release PR computed `v0.1.0` from the full commit history. From
+then on the manifest tracks the last tag and needs no hand edits.
+
+
 `RELEASE_PLEASE_TOKEN` — a PAT with `contents: write` and `pull-requests: write`,
 set as a repository secret. Without it the workflow falls back to `GITHUB_TOKEN`,
 which still cuts the release, but tags pushed with `GITHUB_TOKEN` **do not start
