@@ -103,4 +103,26 @@ grep -q 'argocd.argoproj.io/hook-delete-policy: BeforeHookCreation' "$TMPDIR/job
 grep -q 'backoffLimit: 0' "$TMPDIR/job-ci.yaml" || fail "job: backoffLimit must default to 0"
 echo "  OK  job hook contract"
 
+# ---------------------------------------------------------------------------
+# 4. Platform chart install contract (regressions caught on a real
+#    `helm install` against a fresh cluster, which the Tilt dev loop never
+#    runs because it strips hooks and creates namespaces itself).
+# ---------------------------------------------------------------------------
+echo "==> charts/suparship install contract"
+out="$TMPDIR/suparship.yaml"
+helm template suparship charts/suparship --namespace suparship-system --set org.name=acme >"$out" \
+  || fail "helm template charts/suparship"
+# `helm install --create-namespace` (the documented command) owns the release
+# namespace; a Namespace object in the chart collides with it.
+if grep -q '^kind: Namespace$' "$out"; then
+  fail "charts/suparship must not render a Namespace (conflicts with --create-namespace)"
+fi
+# Pre-install hooks run before any ordinary resource exists, so the
+# prereq-check Job must carry its own hook-scoped ServiceAccount.
+grep -q 'serviceAccountName: suparship-prereq-check' "$out" \
+  || fail "prereq-check Job must run as its hook-scoped ServiceAccount"
+awk '/^kind: ServiceAccount$/{sa=1} sa && /name: suparship-prereq-check$/{found=1} /^---$/{sa=0} END{exit !found}' "$out" \
+  || fail "hook ServiceAccount suparship-prereq-check is not rendered"
+echo "  OK  no Namespace, hook-scoped prereq-check ServiceAccount"
+
 echo "charts-verify: all clean"

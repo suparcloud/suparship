@@ -317,13 +317,10 @@ registry:
 
 # -- Template configuration
 templates:
-  # -- Built-in templates to seed into the gitops repo on initialization
-  builtIn:
-    - web-service
-    - gateway-web-service
-    - voiceai-agent
-    - valkey
-    - color-app
+  # -- There are no built-in templates: every template arrives through a
+  # registered source (Settings → Templates → Sources, docs/templates.md).
+  # Kept for values-file compatibility; leave empty.
+  builtIn: []
   # -- External template repositories, pinned to a version
   external: []
   # Example:
