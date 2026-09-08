@@ -19,6 +19,15 @@ func TestBuildClusterSecretStoreYAML_K8s(t *testing.T) {
 	if !strings.Contains(yaml, "remoteNamespace: suparship-secrets-env-staging") {
 		t.Errorf("expected vault namespace as remoteNamespace, got:\n%s", yaml)
 	}
+	// ESO refuses a kubernetes provider with no server block ("no server URL
+	// provided"); the CRD default for server.url only applies when the block
+	// exists. The k8s backend always targets the local API server.
+	if !strings.Contains(yaml, "url: https://kubernetes.default.svc") {
+		t.Errorf("expected explicit server.url, got:\n%s", yaml)
+	}
+	if !strings.Contains(yaml, "name: kube-root-ca.crt") {
+		t.Errorf("expected kube-root-ca.crt caProvider, got:\n%s", yaml)
+	}
 }
 
 func TestBuildUnifiedClusterSecretStoreYAML(t *testing.T) {

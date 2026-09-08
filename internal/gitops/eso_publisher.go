@@ -105,8 +105,22 @@ spec:
 	case secrets.BackendK8s:
 		// The "vault" is a namespace; ESO reads Secrets from it via the
 		// suparship-eso-reader ServiceAccount in suparship-system.
+		//
+		// server is mandatory: ESO only defaults server.url when a server
+		// block is present, so omitting it entirely leaves the store stuck
+		// on "unable to create client: no server URL provided" and every
+		// ExternalSecret bound to it never syncs. The k8s backend reads the
+		// tooling cluster's own API (it is single-cluster by design), which
+		// every cluster publishes as kube-root-ca.crt in kube-system.
 		sb.WriteString(fmt.Sprintf(`    kubernetes:
       remoteNamespace: %s
+      server:
+        url: https://kubernetes.default.svc
+        caProvider:
+          type: ConfigMap
+          name: kube-root-ca.crt
+          key: ca.crt
+          namespace: kube-system
       auth:
         serviceAccount:
           name: suparship-eso-reader

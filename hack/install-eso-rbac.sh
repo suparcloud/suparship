@@ -85,6 +85,13 @@ spec:
   provider:
     kubernetes:
       remoteNamespace: suparship-secrets-global
+      server:
+        url: https://kubernetes.default.svc
+        caProvider:
+          type: ConfigMap
+          name: kube-root-ca.crt
+          key: ca.crt
+          namespace: kube-system
       auth:
         serviceAccount:
           name: ${ESO_SA_NAME}
