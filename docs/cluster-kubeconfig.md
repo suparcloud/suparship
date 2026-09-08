@@ -25,10 +25,15 @@ everything your apps deploy plus cluster-wide read.
 ```bash
 kubectl create serviceaccount suparship -n kube-system
 
-kubectl create clusterrolebinding suparship \
+kubectl create clusterrolebinding suparship-workload \
   --clusterrole=cluster-admin \
   --serviceaccount=kube-system:suparship
 ```
+
+> The binding is deliberately not named `suparship`: the suparship chart owns a
+> cluster-scoped `ClusterRoleBinding` of that name, so when the workload
+> cluster is the tooling cluster itself the plain name collides
+> (`clusterrolebindings.rbac.authorization.k8s.io "suparship" already exists`).
 
 ## 2. Mint a long-lived token Secret for the ServiceAccount
 
@@ -113,5 +118,6 @@ The cluster should show **ready**.
 - **Rotate** — delete and recreate the token Secret (step 2), rebuild the
   kubeconfig (step 3), and re-register the cluster (or use Refresh cert if only
   the CA changed).
-- **Revoke** — delete the ServiceAccount and its ClusterRoleBinding; the token is
-  immediately invalid. Remove the cluster from suparship too.
+- **Revoke** — delete the ServiceAccount and its ClusterRoleBinding
+  (`suparship-workload`); the token is immediately invalid. Remove the cluster
+  from suparship too.

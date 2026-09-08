@@ -28,9 +28,14 @@ what makes the config export (step below) able to carry encrypted credentials.
 
 Production guidance: install these **independently** and leave the chart's
 `dependencies.*` toggles `false`. The toggles exist for quick evaluation only.
+Kargo itself needs cert-manager (and, for its rollout steps, Argo Rollouts)
+installed first — follow Kargo's own install guide for the order.
 
-The chart runs a `prereq-check` Job on install that reports ArgoCD / ESO
-presence — check its logs if anything downstream misbehaves.
+The chart runs a `prereq-check` Job as a pre-install/pre-upgrade hook that
+asserts ArgoCD (and ESO, for the Vault / 1Password backends) is present. It is
+deleted once it succeeds; when it fails the install stops and the Job stays
+behind, so `kubectl logs -n suparship-system job/suparship-prereq-check` shows
+exactly which prerequisite was missing.
 
 **Verify:** `kubectl get ns argocd` and `kubectl get crd externalsecrets.external-secrets.io` succeed on the relevant clusters.
 
@@ -77,6 +82,50 @@ the UI is friendlier for a first install.
 
 **Verify:** `kubectl rollout status deploy/suparship -n suparship-system` is
 Available.
+
+### Installing through ArgoCD instead of `helm install`
+
+If ArgoCD already runs on the tooling cluster you can deliver suparship itself
+as an ArgoCD `Application` pointing at the published chart
+(`https://suparcloud.github.io/charts`). Start with **auto-sync off**:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: suparship
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://suparcloud.github.io/charts
+    chart: suparship
+    targetRevision: 0.1.0
+    helm:
+      valuesObject:
+        org:
+          name: acme
+          displayName: Acme
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: suparship-system
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+    # no `automated:` yet — see below
+```
+
+Sync it once by hand, then continue with steps 3–10. Everything you do in the
+UI during setup (gitops repo, clusters, environments, secret backend) is
+written to ConfigMaps and Secrets in `suparship-system` that the chart also
+templates. With `automated.selfHeal` on, ArgoCD would treat those edits as
+drift and revert them mid-setup. Keep auto-sync **off** until the setup
+checklist is green, export the configuration (see
+[Config as code](#config-as-code-export-with-sealed-credentials) below), commit
+the exported values into the Application's values, sync, and only then turn
+`syncPolicy.automated` (with `prune` / `selfHeal`) on. From that point the
+committed values are the source of truth, and any later UI change must be
+re-exported and committed the same way.
 
 ---
 
@@ -130,8 +179,10 @@ Settings → Clusters → Register. Provide a name (DNS label), the API server U
 (`https://…`, no trailing space — it's validated), and the kubeconfig. suparship
 fetches the sealed-secrets cert in the background.
 
-> The first cluster can be the tooling cluster itself (`inCluster: true` /
-> `https://kubernetes.default.svc`).
+> The first cluster can be the tooling cluster itself: use
+> `https://kubernetes.default.svc` as the API server URL and a token-based
+> kubeconfig whose `server` is that same in-cluster address (the hub reaches
+> it from inside the cluster, not through your laptop's `127.0.0.1` endpoint).
 
 > **Need a kubeconfig?** The most portable credential is a ServiceAccount token.
 > See [Create a token-based kubeconfig](cluster-kubeconfig.md) for a copy-paste
@@ -224,6 +275,17 @@ for this cluster's sealed-secrets controller, so the file is safe to commit.
   Re-export after any key rotation.
 - Re-export after settings changes you want persisted (the export is always
   a live snapshot; nothing is stored server-side).
+- Registered clusters are exported as **metadata only** (name, API server,
+  routing). The kubeconfig Secrets (`suparship-cluster-kubeconfig-<name>`)
+  are never written to the file — back them up separately, or re-register the
+  clusters after a restore onto a fresh tooling cluster.
+- Applying the export on the **same** cluster it came from leaves the
+  `SealedSecret`s in `extraObjects` reporting
+  `Resource "…" already exists and is not managed by SealedSecret`. That is
+  benign: the plaintext Secrets suparship created are still in place and keep
+  working. On a fresh cluster the same objects unseal normally.
+- Installing via ArgoCD? This is the point to commit the export as the
+  Application's values and enable auto-sync (see step 2).
 
 ---
 
