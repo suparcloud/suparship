@@ -841,3 +841,9 @@ suparship server --ui-dir ui/dist
 | `npm run build` | Type-check and build for production |
 | `npm run preview` | Preview the production build locally |
 | `npm run typecheck` | Run TypeScript type checking only |
+
+## License
+
+suparship is licensed under the [Apache License, Version 2.0](LICENSE).
+See [NOTICE.md](NOTICE.md) for a plain-language summary and trademark
+guidance.
