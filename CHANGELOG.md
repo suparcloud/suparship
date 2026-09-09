@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0](https://github.com/suparcloud/suparship/compare/v0.1.0...v0.2.0) (2026-09-09)
+
+
+### Features
+
+* **license:** relicense suparship from AGPL-3.0 to Apache-2.0 ([299cac0](https://github.com/suparcloud/suparship/commit/299cac034579a9f2d265bb95dcf1baaac8247e06))
+
+
+### Bug Fixes
+
+* **chart:** make `helm install` succeed on a fresh cluster ([e262a8a](https://github.com/suparcloud/suparship/commit/e262a8ad3dfbac666a9c7121089b8d37458e3e53))
+* **secrets:** give k8s-backend ClusterSecretStores an explicit server block ([01e9bf8](https://github.com/suparcloud/suparship/commit/01e9bf8222ce4f991b801b0c758d34b4e350d763))
+
+
+### Documentation
+
+* **install:** ArgoCD install path, hook logs, binding name, export caveats ([51baf45](https://github.com/suparcloud/suparship/commit/51baf45f847801efd11d397f3c4dc6c7929b6c00))
+
 ## 0.1.0 (2026-09-06)
 
 

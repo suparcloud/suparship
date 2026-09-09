@@ -8,8 +8,8 @@ type: application
 # release-please: this chart is suparship's install artifact, not an independent
 # library chart, so "which one do I bump" is never a question. Both lines are
 # rewritten when the release PR merges — edit them there, not by hand.
-version: 0.1.0 # x-release-please-version
-appVersion: "0.1.0" # x-release-please-version
+version: 0.2.0 # x-release-please-version
+appVersion: "0.2.0" # x-release-please-version
 home: https://github.com/suparcloud/suparship
 sources:
   - https://github.com/suparcloud/suparship
