@@ -68,12 +68,11 @@ names):
   points that component's `((platform.configMapName))` at it;
   `((platform.secretName))` keeps pointing at the app-wide secret. App
   variable changes keep flowing — the merge re-renders on every publish.
-  Two limits: a literal overrides inherited *variables*, not secret-delivered
+  One limit: a literal overrides inherited *variables*, not secret-delivered
   keys (charts list secrets after configMaps in `envFrom`, and Kubernetes
-  gives later sources precedence); and previews currently point every
-  component at the app-level preview objects, so the extras don't apply
-  inside previews. Source-mapped entries (`fromConfig`/`fromSecret`) are
-  rejected in this posture — renaming while inheriting is ambiguous.
+  gives later sources precedence). Source-mapped entries
+  (`fromConfig`/`fromSecret`) are rejected in this posture — renaming while
+  inheriting is ambiguous.
 - **Curate (`inheritAppVars: false` + `envVars`).** suparship renders
   per-component objects — `<app>-<component>-config` and (when secret keys
   are selected) `<app>-<component>-secrets` — holding only the curated
@@ -110,8 +109,17 @@ the app page (a preview edits its base env); the compose canvas writes the
 override for its canvas env; the create wizard writes the base env. The
 app-wide list is round-tripped unchanged and remains editable through the API
 (`componentEnvVars` on the update request) for values every environment should
-share. Previews project no component variables at all (see the extend/override
-limit above), so an env override does not reach previews yet.
+share.
+
+**Previews clone the base env's component variables.** A preview renders each
+component with its base env's effective settings, then the all-previews band
+(`EnvironmentDefaults["preview"].componentEnvVars[<component>]`) layered on
+top — the same base env → preview band order the app-level preview variables
+use. Components that extend or curate get their own
+`<app>[-<preview>]-<component>-config` / `-secrets` inside the preview
+(suffixed for shared-namespace previews), pointed at by that component's
+`((platform.configMapName))` / `((platform.secretName))`; components with no
+variable settings keep the app-wide preview objects.
 
 API: `PATCH /api/v1/projects/{p}/apps/{a}` with
 `{"envComponentEnvVars": {"staging": {"api": {"envVars": [{"name": "FEATURE_X", "value": "on"}]}}}}`

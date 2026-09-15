@@ -2081,6 +2081,29 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 		scopeKeys.PreviewPRShared = has(pr, secrets.TierShared, "")
 		scopeKeys.PreviewPRApp = has(pr.WithProject(app.ProjectName), secrets.TierApp, app.Name)
 	}
+	// Secret KEY NAMES for the per-component curated projection inside previews:
+	// the base env's (already collected by enrichPubEnvWithSecrets when the app
+	// curates secrets) plus the preview bands. Same gating as stable envs.
+	secretKeys := basePub.ScopeSecretKeys
+	if a.vault != nil && app.Spec.CuratesSecrets() {
+		keys := func(scope secrets.Scope, tier secrets.Tier, appName string) []string {
+			entries, err := a.vault.ListKeys(ctx, scope, tier, appName)
+			if err != nil || len(entries) == 0 {
+				return nil
+			}
+			out := make([]string, 0, len(entries))
+			for _, e := range entries {
+				out = append(out, e.Key)
+			}
+			return out
+		}
+		band := secrets.PreviewScope(baseEnv)
+		secretKeys.PreviewShared = keys(band, secrets.TierShared, "")
+		secretKeys.PreviewApp = keys(band.WithProject(app.ProjectName), secrets.TierApp, app.Name)
+		pr := secrets.PreviewPRScope(baseEnv, preview.EnvName)
+		secretKeys.PreviewPRShared = keys(pr, secrets.TierShared, "")
+		secretKeys.PreviewPRApp = keys(pr.WithProject(app.ProjectName), secrets.TierApp, app.Name)
+	}
 
 	// Env vars: base env's merged vars, the legacy all-previews band, then the
 	// base env's OWN preview band on top — previews of staging and previews of
@@ -2139,6 +2162,7 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 		StackEnvRawValues:       basePub.StackEnvRawValues,
 		TemplatePreviewValues:   templatePreviewValues,
 		ComponentPlatformValues: basePub.ComponentPlatformValues,
+		ScopeSecretKeys:         secretKeys,
 	}
 	return spec, nil
 }

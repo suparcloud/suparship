@@ -68,6 +68,11 @@ suparship-backup.yaml`) and roll the chart back.
   to migrate.
 - Removing a component from an app now also removes its per-env values,
   variable overrides and version pins.
+- **Previews now project component variables.** A component that extends or
+  curates its variables (app-wide or in the base env, plus the all-previews
+  band) gets its own ConfigMap / secret subset inside previews, as it does in
+  the base env. Previously every preview component used the app-wide preview
+  objects. The next preview publish picks it up; nothing to migrate.
 
 ### v0.1.0 — first tagged release
 

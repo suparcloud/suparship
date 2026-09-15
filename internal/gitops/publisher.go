@@ -2800,6 +2800,25 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	pv.PreviewName = preview.PreviewName
 	pv.ConfigMapName = secrets.AppConfigMapName(resBase)
 	pv.SecretName = secrets.AppSecretName(resBase)
+	// Interpolate preview env-var values against the preview's platform context.
+	previewEnvVars := preview.EnvVars
+	if hasInterpToken(previewEnvVars) {
+		previewEnvVars = platform.Context{Platform: pv, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
+	}
+	// Single-component projection: the component's EFFECTIVE preview variable
+	// settings (app-wide ⊕ base env ⊕ preview band) may give it its own
+	// ConfigMap / secret subset, exactly as in the base env.
+	previewComponents := domain.AppForPreviewComponentEnvVars(app, preview.BaseEnv).Spec.Components
+	if len(previewComponents) == 1 {
+		projections, err := p.writePreviewComponentProjections(repoDir, app, preview, resBase, preview.Namespace, secrets.AppSecretName(resBase), previewEnvVars, previewComponents)
+		if err != nil {
+			return fmt.Errorf("writing preview component projection: %w", err)
+		}
+		if proj, ok := projections[previewComponents[0].Name]; ok {
+			pv.ConfigMapName = proj.configName
+			pv.SecretName = proj.secretName
+		}
+	}
 	hvBytes, err := marshalPassthroughValues(pv, overlay, preview.EnvVars)
 	if err != nil {
 		return fmt.Errorf("marshal preview values.yaml: %w", err)
@@ -2807,11 +2826,6 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	valuesPath := p.outputDir(repoDir, "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name, "values.yaml")
 	if err := p.writeFile(valuesPath, hvBytes); err != nil {
 		return err
-	}
-	// Interpolate preview env-var values against the preview's platform context.
-	previewEnvVars := preview.EnvVars
-	if hasInterpToken(previewEnvVars) {
-		previewEnvVars = platform.Context{Platform: pv, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
 	}
 
 	// Platform-managed ConfigMap + ExternalSecret go to the platform-owned
@@ -2887,16 +2901,21 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 		return fmt.Errorf("prune composed preview manifests: %w", err)
 	}
 
-	// Only the components opted into previews.
+	// Only the components opted into previews — carrying their EFFECTIVE preview
+	// variable settings (app-wide ⊕ base env ⊕ preview band), so a component
+	// that extends or curates its variables in the base env does so in the
+	// preview too.
 	var included []domain.ComponentSpec
-	for _, c := range app.Spec.ComposedComponents() {
+	for _, c := range domain.AppForPreviewComponentEnvVars(app, preview.BaseEnv).Spec.ComposedComponents() {
 		if c.Template != nil && c.EnabledInPreview() {
 			included = append(included, c)
 		}
 	}
 	previewBand := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]
 
-	componentValues := make(map[string]string, len(included))
+	// Platform values per component, computed up front: the first one doubles
+	// as the app-wide identity the env-var interpolation and the projections use.
+	pvs := make([]helmvalues.PlatformValues, len(included))
 	var appPlatform helmvalues.PlatformValues
 	for i, c := range included {
 		pv := helmvalues.MapComponentPlatformValuesForEnv(app, c, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, ns, "", previewOrgName,
@@ -2909,6 +2928,26 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 		}
 		if i == 0 {
 			appPlatform = pv // app-wide identity for env-var interpolation
+		}
+		pvs[i] = pv
+	}
+	previewEnvVars := preview.EnvVars
+	if hasInterpToken(previewEnvVars) {
+		previewEnvVars = platform.Context{Platform: appPlatform, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
+	}
+	// Per-component config/secret projections (extend/override or curated),
+	// pointed at by that component's platform names below.
+	projections, err := p.writePreviewComponentProjections(repoDir, app, preview, resBase, ns, secretName, previewEnvVars, included)
+	if err != nil {
+		return fmt.Errorf("writing composed preview component projections: %w", err)
+	}
+
+	componentValues := make(map[string]string, len(included))
+	for i, c := range included {
+		pv := pvs[i]
+		if proj, ok := projections[c.Name]; ok {
+			pv.ConfigMapName = proj.configName
+			pv.SecretName = proj.secretName
 		}
 
 		// Overlay, low→high: PE component-template base-env overlays (Default+Env; no
@@ -2980,11 +3019,8 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 	}
 
 	// App-wide preview platform resources (ConfigMap + ExternalSecret) — identical
-	// to the single-source preview path; one set per app, shared by all components.
-	previewEnvVars := preview.EnvVars
-	if hasInterpToken(previewEnvVars) {
-		previewEnvVars = platform.Context{Platform: appPlatform, Vars: preview.EnvVars}.InterpolateMap(previewEnvVars)
-	}
+	// to the single-source preview path; one set per app, shared by every
+	// component without its own projection.
 	resDir := p.outputDir(repoDir, "_app-resources", "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name)
 	esCfg := BuildAppExternalSecret(WorkloadExternalSecretParams{
 		App:             app.Name,
@@ -3096,6 +3132,78 @@ type PreviewPublishSpec struct {
 	// composed apps; merged beneath each component's Values in a composed preview.
 	// nil for single-source previews. Cluster overlays don't apply to previews.
 	ComponentPlatformValues map[string]ComponentPlatformValues
+	// ScopeSecretKeys lists the secret KEY NAMES per scope (base env scopes plus
+	// the preview bands) so a component that curates a secret subset can be
+	// projected inside the preview. Populated only when the app curates
+	// secrets (the same gating as AppPublishEnv.ScopeSecretKeys).
+	ScopeSecretKeys ScopeSecretKeys
+}
+
+// previewComponentProjection is the pair of platform names a preview
+// component's ((platform.configMapName)) / ((platform.secretName)) resolve to
+// when it carries its own projection.
+type previewComponentProjection struct{ configName, secretName string }
+
+// writePreviewComponentProjections renders the per-component ConfigMap /
+// ExternalSecret projections for a preview — the preview counterpart of the
+// stable-env loop in publishComposedAppFiles. components must already carry
+// their EFFECTIVE preview variable settings (AppForPreviewComponentEnvVars).
+// Names are built from resBase so shared-namespace previews stay distinct; the
+// files land in the preview's _app-resources tree (shipped by the previews
+// platform ApplicationSet, whose include pattern lists component-*.yaml). Stale
+// projections are pruned first so a reverted component leaves nothing behind.
+func (p *Publisher) writePreviewComponentProjections(repoDir string, app *domain.App, preview PreviewPublishSpec, resBase, ns, appSecretName string, previewEnvVars map[string]string, components []domain.ComponentSpec) (map[string]previewComponentProjection, error) {
+	resDir := p.outputDir(repoDir, "_app-resources", "previews", preview.BaseEnv, app.ProjectName, preview.PreviewName, app.Name)
+	for _, pat := range []string{"component-*-configmap.yaml", "component-*-externalsecret.yaml"} {
+		matches, err := filepath.Glob(filepath.Join(resDir, pat))
+		if err != nil {
+			return nil, fmt.Errorf("glob preview component projections %s: %w", pat, err)
+		}
+		for _, m := range matches {
+			if err := os.Remove(m); err != nil {
+				return nil, fmt.Errorf("prune preview component projection %s: %w", filepath.Base(m), err)
+			}
+		}
+	}
+	out := map[string]previewComponentProjection{}
+	for _, c := range components {
+		projName, projVars, inheritExtras := componentConfigProjection(resBase, c, previewEnvVars)
+		if projName == "" {
+			continue
+		}
+		content := BuildAppConfigMapYAML(projName, ns, projVars, p.cfg.Branding)
+		if err := p.writeFile(filepath.Join(resDir, "component-"+c.Name+"-configmap.yaml"), []byte(content)); err != nil {
+			return nil, err
+		}
+		proj := previewComponentProjection{configName: projName}
+		if inheritExtras {
+			proj.secretName = appSecretName
+		} else if renames := componentSecretRenames(c); renames != nil {
+			esCfg := BuildComponentExternalSecret(WorkloadExternalSecretParams{
+				App:             app.Name,
+				Namespace:       ns,
+				Env:             preview.BaseEnv,
+				Project:         app.ProjectName,
+				Stack:           app.Spec.Stack,
+				Cluster:         preview.Cluster,
+				Presence:        preview.ScopeKeys,
+				SecretKeys:      preview.ScopeSecretKeys,
+				IsPreview:       true,
+				PreviewName:     preview.PreviewName,
+				Backend:         p.effectiveBackend(),
+				Branding:        p.cfg.Branding,
+				RefreshInterval: p.externalSecretRefreshInterval(),
+			}, secrets.AppComponentSecretName(resBase, c.Name), renames)
+			if esCfg != nil {
+				if err := p.writeFile(filepath.Join(resDir, "component-"+c.Name+"-externalsecret.yaml"), []byte(BuildExternalSecretYAML(*esCfg))); err != nil {
+					return nil, err
+				}
+				proj.secretName = esCfg.Name
+			}
+		}
+		out[c.Name] = proj
+	}
+	return out, nil
 }
 
 // DeletePreview removes one app's preview GitOps files and commits. It deletes

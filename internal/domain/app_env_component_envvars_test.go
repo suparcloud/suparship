@@ -118,3 +118,41 @@ func TestValidateEnvComponentEnvVars(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func TestAppForPreviewComponentEnvVars(t *testing.T) {
+	off := false
+	app := &App{Spec: AppSpec{
+		Components: []ComponentSpec{{Name: "web", EnvVars: []ComponentEnvVar{{Name: "A", Value: "app"}}}},
+		EnvironmentDefaults: map[string]EnvironmentOverride{
+			"staging":          {ComponentEnvVars: map[string]ComponentEnvOverride{"web": {EnvVars: []ComponentEnvVar{{Name: "A", Value: "staging"}, {Name: "B", Value: "1"}}}}},
+			PreviewOverrideKey: {ComponentEnvVars: map[string]ComponentEnvOverride{"web": {InheritAppVars: &off, EnvVars: []ComponentEnvVar{{Name: "B", Value: "preview"}, {Name: "C", FromSecret: "S"}}}}},
+		},
+	}}
+	got := AppForPreviewComponentEnvVars(app, "staging").Spec.Components[0]
+	if got.InheritAppVars == nil || *got.InheritAppVars {
+		t.Error("preview band posture must apply")
+	}
+	want := []ComponentEnvVar{{Name: "A", Value: "staging"}, {Name: "B", Value: "preview"}, {Name: "C", FromSecret: "S"}}
+	if len(got.EnvVars) != len(want) {
+		t.Fatalf("effective = %+v, want %+v", got.EnvVars, want)
+	}
+	for i := range want {
+		if got.EnvVars[i] != want[i] {
+			t.Errorf("effective[%d] = %+v, want %+v", i, got.EnvVars[i], want[i])
+		}
+	}
+	// A preview of prod (no prod override) layers the band on the app-wide list.
+	prod := AppForPreviewComponentEnvVars(app, "prod").Spec.Components[0]
+	if len(prod.EnvVars) != 3 || prod.EnvVars[0].Value != "app" {
+		t.Errorf("prod preview effective = %+v", prod.EnvVars)
+	}
+	// No band, no base override → the app itself.
+	plain := &App{Spec: AppSpec{Components: []ComponentSpec{{Name: "web"}}}}
+	if AppForPreviewComponentEnvVars(plain, "staging") != plain {
+		t.Error("expected identical pointer without overrides")
+	}
+	// CuratesSecrets sees the composite: only the band + base env together curate a secret here.
+	if !app.Spec.CuratesSecrets() {
+		t.Error("preview composite curates a secret; CuratesSecrets must report it")
+	}
+}

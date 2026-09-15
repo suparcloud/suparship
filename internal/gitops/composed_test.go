@@ -1871,13 +1871,13 @@ func TestComposedProjectionPrunedOnRevert(t *testing.T) {
 	}
 }
 
-// TestPreviewOfOptOutAppIsAppLevel is the safety check for the deliberate
-// "previews are app-level, not per-component" decision: a preview of a component
-// that opts out of app vars in stable envs must still reference the APP-WIDE
-// config/secret (which the preview publish writes), never a per-component
-// projection object (which is not written in preview scope) — so the preview
-// self-resolves and can't dangle on a missing ConfigMap/Secret.
-func TestPreviewOfOptOutAppIsAppLevel(t *testing.T) {
+// TestPreviewOfOptOutAppProjectsComponentConfig: a preview CLONES its base env,
+// so a 1-component app that curates its variables gets the same per-component
+// projection inside the preview: its own ConfigMap (resolved from the preview's
+// merged vars) and, when a selected secret key resolves, its own ExternalSecret;
+// the preview's values.yaml points ((platform.*)) at them. The app-wide preview
+// objects are still written (other consumers reference them).
+func TestPreviewOfOptOutAppProjectsComponentConfig(t *testing.T) {
 	dir := t.TempDir()
 	no := false
 	app := &domain.App{
@@ -1898,18 +1898,19 @@ func TestPreviewOfOptOutAppIsAppLevel(t *testing.T) {
 	}
 	p := newTestPublisher(t)
 	spec := gitops.PreviewPublishSpec{
-		PreviewName:   "pr-42",
-		BaseEnv:       "staging",
-		ClusterServer: "https://kubernetes.default.svc",
-		Namespace:     "demo-hello-preview-pr-42", // contains the preview name → resBase stays "hello"
-		BaseDomain:    "localhost",
-		ScopeKeys:     gitops.ScopePresence{PreviewApp: true},
+		PreviewName:     "pr-42",
+		BaseEnv:         "staging",
+		ClusterServer:   "https://kubernetes.default.svc",
+		Namespace:       "demo-hello-preview-pr-42", // contains the preview name → resBase stays "hello"
+		BaseDomain:      "localhost",
+		EnvVars:         map[string]string{"DATABASE_URL": "postgres://pr", "OTHER": "y"},
+		ScopeKeys:       gitops.ScopePresence{PreviewApp: true, GlobalApp: true},
+		ScopeSecretKeys: gitops.ScopeSecretKeys{GlobalApp: []string{"API_TOKEN"}},
 	}
 	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
 		t.Fatalf("publish preview: %v", err)
 	}
 
-	// values.yaml points at the app-wide objects, NOT hello-web-config/secrets.
 	raw, err := os.ReadFile(filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello", "values.yaml"))
 	if err != nil {
 		t.Fatalf("read preview values.yaml: %v", err)
@@ -1921,17 +1922,80 @@ func TestPreviewOfOptOutAppIsAppLevel(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
+	if v.EnvCfg != "hello-web-config" || v.EnvSec != "hello-web-secrets" {
+		t.Errorf("preview tokens = %q/%q, want hello-web-config/hello-web-secrets (the component's own projection)", v.EnvCfg, v.EnvSec)
+	}
+
+	resDir := filepath.Join(dir, "_app-resources", "previews", "staging", "demo", "pr-42", "hello")
+	if _, err := os.Stat(filepath.Join(resDir, "env-configmap.yaml")); err != nil {
+		t.Errorf("app-wide preview env-configmap must still be written: %v", err)
+	}
+	cmRaw, err := os.ReadFile(filepath.Join(resDir, "component-web-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("component projection missing in preview: %v", err)
+	}
+	var cm struct {
+		Metadata struct {
+			Name      string `yaml:"name"`
+			Namespace string `yaml:"namespace"`
+		} `yaml:"metadata"`
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(cmRaw, &cm); err != nil {
+		t.Fatal(err)
+	}
+	if cm.Metadata.Name != "hello-web-config" || cm.Metadata.Namespace != "demo-hello-preview-pr-42" {
+		t.Errorf("component configmap identity = %+v", cm.Metadata)
+	}
+	if cm.Data["DB_URL"] != "postgres://pr" {
+		t.Errorf("DB_URL = %q, want resolved from the PREVIEW's merged vars", cm.Data["DB_URL"])
+	}
+	if _, leaked := cm.Data["OTHER"]; leaked {
+		t.Error("curated projection must not include unselected vars")
+	}
+	esRaw, err := os.ReadFile(filepath.Join(resDir, "component-web-externalsecret.yaml"))
+	if err != nil {
+		t.Fatalf("component secret projection missing in preview: %v", err)
+	}
+	if !strings.Contains(string(esRaw), "name: hello-web-secrets") || !strings.Contains(string(esRaw), `secretKey: "TOKEN"`) || !strings.Contains(string(esRaw), `property: "API_TOKEN"`) {
+		t.Errorf("component externalsecret should project TOKEN into hello-web-secrets:\n%s", esRaw)
+	}
+}
+
+// TestPreviewComponentProjection_NoOverrideStaysAppLevel: a component with no
+// variable settings of its own keeps the app-wide preview objects — the
+// projection is opt-in by posture, so plain apps are untouched.
+func TestPreviewComponentProjection_NoOverrideStaysAppLevel(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name: "hello", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"}},
+			},
+			RawValues: envFromTokenValues(),
+		},
+	}
+	p := newTestPublisher(t)
+	spec := gitops.PreviewPublishSpec{
+		PreviewName: "pr-42", BaseEnv: "staging", ClusterServer: "https://kubernetes.default.svc",
+		Namespace: "demo-hello-preview-pr-42", BaseDomain: "localhost",
+		ScopeKeys: gitops.ScopePresence{PreviewApp: true},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello", "values.yaml"))
+	var v struct {
+		EnvCfg string `yaml:"envCfg"`
+		EnvSec string `yaml:"envSec"`
+	}
+	_ = yaml.Unmarshal(raw, &v)
 	if v.EnvCfg != "hello-config" || v.EnvSec != "hello-secrets" {
-		t.Errorf("preview tokens = %q/%q, want hello-config/hello-secrets (app-level, not the per-component projection)",
-			v.EnvCfg, v.EnvSec)
+		t.Errorf("preview tokens = %q/%q, want the app-wide objects", v.EnvCfg, v.EnvSec)
 	}
-
-	// The app-wide ConfigMap the preview references is actually written.
-	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "previews", "staging", "demo", "pr-42", "hello", "env-configmap.yaml")); err != nil {
-		t.Errorf("app-wide preview env-configmap missing (preview would dangle): %v", err)
-	}
-
-	// No per-component projection files leak into either preview tree.
 	for _, root := range []string{
 		filepath.Join(dir, "previews", "staging", "demo", "pr-42", "hello"),
 		filepath.Join(dir, "_app-resources", "previews", "staging", "demo", "pr-42", "hello"),
@@ -1942,6 +2006,176 @@ func TestPreviewOfOptOutAppIsAppLevel(t *testing.T) {
 			}
 			return nil
 		})
+	}
+}
+
+// TestPreviewComponentProjection_SharedNamespaceSuffix: previews sharing one
+// namespace (pattern without the preview name) suffix the component projection
+// like the app-wide objects, so two previews of the same app don't collide.
+func TestPreviewComponentProjection_SharedNamespaceSuffix(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name: "hello", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					EnvVars:  []domain.ComponentEnvVar{{Name: "EXTRA", Value: "1"}}},
+			},
+			RawValues: envFromTokenValues(),
+		},
+	}
+	p := newTestPublisher(t)
+	spec := gitops.PreviewPublishSpec{
+		PreviewName: "pr-7", BaseEnv: "staging", ClusterServer: "https://kubernetes.default.svc",
+		Namespace: "demo-previews", BaseDomain: "localhost",
+		EnvVars:   map[string]string{"SHARED": "app"},
+		ScopeKeys: gitops.ScopePresence{PreviewApp: true},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "previews", "staging", "demo", "pr-7", "hello", "values.yaml"))
+	var v struct {
+		EnvCfg string `yaml:"envCfg"`
+		EnvSec string `yaml:"envSec"`
+	}
+	_ = yaml.Unmarshal(raw, &v)
+	// inherit + extras: own ConfigMap (suffixed), app-wide (suffixed) secret.
+	if v.EnvCfg != "hello-pr-7-web-config" || v.EnvSec != "hello-pr-7-secrets" {
+		t.Errorf("preview tokens = %q/%q, want hello-pr-7-web-config/hello-pr-7-secrets", v.EnvCfg, v.EnvSec)
+	}
+	cmRaw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "previews", "staging", "demo", "pr-7", "hello", "component-web-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("component projection missing: %v", err)
+	}
+	if !strings.Contains(string(cmRaw), "name: hello-pr-7-web-config") || !strings.Contains(string(cmRaw), `SHARED: "app"`) || !strings.Contains(string(cmRaw), `EXTRA: "1"`) {
+		t.Errorf("suffixed inherit+extras projection wrong:\n%s", cmRaw)
+	}
+}
+
+// TestComposedPreview_ComponentEnvVarsLayering: a composed preview renders each
+// component with base env ⊕ preview band variable settings: api inherits and
+// extends (base env adds FEATURE_X, the band overrides LOG_LEVEL), worker is
+// curated app-wide and stays curated in the preview, and a sibling with nothing
+// keeps the app-wide preview objects. Republishing without the overrides prunes
+// the projections.
+func TestComposedPreview_ComponentEnvVarsLayering(t *testing.T) {
+	dir := t.TempDir()
+	no := false
+	app := &domain.App{
+		Name: "bigly", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"}, Values: envFromTokenValues()},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "worker"}, Values: envFromTokenValues(),
+					InheritAppVars: &no,
+					EnvVars:        []domain.ComponentEnvVar{{Name: "MODE", Value: "worker"}, {Name: "DB", FromConfig: "DATABASE_URL"}}},
+				{Name: "plain", Type: domain.ComponentWorker, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "worker"}, Values: envFromTokenValues()},
+			},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"staging": {ComponentEnvVars: map[string]domain.ComponentEnvOverride{
+					"api": {EnvVars: []domain.ComponentEnvVar{{Name: "FEATURE_X", Value: "on"}, {Name: "LOG_LEVEL", Value: "debug"}}},
+				}},
+				"prod": {ComponentEnvVars: map[string]domain.ComponentEnvOverride{
+					"api": {EnvVars: []domain.ComponentEnvVar{{Name: "FEATURE_X", Value: "prod-only"}}},
+				}},
+				domain.PreviewOverrideKey: {ComponentEnvVars: map[string]domain.ComponentEnvOverride{
+					"api": {EnvVars: []domain.ComponentEnvVar{{Name: "LOG_LEVEL", Value: "trace"}}},
+				}},
+			},
+		},
+	}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL: "https://git/repo.git", ArgoCDRepoURL: "https://git/repo.git", SyncAutomated: true,
+		TemplateLoader: keyedTemplateLoader{"web-service": "web", "worker": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	spec := gitops.PreviewPublishSpec{
+		PreviewName: "pr-9", BaseEnv: "staging", ClusterServer: "https://kubernetes.default.svc",
+		Namespace: "demo-bigly-pr-9", BaseDomain: "localhost", ImageTag: "abc1234",
+		EnvVars:   map[string]string{"LOG_LEVEL": "info", "SHARED": "app", "DATABASE_URL": "postgres://pr"},
+		ScopeKeys: gitops.ScopePresence{PreviewApp: true},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish composed preview: %v", err)
+	}
+	resDir := filepath.Join(dir, "_app-resources", "previews", "staging", "demo", "pr-9", "bigly")
+	readCM := func(comp string) map[string]string {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(resDir, "component-"+comp+"-configmap.yaml"))
+		if err != nil {
+			t.Fatalf("%s projection missing: %v", comp, err)
+		}
+		var cm struct {
+			Data map[string]string `yaml:"data"`
+		}
+		if err := yaml.Unmarshal(raw, &cm); err != nil {
+			t.Fatal(err)
+		}
+		return cm.Data
+	}
+	api := readCM("api")
+	if api["SHARED"] != "app" || api["FEATURE_X"] != "on" || api["LOG_LEVEL"] != "trace" {
+		t.Errorf("api preview vars = %v, want inherited SHARED, base-env FEATURE_X=on, band LOG_LEVEL=trace", api)
+	}
+	worker := readCM("worker")
+	if worker["MODE"] != "worker" || worker["DB"] != "postgres://pr" {
+		t.Errorf("worker preview vars = %v", worker)
+	}
+	if _, leaked := worker["SHARED"]; leaked {
+		t.Error("curated worker must not inherit unselected vars in the preview")
+	}
+	if _, err := os.Stat(filepath.Join(resDir, "component-plain-configmap.yaml")); !os.IsNotExist(err) {
+		t.Errorf("plain component has no variable settings and must keep the app-wide objects (err=%v)", err)
+	}
+	// Each component's values point at its own projection (or the app-wide objects).
+	compDir := filepath.Join(dir, "previews", "staging", "demo", "pr-9", "bigly", "components")
+	tokens := func(comp string) (string, string) {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(compDir, comp, "values.yaml"))
+		if err != nil {
+			t.Fatalf("read %s values: %v", comp, err)
+		}
+		var v struct {
+			EnvCfg string `yaml:"envCfg"`
+			EnvSec string `yaml:"envSec"`
+		}
+		_ = yaml.Unmarshal(raw, &v)
+		return v.EnvCfg, v.EnvSec
+	}
+	if cm, sec := tokens("api"); cm != "bigly-api-config" || sec != "bigly-secrets" {
+		t.Errorf("api tokens = %q/%q, want bigly-api-config/bigly-secrets (extend keeps app-wide secret)", cm, sec)
+	}
+	if cm, sec := tokens("worker"); cm != "bigly-worker-config" || sec != "" {
+		t.Errorf("worker tokens = %q/%q, want bigly-worker-config/\"\" (curated, no secret keys)", cm, sec)
+	}
+	if cm, sec := tokens("plain"); cm != "bigly-config" || sec != "bigly-secrets" {
+		t.Errorf("plain tokens = %q/%q, want the app-wide objects", cm, sec)
+	}
+	// The stored spec is untouched by the preview fold.
+	if app.Spec.Components[0].EnvVars != nil {
+		t.Error("preview publish must not write effective vars back into the spec")
+	}
+
+	// Revert every override and republish: the projections are pruned.
+	app.Spec.EnvironmentDefaults = nil
+	app.Spec.Components[1].InheritAppVars = nil
+	app.Spec.Components[1].EnvVars = nil
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	for _, comp := range []string{"api", "worker"} {
+		if _, err := os.Stat(filepath.Join(resDir, "component-"+comp+"-configmap.yaml")); !os.IsNotExist(err) {
+			t.Errorf("%s projection should be pruned after revert (err=%v)", comp, err)
+		}
 	}
 }
 

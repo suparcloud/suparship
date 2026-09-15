@@ -353,6 +353,46 @@ func EffectiveComponentEnvVars(app *App, c ComponentSpec, envName string) (inher
 	return inherit, vars
 }
 
+// applyComponentEnvOverride layers ov onto c in place: posture replaced when
+// set, entries merged by name (ov wins).
+func applyComponentEnvOverride(c *ComponentSpec, ov ComponentEnvOverride) {
+	if ov.IsEmpty() {
+		return
+	}
+	if ov.InheritAppVars != nil {
+		v := *ov.InheritAppVars
+		c.InheritAppVars = &v
+	}
+	c.EnvVars = MergeComponentEnvVars(c.EnvVars, ov.EnvVars)
+}
+
+// AppForPreviewComponentEnvVars returns the app as a PREVIEW of baseEnv renders
+// it: every component carries its base-env effective variable settings
+// (app-wide ⊕ EnvironmentDefaults[baseEnv]) with the all-previews band
+// (EnvironmentDefaults["preview"].ComponentEnvVars) layered on top — the same
+// base env → preview band order the app-level preview vars use. Returns app
+// itself when nothing overrides.
+func AppForPreviewComponentEnvVars(app *App, baseEnv string) *App {
+	if app == nil {
+		return nil
+	}
+	base := AppForEnvComponentEnvVars(app, baseEnv)
+	band := app.Spec.EnvironmentDefaults[PreviewOverrideKey].ComponentEnvVars
+	if len(band) == 0 {
+		return base
+	}
+	out := *base
+	out.Spec.Components = make([]ComponentSpec, len(base.Spec.Components))
+	copy(out.Spec.Components, base.Spec.Components)
+	for i := range out.Spec.Components {
+		c := &out.Spec.Components[i]
+		if ov, ok := band[c.Name]; ok {
+			applyComponentEnvOverride(c, ov)
+		}
+	}
+	return &out
+}
+
 // AppForEnvComponentEnvVars returns the app as it renders for envName with
 // every component carrying its EFFECTIVE variable settings (app-wide ⊕ this
 // env's override). Returns app itself when the env overrides nothing, so the
@@ -404,12 +444,21 @@ func (s AppSpec) CuratesSecrets() bool {
 	}
 	app := &App{Spec: s}
 	for envName, ov := range s.EnvironmentDefaults {
-		for _, c := range s.Components {
-			if _, ok := ov.ComponentEnvVars[c.Name]; !ok {
-				continue
-			}
+		if len(ov.ComponentEnvVars) == 0 && envName != PreviewOverrideKey {
+			continue
+		}
+		for _, c := range app.Spec.Components {
 			if curates(EffectiveComponentEnvVars(app, c, envName)) {
 				return true
+			}
+		}
+		// A preview of this env layers the preview band on the env's effective
+		// settings; the composite may curate a secret neither layer does alone.
+		if envName != PreviewOverrideKey {
+			for _, c := range AppForPreviewComponentEnvVars(app, envName).Spec.Components {
+				if curates(c.InheritAppVars, c.EnvVars) {
+					return true
+				}
 			}
 		}
 	}
