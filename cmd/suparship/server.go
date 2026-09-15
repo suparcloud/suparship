@@ -462,7 +462,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			if err != nil {
 				logger.Warn("gitops publisher disabled", "reason", err.Error())
 			} else {
-				gitOpsPublisher = &gitOpsPublisherAdapter{
+				initialAdapter := &gitOpsPublisherAdapter{
 					inner:           pub,
 					orgProvider:     orgProvider,
 					clusterStore:    clusterStore,
@@ -476,6 +476,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					overrideLoader:  templateOverrideLoaderFromClient(kubeClient),
 					argoRefresher:   argoRefresh,
 				}
+				gitOpsPublisher = initialAdapter
 				sealPublisherHolder.Swap(pub)
 				logger.Info("gitops publisher enabled",
 					"repo", repoCfg.RepoURL,
@@ -519,6 +520,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 					}
 				}()
 				go selfHealSealedTokens(context.Background(), pub, orgProvider, clusterStore, clusterPool, kubeClient, logger)
+				go restoreThenMirrorTemplateConfig(context.Background(), initialAdapter, logger)
 
 				// Ensure the suparship-apps root ArgoCD Application exists.
 				// This replaces the manual `kubectl apply -f config/gitops/root-app.yaml`
@@ -620,7 +622,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			}
 
 			// 4. Hot-swap the live publisher so new app creates/promotes use it.
-			publisherHolder.Swap(&gitOpsPublisherAdapter{
+			adapter := &gitOpsPublisherAdapter{
 				inner:           pub,
 				orgProvider:     orgProvider,
 				clusterStore:    clusterStore,
@@ -633,7 +635,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				clusterLoader:   clusterTemplateLoaderFromClient(kubeClient),
 				overrideLoader:  templateOverrideLoaderFromClient(kubeClient),
 				argoRefresher:   argoRefresh,
-			})
+			}
+			publisherHolder.Swap(adapter)
 			sealPublisherHolder.Swap(pub)
 			logger.Info("gitops publisher hot-reloaded", "repo", repoCfg.RepoURL)
 
@@ -642,6 +645,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			// even before the first app is created.
 			go publishInitialEnvInfra(context.Background(), pub, orgProvider, clusterStore, projectStore, logger)
 			go selfHealSealedTokens(context.Background(), pub, orgProvider, clusterStore, clusterPool, kubeClient, logger)
+			go restoreThenMirrorTemplateConfig(context.Background(), adapter, logger)
 
 			return nil
 		}
@@ -682,6 +686,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			}
 		},
 		GitOpsPublisher:         publisherHolder,
+		TemplateConfigMirror:    publisherHolder,
 		KargoPromoter:           kargoPromoter,
 		KargoStatusReader:       kargoStatusReader,
 		KargoPipelineReader:     kargoPipelineReader,

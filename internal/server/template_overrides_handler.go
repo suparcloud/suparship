@@ -90,6 +90,7 @@ func (th *templateHandler) handlePutTemplateOverride(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save template override"})
 		return
 	}
+	mirrorTemplateConfig(r.Context(), th.mirror, th.logger, "template override "+name)
 	writeJSON(w, http.StatusOK, TemplateOverrideDTO{DefaultValues: ov.DefaultValues, EnvValues: ov.EnvValues, ClusterValues: ov.ClusterValues, PreviewDefaultValues: ov.PreviewDefaultValues})
 }
 

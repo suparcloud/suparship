@@ -96,6 +96,7 @@ func (th *templateHandler) handleUpdateTemplateMetadata(w http.ResponseWriter, r
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save template override"})
 			return
 		}
+		mirrorTemplateConfig(r.Context(), th.mirror, th.logger, "template disabled flag "+name)
 	}
 
 	// Read-only body (synced / built-in): persist a sync-safe metadata override.
@@ -239,6 +240,7 @@ func (th *templateHandler) updateMetadataViaOverride(
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save metadata override"})
 		return
 	}
+	mirrorTemplateConfig(r.Context(), th.mirror, th.logger, "template metadata override "+name)
 
 	dto := templateToDetail(t)
 	dto.Title, dto.Category, dto.Description = applyMetadataOverride(dto.Title, dto.Category, dto.Description, ov.Metadata)

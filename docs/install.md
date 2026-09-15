@@ -295,6 +295,12 @@ for this cluster's sealed-secrets controller, so the file is safe to commit.
   startup self-heal re-seals each cluster's Connect token + store from the local
   stash (1Password backend). Clusters with no stashed token are logged; re-paste
   those.
+- **Lost the template registry or a template override** (the
+  `suparship-template-registry` / `suparship-template-override-*` ConfigMaps)?
+  Restart the suparship pod — startup restores any *missing* one from the
+  `_platform/` mirror in the GitOps repo and re-syncs the sources. Existing
+  ConfigMaps are never overwritten; to roll one back to a committed version,
+  delete it first (or copy the file into the ConfigMap by hand).
 - **App stuck / "Not deployed"?** Check the app's Diagnostics panel first — it
   surfaces the ArgoCD/ESO reason. Most causes (bad image, unbound env, secret
   store not ready) point at a setup gate.
@@ -310,5 +316,6 @@ for this cluster's sealed-secrets controller, so the file is safe to commit.
 | suparship server + config | `suparship-system` namespace (ConfigMaps + Secrets) |
 | Admin credential | Secret `suparship-admin-auth` (configurable) |
 | Rendered manifests | your GitOps repo (`_app-resources/`, `_infra/`, `_secret-stores/`, `envs/`) |
+| Template registry + overrides (config-as-code mirror) | `_platform/template-registry.yaml`, `_platform/template-overrides/{name}.yaml` in the GitOps repo (cluster ConfigMaps stay authoritative) |
 | Per-cluster sealed token + store | `_secret-stores/{cluster}/` |
 | Connect-token stash (recovery) | Secrets in `suparship-system` |

@@ -182,6 +182,9 @@ type templateHandler struct {
 	// clobbered on the next sync). Nil → treat all cluster templates as editable.
 	registryStore *tpl.RegistryStore
 	logger        *slog.Logger
+	// mirror writes the template config mirror into the gitops repo after an
+	// override changes. Nil (tests, fake mode, no repo) → skipped.
+	mirror TemplateConfigMirrorer
 }
 
 func newTemplateHandler(auth *authHandler, builtin []*tpl.Template, clusterLoader ClusterTemplateLoader, logger *slog.Logger) *templateHandler {

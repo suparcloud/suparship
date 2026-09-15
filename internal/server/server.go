@@ -21,6 +21,7 @@ import (
 	"github.com/suparcloud/suparship/internal/gitops"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/license"
+	"github.com/suparcloud/suparship/internal/localuser"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -31,7 +32,6 @@ import (
 	"github.com/suparcloud/suparship/internal/secrets/hcvault"
 	"github.com/suparcloud/suparship/internal/secrets/onepassword"
 	"github.com/suparcloud/suparship/internal/session"
-	"github.com/suparcloud/suparship/internal/localuser"
 	"github.com/suparcloud/suparship/internal/token"
 	"github.com/suparcloud/suparship/internal/tpl"
 	"github.com/suparcloud/suparship/internal/tpl/credstore"
@@ -392,6 +392,39 @@ func (h *PublisherHolder) DeleteAppPreview(ctx context.Context, projectName, pre
 	return nil
 }
 
+// TemplateConfigMirrorer writes the template registry + overrides mirror into
+// the GitOps repo (config as code). Optional capability of the publisher,
+// asserted through PublisherHolder so a hot-reloaded publisher is used.
+type TemplateConfigMirrorer interface {
+	MirrorTemplateConfig(ctx context.Context) error
+}
+
+// MirrorTemplateConfig delegates to the held publisher when it implements
+// TemplateConfigMirrorer; a no-op otherwise (no repo configured yet).
+func (h *PublisherHolder) MirrorTemplateConfig(ctx context.Context) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if m, ok := p.(TemplateConfigMirrorer); ok {
+		return m.MirrorTemplateConfig(ctx)
+	}
+	return nil
+}
+
+// mirrorTemplateConfig runs the mirror after a successful desired-state write.
+// Best effort by design: the cluster copy is already saved, so a git failure
+// only leaves the mirror stale and is logged, never surfaced as a request
+// failure.
+func mirrorTemplateConfig(ctx context.Context, m TemplateConfigMirrorer, logger *slog.Logger, what string) {
+	if m == nil {
+		return
+	}
+	if err := m.MirrorTemplateConfig(ctx); err != nil && logger != nil {
+		logger.Warn("template config mirror failed — cluster state saved, git copy stale",
+			"after", what, "error", err)
+	}
+}
+
 // AppEnvTarget pairs an app with one of its env records for a batched publish.
 type AppEnvTarget struct {
 	App *domain.App
@@ -586,6 +619,7 @@ type Config struct {
 	StackStore              domain.StackStore       // optional: enables stack grouping endpoints when set
 	ClusterStore            domain.ClusterStore     // optional: enables /api/v1/clusters endpoints when set
 	GitOpsPublisher         GitOpsPublisher         // optional: commits app manifests to gitops repo on create
+	TemplateConfigMirror    TemplateConfigMirrorer  // optional: mirrors template registry + overrides into the gitops repo after each change
 	KargoPromoter           KargoPromoter           // optional: enables real Kargo-backed promotions
 	ArgoAppGate             ArgoAppGate             // optional: blocks Kargo promotions until the target env's Application exists
 	ArgoChainNudger         ArgoChainNudger         // optional: nudges ArgoCD's lazy generators so a first promotion converges in seconds
@@ -741,6 +775,7 @@ func New(cfg Config) *Server {
 		th := newTemplateHandler(ah, cfg.Templates, cfg.ClusterTemplateLoader, cfg.Logger)
 		th.kubeClient = cfg.KubeClient
 		th.registryStore = cfg.TemplateRegistryStore
+		th.mirror = cfg.TemplateConfigMirror
 		// Same admin-gating shape as the registry handler: when the org
 		// provider is wired we require org_admin on DELETE; without it we
 		// fall back to plain auth so harnesses without an OrgStore work.
@@ -999,6 +1034,7 @@ func New(cfg Config) *Server {
 			credStore:  cfg.TemplateCredStore,
 			kubeClient: cfg.KubeClient,
 			logger:     cfg.Logger,
+			mirror:     cfg.TemplateConfigMirror,
 		}
 		if appH != nil {
 			trh.repinner = appH

@@ -31,6 +31,27 @@ appear as templates. (The dev loop does this automatically: the Tilt
 mirrors `examples/charts/` into the local Gitea and registers it as a
 `gitcharts` source.)
 
+### Config as code: the `_platform/` mirror
+
+Every change to the registry's desired state (adding, editing, namespacing or
+removing a source; setting its credentials) and to a template's org-level
+override (values overlays, metadata, images, developer values, delivery mode,
+disabled) is also committed to the GitOps repo:
+
+```
+<subpath>/_platform/
+  template-registry.yaml            # builtIn + external[] — no synced rows, no credentials
+  template-overrides/<name>.yaml    # one file per override, removed when the override is emptied
+```
+
+The cluster ConfigMaps remain the source of truth and nothing applies these
+files (they live outside `_infra/`, which ArgoCD syncs). They give you
+history and review of platform-engineer edits and a recovery path: on startup
+suparship restores any registry or override ConfigMap that is missing from
+the mirror, then writes the current cluster state back. Periodic source syncs
+do not commit — they only rewrite derived rows. Source credentials stay as
+SealedSecrets in the cluster and travel with the config export.
+
 ### Template identity: `<source>.<chart>`
 
 A source added with **Namespace templates by source** (on by default) imports

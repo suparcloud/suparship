@@ -46,6 +46,10 @@ type templateRegistryHandler struct {
 	// templates are renamed "<chart>" → "<source>.<chart>"). Nil → the
 	// namespace route refuses with 503 rather than orphaning app pins.
 	repinner templateRepinner
+	// mirror writes the registry + overrides mirror into the gitops repo after
+	// a DESIRED-state change (not after syncs, which only rewrite derived
+	// rows). Nil → skipped.
+	mirror TemplateConfigMirrorer
 }
 
 // templateRepinner is the slice of appHandler the namespace action needs.
@@ -204,6 +208,8 @@ func (h *templateRegistryHandler) handleNamespaceSource(w http.ResponseWriter, r
 		}
 	}
 
+	mirrorTemplateConfig(r.Context(), h.mirror, h.logger, "namespace source")
+
 	if apps == nil {
 		apps = []TemplateRepinApp{}
 	}
@@ -300,6 +306,7 @@ func (h *templateRegistryHandler) handleUpdateRegistry(w http.ResponseWriter, r 
 			}
 		}
 	}
+	mirrorTemplateConfig(r.Context(), h.mirror, h.logger, "registry update")
 
 	writeJSON(w, http.StatusOK, templateRegistryResponse{Configured: true, Registry: &reg})
 }
@@ -604,6 +611,7 @@ func (h *templateRegistryHandler) handleSetCredentials(w http.ResponseWriter, r 
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "credentials sealed but registry update failed"})
 		return
 	}
+	mirrorTemplateConfig(r.Context(), h.mirror, h.logger, "set source credentials")
 
 	writeJSON(w, http.StatusOK, setCredentialsResponse{
 		Source:           source,

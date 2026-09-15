@@ -194,6 +194,10 @@ gitops-output/
       <project>-<app>-warehouse.yaml  Kargo Warehouse CR.
       <project>-<app>-<env>-stage.yaml  Kargo Stage CR per stable env.
 
+  _platform/                  Config-as-code mirror written by suparship; applied by
+    template-registry.yaml    nobody (cluster ConfigMaps stay authoritative). Used
+    template-overrides/*.yaml to restore a lost registry / override on startup.
+
   <env>/<project>/<app>/
     app.yaml                Git File generator parameters (name, project,
                             template, …). Consumed by the <env>-appset.yaml

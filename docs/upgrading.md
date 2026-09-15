@@ -68,6 +68,12 @@ suparship-backup.yaml`) and roll the chart back.
   to migrate.
 - Removing a component from an app now also removes its per-env values,
   variable overrides and version pins.
+- **Template registry and overrides are mirrored into the GitOps repo** under
+  `_platform/` (config as code). The cluster ConfigMaps stay authoritative;
+  nothing applies the mirror. On the first start after upgrading (or when a
+  GitOps repo is configured) suparship writes the current registry and
+  overrides there, and from then on restores missing ConfigMaps from it at
+  startup. No action needed.
 - **Previews now project component variables.** A component that extends or
   curates its variables (app-wide or in the base env, plus the all-previews
   band) gets its own ConfigMap / secret subset inside previews, as it does in

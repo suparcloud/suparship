@@ -3497,7 +3497,7 @@ func kargoManifestLabel(path, key string) string {
 // platform-owned tree rather than a legacy env directory.
 func isReservedTopLevelDir(name string) bool {
 	switch name {
-	case "previews", "envs", "charts", "_infra", "_app-resources", "_secret-stores":
+	case "previews", "envs", "charts", "_infra", "_app-resources", "_secret-stores", "_platform":
 		return true
 	}
 	return false
@@ -3987,6 +3987,9 @@ walk away from the platform entirely. The repo keeps syncing.
 │   └── {env}/
 │       ├── sealed-token.yaml              # SealedSecret of the Connect read token
 │       └── store.yaml                     # ClusterSecretStore (1Password backend)
+├── _platform/                             # config-as-code mirror (applied by nobody; cluster is authoritative)
+│   ├── template-registry.yaml             # template sources (no credentials, no sync status)
+│   └── template-overrides/{name}.yaml     # org-level template overrides
 ├── envs/                                  # stable environments
 │   └── {env}/                             # staging, prod, …
 │       └── {project}/
@@ -4086,6 +4089,16 @@ Four escalating levels of "stop using the platform for this":
 2. Remove `+"`_infra/{env}-appset.yaml`"+`.
 3. If no other env uses the cluster, remove `+"`_infra/secrets-{cluster}-app.yaml`"+`.
 4. Delete the env record from %[1]s's store.
+
+### Restore template configuration
+
+`+"`_platform/`"+` mirrors the template registry (sources) and every template
+override as %[1]s last saved them. Nothing applies these files. If the
+`+"`%[1]s-system`"+` ConfigMaps are lost, restart %[1]s: on startup it restores
+any MISSING registry / override from this mirror (existing cluster objects are
+never overwritten) and re-syncs the sources. Or copy a file by hand into the
+matching ConfigMap (`+"`%[1]s-template-registry`"+` key `+"`registry.json`"+`,
+`+"`%[1]s-template-override-{name}`"+` key `+"`override.yaml`"+`).
 
 ### Operate the entire repo without %[1]s
 
