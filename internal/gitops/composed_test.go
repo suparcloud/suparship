@@ -1009,7 +1009,7 @@ func TestComposedPerEnvComponentValues(t *testing.T) {
 		},
 	}
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL:        "https://git/repo.git",
+		RepoURL: "https://git/repo.git",
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1048,7 +1048,7 @@ func TestComposedPerEnvComponentValues(t *testing.T) {
 func TestComposedComponentIncludesPlatformOverrides(t *testing.T) {
 	dir := t.TempDir()
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL:        "https://git/repo.git",
+		RepoURL: "https://git/repo.git",
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1181,9 +1181,9 @@ func TestStatefulComponentSeparateApplication(t *testing.T) {
 func TestComposedPublishesStatefulComponentManifest(t *testing.T) {
 	dir := t.TempDir()
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL:        "https://git/repo.git",
-		ArgoCDRepoURL:  "https://git/repo.git",
-		SyncAutomated:  true,
+		RepoURL:       "https://git/repo.git",
+		ArgoCDRepoURL: "https://git/repo.git",
+		SyncAutomated: true,
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1323,8 +1323,8 @@ func TestCollectComponentImages_DiscoveredAndFallback(t *testing.T) {
 func TestComposedPublishesKargoCRsAndAnnotation(t *testing.T) {
 	dir := t.TempDir()
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL:        "https://git/repo.git",
-		ArgoCDRepoURL:  "https://git/repo.git",
+		RepoURL:       "https://git/repo.git",
+		ArgoCDRepoURL: "https://git/repo.git",
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1383,8 +1383,8 @@ func TestComposedPublishesKargoCRsAndAnnotation(t *testing.T) {
 func TestComposedTagPreservedOnRepublish(t *testing.T) {
 	dir := t.TempDir()
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL:        "https://git/repo.git",
-		ArgoCDRepoURL:  "https://git/repo.git",
+		RepoURL:       "https://git/repo.git",
+		ArgoCDRepoURL: "https://git/repo.git",
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1451,8 +1451,8 @@ func TestComposedTagPreservedOnRepublish(t *testing.T) {
 func TestComposedPromoteMaterializesEnv(t *testing.T) {
 	dir := t.TempDir()
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL:        "https://git/repo.git",
-		ArgoCDRepoURL:  "https://git/repo.git",
+		RepoURL:       "https://git/repo.git",
+		ArgoCDRepoURL: "https://git/repo.git",
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -1600,7 +1600,7 @@ func TestComposedPromotionTemplateFanOut(t *testing.T) {
 func TestSingleToComposedTransitionPrunesTree(t *testing.T) {
 	dir := t.TempDir()
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{
-		RepoURL:        "https://git/repo.git",
+		RepoURL: "https://git/repo.git",
 	})
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
@@ -2015,6 +2015,91 @@ func keysOf(m map[string]any) []string {
 // off) render into the preview — their per-component values + the multi-source
 // Application manifest — while disabled components (a stateful DB, a migration job)
 // are omitted entirely.
+// A preview clones its base env, so a composed component's BASE-ENV values
+// override (EnvironmentDefaults[baseEnv].ComponentValues) must reach the
+// preview's component values — the composed path used to render only the
+// component's base Values, dropping everything the stable env set per
+// component (resources, feature flags, env-specific config). Layering above
+// it is unchanged: template preview defaults and the app's preview band win.
+func TestComposedPreview_InheritsBaseEnvComponentValues(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		ArgoCDRepoURL:  "https://git/repo.git",
+		SyncAutomated:  true,
+		TemplateLoader: keyedTemplateLoader{"worker": "worker", "web-service": "web"},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	app := &domain.App{
+		Name: "voiceai-lk-sh", ProjectName: "voiceai",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"}},
+				{Name: "express-caller", Type: domain.ComponentType("worker"), Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "worker"},
+					Values: map[string]any{
+						"maxAgents": 20,
+						"caller":    map[string]any{"agentName": "base", "serverType": "EXPRESS"},
+					}},
+			},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				// What staging itself renders with.
+				"staging": {ComponentValues: map[string]map[string]any{
+					"express-caller": {
+						"maxAgents": 7,
+						"caller":    map[string]any{"agentName": "express"},
+						"agent":     map[string]any{"env": map[string]any{"TWILIO_TRUNK_ID": "ST_x"}},
+					},
+				}},
+				// Another env's override must NOT leak into a staging-based preview.
+				"prod": {ComponentValues: map[string]map[string]any{
+					"express-caller": {"maxAgents": 99},
+				}},
+				// The preview band still sits above the base env.
+				domain.PreviewOverrideKey: {ComponentValues: map[string]map[string]any{
+					"express-caller": {"releaseChannel": "preview"},
+				}},
+			},
+		},
+	}
+	spec := gitops.PreviewPublishSpec{
+		PreviewName: "pr-830", BaseEnv: "staging",
+		ClusterServer: "https://kubernetes.default.svc",
+		Namespace:     "voiceai-lk-sh-pr-830", BaseDomain: "localhost", ImageTag: "pr-830-abc",
+		ScopeKeys: gitops.ScopePresence{PreviewApp: true},
+		ComponentPlatformValues: map[string]gitops.ComponentPlatformValues{
+			"express-caller": {Preview: map[string]any{"numIdleProcesses": 2}},
+		},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish composed preview: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "previews", "staging", "voiceai", "pr-830", "voiceai-lk-sh", "components", "express-caller", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read preview values: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		"maxAgents: 7",          // base env wins over the component's base Values
+		"agentName: express",    // base env override of a nested key
+		"serverType: EXPRESS",   // untouched base Values key survives
+		"TWILIO_TRUNK_ID: ST_x", // base-env-only subtree is inherited
+		"numIdleProcesses: 2",   // template preview defaults still apply
+		"releaseChannel: preview",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("preview values missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "maxAgents: 99") {
+		t.Errorf("prod's component values leaked into a staging-based preview:\n%s", got)
+	}
+}
+
 func TestComposedPreview_OnlyEnabledComponents(t *testing.T) {
 	dir := t.TempDir()
 	p, err := gitops.NewPublisher(gitops.PublisherConfig{

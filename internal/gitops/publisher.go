@@ -2906,13 +2906,19 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 		}
 
 		// Overlay, low→high: PE component-template base-env overlays (Default+Env; no
-		// cluster for previews) ⊕ the component's own Values ⊕ the component
-		// template's PREVIEW defaults ⊕ the app's per-component preview band. Mirrors
-		// the single-source order (previewRawValuesOverlay): template preview defaults
-		// sit above the developer base overlay and below the app's own preview band.
+		// cluster for previews) ⊕ the component's own Values ⊕ the component's
+		// BASE-ENV override (EnvironmentDefaults[baseEnv].ComponentValues — what the
+		// stable env itself renders with) ⊕ the component template's PREVIEW
+		// defaults ⊕ the app's per-component preview band. Mirrors the single-source
+		// order (previewRawValuesOverlay, which folds in rawValuesOverlay(baseEnv)):
+		// a preview CLONES its base env, so everything the base env sets on the
+		// component is the floor, and only the preview layers sit above it.
 		cpv := preview.ComponentPlatformValues[c.Name]
 		overlay := deepMerge(deepCopyMap(cpv.Default), deepCopyMap(cpv.Env))
 		overlay = deepMerge(overlay, deepCopyMap(c.Values))
+		if base, ok := app.Spec.EnvironmentDefaults[preview.BaseEnv]; ok && len(base.ComponentValues[c.Name]) > 0 {
+			overlay = deepMerge(overlay, deepCopyMap(base.ComponentValues[c.Name]))
+		}
 		overlay = deepMerge(overlay, deepCopyMap(cpv.Preview))
 		if len(previewBand.ComponentValues[c.Name]) > 0 {
 			overlay = deepMerge(overlay, deepCopyMap(previewBand.ComponentValues[c.Name]))
