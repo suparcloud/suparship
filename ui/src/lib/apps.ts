@@ -427,6 +427,57 @@ export function upgradeAppTemplate(
   );
 }
 
+/** One component's migration target: a different template, optionally pinned
+ *  to one of its versions (default: the template's current version). */
+export interface RetemplateTarget {
+  template: string;
+  version?: string;
+}
+
+export interface RetemplatedComponent {
+  name: string;
+  fromTemplate: string;
+  toTemplate: string;
+  fromVersion?: string;
+  toVersion: string;
+}
+
+/** Overlay keys a migrated component carries that the target chart does not
+ *  define (they go inert). `component` is "" for a component-less app. */
+export interface RetemplateWarning {
+  component: string;
+  unknownValueKeys: string[];
+}
+
+export interface RetemplateResponse {
+  message: string;
+  project: string;
+  app: string;
+  dryRun: boolean;
+  components: RetemplatedComponent[];
+  warnings: RetemplateWarning[];
+}
+
+/**
+ * Migrates named components onto a DIFFERENT template (chart), keyed component
+ * name → target. Values overlays are kept; the response lists the overlay keys
+ * the new chart does not define. Pass dryRun to get that report without
+ * changing anything. Applies to every environment (a migration is not
+ * env-scoped) and is atomic like the version upgrade.
+ */
+export function retemplateAppComponents(
+  project: string,
+  app: string,
+  targets: Record<string, RetemplateTarget>,
+  opts: { dryRun?: boolean } = {},
+): Promise<RetemplateResponse> {
+  const qs = opts.dryRun ? "?dryRun=1" : "";
+  return api.post<RetemplateResponse>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/upgrade-template${qs}`,
+    { retemplate: targets },
+  );
+}
+
 /**
  * Upgrades named components individually, keyed component name → target version.
  * This is the general form: a composed app mixes templates, so there is no single

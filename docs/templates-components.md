@@ -9,7 +9,8 @@ runs is decided by the person creating the app:
   chart deploys — a Deployment, a Deployment + CronJob, anything — is the
   chart's business; suparship publishes one values overlay for it.
 - **Composed app: one component per chart.** Each component declares its own
-  `template: {name, version}` pin and its own `values` overlay, and the app
+  `template: {name, version}` pin (`name` is the template's identity — for a
+  namespaced source that is `<source>.<chart>`) and its own `values` overlay, and the app
   renders as **one multi-source ArgoCD Application** (one source per
   component, all sharing the app's namespace and sync policy). Composition is
   all-or-nothing: either every component carries a template ref, or none do

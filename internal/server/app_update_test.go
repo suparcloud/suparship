@@ -35,10 +35,10 @@ func (p *updatePublisher) PublishAppEnv(_ context.Context, _ *domain.App, _ *dom
 func (p *updatePublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _, _ string) error {
 	return nil
 }
-func (p *updatePublisher) UnpublishApp(_ context.Context, _, _ string) error        { return nil }
-func (p *updatePublisher) RemoveAppEnv(_ context.Context, _, _, _ string) error     { return nil }
-func (p *updatePublisher) UnpublishProjectApps(_ context.Context, _ string) error   { return nil }
-func (p *updatePublisher) UnpublishProjectInfra(_ context.Context, _ string) error  { return nil }
+func (p *updatePublisher) UnpublishApp(_ context.Context, _, _ string) error       { return nil }
+func (p *updatePublisher) RemoveAppEnv(_ context.Context, _, _, _ string) error    { return nil }
+func (p *updatePublisher) UnpublishProjectApps(_ context.Context, _ string) error  { return nil }
+func (p *updatePublisher) UnpublishProjectInfra(_ context.Context, _ string) error { return nil }
 
 func patchAppJSON(mux *http.ServeMux, cookie *http.Cookie, project, app string, body any) *httptest.ResponseRecorder {
 	b, _ := json.Marshal(body)
@@ -167,6 +167,53 @@ func TestUpdateApp_RetemplatePinsToRegistryVersion(t *testing.T) {
 	}
 	if got.Spec.Template.Name != "worker" || got.Spec.Template.Version != "3.1.0" {
 		t.Errorf("mirror = %+v, want worker@3.1.0", got.Spec.Template)
+	}
+}
+
+// A retemplate must drop the state that was authored against the OLD chart and is
+// keyed by the component name: the env-scoped version pin (its version string
+// would otherwise be applied to the new template at publish and the chart dir
+// would not exist) and image bindings whose tag path the new chart does not
+// declare. Other components' pins and declared-slot bindings survive.
+func TestUpdateApp_RetemplateClearsStalePinsAndImages(t *testing.T) {
+	pub := &updatePublisher{}
+	worker := templateAt("worker", "3.1.0")
+	worker.Spec.Images = []tpl.TemplateImage{{Name: "worker", Repository: "acme/worker", TagKey: "worker.image.tag"}}
+	mux, ah, store := newTestAppUpdateMuxWithTemplates(testProject, pub,
+		[]*tpl.Template{templateAt("web-service", "2.0.0"), worker})
+	app := pinnedComponentApp(testProject)
+	app.Spec.Components[0].Images = []domain.ComponentImage{
+		{TagKey: "image.tag"},        // old chart's path — must go
+		{TagKey: "worker.image.tag"}, // declared by the new template — survives
+	}
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"staging": {TemplateVersions: map[string]string{"web": "1.0.0", "other": "9.9.9"}},
+		"prod":    {TemplateVersions: map[string]string{"web": "1.0.0"}},
+	}
+	store.addApp(app)
+
+	rec := patchAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
+		updateAppRequest{Components: []ComponentCreateDTO{{
+			Name: "web", Type: "worker", Enabled: true,
+			Template: &ComponentTemplateDTO{Name: "worker"},
+			Images:   []ComponentImageDTO{{TagKey: "image.tag"}, {TagKey: "worker.image.tag"}},
+		}}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := store.GetApp(context.Background(), testProject, "my-app")
+	if _, stale := got.Spec.EnvironmentDefaults["staging"].TemplateVersions["web"]; stale {
+		t.Error("staging env pin for the retemplated component must be cleared")
+	}
+	if v := got.Spec.EnvironmentDefaults["staging"].TemplateVersions["other"]; v != "9.9.9" {
+		t.Errorf("unrelated component's env pin = %q, want 9.9.9 preserved", v)
+	}
+	if got.Spec.EnvironmentDefaults["prod"].TemplateVersions != nil {
+		t.Errorf("prod pins = %v, want none left", got.Spec.EnvironmentDefaults["prod"].TemplateVersions)
+	}
+	imgs := got.Spec.Components[0].Images
+	if len(imgs) != 1 || imgs[0].TagKey != "worker.image.tag" {
+		t.Errorf("images after retemplate = %+v, want only the slot the new template declares", imgs)
 	}
 }
 

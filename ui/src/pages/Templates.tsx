@@ -177,7 +177,7 @@ export function Templates() {
           {templates.map((t) => (
             <Link
               key={t.name}
-              to={`/templates/${t.name}`}
+              to={`/templates/${encodeURIComponent(t.name)}`}
               className="group rounded-xl border border-gray-200 bg-white p-5 transition-all hover:border-gray-300 hover:shadow-md"
             >
               <div className="flex items-start justify-between">
@@ -187,6 +187,14 @@ export function Templates() {
 
               <h3 className="mt-4 text-base font-semibold text-gray-900 group-hover:text-gray-700">
                 {t.title}
+                {t.source && (
+                  <span
+                    className="ml-2 rounded-full bg-gray-100 px-2 py-0.5 align-middle text-[11px] font-medium text-gray-500"
+                    title={`Synced from source "${t.source}"`}
+                  >
+                    {t.source}
+                  </span>
+                )}
               </h3>
               {t.description && (
                 <p className="mt-1.5 text-sm leading-relaxed text-gray-500 line-clamp-2">

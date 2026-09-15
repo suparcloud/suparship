@@ -31,6 +31,30 @@ appear as templates. (The dev loop does this automatically: the Tilt
 mirrors `examples/charts/` into the local Gitea and registers it as a
 `gitcharts` source.)
 
+### Template identity: `<source>.<chart>`
+
+A source added with **Namespace templates by source** (on by default) imports
+each chart as `<source>.<chart>`: register the catalog above as `examples`
+and the templates are `examples.web`, `examples.worker`, …. That qualified
+name is the template's identity everywhere — app pins, `/templates/{name}`,
+org overrides, the GitOps `charts/<name>/<version>/` directory — while the
+gallery shows the chart's own title with a source chip. Two sources can
+therefore ship a `web` chart each without colliding. The rules for the name:
+lowercase letters, digits, `-`, and one `.` separating source from chart; a
+namespaced source name must itself be a DNS label.
+
+Sources created without namespacing keep **bare** chart names, which are
+global across all bare sources (a duplicate is refused at sync). Flip such a
+source later with **Namespace…** on its row
+(`POST /api/v1/templates/registry/sources/{name}/namespace`, org admin). It is
+an explicit, confirmed step because it is not a flag flip: suparship
+re-syncs the source under the qualified names, rewrites every app pinned to
+the bare names (versions untouched), republishes those apps — same chart
+bytes, only the chart directory in the GitOps repo moves — carries the org
+overrides over, and deletes the bare-named template entries. The response
+lists the renames, the apps re-pinned, and any app whose republish failed
+(re-run **Sync** on that app).
+
 ## What a template creates
 
 A template creates an **app** — the primary user-facing deployment object in suparship. See [ADR-0001](adr/0001-app-as-primary-deployment-object.md) for the rationale behind the app-first model.
@@ -314,6 +338,11 @@ its own.
                                                 // "skipped"
 {"components": {"api": "2.0.0", "web": "1.4.0"}} // per component, each validated
                                                 // against ITS OWN template
+{"components": {"api": "2.0.0"}, "environment": "staging"}
+                                                // either form scoped to ONE stable
+                                                // env: written as that env's pin;
+                                                // pins fold into the app-wide pin
+                                                // once every stable env agrees
 ```
 
 Both forms are atomic: every target version is validated before anything is
@@ -321,6 +350,40 @@ written, then one save + one publish, and a publish failure restores every pin.
 `GET .../apps/{a}` reports `components[].templateVersion` / `latestVersion` /
 `upgradeAvailable`, plus app-level `upgradesAvailable` and `templateVersions`
 (archived versions per template, newest first) so the picker needs no extra calls.
+
+#### Migrate to another template
+
+The same endpoint moves a component onto a **different** template (chart):
+
+```jsonc
+{"retemplate": {"api": {"template": "acme.web"},               // → its current version
+                "worker": {"template": "beta.worker", "version": "1.2.0"}}}
+{"template": "acme.web", "version": "1.2.0"}    // a component-less (BYO) app:
+                                                // the app-level pin is the only pin
+```
+
+Add `?dryRun=1` to get the report without changing anything. Rules:
+
+- The target must exist and not be disabled; the version must be one of its
+  archives (default: its current version). Not combinable with `version`,
+  `components`, or `environment` — a migration applies to every environment.
+- **Values are kept.** Overlays are chart-shaped, so the response's
+  `warnings[].unknownValueKeys` lists every overlay key (component `values`
+  and per-env `componentValues`; `rawValues` for a component-less app) the
+  target chart's defaults do not define. Those keys go inert until renamed or
+  removed — the UI shows them before asking you to confirm.
+- State authored against the old chart and keyed by the component name is
+  reconciled: env-scoped version pins for the moved component are dropped
+  (a version string of the old template applied to the new chart would fail
+  the publish), and image bindings survive only when the target template
+  declares the same tag path. The manage-components retemplate (PATCH with a
+  full `components` list) applies the same reconciliation.
+- Atomic like the version forms: one save + one publish, full restore on a
+  failed publish. Audited as `app.retemplate`.
+
+In the UI the upgrade dialog's **Template** column is a picker; choosing a
+different template turns that row into a migration and shows the unknown-key
+warnings from a dry run before the confirm.
 
 Note an editing invariant: a component PATCH that omits `template.version`
 *preserves* the stored pin rather than re-pinning to the registry's current

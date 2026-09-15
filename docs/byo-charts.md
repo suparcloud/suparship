@@ -45,12 +45,21 @@ tokens* — it never injects its own values into your chart; the chart's own
 (`SUPARSHIP_TEMPLATE_SYNC_INTERVAL`, default 5m), so pushing a chart change
 to the repo rolls it out to new publishes.
 
-> **Template names are global.** The imported template is named after the
-> chart (`Chart.yaml` `name`), across *all* sources. A chart whose name is
-> already provided by a different source is **refused at sync** — the
-> source's sync result names the owner ("rename the chart or remove the
-> conflicting template") while the rest of the repo imports normally. Give
-> your charts names that are unique across everything you register.
+> **Template names are namespaced by source.** A source registered with
+> *Namespace templates by source* (the default for new sources) imports each
+> chart as `<source>.<chart>` — `acme.web`, `beta.web` — so two sources can
+> ship charts with the same name. The gallery shows the chart's title with a
+> source chip; the qualified name is what apps pin and what the
+> `/templates/{name}` routes take.
+>
+> A source registered **without** namespacing keeps bare chart names, which
+> are global: a chart whose name is already provided by a different bare
+> source is **refused at sync** ("rename the chart or remove the conflicting
+> template") while the rest of the repo imports normally. Switch such a
+> source with **Namespace…** on its row in Settings → Templates → Sources:
+> suparship re-syncs it under the new names, rewrites every app pinned to
+> the old names, republishes those apps (same chart bytes — only the chart
+> directory in the GitOps repo moves) and removes the bare-named entries.
 
 For example, to make this repo's example charts available:
 

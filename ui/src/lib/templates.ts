@@ -8,6 +8,7 @@ import type {
   TemplateMetadataPatch,
   TemplateImportPreview,
   TemplateImportResult,
+  TemplateNamespaceResponse,
   TemplateRegistry,
   TemplateRegistryResponse,
   TemplateSyncResponse,
@@ -182,6 +183,16 @@ export function syncAllSources(): Promise<TemplateSyncResponse> {
 export function syncSource(name: string): Promise<TemplateSyncResponse> {
   return api.post<TemplateSyncResponse>(
     `/templates/registry/sources/${encodeURIComponent(name)}/sync`,
+  );
+}
+
+// namespaceTemplateSource flips an existing source to namespaced naming:
+// re-syncs it so its templates land as "<source>.<chart>", rewrites every
+// app pin that referenced the bare names, republishes those apps, and
+// removes the bare-named template entries. Org-admin only.
+export function namespaceTemplateSource(name: string): Promise<TemplateNamespaceResponse> {
+  return api.post<TemplateNamespaceResponse>(
+    `/templates/registry/sources/${encodeURIComponent(name)}/namespace`,
   );
 }
 

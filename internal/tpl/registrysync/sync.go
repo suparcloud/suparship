@@ -126,6 +126,13 @@ func (e *Engine) SyncOne(ctx context.Context, repo tpl.ExternalTemplateRepo, reg
 	// kube.SaveTemplate accepts nil chartTGZ for templates whose chart
 	// is shipped out-of-band (today: never; future: registry-ref mode).
 	for _, rt := range result.Templates {
+		// Stamp provenance, and namespace the name for sources that opted in
+		// ("<source>.<chart>"). Done here, once, rather than in each fetcher.
+		// The chart's own title stays the display name.
+		rt.Template.Metadata.Source = repo.Name
+		if repo.Namespaced {
+			rt.Template.Metadata.Name = tpl.QualifiedTemplateName(repo.Name, rt.Template.Metadata.Name)
+		}
 		if owner, taken := owners[rt.Template.Metadata.Name]; taken {
 			err := fmt.Errorf("chart %q not imported: the template name is already provided by %s — rename the chart or remove the conflicting template",
 				rt.Template.Metadata.Name, owner)

@@ -45,8 +45,21 @@ suparship-backup.yaml`) and roll the chart back.
 
 ### Unreleased (next)
 
-Nothing yet. Notes for changes landing on `main` after v0.1.0 go here; the
-release PR moves them under the next version heading.
+- **Source-namespaced templates.** New template sources default to
+  *Namespace templates by source*: their charts import as `<source>.<chart>`.
+  Existing sources are untouched (bare names, global uniqueness) until you
+  press **Namespace…** on the source row, which rewrites and republishes the
+  apps pinned to that source's templates. Nothing to do on upgrade; the
+  `namespaced` field is exported with the rest of the source.
+- **Deleting a template source now removes what it imported** (registry rows
+  and the template ConfigMaps). Registries that still carry rows of already
+  deleted sources are cleaned up on the next sync.
+- **Retemplating a component drops its stale env-scoped version pin** and
+  image bindings the new chart does not declare. Previously such a pin made
+  the next publish fail with a missing chart directory.
+- `POST .../upgrade-template` gains `retemplate` / `template` for migrating
+  components (or a component-less app) to a different template, with
+  `?dryRun=1` and unknown-values-key warnings. No action needed.
 
 ### v0.1.0 — first tagged release
 

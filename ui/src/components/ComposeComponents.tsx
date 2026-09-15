@@ -572,6 +572,7 @@ export function ComposeComponents({
                 {templates.map((t) => (
                   <option key={t.name} value={t.name}>
                     {t.title}
+                    {t.source ? ` (${t.source})` : ""}
                   </option>
                 ))}
               </select>

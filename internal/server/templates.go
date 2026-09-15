@@ -33,6 +33,10 @@ type TemplateSummaryDTO struct {
 	// and re-enable it) but the create flow must not offer it and the server
 	// refuses new apps from it. Existing apps are unaffected.
 	Disabled bool `json:"disabled,omitempty"`
+	// Source is the external template source that imported this template
+	// (empty for built-ins and uploads). Two sources may ship charts with the
+	// same title; the UI shows this next to the title to tell them apart.
+	Source string `json:"source,omitempty"`
 }
 
 // TemplatesResponse is the JSON body for GET /api/v1/templates.
@@ -43,16 +47,16 @@ type TemplatesResponse struct {
 // TemplateDetailDTO is the full form returned by GET /api/v1/templates/{name},
 // including all inputs and presets needed for UI form generation.
 type TemplateDetailDTO struct {
-	Name           string                 `json:"name"`
-	Version        string                 `json:"version"`
-	Title          string                 `json:"title"`
-	Description    string                 `json:"description,omitempty"`
-	Category       string                 `json:"category"`
-	Engine         string                 `json:"engine"`
-	Inputs         []InputDTO             `json:"inputs"`
-	AdvancedInputs []InputDTO             `json:"advancedInputs"`
-	SecretInputs   []SecretInputDTO       `json:"secretInputs"`
-	Presets        []PresetDTO            `json:"presets"`
+	Name           string           `json:"name"`
+	Version        string           `json:"version"`
+	Title          string           `json:"title"`
+	Description    string           `json:"description,omitempty"`
+	Category       string           `json:"category"`
+	Engine         string           `json:"engine"`
+	Inputs         []InputDTO       `json:"inputs"`
+	AdvancedInputs []InputDTO       `json:"advancedInputs"`
+	SecretInputs   []SecretInputDTO `json:"secretInputs"`
+	Presets        []PresetDTO      `json:"presets"`
 	// DefaultValues / EnvValues are the Platform-Engineer-authored Helm values
 	// overlays (all-envs + per-env), exposed so the values-editor UI can show /
 	// seed the effective-values preview without a second round-trip.
@@ -430,6 +434,12 @@ func (th *templateHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	if th.kubeClient != nil {
 		overrides, _ = kube.ListTemplateOverrides(r.Context(), th.kubeClient)
 	}
+	// Source attribution: templates synced before metadata.source existed carry
+	// none, so fall back to the registry's row for the name. One Get, best-effort.
+	var reg *tpl.TemplateRegistry
+	if th.registryStore != nil {
+		reg, _ = th.registryStore.Get(r.Context())
+	}
 	list := make([]TemplateSummaryDTO, 0, len(merged))
 	for _, t := range merged {
 		title, category, description := t.Spec.Title, t.Spec.Category, t.Spec.Description
@@ -451,6 +461,7 @@ func (th *templateHandler) handleList(w http.ResponseWriter, r *http.Request) {
 			Category:    category,
 			Engine:      t.Spec.Engine.Type,
 			Disabled:    overrides[t.Metadata.Name] != nil && overrides[t.Metadata.Name].Disabled,
+			Source:      templateSourceName(t, reg),
 		})
 	}
 	writeJSON(w, http.StatusOK, TemplatesResponse{Templates: list})
@@ -492,6 +503,22 @@ func (th *templateHandler) handleDetail(w http.ResponseWriter, r *http.Request) 
 	dto.Source = src
 	dto.Editable = editable
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// templateSourceName returns the external source a template came from:
+// metadata.source when the sync stamped it, else the registry row's
+// ExternalRepo for templates synced before that field existed. Empty for
+// built-ins and uploads.
+func templateSourceName(t *tpl.Template, reg *tpl.TemplateRegistry) string {
+	if t.Metadata.Source != "" {
+		return t.Metadata.Source
+	}
+	if reg != nil {
+		if s := reg.FindSource(t.Metadata.Name); s != nil {
+			return s.ExternalRepo
+		}
+	}
+	return ""
 }
 
 // applyMetadataOverride overlays a metadata override's non-empty fields onto the
@@ -541,21 +568,21 @@ func (th *templateHandler) templateProvenance(ctx context.Context, name string) 
 
 func templateToDetail(t *tpl.Template) TemplateDetailDTO {
 	return TemplateDetailDTO{
-		Name:                  t.Metadata.Name,
-		Version:               t.Metadata.Version,
-		Title:                 t.Spec.Title,
-		Description:           t.Spec.Description,
-		Category:              t.Spec.Category,
-		Engine:                t.Spec.Engine.Type,
-		Inputs:                inputsToDTO(t.Spec.Inputs),
-		AdvancedInputs:        inputsToDTO(t.Spec.AdvancedInputs),
-		SecretInputs:          secretInputsToDTO(t.Spec.SecretInputs),
-		Presets:               presetsToDTO(t.Spec.Presets),
-		DefaultValues:         t.Spec.DefaultValues,
-		EnvValues:             t.Spec.EnvValues,
-		Images:                imagesToDTO(t.Spec.Images),
-		DeveloperValues:       developerValuesToDTO(t.Spec.DeveloperValues),
-		DeliveryMode:          t.Spec.DeliveryMode,
+		Name:            t.Metadata.Name,
+		Version:         t.Metadata.Version,
+		Title:           t.Spec.Title,
+		Description:     t.Spec.Description,
+		Category:        t.Spec.Category,
+		Engine:          t.Spec.Engine.Type,
+		Inputs:          inputsToDTO(t.Spec.Inputs),
+		AdvancedInputs:  inputsToDTO(t.Spec.AdvancedInputs),
+		SecretInputs:    secretInputsToDTO(t.Spec.SecretInputs),
+		Presets:         presetsToDTO(t.Spec.Presets),
+		DefaultValues:   t.Spec.DefaultValues,
+		EnvValues:       t.Spec.EnvValues,
+		Images:          imagesToDTO(t.Spec.Images),
+		DeveloperValues: developerValuesToDTO(t.Spec.DeveloperValues),
+		DeliveryMode:    t.Spec.DeliveryMode,
 	}
 }
 

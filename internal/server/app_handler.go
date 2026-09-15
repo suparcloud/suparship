@@ -639,6 +639,9 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		app.Spec.Components = specs
+		// A retemplate (component now on a different chart) invalidates state
+		// keyed by the component NAME that was authored against the old chart.
+		ah.reconcileRetemplatedComponents(r.Context(), &app.Spec, prevByName)
 		// Keep AppSpec.Template (the "primary") in sync so single-component readers
 		// and the single-source render path resolve the right chart. Mirrored from
 		// the resolved component's PIN — reading it off the live template would
@@ -1730,6 +1733,16 @@ type upgradeAppTemplateRequest struct {
 	// at once (the pre-env-scoping behavior; any env-scoped pins for the moved
 	// components are cleared).
 	Environment string `json:"environment,omitempty"`
+	// Retemplate MIGRATES named components onto a different template (chart),
+	// keyed component name → target. Mutually exclusive with Version and
+	// Components. Values overlays are kept and the response lists the overlay
+	// keys the new chart does not define; add ?dryRun=1 to get that report
+	// without changing anything. Not combinable with Environment.
+	Retemplate map[string]retemplateTargetDTO `json:"retemplate,omitempty"`
+	// Template migrates a COMPONENT-LESS app (BYO/passthrough, where the
+	// app-level pin is the only pin) onto a different template; Version then
+	// names the target's version (empty = its current one).
+	Template string `json:"template,omitempty"`
 }
 
 // upgradedComponentDTO reports one component's version move in the response.
@@ -1769,6 +1782,29 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		return
 	}
 	wantVersion := strings.TrimSpace(req.Version)
+
+	// Migration onto a different template is its own path: it shares the
+	// validate-then-single-publish contract but also reconciles what the old
+	// chart left behind. See app_retemplate.go.
+	if len(req.Retemplate) > 0 || strings.TrimSpace(req.Template) != "" {
+		if len(req.Components) > 0 || (len(req.Retemplate) > 0 && wantVersion != "") {
+			writeJSON(w, http.StatusBadRequest, errorResponse{
+				Error: "retemplate / template cannot be combined with version or components",
+			})
+			return
+		}
+		app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, errorResponse{
+				Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
+			})
+			return
+		}
+		q := r.URL.Query().Get("dryRun")
+		ah.retemplateApp(w, r, app, req, q == "1" || strings.EqualFold(q, "true"))
+		return
+	}
+
 	switch {
 	case wantVersion == "" && len(req.Components) == 0:
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "version or components is required"})
@@ -2199,23 +2235,11 @@ func (ah *appHandler) saveAndRepublishUpgrade(w http.ResponseWriter, r *http.Req
 	// PublishApp's syncChart honours each component's Template.Version (and
 	// AppSpec.Template.Version on the single-source path), so the chart bytes in
 	// the gitops repo actually change.
-	allEnvs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list app environments"})
-		return false
-	}
-	var stableEnvs []*domain.AppEnvironment
-	for _, env := range allEnvs {
-		if env.EnvType != domain.AppEnvPreview {
-			stableEnvs = append(stableEnvs, env)
+	if err := ah.republishStable(r.Context(), app); err != nil {
+		if errors.Is(err, errListAppEnvironments) {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to list app environments"})
+			return false
 		}
-	}
-	if len(stableEnvs) == 0 {
-		stableEnvs = ah.stableEnvsFromOrg(r.Context(), app)
-	}
-
-	ah.ensureAppNamespaces(r.Context(), app, stableEnvs)
-	if err := ah.gitOpsPublisher.PublishApp(r.Context(), app, stableEnvs); err != nil {
 		restore()
 		_ = ah.appStore.SaveApp(r.Context(), projectName, app)
 		slog.Error("upgrade-template: publish failed; rolled back version pins",
@@ -2226,6 +2250,117 @@ func (ah *appHandler) saveAndRepublishUpgrade(w http.ResponseWriter, r *http.Req
 		return false
 	}
 	return true
+}
+
+// errListAppEnvironments distinguishes "could not even enumerate the envs"
+// from a publish failure so callers can keep their existing status mapping.
+var errListAppEnvironments = errors.New("failed to list app environments")
+
+// republishStable re-publishes an already-saved app to its stable (non-preview)
+// environments — the same path /sync and upgrade-template use. It does not
+// touch the store; callers own persistence and any rollback.
+func (ah *appHandler) republishStable(ctx context.Context, app *domain.App) error {
+	allEnvs, err := ah.appStore.ListAppEnvironments(ctx, app.ProjectName, app.Name)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errListAppEnvironments, err)
+	}
+	var stableEnvs []*domain.AppEnvironment
+	for _, env := range allEnvs {
+		if env.EnvType != domain.AppEnvPreview {
+			stableEnvs = append(stableEnvs, env)
+		}
+	}
+	if len(stableEnvs) == 0 {
+		stableEnvs = ah.stableEnvsFromOrg(ctx, app)
+	}
+	ah.ensureAppNamespaces(ctx, app, stableEnvs)
+	return ah.gitOpsPublisher.PublishApp(ctx, app, stableEnvs)
+}
+
+// TemplateRepinApp / TemplateRepinFailure describe the outcome of
+// RepinTemplates for one app.
+type TemplateRepinApp struct {
+	Project string `json:"project"`
+	App     string `json:"app"`
+}
+
+type TemplateRepinFailure struct {
+	Project string `json:"project"`
+	App     string `json:"app"`
+	Error   string `json:"error"`
+}
+
+// RepinTemplates rewrites every app pin (AppSpec.Template and each component's
+// Template) whose name appears in renames to the new name, saves the app and
+// republishes it to its stable envs. Versions are preserved: this is a rename
+// of the template identity (a source being namespaced), not an upgrade, so the
+// chart bytes — and the rendered manifests — do not change; only the chart
+// directory in the gitops repo moves.
+//
+// A failed republish is reported, never rolled back: the old template names
+// are about to disappear, so a pin left on them would be strictly worse than
+// a pin on the new name awaiting a manual /sync.
+func (ah *appHandler) RepinTemplates(ctx context.Context, renames map[string]string) ([]TemplateRepinApp, []TemplateRepinFailure) {
+	if len(renames) == 0 || ah.projectStore == nil || ah.appStore == nil {
+		return nil, nil
+	}
+	projects, err := ah.projectStore.List(ctx)
+	if err != nil {
+		return nil, []TemplateRepinFailure{{Error: "list projects: " + err.Error()}}
+	}
+	var done []TemplateRepinApp
+	var failures []TemplateRepinFailure
+	for _, p := range projects {
+		apps, err := ah.appStore.ListApps(ctx, p.Metadata.Name)
+		if err != nil {
+			failures = append(failures, TemplateRepinFailure{Project: p.Metadata.Name, Error: "list apps: " + err.Error()})
+			continue
+		}
+		for _, app := range apps {
+			if !repinApp(app, renames) {
+				continue
+			}
+			ref := TemplateRepinApp{Project: app.ProjectName, App: app.Name}
+			if err := ah.appStore.SaveApp(ctx, app.ProjectName, app); err != nil {
+				failures = append(failures, TemplateRepinFailure{Project: ref.Project, App: ref.App, Error: "save: " + err.Error()})
+				continue
+			}
+			if ah.gitOpsPublisher != nil {
+				if err := ah.republishStable(ctx, app); err != nil {
+					failures = append(failures, TemplateRepinFailure{Project: ref.Project, App: ref.App, Error: "republish: " + err.Error()})
+					continue
+				}
+			}
+			done = append(done, ref)
+		}
+	}
+	return done, failures
+}
+
+// repinApp applies renames to an app's template pins in place. Reports whether
+// anything changed.
+func repinApp(app *domain.App, renames map[string]string) bool {
+	changed := false
+	if to, ok := renames[app.Spec.Template.Name]; ok && to != app.Spec.Template.Name {
+		app.Spec.Template.Name = to
+		changed = true
+	}
+	for i := range app.Spec.Components {
+		t := app.Spec.Components[i].Template
+		if t == nil {
+			continue
+		}
+		if to, ok := renames[t.Name]; ok && to != t.Name {
+			cp := *t
+			cp.Name = to
+			app.Spec.Components[i].Template = &cp
+			changed = true
+		}
+	}
+	if changed && len(app.Spec.Components) > 0 {
+		app.Spec.SyncPrimaryTemplate()
+	}
+	return changed
 }
 
 // upgradeTemplatelessApp handles the app shape that stores no components at all
@@ -4809,6 +4944,73 @@ func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []Componen
 		}
 	}
 	return specs, primary, nil
+}
+
+// reconcileRetemplatedComponents fixes up every component whose template NAME
+// differs from prev (a retemplate onto a different chart). Two things on the
+// component are keyed by its name yet authored against the OLD chart:
+//
+//   - EnvironmentDefaults[env].TemplateVersions[name]: an env-scoped version
+//     pin of the old template. Left alone, AppForEnvTemplateVersions applies
+//     that version string to the NEW template at publish, the chart directory
+//     charts/<new>/<old-version> does not exist, and the publish fails.
+//   - ComponentSpec.Images: bindings keyed by the old chart's values tag paths.
+//     Only bindings the new template declares (same TagKey) survive; the rest
+//     would silently watch nothing.
+//
+// Returns the names of the components that were retemplated.
+func (ah *appHandler) reconcileRetemplatedComponents(ctx context.Context, spec *domain.AppSpec, prev map[string]domain.ComponentSpec) []string {
+	var moved []string
+	for i := range spec.Components {
+		c := &spec.Components[i]
+		p, existed := prev[c.Name]
+		if !existed || p.Template == nil || c.Template == nil || p.Template.Name == c.Template.Name {
+			continue
+		}
+		moved = append(moved, c.Name)
+		clearComponentEnvTemplatePins(spec, c.Name)
+		if tmpl, ok := ah.lookupTemplate(ctx, c.Template.Name); ok {
+			c.Images = retargetComponentImages(c.Images, tmpl)
+		} else {
+			c.Images = nil
+		}
+	}
+	return moved
+}
+
+// clearComponentEnvTemplatePins drops every env-scoped template-version pin
+// for the named component, leaving other components' pins in place.
+func clearComponentEnvTemplatePins(spec *domain.AppSpec, name string) {
+	for envName, ov := range spec.EnvironmentDefaults {
+		if _, ok := ov.TemplateVersions[name]; !ok {
+			continue
+		}
+		delete(ov.TemplateVersions, name)
+		if len(ov.TemplateVersions) == 0 {
+			ov.TemplateVersions = nil
+		}
+		spec.EnvironmentDefaults[envName] = ov
+	}
+}
+
+// retargetComponentImages keeps only the bindings whose TagKey the given
+// template declares as an image slot. Bindings are matched by TagKey, so a
+// path the new chart does not have can never resolve.
+func retargetComponentImages(images []domain.ComponentImage, tmpl *tpl.Template) []domain.ComponentImage {
+	if len(images) == 0 || tmpl == nil {
+		return nil
+	}
+	declared := make(map[string]struct{}, len(tmpl.Spec.Images))
+	for _, img := range tmpl.Spec.Images {
+		declared[img.TagKey] = struct{}{}
+	}
+	var kept []domain.ComponentImage
+	for _, img := range images {
+		if _, ok := declared[img.TagKey]; ok {
+			kept = append(kept, img)
+		}
+	}
+	return kept
 }
 
 func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]domain.EnvironmentOverride) []ComponentSummaryDTO {

@@ -3,6 +3,8 @@ package tpl
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 )
 
 // ErrInvalidProvider is returned when ExternalTemplateRepo.Provider is
@@ -94,6 +96,40 @@ type ExternalTemplateRepo struct {
 	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
 	// ExistingSecret is the name of a K8s Secret for auth (optional).
 	ExistingSecret string `json:"existingSecret,omitempty" yaml:"existingSecret,omitempty"`
+	// Namespaced qualifies every template this source imports with the
+	// source name ("<source>.<chart>"), so two sources can ship charts with
+	// the same name without colliding. Opt-in per source: sources persisted
+	// before this field existed keep bare chart names (and the global
+	// name-collision guard) until an operator namespaces them explicitly —
+	// which rewrites every app pin, so it is never done implicitly.
+	Namespaced bool `json:"namespaced,omitempty" yaml:"namespaced,omitempty"`
+}
+
+// templateNameSeparator joins a source name and a chart name into a
+// namespaced template name. "." is the one character that is legal in a
+// DNS-1123 ConfigMap name, a label value and a single URL path segment, and
+// that chartimport's name sanitizer never emits — so "acme.web" can never be
+// confused with a bare chart name.
+const templateNameSeparator = "."
+
+// sourceNameRE is the charset a namespaced source name must satisfy: it
+// becomes a prefix of template names, ConfigMap names and label values.
+var sourceNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// QualifiedTemplateName returns the namespaced template name for a chart
+// imported from source.
+func QualifiedTemplateName(source, chart string) string {
+	return source + templateNameSeparator + chart
+}
+
+// SplitQualifiedTemplateName splits a namespaced template name into its
+// source and chart parts. ok is false for a bare (un-namespaced) name.
+func SplitQualifiedTemplateName(name string) (source, chart string, ok bool) {
+	i := strings.Index(name, templateNameSeparator)
+	if i <= 0 || i == len(name)-1 {
+		return "", "", false
+	}
+	return name[:i], name[i+1:], true
 }
 
 // EffectiveType returns Type with the empty default normalized to "git".
@@ -113,6 +149,9 @@ func (r *ExternalTemplateRepo) Validate() error {
 	}
 	if r.RepoURL == "" {
 		return errors.New("external template repo: repoURL is required")
+	}
+	if r.Namespaced && !sourceNameRE.MatchString(r.Name) {
+		return fmt.Errorf("external template repo: a namespaced source name must be a DNS label (lowercase letters, digits, '-'), got %q", r.Name)
 	}
 	switch r.Provider {
 	case "github", "gitlab", "gitea", "bitbucket", "generic", "":

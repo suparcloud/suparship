@@ -295,6 +295,14 @@ function TemplateStep({
               </div>
               <h3 className="mt-2 text-sm font-semibold text-gray-900 group-hover:text-gray-700">
                 {t.title}
+                {t.source && (
+                  <span
+                    className="ml-2 rounded-full bg-gray-100 px-2 py-0.5 align-middle text-[11px] font-medium text-gray-500"
+                    title={`Synced from source "${t.source}"`}
+                  >
+                    {t.source}
+                  </span>
+                )}
               </h3>
               {t.description && (
                 <p className="mt-1 text-xs leading-relaxed text-gray-500 line-clamp-2">
@@ -727,6 +735,11 @@ function ConfigureStep({
             {template ? (
               <>
                 {template.title}{" "}
+                {template.source?.externalRepo && (
+                  <span className="font-normal text-gray-400">
+                    ({template.source.externalRepo}){" "}
+                  </span>
+                )}
                 <span className="font-normal text-gray-400">
                   v{template.version}
                 </span>

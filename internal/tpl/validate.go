@@ -26,6 +26,11 @@ var validInputTypes = map[InputType]bool{
 	InputTypeEnum:    true,
 }
 
+// templateNameRE is the charset of a template name. It must survive as a
+// ConfigMap name suffix, a label value and a URL path segment; "." is the
+// namespacing separator (see QualifiedTemplateName).
+var templateNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+
 // Validate checks the Template for structural correctness.
 func (t *Template) Validate() error {
 	if t.APIVersion != CurrentAPIVersion {
@@ -36,6 +41,9 @@ func (t *Template) Validate() error {
 	}
 	if t.Metadata.Name == "" {
 		return fmt.Errorf("metadata.name is required")
+	}
+	if !templateNameRE.MatchString(t.Metadata.Name) {
+		return fmt.Errorf("metadata.name %q must be lowercase letters, digits, '-' or '.' (a namespaced name is \"<source>.<chart>\")", t.Metadata.Name)
 	}
 	if t.Metadata.Version == "" {
 		return fmt.Errorf("metadata.version is required")

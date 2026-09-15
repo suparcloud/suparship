@@ -121,16 +121,16 @@ type helmCluster struct {
 }
 
 type helmGitOps struct {
-	Provider       string           `json:"provider,omitempty"`
-	RepoURL        string           `json:"repoURL,omitempty"`
-	Branch         string           `json:"branch,omitempty"`
-	SubPath        string           `json:"subPath,omitempty"`
-	InitializeRepo bool             `json:"initializeRepo"`
-	ExistingSecret string           `json:"existingSecret,omitempty"`
-	ArgoCDRepoURL  string           `json:"argoCDRepoURL,omitempty"`
-	KargoGitRepoURL string          `json:"kargoGitRepoURL,omitempty"`
-	GitHub         *helmGitHub      `json:"github,omitempty"`
-	Bitbucket      *helmBitbucket   `json:"bitbucket,omitempty"`
+	Provider        string         `json:"provider,omitempty"`
+	RepoURL         string         `json:"repoURL,omitempty"`
+	Branch          string         `json:"branch,omitempty"`
+	SubPath         string         `json:"subPath,omitempty"`
+	InitializeRepo  bool           `json:"initializeRepo"`
+	ExistingSecret  string         `json:"existingSecret,omitempty"`
+	ArgoCDRepoURL   string         `json:"argoCDRepoURL,omitempty"`
+	KargoGitRepoURL string         `json:"kargoGitRepoURL,omitempty"`
+	GitHub          *helmGitHub    `json:"github,omitempty"`
+	Bitbucket       *helmBitbucket `json:"bitbucket,omitempty"`
 }
 
 type helmGitHub struct {
@@ -143,8 +143,8 @@ type helmBitbucket struct {
 }
 
 type helmSecrets struct {
-	Backend    string                `json:"backend"`
-	OnePassword *helmOnePassword     `json:"onePassword,omitempty"`
+	Backend     string           `json:"backend"`
+	OnePassword *helmOnePassword `json:"onePassword,omitempty"`
 }
 
 type helmOnePassword struct {
@@ -167,11 +167,15 @@ type helmTemplates struct {
 
 type helmExternalTemplateRepo struct {
 	Name           string `json:"name"`
+	Type           string `json:"type,omitempty"`
 	RepoURL        string `json:"repoURL"`
 	Ref            string `json:"ref"`
 	Path           string `json:"path"`
+	Chart          string `json:"chart,omitempty"`
+	Version        string `json:"version,omitempty"`
 	Provider       string `json:"provider,omitempty"`
 	ExistingSecret string `json:"existingSecret,omitempty"`
+	Namespaced     bool   `json:"namespaced,omitempty"`
 }
 
 // helmAuth / helmOIDC mirror the OIDC SSO config. The client secret value is
@@ -517,11 +521,15 @@ func (h *exportHandler) collectTemplates(ctx context.Context, vals *helmValues) 
 	for _, ext := range reg.External {
 		t.External = append(t.External, helmExternalTemplateRepo{
 			Name:           ext.Name,
+			Type:           ext.Type,
 			RepoURL:        ext.RepoURL,
 			Ref:            ext.Ref,
 			Path:           ext.Path,
+			Chart:          ext.Chart,
+			Version:        ext.Version,
 			Provider:       ext.Provider,
 			ExistingSecret: ext.ExistingSecret,
+			Namespaced:     ext.Namespaced,
 		})
 	}
 	vals.Templates = t
@@ -676,9 +684,23 @@ func toYAML(v helmValues) string {
 			b.WriteString("  external:\n")
 			for _, ext := range v.Templates.External {
 				b.WriteString(fmt.Sprintf("    - name: %s\n", yamlQ(ext.Name)))
+				// type selects the fetcher (git / gitcharts / oci / …); dropping
+				// it made a restored gitcharts source come back as plain git.
+				if ext.Type != "" {
+					b.WriteString(fmt.Sprintf("      type: %s\n", yamlQ(ext.Type)))
+				}
 				b.WriteString(fmt.Sprintf("      repoURL: %s\n", yamlQ(ext.RepoURL)))
 				b.WriteString(fmt.Sprintf("      ref: %s\n", yamlQ(ext.Ref)))
 				b.WriteString(fmt.Sprintf("      path: %s\n", yamlQ(ext.Path)))
+				if ext.Chart != "" {
+					b.WriteString(fmt.Sprintf("      chart: %s\n", yamlQ(ext.Chart)))
+				}
+				if ext.Version != "" {
+					b.WriteString(fmt.Sprintf("      version: %s\n", yamlQ(ext.Version)))
+				}
+				if ext.Namespaced {
+					b.WriteString("      namespaced: true\n")
+				}
 				if ext.Provider != "" {
 					b.WriteString(fmt.Sprintf("      provider: %s\n", yamlQ(ext.Provider)))
 				}

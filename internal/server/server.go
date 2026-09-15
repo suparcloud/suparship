@@ -1000,6 +1000,9 @@ func New(cfg Config) *Server {
 			kubeClient: cfg.KubeClient,
 			logger:     cfg.Logger,
 		}
+		if appH != nil {
+			trh.repinner = appH
+		}
 		// When the org provider is wired we can require org_admin on the
 		// write/sync routes; without it we fall back to plain auth so test
 		// harnesses without an OrgStore keep working.

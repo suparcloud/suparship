@@ -111,3 +111,36 @@ func TestTemplateRegistry_PruneOrphanSources(t *testing.T) {
 		t.Errorf("second prune removed %+v, want nothing", again)
 	}
 }
+
+func TestQualifiedTemplateName(t *testing.T) {
+	if got := QualifiedTemplateName("acme", "web"); got != "acme.web" {
+		t.Fatalf("QualifiedTemplateName = %q, want acme.web", got)
+	}
+	src, chart, ok := SplitQualifiedTemplateName("acme.web-service")
+	if !ok || src != "acme" || chart != "web-service" {
+		t.Errorf("Split(acme.web-service) = %q,%q,%v", src, chart, ok)
+	}
+	for _, bare := range []string{"web", ".web", "acme.", ""} {
+		if _, _, ok := SplitQualifiedTemplateName(bare); ok {
+			t.Errorf("Split(%q) reported a namespaced name", bare)
+		}
+	}
+}
+
+func TestExternalTemplateRepo_Validate_NamespacedName(t *testing.T) {
+	ok := ExternalTemplateRepo{Name: "acme-charts", RepoURL: "https://example.com/c.git", Namespaced: true}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid namespaced source rejected: %v", err)
+	}
+	for _, bad := range []string{"Acme", "acme_charts", "acme.charts", "-acme"} {
+		r := ExternalTemplateRepo{Name: bad, RepoURL: "https://example.com/c.git", Namespaced: true}
+		if err := r.Validate(); err == nil {
+			t.Errorf("namespaced source name %q accepted", bad)
+		}
+		// The same name is fine while un-namespaced: it never prefixes anything.
+		r.Namespaced = false
+		if err := r.Validate(); err != nil {
+			t.Errorf("un-namespaced source name %q rejected: %v", bad, err)
+		}
+	}
+}

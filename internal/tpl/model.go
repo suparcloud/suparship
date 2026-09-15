@@ -88,6 +88,11 @@ type Template struct {
 type Metadata struct {
 	Name    string `yaml:"name"`
 	Version string `yaml:"version"`
+	// Source is the name of the external template source that imported
+	// this template (empty for built-ins and BYO uploads). Informational:
+	// the UI shows it as a chip next to the title so two sources' charts
+	// with the same title are distinguishable. Name stays the identity.
+	Source string `yaml:"source,omitempty"`
 }
 
 // TemplateSpec defines the template's behavior and user-facing configuration.

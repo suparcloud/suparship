@@ -10,6 +10,7 @@ ADRs document significant decisions that shaped the system's design, API surface
 |-----|-------|--------|
 | [ADR-0001](0001-app-as-primary-deployment-object.md) | App as Primary User-Facing Deployment Object | Accepted |
 | [ADR-0002](0002-app-vs-stack-boundary.md) | App ↔ Stack Boundary & Deployment Variants | Accepted |
+| [ADR-0003](0003-source-qualified-template-identity.md) | Source-qualified template identity (`<source>.<chart>`) | Accepted |
 
 ## Related docs
 

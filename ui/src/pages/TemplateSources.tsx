@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { ApiError } from "../lib/api";
 import {
   fetchTemplateRegistry,
+  namespaceTemplateSource,
   setSourceCredentials,
   syncAllSources,
   syncSource,
@@ -56,6 +57,7 @@ const emptyRepo: ExternalTemplateRepo = {
   chart: "",
   version: "",
   existingSecret: "",
+  namespaced: true,
 };
 
 // Source-type dropdown options. Each maps to a fetcher in registrysync.
@@ -146,6 +148,7 @@ export function TemplateSources() {
   const [savingRepo, setSavingRepo] = useState(false);
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncingOne, setSyncingOne] = useState<string | null>(null);
+  const [namespacing, setNamespacing] = useState<string | null>(null);
   const [draft, setDraft] = useState<ExternalTemplateRepo>(emptyRepo);
   const [showAdd, setShowAdd] = useState(false);
   // editingName holds the original name of the source being edited, or null
@@ -315,6 +318,37 @@ export function TemplateSources() {
     }
   }
 
+  // Namespacing an existing source renames every template it imported to
+  // "<source>.<chart>" and rewrites the pins of every app on them, then
+  // republishes those apps. Explicit and confirmed — never implicit.
+  async function handleNamespace(name: string) {
+    const confirmed = window.confirm(
+      `Namespace source "${name}"? Its templates will be renamed to "${name}.<chart>", every app pinned to them is rewritten to the new name and republished (same chart contents, so no rollout), and the old template entries are removed.`,
+    );
+    if (!confirmed) return;
+    setNamespacing(name);
+    try {
+      const res = await namespaceTemplateSource(name);
+      const reg = await fetchTemplateRegistry();
+      setRegistry(reg.registry);
+      if (res.failures.length > 0) {
+        toast.error(
+          `Namespaced ${res.templates.length} template(s); ${res.failures.length} app(s) failed to republish: ${res.failures
+            .map((f) => `${f.project}/${f.app}: ${f.error}`)
+            .join("; ")}`,
+        );
+      } else {
+        toast.success(
+          `Namespaced ${res.templates.length} template(s); ${res.apps.length} app(s) re-pinned.`,
+        );
+      }
+    } catch (err) {
+      toast.error(extractError(err, "Failed to namespace source"));
+    } finally {
+      setNamespacing(null);
+    }
+  }
+
   async function handleRemove(name: string) {
     const confirmed = window.confirm(
       `Remove external source "${name}"? Templates synced from it will be removed from the cluster; apps already created from them keep their copied chart.`,
@@ -433,6 +467,21 @@ export function TemplateSources() {
                   <tr key={repo.name}>
                     <td className="px-4 py-3 align-top font-medium text-gray-900">
                       {repo.name}
+                      {repo.namespaced ? (
+                        <span
+                          className="ml-2 rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700"
+                          title={`Templates from this source are named "${repo.name}.<chart>"`}
+                        >
+                          namespaced
+                        </span>
+                      ) : (
+                        <span
+                          className="ml-2 rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-500"
+                          title="Templates keep their bare chart names; a chart name another source already provides is refused at sync"
+                        >
+                          bare names
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 align-top text-gray-700">
                       <div className="font-mono text-xs">{repo.repoURL}</div>
@@ -490,6 +539,16 @@ export function TemplateSources() {
                       >
                         {repo.existingSecret ? "Update credentials" : "Set credentials"}
                       </button>
+                      {!repo.namespaced && (
+                        <button
+                          type="button"
+                          onClick={() => handleNamespace(repo.name)}
+                          disabled={namespacing === repo.name}
+                          className="ml-2 rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+                        >
+                          {namespacing === repo.name ? "Namespacing…" : "Namespace…"}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleRemove(repo.name)}
@@ -611,6 +670,26 @@ function SourceForm({
                   : "https://github.com/myorg/charts.git"
             }
           />
+        </Field>
+        <Field
+          label="Template naming"
+          help={
+            isEdit
+              ? draft.namespaced
+                ? `Templates from this source are named "${draft.name}.<chart>".`
+                : "This source uses bare chart names. Use Namespace… on the source row to switch — it rewrites app pins, so it is a separate, confirmed step."
+              : "Namespaced sources import each chart as \"<source>.<chart>\", so two sources can provide the same chart name. Turn this off only to keep bare names for backwards compatibility."
+          }
+        >
+          <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={draft.namespaced ?? false}
+              disabled={isEdit}
+              onChange={(e) => set({ namespaced: e.target.checked })}
+            />
+            Namespace templates by source
+          </label>
         </Field>
         <Field
           label="Existing auth secret"

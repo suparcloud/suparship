@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -521,6 +522,53 @@ func TestSyncOne_CollisionGuard_IgnoresRemovedSource(t *testing.T) {
 	}
 	if len(res.Templates) != 1 || res.Templates[0] != "web" {
 		t.Fatalf("expected [web] imported, got %v", res.Templates)
+	}
+}
+
+// TestSyncOne_Namespaced: a source that opted into namespacing imports its
+// charts as "<source>.<chart>", so a chart name another source already owns
+// is no longer a collision, and the provenance is stamped on the template.
+func TestSyncOne_Namespaced(t *testing.T) {
+	requireGit(t)
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, "charts/web/Chart.yaml"),
+		"apiVersion: v2\nname: web\nversion: 1.0.0\n")
+	gitCommit(t, repoDir, "initial")
+
+	client := k8sfake.NewClientset()
+	eng := &registrysync.Engine{Client: client}
+	reg := &tpl.TemplateRegistry{
+		External: []tpl.ExternalTemplateRepo{
+			{Name: "legacy", Type: "gitcharts", RepoURL: "https://example.com/legacy.git"},
+			{Name: "acme", Type: "gitcharts", RepoURL: repoDir, Namespaced: true},
+		},
+		Sources: []tpl.TemplateSource{
+			// A live, un-namespaced source already owns the bare name.
+			{Name: "web", Origin: "external", ExternalRepo: "legacy"},
+		},
+	}
+
+	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
+		Name: "acme", Type: "gitcharts", RepoURL: repoDir, Ref: "main", Namespaced: true,
+	}, reg)
+	if res.Err != nil {
+		t.Fatalf("namespaced import must not collide with the bare name: %v", res.Err)
+	}
+	if len(res.Templates) != 1 || res.Templates[0] != "acme.web" {
+		t.Fatalf("expected [acme.web] imported, got %v", res.Templates)
+	}
+	cm, err := client.CoreV1().ConfigMaps("suparship-system").Get(
+		context.Background(), "suparship-template-acme.web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("namespaced template ConfigMap missing: %v", err)
+	}
+	if !strings.Contains(cm.Data["template.yaml"], "source: acme") {
+		t.Errorf("template.yaml should carry metadata.source, got:\n%s", cm.Data["template.yaml"])
+	}
+	if !strings.Contains(cm.Data["template.yaml"], "title: ") || strings.Contains(cm.Data["template.yaml"], "title: acme.web") {
+		t.Errorf("display title must stay the chart's own title, got:\n%s", cm.Data["template.yaml"])
 	}
 }
 

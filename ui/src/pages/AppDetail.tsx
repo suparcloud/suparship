@@ -2,7 +2,8 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents, retemplateAppComponents } from "../lib/apps";
+import type { RetemplateWarning } from "../lib/apps";
 import type { ClusterValueOverride, RollbackCandidate, RollbackCandidatesResponse, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
@@ -13,7 +14,7 @@ import { useAuth } from "../lib/AuthContext";
 const ValuesEditor = lazy(() => import("../components/ValuesEditor"));
 import { EffectiveValuesView } from "../components/EffectiveValuesView";
 import { leafPaths, setAtPath, deleteAtPath } from "../lib/valuesTree";
-import { fetchTemplateEffectiveValues, previewTemplateEffectiveValues, fetchTemplates } from "../lib/templates";
+import { fetchTemplateEffectiveValues, previewTemplateEffectiveValues, fetchTemplates, listTemplateVersions } from "../lib/templates";
 import type {
   TemplateVersionInfo,
   TemplateImage,
@@ -903,6 +904,15 @@ export function AppDetail() {
   const [upgradeTargets, setUpgradeTargets] = useState<Record<string, string>>({});
   const [upgradeSelection, setUpgradeSelection] = useState<Record<string, boolean>>({});
   const [upgrading, setUpgrading] = useState(false);
+  // Migration to a DIFFERENT template: component name → chosen template name
+  // (absent = keep the row's own template, i.e. a plain version upgrade).
+  const [upgradeTemplateChoice, setUpgradeTemplateChoice] = useState<Record<string, string>>({});
+  // Gallery for the template picker (loaded when the dialog opens) and the
+  // archived versions of templates the app does not use yet, fetched on pick.
+  const [retemplateCatalog, setRetemplateCatalog] = useState<TemplateSummary[]>([]);
+  const [retemplateVersions, setRetemplateVersions] = useState<Record<string, TemplateVersionInfo[]>>({});
+  // Dry-run result awaiting the user's confirmation (null = not asked yet).
+  const [retemplateWarnings, setRetemplateWarnings] = useState<RetemplateWarning[] | null>(null);
 
   useEffect(() => {
     if (!project || !appName) return;
@@ -965,8 +975,63 @@ export function AppDetail() {
     const stables = (data?.environments ?? []).filter((e) => e.envType !== "preview");
     const selectedStable = stables.find((e) => e.envName === selectedEnvName);
     setUpgradeEnv(selectedStable?.envName ?? stables[0]?.envName ?? "");
+    setUpgradeTemplateChoice({});
+    setRetemplateWarnings(null);
+    fetchTemplates()
+      .then((r) => setRetemplateCatalog(r.templates.filter((t) => !t.disabled)))
+      .catch(() => setRetemplateCatalog([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showUpgradeDialog, upgradeRows]);
+
+  // The template a row targets: its own unless the user picked another one.
+  const templateChoiceOf = useCallback(
+    (row: { name: string; template: string }) => upgradeTemplateChoice[row.name] ?? row.template,
+    [upgradeTemplateChoice],
+  );
+  const rowVersionsOf = useCallback(
+    (row: { name: string; template: string; versions: TemplateVersionInfo[] }) => {
+      const chosen = templateChoiceOf(row);
+      if (chosen === row.template) return row.versions;
+      if (retemplateVersions[chosen]) return retemplateVersions[chosen];
+      // Archives not fetched yet (or none stored): offer the gallery's current version.
+      const cat = retemplateCatalog.find((t) => t.name === chosen);
+      return cat ? [{ version: cat.version }] : [];
+    },
+    [templateChoiceOf, retemplateVersions, retemplateCatalog],
+  );
+  // Picking a different template turns the row into a migration: fetch that
+  // template's archives (once) and default the target to its newest version.
+  const onTemplateChoice = useCallback(
+    (row: { name: string; template: string; current: string; latest: string; upgradeAvailable: boolean }, name: string) => {
+      setRetemplateWarnings(null);
+      if (name === row.template) {
+        setUpgradeTemplateChoice((c) => {
+          const next = { ...c };
+          delete next[row.name];
+          return next;
+        });
+        setUpgradeTargets((t) => ({ ...t, [row.name]: row.upgradeAvailable ? row.latest : row.current }));
+        return;
+      }
+      setUpgradeTemplateChoice((c) => ({ ...c, [row.name]: name }));
+      setUpgradeSelection((s) => ({ ...s, [row.name]: true }));
+      const cached = retemplateVersions[name];
+      if (cached) {
+        setUpgradeTargets((t) => ({ ...t, [row.name]: cached[0]?.version ?? "" }));
+        return;
+      }
+      const cat = retemplateCatalog.find((t) => t.name === name);
+      setUpgradeTargets((t) => ({ ...t, [row.name]: cat?.version ?? "" }));
+      listTemplateVersions(name)
+        .then((r) => {
+          const versions = r.versions.length > 0 ? r.versions : cat ? [{ version: cat.version }] : [];
+          setRetemplateVersions((v) => ({ ...v, [name]: versions }));
+          setUpgradeTargets((t) => ({ ...t, [row.name]: versions[0]?.version ?? "" }));
+        })
+        .catch(() => {});
+    },
+    [retemplateVersions, retemplateCatalog],
+  );
 
   // The version a row currently runs in the CHOSEN upgrade scope: the env's
   // own pin when it has one, else the app-wide pin. "" scope = the app-wide pin.
@@ -977,19 +1042,34 @@ export function AppDetail() {
     [upgradeEnv, data?.envTemplateVersions],
   );
 
-  // Only checked rows whose target differs from what the chosen scope runs are
-  // submitted — re-sending an unchanged pin would be a no-op the backend has to
-  // reject.
+  // Checked rows that picked a DIFFERENT template are migrations; they go
+  // through the retemplate call (every environment at once).
+  const pendingRetemplates = useMemo(
+    () =>
+      upgradeRows
+        .filter((r) => upgradeSelection[r.name] && templateChoiceOf(r) !== r.template)
+        .map((r) => ({ name: r.name, template: templateChoiceOf(r), target: upgradeTargets[r.name] ?? "" })),
+    [upgradeRows, upgradeSelection, upgradeTargets, templateChoiceOf],
+  );
+  // A migration applies to every environment, so an env scope cannot be
+  // combined with it.
+  useEffect(() => {
+    if (pendingRetemplates.length > 0 && upgradeEnv) setUpgradeEnv("");
+  }, [pendingRetemplates.length, upgradeEnv]);
+
+  // Only checked rows (on their own template) whose target differs from what
+  // the chosen scope runs are submitted — re-sending an unchanged pin would be
+  // a no-op the backend has to reject.
   const pendingUpgrades = useMemo(
     () =>
       upgradeRows
-        .filter((r) => upgradeSelection[r.name])
+        .filter((r) => upgradeSelection[r.name] && templateChoiceOf(r) === r.template)
         .map((r) => ({ name: r.name, target: upgradeTargets[r.name] ?? r.current }))
         .filter((r) => {
           const row = upgradeRows.find((x) => x.name === r.name);
           return r.target && r.target !== envCurrentOf(r.name, row?.current ?? "");
         }),
-    [upgradeRows, upgradeSelection, upgradeTargets, envCurrentOf],
+    [upgradeRows, upgradeSelection, upgradeTargets, envCurrentOf, templateChoiceOf],
   );
 
   // When the user switches environments, fetch the specific env detail for
@@ -1129,7 +1209,7 @@ export function AppDetail() {
               </span>
             ) : (
               <Link
-                to={`/templates/${data.template.name}`}
+                to={`/templates/${encodeURIComponent(data.template.name)}`}
                 className="inline-flex items-center gap-1 font-mono text-gray-600 hover:text-gray-900"
               >
                 {data.template.name}
@@ -1579,7 +1659,10 @@ export function AppDetail() {
             <p className="mt-2 text-xs text-amber-700">
               No values migration is performed. A values key the new chart renamed
               or removed goes silently inert — check the chart's values before
-              upgrading, and adjust the app's values via the existing flow.
+              upgrading, and adjust the app's values via the existing flow. Pick a
+              different <em>Template</em> to migrate a component onto another
+              chart; you will see the overlay keys that chart does not know before
+              confirming.
             </p>
 
             {/* Scope: upgrades roll out env by env — the chosen env gets a
@@ -1592,7 +1675,9 @@ export function AppDetail() {
               <select
                 value={upgradeEnv}
                 onChange={(e) => setUpgradeEnv(e.target.value)}
-                className="rounded-md border border-gray-300 px-2 py-1 text-sm"
+                disabled={pendingRetemplates.length > 0}
+                title={pendingRetemplates.length > 0 ? "A template migration applies to every environment" : undefined}
+                className="rounded-md border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
               >
                 {(data.environments ?? [])
                   .filter((e) => e.envType !== "preview")
@@ -1606,6 +1691,11 @@ export function AppDetail() {
               {upgradeEnv && (
                 <span className="text-xs text-gray-400">
                   other environments keep their current version
+                </span>
+              )}
+              {pendingRetemplates.length > 0 && (
+                <span className="text-xs text-gray-400">
+                  migrations apply to every environment
                 </span>
               )}
             </div>
@@ -1661,13 +1751,35 @@ export function AppDetail() {
                         <td className="px-3 py-2 font-medium text-gray-900">
                           {row.name}
                         </td>
-                        <td className="px-3 py-2 font-mono text-xs text-gray-500">
-                          {row.template}
+                        <td className="px-3 py-2">
+                          <select
+                            aria-label={`Template for ${row.name}`}
+                            className={`w-full rounded-md border px-2 py-1 text-xs shadow-sm focus:ring-1 ${
+                              templateChoiceOf(row) !== row.template
+                                ? "border-indigo-300 bg-indigo-50 text-indigo-900 focus:border-indigo-500 focus:ring-indigo-500"
+                                : "border-gray-300 font-mono text-gray-600 focus:border-gray-500 focus:ring-gray-500"
+                            }`}
+                            value={templateChoiceOf(row)}
+                            onChange={(e) => onTemplateChoice(row, e.target.value)}
+                          >
+                            {!retemplateCatalog.some((t) => t.name === row.template) && (
+                              <option value={row.template}>{row.template}</option>
+                            )}
+                            {retemplateCatalog.map((t) => (
+                              <option key={t.name} value={t.name}>
+                                {t.title}
+                                {t.source ? ` (${t.source})` : ""}
+                                {t.name === row.template ? " — current" : ""}
+                              </option>
+                            ))}
+                          </select>
                         </td>
                         <td className="px-3 py-2 font-mono text-xs text-gray-500">
-                          {envCurrentOf(row.name, row.current)
-                            ? `v${envCurrentOf(row.name, row.current)}`
-                            : "—"}
+                          {templateChoiceOf(row) !== row.template
+                            ? `${row.template}@${envCurrentOf(row.name, row.current) || "?"}`
+                            : envCurrentOf(row.name, row.current)
+                              ? `v${envCurrentOf(row.name, row.current)}`
+                              : "—"}
                         </td>
                         <td className="px-3 py-2">
                           <select
@@ -1680,10 +1792,11 @@ export function AppDetail() {
                               }))
                             }
                           >
-                            {row.versions.map((v) => (
+                            {rowVersionsOf(row).map((v) => (
                               <option key={v.version} value={v.version}>
                                 v{v.version}
-                                {v.version === envCurrentOf(row.name, row.current)
+                                {templateChoiceOf(row) === row.template &&
+                                v.version === envCurrentOf(row.name, row.current)
                                   ? " (current)"
                                   : ""}
                               </option>
@@ -1694,6 +1807,27 @@ export function AppDetail() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+
+            {retemplateWarnings && retemplateWarnings.length > 0 && (
+              <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <p className="font-medium">
+                  Some values overlays will go inert on the new chart
+                </p>
+                <p className="mt-1 text-xs text-amber-800">
+                  These keys are set on the component but the target chart's
+                  values do not define them. They are kept as-is; rename or
+                  remove them in the values editor after migrating.
+                </p>
+                <ul className="mt-2 space-y-1">
+                  {retemplateWarnings.map((w) => (
+                    <li key={w.component || "(app)"} className="text-xs">
+                      <span className="font-medium">{w.component || appName}:</span>{" "}
+                      <span className="font-mono">{w.unknownValueKeys.join(", ")}</span>
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
 
@@ -1708,11 +1842,42 @@ export function AppDetail() {
               </button>
               <button
                 type="button"
-                disabled={upgrading || pendingUpgrades.length === 0}
+                disabled={upgrading || (pendingUpgrades.length === 0 && pendingRetemplates.length === 0)}
                 onClick={async () => {
                   if (!project || !appName) return;
                   setUpgrading(true);
                   try {
+                    if (pendingRetemplates.length > 0) {
+                      const targets = Object.fromEntries(
+                        pendingRetemplates.map((r) => [
+                          r.name,
+                          { template: r.template, version: r.target || undefined },
+                        ]),
+                      );
+                      // First pass: dry run. Stop and show the inert-keys
+                      // report; the next click (same state) migrates for real.
+                      if (retemplateWarnings === null) {
+                        const dry = await retemplateAppComponents(project, appName, targets, { dryRun: true });
+                        const warns = dry.warnings.filter((w) => w.unknownValueKeys.length > 0);
+                        if (warns.length > 0) {
+                          setRetemplateWarnings(warns);
+                          return;
+                        }
+                      }
+                      const res = await retemplateAppComponents(project, appName, targets);
+                      const one = res.components.length === 1 ? res.components[0] : undefined;
+                      toast.success(
+                        one
+                          ? `Migrated ${one.name}: ${one.fromTemplate} → ${one.toTemplate}@${one.toVersion}`
+                          : `Migrated ${res.components.length} components of ${appName}`,
+                      );
+                    }
+                    if (pendingUpgrades.length === 0) {
+                      setShowUpgradeDialog(false);
+                      const refreshed = await getApp(project, appName);
+                      setData(refreshed.app);
+                      return;
+                    }
                     const res = await upgradeAppComponents(
                       project,
                       appName,
@@ -1742,10 +1907,20 @@ export function AppDetail() {
                 className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
               >
                 {upgrading
-                  ? "Upgrading…"
-                  : pendingUpgrades.length > 1
-                    ? `Upgrade ${pendingUpgrades.length} components`
-                    : "Upgrade"}
+                  ? pendingRetemplates.length > 0
+                    ? "Migrating…"
+                    : "Upgrading…"
+                  : pendingRetemplates.length > 0
+                    ? retemplateWarnings && retemplateWarnings.length > 0
+                      ? "Migrate anyway"
+                      : pendingUpgrades.length > 0
+                        ? `Migrate ${pendingRetemplates.length} & upgrade ${pendingUpgrades.length}`
+                        : pendingRetemplates.length > 1
+                          ? `Migrate ${pendingRetemplates.length} components`
+                          : "Migrate"
+                    : pendingUpgrades.length > 1
+                      ? `Upgrade ${pendingUpgrades.length} components`
+                      : "Upgrade"}
               </button>
             </div>
           </div>

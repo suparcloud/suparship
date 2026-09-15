@@ -173,6 +173,9 @@ export interface TemplateSummary {
   /** Retired by an org admin: still listed for management, but the create
    *  flow must not offer it (the server also refuses with a 422). */
   disabled?: boolean;
+  /** External source this template was synced from (empty for built-ins and
+   *  uploads). Two sources may ship charts with the same title. */
+  source?: string;
 }
 
 export interface TemplatesResponse {
@@ -257,6 +260,11 @@ export interface ExternalTemplateRepo {
   // credentials write to a deterministic name (suparship-tpl-credentials-
   // <source>); operators may also point at a hand-managed Secret.
   existingSecret?: string;
+  // namespaced qualifies every imported template as "<source>.<chart>" so
+  // sources can ship same-named charts. Default on for new sources; flipping
+  // an existing source rewrites app pins, so it goes through a dedicated
+  // action rather than the edit form.
+  namespaced?: boolean;
 }
 
 // TemplateSourceType matches internal/tpl/registry.go SourceType*
@@ -306,6 +314,16 @@ export interface TemplateSyncResult {
   templates: string[];
   syncedAt: string;
   error?: string;
+}
+
+// TemplateNamespaceResponse is the outcome of namespacing an existing source:
+// each template renamed "<chart>" → "<source>.<chart>", the apps whose pins
+// were rewritten (and republished), and any app that failed to republish.
+export interface TemplateNamespaceResponse {
+  source: string;
+  templates: { from: string; to: string }[];
+  apps: { project: string; app: string }[];
+  failures: { project: string; app: string; error: string }[];
 }
 
 export interface TemplateSyncResponse {

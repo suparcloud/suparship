@@ -325,11 +325,16 @@ templates:
   external: []
   # Example:
   # - name: company-templates
+  #   type: gitcharts            # git | gitcharts | oci | chartmuseum | gittgz
   #   repoURL: https://github.com/myorg/suparship-templates.git
   #   ref: v1.2.0
   #   path: templates/
   #   provider: github           # github | gitlab | gitea | bitbucket | generic
   #   existingSecret: company-tpl-credentials
+  #   # Import charts as "company-templates.<chart>" so another source may
+  #   # ship a chart with the same name (docs/templates.md). Default for
+  #   # sources added in the UI; leave false to keep bare chart names.
+  #   namespaced: true
 
 # ---------------------------------------------------------------------------
 # Extra objects

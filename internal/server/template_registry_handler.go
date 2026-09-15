@@ -42,6 +42,15 @@ type templateRegistryHandler struct {
 	kubeClient     kubernetes.Interface
 	authMiddleware func(http.HandlerFunc) http.HandlerFunc
 	logger         *slog.Logger
+	// repinner rewrites app template pins when a source is namespaced (its
+	// templates are renamed "<chart>" → "<source>.<chart>"). Nil → the
+	// namespace route refuses with 503 rather than orphaning app pins.
+	repinner templateRepinner
+}
+
+// templateRepinner is the slice of appHandler the namespace action needs.
+type templateRepinner interface {
+	RepinTemplates(ctx context.Context, renames map[string]string) ([]TemplateRepinApp, []TemplateRepinFailure)
 }
 
 func (h *templateRegistryHandler) registerRoutes(mux *http.ServeMux) {
@@ -52,6 +61,159 @@ func (h *templateRegistryHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/templates/registry/sources/{name}/sync", h.adminOrAuth()(h.handleSyncOne))
 	mux.HandleFunc("POST /api/v1/templates/registry/sources/{name}/credentials", h.adminOrAuth()(h.handleSetCredentials))
 	mux.HandleFunc("POST /api/v1/templates/registry/sources/{name}/test-connection", h.adminOrAuth()(h.handleTestConnection))
+	mux.HandleFunc("POST /api/v1/templates/registry/sources/{name}/namespace", h.adminOrAuth()(h.handleNamespaceSource))
+}
+
+// templateNamespaceResponse is the body of POST .../sources/{name}/namespace.
+type templateNamespaceResponse struct {
+	Source    string                 `json:"source"`
+	Templates []templateRename       `json:"templates"`
+	Apps      []TemplateRepinApp     `json:"apps"`
+	Failures  []TemplateRepinFailure `json:"failures"`
+}
+
+type templateRename struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// handleNamespaceSource flips an existing, bare-named source to namespaced
+// naming. Namespacing is opt-in per source precisely because this is not a
+// flag flip: every template the source imported is renamed
+// "<chart>" → "<source>.<chart>", so every app pinned to those names must be
+// rewritten and republished (same chart bytes — only the chart directory in
+// the gitops repo moves), org overrides must follow the rename, and the
+// bare-named template entries are removed so nothing resolves to stale bytes.
+//
+// Order matters: the registry flag + fresh sync first (so the new names exist
+// before anything points at them), pins next, deletions last.
+func (h *templateRegistryHandler) handleNamespaceSource(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "source name required"})
+		return
+	}
+	if h.engine == nil || h.repinner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "namespacing a source requires the registry sync engine and the app handler"})
+		return
+	}
+	reg, err := h.store.Get(r.Context())
+	if err != nil {
+		h.logger.Error("namespace: get registry", "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to read template registry"})
+		return
+	}
+	var target *tpl.ExternalTemplateRepo
+	for i := range reg.External {
+		if reg.External[i].Name == name {
+			target = &reg.External[i]
+			break
+		}
+	}
+	if target == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "source not found: " + name})
+		return
+	}
+	if target.Namespaced {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: "source is already namespaced: " + name})
+		return
+	}
+
+	// Bare names this source owns today — the rename candidates.
+	var oldNames []string
+	for _, s := range reg.Sources {
+		if s.ExternalRepo == name {
+			oldNames = append(oldNames, s.Name)
+		}
+	}
+
+	target.Namespaced = true
+	if err := target.Validate(); err != nil {
+		target.Namespaced = false
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if err := h.store.Save(r.Context(), reg); err != nil {
+		h.logger.Error("namespace: save registry", "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save template registry"})
+		return
+	}
+
+	// Fresh sync under the new naming: qualified templates land in the
+	// cluster and the registry rows for this source are rebuilt.
+	result := h.engine.SyncOne(r.Context(), *target, reg)
+	if result.Err != nil && len(result.Templates) == 0 {
+		// Nothing imported — roll the flag back so the source keeps working
+		// under its old names instead of being half-migrated.
+		target.Namespaced = false
+		_ = h.store.Save(r.Context(), reg)
+		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "sync under the namespaced name failed; source left unchanged: " + result.Err.Error()})
+		return
+	}
+	registrysync.ApplyResult(reg, *target, result)
+	reg.PruneOrphanSources()
+	if err := h.store.Save(r.Context(), reg); err != nil {
+		h.logger.Error("namespace: save registry after sync", "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist sync state"})
+		return
+	}
+
+	// Renames: only bare names the new sync actually re-imported. A chart the
+	// source no longer ships keeps its bare entry (and its apps) untouched.
+	imported := make(map[string]struct{}, len(result.Templates))
+	for _, t := range result.Templates {
+		imported[t] = struct{}{}
+	}
+	renames := make(map[string]string, len(oldNames))
+	var renamed []templateRename
+	for _, old := range oldNames {
+		qualified := tpl.QualifiedTemplateName(name, old)
+		if _, ok := imported[qualified]; !ok {
+			continue
+		}
+		renames[old] = qualified
+		renamed = append(renamed, templateRename{From: old, To: qualified})
+	}
+
+	// Org overrides are keyed by template name: carry them over before any
+	// app is republished against the new name.
+	if h.kubeClient != nil {
+		for old, qualified := range renames {
+			ov, err := kube.LoadTemplateOverride(r.Context(), h.kubeClient, old)
+			if err != nil || ov == nil {
+				continue
+			}
+			if err := kube.SaveTemplateOverride(r.Context(), h.kubeClient, qualified, ov); err != nil {
+				h.logger.Warn("namespace: copy template override", "from", old, "to", qualified, "error", err)
+				continue
+			}
+			if err := kube.DeleteTemplateOverride(r.Context(), h.kubeClient, old); err != nil {
+				h.logger.Warn("namespace: delete old template override", "template", old, "error", err)
+			}
+		}
+	}
+
+	apps, failures := h.repinner.RepinTemplates(r.Context(), renames)
+
+	// Bare-named template entries last: nothing points at them any more.
+	if h.kubeClient != nil {
+		for old := range renames {
+			if _, err := kube.DeleteTemplate(r.Context(), h.kubeClient, old); err != nil {
+				h.logger.Warn("namespace: delete bare-named template", "template", old, "error", err)
+			}
+		}
+	}
+
+	if apps == nil {
+		apps = []TemplateRepinApp{}
+	}
+	if failures == nil {
+		failures = []TemplateRepinFailure{}
+	}
+	if renamed == nil {
+		renamed = []templateRename{}
+	}
+	writeJSON(w, http.StatusOK, templateNamespaceResponse{Source: name, Templates: renamed, Apps: apps, Failures: failures})
 }
 
 // adminOrAuth returns the org_admin middleware when wired, falling back to

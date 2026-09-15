@@ -2,10 +2,15 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -13,8 +18,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 
+	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/session"
 	"github.com/suparcloud/suparship/internal/tpl"
+	"github.com/suparcloud/suparship/internal/tpl/registrysync"
 )
 
 func newTemplateRegistryMux(t *testing.T) (*http.ServeMux, *authHandler) {
@@ -234,6 +242,146 @@ func TestTemplateRegistryHandler_PutPrunesRemovedSource(t *testing.T) {
 	}
 }
 
+// fakeRepinner records the renames the namespace action asked for.
+type fakeRepinner struct {
+	renames map[string]string
+}
+
+func (f *fakeRepinner) RepinTemplates(_ context.Context, renames map[string]string) ([]TemplateRepinApp, []TemplateRepinFailure) {
+	f.renames = renames
+	return []TemplateRepinApp{{Project: "demo", App: "hello"}}, nil
+}
+
+func gitChartRepo(t *testing.T, charts ...string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@x", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@x")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	for _, c := range charts {
+		p := filepath.Join(dir, "charts", c)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "Chart.yaml"), []byte("apiVersion: v2\nname: "+c+"\nversion: 1.0.0\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("add", ".")
+	run("commit", "-q", "-m", "init")
+	return dir
+}
+
+// Namespacing an existing source renames its templates to "<source>.<chart>",
+// carries org overrides over, rewrites app pins through the repinner and
+// removes the bare-named template entries — in that order.
+func TestTemplateRegistryHandler_NamespaceSource(t *testing.T) {
+	mux, ah, client := newTemplateRegistryMuxWithClient(t)
+	repo := gitChartRepo(t, "web")
+	rep := &fakeRepinner{}
+	// Reach into the handler registered by the harness: rebuild the mux with
+	// an engine + repinner wired in.
+	mux = http.NewServeMux()
+	ah.registerRoutes(mux)
+	trh := &templateRegistryHandler{
+		store:      tpl.NewRegistryStore(client),
+		auth:       ah,
+		engine:     &registrysync.Engine{Client: client},
+		kubeClient: client,
+		repinner:   rep,
+		logger:     slog.Default(),
+	}
+	trh.registerRoutes(mux)
+	cookie := sessionCookieFor(ah, "admin", "org_admin")
+
+	// Registry: one bare-named gitcharts source that owns "web".
+	body := `{"builtIn":[],"external":[{"name":"acme","type":"gitcharts","repoURL":` + strconv.Quote(repo) + `,"ref":"main"}],
+		"sources":[{"name":"web","origin":"external","externalRepo":"acme"}]}`
+	putReq := httptest.NewRequest("PUT", "/api/v1/templates/registry", bytes.NewBufferString(body))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, putReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("seed PUT: %d %s", w.Code, w.Body.String())
+	}
+	// Cluster state from the source's earlier bare-named sync + an org override.
+	if _, err := client.CoreV1().ConfigMaps("suparship-system").Create(t.Context(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "suparship-template-web", Labels: map[string]string{"suparship.io/template-name": "web"}},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := kube.SaveTemplateOverride(t.Context(), client, "web", &domain.TemplateOverride{DefaultValues: map[string]any{"replicas": 2}}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/templates/registry/sources/acme/namespace", nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("namespace: %d %s", w.Code, w.Body.String())
+	}
+	var resp templateNamespaceResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Templates) != 1 || resp.Templates[0].From != "web" || resp.Templates[0].To != "acme.web" {
+		t.Fatalf("renames = %+v, want web → acme.web", resp.Templates)
+	}
+	if rep.renames["web"] != "acme.web" {
+		t.Errorf("repinner renames = %v, want web → acme.web", rep.renames)
+	}
+	if len(resp.Apps) != 1 || len(resp.Failures) != 0 {
+		t.Errorf("apps=%v failures=%v", resp.Apps, resp.Failures)
+	}
+
+	reg, err := tpl.NewRegistryStore(client).Get(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reg.External[0].Namespaced {
+		t.Error("source should be flagged namespaced")
+	}
+	var names []string
+	for _, s := range reg.Sources {
+		names = append(names, s.Name)
+	}
+	if len(names) != 1 || names[0] != "acme.web" {
+		t.Errorf("registry rows = %v, want [acme.web]", names)
+	}
+	cms := client.CoreV1().ConfigMaps("suparship-system")
+	if _, err := cms.Get(t.Context(), "suparship-template-acme.web", metav1.GetOptions{}); err != nil {
+		t.Errorf("namespaced template ConfigMap missing: %v", err)
+	}
+	if _, err := cms.Get(t.Context(), "suparship-template-web", metav1.GetOptions{}); err == nil {
+		t.Error("bare-named template ConfigMap should be deleted")
+	}
+	if ov, err := kube.LoadTemplateOverride(t.Context(), client, "acme.web"); err != nil || ov == nil || ov.DefaultValues["replicas"] != 2 {
+		t.Errorf("override not carried over: %v %v", ov, err)
+	}
+	if ov, _ := kube.LoadTemplateOverride(t.Context(), client, "web"); ov != nil {
+		t.Error("old override should be removed")
+	}
+
+	// Second call: already namespaced → 409.
+	req = httptest.NewRequest("POST", "/api/v1/templates/registry/sources/acme/namespace", nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Errorf("second namespace call = %d, want 409", w.Code)
+	}
+}
+
 func TestOrphanedManagedCreds(t *testing.T) {
 	managed := func(name string) tpl.ExternalTemplateRepo {
 		return tpl.ExternalTemplateRepo{Name: name, ExistingSecret: "suparship-tpl-credentials-" + name}
@@ -249,9 +397,9 @@ func TestOrphanedManagedCreds(t *testing.T) {
 		wantOrphans []string
 	}{
 		{
-			name:   "managed source removed",
-			before: []tpl.ExternalTemplateRepo{managed("foo"), managed("bar")},
-			after:  []tpl.ExternalTemplateRepo{managed("foo")},
+			name:        "managed source removed",
+			before:      []tpl.ExternalTemplateRepo{managed("foo"), managed("bar")},
+			after:       []tpl.ExternalTemplateRepo{managed("foo")},
 			wantOrphans: []string{"bar"},
 		},
 		{
@@ -260,9 +408,9 @@ func TestOrphanedManagedCreds(t *testing.T) {
 			after:  []tpl.ExternalTemplateRepo{},
 		},
 		{
-			name:   "rename produces an orphan",
-			before: []tpl.ExternalTemplateRepo{managed("old-name")},
-			after:  []tpl.ExternalTemplateRepo{managed("new-name")},
+			name:        "rename produces an orphan",
+			before:      []tpl.ExternalTemplateRepo{managed("old-name")},
+			after:       []tpl.ExternalTemplateRepo{managed("new-name")},
 			wantOrphans: []string{"old-name"},
 		},
 		{
