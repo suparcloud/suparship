@@ -39,6 +39,8 @@ import (
 // is non-nil.
 type appHandler struct {
 	appStore domain.AppStore
+	// drift memoizes GET .../gitops-drift answers per app (see app_drift_handler.go).
+	drift driftCache
 	// autoPromoteAttempts backs the auto-promotion reconciler's retry cooldown
 	// (see auto_promote.go), keyed "{project}/{app}/{env}".
 	autoPromoteMu       sync.Mutex
@@ -1730,6 +1732,7 @@ func (ah *appHandler) handleSyncApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ah.drift.invalidate(projectName + "/" + appName)
 	slog.Info("app synced to gitops repo — ArgoCD will sync shortly",
 		"project", projectName,
 		"app", appName,
@@ -1775,6 +1778,11 @@ type upgradeAppTemplateRequest struct {
 	// app-level pin is the only pin) onto a different template; Version then
 	// names the target's version (empty = its current one).
 	Template string `json:"template,omitempty"`
+	// Force re-publishes the app from suparship's stored state even when every
+	// target equals the stored pin (normally a no-op). The way back when the
+	// gitops repo was edited or reverted behind suparship: the pins are right,
+	// the repo is not. Also accepted as ?force=1.
+	Force bool `json:"force,omitempty"`
 }
 
 // upgradedComponentDTO reports one component's version move in the response.
@@ -1814,6 +1822,9 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 		return
 	}
 	wantVersion := strings.TrimSpace(req.Version)
+	if q := r.URL.Query().Get("force"); q == "1" || strings.EqualFold(q, "true") {
+		req.Force = true
+	}
 
 	// Migration onto a different template is its own path: it shares the
 	// validate-then-single-publish contract but also reconciles what the old
@@ -1889,7 +1900,7 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 	// publisher's single-component handling (component Values overlay, opt-out
 	// env projections) as a side effect of an upgrade.
 	if len(app.Spec.Components) == 0 {
-		ah.upgradeTemplatelessApp(w, r, app, wantVersion, req.Components, envScope)
+		ah.upgradeTemplatelessApp(w, r, app, wantVersion, req.Components, envScope, req.Force)
 		return
 	}
 	app.Spec.BackfillComponentTemplates()
@@ -1963,7 +1974,7 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 	// Env-scoped: write the pins as the chosen env's overrides and stop —
 	// the app-wide pins (and every other env) stay untouched.
 	if envScope != "" {
-		ah.upgradeAppTemplateForEnv(w, r, app, envScope, targets, skipped)
+		ah.upgradeAppTemplateForEnv(w, r, app, envScope, targets, skipped, req.Force)
 		return
 	}
 
@@ -2012,8 +2023,13 @@ func (ah *appHandler) handleUpgradeAppTemplate(w http.ResponseWriter, r *http.Re
 	}
 
 	// Nothing actually moved — re-pinning to the current version is fine, but
-	// don't pretend we did work (or churn a gitops commit for it).
+	// don't pretend we did work (or churn a gitops commit for it) — unless the
+	// caller asked to force a re-publish of the stored state.
 	if len(moved) == 0 {
+		if req.Force {
+			ah.forceRepublish(w, r, app, skipped)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"message": "app already pinned to the requested version(s)",
 			"project": projectName,
@@ -2185,7 +2201,7 @@ func (ah *appHandler) collapseConvergedTemplateVersions(ctx context.Context, app
 // target equal to the app-wide pin clears that env's override instead (the env
 // simply follows the pin again), and full convergence across stable envs folds
 // into the app-wide pin via collapseConvergedTemplateVersions.
-func (ah *appHandler) upgradeAppTemplateForEnv(w http.ResponseWriter, r *http.Request, app *domain.App, envName string, targets map[string]string, skipped []string) {
+func (ah *appHandler) upgradeAppTemplateForEnv(w http.ResponseWriter, r *http.Request, app *domain.App, envName string, targets map[string]string, skipped []string, force bool) {
 	projectName, appName := app.ProjectName, app.Name
 
 	appPin := map[string]string{}
@@ -2238,6 +2254,10 @@ func (ah *appHandler) upgradeAppTemplateForEnv(w http.ResponseWriter, r *http.Re
 		}
 	}
 	if len(moved) == 0 {
+		if force {
+			ah.forceRepublish(w, r, app, skipped)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"message":     fmt.Sprintf("%s is already on the requested version(s)", envName),
 			"project":     projectName,
@@ -2307,6 +2327,26 @@ func (ah *appHandler) upgradeAppTemplateForEnv(w http.ResponseWriter, r *http.Re
 		"app":         appName,
 		"environment": envName,
 		"components":  moved,
+		"skipped":     skipped,
+	})
+}
+
+// forceRepublish re-renders the app's stable environments from the stored
+// state without changing any pin — the upgrade dialog's "Re-publish current"
+// for a gitops repo that no longer matches suparship.
+func (ah *appHandler) forceRepublish(w http.ResponseWriter, r *http.Request, app *domain.App, skipped []string) {
+	if err := ah.republishStable(r.Context(), app); err != nil {
+		slog.Error("upgrade-template: forced re-publish failed", "project", app.ProjectName, "app", app.Name, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "re-publish failed: " + err.Error()})
+		return
+	}
+	ah.drift.invalidate(app.ProjectName + "/" + app.Name)
+	slog.Info("app re-published from stored state (forced)", "project", app.ProjectName, "app", app.Name)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":     "re-published from suparship's stored state — ArgoCD will sync the repo shortly",
+		"project":     app.ProjectName,
+		"app":         app.Name,
+		"republished": true,
 		"skipped":     skipped,
 	})
 }
@@ -2472,7 +2512,7 @@ func repinApp(app *domain.App, renames map[string]string) bool {
 // the pin the single-source render path reads, so it is upgraded directly (or,
 // env-scoped, via the env's reserved-"" TemplateVersions override). The
 // per-component request form has nothing to address here and is rejected.
-func (ah *appHandler) upgradeTemplatelessApp(w http.ResponseWriter, r *http.Request, app *domain.App, wantVersion string, components map[string]string, envScope string) {
+func (ah *appHandler) upgradeTemplatelessApp(w http.ResponseWriter, r *http.Request, app *domain.App, wantVersion string, components map[string]string, envScope string, force bool) {
 	if len(components) > 0 {
 		writeJSON(w, http.StatusBadRequest, errorResponse{
 			Error: fmt.Sprintf("app %q has no components; upgrade it with {\"version\": ...}", app.Name),
@@ -2491,13 +2531,17 @@ func (ah *appHandler) upgradeTemplatelessApp(w http.ResponseWriter, r *http.Requ
 
 	if envScope != "" {
 		// The reserved "" key pins the app-level template for this env only.
-		ah.upgradeAppTemplateForEnv(w, r, app, envScope, map[string]string{"": wantVersion}, nil)
+		ah.upgradeAppTemplateForEnv(w, r, app, envScope, map[string]string{"": wantVersion}, nil, force)
 		return
 	}
 
 	prevVersion := app.Spec.Template.Version
 	prevEnvDefaults := snapshotEnvTemplateVersions(app)
 	if prevVersion == wantVersion {
+		if force {
+			ah.forceRepublish(w, r, app, nil)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"message": "app already pinned to the requested version(s)",
 			"project": app.ProjectName,

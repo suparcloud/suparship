@@ -406,6 +406,8 @@ export interface UpgradeAppTemplateResponse {
   message: string;
   project: string;
   app: string;
+  /** Set when the call was a forced re-publish of the stored state (no pin moved). */
+  republished?: boolean;
   /** The PRIMARY template's move, for the single-component headline. */
   fromVersion?: string;
   toVersion?: string;
@@ -500,10 +502,38 @@ export function upgradeAppComponents(
   // Scope the upgrade to ONE stable environment (its per-env version pins);
   // omit to upgrade every environment at once.
   environment?: string,
+  // force re-publishes from suparship's stored state even when every target
+  // equals the stored pin — the way back when the gitops repo was edited or
+  // reverted behind suparship.
+  opts: { force?: boolean } = {},
 ): Promise<UpgradeAppTemplateResponse> {
   return api.post<UpgradeAppTemplateResponse>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/upgrade-template`,
-    environment ? { components, environment } : { components },
+    {
+      components,
+      ...(environment ? { environment } : {}),
+      ...(opts.force ? { force: true } : {}),
+    },
+  );
+}
+
+/** GET .../gitops-drift: files of this app's gitops tree that differ from
+ *  what suparship would publish from its stored state. */
+export interface AppGitopsDrift {
+  drifted: boolean;
+  files: string[];
+  checkedAt: string;
+  cached?: boolean;
+}
+
+export function getAppGitopsDrift(
+  project: string,
+  app: string,
+  opts: { refresh?: boolean } = {},
+): Promise<AppGitopsDrift> {
+  const qs = opts.refresh ? "?refresh=1" : "";
+  return api.get<AppGitopsDrift>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/gitops-drift${qs}`,
   );
 }
 

@@ -301,6 +301,12 @@ for this cluster's sealed-secrets controller, so the file is safe to commit.
   `_platform/` mirror in the GitOps repo and re-syncs the sources. Existing
   ConfigMaps are never overwritten; to roll one back to a committed version,
   delete it first (or copy the file into the ConfigMap by hand).
+- **Edited or reverted the GitOps repo by hand?** The app page shows an amber
+  "GitOps repo differs from suparship's state" banner listing the files a
+  publish would change. suparship's store is authoritative: **Sync to Git**
+  (or **Re-publish current** in the Upgrade dialog) rewrites the repo from it;
+  to keep the repo's version instead, make the matching change in suparship
+  (e.g. pick that template version in the Upgrade dialog).
 - **App stuck / "Not deployed"?** Check the app's Diagnostics panel first — it
   surfaces the ArgoCD/ESO reason. Most causes (bad image, unbound env, secret
   store not ready) point at a setup gate.

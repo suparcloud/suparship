@@ -1346,6 +1346,16 @@ func (a *gitOpsPublisherAdapter) PublishApp(ctx context.Context, app *domain.App
 	return nil
 }
 
+// DetectAppDrift implements server.AppDriftDetector: the files of this app's
+// gitops tree that differ between the repo and a fresh render from the store.
+func (a *gitOpsPublisherAdapter) DetectAppDrift(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) ([]string, error) {
+	pubEnvs, _, err := a.buildAppBundle(ctx, app, envs)
+	if err != nil {
+		return nil, err
+	}
+	return a.inner.DetectAppDrift(ctx, app, pubEnvs)
+}
+
 // buildAppBundle resolves an app's per-env AppPublishEnv slice (values overlays,
 // secrets, CD images, suspend key) and the AppSet envs for its infra. Shared by
 // PublishApp and the batched PublishApps so both produce identical output.

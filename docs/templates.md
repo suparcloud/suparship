@@ -406,6 +406,13 @@ In the UI the upgrade dialog's **Template** column is a picker; choosing a
 different template turns that row into a migration and shows the unknown-key
 warnings from a dry run before the confirm.
 
+Re-selecting a version a component is already pinned to is a no-op — unless
+you pass `"force": true` (or `?force=1`), which re-publishes the app's stable
+environments from suparship's stored state without touching any pin. That is
+the recovery path when the GitOps repo was edited or reverted directly and no
+longer matches suparship (the app page's drift banner names the files); in
+the dialog it is **Re-publish current**.
+
 Note an editing invariant: a component PATCH that omits `template.version`
 *preserves* the stored pin rather than re-pinning to the registry's current
 version. Only an explicit version, a brand-new component, or a retemplate onto a

@@ -2,8 +2,8 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents, retemplateAppComponents } from "../lib/apps";
-import type { RetemplateWarning } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents, retemplateAppComponents, getAppGitopsDrift } from "../lib/apps";
+import type { RetemplateWarning, AppGitopsDrift } from "../lib/apps";
 import type { ClusterValueOverride, RollbackCandidate, RollbackCandidatesResponse, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
@@ -553,6 +553,9 @@ function EnvPipelineBar({
   previewEnvs,
   selectedEnvName,
   onSelect,
+  drift,
+  driftChecking,
+  onCheckDrift,
 }: {
   project: string;
   appName: string;
@@ -560,6 +563,10 @@ function EnvPipelineBar({
   previewEnvs: AppEnvironmentSummary[];
   selectedEnvName: string | null;
   onSelect: (envName: string) => void;
+  // GitOps drift (see AppDetail): files a publish would change in the repo.
+  drift?: AppGitopsDrift | null;
+  driftChecking?: boolean;
+  onCheckDrift?: (refresh: boolean) => void;
 }) {
   const [pipeline, setPipeline] = useState<KargoAppPipeline | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -655,6 +662,32 @@ function EnvPipelineBar({
             </svg>
           )}
           {banner.message && <span className="break-words">{banner.message}</span>}
+        </div>
+      )}
+      {drift?.drifted && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium">GitOps repo differs from suparship's state</span>
+            <span className="text-amber-800">
+              — {drift.files.length} file{drift.files.length === 1 ? "" : "s"} would change on the next
+              publish. The repo was edited or reverted directly; re-publish to
+              restore suparship's state, or change the app here to match the repo.
+            </span>
+            <button
+              type="button"
+              onClick={() => onCheckDrift?.(true)}
+              disabled={driftChecking}
+              className="ml-auto rounded-md border border-amber-300 bg-white px-2 py-0.5 font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+            >
+              {driftChecking ? "Checking…" : "Re-check"}
+            </button>
+          </div>
+          <ul className="mt-1 max-h-24 overflow-y-auto font-mono text-[11px] text-amber-800">
+            {drift.files.slice(0, 20).map((f: string) => (
+              <li key={f}>{f}</li>
+            ))}
+            {drift.files.length > 20 && <li>… and {drift.files.length - 20} more</li>}
+          </ul>
         </div>
       )}
       {/* Pipeline row: stable envs connected by promotion arrows; each env
@@ -882,6 +915,29 @@ export function AppDetail() {
   // Sync to git
   type SyncState = "idle" | "syncing" | "success" | "error";
   const [syncState, setSyncState] = useState<SyncState>("idle");
+  // GitOps drift: what a publish from the store would change in the repo.
+  // Someone editing or reverting the repo directly shows up here; the fix is
+  // a re-publish (or a suparship-side change that matches the repo).
+  const [drift, setDrift] = useState<AppGitopsDrift | null>(null);
+  const [driftChecking, setDriftChecking] = useState(false);
+  const checkDrift = useCallback(
+    async (refresh = false) => {
+      if (!project || !appName) return;
+      setDriftChecking(true);
+      try {
+        setDrift(await getAppGitopsDrift(project, appName, { refresh }));
+      } catch {
+        // No publisher / unsupported — nothing to show.
+        setDrift(null);
+      } finally {
+        setDriftChecking(false);
+      }
+    },
+    [project, appName],
+  );
+  useEffect(() => {
+    void checkDrift(false);
+  }, [checkDrift]);
   const [syncError, setSyncError] = useState<string | null>(null);
 
   // Delete app
@@ -1058,6 +1114,19 @@ export function AppDetail() {
   useEffect(() => {
     if (pendingRetemplates.length > 0 && upgradeEnv) setUpgradeEnv("");
   }, [pendingRetemplates.length, upgradeEnv]);
+
+  // Checked rows whose target EQUALS what the chosen scope runs. Normally a
+  // no-op, but with the force flag they re-publish the stored state — the way
+  // back when the gitops repo was edited or reverted behind suparship.
+  const checkedUnchanged = useMemo(
+    () =>
+      upgradeRows.filter((r) => {
+        if (!upgradeSelection[r.name] || templateChoiceOf(r) !== r.template) return false;
+        const target = upgradeTargets[r.name] ?? r.current;
+        return !!target && target === envCurrentOf(r.name, r.current);
+      }),
+    [upgradeRows, upgradeSelection, upgradeTargets, envCurrentOf, templateChoiceOf],
+  );
 
   // Only checked rows (on their own template) whose target differs from what
   // the chosen scope runs are submitted — re-sending an unchanged pin would be
@@ -1286,6 +1355,7 @@ export function AppDetail() {
                 toast.success("Synced to Git", {
                   description: "ArgoCD will pick up the latest changes shortly.",
                 });
+                void checkDrift(true);
                 setTimeout(() => setSyncState("idle"), 3000);
               } catch (err) {
                 const msg = err instanceof Error ? err.message : "Sync failed";
@@ -1664,7 +1734,9 @@ export function AppDetail() {
               upgrading, and adjust the app's values via the existing flow. Pick a
               different <em>Template</em> to migrate a component onto another
               chart; you will see the overlay keys that chart does not know before
-              confirming.
+              confirming. Checking rows at their current version and pressing{" "}
+              <em>Re-publish current</em> rewrites the repo from suparship's stored
+              state — use it when the repo was edited or reverted directly.
             </p>
 
             {/* Scope: upgrades roll out env by env — the chosen env gets a
@@ -1844,11 +1916,31 @@ export function AppDetail() {
               </button>
               <button
                 type="button"
-                disabled={upgrading || (pendingUpgrades.length === 0 && pendingRetemplates.length === 0)}
+                disabled={
+                  upgrading ||
+                  (pendingUpgrades.length === 0 && pendingRetemplates.length === 0 && checkedUnchanged.length === 0)
+                }
                 onClick={async () => {
                   if (!project || !appName) return;
                   setUpgrading(true);
                   try {
+                    // Nothing moves but rows are checked at their current
+                    // version: force a re-publish of the stored state.
+                    if (pendingUpgrades.length === 0 && pendingRetemplates.length === 0 && checkedUnchanged.length > 0) {
+                      await upgradeAppComponents(
+                        project,
+                        appName,
+                        Object.fromEntries(checkedUnchanged.map((r) => [r.name, upgradeTargets[r.name] ?? r.current])),
+                        upgradeEnv || undefined,
+                        { force: true },
+                      );
+                      toast.success(`Re-published ${appName} from suparship's stored state`);
+                      setShowUpgradeDialog(false);
+                      const refreshed = await getApp(project, appName);
+                      setData(refreshed.app);
+                      void checkDrift(true);
+                      return;
+                    }
                     if (pendingRetemplates.length > 0) {
                       const targets = Object.fromEntries(
                         pendingRetemplates.map((r) => [
@@ -1922,7 +2014,9 @@ export function AppDetail() {
                           : "Migrate"
                     : pendingUpgrades.length > 1
                       ? `Upgrade ${pendingUpgrades.length} components`
-                      : "Upgrade"}
+                      : pendingUpgrades.length === 0 && checkedUnchanged.length > 0
+                        ? "Re-publish current"
+                        : "Upgrade"}
               </button>
             </div>
           </div>
@@ -2121,6 +2215,9 @@ export function AppDetail() {
           previewEnvs={previewEnvs}
           selectedEnvName={selectedEnvName}
           onSelect={setSelectedEnvName}
+          drift={drift}
+          driftChecking={driftChecking}
+          onCheckDrift={(refresh) => void checkDrift(refresh)}
         />
       )}
 

@@ -68,6 +68,14 @@ suparship-backup.yaml`) and roll the chart back.
   to migrate.
 - Removing a component from an app now also removes its per-env values,
   variable overrides and version pins.
+- **GitOps drift is surfaced on the app page.** suparship renders the app from
+  its stored state and compares with the repo (`GET .../apps/{app}/gitops-drift`);
+  files that differ — a direct edit or revert of the repo — show in an amber
+  banner with the paths. **Re-publish** (Sync to Git) restores suparship's
+  state. The Upgrade dialog also gains **Re-publish current** (the
+  `force` flag on `upgrade-template`) for rows checked at their current
+  version, since re-selecting an already-pinned version used to be a silent
+  no-op that left a reverted repo unchanged.
 - **Template registry and overrides are mirrored into the GitOps repo** under
   `_platform/` (config as code). The cluster ConfigMaps stay authoritative;
   nothing applies the mirror. On the first start after upgrading (or when a

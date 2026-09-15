@@ -392,6 +392,29 @@ func (h *PublisherHolder) DeleteAppPreview(ctx context.Context, projectName, pre
 	return nil
 }
 
+// AppDriftDetector reports the gitops files of an app that differ from what
+// suparship would publish from its stored state — repo edits or reverts made
+// behind suparship's back. Optional publisher capability, asserted through
+// PublisherHolder.
+type AppDriftDetector interface {
+	DetectAppDrift(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) ([]string, error)
+}
+
+// errDriftUnsupported marks a publisher without drift detection.
+var errDriftUnsupported = errors.New("drift detection is not supported by the configured publisher")
+
+// DetectAppDrift delegates to the held publisher when it implements
+// AppDriftDetector.
+func (h *PublisherHolder) DetectAppDrift(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) ([]string, error) {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	if d, ok := p.(AppDriftDetector); ok {
+		return d.DetectAppDrift(ctx, app, envs)
+	}
+	return nil, errDriftUnsupported
+}
+
 // TemplateConfigMirrorer writes the template registry + overrides mirror into
 // the GitOps repo (config as code). Optional capability of the publisher,
 // asserted through PublisherHolder so a hot-reloaded publisher is used.
