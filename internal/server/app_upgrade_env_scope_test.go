@@ -55,6 +55,72 @@ func TestUpgradeTemplate_EnvScopedWritesOverrideOnly(t *testing.T) {
 	}
 }
 
+// An env-scoped upgrade must never move an environment that was not selected —
+// even when that other environment has no recorded AppEnvironment yet (an app
+// created before per-org env records, cloned, or never promoted). The
+// convergence fold used to treat the one recorded env as "every env" and hoist
+// the pin app-wide, which re-versioned prod on the same publish.
+func TestUpgradeTemplate_EnvScopedDoesNotLeakWhenOtherEnvUnrecorded(t *testing.T) {
+	kc := fake.NewSimpleClientset(archiveCM("web-service", "1.0.0"), archiveCM("web-service", "1.1.0"))
+	mux, ah, store := newTestAppUpgradeMuxWithKube(testProject, &recordingPublisher{}, kc)
+	store.addApp(upgradeTestApp(testProject, comp("web", "web-service", "1.0.0")))
+	// Only staging is recorded; the org still defines prod.
+	_ = store.SaveAppEnvironment(context.Background(), testProject, &domain.AppEnvironment{
+		AppName: "my-app", EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1,
+	})
+	cookie := sessionCookieFor(ah, "alice", "org_admin")
+
+	rec := postUpgradeTemplateJSON(mux, cookie, testProject, "my-app",
+		map[string]any{"version": "1.1.0", "environment": "staging"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	app, _ := store.GetApp(context.Background(), testProject, "my-app")
+	if got := componentVersions(app)["web"]; got != "1.0.0" {
+		t.Errorf("app-wide pin = %q, want 1.0.0 (untouched)", got)
+	}
+	if got := app.Spec.EnvironmentDefaults["staging"].TemplateVersions["web"]; got != "1.1.0" {
+		t.Errorf("staging pin = %q, want 1.1.0", got)
+	}
+	if got := effectiveTemplateVersionsForEnv(app, "prod")["web"]; got != "1.0.0" {
+		t.Errorf("prod effective version = %q, want 1.0.0 — the env-scoped upgrade leaked", got)
+	}
+	if got := effectiveTemplateVersionsForEnv(app, "staging")["web"]; got != "1.1.0" {
+		t.Errorf("staging effective version = %q, want 1.1.0", got)
+	}
+}
+
+// Same contract for the per-component form on a composed app: only the named
+// component in the named env moves; the sibling component and prod stay put.
+func TestUpgradeTemplate_EnvScopedComponentsDoNotLeak(t *testing.T) {
+	kc := fake.NewSimpleClientset(
+		archiveCM("web-service", "1.0.0"), archiveCM("web-service", "1.1.0"),
+		archiveCM("worker", "2.0.0"), archiveCM("worker", "2.1.0"))
+	mux, ah, store := newTestAppUpgradeMuxWithKube(testProject, &recordingPublisher{}, kc)
+	store.addApp(upgradeTestApp(testProject, comp("web", "web-service", "1.0.0"), comp("jobs", "worker", "2.0.0")))
+	seedStableEnvs(store, testProject)
+	cookie := sessionCookieFor(ah, "alice", "org_admin")
+
+	rec := postUpgradeTemplateJSON(mux, cookie, testProject, "my-app",
+		map[string]any{"components": map[string]string{"web": "1.1.0", "jobs": "2.1.0"}, "environment": "staging"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	app, _ := store.GetApp(context.Background(), testProject, "my-app")
+	prod := effectiveTemplateVersionsForEnv(app, "prod")
+	if prod["web"] != "1.0.0" || prod["jobs"] != "2.0.0" {
+		t.Errorf("prod effective = %v, want web 1.0.0 / jobs 2.0.0", prod)
+	}
+	staging := effectiveTemplateVersionsForEnv(app, "staging")
+	if staging["web"] != "1.1.0" || staging["jobs"] != "2.1.0" {
+		t.Errorf("staging effective = %v, want web 1.1.0 / jobs 2.1.0", staging)
+	}
+	if v := componentVersions(app); v["web"] != "1.0.0" || v["jobs"] != "2.0.0" {
+		t.Errorf("app-wide pins = %v, want untouched", v)
+	}
+}
+
 // Once every stable env pins the same version, the overrides fold into the
 // app-wide pin and the spec reads as if the upgrade had been app-wide.
 func TestUpgradeTemplate_EnvScopedConvergenceCollapses(t *testing.T) {

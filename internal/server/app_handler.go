@@ -2043,21 +2043,48 @@ func restoreEnvTemplateVersions(app *domain.App, snap map[string]map[string]stri
 	}
 }
 
-// stableEnvNamesForApp lists the app's stable (non-preview) environment names,
-// falling back to the org's environments when none are recorded yet — the same
-// universe saveAndRepublishUpgrade publishes to.
+// stableEnvNamesForApp lists every stable (non-preview) environment the app
+// can be published to: the UNION of the app's recorded environments and the
+// org's stable environments. Recorded envs alone are not enough — an app
+// created before per-org env records existed, cloned, or never promoted to an
+// env has no record for it, and a convergence check over "all envs" that only
+// sees one env would fold an env-scoped pin into the app-wide pin and move
+// every other environment along with it.
 func (ah *appHandler) stableEnvNamesForApp(ctx context.Context, app *domain.App) []string {
 	var out []string
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	for _, e := range ah.stableEnvsFromOrg(ctx, app) {
+		add(e.EnvName)
+	}
 	if envs, err := ah.appStore.ListAppEnvironments(ctx, app.ProjectName, app.Name); err == nil {
 		for _, e := range envs {
 			if e.EnvType != domain.AppEnvPreview {
-				out = append(out, e.EnvName)
+				add(e.EnvName)
 			}
 		}
 	}
-	if len(out) == 0 {
-		for _, e := range ah.stableEnvsFromOrg(ctx, app) {
-			out = append(out, e.EnvName)
+	return out
+}
+
+// effectiveTemplateVersionsForEnv returns what envName actually renders with:
+// component name → version (and the reserved "" key for the app-level pin),
+// after applying that env's overrides on top of the app-wide pins.
+func effectiveTemplateVersionsForEnv(app *domain.App, envName string) map[string]string {
+	envApp := domain.AppForEnvTemplateVersions(app, envName)
+	out := map[string]string{"": envApp.Spec.Template.Version}
+	for _, c := range envApp.Spec.Components {
+		if c.Template != nil {
+			out[c.Name] = c.Template.Version
 		}
 	}
 	return out
@@ -2197,7 +2224,40 @@ func (ah *appHandler) upgradeAppTemplateForEnv(w http.ResponseWriter, r *http.Re
 	}
 	app.Spec.EnvironmentDefaults[envName] = ov
 
+	// Folding converged pins into the app-wide pin is a normalization, never a
+	// change in what any environment runs. Verify that contract: if the fold
+	// would alter another environment's effective versions (a convergence
+	// universe that missed an env, a future rule change), keep the explicit
+	// per-env pin instead — the env-scoped upgrade must only touch envName.
+	envUniverse := ah.stableEnvNamesForApp(r.Context(), app)
+	before := map[string]map[string]string{}
+	for _, name := range envUniverse {
+		if name != envName {
+			before[name] = effectiveTemplateVersionsForEnv(app, name)
+		}
+	}
+	preCollapseComponents := make([]domain.ComponentSpec, len(app.Spec.Components))
+	copy(preCollapseComponents, app.Spec.Components)
+	for i := range preCollapseComponents {
+		if preCollapseComponents[i].Template != nil {
+			t := *preCollapseComponents[i].Template
+			preCollapseComponents[i].Template = &t
+		}
+	}
+	preCollapseTemplate := app.Spec.Template
+	preCollapseEnvDefaults := snapshotEnvTemplateVersions(app)
 	ah.collapseConvergedTemplateVersions(r.Context(), app)
+	for name, want := range before {
+		got := effectiveTemplateVersionsForEnv(app, name)
+		if !equalStringMaps(got, want) {
+			slog.Warn("upgrade-template: convergence fold would change another environment; keeping per-env pins",
+				"project", projectName, "app", appName, "env", envName, "affected", name)
+			app.Spec.Components = preCollapseComponents
+			app.Spec.Template = preCollapseTemplate
+			restoreEnvTemplateVersions(app, preCollapseEnvDefaults)
+			break
+		}
+	}
 
 	if !ah.saveAndRepublishUpgrade(w, r, app, func() {
 		app.Spec.Components = prevComponents
@@ -2217,6 +2277,18 @@ func (ah *appHandler) upgradeAppTemplateForEnv(w http.ResponseWriter, r *http.Re
 		"components":  moved,
 		"skipped":     skipped,
 	})
+}
+
+func equalStringMaps(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // saveAndRepublishUpgrade persists a mutated app and re-publishes it via the same
