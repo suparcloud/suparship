@@ -2860,6 +2860,12 @@ func runOneTemplateSync(
 			}
 		}
 	}
+	// Self-heal registries that still carry rows of already-deleted repos
+	// (rows only — template ConfigMaps are removed on the explicit
+	// registry update, never by a background tick).
+	if removed := reg.PruneOrphanSources(); len(removed) > 0 {
+		logger.Info("template sync: pruned rows of removed sources", "count", len(removed))
+	}
 	if err := store.Save(ctx, reg); err != nil {
 		logger.Warn("template sync: persist registry state failed", "err", err)
 	}

@@ -317,7 +317,7 @@ export function TemplateSources() {
 
   async function handleRemove(name: string) {
     const confirmed = window.confirm(
-      `Remove external source "${name}"? Templates already synced from it will remain in the cluster until cleaned up manually.`,
+      `Remove external source "${name}"? Templates synced from it will be removed from the cluster; apps already created from them keep their copied chart.`,
     );
     if (!confirmed) return;
     try {

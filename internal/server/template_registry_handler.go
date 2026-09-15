@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/tpl"
 	"github.com/suparcloud/suparship/internal/tpl/credstore"
 	"github.com/suparcloud/suparship/internal/tpl/registrysync"
@@ -106,6 +107,13 @@ func (h *templateRegistryHandler) handleUpdateRegistry(w http.ResponseWriter, r 
 	// across sources, or manage them via ESO/SealedSecret-by-hand).
 	orphans := orphanedManagedCreds(h.previousExternal(r.Context()), reg.External)
 
+	// Sources rows of repos that are no longer in External[] are dropped
+	// server-side (the UI round-trips whatever it loaded), and the templates
+	// those rows describe are removed from the cluster below. Without this a
+	// deleted source keeps owning its template names forever and every later
+	// source shipping the same charts is refused on sync.
+	removedRows := reg.PruneOrphanSources()
+
 	if err := h.store.Save(r.Context(), &reg); err != nil {
 		h.logger.Error("save template registry", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save template registry"})
@@ -119,6 +127,14 @@ func (h *templateRegistryHandler) handleUpdateRegistry(w http.ResponseWriter, r 
 			if err := h.credStore.Delete(r.Context(), name); err != nil {
 				h.logger.Warn("orphan cleanup: delete sealed credentials",
 					"source", name, "error", err)
+			}
+		}
+	}
+	if h.kubeClient != nil {
+		for _, row := range removedRows {
+			if _, err := kube.DeleteTemplate(r.Context(), h.kubeClient, row.Name); err != nil {
+				h.logger.Warn("orphan cleanup: delete template of removed source",
+					"source", row.ExternalRepo, "template", row.Name, "error", err)
 			}
 		}
 	}
@@ -235,6 +251,8 @@ func (h *templateRegistryHandler) handleSyncAll(w http.ResponseWriter, r *http.R
 			registrysync.ApplyResult(reg, repo, results[i])
 		}
 	}
+	// Self-heal registries that still carry rows of already-deleted repos.
+	reg.PruneOrphanSources()
 	if err := h.store.Save(r.Context(), reg); err != nil {
 		h.logger.Error("sync: save registry", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist sync state"})
@@ -276,6 +294,7 @@ func (h *templateRegistryHandler) handleSyncOne(w http.ResponseWriter, r *http.R
 
 	result := h.engine.SyncOne(r.Context(), *target, reg)
 	registrysync.ApplyResult(reg, *target, result)
+	reg.PruneOrphanSources()
 	if err := h.store.Save(r.Context(), reg); err != nil {
 		h.logger.Error("sync: save registry", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist sync state"})

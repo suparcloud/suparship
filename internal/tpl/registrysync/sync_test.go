@@ -443,12 +443,19 @@ func TestSyncOne_CollisionGuard(t *testing.T) {
 
 	client := k8sfake.NewClientset()
 	eng := &registrysync.Engine{Client: client, Builtins: []string{"worker"}}
-	reg := &tpl.TemplateRegistry{Sources: []tpl.TemplateSource{
-		// "web" belongs to a different source → conflict.
-		{Name: "web", Origin: "external", ExternalRepo: "other-source"},
-		// "mine" was previously synced by THIS source → re-sync allowed.
-		{Name: "mine", Origin: "external", ExternalRepo: "demo"},
-	}}
+	reg := &tpl.TemplateRegistry{
+		// Both sources are still configured; only a LIVE repo can own a name.
+		External: []tpl.ExternalTemplateRepo{
+			{Name: "other-source", Type: "gitcharts", RepoURL: "https://example.com/other.git"},
+			{Name: "demo", Type: "gitcharts", RepoURL: repoDir},
+		},
+		Sources: []tpl.TemplateSource{
+			// "web" belongs to a different source → conflict.
+			{Name: "web", Origin: "external", ExternalRepo: "other-source"},
+			// "mine" was previously synced by THIS source → re-sync allowed.
+			{Name: "mine", Origin: "external", ExternalRepo: "demo"},
+		},
+	}
 
 	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
 		Name:    "demo",
@@ -473,6 +480,47 @@ func TestSyncOne_CollisionGuard(t *testing.T) {
 	if _, err := client.CoreV1().ConfigMaps("suparship-system").Get(
 		context.Background(), "suparship-template-mine", metav1.GetOptions{}); err != nil {
 		t.Errorf("non-conflicting template mine should be persisted: %v", err)
+	}
+}
+
+// TestSyncOne_CollisionGuard_IgnoresRemovedSource: a Sources row whose repo
+// is no longer in External (the source was deleted, its rows were not) must
+// not block another source from importing the same chart name — that is the
+// "already provided by source <deleted-name>" trap operators cannot fix from
+// the UI.
+func TestSyncOne_CollisionGuard_IgnoresRemovedSource(t *testing.T) {
+	requireGit(t)
+
+	repoDir := t.TempDir()
+	gitInit(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, "charts/web/Chart.yaml"),
+		"apiVersion: v2\nname: web\nversion: 1.0.0\n")
+	gitCommit(t, repoDir, "initial")
+
+	client := k8sfake.NewClientset()
+	eng := &registrysync.Engine{Client: client}
+	reg := &tpl.TemplateRegistry{
+		External: []tpl.ExternalTemplateRepo{
+			{Name: "demo", Type: "gitcharts", RepoURL: repoDir},
+		},
+		Sources: []tpl.TemplateSource{
+			// Left behind by a source that has since been removed from External.
+			{Name: "web", Origin: "external", ExternalRepo: "platfrom-templates"},
+		},
+	}
+
+	res := eng.SyncOne(context.Background(), tpl.ExternalTemplateRepo{
+		Name:    "demo",
+		Type:    "gitcharts",
+		RepoURL: repoDir,
+		Ref:     "main",
+	}, reg)
+
+	if res.Err != nil {
+		t.Fatalf("ghost owner must not block the import: %v", res.Err)
+	}
+	if len(res.Templates) != 1 || res.Templates[0] != "web" {
+		t.Fatalf("expected [web] imported, got %v", res.Templates)
 	}
 }
 

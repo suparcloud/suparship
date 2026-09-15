@@ -74,3 +74,40 @@ func TestExternalTemplateRepo_GitChartsValidate(t *testing.T) {
 		t.Error("expected error when repoURL is missing")
 	}
 }
+
+func TestTemplateRegistry_PruneOrphanSources(t *testing.T) {
+	reg := &TemplateRegistry{
+		External: []ExternalTemplateRepo{{Name: "live", RepoURL: "https://example.com/live.git"}},
+		Sources: []TemplateSource{
+			{Name: "web", Origin: "external", ExternalRepo: "live"},
+			{Name: "worker", Origin: "external", ExternalRepo: "deleted-with-typo"},
+			{Name: "cronjob", Origin: "external", ExternalRepo: "deleted-with-typo"},
+			{Name: "byo-upload", Origin: "cluster"},
+			{Name: "web-service", Origin: "builtin", Version: "1.0.0"},
+		},
+	}
+
+	removed := reg.PruneOrphanSources()
+
+	if len(removed) != 2 || removed[0].Name != "worker" || removed[1].Name != "cronjob" {
+		t.Fatalf("removed = %+v, want the two rows of the deleted repo", removed)
+	}
+	var kept []string
+	for _, s := range reg.Sources {
+		kept = append(kept, s.Name)
+	}
+	want := []string{"web", "byo-upload", "web-service"}
+	if len(kept) != len(want) {
+		t.Fatalf("kept = %v, want %v", kept, want)
+	}
+	for i := range want {
+		if kept[i] != want[i] {
+			t.Errorf("kept[%d] = %q, want %q", i, kept[i], want[i])
+		}
+	}
+
+	// Idempotent: a clean registry loses nothing.
+	if again := reg.PruneOrphanSources(); len(again) != 0 {
+		t.Errorf("second prune removed %+v, want nothing", again)
+	}
+}

@@ -163,10 +163,23 @@ func (e *Engine) SyncOne(ctx context.Context, repo tpl.ExternalTemplateRepo, reg
 func (e *Engine) templateOwners(repo tpl.ExternalTemplateRepo, reg *tpl.TemplateRegistry) map[string]string {
 	owners := make(map[string]string, len(e.Builtins))
 	if reg != nil {
+		// Only repos still configured can own a name. Sources rows outlive
+		// their repo when it is removed from External (nothing rewrote them
+		// until PruneOrphanSources landed), and a ghost owner would refuse
+		// every later source shipping the same chart names in the name of a
+		// repo the operator can no longer see or remove.
+		live := make(map[string]struct{}, len(reg.External))
+		for _, ext := range reg.External {
+			live[ext.Name] = struct{}{}
+		}
 		for _, s := range reg.Sources {
-			if s.ExternalRepo != "" && s.ExternalRepo != repo.Name {
-				owners[s.Name] = fmt.Sprintf("source %q", s.ExternalRepo)
+			if s.ExternalRepo == "" || s.ExternalRepo == repo.Name {
+				continue
 			}
+			if _, ok := live[s.ExternalRepo]; !ok {
+				continue
+			}
+			owners[s.Name] = fmt.Sprintf("source %q", s.ExternalRepo)
 		}
 	}
 	// Built-ins last so a (mis)claimed built-in name still reports as

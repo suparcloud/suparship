@@ -19,6 +19,12 @@ import (
 
 func newTemplateRegistryMux(t *testing.T) (*http.ServeMux, *authHandler) {
 	t.Helper()
+	mux, ah, _ := newTemplateRegistryMuxWithClient(t)
+	return mux, ah
+}
+
+func newTemplateRegistryMuxWithClient(t *testing.T) (*http.ServeMux, *authHandler, *kubefake.Clientset) {
+	t.Helper()
 	client := kubefake.NewSimpleClientset(
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "suparship-system"}},
 	)
@@ -32,13 +38,14 @@ func newTemplateRegistryMux(t *testing.T) (*http.ServeMux, *authHandler) {
 	ah.registerRoutes(mux)
 
 	trh := &templateRegistryHandler{
-		store:  tpl.NewRegistryStore(client),
-		auth:   ah,
-		logger: slog.Default(),
+		store:      tpl.NewRegistryStore(client),
+		auth:       ah,
+		kubeClient: client,
+		logger:     slog.Default(),
 	}
 	trh.registerRoutes(mux)
 
-	return mux, ah
+	return mux, ah, client
 }
 
 func TestTemplateRegistryHandler_GetEmpty(t *testing.T) {
@@ -151,6 +158,79 @@ func TestTemplateRegistryHandler_Unauthenticated(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+// Removing an external source from the registry must also drop the Sources
+// rows it imported and the template ConfigMaps behind them — otherwise the
+// deleted source keeps "owning" its template names and every later source
+// shipping the same charts is refused on sync.
+func TestTemplateRegistryHandler_PutPrunesRemovedSource(t *testing.T) {
+	mux, ah, client := newTemplateRegistryMuxWithClient(t)
+	cookie := sessionCookieFor(ah, "admin", "org_admin")
+
+	// Cluster state left behind by the (typo-named) source's last sync.
+	for _, name := range []string{"worker", "cronjob"} {
+		_, err := client.CoreV1().ConfigMaps("suparship-system").Create(t.Context(), &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "suparship-template-" + name,
+				Labels: map[string]string{"suparship.io/template-name": name},
+			},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("seed configmap %s: %v", name, err)
+		}
+	}
+	_, err := client.CoreV1().ConfigMaps("suparship-system").Create(t.Context(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "suparship-template-web",
+			Labels: map[string]string{"suparship.io/template-name": "web"},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("seed configmap web: %v", err)
+	}
+
+	// The UI sends back the registry it loaded with the source removed from
+	// external[] but every sources[] row still present.
+	body := `{
+		"builtIn": [],
+		"external": [{"name": "platform-templates", "repoURL": "https://example.com/t.git", "ref": "main", "path": "charts"}],
+		"sources": [
+			{"name": "web", "origin": "external", "externalRepo": "platform-templates"},
+			{"name": "worker", "origin": "external", "externalRepo": "platfrom-templates"},
+			{"name": "cronjob", "origin": "external", "externalRepo": "platfrom-templates"},
+			{"name": "byo", "origin": "cluster"}
+		]
+	}`
+	putReq := httptest.NewRequest("PUT", "/api/v1/templates/registry", bytes.NewBufferString(body))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, putReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp templateRegistryResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var names []string
+	for _, s := range resp.Registry.Sources {
+		names = append(names, s.Name)
+	}
+	if len(names) != 2 || names[0] != "web" || names[1] != "byo" {
+		t.Fatalf("sources after PUT = %v, want [web byo]", names)
+	}
+
+	// Ghost rows' ConfigMaps are gone; the live source's and unrelated ones stay.
+	for name, wantGone := range map[string]bool{"worker": true, "cronjob": true, "web": false} {
+		_, err := client.CoreV1().ConfigMaps("suparship-system").Get(t.Context(), "suparship-template-"+name, metav1.GetOptions{})
+		gone := err != nil
+		if gone != wantGone {
+			t.Errorf("configmap %s gone=%v, want %v (err=%v)", name, gone, wantGone, err)
+		}
 	}
 }
 

@@ -163,6 +163,35 @@ func (r *TemplateRegistry) FindSource(name string) *TemplateSource {
 	return nil
 }
 
+// PruneOrphanSources drops every Sources row that claims to come from an
+// external repo no longer listed in External, and returns the dropped rows.
+//
+// Rows are only ever rewritten per-repo by the sync engine, so once a repo
+// is removed from External its rows would otherwise live forever — and keep
+// "owning" their template names, so a later source shipping a same-named
+// chart is refused in the name of a repo the operator already deleted.
+// Rows with an empty ExternalRepo (built-ins, wizard/BYO uploads) are not
+// attributed to any repo and are left alone.
+func (r *TemplateRegistry) PruneOrphanSources() []TemplateSource {
+	live := make(map[string]struct{}, len(r.External))
+	for _, ext := range r.External {
+		live[ext.Name] = struct{}{}
+	}
+	var removed []TemplateSource
+	kept := r.Sources[:0]
+	for _, s := range r.Sources {
+		if s.ExternalRepo != "" {
+			if _, ok := live[s.ExternalRepo]; !ok {
+				removed = append(removed, s)
+				continue
+			}
+		}
+		kept = append(kept, s)
+	}
+	r.Sources = kept
+	return removed
+}
+
 // UpsertSource adds or updates a TemplateSource by name.
 func (r *TemplateRegistry) UpsertSource(src TemplateSource) {
 	for i := range r.Sources {
