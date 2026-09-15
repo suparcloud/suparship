@@ -13,9 +13,15 @@ import type { ComponentEnvVar } from "../types";
 // ComponentEnvPanel — per-component variables, rendered INLINE in the component
 // card (an "env vars" disclosure, sibling of "values").
 //
+// The panel edits ONE environment's settings — the env selected at the top of
+// the app page (or the compose canvas's env). `value` is the EFFECTIVE state
+// for that env (app-wide ⊕ the env's override) so the editor shows what is
+// live; what it saves is written back as that env's override, layered over the
+// app-wide list by name. Nothing here writes app-wide.
+//
 // Two editing surfaces, both delivered through platform-rendered objects:
 //
-//   - Add / override rows: literal envVars, applied in EVERY environment.
+//   - Add / override rows: literal envVars for the selected environment.
 //     While inheriting they put the component on the extend/override posture —
 //     the publisher renders <app>-<component>-config as the app/env vars
 //     merged with these literals (literal wins) and points the component's
@@ -44,6 +50,7 @@ interface ChecklistRow {
 
 export function ComponentEnvPanel({
   componentName,
+  env,
   value,
   appCtx,
   onSave,
@@ -51,7 +58,9 @@ export function ComponentEnvPanel({
   saving = false,
 }: {
   componentName: string;
-  // Current stored/draft state.
+  // The environment being edited (display only — the caller scopes the write).
+  env?: string | null;
+  // Current EFFECTIVE state for `env` (app-wide ⊕ env override).
   value: ComponentEnvValue;
   // When the app exists: enables the inherited-keys checklist.
   appCtx?: { project: string; appName: string; env: string | null };
@@ -209,13 +218,25 @@ export function ComponentEnvPanel({
       <section>
         <h3 className="text-xs font-medium uppercase tracking-wider text-gray-400">
           Component variables
+          {env && (
+            <span className="ml-2 rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-white">
+              {env}
+            </span>
+          )}
         </h3>
         <p className="mt-0.5 text-xs text-gray-500">
-          Variables for <span className="font-mono">{componentName}</span>,
-          applied in <strong>every environment</strong>. A name matching an
-          inherited key <strong>overrides</strong> it (variables, not secrets —
-          secret values are added at app/env scope; map inherited secrets
-          below).
+          Variables for <span className="font-mono">{componentName}</span>
+          {env ? (
+            <>
+              {" "}in <strong>{env}</strong> only — pick another environment at
+              the top of the page to edit it.
+            </>
+          ) : (
+            <> — select an environment at the top of the page first.</>
+          )}{" "}
+          A name matching an inherited key <strong>overrides</strong> it
+          (variables, not secrets — secret values are added at app/env scope;
+          map inherited secrets below).
         </p>
         <div className="mt-2 space-y-1.5">
           {literals.map((o, i) => (
@@ -370,7 +391,8 @@ export function ComponentEnvPanel({
       <div className="flex justify-end">
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || !env}
+          title={env ? undefined : "Select an environment first"}
           className="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
         >
           {saving ? "Saving…" : saveLabel}

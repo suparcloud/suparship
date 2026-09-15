@@ -53,10 +53,15 @@ type ComponentSummaryDTO struct {
 	// from EnvironmentDefaults[env].ComponentValues[name] so the detail page can
 	// edit per-env component values.
 	EnvValues map[string]map[string]any `json:"envValues,omitempty"`
-	// InheritAppVars / EnvVars expose the component's env policy for the detail
-	// page (inherit all app vars, or a curated subset).
+	// InheritAppVars / EnvVars expose the component's APP-WIDE env policy for the
+	// detail page (inherit all app vars, or a curated subset).
 	InheritAppVars *bool                `json:"inheritAppVars,omitempty"`
 	EnvVars        []ComponentEnvVarDTO `json:"envVars,omitempty"`
+	// EnvEnvVars holds this component's per-environment variable overrides keyed
+	// by env name — each layered over InheritAppVars/EnvVars for that env only
+	// (posture replaced when set, entries merged by name). Populated from
+	// EnvironmentDefaults[env].ComponentEnvVars[name].
+	EnvEnvVars map[string]ComponentEnvOverrideDTO `json:"envEnvVars,omitempty"`
 	// Images exposes the component's Kargo image bindings (repo + tag-key).
 	Images []ComponentImageDTO `json:"images,omitempty"`
 	// Stateful reports whether this component renders as its own prune-disabled
@@ -363,6 +368,13 @@ type ComponentEnvVarDTO struct {
 	FromSecret string `json:"fromSecret,omitempty"`
 }
 
+// ComponentEnvOverrideDTO is one environment's override of a component's
+// variable settings (read side of EnvironmentDefaults[env].ComponentEnvVars).
+type ComponentEnvOverrideDTO struct {
+	InheritAppVars *bool                `json:"inheritAppVars,omitempty"`
+	EnvVars        []ComponentEnvVarDTO `json:"envVars,omitempty"`
+}
+
 // ComponentEnvVarsPatchDTO patches ONE component's env-var settings on update
 // without resending the whole components list (which would replace structure).
 // The component-variables drawer uses this so a variables tweak can't collide
@@ -461,6 +473,11 @@ type createAppRequest struct {
 	// after Create (mirrors the update path). Component-level values are per-env only —
 	// there is no all-envs component base set at creation.
 	EnvComponentValues map[string]map[string]map[string]any `json:"envComponentValues,omitempty"`
+	// EnvComponentEnvVars holds per-(env, component) variable overrides set at
+	// creation, keyed env → component → settings, layered over the component's
+	// app-wide InheritAppVars/EnvVars for that env only. Folded into
+	// EnvironmentDefaults[env].ComponentEnvVars after Create.
+	EnvComponentEnvVars map[string]map[string]ComponentEnvVarsPatchDTO `json:"envComponentEnvVars,omitempty"`
 }
 
 // createAppResponse is the JSON body returned on a successful app creation.
@@ -519,6 +536,13 @@ type updateAppRequest struct {
 	// (inheritAppVars + curated/added envVars) without touching component
 	// structure — the component-variables drawer's write path.
 	ComponentEnvVars map[string]ComponentEnvVarsPatchDTO `json:"componentEnvVars,omitempty"`
+	// EnvComponentEnvVars patches per-(env, component) variable overrides keyed
+	// env → component → patch, each layered over the component's app-wide
+	// settings for that env only (the variables drawer's "<env> only" scope).
+	// InheritAppVars sets/clears the env's posture override; EnvVars replaces
+	// the env's entry list ([] clears). A patch that leaves the pair empty
+	// removes it. Only the named pairs change.
+	EnvComponentEnvVars map[string]map[string]ComponentEnvVarsPatchDTO `json:"envComponentEnvVars,omitempty"`
 	// CD, when non-nil, replaces the app's continuous-delivery settings
 	// (external-CD tag ownership). Omit to leave unchanged.
 	CD *CDConfigDTO `json:"cd,omitempty"`

@@ -285,18 +285,130 @@ type ComponentEnvVar struct {
 	FromSecret string `json:"fromSecret,omitempty" yaml:"fromSecret,omitempty"`
 }
 
-// CuratesSecrets reports whether any component opts out of the app-wide vars and
-// selects a SUBSET of app secret keys (a FromSecret entry) into its own
-// <app>-<component>-secrets. The publish adapter uses this to decide whether to
-// pay for listing secret KEY NAMES per scope (needed only for the data[]
-// projection) — the app-wide secret uses whole-item dataFrom and needs no names.
-func (s AppSpec) CuratesSecrets() bool {
-	for _, c := range s.Components {
-		if c.InheritAppVars == nil || *c.InheritAppVars {
+// ComponentEnvOverride is ONE environment's override of a component's variable
+// settings (EnvironmentOverride.ComponentEnvVars[component]). It layers on top
+// of the component's app-wide ComponentSpec.InheritAppVars / EnvVars for that
+// env only: InheritAppVars replaces the posture when set; EnvVars are merged
+// by name over the app-wide list (this env wins). Resolved at publish via
+// AppForEnvComponentEnvVars.
+type ComponentEnvOverride struct {
+	InheritAppVars *bool             `json:"inheritAppVars,omitempty" yaml:"inheritAppVars,omitempty"`
+	EnvVars        []ComponentEnvVar `json:"envVars,omitempty" yaml:"envVars,omitempty"`
+}
+
+// IsEmpty reports whether the override carries nothing (so the (env, component)
+// pair can be dropped).
+func (o ComponentEnvOverride) IsEmpty() bool {
+	return o.InheritAppVars == nil && len(o.EnvVars) == 0
+}
+
+// MergeComponentEnvVars layers override entries over base by variable name:
+// an entry present in both takes the override's definition (source and all),
+// base order is kept, and override-only entries are appended in their order.
+func MergeComponentEnvVars(base, override []ComponentEnvVar) []ComponentEnvVar {
+	if len(override) == 0 {
+		return append([]ComponentEnvVar(nil), base...)
+	}
+	byName := make(map[string]ComponentEnvVar, len(override))
+	for _, e := range override {
+		byName[e.Name] = e
+	}
+	out := make([]ComponentEnvVar, 0, len(base)+len(override))
+	seen := make(map[string]struct{}, len(base))
+	for _, e := range base {
+		seen[e.Name] = struct{}{}
+		if o, ok := byName[e.Name]; ok {
+			out = append(out, o)
 			continue
 		}
-		for _, e := range c.EnvVars {
+		out = append(out, e)
+	}
+	for _, e := range override {
+		if _, dup := seen[e.Name]; dup {
+			continue
+		}
+		seen[e.Name] = struct{}{}
+		out = append(out, e)
+	}
+	return out
+}
+
+// EffectiveComponentEnvVars returns the posture and variable list a component
+// renders with in envName: the app-wide settings with that env's
+// ComponentEnvOverride (if any) layered on top.
+func EffectiveComponentEnvVars(app *App, c ComponentSpec, envName string) (inherit *bool, vars []ComponentEnvVar) {
+	inherit, vars = c.InheritAppVars, c.EnvVars
+	if app == nil {
+		return inherit, vars
+	}
+	ov, ok := app.Spec.EnvironmentDefaults[envName].ComponentEnvVars[c.Name]
+	if !ok || ov.IsEmpty() {
+		return inherit, vars
+	}
+	if ov.InheritAppVars != nil {
+		v := *ov.InheritAppVars
+		inherit = &v
+	}
+	vars = MergeComponentEnvVars(vars, ov.EnvVars)
+	return inherit, vars
+}
+
+// AppForEnvComponentEnvVars returns the app as it renders for envName with
+// every component carrying its EFFECTIVE variable settings (app-wide ⊕ this
+// env's override). Returns app itself when the env overrides nothing, so the
+// publisher can keep reading ComponentSpec.InheritAppVars/EnvVars unchanged —
+// the same shape as AppForEnvTemplateVersions.
+func AppForEnvComponentEnvVars(app *App, envName string) *App {
+	if app == nil {
+		return nil
+	}
+	overrides := app.Spec.EnvironmentDefaults[envName].ComponentEnvVars
+	if len(overrides) == 0 {
+		return app
+	}
+	out := *app
+	out.Spec.Components = make([]ComponentSpec, len(app.Spec.Components))
+	copy(out.Spec.Components, app.Spec.Components)
+	for i := range out.Spec.Components {
+		c := &out.Spec.Components[i]
+		if _, ok := overrides[c.Name]; !ok {
+			continue
+		}
+		c.InheritAppVars, c.EnvVars = EffectiveComponentEnvVars(app, *c, envName)
+	}
+	return &out
+}
+
+// CuratesSecrets reports whether any component opts out of the app-wide vars and
+// selects a SUBSET of app secret keys (a FromSecret entry) into its own
+// <app>-<component>-secrets — app-wide OR in any environment's override. The
+// publish adapter uses this to decide whether to pay for listing secret KEY
+// NAMES per scope (needed only for the data[] projection) — the app-wide
+// secret uses whole-item dataFrom and needs no names.
+func (s AppSpec) CuratesSecrets() bool {
+	curates := func(inherit *bool, vars []ComponentEnvVar) bool {
+		if inherit == nil || *inherit {
+			return false
+		}
+		for _, e := range vars {
 			if e.FromSecret != "" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range s.Components {
+		if curates(c.InheritAppVars, c.EnvVars) {
+			return true
+		}
+	}
+	app := &App{Spec: s}
+	for envName, ov := range s.EnvironmentDefaults {
+		for _, c := range s.Components {
+			if _, ok := ov.ComponentEnvVars[c.Name]; !ok {
+				continue
+			}
+			if curates(EffectiveComponentEnvVars(app, c, envName)) {
 				return true
 			}
 		}
@@ -338,6 +450,13 @@ type EnvironmentOverride struct {
 	// leaves may reference ((platform.*))/((vars.*)) tokens. No secrets. Only
 	// meaningful for composed apps (each component is its own chart source).
 	ComponentValues map[string]map[string]any `json:"componentValues,omitempty" yaml:"componentValues,omitempty"`
+	// ComponentEnvVars overrides composed components' variable settings for THIS
+	// environment only, keyed by component name — layered over each
+	// component's app-wide InheritAppVars/EnvVars (posture replaced when set,
+	// entries merged by name, this env wins). Resolved via
+	// AppForEnvComponentEnvVars at publish. Previews do not project component
+	// variables (they use the app-wide preview objects).
+	ComponentEnvVars map[string]ComponentEnvOverride `json:"componentEnvVars,omitempty" yaml:"componentEnvVars,omitempty"`
 	// TemplateVersions pins template versions for THIS environment only, keyed
 	// by component name (the reserved key "" pins the app-level template of a
 	// component-less BYO app). An env-scoped upgrade writes here so e.g. staging

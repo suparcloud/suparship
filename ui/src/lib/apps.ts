@@ -120,6 +120,14 @@ export interface UpdateAppRequest {
     string,
     { inheritAppVars?: boolean; envVars?: ComponentEnvVar[] }
   >;
+  // envComponentEnvVars patches per-(env, component) variable overrides keyed
+  // env → component → settings, layered over the component's app-wide
+  // settings for that env only. This is what the component card writes for
+  // the environment selected at the top of the app page.
+  envComponentEnvVars?: Record<
+    string,
+    Record<string, { inheritAppVars?: boolean; envVars?: ComponentEnvVar[] }>
+  >;
   // cd replaces the app's continuous-delivery settings (external-CD tag
   // ownership). Omit to leave unchanged.
   cd?: CDConfig;

@@ -12,6 +12,7 @@ import {
 } from "../lib/yamlDoc";
 import type {
   ComponentCreate,
+  ComponentEnvOverride,
   ComponentEnvVar,
   ComponentImage,
   ComponentSummary,
@@ -24,6 +25,7 @@ import { setAtPath, deleteAtPath } from "../lib/valuesTree";
 import { ProjectionForm } from "./ProjectionForm";
 import { ComponentEnvPanel } from "./ComponentEnvPanel";
 import type { ConfigVariables } from "../lib/configVars";
+import { effectiveComponentEnvVars } from "../lib/componentEnv";
 
 // CodeMirror is heavy; load it only when the compose canvas is shown.
 const ValuesEditor = lazy(() => import("./ValuesEditor"));
@@ -54,9 +56,12 @@ export interface ComponentDraft {
   envValuesText: Record<string, string>;
   /** per-env YAML parse error, keyed env */
   envValuesError: Record<string, string | null>;
-  /** env policy: inherit all app vars, or curate a subset */
+  /** APP-WIDE env policy — PRESERVED unchanged (round-tripped), not edited here */
   inheritAppVars: boolean;
   envVars: ComponentEnvVar[];
+  /** per-env variable overrides keyed env name — the editable layer (the
+   *  canvas env selector picks which env the Variables panel edits) */
+  envEnvVars: Record<string, ComponentEnvOverride>;
   /** Kargo image bindings (repo + tag-key path in this component's overlay) */
   images: ComponentImage[];
   /** stateful (database/cache) — renders as its own prune-disabled Application */
@@ -99,6 +104,26 @@ export function draftsToEnvComponentValues(
       if (Object.keys(ov).length > 0 || includeEmpty) {
         (out[env] ??= {})[name] = ov;
       }
+    }
+  }
+  return out;
+}
+
+// draftsToEnvComponentEnvVars collects each draft's per-env variable overrides
+// into the request shape (env → component → settings). Only envs a draft
+// actually carries an override for are sent, so an untouched env is never
+// wiped.
+export function draftsToEnvComponentEnvVars(
+  drafts: ComponentDraft[],
+  environments: string[],
+): Record<string, Record<string, ComponentEnvOverride>> {
+  const out: Record<string, Record<string, ComponentEnvOverride>> = {};
+  for (const env of environments) {
+    for (const d of drafts) {
+      const ov = d.envEnvVars[env];
+      const name = d.name.trim();
+      if (!name || !ov) continue;
+      (out[env] ??= {})[name] = ov;
     }
   }
   return out;
@@ -153,6 +178,7 @@ export function newComponentDraft(
     envValuesError: {},
     inheritAppVars: !isAddon,
     envVars: [],
+    envEnvVars: {},
     images: [],
     stateful: isAddon,
     previewEnabled: defaultPreview(type, isAddon),
@@ -177,6 +203,7 @@ export function draftFromSummary(c: ComponentSummary): ComponentDraft {
     envValuesError: {},
     inheritAppVars: c.inheritAppVars ?? true,
     envVars: c.envVars ?? [],
+    envEnvVars: c.envEnvVars ?? {},
     images: c.images ?? [],
     stateful: c.stateful ?? false,
     // Effective preview inclusion from the backend (explicit override or type default).
@@ -187,9 +214,9 @@ export function draftFromSummary(c: ComponentSummary): ComponentDraft {
 // toComponentCreate coerces a draft to the wire shape, dropping empty optional
 // fields so the request stays minimal.
 export function toComponentCreate(d: ComponentDraft): ComponentCreate {
-  const envVars = d.inheritAppVars
-    ? []
-    : d.envVars
+  // The app-wide list is round-tripped in BOTH postures: while inheriting,
+  // literal entries are the extend/override channel and must survive a save.
+  const envVars = d.envVars
         .filter((e) => e.name.trim())
         .map((e) => ({
           name: e.name.trim(),
@@ -666,16 +693,25 @@ export function ComposeComponents({
                     className={`${segClass(section === "env")} border-l border-gray-200`}
                   >
                     Variables
-                    {!c.inheritAppVars && section !== "env" && (
-                      <span className="rounded-full bg-amber-50 px-1.5 py-px text-[10px] text-amber-700">
-                        curated
-                      </span>
-                    )}
-                    {c.inheritAppVars && c.envVars.length > 0 && section !== "env" && (
-                      <span className="rounded-full bg-indigo-50 px-1.5 py-px text-[10px] text-indigo-600">
-                        +{c.envVars.length}
-                      </span>
-                    )}
+                    {(() => {
+                      const eff = effectiveComponentEnvVars(c, c.envEnvVars, env);
+                      if (section === "env") return null;
+                      if (!eff.inheritAppVars) {
+                        return (
+                          <span className="rounded-full bg-amber-50 px-1.5 py-px text-[10px] text-amber-700">
+                            curated
+                          </span>
+                        );
+                      }
+                      if (eff.envVars.length > 0) {
+                        return (
+                          <span className="rounded-full bg-indigo-50 px-1.5 py-px text-[10px] text-indigo-600">
+                            +{eff.envVars.length}
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
                   </button>
                 </div>
                 {section === "values" && (
@@ -931,7 +967,8 @@ export function ComposeComponents({
             {rowSection[i] === "env" && (
               <ComponentEnvPanel
                 componentName={c.name || `component-${i + 1}`}
-                value={{ inheritAppVars: c.inheritAppVars, envVars: c.envVars }}
+                env={canvasEnv}
+                value={effectiveComponentEnvVars(c, c.envEnvVars, canvasEnv)}
                 appCtx={
                   appRef
                     ? { project: appRef.project, appName: appRef.appName, env: canvasEnv }
@@ -939,9 +976,13 @@ export function ComposeComponents({
                 }
                 saveLabel="Apply"
                 onSave={(next) => {
+                  // Written as the CANVAS env's override; the app-wide list is
+                  // never edited from here.
                   update(i, {
-                    inheritAppVars: next.inheritAppVars,
-                    envVars: next.envVars,
+                    envEnvVars: {
+                      ...c.envEnvVars,
+                      [canvasEnv]: { inheritAppVars: next.inheritAppVars, envVars: next.envVars },
+                    },
                   });
                   setRowSection((cur) => ({ ...cur, [i]: null }));
                 }}

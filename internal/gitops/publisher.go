@@ -1106,7 +1106,10 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		// per-cluster loop below only sets the two platform names on each cluster's hv.
 		type componentProjection struct{ configName, secretName string }
 		projections := map[string]componentProjection{}
-		for _, c := range app.Spec.ComposedComponents() {
+		// Per-env component variable overrides: project THIS env's effective
+		// posture + entries (app-wide ⊕ EnvironmentDefaults[env].ComponentEnvVars).
+		envVarsApp := domain.AppForEnvComponentEnvVars(app, env.EnvName)
+		for _, c := range envVarsApp.Spec.ComposedComponents() {
 			projName, projVars, inheritExtras := componentConfigProjection(app.Name, c, resolvedVars)
 			if projName == "" {
 				continue // inherits the app-wide config/secret — hv keeps the mapper defaults
@@ -1537,9 +1540,12 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// inherits app secrets or no requested key resolves in this env's scope.
 		var componentSecretName string
 		var componentSecretCfg *ESOExternalSecretConfig
-		if len(app.Spec.Components) == 1 {
-			if renames := componentSecretRenames(app.Spec.Components[0]); renames != nil {
-				if esCfg := p.buildComponentExternalSecret(env, app, app.Spec.Components[0].Name, ns, renames); esCfg != nil {
+		// The single component's EFFECTIVE variable settings for this env
+		// (app-wide ⊕ the env's override) drive every projection below.
+		envComponents := domain.AppForEnvComponentEnvVars(app, env.EnvName).Spec.Components
+		if len(envComponents) == 1 {
+			if renames := componentSecretRenames(envComponents[0]); renames != nil {
+				if esCfg := p.buildComponentExternalSecret(env, app, envComponents[0].Name, ns, renames); esCfg != nil {
 					componentSecretCfg = esCfg
 					componentSecretName = esCfg.Name
 				}
@@ -1557,8 +1563,8 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			// Per-component env scoping: a single-component app with its own
 			// projection points platform.configMapName at it (written below) —
 			// same as the composed path.
-			if len(app.Spec.Components) == 1 {
-				if projName, _, inheritExtras := componentConfigProjection(app.Name, app.Spec.Components[0], nil); projName != "" {
+			if len(envComponents) == 1 {
+				if projName, _, inheritExtras := componentConfigProjection(app.Name, envComponents[0], nil); projName != "" {
 					pv.ConfigMapName = projName
 					if !inheritExtras {
 						// Opt-out: no app-wide secrets. If the component curates a
@@ -1714,8 +1720,8 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// Single-component projection: write its <app>-<component>-config —
 		// curated list, or the inherit+extras merge (resolved env vars with the
 		// component's literals winning).
-		if len(app.Spec.Components) == 1 {
-			c0 := app.Spec.Components[0]
+		if len(envComponents) == 1 {
+			c0 := envComponents[0]
 			if projName, projVars, _ := componentConfigProjection(app.Name, c0, envVars); projName != "" {
 				if err := p.writeComponentConfigMap(repoDir, env, app, c0.Name, projName, ns, projVars); err != nil {
 					return fmt.Errorf("writing component config for %s env %s: %w", c0.Name, env.EnvName, err)

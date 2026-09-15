@@ -104,6 +104,46 @@ func ValidateComponents(components []ComponentSpec) error {
 	return ValidateComposedComponents(components)
 }
 
+// ValidateEnvComponentEnvVars checks every per-environment component variable
+// override: the component must exist, each entry must be well formed, and the
+// EFFECTIVE posture for that env (app-wide ⊕ override) must respect the same
+// rule as ValidateComponents — source-mapped entries only while curating.
+func ValidateEnvComponentEnvVars(components []ComponentSpec, envDefaults map[string]EnvironmentOverride) error {
+	if len(envDefaults) == 0 {
+		return nil
+	}
+	byName := make(map[string]ComponentSpec, len(components))
+	for _, c := range components {
+		byName[c.Name] = c
+	}
+	app := &App{Spec: AppSpec{Components: components, EnvironmentDefaults: envDefaults}}
+	for envName, ov := range envDefaults {
+		for compName, o := range ov.ComponentEnvVars {
+			c, ok := byName[compName]
+			if !ok {
+				return fmt.Errorf("environment %q: component variable override for unknown component %q", envName, compName)
+			}
+			for _, e := range o.EnvVars {
+				if err := validateComponentEnvVar(c.Name, e); err != nil {
+					return fmt.Errorf("environment %q: %w", envName, err)
+				}
+			}
+			inherit, effective := EffectiveComponentEnvVars(app, c, envName)
+			if inherit == nil || *inherit {
+				for _, e := range effective {
+					if e.FromConfig != "" || e.FromSecret != "" {
+						return fmt.Errorf(
+							"environment %q component %q env %q: fromConfig/fromSecret require inheritAppVars=false in that environment (a curated variable list); while inheriting, add a literal value or configure the variable at app/env scope",
+							envName, c.Name, e.Name,
+						)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // tagKeyRE matches a dotted Helm values path (e.g. "image.tag",
 // "controller.image.tag") — segments of identifier/number chars joined by dots.
 var tagKeyRE = regexp.MustCompile(`^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`)

@@ -25,6 +25,7 @@ import { declaredPaths, hasProjection, splitPath, stringifyProjection } from "..
 import { ProjectionForm } from "../components/ProjectionForm";
 import { ImagePullRules } from "../components/ImagePullRules";
 import { ComponentEnvPanel } from "../components/ComponentEnvPanel";
+import { effectiveComponentEnvVars } from "../lib/componentEnv";
 import {
   groupByRepo,
   imageRulesToAppImages,
@@ -39,6 +40,7 @@ import {
   type ComponentDraft,
   draftFromSummary,
   draftsToEnvComponentValues,
+  draftsToEnvComponentEnvVars,
   toComponentCreate,
 } from "../components/ComposeComponents";
 import { createAppPreview, deleteAppPreview } from "../lib/previews";
@@ -5215,6 +5217,7 @@ function ComponentsTable({
       await updateApp(project, data.name, {
         components: drafts.map(toComponentCreate),
         envComponentValues,
+        envComponentEnvVars: draftsToEnvComponentEnvVars(drafts, manageEnvs),
         ...imagePatch,
       });
       toast.success("Components updated and published to GitOps.", {
@@ -5435,23 +5438,23 @@ function ComponentsTable({
                             upgrade → v{comp.latestVersion}
                           </button>
                         )}
-                        {comp.inheritAppVars === false && (
-                          <span
-                            className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700"
-                            title={
-                              (comp.envVars ?? []).length > 0
-                                ? `Scoped env: ${(comp.envVars ?? [])
-                                    .map((e) => e.name)
-                                    .join(", ")}`
-                                : "Does not inherit app vars"
-                            }
-                          >
-                            scoped env
-                            {(comp.envVars ?? []).length > 0
-                              ? ` (${comp.envVars?.length})`
-                              : ""}
-                          </span>
-                        )}
+                        {(() => {
+                          const eff = effectiveComponentEnvVars(comp, comp.envEnvVars, envPanelEnv);
+                          if (eff.inheritAppVars) return null;
+                          return (
+                            <span
+                              className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700"
+                              title={
+                                eff.envVars.length > 0
+                                  ? `Curated in ${envPanelEnv ?? "this env"}: ${eff.envVars.map((e) => e.name).join(", ")}`
+                                  : "Does not inherit app vars"
+                              }
+                            >
+                              scoped env
+                              {eff.envVars.length > 0 ? ` (${eff.envVars.length})` : ""}
+                            </span>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>
@@ -5488,7 +5491,10 @@ function ComponentsTable({
                       Object.values(comp.envValues ?? {}).some(
                         (v) => Object.keys(v ?? {}).length > 0,
                       );
-                  const envOverrideCount = comp.envVars?.length ?? 0;
+                  // Badges reflect the environment selected at the top of the
+                  // page: what this component actually renders with there.
+                  const effEnv = effectiveComponentEnvVars(comp, comp.envEnvVars, envPanelEnv);
+                  const envOverrideCount = effEnv.envVars.length;
                   const pick = (s: "values" | "env") =>
                     setCardSection((cur) => ({
                       ...cur,
@@ -5522,13 +5528,16 @@ function ComponentsTable({
                         className={`${segClass(section === "env")} border-l border-gray-200`}
                       >
                         Variables
-                        {comp.inheritAppVars === false && section !== "env" && (
+                        {!effEnv.inheritAppVars && section !== "env" && (
                           <span className="rounded-full bg-amber-50 px-1.5 py-px text-[10px] text-amber-700">
                             curated
                           </span>
                         )}
-                        {envOverrideCount > 0 && section !== "env" && (
-                          <span className="rounded-full bg-indigo-50 px-1.5 py-px text-[10px] text-indigo-600">
+                        {effEnv.inheritAppVars && envOverrideCount > 0 && section !== "env" && (
+                          <span
+                            className="rounded-full bg-indigo-50 px-1.5 py-px text-[10px] text-indigo-600"
+                            title={envPanelEnv ? `${envOverrideCount} variable(s) in ${envPanelEnv}` : undefined}
+                          >
                             +{envOverrideCount}
                           </span>
                         )}
@@ -5556,33 +5565,38 @@ function ComponentsTable({
                 <div>
                   {cardSection[comp.name] === "env" &&
                     (() => {
+                      // The write is scoped to the environment selected at the
+                      // top of the page (a preview edits its base env). The
+                      // panel shows and edits the EFFECTIVE settings for it.
                       const panelEnv = envPanelEnv;
+                      const eff = effectiveComponentEnvVars(comp, comp.envEnvVars, panelEnv);
                       return (
                         <ComponentEnvPanel
                           componentName={comp.name}
-                          value={{
-                            inheritAppVars: comp.inheritAppVars !== false,
-                            envVars: comp.envVars ?? [],
-                          }}
+                          env={panelEnv}
+                          value={eff}
                           appCtx={{ project, appName: data.name, env: panelEnv }}
                           saving={envSavingFor === comp.name}
                           onSave={async (next) => {
+                            if (!panelEnv) return;
                             setEnvSavingFor(comp.name);
                             const progress = toast.loading(
-                              "Saving component variables — publishing to GitOps…",
+                              `Saving component variables for ${panelEnv} — publishing to GitOps…`,
                             );
                             try {
                               const req: UpdateAppRequest = {
-                                componentEnvVars: {
-                                  [comp.name]: {
-                                    inheritAppVars: next.inheritAppVars,
-                                    envVars: next.envVars,
+                                envComponentEnvVars: {
+                                  [panelEnv]: {
+                                    [comp.name]: {
+                                      inheritAppVars: next.inheritAppVars,
+                                      envVars: next.envVars,
+                                    },
                                   },
                                 },
                               };
                               await updateApp(project, data.name, req);
                               toast.success(
-                                "Component variables saved and published.",
+                                `Component variables saved for ${panelEnv} and published.`,
                                 { id: progress },
                               );
                               await onSaved();

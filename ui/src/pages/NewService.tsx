@@ -34,6 +34,7 @@ import {
   ComposeComponents,
   type ComponentDraft,
   draftsToEnvComponentValues,
+  draftsToEnvComponentEnvVars,
   newComponentDraft,
   toComponentCreate,
 } from "../components/ComposeComponents";
@@ -703,6 +704,11 @@ function ConfigureStep({
           const v = baseEnv
             ? draftsToEnvComponentValues(components, [baseEnv])
             : {};
+          return Object.keys(v).length > 0 ? v : undefined;
+        })(),
+        // Component variables authored in the wizard land in the base env too.
+        envComponentEnvVars: (() => {
+          const v = baseEnv ? draftsToEnvComponentEnvVars(components, [baseEnv]) : {};
           return Object.keys(v).length > 0 ? v : undefined;
         })(),
       });

@@ -632,13 +632,24 @@ export interface ComponentSummary {
   /** Per-environment overlay overrides keyed by env name (deep-merged over
    *  values for that env). Editable per (component, env). */
   envValues?: Record<string, Record<string, unknown>>;
-  /** Env policy: inherit all app vars (default) or a curated subset. */
+  /** APP-WIDE env policy: inherit all app vars (default) or a curated subset. */
   inheritAppVars?: boolean;
   envVars?: ComponentEnvVar[];
+  /** Per-environment variable overrides keyed by env name, each layered over
+   *  inheritAppVars/envVars for that env only (posture replaced when set,
+   *  entries merged by name). The UI edits THESE, for the selected env. */
+  envEnvVars?: Record<string, ComponentEnvOverride>;
   /** Kargo image bindings (repo + tag-key). */
   images?: ComponentImage[];
   /** Stateful (a database/cache): its own prune-disabled Application. */
   stateful?: boolean;
+}
+
+// ComponentEnvOverride is one environment's override of a component's
+// variable settings (mirrors the backend ComponentEnvOverrideDTO).
+export interface ComponentEnvOverride {
+  inheritAppVars?: boolean;
+  envVars?: ComponentEnvVar[];
 }
 
 export interface AppReleaseRef {
@@ -1049,6 +1060,9 @@ export interface CreateAppRequest {
     string,
     Record<string, Record<string, unknown>>
   >;
+  /** Per-(env, component) variable overrides set at creation, keyed
+   *  env → component → settings; the wizard populates the base env only. */
+  envComponentEnvVars?: Record<string, Record<string, ComponentEnvOverride>>;
 }
 
 export interface CreateAppResponse {

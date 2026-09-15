@@ -693,6 +693,133 @@ func TestComposedPerComponentConfigProjection(t *testing.T) {
 	}
 }
 
+// TestComposedPerEnvComponentEnvVars: an environment's component variable
+// override is projected for THAT env only. staging adds FEATURE_X and overrides
+// LOG_LEVEL for api; prod carries no override, so api keeps the app-wide
+// objects there (no component ConfigMap at all).
+func TestComposedPerEnvComponentEnvVars(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{
+		Name:        "bigly",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					Values:   envFromTokenValues()},
+				{Name: "worker", Type: domain.ComponentWorker, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					Values:   envFromTokenValues()},
+			},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"staging": {ComponentEnvVars: map[string]domain.ComponentEnvOverride{
+					"api": {EnvVars: []domain.ComponentEnvVar{{Name: "FEATURE_X", Value: "on"}, {Name: "LOG_LEVEL", Value: "debug"}}},
+				}},
+			},
+		},
+	}
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL:        "https://git/repo.git",
+		TemplateLoader: keyedTemplateLoader{"web-service": "web"},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	mkEnv := func(name string, order int, et domain.AppEnvironmentType) gitops.AppPublishEnv {
+		return gitops.AppPublishEnv{
+			EnvName: name, EnvType: et, Order: order, Bound: true,
+			Namespace: "bigly-" + name, BaseDomain: "localhost",
+			Clusters: []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+			EnvVars:  map[string]string{"LOG_LEVEL": "info", "SHARED": "app"},
+		}
+	}
+	envs := []gitops.AppPublishEnv{mkEnv("staging", 1, domain.AppEnvStaging), mkEnv("prod", 2, domain.AppEnvProd)}
+	if err := p.WriteComposedAppTreeForTest(context.Background(), dir, app, envs); err != nil {
+		t.Fatalf("WriteComposedAppTreeForTest: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-api-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("staging must project api's override into its own ConfigMap: %v", err)
+	}
+	var cm struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(raw, &cm); err != nil {
+		t.Fatal(err)
+	}
+	if cm.Data["FEATURE_X"] != "on" || cm.Data["LOG_LEVEL"] != "debug" || cm.Data["SHARED"] != "app" {
+		t.Errorf("staging api configmap = %+v, want inherited SHARED + env literals winning", cm.Data)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "prod", "demo", "bigly", "component-api-configmap.yaml")); !os.IsNotExist(err) {
+		t.Errorf("prod has no override for api and must keep the app-wide objects (err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "staging", "demo", "bigly", "component-worker-configmap.yaml")); !os.IsNotExist(err) {
+		t.Errorf("worker has no override anywhere (err=%v)", err)
+	}
+	// The stored spec is not mutated by the per-env fold.
+	if app.Spec.Components[0].EnvVars != nil {
+		t.Error("publish must not write env overrides back into the app-wide list")
+	}
+}
+
+// TestSingleSourcePerEnvComponentEnvVars: the same for a 1-component app —
+// prod curates a secret subset only in prod.
+func TestSingleSourcePerEnvComponentEnvVars(t *testing.T) {
+	dir := t.TempDir()
+	off := false
+	app := &domain.App{
+		Name:        "solo",
+		ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "web", Type: domain.ComponentWeb, Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "web-service"},
+					Values:   envFromTokenValues()},
+			},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"prod": {ComponentEnvVars: map[string]domain.ComponentEnvOverride{
+					"web": {InheritAppVars: &off, EnvVars: []domain.ComponentEnvVar{{Name: "ONLY", Value: "prod"}}},
+				}},
+			},
+		},
+	}
+	mkEnv := func(name string, order int, et domain.AppEnvironmentType) gitops.AppPublishEnv {
+		return gitops.AppPublishEnv{
+			EnvName: name, EnvType: et, Order: order, Bound: true, BaseDomain: "localhost",
+			Namespace: "solo-" + name,
+			Clusters:  []gitops.ClusterTarget{{Name: "c1", Server: "https://c1"}},
+			EnvVars:   map[string]string{"SHARED": "app"},
+		}
+	}
+	envs := []gitops.AppPublishEnv{mkEnv("staging", 1, domain.AppEnvStaging), mkEnv("prod", 2, domain.AppEnvProd)}
+	p := newTestPublisher(t)
+	if err := p.PublishAppFilesForTest(dir, app, envs); err != nil {
+		t.Fatalf("PublishAppFilesForTest: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "_app-resources", "staging", "demo", "solo", "component-web-configmap.yaml")); !os.IsNotExist(err) {
+		t.Errorf("staging inherits app-wide objects; no projection expected (err=%v)", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "_app-resources", "prod", "demo", "solo", "component-web-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("prod must project the curated override: %v", err)
+	}
+	var cm struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(raw, &cm); err != nil {
+		t.Fatal(err)
+	}
+	if cm.Data["ONLY"] != "prod" {
+		t.Errorf("prod configmap = %+v", cm.Data)
+	}
+	if _, leaked := cm.Data["SHARED"]; leaked {
+		t.Error("curated prod projection must not include unselected app vars")
+	}
+}
+
 // TestComposedInheritExtrasProjection verifies the inherit + extend/override
 // posture: an INHERITING component with literal envVars gets its own
 // <app>-<component>-config holding the app/env vars MERGED with the literals

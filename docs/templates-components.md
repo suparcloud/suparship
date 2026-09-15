@@ -89,6 +89,36 @@ The shipnotes `db` component is the worked example: it curates
 `POSTGRES_USER`/`POSTGRES_PASSWORD` from the app's secrets (`fromSecret`)
 instead of inheriting every app variable.
 
+### Per-environment overrides
+
+The fields above are the component's **app-wide** settings. Each environment
+can layer its own override on top —
+`EnvironmentDefaults[env].componentEnvVars[<component>]` holds an optional
+`inheritAppVars` (replaces the posture for that env when set) and `envVars`
+(merged over the app-wide list **by name**, the env wins; env-only entries are
+appended). The publisher resolves the effective settings per env
+(`domain.AppForEnvComponentEnvVars`) before rendering that env's
+`<app>-<component>-config` / `-secrets`, so staging can add `FEATURE_X=on`
+while production keeps the app-wide list, or production alone can curate a
+secret subset. The rule for source-mapped entries applies to the *effective*
+posture: `fromConfig`/`fromSecret` in an env override need that env to be
+curated.
+
+**The UI only ever edits the selected environment.** The component card's
+Variables panel writes the override for the environment chosen at the top of
+the app page (a preview edits its base env); the compose canvas writes the
+override for its canvas env; the create wizard writes the base env. The
+app-wide list is round-tripped unchanged and remains editable through the API
+(`componentEnvVars` on the update request) for values every environment should
+share. Previews project no component variables at all (see the extend/override
+limit above), so an env override does not reach previews yet.
+
+API: `PATCH /api/v1/projects/{p}/apps/{a}` with
+`{"envComponentEnvVars": {"staging": {"api": {"envVars": [{"name": "FEATURE_X", "value": "on"}]}}}}`
+(an empty patch removes the pair); `GET .../apps/{a}` reports
+`components[].envEnvVars` keyed by env. Removing a component drops its
+per-env values, variable overrides and version pins.
+
 ---
 
 ## Stateful components (addons)

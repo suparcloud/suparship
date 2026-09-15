@@ -60,6 +60,14 @@ suparship-backup.yaml`) and roll the chart back.
 - `POST .../upgrade-template` gains `retemplate` / `template` for migrating
   components (or a component-less app) to a different template, with
   `?dryRun=1` and unknown-values-key warnings. No action needed.
+- **Component variables are edited per environment.** The component card's
+  Variables panel now writes an override for the environment selected at the
+  top of the app page (`envComponentEnvVars`), layered by name over the
+  component's app-wide list, instead of rewriting that list for every
+  environment. Existing app-wide settings keep rendering unchanged; nothing
+  to migrate.
+- Removing a component from an app now also removes its per-env values,
+  variable overrides and version pins.
 
 ### v0.1.0 — first tagged release
 

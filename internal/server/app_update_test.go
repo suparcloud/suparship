@@ -186,6 +186,11 @@ func TestUpdateApp_RetemplateClearsStalePinsAndImages(t *testing.T) {
 		{TagKey: "image.tag"},        // old chart's path — must go
 		{TagKey: "worker.image.tag"}, // declared by the new template — survives
 	}
+	// A sibling that stays on its template keeps its own env pin.
+	app.Spec.Components = append(app.Spec.Components, domain.ComponentSpec{
+		Name: "other", Type: domain.ComponentWorker, Enabled: true,
+		Template: &domain.AppTemplateRef{Name: "worker", Version: "3.1.0"},
+	})
 	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
 		"staging": {TemplateVersions: map[string]string{"web": "1.0.0", "other": "9.9.9"}},
 		"prod":    {TemplateVersions: map[string]string{"web": "1.0.0"}},
@@ -193,11 +198,14 @@ func TestUpdateApp_RetemplateClearsStalePinsAndImages(t *testing.T) {
 	store.addApp(app)
 
 	rec := patchAppJSON(mux, sessionCookieFor(ah, "alice", "org_admin"), testProject, "my-app",
-		updateAppRequest{Components: []ComponentCreateDTO{{
-			Name: "web", Type: "worker", Enabled: true,
-			Template: &ComponentTemplateDTO{Name: "worker"},
-			Images:   []ComponentImageDTO{{TagKey: "image.tag"}, {TagKey: "worker.image.tag"}},
-		}}})
+		updateAppRequest{Components: []ComponentCreateDTO{
+			{
+				Name: "web", Type: "worker", Enabled: true,
+				Template: &ComponentTemplateDTO{Name: "worker"},
+				Images:   []ComponentImageDTO{{TagKey: "image.tag"}, {TagKey: "worker.image.tag"}},
+			},
+			{Name: "other", Type: "worker", Enabled: true, Template: &ComponentTemplateDTO{Name: "worker"}},
+		}})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}

@@ -192,8 +192,9 @@ every component carries a template ref, or none do.
 | `exposeMode` | Routing profile: `disabled`, `internal`, or `external` |
 | `template` | The component's own chart pin |
 | `values` | The component's Helm values overlay, in its chart's own shape — image, port, replicas, resources, everything |
-| `inheritAppVars` | `true`/unset: envFrom the app-wide config/secrets; `false`: curated `envVars` only |
-| `envVars` | Curated per-component env (literals or selected/renamed app config/secret keys) |
+| `inheritAppVars` | App-wide: `true`/unset: envFrom the app-wide config/secrets; `false`: curated `envVars` only |
+| `envVars` | App-wide per-component env (literals or selected/renamed app config/secret keys) |
+| — | Per-environment overrides of both live on the environment record (`EnvironmentDefaults[env].componentEnvVars[name]`, layered by name); the UI edits those for the selected environment |
 | `images` | Per-component CD image bindings (by the chart's tag path) |
 | `stateful` | Renders as its own prune-disabled Application (databases/caches) |
 | `previewEnabled` | Whether this component deploys in preview environments |

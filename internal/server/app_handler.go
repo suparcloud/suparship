@@ -453,6 +453,19 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		}
 		result.App.Spec.EnvironmentDefaults = ed
 	}
+	// Per-(env, component) variable overrides set at creation.
+	if len(req.EnvComponentEnvVars) > 0 {
+		ed, err := applyEnvComponentEnvVars(result.App.Spec.Components, result.App.Spec.EnvironmentDefaults, req.EnvComponentEnvVars)
+		if err != nil {
+			status := http.StatusUnprocessableEntity
+			if errors.Is(err, errUnknownComponent) {
+				status = http.StatusBadRequest
+			}
+			writeJSON(w, status, errorResponse{Error: err.Error()})
+			return
+		}
+		result.App.Spec.EnvironmentDefaults = ed
+	}
 
 	// Verify at least one environment is registered in the org before creating
 	// the app. Deploying to unregistered environments silently would produce
@@ -639,6 +652,10 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		app.Spec.Components = specs
+		// Components that left the list take their per-env state with them:
+		// values overlays, variable overrides and version pins keyed by a name
+		// nothing renders any more.
+		pruneRemovedComponentEnvState(&app.Spec)
 		// A retemplate (component now on a different chart) invalidates state
 		// keyed by the component NAME that was authored against the old chart.
 		ah.reconcileRetemplatedComponents(r.Context(), &app.Spec, prevByName)
@@ -740,6 +757,21 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		app.Spec.Components = next
+	}
+	// Per-(env, component) variable overrides — the drawer's "<env> only" scope.
+	// Applied on a copy of the env overrides and validated as the EFFECTIVE
+	// (app-wide ⊕ env) posture before assigning.
+	if req.EnvComponentEnvVars != nil {
+		ed, err := applyEnvComponentEnvVars(app.Spec.Components, app.Spec.EnvironmentDefaults, req.EnvComponentEnvVars)
+		if err != nil {
+			status := http.StatusUnprocessableEntity
+			if errors.Is(err, errUnknownComponent) {
+				status = http.StatusBadRequest
+			}
+			writeJSON(w, status, errorResponse{Error: err.Error()})
+			return
+		}
+		app.Spec.EnvironmentDefaults = ed
 	}
 	if req.CD != nil {
 		cd := cdConfigFromDTO(req.CD)
@@ -5050,6 +5082,101 @@ func (ah *appHandler) reconcileRetemplatedComponents(ctx context.Context, spec *
 	return moved
 }
 
+// errUnknownComponent marks a request naming a component the app does not have.
+var errUnknownComponent = errors.New("unknown component")
+
+// applyEnvComponentEnvVars folds per-(env, component) variable patches into a
+// COPY of the env overrides: InheritAppVars sets the env's posture override,
+// EnvVars replaces the env's entry list, and a pair left empty is removed. The
+// result is validated as the effective per-env posture before being returned.
+func applyEnvComponentEnvVars(components []domain.ComponentSpec, envDefaults map[string]domain.EnvironmentOverride, patches map[string]map[string]ComponentEnvVarsPatchDTO) (map[string]domain.EnvironmentOverride, error) {
+	known := make(map[string]bool, len(components))
+	for _, c := range components {
+		known[c.Name] = true
+	}
+	ed := make(map[string]domain.EnvironmentOverride, len(envDefaults)+len(patches))
+	for k, v := range envDefaults {
+		ed[k] = v
+	}
+	for envName, byComp := range patches {
+		if envName == "" {
+			return nil, fmt.Errorf("environment name is required for a component variable override")
+		}
+		ov := ed[envName]
+		next := make(map[string]domain.ComponentEnvOverride, len(ov.ComponentEnvVars))
+		for k, v := range ov.ComponentEnvVars {
+			next[k] = v
+		}
+		for name, patch := range byComp {
+			if !known[name] {
+				return nil, fmt.Errorf("%w: %s", errUnknownComponent, name)
+			}
+			cur := next[name]
+			if patch.InheritAppVars != nil {
+				v := *patch.InheritAppVars
+				cur.InheritAppVars = &v
+			}
+			if patch.EnvVars != nil {
+				var evs []domain.ComponentEnvVar
+				for _, e := range *patch.EnvVars {
+					evs = append(evs, domain.ComponentEnvVar{Name: e.Name, Value: e.Value, FromConfig: e.FromConfig, FromSecret: e.FromSecret})
+				}
+				cur.EnvVars = evs
+			}
+			if cur.IsEmpty() {
+				delete(next, name)
+			} else {
+				next[name] = cur
+			}
+		}
+		if len(next) == 0 {
+			next = nil
+		}
+		ov.ComponentEnvVars = next
+		ed[envName] = ov
+	}
+	if err := domain.ValidateEnvComponentEnvVars(components, ed); err != nil {
+		return nil, err
+	}
+	return ed, nil
+}
+
+// pruneRemovedComponentEnvState drops per-env state (values overlays, variable
+// overrides, version pins) keyed by component names no longer in the spec.
+func pruneRemovedComponentEnvState(spec *domain.AppSpec) {
+	live := make(map[string]bool, len(spec.Components))
+	for _, c := range spec.Components {
+		live[c.Name] = true
+	}
+	for envName, ov := range spec.EnvironmentDefaults {
+		for name := range ov.ComponentValues {
+			if !live[name] {
+				delete(ov.ComponentValues, name)
+			}
+		}
+		if len(ov.ComponentValues) == 0 {
+			ov.ComponentValues = nil
+		}
+		for name := range ov.ComponentEnvVars {
+			if !live[name] {
+				delete(ov.ComponentEnvVars, name)
+			}
+		}
+		if len(ov.ComponentEnvVars) == 0 {
+			ov.ComponentEnvVars = nil
+		}
+		for name := range ov.TemplateVersions {
+			if name != "" && !live[name] {
+				delete(ov.TemplateVersions, name)
+			}
+		}
+		if len(ov.TemplateVersions) == 0 {
+			ov.TemplateVersions = nil
+		}
+		spec.EnvironmentDefaults[envName] = ov
+	}
+}
+
 // clearComponentEnvTemplatePins drops every env-scoped template-version pin
 // for the named component, leaving other components' pins in place.
 func clearComponentEnvTemplatePins(spec *domain.AppSpec, name string) {
@@ -5101,6 +5228,24 @@ func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]dom
 		}
 	}
 
+	// Same inversion for per-env variable overrides.
+	envVarsByComp := map[string]map[string]ComponentEnvOverrideDTO{}
+	for envName, ov := range envDefaults {
+		for compName, o := range ov.ComponentEnvVars {
+			if o.IsEmpty() {
+				continue
+			}
+			if envVarsByComp[compName] == nil {
+				envVarsByComp[compName] = map[string]ComponentEnvOverrideDTO{}
+			}
+			dto := ComponentEnvOverrideDTO{InheritAppVars: o.InheritAppVars}
+			for _, e := range o.EnvVars {
+				dto.EnvVars = append(dto.EnvVars, ComponentEnvVarDTO{Name: e.Name, Value: e.Value, FromConfig: e.FromConfig, FromSecret: e.FromSecret})
+			}
+			envVarsByComp[compName][envName] = dto
+		}
+	}
+
 	dtos := make([]ComponentSummaryDTO, 0, len(components))
 	for _, c := range components {
 		dto := ComponentSummaryDTO{
@@ -5110,6 +5255,7 @@ func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]dom
 			ExposeMode:       string(c.ExposeMode),
 			Values:           c.Values,
 			EnvValues:        envValsByComp[c.Name],
+			EnvEnvVars:       envVarsByComp[c.Name],
 			InheritAppVars:   c.InheritAppVars,
 			Stateful:         c.Stateful,
 			EnabledInPreview: c.EnabledInPreview(),
