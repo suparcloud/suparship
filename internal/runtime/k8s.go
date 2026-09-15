@@ -86,7 +86,7 @@ func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceN
 		info.Available = w.available
 		info.Image = w.image
 		info.LastDeployed = w.lastDeployed
-		info.Status = DeploymentStatus(w.desired, w.ready, w.available)
+		info.Status = WorkloadStatus(w.health())
 	}
 
 	ingList, err := p.client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{})
@@ -188,7 +188,7 @@ func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fa
 			continue // scaled to zero — idle, doesn't affect health
 		}
 		allIdle = false
-		phase := DeploymentStatus(w.desired, w.ready, w.available)
+		phase := WorkloadStatus(w.health())
 		if statusRank[phase] >= statusRank[worst] {
 			worst = phase
 		}
@@ -259,6 +259,20 @@ type workload struct {
 	available    int32
 	image        string
 	lastDeployed string
+	// Rollout signals for WorkloadStatus (see runtime.WorkloadHealth).
+	updated        int32
+	total          int32
+	generationLag  bool
+	degradedReason string
+}
+
+// health adapts the workload to the status derivation's input.
+func (w workload) health() WorkloadHealth {
+	return WorkloadHealth{
+		Desired: w.desired, Ready: w.ready, Available: w.available,
+		Updated: w.updated, Total: w.total,
+		GenerationLag: w.generationLag, DegradedReason: w.degradedReason,
+	}
 }
 
 // listLabelledWorkloads returns every Deployment, StatefulSet, and DaemonSet in
@@ -365,19 +379,36 @@ func (p *K8sProvider) getNamedWorkload(ctx context.Context, namespace, name stri
 
 func deploymentWorkload(dep *appsv1.Deployment) workload {
 	w := workload{
-		ready:        dep.Status.ReadyReplicas,
-		available:    dep.Status.AvailableReplicas,
-		image:        podImage(dep.Spec.Template),
-		lastDeployed: formatTime(dep.CreationTimestamp),
+		ready:         dep.Status.ReadyReplicas,
+		available:     dep.Status.AvailableReplicas,
+		updated:       dep.Status.UpdatedReplicas,
+		total:         dep.Status.Replicas,
+		generationLag: dep.Status.ObservedGeneration < dep.Generation,
+		image:         podImage(dep.Spec.Template),
+		lastDeployed:  formatTime(dep.CreationTimestamp),
 	}
 	if dep.Spec.Replicas != nil {
 		w.desired = *dep.Spec.Replicas
 	}
-	// A Deployment's last roll-out is more accurate than its creation time.
 	for _, cond := range dep.Status.Conditions {
-		if cond.Type == appsv1.DeploymentProgressing && cond.LastUpdateTime.After(dep.CreationTimestamp.Time) {
-			w.lastDeployed = formatTime(cond.LastUpdateTime)
-			break
+		switch cond.Type {
+		case appsv1.DeploymentProgressing:
+			// A Deployment's last roll-out is more accurate than its creation time.
+			if cond.LastUpdateTime.After(dep.CreationTimestamp.Time) && w.lastDeployed == formatTime(dep.CreationTimestamp) {
+				w.lastDeployed = formatTime(cond.LastUpdateTime)
+			}
+			// The controller stopped waiting for the rollout: that is the one
+			// signal that turns a Deployment degraded (ArgoCD does the same).
+			if cond.Status == corev1.ConditionFalse && cond.Reason == "ProgressDeadlineExceeded" {
+				w.degradedReason = cond.Reason
+			}
+		case appsv1.DeploymentReplicaFailure:
+			if cond.Status == corev1.ConditionTrue {
+				w.degradedReason = cond.Reason
+				if w.degradedReason == "" {
+					w.degradedReason = "ReplicaFailure"
+				}
+			}
 		}
 	}
 	return w
@@ -385,13 +416,21 @@ func deploymentWorkload(dep *appsv1.Deployment) workload {
 
 func statefulSetWorkload(sts *appsv1.StatefulSet) workload {
 	w := workload{
-		ready:        sts.Status.ReadyReplicas,
-		available:    sts.Status.AvailableReplicas,
-		image:        podImage(sts.Spec.Template),
-		lastDeployed: formatTime(sts.CreationTimestamp),
+		ready:         sts.Status.ReadyReplicas,
+		available:     sts.Status.AvailableReplicas,
+		updated:       sts.Status.UpdatedReplicas,
+		total:         sts.Status.Replicas,
+		generationLag: sts.Status.ObservedGeneration < sts.Generation,
+		image:         podImage(sts.Spec.Template),
+		lastDeployed:  formatTime(sts.CreationTimestamp),
 	}
 	if sts.Spec.Replicas != nil {
 		w.desired = *sts.Spec.Replicas
+	}
+	// A StatefulSet reports its rollout through revisions: while the update
+	// revision is not the current one, pods are still being replaced.
+	if sts.Status.UpdateRevision != "" && sts.Status.CurrentRevision != sts.Status.UpdateRevision {
+		w.updated = min32(w.updated, w.desired-1)
 	}
 	return w
 }
@@ -400,12 +439,22 @@ func daemonSetWorkload(ds *appsv1.DaemonSet) workload {
 	// A DaemonSet has no spec.replicas: its desired count is one pod per matching
 	// node, which the scheduler reports as DesiredNumberScheduled.
 	return workload{
-		desired:      ds.Status.DesiredNumberScheduled,
-		ready:        ds.Status.NumberReady,
-		available:    ds.Status.NumberAvailable,
-		image:        podImage(ds.Spec.Template),
-		lastDeployed: formatTime(ds.CreationTimestamp),
+		desired:       ds.Status.DesiredNumberScheduled,
+		ready:         ds.Status.NumberReady,
+		available:     ds.Status.NumberAvailable,
+		updated:       ds.Status.UpdatedNumberScheduled,
+		total:         ds.Status.CurrentNumberScheduled,
+		generationLag: ds.Status.ObservedGeneration < ds.Generation,
+		image:         podImage(ds.Spec.Template),
+		lastDeployed:  formatTime(ds.CreationTimestamp),
 	}
+}
+
+func min32(a, b int32) int32 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // podImage returns the first container image of a pod template, or "".

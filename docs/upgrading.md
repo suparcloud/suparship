@@ -68,6 +68,13 @@ suparship-backup.yaml`) and roll the chart back.
   to migrate.
 - Removing a component from an app now also removes its per-env values,
   variable overrides and version pins.
+- **Runtime health follows ArgoCD's rules.** A rolling update (new pod not
+  yet ready, old pod still serving) used to show the environment as
+  *Degraded* because fewer pods were available than desired; it now shows
+  *Progressing*, like ArgoCD. *Degraded* means the controller gave up — a
+  Deployment's `ProgressDeadlineExceeded` or `ReplicaFailure` condition — not
+  partial availability. StatefulSet and DaemonSet rollouts are recognised the
+  same way.
 - **Preview values: template preview defaults now sit below the app's values.**
   A preview renders platform overlays → template `previewDefaultValues` (spec
   ⊕ org override) → app / component values → base-env overrides → the app's

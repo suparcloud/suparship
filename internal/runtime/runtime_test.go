@@ -27,9 +27,10 @@ func TestDeploymentStatus(t *testing.T) {
 	}{
 		{"zero replicas", 0, 0, 0, StatusNotDeployed},
 		{"all healthy", 3, 3, 3, StatusHealthy},
-		{"partially available", 3, 1, 1, StatusDegraded},
+		// Counts alone cannot distinguish a rollout from a failure: never degraded.
+		{"partially available", 3, 1, 1, StatusProgressing},
 		{"none available", 3, 0, 0, StatusProgressing},
-		{"ready but not all available", 3, 3, 2, StatusDegraded},
+		{"ready but not all available", 3, 3, 2, StatusProgressing},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,6 +128,7 @@ func TestK8sProviderDegraded(t *testing.T) {
 		},
 		Status: appsv1.DeploymentStatus{
 			Replicas:          3,
+			UpdatedReplicas:   3,
 			ReadyReplicas:     1,
 			AvailableReplicas: 1,
 		},
@@ -135,12 +137,28 @@ func TestK8sProviderDegraded(t *testing.T) {
 	client := fake.NewSimpleClientset(dep)
 	p := NewK8sProvider(client, nil)
 
+	// Two pods short at a steady revision is a rollout the controller is still
+	// waiting on — PROGRESSING, like ArgoCD reports it.
 	info, err := p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if info.Status != StatusProgressing {
+		t.Fatalf("expected progressing while the rollout is in flight, got %s", info.Status)
+	}
+
+	// Once the controller gives up (ProgressDeadlineExceeded) it is degraded.
+	dep.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
+	}}
+	client = fake.NewSimpleClientset(dep)
+	p = NewK8sProvider(client, nil)
+	info, err = p.GetServiceRuntime(context.Background(), "myapi-dev", "api")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if info.Status != StatusDegraded {
-		t.Fatalf("expected degraded, got %s", info.Status)
+		t.Fatalf("expected degraded after ProgressDeadlineExceeded, got %s", info.Status)
 	}
 }
 
@@ -364,7 +382,7 @@ func TestGetAppRuntime_FallsBackToNameWhenNoLabels(t *testing.T) {
 func TestGetAppRuntime_ScaleToZeroIsIdleNotNotDeployed(t *testing.T) {
 	const ns, instance = "proj-voice-staging", "proj-voice-staging"
 	agent := deployWithInstance("voice-server", ns, instance, "img/agent:1", 0, 0) // KEDA idle
-	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 1, 1)            // healthy
+	cm := deployWithInstance("voice-cm", ns, instance, "img/cm:1", 1, 1)           // healthy
 	client := fake.NewSimpleClientset(agent, cm)
 	p := NewK8sProvider(client, nil)
 
@@ -459,7 +477,10 @@ func TestGetAppRuntime_DiscoversStatefulSet(t *testing.T) {
 }
 
 // A degraded StatefulSet (some pods not ready) must surface as degraded.
-func TestGetAppRuntime_StatefulSetDegraded(t *testing.T) {
+// A StatefulSet short of pods is a rollout in flight, PROGRESSING — a
+// StatefulSet has no give-up condition, so it never reports degraded on
+// counts alone (same as ArgoCD).
+func TestGetAppRuntime_StatefulSetShortIsProgressing(t *testing.T) {
 	const ns, instance = "voiceai", "valkey-internal"
 	sts := stsWithInstance("valkey-internal", ns, instance, "valkey:9.0.2", 3, 1)
 	client := fake.NewSimpleClientset(sts)
@@ -469,8 +490,8 @@ func TestGetAppRuntime_StatefulSetDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if info.Status != StatusDegraded {
-		t.Errorf("status = %s, want degraded", info.Status)
+	if info.Status != StatusProgressing {
+		t.Errorf("status = %s, want progressing", info.Status)
 	}
 }
 
@@ -494,11 +515,15 @@ func TestGetAppRuntime_DiscoversDaemonSet(t *testing.T) {
 }
 
 // An app composed of mixed workload kinds aggregates worst-of across all of them:
-// a healthy Deployment plus a degraded StatefulSet is degraded, with summed replicas.
+// a Deployment whose rollout the controller gave up on (degraded) plus a
+// StatefulSet still rolling (progressing) is degraded, with summed replicas.
 func TestGetAppRuntime_AggregatesMixedKinds(t *testing.T) {
 	const ns, instance = "proj-staging", "proj-staging"
-	api := deployWithInstance("api", ns, instance, "img/api:1", 2, 2)   // healthy
-	db := stsWithInstance("db", ns, instance, "postgres:16", 3, 1)      // degraded
+	api := deployWithInstance("api", ns, instance, "img/api:1", 2, 2)
+	api.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
+	}} // degraded
+	db := stsWithInstance("db", ns, instance, "postgres:16", 3, 1) // progressing
 	client := fake.NewSimpleClientset(api, db)
 	p := NewK8sProvider(client, nil)
 
@@ -541,7 +566,6 @@ func TestGetServiceRuntime_FindsStatefulSetByName(t *testing.T) {
 		t.Errorf("image = %s, want valkey:9.0.2", info.Image)
 	}
 }
-
 
 // An Ingress with no spec.tls carries no scheme information of its own, so the
 // secure-endpoints setting decides: default (nil getter) → https (TLS may
@@ -617,5 +641,32 @@ func TestIngressURLScheme_NoTLSFollowsSecureEndpoints(t *testing.T) {
 	}
 	if len(info.IngressURLs) != 1 || info.IngressURLs[0] != "http://web.example.com" {
 		t.Fatalf("host omitted from all TLS blocks should be http, got %v", info.IngressURLs)
+	}
+}
+
+// WorkloadStatus mirrors ArgoCD's workload health: a rolling update with one
+// new pod not yet ready is PROGRESSING (the old pod still serves), and only the
+// controller giving up turns it DEGRADED.
+func TestWorkloadStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		h    WorkloadHealth
+		want string
+	}{
+		{"idle", WorkloadHealth{}, StatusNotDeployed},
+		{"steady healthy", WorkloadHealth{Desired: 2, Ready: 2, Available: 2, Updated: 2, Total: 2}, StatusHealthy},
+		// The screenshot case: desired 1, surge pod progressing, old pod healthy.
+		{"rolling update surge", WorkloadHealth{Desired: 1, Ready: 1, Available: 1, Updated: 1, Total: 2}, StatusProgressing},
+		{"rolling update new pod not ready", WorkloadHealth{Desired: 2, Ready: 1, Available: 1, Updated: 1, Total: 2}, StatusProgressing},
+		{"spec not yet observed", WorkloadHealth{Desired: 2, Ready: 2, Available: 2, Updated: 2, Total: 2, GenerationLag: true}, StatusProgressing},
+		{"old pods lingering", WorkloadHealth{Desired: 2, Ready: 2, Available: 2, Updated: 2, Total: 3}, StatusProgressing},
+		{"not all available at steady revision", WorkloadHealth{Desired: 3, Ready: 2, Available: 2, Updated: 3, Total: 3}, StatusProgressing},
+		{"progress deadline exceeded", WorkloadHealth{Desired: 2, Ready: 1, Available: 1, Updated: 1, Total: 2, DegradedReason: "ProgressDeadlineExceeded"}, StatusDegraded},
+		{"replica failure", WorkloadHealth{Desired: 2, Ready: 2, Available: 2, Updated: 2, Total: 2, DegradedReason: "FailedCreate"}, StatusDegraded},
+	}
+	for _, tc := range cases {
+		if got := WorkloadStatus(tc.h); got != tc.want {
+			t.Errorf("%s: WorkloadStatus = %s, want %s", tc.name, got, tc.want)
+		}
 	}
 }

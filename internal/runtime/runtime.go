@@ -58,16 +58,72 @@ func Namespace(project, environment string) string {
 	return project + "-" + environment
 }
 
-// DeploymentStatus derives a status string from replica counts.
+// DeploymentStatus derives a status string from replica counts alone. Counts
+// cannot tell a rolling update (new pod not ready yet, old one still serving)
+// from a broken workload, so partial availability is PROGRESSING, never
+// degraded — the same call ArgoCD makes. Degraded needs the workload's
+// conditions: see WorkloadStatus.
 func DeploymentStatus(desired, ready, available int32) string {
-	if desired == 0 {
+	return WorkloadStatus(WorkloadHealth{Desired: desired, Ready: ready, Available: available, Updated: desired, Total: desired})
+}
+
+// WorkloadHealth is the rollout-aware view of a Deployment / StatefulSet /
+// DaemonSet the status derivation needs. Zero values are safe: a caller with
+// only counts gets the count-based answer.
+type WorkloadHealth struct {
+	Desired   int32
+	Ready     int32
+	Available int32
+	// Updated is the number of pods on the current template revision
+	// (Deployment updatedReplicas, StatefulSet updatedReplicas, DaemonSet
+	// updatedNumberScheduled). Total is every pod the controller owns,
+	// including old-revision ones still terminating (Deployment/StatefulSet
+	// status.replicas, DaemonSet currentNumberScheduled).
+	Updated int32
+	Total   int32
+	// GenerationLag is true while status.observedGeneration trails
+	// metadata.generation — the controller has not yet acted on the spec.
+	GenerationLag bool
+	// DegradedReason is set when the controller itself gave up: a Deployment's
+	// Progressing=False/ProgressDeadlineExceeded or ReplicaFailure=True
+	// condition. That, not partial availability, is what "degraded" means.
+	DegradedReason string
+}
+
+// WorkloadStatus mirrors ArgoCD's built-in health rules for the three workload
+// kinds so suparship and ArgoCD agree about the same object:
+//
+//   - desired 0                              → not deployed (idle)
+//   - controller gave up (deadline/failure)  → degraded
+//   - spec not yet observed                  → progressing
+//   - rollout in flight (updated < desired,
+//     old pods lingering, not all available)  → progressing
+//   - everything ready and available         → healthy
+//
+// Partial availability on its own is a rollout in flight, not a failure:
+// Kubernetes surfaces a stuck rollout as ProgressDeadlineExceeded after
+// progressDeadlineSeconds, and that is when this turns degraded.
+func WorkloadStatus(h WorkloadHealth) string {
+	if h.Desired == 0 {
 		return StatusNotDeployed
 	}
-	if available == desired && ready == desired {
-		return StatusHealthy
-	}
-	if available > 0 {
+	if h.DegradedReason != "" {
 		return StatusDegraded
 	}
-	return StatusProgressing
+	if h.GenerationLag {
+		return StatusProgressing
+	}
+	// Rollout counters are only meaningful once the controller has scaled the
+	// current revision (Updated > 0). Before that — a counts-only caller, or a
+	// rollout the controller has not started acting on, which GenerationLag
+	// already covers — fall through to the availability checks.
+	if h.Updated > 0 {
+		if h.Updated < h.Desired || h.Total > h.Updated {
+			return StatusProgressing
+		}
+	}
+	if h.Available < h.Desired || h.Ready < h.Desired {
+		return StatusProgressing
+	}
+	return StatusHealthy
 }
