@@ -377,8 +377,8 @@ func TestPublishPreview_TemplateDefaultsBelowAppBand(t *testing.T) {
 		Name: "hello", ProjectName: "demo",
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"},
-			// App's base-env (staging) value — the template preview default should
-			// override it for previews.
+			// App's base-env (staging) value — a preview clones its base env, so it
+			// wins over the template's generic preview default.
 			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
 				"staging": {RawValues: map[string]any{"replicas": 5}},
 				// App preview band: wins over the template default.
@@ -393,8 +393,8 @@ func TestPublishPreview_TemplateDefaultsBelowAppBand(t *testing.T) {
 		Namespace:         "demo-preview-pr-1",
 		BaseDomain:        "localhost",
 		TemplatePreviewValues: map[string]any{
-			"replicas":     1,     // overrides app base-env (5) for previews
-			"templateOnly": "t",   // survives
+			"replicas":     1,     // BELOW the app's base-env value (5): env wins
+			"templateOnly": "t",   // survives where nothing above sets it
 			"appWins":      "no",  // app band overrides this
 		},
 	}
@@ -402,8 +402,8 @@ func TestPublishPreview_TemplateDefaultsBelowAppBand(t *testing.T) {
 		t.Fatalf("publish preview: %v", err)
 	}
 	m := readPreviewValues(t, filepath.Join(dir, "previews", "staging", "demo", "pr-1", "hello", "values.yaml"))
-	if m["replicas"] != 1 {
-		t.Errorf("replicas = %v, want 1 (template preview default over app base-env)", m["replicas"])
+	if m["replicas"] != 5 {
+		t.Errorf("replicas = %v, want 5 (app base-env value over the template preview default)", m["replicas"])
 	}
 	if m["templateOnly"] != "t" {
 		t.Errorf("templateOnly = %v, want t (template default survives)", m["templateOnly"])

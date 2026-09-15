@@ -66,12 +66,13 @@ and its **secrets** — exactly what the base env itself resolves.
 
 On top of the base env, a preview applies a reserved per-app **preview band** —
 one configuration that applies to *every* preview of the app — and, optionally, a
-**per-PR** override. Precedence is **base env → preview band → per-PR** (later
-wins):
+**per-PR** override. Precedence is **template preview values → base env →
+preview band → per-PR** (later wins):
 
 | Layer | Where it's stored |
 |-------|-------------------|
-| Base env | the stable env's own values / `<app>-config` ConfigMap / `<app>-env-<baseEnv>` vault item |
+| Template preview values | the template's `previewDefaultValues` (template.yaml ⊕ the org template override's) — the template's generic preview shape (one replica, smaller resources). Sits **below** the app's own values so a preview still looks like the env it clones |
+| Base env | the stable env's own values (app values ⊕ per-env / per-component overrides) / `<app>-config` ConfigMap / `<app>-env-<baseEnv>` vault item |
 | Preview band (all previews) | `EnvironmentDefaults["preview"]` (values + env vars) and the `<app>-env-preview` item **inside the base env vault** |
 | Per-PR (one preview) | `<app>-env-preview-pr-<name>` item inside the base env vault (read if present) |
 

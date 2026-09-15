@@ -68,6 +68,14 @@ suparship-backup.yaml`) and roll the chart back.
   to migrate.
 - Removing a component from an app now also removes its per-env values,
   variable overrides and version pins.
+- **Preview values: template preview defaults now sit below the app's values.**
+  A preview renders platform overlays → template `previewDefaultValues` (spec
+  ⊕ org override) → app / component values → base-env overrides → the app's
+  preview band. Previously the template's preview defaults were applied above
+  the app's env values and could clobber them (e.g. a form-generated empty
+  string). Previews republish on their next publish; if you relied on a
+  template preview default overriding an app value, move it to the app's
+  preview overrides.
 - **GitOps drift is surfaced on the app page.** suparship renders the app from
   its stored state and compares with the repo (`GET .../apps/{app}/gitops-drift`);
   files that differ — a direct edit or revert of the repo — show in an amber

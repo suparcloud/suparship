@@ -2566,3 +2566,124 @@ func TestComposedPreview_OnlyEnabledComponents(t *testing.T) {
 		t.Errorf("app-wide preview env-configmap missing: %v", err)
 	}
 }
+
+// TestComposedPreview_TemplatePreviewValuesSitBelowEnv pins the preview
+// layering: template preview values (spec ⊕ org override) are the floor for
+// preview-specific shape; the component's values and its base-env override win
+// over them, and only the app's preview band wins over those.
+func TestComposedPreview_TemplatePreviewValuesSitBelowEnv(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL: "https://git/repo.git", ArgoCDRepoURL: "https://git/repo.git", SyncAutomated: true,
+		TemplateLoader: keyedTemplateLoader{"web-service": "web", "worker": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	app := &domain.App{
+		Name: "voiceai-lk-sh", ProjectName: "voiceai",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web-service"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true, Template: &domain.AppTemplateRef{Name: "web-service"}},
+				{Name: "express-caller", Type: domain.ComponentType("worker"), Enabled: true,
+					Template: &domain.AppTemplateRef{Name: "worker"},
+					Values:   map[string]any{"caller": map[string]any{"agentName": "express"}, "maxAgents": 20}},
+			},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"staging": {ComponentValues: map[string]map[string]any{
+					"express-caller": {"maxAgents": 7, "agent": map[string]any{"resources": map[string]any{"requests": map[string]any{"cpu": "300m"}}}},
+				}},
+				domain.PreviewOverrideKey: {ComponentValues: map[string]map[string]any{
+					"express-caller": {"releaseChannel": "preview", "maxAgents": 3},
+				}},
+			},
+		},
+	}
+	spec := gitops.PreviewPublishSpec{
+		PreviewName: "pr-830", BaseEnv: "staging", ClusterServer: "https://kubernetes.default.svc",
+		Namespace: "voiceai-lk-sh-pr-830", BaseDomain: "localhost", ImageTag: "pr-830-abc",
+		ScopeKeys: gitops.ScopePresence{PreviewApp: true},
+		ComponentPlatformValues: map[string]gitops.ComponentPlatformValues{
+			// A form-generated template preview default with an empty agentName and a
+			// generic cpu request: must NOT clobber the env's values.
+			"express-caller": {Preview: map[string]any{
+				"caller":           map[string]any{"agentName": ""},
+				"agent":            map[string]any{"resources": map[string]any{"requests": map[string]any{"cpu": "1700m"}}},
+				"numIdleProcesses": 2,
+				"maxAgents":        99,
+			}},
+		},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish composed preview: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "previews", "staging", "voiceai", "pr-830", "voiceai-lk-sh", "components", "express-caller", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read preview values: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		"agentName: express",  // component values beat the template preview default
+		"cpu: 300m",           // base-env override beats the template preview default
+		"numIdleProcesses: 2", // template preview default still applies where nothing above sets it
+		"maxAgents: 3",        // the app's preview band beats everything
+		"releaseChannel: preview",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("preview values missing %q:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{`agentName: ""`, "cpu: 1700m", "maxAgents: 99", "maxAgents: 7", "maxAgents: 20"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("preview values must not contain %q:\n%s", bad, got)
+		}
+	}
+}
+
+// Single-source counterpart: TemplatePreviewValues sit below the app / base-env
+// raw values and above nothing but the platform/stack overlays.
+func TestSingleSourcePreview_TemplatePreviewValuesSitBelowEnv(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+	app := &domain.App{
+		Name: "hello", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template:  domain.AppTemplateRef{Name: "web-service"},
+			RawValues: map[string]any{"replicaCount": 4, "image": map[string]any{"pullPolicy": "Always"}},
+			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
+				"staging":                 {RawValues: map[string]any{"replicaCount": 2}},
+				domain.PreviewOverrideKey: {RawValues: map[string]any{"ingress": map[string]any{"enabled": false}}},
+			},
+		},
+	}
+	spec := gitops.PreviewPublishSpec{
+		PreviewName: "pr-1", BaseEnv: "staging", ClusterServer: "https://kubernetes.default.svc",
+		Namespace: "demo-hello-preview-pr-1", BaseDomain: "localhost",
+		ScopeKeys: gitops.ScopePresence{PreviewApp: true},
+		TemplatePreviewValues: map[string]any{
+			"replicaCount": 1,
+			"image":        map[string]any{"pullPolicy": "IfNotPresent"},
+			"resources":    map[string]any{"limits": map[string]any{"memory": "256Mi"}},
+			"ingress":      map[string]any{"enabled": true},
+		},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "previews", "staging", "demo", "pr-1", "hello", "values.yaml"))
+	if err != nil {
+		t.Fatalf("read preview values: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{"replicaCount: 2", "pullPolicy: Always", "memory: 256Mi", "enabled: false"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("preview values missing %q:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{"replicaCount: 1", "replicaCount: 4", "pullPolicy: IfNotPresent", "enabled: true"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("preview values must not contain %q:\n%s", bad, got)
+		}
+	}
+}

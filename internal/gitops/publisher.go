@@ -1803,11 +1803,13 @@ func previewRawValuesOverlay(app *domain.App, preview PreviewPublishSpec) map[st
 	}
 	overlay = deepMerge(overlay, deepCopyMap(preview.StackRawValues))
 	overlay = deepMerge(overlay, deepCopyMap(preview.StackEnvRawValues))
-	overlay = deepMerge(overlay, rawValuesOverlay(app, preview.BaseEnv))
-	// Template-level preview defaults: the bottom of the "preview band" — applied
-	// to every preview of this template's apps, above the base-env composition and
-	// below the app's own preview override (so apps can modify/extend).
+	// Template-level preview values (template.yaml previewDefaultValues ⊕ the org
+	// override's): the template's generic preview shape, applied to every preview
+	// of this template's apps BELOW the app's own values — a preview clones its
+	// base env, so the developer's app/env config wins over them; only the app's
+	// own preview band sits above.
 	overlay = deepMerge(overlay, deepCopyMap(preview.TemplatePreviewValues))
+	overlay = deepMerge(overlay, rawValuesOverlay(app, preview.BaseEnv))
 	if ov, ok := app.Spec.EnvironmentDefaults[domain.PreviewOverrideKey]; ok && len(ov.RawValues) > 0 {
 		overlay = deepMerge(overlay, deepCopyMap(ov.RawValues))
 	}
@@ -2951,20 +2953,24 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 		}
 
 		// Overlay, low→high: PE component-template base-env overlays (Default+Env; no
-		// cluster for previews) ⊕ the component's own Values ⊕ the component's
-		// BASE-ENV override (EnvironmentDefaults[baseEnv].ComponentValues — what the
-		// stable env itself renders with) ⊕ the component template's PREVIEW
-		// defaults ⊕ the app's per-component preview band. Mirrors the single-source
-		// order (previewRawValuesOverlay, which folds in rawValuesOverlay(baseEnv)):
-		// a preview CLONES its base env, so everything the base env sets on the
-		// component is the floor, and only the preview layers sit above it.
+		// cluster for previews) ⊕ the component template's PREVIEW values
+		// (template.yaml previewDefaultValues ⊕ the org override's) ⊕ the
+		// component's own Values ⊕ the component's BASE-ENV override
+		// (EnvironmentDefaults[baseEnv].ComponentValues — what the stable env
+		// itself renders with) ⊕ the app's per-component preview band. Mirrors
+		// the single-source order (previewRawValuesOverlay).
+		//
+		// Template preview values sit BELOW the app's values on purpose: they are
+		// the template's generic preview shape (smaller resources, one replica),
+		// and a preview must still look like the env it clones — the developer's
+		// env config wins over them. Only the app's own preview band sits above.
 		cpv := preview.ComponentPlatformValues[c.Name]
 		overlay := deepMerge(deepCopyMap(cpv.Default), deepCopyMap(cpv.Env))
+		overlay = deepMerge(overlay, deepCopyMap(cpv.Preview))
 		overlay = deepMerge(overlay, deepCopyMap(c.Values))
 		if base, ok := app.Spec.EnvironmentDefaults[preview.BaseEnv]; ok && len(base.ComponentValues[c.Name]) > 0 {
 			overlay = deepMerge(overlay, deepCopyMap(base.ComponentValues[c.Name]))
 		}
-		overlay = deepMerge(overlay, deepCopyMap(cpv.Preview))
 		if len(previewBand.ComponentValues[c.Name]) > 0 {
 			overlay = deepMerge(overlay, deepCopyMap(previewBand.ComponentValues[c.Name]))
 		}
