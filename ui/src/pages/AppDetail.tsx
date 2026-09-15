@@ -1291,22 +1291,39 @@ export function AppDetail() {
             )}
             {/* Outside the composed/single branch on purpose: a composed app's
                 components can each be behind, and used to get no affordance. */}
-            {(data.upgradesAvailable ?? 0) > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowUpgradeDialog(true)}
-                className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
-                title={
-                  data.upgradesAvailable === 1
-                    ? "A newer template version is available"
-                    : `${data.upgradesAvailable} components have newer template versions`
-                }
-              >
-                {(data.components?.length ?? 0) > 1 && data.upgradesAvailable! > 1
-                  ? `${data.upgradesAvailable} template upgrades`
-                  : `upgrade → v${data.components?.find((c) => c.upgradeAvailable)?.latestVersion ?? data.templateLatestVersion}`}
-              </button>
-            )}
+            {(() => {
+              // Count for the environment selected in the pipeline bar (its
+              // effective versions), falling back to the app-wide count.
+              const chipEnv =
+                currentEnv && currentEnv.envType !== "preview"
+                  ? currentEnv.envName
+                  : (nonPreviewEnvs[0]?.envName ?? null);
+              const count =
+                (chipEnv ? data.envUpgradesAvailable?.[chipEnv] : undefined) ?? data.upgradesAvailable ?? 0;
+              if (count <= 0) return null;
+              const behindComp = data.components?.find((c) =>
+                chipEnv && c.envUpgradeAvailable?.[chipEnv] !== undefined
+                  ? c.envUpgradeAvailable[chipEnv]
+                  : c.upgradeAvailable,
+              );
+              const where = chipEnv ? ` in ${chipEnv}` : "";
+              return (
+                <button
+                  type="button"
+                  onClick={() => setShowUpgradeDialog(true)}
+                  className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                  title={
+                    count === 1
+                      ? `A newer template version is available${where}`
+                      : `${count} components have newer template versions${where}`
+                  }
+                >
+                  {(data.components?.length ?? 0) > 1 && count > 1
+                    ? `${count} template upgrades${where}`
+                    : `upgrade → v${behindComp?.latestVersion ?? data.templateLatestVersion}${where}`}
+                </button>
+              );
+            })()}
             {data.description && (
               <span className="text-gray-400">{data.description}</span>
             )}
@@ -5511,26 +5528,45 @@ function ComponentsTable({
                       </span>
                       {componentVisibilityBadge(comp)}
                     </div>
-                    {comp.template && (
+                    {comp.template && (() => {
+                      // Version + upgrade badge for the environment selected at
+                      // the top of the page: its own pin when it has one, else the
+                      // app-wide pin. An env-scoped upgrade moves staging alone, so
+                      // the app-wide pin (and prod) can legitimately stay behind.
+                      const envPin = envPanelEnv ? data.envTemplateVersions?.[envPanelEnv]?.[comp.name] : undefined;
+                      const effVersion = envPin ?? comp.templateVersion;
+                      const behind =
+                        envPanelEnv && comp.envUpgradeAvailable?.[envPanelEnv] !== undefined
+                          ? comp.envUpgradeAvailable[envPanelEnv]
+                          : !!comp.upgradeAvailable;
+                      return (
                       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-400">
                         <span className="truncate">
                           template{" "}
                           <span className="font-medium text-gray-500">
                             {comp.template}
-                            {comp.templateVersion && (
+                            {effVersion && (
                               <span className="text-gray-400">
                                 {" "}
-                                v{comp.templateVersion}
+                                v{effVersion}
+                                {envPin && envPin !== comp.templateVersion && (
+                                  <span
+                                    className="ml-1 rounded bg-gray-100 px-1 py-px text-[10px] text-gray-500"
+                                    title={`${envPanelEnv} pins v${envPin}; the app-wide pin is v${comp.templateVersion}`}
+                                  >
+                                    {envPanelEnv} only · app-wide v{comp.templateVersion}
+                                  </span>
+                                )}
                               </span>
                             )}
                           </span>
                         </span>
-                        {comp.upgradeAvailable && (
+                        {behind && (
                           <button
                             type="button"
                             onClick={onUpgrade}
                             className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 font-medium text-amber-800 hover:bg-amber-100"
-                            title={`Upgrade available: v${comp.latestVersion}`}
+                            title={`Upgrade available in ${envPanelEnv ?? "this environment"}: v${comp.latestVersion}`}
                           >
                             upgrade → v{comp.latestVersion}
                           </button>
@@ -5553,7 +5589,8 @@ function ComponentsTable({
                           );
                         })()}
                       </div>
-                    )}
+                      );
+                    })()}
                   </div>
 
                   {/* Right: replicas + status + preview eligibility */}

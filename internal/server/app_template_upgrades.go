@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"github.com/suparcloud/suparship/internal/domain"
 	"log/slog"
 	"sort"
 	"sync"
@@ -128,6 +129,43 @@ func (ah *appHandler) decorateTemplateUpgrades(ctx context.Context, detail *AppD
 			c.UpgradeAvailable = true
 			detail.UpgradesAvailable++
 		}
+		// Env-scoped pins: an env that runs a different version than the
+		// app-wide pin has its own answer (staging upgraded, prod not yet).
+		for envName, pins := range detail.EnvTemplateVersions {
+			v, ok := pins[c.Name]
+			if !ok || v == "" {
+				continue
+			}
+			if c.EnvUpgradeAvailable == nil {
+				c.EnvUpgradeAvailable = map[string]bool{}
+			}
+			c.EnvUpgradeAvailable[envName] = semverGreater(c.LatestVersion, v)
+		}
+	}
+	// Per-env roll-up over every stable environment, using each env's
+	// effective versions.
+	for _, env := range detail.Environments {
+		if env.EnvType == string(domain.AppEnvPreview) {
+			continue
+		}
+		n := 0
+		for i := range detail.Components {
+			c := &detail.Components[i]
+			if c.LatestVersion == "" {
+				continue
+			}
+			if behind, ok := c.EnvUpgradeAvailable[env.EnvName]; ok {
+				if behind {
+					n++
+				}
+			} else if c.UpgradeAvailable {
+				n++
+			}
+		}
+		if detail.EnvUpgradesAvailable == nil {
+			detail.EnvUpgradesAvailable = map[string]int{}
+		}
+		detail.EnvUpgradesAvailable[env.EnvName] = n
 	}
 	// Drop templates that turned out to have no archives so the map only carries
 	// pickable versions.

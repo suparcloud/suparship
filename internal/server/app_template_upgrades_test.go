@@ -123,3 +123,53 @@ func TestComponentDTOs_CarriesTemplateVersion(t *testing.T) {
 		t.Errorf("dto = {%q %q}, want {web-service 1.2.3}", dtos[0].Template, dtos[0].TemplateVersion)
 	}
 }
+
+// An env-scoped pin gets its own answer: staging on 2.0.0 is not behind while
+// the app-wide pin (and prod) still is, and the per-env roll-up counts each
+// env against its effective versions.
+func TestDecorateTemplateUpgrades_EnvScopedPins(t *testing.T) {
+	kc := fake.NewSimpleClientset(
+		archiveCM("web-service", "1.0.0"), archiveCM("web-service", "2.0.0"),
+		archiveCM("job", "3.0.0"),
+	)
+	ah := &appHandler{kubeClient: kc, templateVersionCache: newTemplateVersionCache(templateVersionsTTL)}
+
+	app := upgradeTestApp("demo",
+		comp("web", "web-service", "1.0.0"),
+		comp("migrate", "job", "3.0.0"),
+	)
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"staging": {TemplateVersions: map[string]string{"web": "2.0.0"}},
+	}
+	detail := appToDetailDTO(app, []*domain.AppEnvironment{
+		{AppName: "my-app", EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1},
+		{AppName: "my-app", EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2},
+		{AppName: "my-app", EnvName: "pr-1", EnvType: domain.AppEnvPreview},
+	})
+	ah.decorateTemplateUpgrades(context.Background(), &detail)
+
+	var web ComponentSummaryDTO
+	for _, c := range detail.Components {
+		if c.Name == "web" {
+			web = c
+		}
+	}
+	if !web.UpgradeAvailable {
+		t.Error("app-wide pin 1.0.0 is behind 2.0.0")
+	}
+	if behind, ok := web.EnvUpgradeAvailable["staging"]; !ok || behind {
+		t.Errorf("staging pins 2.0.0 and must not be behind: %v (present=%v)", behind, ok)
+	}
+	if _, ok := web.EnvUpgradeAvailable["prod"]; ok {
+		t.Error("prod has no env pin and must fall back to the app-wide answer (no entry)")
+	}
+	if got := detail.EnvUpgradesAvailable; got["staging"] != 0 || got["prod"] != 1 {
+		t.Errorf("env roll-up = %v, want staging 0 / prod 1", got)
+	}
+	if _, ok := detail.EnvUpgradesAvailable["pr-1"]; ok {
+		t.Error("previews are not counted")
+	}
+	if detail.UpgradesAvailable != 1 {
+		t.Errorf("app-wide count = %d, want 1", detail.UpgradesAvailable)
+	}
+}

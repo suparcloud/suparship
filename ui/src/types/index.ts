@@ -625,8 +625,11 @@ export interface ComponentSummary {
   /** Newest archived version of THIS component's template. Empty = the template
    *  isn't version-managed, so no upgrade affordance should be shown. */
   latestVersion?: string;
-  /** Whether latestVersion is newer than templateVersion. */
+  /** Whether latestVersion is newer than templateVersion (the app-wide pin). */
   upgradeAvailable?: boolean;
+  /** Per environment that pins this component differently: whether that env's
+   *  effective version is behind latestVersion. Missing env → use upgradeAvailable. */
+  envUpgradeAvailable?: Record<string, boolean>;
   /** The component's base Helm values overlay (all environments), editable. */
   values?: Record<string, unknown>;
   /** Per-environment overlay overrides keyed by env name (deep-merged over
@@ -773,6 +776,8 @@ export interface AppDetail {
   // How many components have a newer template version available. The upgrade
   // affordance keys off this so it works for composed apps too.
   upgradesAvailable?: number;
+  /** upgradesAvailable per stable environment, against each env's effective versions. */
+  envUpgradesAvailable?: Record<string, number>;
   // Archived versions of every template this app's components use, keyed by
   // template name, newest first — the source for the upgrade picker.
   templateVersions?: Record<string, TemplateVersionInfo[]>;

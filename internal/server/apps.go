@@ -43,8 +43,15 @@ type ComponentSummaryDTO struct {
 	// Empty means the template is not version-managed (a built-in with no
 	// archives), in which case no upgrade affordance should be shown.
 	LatestVersion string `json:"latestVersion,omitempty"`
-	// UpgradeAvailable reports that LatestVersion is newer than TemplateVersion.
+	// UpgradeAvailable reports that LatestVersion is newer than TemplateVersion
+	// (the APP-WIDE pin).
 	UpgradeAvailable bool `json:"upgradeAvailable,omitempty"`
+	// EnvUpgradeAvailable reports, per environment that pins THIS component to
+	// a different version than the app-wide pin, whether LatestVersion is newer
+	// than that env's effective version. Envs without an entry follow
+	// UpgradeAvailable. Lets the UI show the badge for the selected env rather
+	// than for the app-wide pin.
+	EnvUpgradeAvailable map[string]bool `json:"envUpgradeAvailable,omitempty"`
 	// Values is the component's base Helm values overlay (all environments) — its
 	// value-based config, editable on the app detail page (composed apps).
 	Values map[string]any `json:"values,omitempty"`
@@ -251,6 +258,9 @@ type AppDetailDTO struct {
 	// app-level upgrade affordance keys off this, so it works for a composed app
 	// whose components sit on different templates.
 	UpgradesAvailable int `json:"upgradesAvailable,omitempty"`
+	// EnvUpgradesAvailable is UpgradesAvailable computed per stable environment
+	// against that env's EFFECTIVE versions (env pin, else app-wide pin).
+	EnvUpgradesAvailable map[string]int `json:"envUpgradesAvailable,omitempty"`
 	// TemplateVersions lists the archived versions of every template this app's
 	// components use, keyed by template name, newest first. Served here so the
 	// upgrade picker needs no extra round-trips (one per distinct template).
