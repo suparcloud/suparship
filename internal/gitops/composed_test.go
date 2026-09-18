@@ -2687,3 +2687,76 @@ func TestSingleSourcePreview_TemplatePreviewValuesSitBelowEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestComposedPreview_BoundImageTagBeatsLiteralTag is the composed counterpart of
+// TestPublishPreview_BoundImageTagBeatsLiteralTag: every CD-bound component
+// deploys the PR build even though its values carry a literal tag, an unbound
+// component is left alone, and an empty ImageTag inherits.
+func TestComposedPreview_BoundImageTagBeatsLiteralTag(t *testing.T) {
+	dir := t.TempDir()
+	p, err := gitops.NewPublisher(gitops.PublisherConfig{
+		RepoURL: "https://git/repo.git", ArgoCDRepoURL: "https://git/repo.git", SyncAutomated: true,
+		TemplateLoader: keyedTemplateLoader{"web": "web", "postgres": "postgres"},
+	})
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	const prTag = "pr-1-001f056"
+	webValues := func(repo string) map[string]any {
+		return map[string]any{"image": map[string]any{"repository": repo, "tag": "main-b8eff88"}}
+	}
+	app := &domain.App{
+		Name: "shipnotes", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "web"},
+			Components: []domain.ComponentSpec{
+				{Name: "api", Type: domain.ComponentWeb, Enabled: true, Template: &domain.AppTemplateRef{Name: "web"},
+					Values: webValues("kind-registry:5000/demo/shipnotes-api"),
+					Images: []domain.ComponentImage{{Name: "api", TagKey: "image.tag"}}},
+				{Name: "frontend", Type: domain.ComponentWeb, Enabled: true, Template: &domain.AppTemplateRef{Name: "web"},
+					Values: webValues("kind-registry:5000/demo/shipnotes-frontend"),
+					Images: []domain.ComponentImage{{Name: "frontend", TagKey: "image.tag"}}},
+				// Unbound: a stock image the platform must not re-tag.
+				{Name: "db", Type: domain.ComponentType("worker"), Enabled: true, Template: &domain.AppTemplateRef{Name: "postgres"},
+					Values: map[string]any{"image": map[string]any{"repository": "postgres", "tag": "16-alpine"}}},
+			},
+		},
+	}
+	spec := gitops.PreviewPublishSpec{
+		PreviewName: "pr-1", BaseEnv: "staging", ClusterServer: "https://kubernetes.default.svc",
+		Namespace: "demo-shipnotes-preview-pr-1", BaseDomain: "localhost", ImageTag: prTag,
+		// The template's preview default carries the token, exactly as the dev
+		// seeder sets it — and it sits BELOW the component's literal tag.
+		ComponentPlatformValues: map[string]gitops.ComponentPlatformValues{
+			"api":      {Preview: map[string]any{"image": map[string]any{"tag": "((platform.imageTag))"}}},
+			"frontend": {Preview: map[string]any{"image": map[string]any{"tag": "((platform.imageTag))"}}},
+		},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish composed preview: %v", err)
+	}
+	read := func(preview, component string) string {
+		raw, err := os.ReadFile(filepath.Join(dir, "previews", "staging", "demo", preview, "shipnotes", "components", component, "values.yaml"))
+		if err != nil {
+			t.Fatalf("read %s/%s values: %v", preview, component, err)
+		}
+		return string(raw)
+	}
+	for _, c := range []string{"api", "frontend"} {
+		got := read("pr-1", c)
+		if !strings.Contains(got, "tag: "+prTag) || strings.Contains(got, "main-b8eff88") {
+			t.Errorf("%s: bound image must deploy the PR build %q, got:\n%s", c, prTag, got)
+		}
+	}
+	if got := read("pr-1", "db"); !strings.Contains(got, "tag: 16-alpine") {
+		t.Errorf("db: unbound image must keep its own tag, got:\n%s", got)
+	}
+
+	spec.PreviewName, spec.Namespace, spec.ImageTag = "pr-2", "demo-shipnotes-preview-pr-2", ""
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish composed preview (inherit): %v", err)
+	}
+	if got := read("pr-2", "api"); !strings.Contains(got, "tag: main-b8eff88") {
+		t.Errorf("api without imageTag must inherit the base env's tag, got:\n%s", got)
+	}
+}

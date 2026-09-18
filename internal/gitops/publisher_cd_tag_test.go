@@ -540,3 +540,47 @@ func TestPublishPreview_InheritsBaseEnvOverlay(t *testing.T) {
 		}
 	}
 }
+
+// TestPublishPreview_BoundImageTagBeatsLiteralTag: the per-PR tag must reach a
+// CD-bound image even when the app's values carry a LITERAL tag (the tag the app
+// was created with, or one Kargo committed into the base env). The
+// ((platform.imageTag)) token cannot help there — the literal sits above the
+// template's preview defaults in the merge — so the binding's tag key is written
+// directly. Seen live: a composed preview rendering staging's main-<sha> build.
+func TestPublishPreview_BoundImageTagBeatsLiteralTag(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+	const prTag = "pr-1-001f056"
+
+	app := &domain.App{
+		Name: "hello", ProjectName: "demo",
+		Spec: domain.AppSpec{
+			Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"},
+			RawValues: map[string]any{
+				"image": map[string]any{"repository": "registry.example.com/demo/hello", "tag": "main-b8eff88"},
+			},
+			Images: []domain.AppImageBinding{{Name: "image", TagKey: "image.tag"}},
+		},
+	}
+	spec := gitops.PreviewPublishSpec{
+		PreviewName: "pr-1", BaseEnv: "staging", ClusterServer: "https://kubernetes.default.svc",
+		Namespace: "demo-hello-preview-pr-1", BaseDomain: "localhost", ImageTag: prTag,
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	path := filepath.Join(dir, "previews", "staging", "demo", "pr-1", "hello", "values.yaml")
+	if got := readRootImageTag(t, path); got != prTag {
+		t.Errorf("preview image.tag = %q, want %q (bound image must deploy the PR build over a literal tag)", got, prTag)
+	}
+
+	// No imageTag → inherit: the literal base-env tag stays.
+	spec.PreviewName, spec.Namespace, spec.ImageTag = "pr-2", "demo-hello-preview-pr-2", ""
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish preview (inherit): %v", err)
+	}
+	path = filepath.Join(dir, "previews", "staging", "demo", "pr-2", "hello", "values.yaml")
+	if got := readRootImageTag(t, path); got != "main-b8eff88" {
+		t.Errorf("preview without imageTag: image.tag = %q, want the inherited %q", got, "main-b8eff88")
+	}
+}

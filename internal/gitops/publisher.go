@@ -1935,6 +1935,46 @@ func setStringAtPath(m map[string]any, dotted, val string) {
 	setValueAtPath(m, dotted, val)
 }
 
+// applyPreviewImageTag writes the per-PR image tag onto every CD-bound image's
+// tag key in a preview's values overlay, so the preview deploys the PR build
+// regardless of any literal tag the merged values carry. An empty tag means
+// "inherit the base env's image" and leaves the overlay untouched; unbound
+// images are left to the ((platform.imageTag)) token. Never mutates its input.
+func applyPreviewImageTag(overlay map[string]any, tagKeys []string, tag string) map[string]any {
+	if tag == "" || len(tagKeys) == 0 {
+		return overlay
+	}
+	out := deepCopyMap(overlay)
+	if out == nil {
+		out = map[string]any{}
+	}
+	for _, k := range tagKeys {
+		if k == "" {
+			continue
+		}
+		setStringAtPath(out, k, tag)
+	}
+	return out
+}
+
+// componentImageTagKeys / appImageTagKeys list the tag keys of a component's /
+// the app's CD-bound images — the paths Kargo writes and previews pin.
+func componentImageTagKeys(images []domain.ComponentImage) []string {
+	keys := make([]string, 0, len(images))
+	for _, img := range images {
+		keys = append(keys, img.TagKey)
+	}
+	return keys
+}
+
+func appImageTagKeys(images []domain.AppImageBinding) []string {
+	keys := make([]string, 0, len(images))
+	for _, img := range images {
+		keys = append(keys, img.TagKey)
+	}
+	return keys
+}
+
 // setValueAtPath sets an arbitrary-typed val at a dotted key path within a
 // nested map, creating intermediate maps as needed. A non-map value encountered
 // along the path is replaced with a map so the leaf can be written.
@@ -2780,6 +2820,9 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	// resolves to the PR build at publish (overlay tokens interpolate against
 	// hv.Platform). Chart-agnostic — the image key is the chart's own.
 	overlay := previewRawValuesOverlay(app, preview)
+	// CD-bound images deploy the PR build even when the app's values carry a
+	// literal tag — see the same step in publishComposedPreviewFiles.
+	overlay = applyPreviewImageTag(overlay, appImageTagKeys(app.Spec.Images), preview.ImageTag)
 	pv := helmvalues.MapPlatformValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil)
 	// Expose the per-PR tag as ((platform.imageTag)) for overlay/raw-values token
 	// interpolation, independent of the chart's image-mapping shape.
@@ -2974,8 +3017,16 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 		if len(previewBand.ComponentValues[c.Name]) > 0 {
 			overlay = deepMerge(overlay, deepCopyMap(previewBand.ComponentValues[c.Name]))
 		}
-		// The per-PR image tag reaches the chart via the ((platform.imageTag))
-		// token in the component's own overlay (set on pv above).
+		// The per-PR image tag reaches the chart two ways. Unbound images (sidecars,
+		// init containers) get it through the ((platform.imageTag)) token in the
+		// overlay (set on pv above). Every CD-BOUND image gets it written straight
+		// onto the binding's tag key here — the token alone is not enough: a
+		// component whose values carry a literal tag (the tag the app was created
+		// with, or one Kargo committed into the base env) sits ABOVE the template's
+		// preview defaults in the merge, so the literal would win and the preview
+		// would render the base env's build. Mirrors the pin step in
+		// publishComposedAppFiles; empty ImageTag inherits the base env's tag.
+		overlay = applyPreviewImageTag(overlay, componentImageTagKeys(c.Images), preview.ImageTag)
 		hvBytes, err := marshalPassthroughValues(pv, overlay, preview.EnvVars)
 		if err != nil {
 			return fmt.Errorf("marshal preview values for component %s: %w", c.Name, err)
