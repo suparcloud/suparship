@@ -112,6 +112,10 @@ type ComponentRuntimeStatusDTO struct {
 	Phase     string `json:"phase"`
 	Replicas  int32  `json:"replicas"`
 	Available int32  `json:"available"`
+	// Image/Tag: what this component's workload is actually running. Lets the
+	// UI flag a composed app whose components ended up on different tags.
+	Image string `json:"image,omitempty"`
+	Tag   string `json:"tag,omitempty"`
 }
 
 // DiagnosticDTO is one human-readable problem report surfaced from the

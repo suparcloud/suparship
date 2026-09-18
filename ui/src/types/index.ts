@@ -686,6 +686,9 @@ export interface ComponentRuntimeStatus {
   phase: string;
   replicas: number;
   available: number;
+  /** Image the component's workload is running, and its tag. */
+  image?: string;
+  tag?: string;
 }
 
 export interface PreviewMeta {

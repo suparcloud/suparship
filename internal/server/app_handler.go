@@ -4379,6 +4379,8 @@ func (ah *appHandler) applyComponentRuntimes(env *domain.AppEnvironment, instanc
 				Phase:     info.Status,
 				Replicas:  info.Replicas,
 				Available: info.Available,
+				Image:     info.Image,
+				Tag:       imageTagFromRef(info.Image),
 			})
 		}
 	}
@@ -4470,18 +4472,23 @@ func (ah *appHandler) applyRuntimeInfo(env *domain.AppEnvironment, info *runtime
 		env.URLs = info.IngressURLs
 	}
 	if info.Image != "" && env.Release == nil {
-		ref := &domain.AppReleaseRef{Image: info.Image}
-		// Derive the tag from the running image ref: everything after the last
-		// ':' PROVIDED it follows the last '/' (a ':' before that is the
-		// registry port, e.g. kind-registry:5000/demo/app). Without this the
-		// runtime-derived release has no tag, and everything gated on
-		// release.tag — the Promote button, pin/rollback affordances — stays
-		// disabled even though the env is deployed and healthy.
-		if i := strings.LastIndex(info.Image, ":"); i > strings.LastIndex(info.Image, "/") {
-			ref.Tag = info.Image[i+1:]
-		}
-		env.Release = ref
+		// Without a tag, everything gated on release.tag — the Promote button,
+		// pin/rollback affordances — stays disabled even though the env is
+		// deployed and healthy.
+		env.Release = &domain.AppReleaseRef{Image: info.Image, Tag: imageTagFromRef(info.Image)}
 	}
+}
+
+// imageTagFromRef returns the tag of an image reference: everything after the
+// last ':' PROVIDED it follows the last '/' (a ':' before that is the registry
+// port, e.g. kind-registry:5000/demo/app). Empty when the ref has no tag or is
+// digest-only.
+func imageTagFromRef(image string) string {
+	i := strings.LastIndex(image, ":")
+	if i < 0 || i < strings.LastIndex(image, "/") {
+		return ""
+	}
+	return image[i+1:]
 }
 
 // enrichEnvWithDiagnostics appends ArgoCD/ESO failure signals to env.Status so
@@ -5013,6 +5020,8 @@ func appRuntimeStatusDTO(s domain.AppRuntimeStatus) AppStatusSummaryDTO {
 			Phase:     c.Phase,
 			Replicas:  c.Replicas,
 			Available: c.Available,
+			Image:     c.Image,
+			Tag:       c.Tag,
 		})
 	}
 	return dto

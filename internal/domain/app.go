@@ -984,6 +984,13 @@ type ComponentRuntimeStatus struct {
 	Replicas int32 `json:"replicas"`
 	// Available is the number of ready replicas for this component.
 	Available int32 `json:"available"`
+	// Image is the container image the component's workload is running, and
+	// Tag its tag part. Composed apps are meant to run one tag across every
+	// component, but Kargo selects per subscription, so a freight can be split;
+	// exposing the tag per component lets the UI show that instead of hiding
+	// it behind the first component's tag.
+	Image string `json:"image,omitempty"`
+	Tag   string `json:"tag,omitempty"`
 }
 
 // WorkloadInstance identifies one component's running workloads for live-status

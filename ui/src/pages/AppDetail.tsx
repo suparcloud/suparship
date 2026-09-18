@@ -4021,11 +4021,31 @@ function OverviewTab({
   const replicas = currentEnv
     ? `${currentEnv.status.available}/${currentEnv.status.replicas}`
     : "—";
-  const releaseTag =
-    currentEnv?.release?.tag ??
-    (currentEnv?.release?.image
-      ? currentEnv.release.image.split(":").pop() ?? "—"
-      : "—");
+  // A composed app is meant to run ONE tag across its components, but Kargo
+  // selects per image subscription, so a freight can be split (one component
+  // promoted, another left on the previous build). The env-level release only
+  // carries the first component's tag, which would hide that; when the live
+  // component tags disagree, say so and list them.
+  // Only CD-bound components take part: a stateful database on a stock image
+  // (postgres:16-alpine) is never promoted and must not make the app "mixed".
+  const cdBound = new Set(
+    data.components.filter((c) => (c.images?.length ?? 0) > 0).map((c) => c.name),
+  );
+  const componentTags = (currentEnv?.status.components ?? []).filter(
+    (c): c is typeof c & { tag: string } => Boolean(c.tag) && cdBound.has(c.component),
+  );
+  const mixedRelease =
+    componentTags.length > 1 &&
+    new Set(componentTags.map((c) => c.tag)).size > 1;
+  const releaseTag = mixedRelease
+    ? "mixed"
+    : (currentEnv?.release?.tag ??
+      (currentEnv?.release?.image
+        ? currentEnv.release.image.split(":").pop() ?? "—"
+        : "—"));
+  const releaseHint = mixedRelease
+    ? componentTags.map((c) => `${c.component}: ${c.tag}`).join("  ·  ")
+    : undefined;
   const lastDeployed = formatTime(currentEnv?.status.lastDeployed);
   const urls = currentEnv?.urls ?? [];
 
@@ -4074,6 +4094,8 @@ function OverviewTab({
           label="Release"
           value={releaseTag !== "—" ? releaseTag : "—"}
           mono
+          hint={releaseHint}
+          tone={mixedRelease ? "warning" : undefined}
         />
         <QuickStat label="Last deployed" value={lastDeployed} />
       </div>
@@ -6528,19 +6550,30 @@ function QuickStat({
   label,
   value,
   mono,
+  hint,
+  tone,
 }: {
   label: string;
   value: string;
   mono?: boolean;
+  /** One-line detail under the value (e.g. per-component tags when mixed). */
+  hint?: string;
+  /** "warning" tints the value amber — the number needs a second look. */
+  tone?: "warning";
 }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white px-4 py-3">
       <p className="text-xs text-gray-400">{label}</p>
       <p
-        className={`mt-0.5 text-lg font-semibold text-gray-900 ${mono ? "font-mono" : ""}`}
+        className={`mt-0.5 text-lg font-semibold ${tone === "warning" ? "text-amber-700" : "text-gray-900"} ${mono ? "font-mono" : ""}`}
       >
         {value}
       </p>
+      {hint && (
+        <p className="mt-0.5 truncate font-mono text-xs text-gray-500" title={hint}>
+          {hint}
+        </p>
+      )}
     </div>
   );
 }
