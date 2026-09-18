@@ -86,12 +86,38 @@ takes over the screen), and lives on the **`endpoints`** resource in the Tilt
 UI — it goes green once every user-facing service is ready, with all the
 links clickable. One source of truth: `hack/dev/endpoints.sh`.
 
-Tear down:
+Pause and tear down:
 
 ```bash
+task suspend         # freeze: stop Tilt + the kind/registry containers (state kept)
+task resume          # wake it and `tilt up` again — `task up` does the same
 task down            # stop Tilt, remove workloads (keeps the cluster)
 task cluster:delete  # delete the kind cluster + registry entirely
 ```
+
+`task suspend` is the one to reach for at the end of the day. An idle kind node
+still runs a full control plane plus ArgoCD, Kargo, Gitea and Vault, which is a
+steady CPU draw on a laptop; `task down` avoids that but deletes the workloads,
+so coming back means every Helm install and image pull again. Suspend instead
+`docker pause`s the kind node and the registry: every process goes into the
+cgroup freezer at zero CPU, and on resume it continues where it was. Measured:
+apiserver answering 2 s after unpause, node Ready in 11 s, zero container
+restarts, and a running Tilt session reconnects on its own — so `task resume`
+only starts `tilt up` if Tilt is not already running. It is the same thing that
+happens to the cluster when the laptop lid closes.
+
+Pause keeps the RAM allocated. If you need it back, `SUSPEND_MODE=stop task
+suspend` stops the containers instead (state stays on disk, Tilt is stopped).
+Expect the price on resume: pods whose dependencies are not up yet crash on
+first start and sit in Kubernetes' exponential back-off, so the last pods take
+about five minutes to become Ready even though the apiserver is back in ten
+seconds. Vault also comes back sealed after a stop; the `vault-bootstrap`
+resource re-runs on `tilt up` and unseals it.
+
+Suspend only touches the clusters this repo defines (`suparship-dev`, and
+`staging`/`prod` from `task up:multi`) plus `kind-registry`; other kind
+clusters on the machine are left alone. A Docker Desktop restart turns paused
+containers into stopped ones; resume handles both.
 
 ---
 
@@ -464,6 +490,9 @@ task charts:verify  # lint + default render + platform-contract assertions (CI g
   garbage-collector CronJob wins pod attribution and always will. That is
   harmless now precisely *because* the port lives on `kargo-api-forward`
   instead. Nothing to fix there.
+- **Resumed cluster stays unhealthy** — after a `SUSPEND_MODE=stop` the node gets a
+  fresh IP; kind rewrites its config on boot, but if the apiserver never comes back,
+  recreate: `task cluster:delete && task up`.
 - **Start over** — `task down && task cluster:delete && task up`.
 
 ### Safety: this loop cannot touch a real cluster

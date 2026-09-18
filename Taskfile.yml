@@ -42,6 +42,7 @@ tasks:
     desc: "Start the full dev cluster with Tilt — cluster + ingress (*.localhost) + Vault + registries + suparship (hot-reload). Tilt UI: http://localhost:10350"
     cmds:
       - hack/preflight.sh tilt
+      - hack/dev/resume.sh
       - ctlptl apply -f hack/dev/cluster.yaml
       - 'echo "Endpoints once resources go green (also on the endpoints resource in the Tilt UI):"'
       - hack/dev/endpoints.sh
@@ -51,6 +52,7 @@ tasks:
     desc: "Like `task up` but without Vault and ingress (org backend = deprecated k8s; leanest loop)"
     cmds:
       - hack/preflight.sh tilt
+      - hack/dev/resume.sh
       - ctlptl apply -f hack/dev/cluster.yaml
       - 'echo "Endpoints once resources go green (also on the endpoints resource in the Tilt UI):"'
       - SUPARSHIP_VAULT=0 SUPARSHIP_INGRESS=0 hack/dev/endpoints.sh
@@ -70,6 +72,7 @@ tasks:
     desc: "Like `task up`, plus kind-staging + kind-prod workload clusters (real multi-cluster; ~+2 GiB RAM)"
     cmds:
       - hack/preflight.sh tilt
+      - hack/dev/resume.sh
       - ctlptl apply -f hack/dev/cluster.yaml
       - ctlptl apply -f hack/dev/clusters-workload.yaml
       # ctlptl points the current context at whatever it created LAST, which
@@ -84,6 +87,25 @@ tasks:
     desc: "Stop Tilt and remove the in-cluster workloads (keeps the cluster running)"
     cmds:
       - tilt down
+
+  suspend:
+    desc: "Freeze the dev cluster in place (docker pause: 0% CPU, no pod restarts, Tilt keeps running). SUSPEND_MODE=stop frees RAM too but pods restart. Wake with `task resume` or `task up`"
+    cmds:
+      - hack/dev/suspend.sh
+
+  resume:
+    desc: "Wake a suspended dev cluster (unpause or start + wait for the apiserver), then `tilt up` unless Tilt is already running"
+    silent: true
+    cmds:
+      - hack/dev/resume.sh
+      # Pause mode leaves Tilt running and it reconnects by itself; a second
+      # `tilt up` would only fail on the busy port. Start one only when needed.
+      - |
+        if pgrep -f '(^|/)tilt up( |$)' >/dev/null; then
+          echo "  tilt is already running — UI: http://localhost:10350"
+        else
+          exec tilt up
+        fi
 
   cluster:delete:
     desc: "Delete the dev clusters + local registry (ctlptl) — tooling and, if present, the workload clusters"
