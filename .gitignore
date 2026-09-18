@@ -51,3 +51,7 @@ ui/dist/
 
 # macOS
 .DS_Store
+
+# Hugo build lock (docs site)
+.hugo_build.lock
+
