@@ -1,7 +1,8 @@
 name: release-please
 
 # Maintains a standing "chore: release X.Y.Z" pull request built from the
-# conventional-commit history on main. Merging that PR writes CHANGELOG.md,
+# conventional-commit history on main. Runs on every push to main, weekly, and
+# on demand — a manual run may pin the next version. Merging that PR writes CHANGELOG.md,
 # bumps charts/suparship/Chart.yaml (version + appVersion), creates the vX.Y.Z
 # tag and publishes the GitHub Release.
 #
@@ -15,9 +16,22 @@ name: release-please
 # RELEASING.md.
 
 on:
+  # Every push keeps the standing release PR current. If that turns out to be
+  # noisy, delete this trigger — the schedule below keeps the PR fresh on its
+  # own, and a dispatch refreshes it on demand.
   push:
     branches: [main]
+  # Weekly refresh so the release PR never goes stale on a quiet week.
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC
   workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Pin the next release to this exact version (e.g. 0.2.0, no leading v).
+          Leave empty to let the conventional-commit history decide.
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -34,6 +48,41 @@ jobs:
     name: Maintain the release PR
     runs-on: ubuntu-latest
     steps:
+      # Pinning a version: release-please honours a `Release-As: X.Y.Z` footer
+      # on any commit since the last tag, so an empty commit carrying that
+      # footer is the documented override. It is pushed here and then the
+      # action below runs against it in the same job — the release PR reflects
+      # the pinned version immediately, without waiting for the push-triggered
+      # run that the commit also queues (harmless: same result, no cancel).
+      # The override applies to the next release only.
+      - name: Check out main
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # Push with the PAT when available; GITHUB_TOKEN works only while
+          # main has no branch protection.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Pin the next release version
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::version must be plain semver like 0.2.0 (no leading v), got '$VERSION'"
+            exit 1
+          fi
+          if git log -1 --format=%B | grep -Fxq "Release-As: $VERSION"; then
+            echo "HEAD already pins Release-As: $VERSION — nothing to push"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: release $VERSION" -m "Release-As: $VERSION"
+          git push origin HEAD:main
+          echo "Pinned next release to $VERSION" >> "$GITHUB_STEP_SUMMARY"
+
       - uses: googleapis/release-please-action@v4
         id: release
         with:

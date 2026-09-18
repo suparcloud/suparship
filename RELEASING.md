@@ -9,9 +9,12 @@ pull request does all of it.
 
 ## How it works
 
-Every push to `main` re-runs `release-please`, which reads the conventional
-commits since the last release and maintains a standing **`chore: release X.Y.Z`**
-pull request. That PR is the release: it accumulates the changelog and the
+`release-please` reads the conventional commits since the last release and
+maintains a standing **`chore: release X.Y.Z`** pull request. It runs on every
+push to `main`, once a week (Mondays 06:00 UTC) as a staleness guard, and on
+demand from the Actions tab. All three do the same thing — rescan `main` from
+the last tag and update the one PR in place — so the PR is never more than one
+run behind. That PR is the release: it accumulates the changelog and the
 version bump as you land work, and sits there until you decide to ship.
 
 Merging it:
@@ -57,6 +60,30 @@ minor rather than declaring 1.0 by accident.
 Because the version is computed from commit messages, **the commit message is
 the release note**. A commit landing on `main` with a non-conventional subject
 is invisible to the changelog.
+
+### Choosing the version yourself
+
+The computed bump is a default, not a rule. To pin the next release to an exact
+version — say the commits only add up to `0.1.1` but you want to ship `0.2.0` —
+run the `release-please` workflow manually (**Actions → release-please → Run
+workflow**) and fill in the `version` input as plain semver (`0.2.0`, no
+leading `v`).
+
+Under the hood that pushes an empty `chore: release 0.2.0` commit to `main`
+carrying a `Release-As: 0.2.0` footer, which release-please honours over the
+computed bump, then refreshes the release PR in the same run. The pin covers
+**the next release only**; after it merges, versions go back to being computed.
+
+The same footer works by hand if you prefer, and is the escape hatch when the
+workflow cannot push (see [One-time setup](#one-time-setup)):
+
+```
+git commit --allow-empty -m "chore: release 0.2.0" -m "Release-As: 0.2.0"
+git push origin main
+```
+
+Do not reach for `"release-as"` in `release-please-config.json` for this — it
+is sticky and has to be removed again by hand after the release.
 
 ## Contract versions — still manual, on purpose
 
@@ -121,6 +148,12 @@ which still cuts the release, but tags pushed with `GITHUB_TOKEN` **do not start
 new workflow runs** — so `release-image` will not fire and no versioned image is
 built. The fallback path is recoverable: dispatch `release-image` manually
 against the new tag. The PAT just makes it automatic.
+
+The same token pushes the `Release-As` commit when you pin a version from the
+workflow. `GITHUB_TOKEN` can do that push only while `main` has no branch
+protection; once it does, the pin needs the PAT (with any "bypass" allowance
+the protection rules require), or fall back to pushing the footer commit by
+hand.
 
 ## Principles
 
