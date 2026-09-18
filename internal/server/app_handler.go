@@ -4389,6 +4389,49 @@ func (ah *appHandler) applyComponentRuntimes(env *domain.AppEnvironment, instanc
 	}
 	ah.applyRuntimeInfo(env, agg)
 	env.Status.Components = comps
+	if d := splitReleaseDiagnostic(instances, comps); d != nil {
+		env.Status.Diagnostics = append(env.Status.Diagnostics, *d)
+	}
+}
+
+// splitReleaseDiagnostic reports a composed app whose CD-bound components run
+// different image tags. They are meant to move together — CI builds every
+// component at one shared tag — but Kargo selects per image subscription with
+// NewestBuild, which orders by the image's OCI `created` timestamp. A build
+// whose layers were all cache hits inherits the OLD timestamps (seen live: a
+// frontend rebuilt for a README-only change kept an August `created` on a new
+// tag), so Kargo never sees it as newer and leaves that component behind while
+// the others promote. The env then looks healthy while serving two builds.
+// Components without a binding (a database on a stock image) are ignored.
+func splitReleaseDiagnostic(instances []domain.WorkloadInstance, comps []domain.ComponentRuntimeStatus) *domain.Diagnostic {
+	bound := map[string]bool{}
+	for _, wi := range instances {
+		if wi.CDBound {
+			bound[wi.Component] = true
+		}
+	}
+	var parts []string
+	tags := map[string]bool{}
+	for _, c := range comps {
+		if !bound[c.Component] || c.Tag == "" {
+			continue
+		}
+		tags[c.Tag] = true
+		parts = append(parts, c.Component+": "+c.Tag)
+	}
+	if len(tags) < 2 {
+		return nil
+	}
+	return &domain.Diagnostic{
+		Source: "release",
+		Level:  domain.DiagnosticWarning,
+		Title:  "Components run different image tags",
+		Detail: strings.Join(parts, "\n"),
+		Hint: "A composed app promotes one tag across its components, but Kargo picks each image separately by its build timestamp (NewestBuild). " +
+			"A component whose image was rebuilt entirely from cache keeps its old `created` timestamp on the new tag, so Kargo never sees it as newer. " +
+			"Check the lagging component's image config (`docker inspect` → Created): if it predates the build, make its Dockerfile produce a fresh layer per build " +
+			"(e.g. a RUN that writes the version after ARG VERSION), or rebuild it with --no-cache, then let the Warehouse pick up the new freight.",
+	}
 }
 
 // argoClusterApp pairs a destination cluster with the app's ArgoCD Application

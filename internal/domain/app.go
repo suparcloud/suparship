@@ -1007,6 +1007,10 @@ type WorkloadInstance struct {
 	// running-replica query yields zero. Such a component must NOT be read as
 	// "not deployed" nor drag a composed app's aggregate health down.
 	OneShot bool
+	// CDBound marks a component with at least one Kargo image binding — its tag
+	// is promoted, so it takes part in "do all components run the same
+	// release" checks. A stateful component on a stock image does not.
+	CDBound bool
 }
 
 // WorkloadInstances returns each enabled component's workload identity. A
@@ -1033,11 +1037,11 @@ func (a *App) WorkloadInstances() []WorkloadInstance {
 			comp = a.Spec.Components[0].Name
 			oneShot = a.Spec.Components[0].Type.OneShot()
 		}
-		return []WorkloadInstance{{Component: comp, Instance: a.Name, OneShot: oneShot}}
+		return []WorkloadInstance{{Component: comp, Instance: a.Name, OneShot: oneShot, CDBound: len(a.Spec.Images) > 0}}
 	}
 	out := make([]WorkloadInstance, 0, len(enabled))
 	for _, c := range enabled {
-		out = append(out, WorkloadInstance{Component: c.Name, Instance: a.Name + "-" + c.Name, OneShot: c.Type.OneShot()})
+		out = append(out, WorkloadInstance{Component: c.Name, Instance: a.Name + "-" + c.Name, OneShot: c.Type.OneShot(), CDBound: len(c.Images) > 0})
 	}
 	return out
 }
