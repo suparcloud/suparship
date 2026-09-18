@@ -138,9 +138,12 @@ else
   python3 - "$MAIN_TAG" "$REGISTRY_HOST" >"$tmp/create.json" <<'PY'
 import json, sys
 tag, registry = sys.argv[1], sys.argv[2]
-# Generic `web` chart, configured entirely through ITS OWN values — the
-# platform contributes only resolved ((platform.*)) tokens and the env
-# ConfigMap/Secret objects behind them.
+# Generic `web` chart. What a DEVELOPER writes is only the curated developer
+# values (image, port, health path, endpoint on/off, env) plus a couple of
+# demo-image quirks. The platform↔chart wiring — envFrom pointing at the
+# platform-rendered ConfigMap/Secret, the routing host and ingress class,
+# TLS, per-env resource baselines — lives in the web template's platform
+# overrides (see seed-example-charts.sh step 4) and is inherited here.
 def web(name, repo, port, health, expose):
     full = registry + "/" + repo
     return {
@@ -154,10 +157,6 @@ def web(name, repo, port, health, expose):
             "containerPort": port,
             "service": {"port": port},
             "healthCheck": {"path": health},
-            "envFrom": {
-                "configMaps": ["((platform.configMapName))"],
-                "secrets": ["((platform.secretName))"],
-            },
             # Demo-grade images (stock nginx / uvicorn) run as root. An empty
             # map is a NO-OP under deep-merge — the chart's runAsNonRoot
             # default would survive and the kubelet rejects the container
@@ -168,15 +167,10 @@ def web(name, repo, port, health, expose):
                     "repository": full, "tagPattern": "^main-"}],
     }
 frontend = web("frontend", "demo/shipnotes-frontend", 80, "/", "external")
-# Routing the BYO way: the chart's own ingress values, wired to the
-# platform-resolved host + class via tokens. TLS off — the dev loop serves
-# plain HTTP (no cert-manager) and nginx would otherwise redirect to https.
-frontend["values"]["ingress"] = {
-    "enabled": True,
-    "host": "((platform.routingHost))",
-    "className": "((platform.ingressClassName))",
-    "tls": {"enabled": False},
-}
+# The developer's routing decision: expose it. Host, class and TLS come from
+# the template's platform override; set ingress.host here to use a custom
+# domain instead of the platform one.
+frontend["values"]["ingress"] = {"enabled": True}
 # The frontend nginx proxies /api to this env var; shipnotes-api is the api
 # component's Service (fullnameOverride above).
 frontend["values"]["env"] = {"API_UPSTREAM": "http://shipnotes-api:8000"}

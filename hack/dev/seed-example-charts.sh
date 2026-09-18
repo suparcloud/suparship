@@ -11,7 +11,8 @@
 #   2. registers the `example-charts` gitcharts source (preserving any other
 #      sources) and triggers a sync
 #   3. polls /templates until every chart has been indexed
-#   4. sets the web template's preview defaults (image.tag → ((platform.imageTag)))
+#   4. curates the web template as a platform engineer would: platform wiring
+#      for all envs, staging/prod baselines, preview image.tag
 #   5. curates developer-values projections for the web + postgres templates
 #
 # Idempotent: re-run to push updated charts and re-sync. Overridables:
@@ -103,11 +104,24 @@ done
 [ -n "$synced" ] || die "templates never appeared:$missing — check the example-charts source in Settings → Templates"
 ok "templates available:$(printf ' %s' $CHARTS)"
 
-# ── 4. Preview wiring for the web template ─────────────────────────────────
-# Every preview of a web app should deploy its PR build: the org-level template
-# override (sync-safe — survives re-syncs of the source) sets
-# previewDefaultValues image.tag → ((platform.imageTag)) (always resolved; the
-# per-PR tag in previews, "" in stable envs where Kargo owns the tag).
+# ── 4. Platform curation of the web template ───────────────────────────────
+# This is the platform engineer's job, done ONCE per template and inherited by
+# every app built from it. Stored as an org-level override (sync-safe — a
+# re-sync of the chart source can't clobber it), layered on top of the chart's
+# own values.yaml and BELOW the app's values, so a developer can still override
+# any of it. Three layers:
+#
+#   defaultValues        — all environments. The platform↔chart wiring: the
+#                          env ConfigMap/Secret the platform renders, the
+#                          routing host and ingress class the platform
+#                          resolves, TLS off (the dev loop has no issuer).
+#   envValues.staging    — a small footprint: modest requests, no HPA, no PDB.
+#   envValues.prod       — the real baseline: bigger requests, HPA on, PDB on.
+#   previewDefaultValues — every preview deploys its PR build
+#                          (image.tag → ((platform.imageTag))).
+#
+# ((platform.*)) tokens resolve at publish, per environment, so one override
+# yields a different host per env without hardcoding anything.
 override_json="$(curl -sS -b "$cookies" "$API/templates/web/overrides")"
 merged="$(printf '%s' "$override_json" | python3 -c "
 import json,sys
@@ -115,15 +129,33 @@ try:
     ov=json.load(sys.stdin) or {}
 except Exception:
     ov={}
-pdv=ov.get('previewDefaultValues') or {}
-img=pdv.get('image') or {}
-img['tag']='((platform.imageTag))'
-pdv['image']=img
-ov['previewDefaultValues']=pdv
+def merge(dst, src):
+    for k,v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict): merge(dst[k], v)
+        else: dst[k]=v
+    return dst
+ov['defaultValues']=merge(ov.get('defaultValues') or {}, {
+    'envFrom': {'configMaps': ['((platform.configMapName))'], 'secrets': ['((platform.secretName))']},
+    'ingress': {'className': '((platform.ingressClassName))', 'host': '((platform.routingHost))',
+                'tls': {'enabled': False}},
+})
+env=ov.get('envValues') or {}
+env['staging']=merge(env.get('staging') or {}, {
+    'resources': {'requests': {'cpu': '50m', 'memory': '64Mi'}, 'limits': {'memory': '128Mi'}},
+    'autoscaling': {'enabled': False},
+    'pdb': {'enabled': False},
+})
+env['prod']=merge(env.get('prod') or {}, {
+    'resources': {'requests': {'cpu': '250m', 'memory': '256Mi'}, 'limits': {'memory': '512Mi'}},
+    'autoscaling': {'enabled': True, 'minReplicas': 2, 'maxReplicas': 6, 'targetCPUUtilizationPercentage': 70},
+    'pdb': {'enabled': True, 'maxUnavailable': 1},
+})
+ov['envValues']=env
+ov['previewDefaultValues']=merge(ov.get('previewDefaultValues') or {}, {'image': {'tag': '((platform.imageTag))'}})
 print(json.dumps(ov))")"
 curl -sS -b "$cookies" -o /dev/null -X PUT "$API/templates/web/overrides" \
   -H 'Content-Type: application/json' -d "$merged"
-ok "web template preview defaults set (image.tag → ((platform.imageTag)))"
+ok "web template curated: platform wiring (all envs), staging + prod baselines, preview image.tag"
 
 # ── 5. Developer values projections for web + postgres ─────────────────────
 # Curate the small set of Helm values a DEVELOPER owns in the app editor;
@@ -143,6 +175,9 @@ patch_dev_values() { # template json
 # web: the image is yours, the tag belongs to the pipeline (CD/previews own
 # image.tag, so it is deliberately NOT projected). containerPort mirrors
 # service.port — one question, two keys.
+# Routing is a developer decision (expose me or not, on which name) over a
+# platform-owned mechanism: the ingress class, the default host and TLS come
+# from the override above, so the two fields here are all a developer touches.
 patch_dev_values web '{"developerValues":[
   {"path":"image.repository","title":"Image repository","type":"string","required":true,
    "description":"Container image to run (no tag — CD owns the tag)."},
@@ -152,6 +187,10 @@ patch_dev_values web '{"developerValues":[
   {"path":"healthCheck.path","title":"Health check path","type":"string","default":"/",
    "description":"HTTP path probed for liveness/readiness."},
   {"path":"replicaCount","title":"Replicas","type":"number","default":2,"min":1,"max":10},
+  {"path":"ingress.enabled","title":"Expose an HTTP endpoint","type":"boolean","default":false,
+   "description":"Publish this component on a URL. The platform picks the ingress class and a host per environment."},
+  {"path":"ingress.host","title":"Custom domain","type":"string",
+   "description":"Optional. Leave untouched for the platform host (<app>-<component>.<env>.<base domain>); set a hostname to serve on your own domain."},
   {"path":"env","title":"Environment variables",
    "description":"Plain key/value env for the container (secrets belong in App → Settings → Variables & secrets)."}
 ]}'
