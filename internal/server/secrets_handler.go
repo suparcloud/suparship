@@ -734,6 +734,21 @@ func (h *secretsHandler) sealCluster(ctx context.Context, org *rbac.Org, cluster
 	if cluster.APIServer == "" {
 		return fmt.Errorf("cluster %q has no apiServer", clusterName)
 	}
+	// One store per physical cluster: when another registered cluster shares
+	// this API server and sorts first, it publishes the store and this one is
+	// served by it. Any copy this cluster published earlier is pruned so two
+	// ArgoCD Applications never fight over the same fixed-name objects. The
+	// seal status still flips to sealed — the store exists for its workloads.
+	if all, err := h.clusterStore.ListClusters(ctx); err == nil {
+		if owner := gitops.SecretStoreOwner(all, clusterName); owner != clusterName {
+			h.logger.Info("seal cluster: store owned by a cluster sharing the API server",
+				"cluster", clusterName, "owner", owner, "server", cluster.APIServer)
+			if err := h.sealPublisher.DeleteClusterSecretStores(ctx, clusterName); err != nil {
+				return fmt.Errorf("prune duplicate store for cluster %q: %w", clusterName, err)
+			}
+			return nil
+		}
+	}
 
 	params := gitops.ClusterSealParams{
 		ClusterName:       clusterName,

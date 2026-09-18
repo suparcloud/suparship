@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/suparcloud/suparship/internal/branding"
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
 
@@ -85,5 +86,29 @@ func TestPublishClusterSecretStore_ValidatesInputs(t *testing.T) {
 				t.Error("expected validation error")
 			}
 		})
+	}
+}
+
+// TestSecretStoreOwner: clusters sharing an API server resolve to ONE owner
+// (alphabetically first), so the fixed-name store and sealed token are
+// published once per physical cluster; distinct servers own their own.
+func TestSecretStoreOwner(t *testing.T) {
+	clusters := []domain.Cluster{
+		{Name: "staging-cluster", APIServer: "https://kubernetes.default.svc"},
+		{Name: "prod-cluster", APIServer: "https://kubernetes.default.svc"},
+		{Name: "eu-west", APIServer: "https://10.0.0.1:6443"},
+		{Name: "no-server"},
+	}
+	cases := map[string]string{
+		"staging-cluster": "prod-cluster", // shares the tooling server; prod sorts first
+		"prod-cluster":    "prod-cluster",
+		"eu-west":         "eu-west", // alone on its server
+		"no-server":       "no-server",
+		"unknown":         "unknown",
+	}
+	for name, want := range cases {
+		if got := SecretStoreOwner(clusters, name); got != want {
+			t.Errorf("SecretStoreOwner(%q) = %q, want %q", name, got, want)
+		}
 	}
 }

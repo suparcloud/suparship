@@ -2628,6 +2628,13 @@ func selfHealSealedTokens(
 
 	certCache := seal.NewK8sCertCache(kubeClient)
 	for _, c := range clusters {
+		// One store per physical cluster (see gitops.SecretStoreOwner): a
+		// cluster sharing its API server with an alphabetically earlier one is
+		// served by that cluster's store and must not publish a duplicate.
+		if owner := gitops.SecretStoreOwner(clusters, c.Name); owner != c.Name {
+			logger.Info("self-heal: store owned by a cluster sharing the API server", "cluster", c.Name, "owner", owner)
+			continue
+		}
 		// Skip clusters whose store is already published — re-sealing is
 		// non-deterministic and would churn the repo on every restart.
 		if present, err := pub.HasClusterSecretStore(ctx, c.Name); err != nil {

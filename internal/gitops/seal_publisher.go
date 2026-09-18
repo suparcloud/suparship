@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/suparcloud/suparship/internal/branding"
+	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/seal"
 	"github.com/suparcloud/suparship/internal/secrets"
 )
@@ -159,6 +160,42 @@ func (p *Publisher) PublishClusterSecretStore(ctx context.Context, params Cluste
 		}
 		return p.commitAndPush(ctx, repoDir, fmt.Sprintf("feat(secrets): seal connect token for cluster=%s", params.ClusterName))
 	})
+}
+
+// SecretStoreOwner returns the registered cluster that publishes the unified
+// store for the API server clusterName points at.
+//
+// The unified store and its sealed token have FIXED names (suparship-store,
+// vault-token / op-connect-token) so app ExternalSecrets are cluster-agnostic.
+// That only holds when one publisher owns them per physical cluster. Two
+// registered clusters on one API server — the single-cluster dev loop seeds
+// staging-cluster and prod-cluster both at https://kubernetes.default.svc —
+// would otherwise each publish their own copy: two ArgoCD Applications
+// syncing the same SealedSecret and ClusterSecretStore, differing only in the
+// cluster label, flipping each other OutOfSync on every reconcile forever.
+//
+// The owner is the alphabetically first cluster sharing the destination, so
+// every caller (paste handler, reseal, startup self-heal) agrees without
+// coordination. A cluster with no destination, or one nobody else shares,
+// owns its own store. Unknown names own themselves.
+func SecretStoreOwner(clusters []domain.Cluster, clusterName string) string {
+	var server string
+	for _, c := range clusters {
+		if c.Name == clusterName {
+			server = c.APIServer
+			break
+		}
+	}
+	if server == "" {
+		return clusterName
+	}
+	owner := clusterName
+	for _, c := range clusters {
+		if c.APIServer == server && c.Name < owner {
+			owner = c.Name
+		}
+	}
+	return owner
 }
 
 // HasClusterSecretStore reports whether a cluster's unified store (store.yaml)

@@ -204,10 +204,18 @@ ok "write-token Secret suparship-vault-token in $SYSTEM_NS (Vault's root token)"
 # ClusterSecretStore's tokenSecretRef points at. On a real cluster this arrives
 # as a SealedSecret through gitops; creating it directly is the dev shortcut,
 # same as the tooling cluster never sealing its own credentials.
+#
+# seal-cluster-tokens.sh later runs the REAL pipeline, which publishes a
+# SealedSecret of the same name into this namespace. The sealed-secrets
+# controller refuses to overwrite a Secret it did not create ("already exists
+# and is not managed by SealedSecret") and retries forever — unless the Secret
+# carries the managed annotation, which tells it to adopt the object.
 kubectl -n "$ESO_NS" create secret generic vault-token \
   --from-literal=token="$VAULT_DEV_TOKEN" \
-  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-ok "read-token Secret vault-token in $ESO_NS"
+  --dry-run=client -o yaml \
+  | kubectl annotate --local -f - sealedsecrets.bitnami.com/managed=true -o yaml \
+  | kubectl apply -f - >/dev/null
+ok "read-token Secret vault-token in $ESO_NS (adoptable by the sealed pipeline)"
 
 # ── 3b. The unified ClusterSecretStore — dev shortcut for the seal pipeline ─
 # On a real install the per-cluster store arrives via the seal-and-publish
