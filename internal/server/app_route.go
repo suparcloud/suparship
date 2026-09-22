@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	domainapp "github.com/suparcloud/suparship/internal/app"
 	"github.com/suparcloud/suparship/internal/domain"
@@ -40,13 +41,15 @@ var (
 	errRouteTargetDecommissioned = errors.New("target environment is decommissioned; re-enable it first")
 	errRouteNoIngress            = errors.New("app exposes no HTTP route; there is no hostname to route")
 	errRoutePreviewBaseMismatch  = errors.New("preview is not based on the target environment")
+	errRouteHostNotTokenized     = errors.New("hostname is not platform-managed")
 )
 
 // statusForRouteErr maps a routeAppEnv/unrouteAppEnv error to an HTTP status.
 func statusForRouteErr(err error) int {
 	switch {
 	case errors.Is(err, errRouteTargetIsProd), errors.Is(err, errRouteTargetDecommissioned),
-		errors.Is(err, errRouteNoIngress), errors.Is(err, errRoutePreviewBaseMismatch):
+		errors.Is(err, errRouteNoIngress), errors.Is(err, errRoutePreviewBaseMismatch),
+		errors.Is(err, errRouteHostNotTokenized):
 		return http.StatusUnprocessableEntity
 	default:
 		return statusForPinErr(err)
@@ -60,6 +63,75 @@ func routeIsSkippable(err error) bool {
 	return errors.Is(err, errPinTargetNotFound) ||
 		errors.Is(err, errPinPreviewNotFound) ||
 		errors.Is(err, errRouteNoIngress)
+}
+
+// routingTokens are the ((platform.*)) tokens the host swap can move. A host
+// value that carries none of them is a literal the platform cannot swap.
+var routingTokens = []string{
+	"platform.routingHost", "platform.externalRoutingHost", "platform.internalRoutingHost",
+	"platform.appRoutingName", "platform.appComponentRoutingName",
+}
+
+// componentsWithoutRoutingToken returns the exposed components whose effective
+// values (template ⊕ org override ⊕ app ⊕ env ⊕ component overlays, before
+// interpolation) carry NO routing token in any string leaf — i.e. whose host
+// is a literal the swap could not move. Best-effort: a component whose template
+// can't be resolved (fake mode, test harness) is not reported, so the check
+// never blocks where it can't see.
+func (ah *appHandler) componentsWithoutRoutingToken(ctx context.Context, app *domain.App, envName string) []string {
+	var missing []string
+	envOv := app.Spec.EnvironmentDefaults[envName]
+	for _, c := range app.Spec.Components {
+		if c.ExposeMode != domain.ExposeExternal && c.ExposeMode != domain.ExposeInternal {
+			continue
+		}
+		// A component with its own template (composed app) is interpolated
+		// against its own values; one without (single-template app) against
+		// the app-level values — mirroring the publisher's two overlay paths.
+		tref, appRaw, envRaw := c.Template, c.Values, envOv.ComponentValues[c.Name]
+		if tref == nil {
+			tref, appRaw, envRaw = &app.Spec.Template, app.Spec.RawValues, envOv.RawValues
+		}
+		if tref.Name == "" {
+			continue
+		}
+		t, ok := ah.lookupTemplate(ctx, tref.Name)
+		if !ok || t == nil {
+			continue
+		}
+		ov := loadOverride(ctx, ah.kubeClient, tref.Name)
+		values := computeEffectiveValues(nil, t, ov, envName, ah.envCluster(ctx, envName), appRaw, envRaw)
+		if !valuesContainAnyToken(values, routingTokens) {
+			missing = append(missing, c.Name)
+		}
+	}
+	return missing
+}
+
+// valuesContainAnyToken reports whether any string leaf of a values tree
+// mentions one of the token names (either delimiter).
+func valuesContainAnyToken(v any, names []string) bool {
+	switch x := v.(type) {
+	case string:
+		for _, n := range names {
+			if strings.Contains(x, n) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, e := range x {
+			if valuesContainAnyToken(e, names) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if valuesContainAnyToken(e, names) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // previewURLFor returns the URL a preview's stored record should carry: the
@@ -163,6 +235,118 @@ func (ah *appHandler) setRoutedToPreview(ctx context.Context, app *domain.App, e
 	return nil
 }
 
+// argoEnvSettledReader is the optional capability (kube.ArgoCDStatusReader) to
+// tell whether an env's generated Applications have applied a change committed
+// at a given time. Asserted from the ArgoAppGate; absent (fake mode, tests) the
+// sequencing below degrades to "publish, then publish".
+type argoEnvSettledReader interface {
+	EnvAppsSettled(ctx context.Context, projectName, appName, envName string, since time.Time) (bool, []string, error)
+}
+
+// Ordering rule for the host swap: ingress-nginx's admission webhook refuses an
+// Ingress claiming a host+path another Ingress still holds. So whichever side
+// GIVES UP a hostname is published first and its Applications are given time to
+// sync before the side CLAIMING the hostname is published. Route: env → -origin
+// host, then preview → env host. Restore: preview → own host, then env → its
+// host. Delete: preview pruned, then env → its host. The cost is a few seconds
+// where the hostname answers 404; the alternative is a guaranteed SyncFailed.
+//
+// routeSettleTimeout bounds the wait; on timeout the claim is published anyway
+// and the Applications' sync retry policy finishes the handover.
+const routeSettleTimeout = 2 * time.Minute
+
+// routeSettlePoll is a var so tests can shorten the wait loop.
+var routeSettlePoll = 2 * time.Second
+
+// envRef names one app env to wait on.
+type envRef struct{ project, app, env string }
+
+// waitForEnvsSettled waits until every listed env's Applications have applied
+// what was committed at `since` (see argoEnvSettledReader), nudging ArgoCD to
+// refresh instead of waiting out its poll cycle. Best-effort: returns on
+// timeout or a read error so the caller can proceed.
+func (ah *appHandler) waitForEnvsSettled(ctx context.Context, refs []envRef, since time.Time) {
+	r, ok := ah.argoAppGate.(argoEnvSettledReader)
+	if !ok || len(refs) == 0 {
+		return
+	}
+	// ArgoCD records reconciledAt at second precision; give the comparison a
+	// second of slack so a commit and a refresh in the same second still count.
+	since = since.Add(-time.Second)
+	deadline := time.Now().Add(routeSettleTimeout)
+	pending := append([]envRef(nil), refs...)
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.env)
+	}
+	reportProgress(ctx, "wait", "waiting for ArgoCD to apply the hostname release on "+strings.Join(names, ", "))
+	for i := 0; len(pending) > 0; i++ {
+		var still []envRef
+		for _, ref := range pending {
+			settled, names, err := r.EnvAppsSettled(ctx, ref.project, ref.app, ref.env, since)
+			if err != nil {
+				slog.Warn("route: argocd sync read failed — proceeding without the wait",
+					"project", ref.project, "app", ref.app, "env", ref.env, "err", err)
+				continue
+			}
+			if settled {
+				continue
+			}
+			if ah.argoChainNudger != nil && i%3 == 0 && len(names) > 0 {
+				if nerr := ah.argoChainNudger.RefreshAppsByName(ctx, names); nerr != nil {
+					slog.Debug("route: argocd refresh nudge failed", "env", ref.env, "err", nerr)
+				}
+			}
+			still = append(still, ref)
+		}
+		pending = still
+		if len(pending) == 0 || time.Now().After(deadline) {
+			if len(pending) > 0 {
+				slog.Warn("route: timed out waiting for argocd to apply the hostname release — proceeding; the sync retry policy completes the handover",
+					"pending", len(pending))
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(routeSettlePoll):
+		}
+	}
+}
+
+// waitForPreviewAppGone waits until a pruned preview's Application has been
+// removed (its Ingress with it), nudging the previews ApplicationSet. Same
+// best-effort posture as waitForEnvsSettled.
+func (ah *appHandler) waitForPreviewAppGone(ctx context.Context, projectName, appName, previewName string) {
+	if ah.argoAppGate == nil {
+		return
+	}
+	deadline := time.Now().Add(routeSettleTimeout)
+	reportProgress(ctx, "wait", "waiting for ArgoCD to remove preview "+previewName)
+	for i := 0; ; i++ {
+		if ah.argoChainNudger != nil && i%3 == 0 {
+			if err := ah.argoChainNudger.RefreshAppSets(ctx, []string{"previews"}); err != nil {
+				slog.Debug("route: previews appset nudge failed", "err", err)
+			}
+		}
+		exists, err := ah.argoAppGate.HasAppForEnv(ctx, projectName, appName, previewName)
+		if err != nil || !exists {
+			return
+		}
+		if time.Now().After(deadline) {
+			slog.Warn("route: timed out waiting for the preview Application to be pruned — proceeding; the sync retry policy completes the handover",
+				"project", projectName, "app", appName, "preview", previewName)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(routeSettlePoll):
+		}
+	}
+}
+
 // routeAppEnvSpec validates and records the swap in the app spec WITHOUT
 // publishing. Returns the app, the target env record, the preview record and
 // the preview previously routed to this env ("" when none). Shared by the
@@ -188,6 +372,10 @@ func (ah *appHandler) routeAppEnvSpec(ctx context.Context, projectName, appName,
 	if !domainapp.AppHasIngressRoute(app) {
 		return nil, nil, nil, "", fmt.Errorf("%w: app %q", errRouteNoIngress, appName)
 	}
+	if missing := ah.componentsWithoutRoutingToken(ctx, app, envName); len(missing) > 0 {
+		return nil, nil, nil, "", fmt.Errorf("%w: component(s) %s set a literal host; use ((platform.appRoutingName)), ((platform.appComponentRoutingName)) or ((platform.routingHost)) in the host value so the platform can move it",
+			errRouteHostNotTokenized, strings.Join(missing, ", "))
+	}
 	preview, err = ah.appStore.GetAppEnvironment(ctx, projectName, appName, fromPreview)
 	if err != nil || preview.EnvType != domain.AppEnvPreview {
 		return nil, nil, nil, "", fmt.Errorf("%w: %q for app %q", errPinPreviewNotFound, fromPreview, appName)
@@ -211,12 +399,12 @@ func (ah *appHandler) routeAppEnvSpec(ctx context.Context, projectName, appName,
 	return app, targetEnv, preview, prevPreview, nil
 }
 
-// routeAppEnv records the swap and publishes both sides: the preview first (it
-// takes the hostname), then the stable env (it moves to the "-origin" host) —
-// so an ingress controller that keeps the OLDER claimant on a duplicate host
-// hands the host over the moment the env's update syncs, with no 404 window.
-// A previously routed preview is moved back to its own host first. On a publish
-// failure the spec is reverted so a retry starts clean. Returns the routed URL.
+// routeAppEnv records the swap and publishes both sides in the order the
+// ingress admission webhook demands (see the ordering rule above): the side
+// releasing the hostname first — the env moving to its "-origin" host, or the
+// previously routed preview moving back to its own — then, once ArgoCD has
+// applied that, the preview claiming it. On a publish failure the spec is
+// reverted so a retry starts clean. Returns the routed URL.
 func (ah *appHandler) routeAppEnv(ctx context.Context, projectName, appName, envName, fromPreview string) (string, error) {
 	app, targetEnv, preview, prev, err := ah.routeAppEnvSpec(ctx, projectName, appName, envName, fromPreview)
 	if err != nil {
@@ -228,22 +416,35 @@ func (ah *appHandler) routeAppEnv(ctx context.Context, projectName, appName, env
 			slog.Warn("route: failed to revert spec after publish failure", "project", projectName, "app", appName, "env", envName, "err", rerr)
 		}
 	}
-	if prev != "" && prev != fromPreview {
+	releaseStart := time.Now()
+	var release []envRef
+	switch {
+	case prev != "" && prev != fromPreview:
+		// Replacing: the old preview holds the hostname; move it off first. The
+		// env is already on its -origin host.
 		if old, gerr := ah.appStore.GetAppEnvironment(ctx, projectName, appName, prev); gerr == nil && old.EnvType == domain.AppEnvPreview {
+			reportProgress(ctx, "release", "publishing preview "+prev+" back to its own host")
 			if err := ah.republishStoredPreview(ctx, app, old); err != nil {
 				revert()
 				return "", fmt.Errorf("failed to publish previously routed preview %s: %w", prev, err)
 			}
 			ah.savePreviewURL(ctx, app, old, previewURLFor(app, prev, baseDomain, secure))
+			release = append(release, envRef{projectName, appName, prev})
 		}
+	case prev == "":
+		// Fresh route: the env releases the hostname by moving to -origin.
+		reportProgress(ctx, "release", "publishing "+envName+" on its -origin host")
+		if err := ah.republishAppsFocus(ctx, []appFocusPublish{{app: app, focusEnv: targetEnv}}); err != nil {
+			revert()
+			return "", fmt.Errorf("failed to publish environment %s: %w", envName, err)
+		}
+		release = append(release, envRef{projectName, appName, envName})
 	}
+	ah.waitForEnvsSettled(ctx, release, releaseStart)
+	reportProgress(ctx, "claim", "publishing preview "+fromPreview+" on "+envName+"'s hostname")
 	if err := ah.republishStoredPreview(ctx, app, preview); err != nil {
 		revert()
 		return "", fmt.Errorf("failed to publish preview %s: %w", fromPreview, err)
-	}
-	if err := ah.republishAppsFocus(ctx, []appFocusPublish{{app: app, focusEnv: targetEnv}}); err != nil {
-		revert()
-		return "", fmt.Errorf("failed to publish environment %s: %w", envName, err)
 	}
 	url := previewURLFor(app, fromPreview, baseDomain, secure)
 	ah.savePreviewURL(ctx, app, preview, url)
@@ -267,39 +468,52 @@ func (ah *appHandler) unrouteAppEnvSpec(ctx context.Context, projectName, appNam
 	return app, ah.stableEnvRecord(ctx, app, envName), previewName, true, nil
 }
 
-// unrouteAppEnv clears the swap and publishes: the stable env first (it takes
-// its hostname back), then the preview (back to its own host) if it still
-// exists. A failed env publish reverts the spec so a retry starts clean.
+// unrouteAppEnv clears the swap and publishes in webhook order: the preview
+// releases the hostname (back to its own host) if it still exists, ArgoCD
+// applies that, then the stable env takes its hostname back. A failed publish
+// reverts the spec so a retry starts clean.
 func (ah *appHandler) unrouteAppEnv(ctx context.Context, projectName, appName, envName string) (string, bool, error) {
 	app, targetEnv, previewName, wasRouted, err := ah.unrouteAppEnvSpec(ctx, projectName, appName, envName)
 	if err != nil || !wasRouted {
 		return previewName, wasRouted, err
 	}
-	if err := ah.republishAppsFocus(ctx, []appFocusPublish{{app: app, focusEnv: targetEnv}}); err != nil {
+	revert := func() {
 		if rerr := ah.setRoutedToPreview(ctx, app, envName, previewName); rerr != nil {
 			slog.Warn("unroute: failed to revert spec after publish failure", "project", projectName, "app", appName, "env", envName, "err", rerr)
 		}
-		return previewName, true, fmt.Errorf("failed to publish environment %s: %w", envName, err)
 	}
-	if err := ah.republishPreviewOwnHost(ctx, app, envName, previewName); err != nil {
+	releaseStart := time.Now()
+	reportProgress(ctx, "release", "publishing preview "+previewName+" back to its own host")
+	released, err := ah.republishPreviewOwnHost(ctx, app, envName, previewName)
+	if err != nil {
+		revert()
 		return previewName, true, err
+	}
+	if released {
+		ah.waitForEnvsSettled(ctx, []envRef{{projectName, appName, previewName}}, releaseStart)
+	}
+	reportProgress(ctx, "claim", "publishing "+envName+" back on its own hostname")
+	if err := ah.republishAppsFocus(ctx, []appFocusPublish{{app: app, focusEnv: targetEnv}}); err != nil {
+		revert()
+		return previewName, true, fmt.Errorf("failed to publish environment %s: %w", envName, err)
 	}
 	return previewName, true, nil
 }
 
 // republishPreviewOwnHost moves a (no longer routed) preview back to its own
-// host and URL, if its record still exists. Missing preview = nothing to do.
-func (ah *appHandler) republishPreviewOwnHost(ctx context.Context, app *domain.App, envName, previewName string) error {
+// host and URL, if its record still exists. Returns whether a preview was
+// republished (a missing preview = nothing to release).
+func (ah *appHandler) republishPreviewOwnHost(ctx context.Context, app *domain.App, envName, previewName string) (bool, error) {
 	preview, err := ah.appStore.GetAppEnvironment(ctx, app.ProjectName, app.Name, previewName)
 	if err != nil || preview.EnvType != domain.AppEnvPreview {
-		return nil
+		return false, nil
 	}
 	if err := ah.republishStoredPreview(ctx, app, preview); err != nil {
-		return fmt.Errorf("environment %s restored, but failed to publish preview %s: %w", envName, previewName, err)
+		return false, fmt.Errorf("failed to publish preview %s: %w", previewName, err)
 	}
 	baseDomain, secure := ah.previewRoutingForEnv(ctx, envName)
 	ah.savePreviewURL(ctx, app, preview, previewURLFor(app, previewName, baseDomain, secure))
-	return nil
+	return true, nil
 }
 
 // clearRoutingForPreview clears the swap on whichever env routes to the named
@@ -313,22 +527,32 @@ func (ah *appHandler) clearRoutingForPreview(ctx context.Context, app *domain.Ap
 	if err := ah.setRoutedToPreview(ctx, app, donor, ""); err != nil {
 		return nil, err
 	}
-	return &appFocusPublish{app: app, focusEnv: ah.stableEnvRecord(ctx, app, donor)}, nil
+	env := ah.stableEnvRecord(ctx, app, donor)
+	if env == nil {
+		// No record anywhere (org env removed?): still name the env so the
+		// focus publish and any spec revert have something to address.
+		env = &domain.AppEnvironment{AppName: app.Name, ProjectName: app.ProjectName, EnvName: donor, EnvType: domain.AppEnvStaging}
+	}
+	return &appFocusPublish{app: app, focusEnv: env}, nil
 }
 
-// restoreRoutingForDeletedPreview gives a stable env its hostname back before
-// the preview serving it is deleted (spec + one publish). Reverts the spec on a
-// publish failure so the delete can be retried with the swap still recorded.
-func (ah *appHandler) restoreRoutingForDeletedPreview(ctx context.Context, app *domain.App, previewName string) error {
-	item, err := ah.clearRoutingForPreview(ctx, app, previewName)
-	if err != nil || item == nil {
-		return err
+// restoreRoutingAfterPrune gives a stable env its hostname back once the
+// preview serving it has been pruned from gitops: waits for the preview's
+// Application (and its Ingress) to be gone, then republishes the env. The spec
+// was cleared by clearRoutingForPreview before the prune; a publish failure
+// reinstates it so a later unroute republishes the env (a missing preview is
+// then simply nothing to release).
+func (ah *appHandler) restoreRoutingAfterPrune(ctx context.Context, item *appFocusPublish, previewName string) error {
+	if item == nil {
+		return nil
 	}
+	ah.waitForPreviewAppGone(ctx, item.app.ProjectName, item.app.Name, previewName)
+	reportProgress(ctx, "claim", "publishing "+item.focusEnv.EnvName+" back on its own hostname")
 	if err := ah.republishAppsFocus(ctx, []appFocusPublish{*item}); err != nil {
-		if rerr := ah.setRoutedToPreview(ctx, app, item.focusEnv.EnvName, previewName); rerr != nil {
-			slog.Warn("preview delete: failed to revert routing after publish failure", "project", app.ProjectName, "app", app.Name, "preview", previewName, "err", rerr)
+		if rerr := ah.setRoutedToPreview(ctx, item.app, item.focusEnv.EnvName, previewName); rerr != nil {
+			slog.Warn("preview delete: failed to reinstate routing after publish failure", "project", item.app.ProjectName, "app", item.app.Name, "preview", previewName, "err", rerr)
 		}
-		return fmt.Errorf("failed to restore %s routing before deleting preview %s: %w", item.focusEnv.EnvName, previewName, err)
+		return fmt.Errorf("preview %s removed, but failed to restore %s's hostname: %w — run unroute to retry", previewName, item.focusEnv.EnvName, err)
 	}
 	return nil
 }
@@ -365,7 +589,7 @@ func (ah *appHandler) handleRouteAppEnv(w http.ResponseWriter, r *http.Request) 
 			"host":    hostOf(url),
 		}, nil
 	}
-	dispatchOp(w, r, ah.async, "route-app", projectName, op)
+	dispatchOpAsyncDefault(w, r, ah.async, "route-app", projectName, op)
 }
 
 // handleUnrouteAppEnv serves DELETE .../apps/{app}/environments/{env}/route.
@@ -390,5 +614,5 @@ func (ah *appHandler) handleUnrouteAppEnv(w http.ResponseWriter, r *http.Request
 			"from":    previewName,
 		}, nil
 	}
-	dispatchOp(w, r, ah.async, "unroute-app", projectName, op)
+	dispatchOpAsyncDefault(w, r, ah.async, "unroute-app", projectName, op)
 }

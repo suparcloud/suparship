@@ -50,6 +50,12 @@ type asyncTask struct {
 	Result any `json:"result,omitempty"`
 	// Error is the terminal failure message (empty unless failed).
 	Error string `json:"error,omitempty"`
+	// Phase / Message are the op's self-reported progress while running (see
+	// reportProgress) — e.g. phase "wait" with "waiting for ArgoCD to apply
+	// staging's hostname release" — so a poller can show what a long task is
+	// doing, not just that it is running. Empty for ops that don't report.
+	Phase   string `json:"phase,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // asyncOp is the deferred work. It returns the HTTP status + body the sync
@@ -103,6 +109,16 @@ func (s *asyncTaskStore) setRunning(id string) {
 	s.mu.Unlock()
 }
 
+func (s *asyncTaskStore) progress(id, phase, message string) {
+	s.mu.Lock()
+	if t := s.tasks[id]; t != nil {
+		t.Phase = phase
+		t.Message = message
+		t.UpdatedAt = time.Now()
+	}
+	s.mu.Unlock()
+}
+
 func (s *asyncTaskStore) finish(id string, state asyncTaskState, status int, result any, errMsg string) {
 	s.mu.Lock()
 	if t := s.tasks[id]; t != nil {
@@ -148,6 +164,21 @@ func newAsyncRunner(baseCtx context.Context, wg *sync.WaitGroup) *asyncRunner {
 	return &asyncRunner{store: newAsyncTaskStore(asyncTaskTTL), wg: wg, baseCtx: baseCtx}
 }
 
+// progressReporter receives an op's progress updates. The runner installs one
+// on the op's context (async mode); reportProgress is a no-op without it.
+type progressReporter func(phase, message string)
+
+type progressReporterKey struct{}
+
+// reportProgress records a running task's current phase + human message for
+// pollers. Safe to call from any op: in sync mode (no reporter on ctx) it does
+// nothing.
+func reportProgress(ctx context.Context, phase, message string) {
+	if rep, ok := ctx.Value(progressReporterKey{}).(progressReporter); ok && rep != nil {
+		rep(phase, message)
+	}
+}
+
 // accept registers a task, launches op on a tracked goroutine, and writes 202
 // with the ack id + poll URL.
 func (a *asyncRunner) accept(w http.ResponseWriter, kind, project string, op asyncOp) {
@@ -156,7 +187,10 @@ func (a *asyncRunner) accept(w http.ResponseWriter, kind, project string, op asy
 	go func() {
 		defer a.wg.Done()
 		a.store.setRunning(t.ID)
-		status, result, err := op(a.baseCtx)
+		ctx := context.WithValue(a.baseCtx, progressReporterKey{}, progressReporter(func(phase, message string) {
+			a.store.progress(t.ID, phase, message)
+		}))
+		status, result, err := op(ctx)
 		if err != nil {
 			a.store.finish(t.ID, asyncFailed, status, errorResponse{Error: err.Error()}, err.Error())
 			return
@@ -198,6 +232,21 @@ func wantAsync(r *http.Request) bool {
 	return false
 }
 
+// wantSync reports whether the caller of a default-async endpoint asked for the
+// inline result instead: ?async=0 or the RFC 7240 "Prefer: wait" header.
+func wantSync(r *http.Request) bool {
+	switch strings.ToLower(r.URL.Query().Get("async")) {
+	case "0", "false", "no":
+		return true
+	}
+	for _, v := range r.Header.Values("Prefer") {
+		if strings.Contains(strings.ToLower(v), "wait") {
+			return true
+		}
+	}
+	return false
+}
+
 // dispatchOp runs op synchronously (the default — sync callers and the web UI
 // keep their inline 200/result), or accepts it for background execution and
 // returns 202 when the caller opts in and an async runner is wired. Request
@@ -208,6 +257,24 @@ func dispatchOp(w http.ResponseWriter, r *http.Request, async *asyncRunner, kind
 		async.accept(w, kind, project, op)
 		return
 	}
+	runOpInline(w, r, op)
+}
+
+// dispatchOpAsyncDefault is dispatchOp for operations that are ALWAYS slow
+// (the host swap waits on ArgoCD, minutes on a cold cluster): it accepts for
+// background execution and returns 202 unless the caller explicitly asks to
+// wait (?async=0 / Prefer: wait) or no runner is wired. An ingress or gateway
+// in front of suparship typically times out at 30–60s, so a default-sync
+// response would never reach the caller.
+func dispatchOpAsyncDefault(w http.ResponseWriter, r *http.Request, async *asyncRunner, kind, project string, op asyncOp) {
+	if async != nil && !wantSync(r) {
+		async.accept(w, kind, project, op)
+		return
+	}
+	runOpInline(w, r, op)
+}
+
+func runOpInline(w http.ResponseWriter, r *http.Request, op asyncOp) {
 	status, result, err := op(r.Context())
 	if err != nil {
 		writeJSON(w, status, errorResponse{Error: err.Error()})

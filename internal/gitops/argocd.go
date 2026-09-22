@@ -237,6 +237,33 @@ type SyncPolicy struct {
 	// The most commonly needed option is "CreateNamespace=true", which tells
 	// ArgoCD to create the destination namespace if it does not already exist.
 	SyncOptions []string `json:"syncOptions,omitempty" yaml:"syncOptions,omitempty"`
+	// Retry re-attempts a failed sync with backoff. Without it ArgoCD never
+	// re-syncs a revision that already failed, so a transient rejection (an
+	// admission webhook refusing an Ingress whose host another Ingress is
+	// still releasing, an API hiccup) leaves the Application SyncFailed until
+	// the next commit or a manual sync.
+	Retry *SyncRetry `json:"retry,omitempty" yaml:"retry,omitempty"`
+}
+
+// SyncRetry mirrors ArgoCD's syncPolicy.retry.
+type SyncRetry struct {
+	Limit   int64             `json:"limit,omitempty" yaml:"limit,omitempty"`
+	Backoff *SyncRetryBackoff `json:"backoff,omitempty" yaml:"backoff,omitempty"`
+}
+
+// SyncRetryBackoff mirrors ArgoCD's syncPolicy.retry.backoff.
+type SyncRetryBackoff struct {
+	Duration    string `json:"duration,omitempty" yaml:"duration,omitempty"`
+	Factor      int64  `json:"factor,omitempty" yaml:"factor,omitempty"`
+	MaxDuration string `json:"maxDuration,omitempty" yaml:"maxDuration,omitempty"`
+}
+
+// defaultSyncRetry is the retry every automated Application gets: five
+// attempts, 5s doubling to a 1m cap (~2 minutes total) — long enough to ride
+// out the other side of a host swap being admitted, short enough that a real
+// failure still surfaces quickly.
+func defaultSyncRetry() *SyncRetry {
+	return &SyncRetry{Limit: 5, Backoff: &SyncRetryBackoff{Duration: "5s", Factor: 2, MaxDuration: "1m"}}
 }
 
 // AutomatedSyncPolicy configures automatic synchronisation behaviour.
@@ -367,6 +394,7 @@ func BuildArgoApplication(app *domain.App, env domain.AppEnvironment, opts Build
 				Prune:    true,
 				SelfHeal: true,
 			},
+			Retry: defaultSyncRetry(),
 			// CreateNamespace=true is required because suparship uses a
 			// dedicated namespace per app-environment (e.g. "hello-staging").
 			// Without it ArgoCD fails the first sync with "namespace not found".

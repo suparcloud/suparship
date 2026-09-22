@@ -227,6 +227,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 	if opts.SyncAutomated {
 		syncPolicy = &SyncPolicy{
 			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			Retry:       defaultSyncRetry(),
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	} else {
@@ -363,6 +364,7 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 	if opts.SyncAutomated {
 		syncPolicy = &SyncPolicy{
 			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			Retry:       defaultSyncRetry(),
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	} else {
@@ -467,6 +469,7 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 	if opts.SyncAutomated {
 		syncPolicy = &SyncPolicy{
 			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			Retry:       defaultSyncRetry(),
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	} else {
@@ -651,6 +654,7 @@ func platformSyncPolicy(opts AppSetOptions) *SyncPolicy {
 	if opts.SyncAutomated {
 		return &SyncPolicy{
 			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			Retry:       defaultSyncRetry(),
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	}

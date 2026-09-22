@@ -3871,6 +3871,7 @@ function PinControls({
   const stableEnvs = environments.filter((e) => e.envType !== "preview");
   const [target, setTarget] = useState<string>(stableEnvs[0]?.envName ?? "");
   const [busy, setBusy] = useState(false);
+  const [phaseMsg, setPhaseMsg] = useState("");
 
   // Pinning is pipeline-only, but suspend/resume works for direct apps too — so
   // gate only on currentEnv here and guard the pin branches on !isDirect below.
@@ -3886,16 +3887,22 @@ function PinControls({
   const routedFromEnv = enriched?.routedFromEnv ?? currentEnv.routedFromEnv;
   const liveUrl = (enriched?.urls ?? currentEnv.urls ?? [])[0];
 
+  // Route/restore run as a server task (they wait on ArgoCD between the two
+  // publishes); the task's phase message is shown while busy.
+  const onProgress = (_phase: string, message: string) => setPhaseMsg(message);
+
   async function unroute(env: string, label: string) {
     setBusy(true);
+    setPhaseMsg("");
     try {
-      await unrouteAppEnv(project, app, env);
+      await unrouteAppEnv(project, app, env, onProgress);
       toast.success(`${label} — hostname restored`);
       await onChanged();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to restore routing");
     } finally {
       setBusy(false);
+      setPhaseMsg("");
     }
   }
 
@@ -3924,9 +3931,10 @@ function PinControls({
         <button
           onClick={() => unroute(currentEnv!.envName, currentEnv!.envName)}
           disabled={busy}
+          title={busy ? phaseMsg : ""}
           className="shrink-0 rounded-md border border-indigo-300 bg-white px-3 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
         >
-          {busy ? "Restoring…" : "Restore routing"}
+          {busy ? (phaseMsg ? `Restoring… ${phaseMsg}` : "Restoring…") : "Restore routing"}
         </button>
       </div>
     );
@@ -3950,9 +3958,10 @@ function PinControls({
         <button
           onClick={() => unroute(routedFromEnv!, routedFromEnv!)}
           disabled={busy}
+          title={busy ? phaseMsg : ""}
           className="shrink-0 rounded-md border border-indigo-300 bg-white px-3 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
         >
-          {busy ? "Restoring…" : `Restore ${routedFromEnv}`}
+          {busy ? (phaseMsg ? `Restoring… ${phaseMsg}` : "Restoring…") : `Restore ${routedFromEnv}`}
         </button>
       </div>
     );
@@ -4033,14 +4042,16 @@ function PinControls({
     async function route() {
       if (!routeTargetName) return;
       setBusy(true);
+      setPhaseMsg("");
       try {
-        const res = await routeAppEnv(project, app, routeTargetName, currentEnv!.envName);
+        const res = await routeAppEnv(project, app, routeTargetName, currentEnv!.envName, onProgress);
         toast.success(`${res.host} now served by ${previewName}`);
         await onChanged();
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Failed to route");
       } finally {
         setBusy(false);
+        setPhaseMsg("");
       }
     }
     async function pin() {
@@ -4068,10 +4079,10 @@ function PinControls({
           <button
             onClick={route}
             disabled={busy || routeDisabled}
-            title={routeBlocked}
+            title={busy ? phaseMsg : routeBlocked}
             className="shrink-0 rounded-md border border-indigo-300 bg-white px-3 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
           >
-            {busy ? "Routing…" : `🔀 Route ${routeTargetName || "env"} here`}
+            {busy ? (phaseMsg ? `Routing… ${phaseMsg}` : "Routing…") : `🔀 Route ${routeTargetName || "env"} here`}
           </button>
         </div>
         {!isDirect && (

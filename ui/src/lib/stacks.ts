@@ -1,3 +1,5 @@
+import { isAcceptedTask, pollTask } from "./apps";
+import type { AcceptedTask, TaskProgress } from "./apps";
 import { api } from "./api";
 import type { EnvConfig } from "./envconfig";
 
@@ -216,27 +218,39 @@ export function unpinStack(
 
 // routeStack routes a stable env's hostname to a PR preview group across the
 // stack (the host swap): each member's preview serves the member's stable URL.
-// Members without the preview or without an HTTP route are skipped.
-export function routeStack(
+// Members without the preview or without an HTTP route are skipped. The server
+// accepts by default (it waits on ArgoCD between publishes); we poll the task
+// to completion, reporting each phase through onProgress.
+export async function routeStack(
   project: string,
   stack: string,
   req: { fromPreview: string; targetEnv: string; apps?: string[] },
+  onProgress?: TaskProgress,
 ): Promise<StackBatchResponse> {
-  return api.post<StackBatchResponse>(`${stackBase(project, stack)}/route`, req);
+  const res = await api.post<StackBatchResponse | AcceptedTask>(`${stackBase(project, stack)}/route`, req);
+  if (isAcceptedTask(res)) {
+    return pollTask<StackBatchResponse>(project, res.taskId, onProgress);
+  }
+  return res;
 }
 
 // unrouteStack restores the swap on a stable env across the stack. Sends a
-// JSON body {targetEnv, apps?} — symmetric with routeStack.
-export function unrouteStack(
+// JSON body {targetEnv, apps?} — symmetric with routeStack. Async by default.
+export async function unrouteStack(
   project: string,
   stack: string,
   targetEnv: string,
   apps?: string[],
+  onProgress?: TaskProgress,
 ): Promise<StackBatchResponse> {
-  return api.del<StackBatchResponse>(`${stackBase(project, stack)}/route`, {
+  const res = await api.del<StackBatchResponse | AcceptedTask>(`${stackBase(project, stack)}/route`, {
     targetEnv,
     apps,
   });
+  if (isAcceptedTask(res)) {
+    return pollTask<StackBatchResponse>(project, res.taskId, onProgress);
+  }
+  return res;
 }
 
 // suspendStack suspends (scales down) an env across the stack; resumeStack brings

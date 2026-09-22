@@ -332,10 +332,11 @@ func (rh *rbacHandler) handleDeleteStackPreview(w http.ResponseWriter, r *http.R
 	// the caller opts into async so tearing down a large stack preview can't 504.
 	op := func(ctx context.Context) (int, any, error) {
 		results := make([]stackOpResult, 0, len(members))
-		// Members whose stable env hostname this preview serves hand it back
-		// first (one batched republish), so the envs never go dark. A failed
-		// restore keeps those members' swap + preview for a retry.
-		restoreFailed := rh.restoreRoutingForDeletedStackPreview(ctx, members, preview, &results)
+		// Members whose stable env hostname this preview serves (the host swap)
+		// get it back in webhook order: swap cleared now, preview pruned below
+		// (its Ingress releases the host), envs republished after the loop.
+		restoreItems, restoreFailed := rh.clearRoutingForDeletedStackPreview(ctx, members, preview, &results)
+		pruned := map[string]bool{}
 		for _, a := range members {
 			if restoreFailed[a.Name] {
 				continue
@@ -361,12 +362,14 @@ func (rh *rbacHandler) handleDeleteStackPreview(w http.ResponseWriter, r *http.R
 					continue
 				}
 			}
+			pruned[a.Name] = true
 			if err := rh.appHandler.appStore.DeleteAppEnvironment(ctx, project, a.Name, preview); err != nil {
 				results = append(results, errResult(a.Name, err))
 				continue
 			}
 			results = append(results, okResult(a.Name, "preview "+preview+" deleted"))
 		}
+		rh.restoreRoutingAfterStackPrune(ctx, restoreItems, preview, pruned, &results)
 		return http.StatusOK, stackBatchResponse{Project: project, Stack: name, Action: "preview-delete", Results: results}, nil
 	}
 	dispatchOp(w, r, rh.appHandler.async, "preview-stack-delete", project, op)

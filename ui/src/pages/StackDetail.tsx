@@ -173,6 +173,8 @@ export function StackDetail() {
   const [previewGroups, setPreviewGroups] = useState<PreviewGroup[]>([]);
   // Per-preview-group selected pin target env (keyed by preview name).
   const [pinTargets, setPinTargets] = useState<Record<string, string>>({});
+  // Progress message of a running route/restore task (they wait on ArgoCD).
+  const [busyNote, setBusyNote] = useState("");
   // Org environments (excluding "preview") — drives the Target clusters control.
   const [orgEnvs, setOrgEnvs] = useState<OrgEnvironment[]>([]);
   // Per-env chosen cluster names for the Target clusters control (UI state). An
@@ -363,16 +365,18 @@ export function StackDetail() {
   async function doRoute(previewName: string, targetEnv: string) {
     if (!targetEnv) return;
     setBusy(`route:${previewName}`);
+    setBusyNote("");
     try {
       summarize(
         `Route ${targetEnv} → ${previewName}`,
-        await routeStack(project!, stackName!, { fromPreview: previewName, targetEnv }),
+        await routeStack(project!, stackName!, { fromPreview: previewName, targetEnv }, (_p, m) => setBusyNote(m)),
       );
       await reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Failed to route hostname");
     } finally {
       setBusy(null);
+      setBusyNote("");
     }
   }
 
@@ -380,16 +384,18 @@ export function StackDetail() {
   // their preview URLs).
   async function doUnroute(previewName: string, targetEnv: string) {
     setBusy(`unroute:${previewName}`);
+    setBusyNote("");
     try {
       summarize(
         `Restore ${targetEnv} hostname`,
-        await unrouteStack(project!, stackName!, targetEnv),
+        await unrouteStack(project!, stackName!, targetEnv, undefined, (_p, m) => setBusyNote(m)),
       );
       await reload();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Failed to restore hostname");
     } finally {
       setBusy(null);
+      setBusyNote("");
     }
   }
 
@@ -709,6 +715,9 @@ export function StackDetail() {
                       >
                         {unrouting ? "Restoring…" : "Restore hostname"}
                       </button>
+                      {(routing || unrouting) && busyNote && (
+                        <span className="text-xs text-indigo-600">{busyNote}</span>
+                      )}
                       <span className="text-gray-300">|</span>
                       <span>Pin {g.name} to</span>
                       <select

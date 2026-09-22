@@ -1644,19 +1644,29 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 	// orphaning a running Application with no store entry. The gitops prune
 	// clones/commits/pushes, so it's deferred when the caller opts into async.
 	op := func(ctx context.Context) (int, any, error) {
-		// A preview serving a stable env's hostname hands it back first, so the
-		// env never goes dark: the swap is cleared and the env republished
-		// before the preview's files are pruned. A restore failure keeps both
-		// the swap and the preview so the delete can be retried.
+		// A preview serving a stable env's hostname (the host swap) hands it
+		// back: the swap is cleared, the preview pruned (its Ingress releases
+		// the host), then the env republished on its own hostname — in that
+		// order, because the ingress admission webhook refuses the env's claim
+		// while the preview still holds the host.
+		var restore *appFocusPublish
 		if app, gerr := ah.appStore.GetApp(ctx, projectName, appName); gerr == nil {
-			if err := ah.restoreRoutingForDeletedPreview(ctx, app, previewName); err != nil {
+			item, err := ah.clearRoutingForPreview(ctx, app, previewName)
+			if err != nil {
 				return http.StatusInternalServerError, nil, err
 			}
+			restore = item
 		}
 		if d, ok := ah.gitOpsPublisher.(AppPreviewDeleter); ok {
 			if err := d.DeleteAppPreview(ctx, projectName, previewName, appName, env.BaseEnv); err != nil {
+				if restore != nil {
+					_ = ah.setRoutedToPreview(ctx, restore.app, restore.focusEnv.EnvName, previewName)
+				}
 				return http.StatusInternalServerError, nil, fmt.Errorf("failed to remove preview from gitops")
 			}
+		}
+		if err := ah.restoreRoutingAfterPrune(ctx, restore, previewName); err != nil {
+			return http.StatusInternalServerError, nil, err
 		}
 		if err := ah.appStore.DeleteAppEnvironment(ctx, projectName, appName, previewName); err != nil {
 			return http.StatusInternalServerError, nil, fmt.Errorf("failed to delete preview")

@@ -161,6 +161,32 @@ jobs:
           # PR's route replaces it (that PR's preview returns to its own URL); to
           # refuse a takeover, GET .../apps/{app} and check .environments[]
           # .routedToPreview first. Prod is refused (422).
+          # Route accepts by default (202 + task): it waits on ArgoCD between
+          # its two publishes, longer than a gateway timeout. Poll the task
+          # until it is terminal; the task's "phase"/"message" say what it is
+          # doing. Pass ?async=0 to get the inline result instead.
+          wait_task() {
+            status_url="$1"
+            for _ in $(seq 1 150); do
+              sleep 2
+              curl -sS -o /tmp/task "$API${status_url#/api/v1}" -H "Authorization: Bearer $TOKEN"
+              state=$(jq -r .state /tmp/task)
+              echo "task $state $(jq -r '[.phase, .message] | map(select(. != null)) | join(": ")' /tmp/task)"
+              case "$state" in
+                succeeded) jq . /tmp/task; return 0 ;;
+                failed)    jq . /tmp/task; return 1 ;;
+              esac
+            done
+            echo "timed out waiting for the task (it keeps running server-side)"; return 1
+          }
+          route_result() {
+            code="$1"
+            case "$code" in
+              202) wait_task "$(jq -r .statusUrl /tmp/route)" ;;
+              200) jq . /tmp/route 2>/dev/null || cat /tmp/route ;;
+              *)   jq . /tmp/route 2>/dev/null || cat /tmp/route; return 1 ;;
+            esac
+          }
           do_route() {
             env="$1"
             echo "==> route $env hostname → $STACK preview '$NAME'"
@@ -168,8 +194,8 @@ jobs:
               -X POST "$API/projects/$PROJECT/stacks/$STACK/route" \
               -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
               -d "{\"fromPreview\":\"$NAME\",\"targetEnv\":\"$env\"}")
-            echo "HTTP $code"; jq . /tmp/route 2>/dev/null || cat /tmp/route
-            [ "$code" = "200" ] || { echo "route failed"; exit 1; }
+            echo "HTTP $code"
+            route_result "$code" || { echo "route failed"; exit 1; }
           }
           do_unroute() {
             env="$1"
@@ -178,8 +204,8 @@ jobs:
               -X DELETE "$API/projects/$PROJECT/stacks/$STACK/route" \
               -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
               -d "{\"targetEnv\":\"$env\"}")
-            echo "HTTP $code"; jq . /tmp/route 2>/dev/null || cat /tmp/route
-            [ "$code" = "200" ] || { echo "unroute failed"; exit 1; }
+            echo "HTTP $code"
+            route_result "$code" || { echo "unroute failed"; exit 1; }
           }
 
           # Pin the stack's PR preview to a stable env. Each pipeline member

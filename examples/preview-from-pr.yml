@@ -106,6 +106,24 @@ jobs:
         run: |
           set -euo pipefail
           url="$API/projects/$PROJECT/apps/$APP/environments/staging/route"
+          # Route accepts by default (202 + task): it waits on ArgoCD between
+          # its two publishes, longer than a gateway timeout. Poll the task
+          # until it is terminal; the task's "phase"/"message" say what it is
+          # doing. Pass ?async=0 to get the inline result instead.
+          wait_task() {
+            status_url="$1"
+            for _ in $(seq 1 150); do
+              sleep 2
+              curl -sS -o /tmp/task "$API${status_url#/api/v1}" -H "Authorization: Bearer $TOKEN"
+              state=$(jq -r .state /tmp/task)
+              echo "task $state $(jq -r '[.phase, .message] | map(select(. != null)) | join(": ")' /tmp/task)"
+              case "$state" in
+                succeeded) jq . /tmp/task; return 0 ;;
+                failed)    jq . /tmp/task; return 1 ;;
+              esac
+            done
+            echo "timed out waiting for the task (it keeps running server-side)"; return 1
+          }
           if [ "$ACTION" = "unlabeled" ]; then
             # Restore: staging serves its own hostname again; the preview goes
             # back to its preview URL. 200 even when nothing was routed.
@@ -121,4 +139,8 @@ jobs:
               -d "{\"fromPreview\":\"$NAME\"}")
           fi
           echo "HTTP $code"; cat /tmp/resp; echo
-          [ "$code" = "200" ] || { echo "route $ACTION failed"; exit 1; }
+          case "$code" in
+            202) wait_task "$(jq -r .statusUrl /tmp/resp)" ;;
+            200) ;;
+            *)   echo "route $ACTION failed"; exit 1 ;;
+          esac

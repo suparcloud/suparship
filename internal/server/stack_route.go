@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -79,14 +80,17 @@ func (rh *rbacHandler) handleRouteStack(w http.ResponseWriter, r *http.Request) 
 	op := func(ctx context.Context) (int, any, error) {
 		return http.StatusOK, rh.routeStackExec(ctx, project, name, members, req), nil
 	}
-	dispatchOp(w, r, rh.appHandler.async, "route-stack", project, op)
+	dispatchOpAsyncDefault(w, r, rh.appHandler.async, "route-stack", project, op)
 }
 
-// routeStackExec runs the two-phase route for the resolved members and returns
-// the per-member batch result. Previews publish first (they take the hostnames),
-// then the stable envs (they move to their "-origin" hosts) — same ordering as
-// the per-app op, batched. On a publish failure every published member's spec
-// is reverted so a retry starts clean.
+// routeStackExec runs the route for the resolved members and returns the
+// per-member batch result, in the order the ingress admission webhook demands
+// (see app_route.go): first everything that RELEASES a hostname — envs moving
+// to their "-origin" hosts (one batched app publish) and previously routed
+// previews moving back to their own (one batched preview publish) — then, once
+// ArgoCD has applied those, the previews CLAIMING the hostnames (one batched
+// preview publish). On a publish failure every published member's spec is
+// reverted so a retry starts clean.
 func (rh *rbacHandler) routeStackExec(ctx context.Context, project, name string, members []*domain.App, req stackRouteRequest) stackBatchResponse {
 	ah := rh.appHandler
 	type routePrep struct {
@@ -105,8 +109,9 @@ func (rh *rbacHandler) routeStackExec(ctx context.Context, project, name string,
 	baseDomain, secure := ah.previewRoutingForEnv(ctx, req.TargetEnv)
 
 	results := make([]stackOpResult, 0, len(members))
-	var previewTargets []PreviewPublishTarget
-	var focus []appFocusPublish
+	var releasePreviews, claimPreviews []PreviewPublishTarget
+	var releaseEnvs []appFocusPublish
+	var releaseRefs []envRef
 	type routed struct {
 		prep        routePrep
 		prevPreview *domain.AppEnvironment // previously routed preview moving back, if any
@@ -117,14 +122,21 @@ func (rh *rbacHandler) routeStackExec(ctx context.Context, project, name string,
 		switch {
 		case p.err == nil:
 			item := routed{prep: p}
-			if p.prev != "" && p.prev != req.FromPreview {
+			switch {
+			case p.prev != "" && p.prev != req.FromPreview:
+				// Replacing: the old preview releases the hostname (the env is
+				// already on its -origin host).
 				if old, gerr := ah.appStore.GetAppEnvironment(ctx, project, a.Name, p.prev); gerr == nil && old.EnvType == domain.AppEnvPreview {
 					item.prevPreview = old
-					previewTargets = append(previewTargets, ah.previewPublishTarget(ctx, p.app, old))
+					releasePreviews = append(releasePreviews, ah.previewPublishTarget(ctx, p.app, old))
+					releaseRefs = append(releaseRefs, envRef{project, a.Name, p.prev})
 				}
+			case p.prev == "":
+				// Fresh route: the env releases the hostname by moving to -origin.
+				releaseEnvs = append(releaseEnvs, appFocusPublish{app: p.app, focusEnv: p.targetEnv})
+				releaseRefs = append(releaseRefs, envRef{project, a.Name, req.TargetEnv})
 			}
-			previewTargets = append(previewTargets, ah.previewPublishTarget(ctx, p.app, p.preview))
-			focus = append(focus, appFocusPublish{app: p.app, focusEnv: p.targetEnv})
+			claimPreviews = append(claimPreviews, ah.previewPublishTarget(ctx, p.app, p.preview))
 			pending = append(pending, item)
 		case routeIsSkippable(p.err):
 			results = append(results, skipResult(a.Name, p.err.Error()))
@@ -135,9 +147,15 @@ func (rh *rbacHandler) routeStackExec(ctx context.Context, project, name string,
 
 	pubStart := time.Now()
 	if len(pending) > 0 {
-		err := ah.publishPreviewsBatch(ctx, previewTargets)
+		reportProgress(ctx, "release", fmt.Sprintf("publishing %d member env(s) on their -origin hosts", len(releaseEnvs)))
+		err := ah.republishAppsFocus(ctx, releaseEnvs)
 		if err == nil {
-			err = ah.republishAppsFocus(ctx, focus)
+			err = ah.publishPreviewsBatch(ctx, releasePreviews)
+		}
+		if err == nil {
+			ah.waitForEnvsSettled(ctx, releaseRefs, pubStart)
+			reportProgress(ctx, "claim", fmt.Sprintf("publishing %d preview(s) on the %s hostnames", len(claimPreviews), req.TargetEnv))
+			err = ah.publishPreviewsBatch(ctx, claimPreviews)
 		}
 		if err != nil {
 			for _, it := range pending {
@@ -202,13 +220,14 @@ func (rh *rbacHandler) handleUnrouteStack(w http.ResponseWriter, r *http.Request
 	op := func(ctx context.Context) (int, any, error) {
 		return http.StatusOK, rh.unrouteStackExec(ctx, project, name, members, req), nil
 	}
-	dispatchOp(w, r, rh.appHandler.async, "unroute-stack", project, op)
+	dispatchOpAsyncDefault(w, r, rh.appHandler.async, "unroute-stack", project, op)
 }
 
-// unrouteStackExec restores every routed member: stable envs first (ONE batched
-// publish — they take their hostnames back), then the previews still on record
-// (ONE batched publish — back to their own hosts). A failed env publish reverts
-// those members' specs for a retry.
+// unrouteStackExec restores every routed member in webhook order: the previews
+// still on record release the hostnames first (ONE batched publish — back to
+// their own hosts), ArgoCD applies that, then the stable envs take their
+// hostnames back (ONE batched publish). A failed publish reverts those members'
+// specs for a retry.
 func (rh *rbacHandler) unrouteStackExec(ctx context.Context, project, name string, members []*domain.App, req stackSuspendRequest) stackBatchResponse {
 	ah := rh.appHandler
 	type unroutePrep struct {
@@ -240,7 +259,7 @@ func (rh *rbacHandler) unrouteStackExec(ctx context.Context, project, name strin
 	if len(pending) == 0 {
 		return stackBatchResponse{Project: project, Stack: name, Action: "unroute", Results: results}
 	}
-	if err := ah.republishAppsFocus(ctx, focus); err != nil {
+	revertAll := func(err error) stackBatchResponse {
 		for _, p := range pending {
 			if rerr := ah.setRoutedToPreview(ctx, p.app, req.TargetEnv, p.preview); rerr != nil {
 				slog.Warn("stack unroute: failed to revert spec after publish failure", "project", project, "app", p.app.Name, "err", rerr)
@@ -249,48 +268,54 @@ func (rh *rbacHandler) unrouteStackExec(ctx context.Context, project, name strin
 		}
 		return stackBatchResponse{Project: project, Stack: name, Action: "unroute", Results: results}
 	}
-	// Previews back to their own hosts — those still on record.
+	// Phase 2a: previews still on record release the hostnames.
 	baseDomain, secure := ah.previewRoutingForEnv(ctx, req.TargetEnv)
 	var previewTargets []PreviewPublishTarget
-	type restored struct {
-		p       unroutePrep
-		preview *domain.AppEnvironment
-	}
-	var withPreview []restored
+	var releaseRefs []envRef
+	previewOf := map[string]*domain.AppEnvironment{}
 	for _, p := range pending {
 		pe, gerr := ah.appStore.GetAppEnvironment(ctx, project, p.app.Name, p.preview)
 		if gerr != nil || pe.EnvType != domain.AppEnvPreview {
-			results = append(results, okResult(p.app.Name, "restored "+req.TargetEnv+" hostname"))
 			continue
 		}
+		previewOf[p.app.Name] = pe
 		previewTargets = append(previewTargets, ah.previewPublishTarget(ctx, p.app, pe))
-		withPreview = append(withPreview, restored{p: p, preview: pe})
+		releaseRefs = append(releaseRefs, envRef{project, p.app.Name, p.preview})
 	}
-	if len(withPreview) == 0 {
-		return stackBatchResponse{Project: project, Stack: name, Action: "unroute", Results: results}
-	}
+	releaseStart := time.Now()
+	reportProgress(ctx, "release", fmt.Sprintf("publishing %d preview(s) back to their own hosts", len(previewTargets)))
 	if err := ah.publishPreviewsBatch(ctx, previewTargets); err != nil {
-		for _, r := range withPreview {
-			results = append(results, errResult(r.p.app.Name, err))
-		}
-		return stackBatchResponse{Project: project, Stack: name, Action: "unroute", Results: results}
+		return revertAll(err)
 	}
-	for _, r := range withPreview {
-		ah.savePreviewURL(ctx, r.p.app, r.preview, previewURLFor(r.p.app, r.p.preview, baseDomain, secure))
-		results = append(results, okResult(r.p.app.Name, "restored "+req.TargetEnv+" hostname; "+r.p.preview+" back on its preview URL"))
+	for _, p := range pending {
+		if pe := previewOf[p.app.Name]; pe != nil {
+			ah.savePreviewURL(ctx, p.app, pe, previewURLFor(p.app, p.preview, baseDomain, secure))
+		}
+	}
+	ah.waitForEnvsSettled(ctx, releaseRefs, releaseStart)
+	// Phase 2b: envs take their hostnames back.
+	reportProgress(ctx, "claim", fmt.Sprintf("publishing %d member env(s) back on their own hostnames", len(focus)))
+	if err := ah.republishAppsFocus(ctx, focus); err != nil {
+		return revertAll(err)
+	}
+	for _, p := range pending {
+		if previewOf[p.app.Name] != nil {
+			results = append(results, okResult(p.app.Name, "restored "+req.TargetEnv+" hostname; "+p.preview+" back on its preview URL"))
+		} else {
+			results = append(results, okResult(p.app.Name, "restored "+req.TargetEnv+" hostname"))
+		}
 	}
 	return stackBatchResponse{Project: project, Stack: name, Action: "unroute", Results: results}
 }
 
-// restoreRoutingForDeletedStackPreview hands stable env hostnames back before a
-// stack preview is torn down: every member whose env routes to the preview has
-// its swap cleared, then all are republished in ONE batch. Members whose
-// restore failed get an error row, have their swap reinstated, and are
-// reported in the returned set so the caller skips their prune (retryable).
-func (rh *rbacHandler) restoreRoutingForDeletedStackPreview(ctx context.Context, members []*domain.App, preview string, results *[]stackOpResult) map[string]bool {
+// clearRoutingForDeletedStackPreview is phase 1 of handing hostnames back when
+// a stack preview is torn down: every member whose env routes to the preview
+// has its swap cleared (spec only) and its env focus item collected for the
+// restore publish that follows the prune. Members whose spec save failed get an
+// error row and are reported so the caller skips their prune (retryable).
+func (rh *rbacHandler) clearRoutingForDeletedStackPreview(ctx context.Context, members []*domain.App, preview string, results *[]stackOpResult) (items []appFocusPublish, failed map[string]bool) {
 	ah := rh.appHandler
-	failed := map[string]bool{}
-	var items []appFocusPublish
+	failed = map[string]bool{}
 	for _, a := range members {
 		app, gerr := ah.appStore.GetApp(ctx, a.ProjectName, a.Name)
 		if gerr != nil {
@@ -306,17 +331,37 @@ func (rh *rbacHandler) restoreRoutingForDeletedStackPreview(ctx context.Context,
 			items = append(items, *item)
 		}
 	}
-	if len(items) == 0 {
-		return failed
+	return items, failed
+}
+
+// restoreRoutingAfterStackPrune is phase 2: once the preview has been pruned
+// for every routed member (their Ingresses release the hostnames), wait for
+// the preview Applications to be gone, then republish the envs in ONE batch.
+// Members whose prune failed keep their swap (reinstated) and are left out.
+// A publish failure reinstates every included member's swap so a later
+// unroute republishes the envs.
+func (rh *rbacHandler) restoreRoutingAfterStackPrune(ctx context.Context, items []appFocusPublish, preview string, pruned map[string]bool, results *[]stackOpResult) {
+	ah := rh.appHandler
+	var publish []appFocusPublish
+	for _, it := range items {
+		if !pruned[it.app.Name] {
+			_ = ah.setRoutedToPreview(ctx, it.app, it.focusEnv.EnvName, preview)
+			continue
+		}
+		publish = append(publish, it)
 	}
-	if err := ah.republishAppsFocus(ctx, items); err != nil {
-		for _, it := range items {
+	if len(publish) == 0 {
+		return
+	}
+	for _, it := range publish {
+		ah.waitForPreviewAppGone(ctx, it.app.ProjectName, it.app.Name, preview)
+	}
+	if err := ah.republishAppsFocus(ctx, publish); err != nil {
+		for _, it := range publish {
 			if rerr := ah.setRoutedToPreview(ctx, it.app, it.focusEnv.EnvName, preview); rerr != nil {
-				slog.Warn("stack preview delete: failed to revert routing after publish failure", "app", it.app.Name, "err", rerr)
+				slog.Warn("stack preview delete: failed to reinstate routing after publish failure", "app", it.app.Name, "err", rerr)
 			}
-			*results = append(*results, errResult(it.app.Name, err))
-			failed[it.app.Name] = true
+			*results = append(*results, errResult(it.app.Name, fmt.Errorf("preview removed, but failed to restore %s's hostname: %w — run unroute to retry", it.focusEnv.EnvName, err)))
 		}
 	}
-	return failed
 }

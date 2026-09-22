@@ -157,21 +157,27 @@ export interface UpdateAppRequest {
 // save + gitops publish runs on a server goroutine. We poll the task to its
 // terminal state and return exactly what the synchronous call would have.
 
-interface AcceptedTask {
+export interface AcceptedTask {
   taskId: string;
   state: string;
   statusUrl: string;
 }
 
-interface AsyncTaskStatus<T> {
+export interface AsyncTaskStatus<T> {
   id: string;
   state: "pending" | "running" | "succeeded" | "failed";
   status?: number;
   result?: T;
   error?: string;
+  /** Self-reported progress while running (e.g. "wait" / "waiting for ArgoCD…"). */
+  phase?: string;
+  message?: string;
 }
 
-function isAcceptedTask(v: unknown): v is AcceptedTask {
+/** Progress callback for pollTask: the task's current phase + message. */
+export type TaskProgress = (phase: string, message: string) => void;
+
+export function isAcceptedTask(v: unknown): v is AcceptedTask {
   return (
     typeof v === "object" && v !== null && "taskId" in v && "statusUrl" in v
   );
@@ -180,13 +186,24 @@ function isAcceptedTask(v: unknown): v is AcceptedTask {
 // pollTask polls a deferred operation until it succeeds or fails. The server
 // keeps working regardless — a poll timeout only means the CLIENT stopped
 // watching, so the error says so instead of implying the save was lost.
-async function pollTask<T>(project: string, taskId: string): Promise<T> {
+// onProgress receives each new phase/message the task reports.
+export async function pollTask<T>(
+  project: string,
+  taskId: string,
+  onProgress?: TaskProgress,
+): Promise<T> {
   const deadline = Date.now() + 15 * 60_000;
+  let lastPhase = "";
   for (;;) {
     await new Promise((r) => setTimeout(r, 2000));
     const t = await api.get<AsyncTaskStatus<T>>(
       `/projects/${encodeURIComponent(project)}/tasks/${encodeURIComponent(taskId)}`,
     );
+    const key = `${t.phase ?? ""}|${t.message ?? ""}`;
+    if (onProgress && t.phase && key !== lastPhase) {
+      lastPhase = key;
+      onProgress(t.phase, t.message ?? "");
+    }
     if (t.state === "succeeded") return t.result as T;
     if (t.state === "failed") {
       throw new ApiError(t.status ?? 500, t.error || "operation failed");
@@ -339,31 +356,49 @@ export function unpinAppEnv(
   );
 }
 
+export interface RouteAppEnvResponse {
+  message: string;
+  host: string;
+  from: string;
+}
+
 // routeAppEnv routes a stable env's hostname to a preview (the host swap): the
 // preview serves the env's normal URL and the env moves to its "-origin"
 // alternate host. Unlike pin, no image changes hands and CD keeps flowing.
-export function routeAppEnv(
+// The server accepts by default (it waits on ArgoCD between the two
+// publishes, longer than a gateway timeout) — we poll the task to completion,
+// reporting each phase through onProgress.
+export async function routeAppEnv(
   project: string,
   app: string,
   env: string,
   fromPreview: string,
-): Promise<{ message: string; host: string; from: string }> {
-  return api.post<{ message: string; host: string; from: string }>(
+  onProgress?: TaskProgress,
+): Promise<RouteAppEnvResponse> {
+  const res = await api.post<RouteAppEnvResponse | AcceptedTask>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/route`,
     { fromPreview },
   );
+  if (isAcceptedTask(res)) {
+    return pollTask<RouteAppEnvResponse>(project, res.taskId, onProgress);
+  }
+  return res;
 }
 
 // unrouteAppEnv restores the swap: the env serves its own hostname again and
-// the preview goes back to its preview URL.
-export function unrouteAppEnv(
+// the preview goes back to its preview URL. Async by default like routeAppEnv.
+export async function unrouteAppEnv(
   project: string,
   app: string,
   env: string,
+  onProgress?: TaskProgress,
 ): Promise<void> {
-  return api.del(
+  const res = await api.del<{ message: string } | AcceptedTask>(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/route`,
   );
+  if (isAcceptedTask(res)) {
+    await pollTask<unknown>(project, res.taskId, onProgress);
+  }
 }
 
 // suspendAppEnv scales an env's workload down (the env stays published, no data

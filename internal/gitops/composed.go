@@ -115,6 +115,7 @@ func BuildComposedApplication(app *domain.App, opts ComposedBuildOptions) *Appli
 	if opts.SyncAutomated {
 		syncPolicy = &SyncPolicy{
 			Automated:   &AutomatedSyncPolicy{Prune: true, SelfHeal: true},
+			Retry:       defaultSyncRetry(),
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	} else {
@@ -196,6 +197,7 @@ func BuildComponentApplication(app *domain.App, c domain.ComponentSpec, opts Com
 		// stays on so config drift is still corrected.
 		syncPolicy = &SyncPolicy{
 			Automated:   &AutomatedSyncPolicy{Prune: false, SelfHeal: true},
+			Retry:       defaultSyncRetry(),
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	} else {
@@ -247,7 +249,7 @@ func BuildComposedRootApp(envName, repoURL string, opts AppSetOptions) *Applicat
 
 	var syncPolicy *SyncPolicy
 	if opts.SyncAutomated {
-		syncPolicy = &SyncPolicy{Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true}}
+		syncPolicy = &SyncPolicy{Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true}, Retry: defaultSyncRetry()}
 	}
 
 	return &Application{
@@ -293,7 +295,7 @@ func BuildComposedPreviewRootApp(repoURL string, opts AppSetOptions) *Applicatio
 		// open PRs) — without it ArgoCD refuses the sync that prunes the
 		// last preview and its workloads zombie. Pairs with the .gitkeep
 		// that keeps the source path present (ensureComposedPreviewsRoot).
-		syncPolicy = &SyncPolicy{Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true, AllowEmpty: true}}
+		syncPolicy = &SyncPolicy{Automated: &AutomatedSyncPolicy{Prune: true, SelfHeal: true, AllowEmpty: true}, Retry: defaultSyncRetry()}
 	}
 
 	return &Application{

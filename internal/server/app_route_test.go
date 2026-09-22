@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/suparcloud/suparship/internal/domain"
+	"github.com/suparcloud/suparship/internal/tpl"
 )
 
 // --- helpers ---
@@ -90,7 +93,7 @@ func previewURLs(t *testing.T, store *memAppStore, project, app, preview string)
 
 // --- route ---
 
-func TestRouteAppEnv_SetsSpecAndPublishesPreviewThenEnv(t *testing.T) {
+func TestRouteAppEnv_SetsSpecAndPublishesEnvThenPreview(t *testing.T) {
 	pub := &recordingPublisher{}
 	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)
 	store.addApp(routedTestApp(testProject))
@@ -109,9 +112,10 @@ func TestRouteAppEnv_SetsSpecAndPublishesPreviewThenEnv(t *testing.T) {
 	if got := routedTo(t, store, testProject, "my-app", "staging"); got != "pr-42" {
 		t.Errorf("staging RoutedToPreview = %q, want pr-42", got)
 	}
-	// Preview publishes first (takes the host), then the env (moves to -origin)
-	// — one batched app publish carrying the staging focus env.
-	if want := []string{"preview:pr-42", "apps:1"}; strings.Join(pub.log, ",") != strings.Join(want, ",") {
+	// Webhook order: the env releases the host first (moves to -origin, one
+	// batched app publish carrying the staging focus env), then the preview
+	// claims it.
+	if want := []string{"apps:1", "preview:pr-42"}; strings.Join(pub.log, ",") != strings.Join(want, ",") {
 		t.Errorf("publish order = %v, want %v", pub.log, want)
 	}
 	if len(pub.previewInsts) != 1 || pub.previewInsts[0].Namespace != testProject+"-my-app-preview-pr-42" {
@@ -215,8 +219,9 @@ func TestRouteAppEnv_ReplacesExistingRoute(t *testing.T) {
 	if got := routedTo(t, store, testProject, "my-app", "staging"); got != "pr-43" {
 		t.Errorf("RoutedToPreview = %q, want pr-43", got)
 	}
-	// Old preview moves back to its own host first, then the new one takes over.
-	if want := "preview:pr-42,preview:pr-43,apps:1"; strings.Join(pub.log, ",") != want {
+	// Old preview releases the host first, then the new one claims it. The env
+	// is already on its -origin host, so it is not republished.
+	if want := "preview:pr-42,preview:pr-43"; strings.Join(pub.log, ",") != want {
 		t.Errorf("publish order = %v, want %s", pub.log, want)
 	}
 	if urls := previewURLs(t, store, testProject, "my-app", "pr-42"); len(urls) != 1 || urls[0] != "https://pr-42.my-app.preview.localhost" {
@@ -276,7 +281,7 @@ func TestRouteAppEnv_PublishFailureRevertsSpec(t *testing.T) {
 
 // --- unroute ---
 
-func TestUnrouteAppEnv_RestoresEnvThenPreview(t *testing.T) {
+func TestUnrouteAppEnv_RestoresPreviewThenEnv(t *testing.T) {
 	pub := &recordingPublisher{}
 	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, pub)
 	store.addApp(routedTestApp(testProject))
@@ -294,8 +299,9 @@ func TestUnrouteAppEnv_RestoresEnvThenPreview(t *testing.T) {
 	if got := routedTo(t, store, testProject, "my-app", "staging"); got != "" {
 		t.Errorf("RoutedToPreview = %q, want cleared", got)
 	}
-	// Env first (takes its host back), then the preview (back to its own).
-	if want := "apps:1,preview:pr-42"; strings.Join(pub.log, ",") != want {
+	// Webhook order: the preview releases the host first (back to its own),
+	// then the env takes it back.
+	if want := "preview:pr-42,apps:1"; strings.Join(pub.log, ",") != want {
 		t.Errorf("publish order = %v, want %s", pub.log, want)
 	}
 	if urls := previewURLs(t, store, testProject, "my-app", "pr-42"); len(urls) != 1 || urls[0] != "https://pr-42.my-app.preview.localhost" {
@@ -370,7 +376,8 @@ func TestDeleteAppPreview_RestoresRouting(t *testing.T) {
 	if got := routedTo(t, store, testProject, "my-app", "staging"); got != "" {
 		t.Errorf("deleting the routed preview must clear the swap, got %q", got)
 	}
-	// The env is republished (gets its host back) BEFORE the preview is pruned.
+	// Webhook order: the preview is pruned (releases the host) BEFORE the env
+	// is republished to take it back.
 	if want := "apps:1"; strings.Join(pub.log, ",") != want {
 		t.Errorf("publish log = %v, want %s", pub.log, want)
 	}
@@ -382,7 +389,7 @@ func TestDeleteAppPreview_RestoresRouting(t *testing.T) {
 	}
 }
 
-func TestDeleteAppPreview_RestoreFailureKeepsSwapAndPreview(t *testing.T) {
+func TestDeleteAppPreview_RestoreFailureReinstatesSwap(t *testing.T) {
 	// routeFailPublisher (failApps) + AppPreviewDeleter.
 	del := &routeFailDeleter{}
 	mux, ah, store := newTestAppPromoteMuxWithPublisher(testProject, del)
@@ -397,14 +404,20 @@ func TestDeleteAppPreview_RestoreFailureKeepsSwapAndPreview(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("delete: status = %d, want 500 (%s)", rec.Code, rec.Body.String())
 	}
+	// The prune already happened (it releases the host); the failed env
+	// republish reinstates the swap and keeps the record so a retry (or an
+	// unroute, which tolerates a missing preview) republishes the env.
 	if got := routedTo(t, store, testProject, "my-app", "staging"); got != "pr-42" {
 		t.Errorf("swap must be reinstated after a failed restore, got %q", got)
 	}
-	if len(del.deleted) != 0 {
-		t.Errorf("preview must not be pruned when the restore failed: %v", del.deleted)
+	if len(del.deleted) != 1 {
+		t.Errorf("preview should have been pruned once before the restore: %v", del.deleted)
 	}
 	if _, err := store.GetAppEnvironment(context.Background(), testProject, "my-app", "pr-42"); err != nil {
 		t.Error("preview record must be kept for a retry")
+	}
+	if !strings.Contains(rec.Body.String(), "unroute") {
+		t.Errorf("error should point at unroute as the retry: %s", rec.Body.String())
 	}
 }
 
@@ -524,4 +537,262 @@ func TestGetAppEnvironment_RoutedFields(t *testing.T) {
 	if p := get("pr-42"); p.RoutedFromEnv != "staging" {
 		t.Errorf("pr-42 = %+v, want RoutedFromEnv=staging", p)
 	}
+}
+
+// --- ArgoCD sequencing ---
+
+// settleGate fakes the ArgoCD gate + nudger: the env's Applications report
+// "settled" only after settleAfter reads, and the preview Application reports
+// "gone" only after goneAfter reads. Every call is logged so a test can assert
+// the claim publish waited for the release to be applied.
+type settleGate struct {
+	settleAfter, goneAfter int
+	settleReads, goneReads int
+	refreshed              []string
+	appsets                []string
+	log                    []string
+}
+
+func (g *settleGate) HasAppForEnv(_ context.Context, _, _, env string) (bool, error) {
+	g.goneReads++
+	g.log = append(g.log, "gone?:"+env)
+	return g.goneReads <= g.goneAfter, nil
+}
+
+func (g *settleGate) EnvAppsSettled(_ context.Context, _, _, env string, _ time.Time) (bool, []string, error) {
+	g.settleReads++
+	g.log = append(g.log, "settled?:"+env)
+	return g.settleReads > g.settleAfter, []string{"demo-my-app-" + env}, nil
+}
+
+func (g *settleGate) RefreshAppsByName(_ context.Context, names []string) error {
+	g.refreshed = append(g.refreshed, names...)
+	return nil
+}
+
+func (g *settleGate) RefreshAppSets(_ context.Context, names []string) error {
+	g.appsets = append(g.appsets, names...)
+	return nil
+}
+
+func TestRouteAppEnv_WaitsForEnvToReleaseBeforePreviewClaims(t *testing.T) {
+	routeSettlePoll = time.Millisecond
+	pub := &recordingPublisher{}
+	mux, ah, store, _, appH := newTestStackMuxPub(testProject, pub)
+	gate := &settleGate{settleAfter: 2}
+	appH.argoAppGate = gate
+	appH.argoChainNudger = gate
+	store.addApp(routedTestApp(testProject))
+	seedRouteEnvs(store, testProject)
+	dev := sessionCookieFor(ah, "bob", "developer")
+
+	if rec := routeAppEnvReq(mux, dev, testProject, "my-app", "staging", "pr-42"); rec.Code != http.StatusOK {
+		t.Fatalf("route: %d %s", rec.Code, rec.Body.String())
+	}
+	// Env published, then polled until settled (3 reads), then the preview.
+	if want := "apps:1,preview:pr-42"; strings.Join(pub.log, ",") != want {
+		t.Errorf("publish order = %v, want %s", pub.log, want)
+	}
+	if gate.settleReads != 3 {
+		t.Errorf("settle reads = %d, want 3 (two not-yet, one settled)", gate.settleReads)
+	}
+	if len(gate.refreshed) == 0 || gate.refreshed[0] != "demo-my-app-staging" {
+		t.Errorf("ArgoCD should have been nudged to refresh the env's Application, got %v", gate.refreshed)
+	}
+
+	// Restore: the preview releases, polled until settled, then the env.
+	gate.settleReads, gate.settleAfter, pub.log = 0, 1, nil
+	if rec := unrouteAppEnvReq(mux, dev, testProject, "my-app", "staging"); rec.Code != http.StatusOK {
+		t.Fatalf("unroute: %d %s", rec.Code, rec.Body.String())
+	}
+	if want := "preview:pr-42,apps:1"; strings.Join(pub.log, ",") != want {
+		t.Errorf("restore publish order = %v, want %s", pub.log, want)
+	}
+	if gate.settleReads != 2 {
+		t.Errorf("restore settle reads = %d, want 2", gate.settleReads)
+	}
+}
+
+func TestDeleteAppPreview_WaitsForPruneBeforeRestoring(t *testing.T) {
+	routeSettlePoll = time.Millisecond
+	pub := &previewDeleterPublisher{}
+	mux, ah, store, _, appH := newTestStackMuxPub(testProject, pub)
+	gate := &settleGate{goneAfter: 2}
+	appH.argoAppGate = gate
+	appH.argoChainNudger = gate
+	store.addApp(routedTestApp(testProject))
+	seedRouteEnvs(store, testProject)
+	dev := sessionCookieFor(ah, "bob", "developer")
+	if rec := routeAppEnvReq(mux, dev, testProject, "my-app", "staging", "pr-42"); rec.Code != http.StatusOK {
+		t.Fatalf("route: %d %s", rec.Code, rec.Body.String())
+	}
+	pub.log, gate.log = nil, nil
+
+	if rec := deleteAppPreview(mux, dev, testProject, "my-app", "pr-42"); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	// Prune, then poll until the preview Application is gone (3 reads, the
+	// previews ApplicationSet nudged), then the env republish.
+	if gate.goneReads != 3 {
+		t.Errorf("gone reads = %d, want 3", gate.goneReads)
+	}
+	if len(gate.appsets) == 0 || gate.appsets[0] != "previews" {
+		t.Errorf("the previews ApplicationSet should have been nudged, got %v", gate.appsets)
+	}
+	if want := "apps:1"; strings.Join(pub.log, ",") != want {
+		t.Errorf("publish log = %v, want %s", pub.log, want)
+	}
+	if got := routedTo(t, store, testProject, "my-app", "staging"); got != "" {
+		t.Errorf("swap should be cleared, got %q", got)
+	}
+}
+
+// --- async by default ---
+
+// Route is always slow (it waits on ArgoCD), so it accepts by default: 202 +
+// a task the caller polls, which reports the phase while running and the
+// sync payload when done. ?async=0 still returns the inline result.
+func TestRouteAppEnv_AsyncByDefaultWithPhases(t *testing.T) {
+	routeSettlePoll = time.Millisecond
+	pub := &recordingPublisher{}
+	mux, ah, store, _, appH := newTestStackMuxPub(testProject, pub)
+	var wg sync.WaitGroup
+	appH.async = newAsyncRunner(context.Background(), &wg)
+	gate := &settleGate{settleAfter: 1}
+	appH.argoAppGate = gate
+	appH.argoChainNudger = gate
+	store.addApp(routedTestApp(testProject))
+	seedRouteEnvs(store, testProject)
+	dev := sessionCookieFor(ah, "bob", "developer")
+
+	rec := routeAppEnvReq(mux, dev, testProject, "my-app", "staging", "pr-42")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 by default (%s)", rec.Code, rec.Body.String())
+	}
+	var acc acceptedResponse
+	_ = json.NewDecoder(rec.Body).Decode(&acc)
+	if acc.TaskID == "" || acc.StatusURL != "/api/v1/projects/"+testProject+"/tasks/"+acc.TaskID {
+		t.Fatalf("202 body = %+v, want taskId + statusUrl", acc)
+	}
+	wg.Wait()
+
+	req := httptest.NewRequest(http.MethodGet, acc.StatusURL, nil)
+	req.AddCookie(dev)
+	srec := httptest.NewRecorder()
+	mux.ServeHTTP(srec, req)
+	if srec.Code != http.StatusOK {
+		t.Fatalf("task status = %d (%s)", srec.Code, srec.Body.String())
+	}
+	var task asyncTask
+	_ = json.NewDecoder(srec.Body).Decode(&task)
+	if task.State != asyncSucceeded || task.Status != http.StatusOK || task.Kind != "route-app" {
+		t.Errorf("task = %+v, want succeeded/200/route-app", task)
+	}
+	// The last reported phase is the claim; the terminal result is the sync payload.
+	if task.Phase != "claim" {
+		t.Errorf("task phase = %q (%s), want claim", task.Phase, task.Message)
+	}
+	res, _ := task.Result.(map[string]any)
+	if res["host"] != "my-app.staging.localhost" {
+		t.Errorf("task result = %v, want the route payload", task.Result)
+	}
+	if got := routedTo(t, store, testProject, "my-app", "staging"); got != "pr-42" {
+		t.Errorf("RoutedToPreview = %q, want pr-42", got)
+	}
+
+	// Opting out of async returns the inline result.
+	req2 := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/"+testProject+"/apps/my-app/environments/staging/route?async=0", nil)
+	req2.AddCookie(dev)
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK || !strings.Contains(rec2.Body.String(), "serves its own hostname again") {
+		t.Errorf("sync opt-out: %d %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestStackRoute_AsyncByDefault(t *testing.T) {
+	pub := &recordingPublisher{}
+	mux, ah, store, stackStore, appH := newTestStackMuxPub(testProject, pub)
+	var wg sync.WaitGroup
+	appH.async = newAsyncRunner(context.Background(), &wg)
+	_ = stackStore.SaveStack(context.Background(), &domain.Stack{Name: "voiceai", ProjectName: testProject})
+	seedRoutedStackMember(store, testProject, "web", "voiceai", true)
+	rec := postStackJSON(mux, sessionCookieFor(ah, "bob", "developer"),
+		"/api/v1/projects/"+testProject+"/stacks/voiceai/route",
+		stackRouteRequest{FromPreview: "pr-5", TargetEnv: "staging"})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	wg.Wait()
+	var acc acceptedResponse
+	_ = json.NewDecoder(rec.Body).Decode(&acc)
+	task, ok := appH.async.store.get(acc.TaskID)
+	if !ok || task.State != asyncSucceeded || task.Kind != "route-stack" {
+		t.Fatalf("task = %+v ok=%v, want succeeded route-stack", task, ok)
+	}
+	res, _ := task.Result.(stackBatchResponse)
+	if len(res.Results) != 1 || !res.Results[0].OK {
+		t.Errorf("task result = %+v, want one ok row", task.Result)
+	}
+}
+
+// --- literal-host guard ---
+
+// A component whose host is a literal (no routing token anywhere in its
+// effective values) cannot be moved by the swap: route refuses with 422 and
+// names it. A tokenized host passes. Templates come from the built-in registry
+// the handler resolves through lookupTemplate.
+func TestRouteAppEnv_RefusesLiteralHost(t *testing.T) {
+	mk := func(host string) *tpl.Template {
+		return &tpl.Template{
+			APIVersion: tpl.CurrentAPIVersion, Kind: tpl.TemplateKind,
+			Metadata: tpl.Metadata{Name: "web-service", Version: "1.0.0"},
+			Spec: tpl.TemplateSpec{Title: "Web", Engine: tpl.Engine{Type: tpl.EngineHelm},
+				DefaultValues: map[string]any{"ingress": map[string]any{"enabled": true, "host": host}}},
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		host string
+		want int
+	}{
+		{"literal host", "voiceai.acme.com", http.StatusUnprocessableEntity},
+		{"legacy routingHost token", "((platform.routingHost))", http.StatusOK},
+		{"composed appRoutingName", "((platform.appRoutingName)).((platform.externalBaseDomain))", http.StatusOK},
+		{"legacy delimiter", "[[platform.appComponentRoutingName]].acme.com", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &recordingPublisher{}
+			mux, ah, store, _, appH := newTestStackMuxPub(testProject, pub)
+			appH.builtin = []*tpl.Template{mk(tc.host)}
+			store.addApp(routedTestApp(testProject)) // single component "web", template web-service
+			seedRouteEnvs(store, testProject)
+			rec := routeAppEnvReq(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app", "staging", "pr-42")
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (%s)", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.want == http.StatusUnprocessableEntity {
+				if !strings.Contains(rec.Body.String(), "web") || !strings.Contains(rec.Body.String(), "appRoutingName") {
+					t.Errorf("error should name the component and the tokens: %s", rec.Body.String())
+				}
+				if pub.previewCalls != 0 || pub.batchAppCalls != 0 {
+					t.Errorf("a refused route must not publish: %v", pub.log)
+				}
+			}
+		})
+	}
+	// The app's own values can supply the token even when the template doesn't.
+	t.Run("app values override a literal template host", func(t *testing.T) {
+		pub := &recordingPublisher{}
+		mux, ah, store, _, appH := newTestStackMuxPub(testProject, pub)
+		appH.builtin = []*tpl.Template{mk("voiceai.acme.com")}
+		app := routedTestApp(testProject)
+		app.Spec.RawValues = map[string]any{"ingress": map[string]any{"host": "((platform.appRoutingName)).acme.com"}}
+		store.addApp(app)
+		seedRouteEnvs(store, testProject)
+		rec := routeAppEnvReq(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app", "staging", "pr-42")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+		}
+	})
 }

@@ -210,15 +210,26 @@ Composed apps route per component: `myapp-api.staging.…` → the preview,
 
 Nothing changes in the image pipeline. Staging keeps receiving mainline freight,
 Kargo auto-promotion keeps flowing to prod, and manual promotion works as usual.
-Mechanically it is a host swap: only `((platform.routingHost))` changes on both
-sides — the same token every chart already wires (see
-[byo-charts.md](byo-charts.md)) — so it works for any chart and any app that
-exposes an HTTP route, direct-delivery apps included.
+Mechanically it is a host swap: only the routing tokens change on both sides —
+`((platform.routingHost))`, the per-tier `((platform.externalRoutingHost))` /
+`((platform.internalRoutingHost))`, or a host you composed from
+`((platform.appRoutingName))` / `((platform.appComponentRoutingName))` (see
+[byo-charts.md](byo-charts.md#wiring-platform-context-with-platform-tokens)) —
+so it works for any chart and any app that exposes an HTTP route,
+direct-delivery apps included. The host shapes above assume the default
+`routingHost`; with a composed host the same rule applies to whatever you
+built: the preview gets the env's name, the env gets `-origin`.
 
 Guardrails:
 
 - **Prod is never routed.** `env` must be a non-prod stable env, and the preview
   must be based on it (`baseEnv`), since it reuses that env's cluster and vault.
+- **Only platform-managed hosts move.** Route refuses (422) when an exposed
+  component's effective values carry no routing token — a literal host would
+  stay put on both sides. The error names the component and the tokens.
+- **Names must fit a DNS label.** Launching a preview is refused when
+  `{app}-{component}-{preview}` for an exposed component exceeds 63 characters,
+  since a host composed from the name tokens could not be created.
 - **One preview per env.** Routing a second preview replaces the first, which
   goes back to its own host in the same operation.
 - **Deleting the preview restores the env** before the preview's files are
@@ -231,10 +242,15 @@ Guardrails:
 
 Two things to know about the edge:
 
-- **The switch is two GitOps commits** (preview first, then the env). Between
-  them both objects briefly claim the host; ingress-nginx keeps the older
-  claimant until the env's update syncs, so the handover has no 404 window.
-  Restore runs in the opposite order.
+- **The switch takes a few seconds and is not seamless.** ingress-nginx's
+  admission webhook refuses an Ingress that claims a host and path another
+  Ingress still holds, so the side giving the hostname up is published first
+  (staging moves to `-origin`), suparship waits for ArgoCD to apply it, and only
+  then is the preview published to claim it. Restore runs in the opposite order:
+  the preview releases, then staging takes its hostname back. Between the two
+  syncs the hostname answers with the controller's default 404. If the wait
+  times out, the claim is published anyway and the Applications' sync retry
+  policy finishes the handover.
 - **Certificates.** If your chart issues a per-release certificate (the example
   `web` chart uses one `<release>-tls` secret covering its hosts), each route or
   restore triggers a re-issue for the new host set and a brief TLS gap. A
@@ -261,6 +277,34 @@ curl -fsS -X POST "$SUPARSHIP_API/projects/$PROJECT/apps/$APP/environments/stagi
 curl -fsS -X DELETE "$SUPARSHIP_API/projects/$PROJECT/apps/$APP/environments/staging/route" \
   -H "Authorization: Bearer $SUPARSHIP_TOKEN"
 ```
+
+**Route and restore are asynchronous by default.** They wait for ArgoCD
+between their two publishes, which takes longer than a typical ingress or
+gateway timeout, so the calls above return `202 Accepted` with a task:
+
+```jsonc
+{ "taskId": "pintask_…", "state": "pending",
+  "statusUrl": "/api/v1/projects/{project}/tasks/pintask_…" }
+```
+
+Poll `statusUrl` (any project viewer can read it) until `state` is
+`succeeded` or `failed`. While it runs the task reports what it is doing:
+
+```jsonc
+{ "id": "pintask_…", "kind": "route-app", "state": "running",
+  "phase": "wait",                       // release → wait → claim
+  "message": "waiting for ArgoCD to apply the hostname release on staging",
+  "createdAt": "…", "updatedAt": "…" }
+
+{ "id": "pintask_…", "state": "succeeded", "status": 200,
+  "result": { "host": "myapp.staging.acme.com", "from": "pr-42", "message": "…" } }
+```
+
+`result` is exactly what the synchronous call would have returned (the
+per-member rows for a stack route); a failed task carries `status` and `error`.
+Tasks stay queryable for 30 minutes. To get the inline result instead — only
+sensible when nothing in front of suparship will time out — pass `?async=0` or
+send `Prefer: wait`.
 
 Both example workflows carry a working version:
 [`examples/preview-from-pr.yml`](../examples/preview-from-pr.yml) (per app) and
