@@ -721,6 +721,13 @@ export interface AppEnvironmentSummary {
   /** When true, this env's workload is scaled down via the suspend op (the env
    *  stays published; resume brings it back). */
   suspended?: boolean;
+  /** Host swap (stable envs): the preview currently serving this env's hostname,
+   *  and that hostname's URL. The env itself is reachable on its "-origin"
+   *  alternate host (see urls). Absent when the env serves its own hostname. */
+  routedToPreview?: string;
+  routedHost?: string;
+  /** Host swap (previews): the stable env whose hostname this preview serves. */
+  routedFromEnv?: string;
 }
 
 export interface AppSummary {

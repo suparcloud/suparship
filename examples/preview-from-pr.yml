@@ -11,6 +11,14 @@
 #   vars.SUPARSHIP_PROJECT   — the project name (e.g. "voiceai")
 #   vars.SUPARSHIP_APP       — the app name (e.g. "livekit-express-caller-v2")
 #
+# Route (opt-in, label-driven): add the "route-staging" label to serve staging's
+# hostname from this PR's preview, so external services that only know the
+# staging URL exercise the PR. Staging keeps its image and its delivery pipeline;
+# it stays reachable on its "-origin" host. Remove the label to restore; closing
+# the PR restores automatically (the preview delete hands the hostname back).
+# The route survives PR pushes, so nothing is re-applied per push. Route needs
+# the same developer role as the preview. See docs/previews.md#route-send-a-stable-hostname-to-a-preview.
+#
 # Single-app shown here; for a monorepo, loop the create/delete over each app
 # (e.g. read an app list from a matrix) — the API call is per app. If those apps
 # form a suparship stack, prefer stack-preview-from-pr.yml: one call previews the
@@ -20,15 +28,17 @@ name: suparship-preview
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, closed]
+    types: [opened, synchronize, reopened, closed, labeled, unlabeled]
 
-# One in-flight run per PR; a newer push supersedes an older create.
+# One in-flight run per PR; a newer push supersedes an older create/route.
 concurrency:
   group: suparship-preview-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
   preview:
+    # Label events are handled by the route job below.
+    if: github.event.action != 'labeled' && github.event.action != 'unlabeled'
     runs-on: ubuntu-latest
     env:
       API: ${{ vars.SUPARSHIP_API }}
@@ -67,3 +77,48 @@ jobs:
             -H "Authorization: Bearer $TOKEN")
           echo "HTTP $code"; cat /tmp/resp
           case "$code" in 200|204|404) ;; *) exit 1 ;; esac
+
+  # Route lifecycle — label-driven. Also (re)applies a label that was already on
+  # the PR when the preview was (re)created, since routing needs the preview to
+  # exist (404 otherwise). needs:[preview] + always() lets the label paths run
+  # when preview is skipped.
+  route:
+    needs: [preview]
+    if: >
+      always() &&
+      (
+        (github.event.action == 'labeled'   && github.event.label.name == 'route-staging') ||
+        (github.event.action == 'unlabeled' && github.event.label.name == 'route-staging') ||
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+          needs.preview.result == 'success' &&
+          contains(github.event.pull_request.labels.*.name, 'route-staging'))
+      )
+    runs-on: ubuntu-latest
+    env:
+      API: ${{ vars.SUPARSHIP_API }}
+      PROJECT: ${{ vars.SUPARSHIP_PROJECT }}
+      APP: ${{ vars.SUPARSHIP_APP }}
+      TOKEN: ${{ secrets.SUPARSHIP_TOKEN }}
+      NAME: pr-${{ github.event.pull_request.number }}
+      ACTION: ${{ github.event.action }}
+    steps:
+      - name: Route or restore staging hostname
+        run: |
+          set -euo pipefail
+          url="$API/projects/$PROJECT/apps/$APP/environments/staging/route"
+          if [ "$ACTION" = "unlabeled" ]; then
+            # Restore: staging serves its own hostname again; the preview goes
+            # back to its preview URL. 200 even when nothing was routed.
+            code=$(curl -sS -o /tmp/resp -w '%{http_code}' -X DELETE "$url" \
+              -H "Authorization: Bearer $TOKEN")
+          else
+            # Route: the preview takes staging's hostname. Routing over another
+            # PR's route replaces it (that PR's preview returns to its own URL).
+            # To refuse a takeover, GET .../apps/$APP and check
+            # .environments[] | select(.envName=="staging") | .routedToPreview first.
+            code=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$url" \
+              -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+              -d "{\"fromPreview\":\"$NAME\"}")
+          fi
+          echo "HTTP $code"; cat /tmp/resp; echo
+          [ "$code" = "200" ] || { echo "route $ACTION failed"; exit 1; }

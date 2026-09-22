@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, updateApp, upgradeAppComponents, retemplateAppComponents, getAppGitopsDrift } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, routeAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, unrouteAppEnv, updateApp, upgradeAppComponents, retemplateAppComponents, getAppGitopsDrift } from "../lib/apps";
 import type { RetemplateWarning, AppGitopsDrift } from "../lib/apps";
 import type { ClusterValueOverride, RollbackCandidate, RollbackCandidatesResponse, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
@@ -801,6 +801,25 @@ function EnvPipelineBar({
                       {env.pinnedFrom === "rollback"
                         ? "⏪ rolled back"
                         : `📌 ${env.pinnedFrom || "pinned"}`}
+                    </span>
+                  )}
+
+                  {/* Routed badge: a stable env whose hostname a preview is
+                      serving, or the preview serving it (the host swap). */}
+                  {(env.routedToPreview || env.routedFromEnv) && (
+                    <span
+                      title={
+                        env.routedToPreview
+                          ? `Hostname routed to ${env.routedToPreview} — this env is on its -origin host; CD unaffected`
+                          : `Serving ${env.routedFromEnv}'s hostname`
+                      }
+                      className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                        isSelected ? "bg-white/10 text-white/80" : "bg-indigo-100 text-indigo-700"
+                      }`}
+                    >
+                      {env.routedToPreview
+                        ? `🔀 ${env.routedToPreview}`
+                        : `🔀 serving ${env.routedFromEnv}`}
                     </span>
                   )}
 
@@ -3837,6 +3856,7 @@ function PinControls({
   currentEnv,
   environments,
   isDirect,
+  hasIngress,
   onChanged,
 }: {
   project: string;
@@ -3844,6 +3864,8 @@ function PinControls({
   currentEnv: AppEnvironmentSummary | null;
   environments: AppEnvironmentSummary[];
   isDirect: boolean;
+  /** Whether any component exposes an HTTP route — routing needs a hostname. */
+  hasIngress: boolean;
   onChanged: () => Promise<void>;
 }) {
   const stableEnvs = environments.filter((e) => e.envType !== "preview");
@@ -3859,6 +3881,82 @@ function PinControls({
   const enriched = environments.find((e) => e.envName === currentEnv.envName);
   const pinnedTag = enriched?.pinnedTag ?? currentEnv.pinnedTag;
   const pinnedFrom = enriched?.pinnedFrom ?? currentEnv.pinnedFrom;
+  const routedToPreview = enriched?.routedToPreview ?? currentEnv.routedToPreview;
+  const routedHost = enriched?.routedHost ?? currentEnv.routedHost;
+  const routedFromEnv = enriched?.routedFromEnv ?? currentEnv.routedFromEnv;
+  const liveUrl = (enriched?.urls ?? currentEnv.urls ?? [])[0];
+
+  async function unroute(env: string, label: string) {
+    setBusy(true);
+    try {
+      await unrouteAppEnv(project, app, env);
+      toast.success(`${label} — hostname restored`);
+      await onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to restore routing");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Stable env whose hostname is routed to a preview (the host swap) → say
+  // where its traffic goes, where the env itself is reachable, and offer
+  // restoring. Takes precedence over pin/suspend: it changes what the URL means.
+  if (currentEnv.envType !== "preview" && routedToPreview) {
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2.5">
+        <span className="text-sm text-indigo-900">
+          🔀 Traffic for{" "}
+          <code className="font-mono text-xs">{routedHost ? routedHost.replace(/^https?:\/\//, "") : "this env's hostname"}</code>{" "}
+          is served by preview <span className="font-medium">{routedToPreview}</span>.
+          {liveUrl && (
+            <>
+              {" "}
+              This env is reachable at{" "}
+              <a href={liveUrl} target="_blank" rel="noreferrer" className="font-mono text-xs underline">
+                {liveUrl.replace(/^https?:\/\//, "")}
+              </a>
+              .
+            </>
+          )}{" "}
+          Delivery is unaffected: new images still deploy here.
+        </span>
+        <button
+          onClick={() => unroute(currentEnv!.envName, currentEnv!.envName)}
+          disabled={busy}
+          className="shrink-0 rounded-md border border-indigo-300 bg-white px-3 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+        >
+          {busy ? "Restoring…" : "Restore routing"}
+        </button>
+      </div>
+    );
+  }
+
+  // Preview currently serving a stable env's hostname → banner + restore.
+  if (currentEnv.envType === "preview" && routedFromEnv) {
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2.5">
+        <span className="text-sm text-indigo-900">
+          🔀 Serving <span className="font-medium">{routedFromEnv}</span>'s hostname
+          {liveUrl && (
+            <>
+              {" "}
+              (<code className="font-mono text-xs">{liveUrl.replace(/^https?:\/\//, "")}</code>)
+            </>
+          )}
+          . External callers hitting {routedFromEnv} reach this preview. Deleting the
+          preview restores it automatically.
+        </span>
+        <button
+          onClick={() => unroute(routedFromEnv!, routedFromEnv!)}
+          disabled={busy}
+          className="shrink-0 rounded-md border border-indigo-300 bg-white px-3 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+        >
+          {busy ? "Restoring…" : `Restore ${routedFromEnv}`}
+        </button>
+      </div>
+    );
+  }
 
   // Held stable env (pinned to a preview, or a rollback hold) → offer resuming
   // CD (pipeline-only; direct apps never pin). A rollback hold may carry no
@@ -3911,10 +4009,40 @@ function PinControls({
     );
   }
 
-  // Preview selected → offer pinning it to a stable env (pipeline-only).
-  if (!isDirect && currentEnv.envType === "preview") {
+  // Preview selected → offer routing a stable env's hostname here (the host
+  // swap; any app with an HTTP route) and, for pipeline apps, pinning its image
+  // to a stable env. Routing is the answer to "test my PR at the staging URL":
+  // it leaves the image pipeline alone, whereas pin freezes the env.
+  if (currentEnv.envType === "preview") {
     const previewName = currentEnv.preview?.previewName ?? currentEnv.envName;
     const hasImage = !!currentEnv.release?.tag;
+    const baseEnv = currentEnv.preview?.baseEnv;
+    // Only the env this preview clones can donate its hostname, and never prod.
+    const routeTarget = stableEnvs.find((e) => e.envName === (baseEnv || stableEnvs[0]?.envName));
+    const routeTargetName = routeTarget?.envName ?? "";
+    const routeBlocked = !hasIngress
+      ? "This app exposes no HTTP route — there is no hostname to route"
+      : !routeTarget
+        ? "No stable env to route from"
+        : routeTarget.envType === "prod"
+          ? "Production hostnames are never routed to a preview"
+          : routeTarget.routedToPreview && routeTarget.routedToPreview !== currentEnv.envName
+            ? `${routeTargetName} is already routed to ${routeTarget.routedToPreview}; routing here replaces that`
+            : "";
+    const routeDisabled = !hasIngress || !routeTarget || routeTarget.envType === "prod";
+    async function route() {
+      if (!routeTargetName) return;
+      setBusy(true);
+      try {
+        const res = await routeAppEnv(project, app, routeTargetName, currentEnv!.envName);
+        toast.success(`${res.host} now served by ${previewName}`);
+        await onChanged();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to route");
+      } finally {
+        setBusy(false);
+      }
+    }
     async function pin() {
       if (!target) return;
       setBusy(true);
@@ -3929,38 +4057,55 @@ function PinControls({
       }
     }
     return (
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2.5">
-        <span className="text-sm text-gray-600">
-          Pin this preview's image to a stable env (deploy without merging). The env
-          holds it until unpinned.
-        </span>
-        <div className="flex shrink-0 items-center gap-2">
-          <select
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-            className="rounded-md border border-gray-300 px-2 py-1 text-xs"
-          >
-            {stableEnvs.map((e) => (
-              <option key={e.envName} value={e.envName}>
-                {e.envName}
-              </option>
-            ))}
-          </select>
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2.5">
+          <span className="text-sm text-gray-600">
+            Route <span className="font-medium">{routeTargetName || "the base env"}</span>'s
+            hostname here so external services test this PR at the stable URL. The
+            image pipeline keeps flowing; {routeTargetName || "the env"} stays reachable
+            on its <code className="font-mono text-xs">-origin</code> host.
+          </span>
           <button
-            onClick={pin}
-            disabled={busy || !target || !hasImage}
-            title={hasImage ? "" : "This preview has no image tag yet"}
-            className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+            onClick={route}
+            disabled={busy || routeDisabled}
+            title={routeBlocked}
+            className="shrink-0 rounded-md border border-indigo-300 bg-white px-3 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
           >
-            {busy ? "Pinning…" : `Pin to ${target || "env"}`}
+            {busy ? "Routing…" : `🔀 Route ${routeTargetName || "env"} here`}
           </button>
         </div>
+        {!isDirect && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2.5">
+            <span className="text-sm text-gray-600">
+              Pin this preview's image to a stable env (deploy without merging). The env
+              holds it until unpinned.
+            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <select
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+                className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+              >
+                {stableEnvs.map((e) => (
+                  <option key={e.envName} value={e.envName}>
+                    {e.envName}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={pin}
+                disabled={busy || !target || !hasImage}
+                title={hasImage ? "" : "This preview has no image tag yet"}
+                className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
+              >
+                {busy ? "Pinning…" : `Pin to ${target || "env"}`}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
-
-  // Non-stable (preview) envs can't be suspended — nothing more to offer.
-  if (currentEnv.envType === "preview") return null;
 
   // Stable, unpinned env → offer suspend/resume (scale the workload down/up
   // without deleting it — no data loss, unlike undeploy). Works for direct apps.
@@ -4081,6 +4226,7 @@ function OverviewTab({
         currentEnv={currentEnv}
         environments={data.environments}
         isDirect={data.deliveryMode === "direct"}
+        hasIngress={data.components.some((c) => c.exposeMode === "external" || c.exposeMode === "internal")}
         onChanged={onSaved}
       />
 

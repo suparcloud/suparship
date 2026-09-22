@@ -558,6 +558,45 @@ type EnvironmentOverride struct {
 	// stays published (no data loss, unlike undeploy). nil/false = running.
 	// Works for pipeline and direct apps; toggled by the suspend/resume ops.
 	Suspend *bool `json:"suspend,omitempty" yaml:"suspend,omitempty"`
+	// RoutedToPreview names the preview environment that is temporarily serving
+	// THIS stable environment's hostname (the "host swap"). While set, the
+	// publisher renders the preview on this env's normal host (e.g.
+	// "app.staging.example.com") and this env on the alternate "-origin" host
+	// (e.g. "app-origin.staging.example.com"), so external callers that only
+	// know the stable URL exercise the preview without any image being pinned
+	// or promotion being paused. One preview per env at a time. Cleared by the
+	// unroute op or when the routed preview is deleted. Prod is never routed.
+	RoutedToPreview string `json:"routedToPreview,omitempty" yaml:"routedToPreview,omitempty"`
+}
+
+// RoutedAwayHostSuffix is appended to an app (or "{app}-{component}") instance
+// name to form the alternate host a stable env serves while its normal host is
+// routed to a preview: "{app}-origin.{envType}.{baseDomain}". Kept one label
+// deep so a wildcard certificate on the env's domain still covers it.
+const RoutedAwayHostSuffix = "-origin"
+
+// EnvRoutedToPreview returns the stable environment whose hostname is routed to
+// the named preview (its EnvironmentOverride.RoutedToPreview == previewName), or
+// "" when no env routes to it. Keys are visited in sorted order so the answer is
+// deterministic; the reserved preview band key is never a donor.
+func (s *AppSpec) EnvRoutedToPreview(previewName string) string {
+	if s == nil || previewName == "" || len(s.EnvironmentDefaults) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(s.EnvironmentDefaults))
+	for k := range s.EnvironmentDefaults {
+		if k == PreviewOverrideKey {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if s.EnvironmentDefaults[k].RoutedToPreview == previewName {
+			return k
+		}
+	}
+	return ""
 }
 
 // ClusterValueOverride holds a per-(env, cluster) Helm values overlay, applied

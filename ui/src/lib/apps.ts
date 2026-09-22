@@ -339,6 +339,33 @@ export function unpinAppEnv(
   );
 }
 
+// routeAppEnv routes a stable env's hostname to a preview (the host swap): the
+// preview serves the env's normal URL and the env moves to its "-origin"
+// alternate host. Unlike pin, no image changes hands and CD keeps flowing.
+export function routeAppEnv(
+  project: string,
+  app: string,
+  env: string,
+  fromPreview: string,
+): Promise<{ message: string; host: string; from: string }> {
+  return api.post<{ message: string; host: string; from: string }>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/route`,
+    { fromPreview },
+  );
+}
+
+// unrouteAppEnv restores the swap: the env serves its own hostname again and
+// the preview goes back to its preview URL.
+export function unrouteAppEnv(
+  project: string,
+  app: string,
+  env: string,
+): Promise<void> {
+  return api.del(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/route`,
+  );
+}
+
 // suspendAppEnv scales an env's workload down (the env stays published, no data
 // loss); resumeAppEnv brings it back. The chart honors the platform's suspend
 // values key (default `suspend`).

@@ -214,6 +214,31 @@ export function unpinStack(
   });
 }
 
+// routeStack routes a stable env's hostname to a PR preview group across the
+// stack (the host swap): each member's preview serves the member's stable URL.
+// Members without the preview or without an HTTP route are skipped.
+export function routeStack(
+  project: string,
+  stack: string,
+  req: { fromPreview: string; targetEnv: string; apps?: string[] },
+): Promise<StackBatchResponse> {
+  return api.post<StackBatchResponse>(`${stackBase(project, stack)}/route`, req);
+}
+
+// unrouteStack restores the swap on a stable env across the stack. Sends a
+// JSON body {targetEnv, apps?} — symmetric with routeStack.
+export function unrouteStack(
+  project: string,
+  stack: string,
+  targetEnv: string,
+  apps?: string[],
+): Promise<StackBatchResponse> {
+  return api.del<StackBatchResponse>(`${stackBase(project, stack)}/route`, {
+    targetEnv,
+    apps,
+  });
+}
+
 // suspendStack suspends (scales down) an env across the stack; resumeStack brings
 // it back. targetEnv is required; apps optionally narrows to a subset. A member
 // not deployed to targetEnv is skipped.

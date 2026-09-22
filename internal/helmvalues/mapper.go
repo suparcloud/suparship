@@ -53,9 +53,7 @@ func MapPlatformValuesForEnv(
 		}
 		break
 	}
-	// secure=false is arbitrary here: stripScheme discards the scheme, charts
-	// only ever see the bare host.
-	routingHost := stripScheme(domain.GenerateURLWithDomain(app.Name, envName, envType, effectiveBase, false))
+	routingHost := routingHostFor(app, app.Name, envName, envType, effectiveBase)
 
 	platform := PlatformValues{
 		Org:        orgName,
@@ -151,9 +149,32 @@ func MapComponentPlatformValuesForEnv(
 	// Only consumed when the component is exposed; overriding unconditionally
 	// keeps the context self-consistent.
 	instanceName := app.Name + "-" + comp.Name
-	platform.RoutingHost = stripScheme(domain.GenerateURLWithDomain(instanceName, envName, envType, platform.BaseDomain, false))
+	platform.RoutingHost = routingHostFor(app, instanceName, envName, envType, platform.BaseDomain)
 	platform.Component = comp.Name
 	return platform
+}
+
+// routingHostFor derives the bare host an instance ("{app}" or
+// "{app}-{component}") serves in one environment, honoring a host swap
+// (EnvironmentOverride.RoutedToPreview):
+//   - a stable env whose hostname is routed to a preview moves to the
+//     "-origin" alternate host, e.g. "app-origin.staging.example.com";
+//   - the preview it routes to takes the env's normal stable host, e.g.
+//     "app.staging.example.com" (prod never donates, so the stable host is
+//     always the staging-shaped one);
+//   - otherwise the plain per-env derivation.
+//
+// secure=false is arbitrary: stripScheme discards the scheme, charts only ever
+// see the bare host.
+func routingHostFor(app *domain.App, instanceName, envName string, envType domain.AppEnvironmentType, base string) string {
+	if envType == domain.AppEnvPreview {
+		if donor := app.Spec.EnvRoutedToPreview(envName); donor != "" {
+			return stripScheme(domain.GenerateURLWithDomain(instanceName, donor, domain.AppEnvStaging, base, false))
+		}
+	} else if app.Spec.EnvironmentDefaults[envName].RoutedToPreview != "" {
+		return stripScheme(domain.GenerateURLWithDomain(instanceName+domain.RoutedAwayHostSuffix, envName, envType, base, false))
+	}
+	return stripScheme(domain.GenerateURLWithDomain(instanceName, envName, envType, base, false))
 }
 
 // resolveIngress turns a component's exposure intent into the resolved ingress

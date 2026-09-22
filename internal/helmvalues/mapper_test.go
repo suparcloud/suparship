@@ -259,3 +259,77 @@ func TestStripScheme(t *testing.T) {
 		}
 	}
 }
+
+// ── host swap (EnvironmentOverride.RoutedToPreview) ───────────────────────────
+
+func routedApp(name string, components ...domain.ComponentSpec) *domain.App {
+	app := webApp(name, components...)
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{
+		"staging": {RoutedToPreview: "pr-42"},
+	}
+	return app
+}
+
+func TestMapPlatformValuesForEnv_RoutedAwayStableUsesOriginHost(t *testing.T) {
+	app := routedApp("hello", webComponent("web"))
+	p := MapPlatformValuesForEnv(app, "staging", domain.AppEnvStaging,
+		"acme.com", "hello-staging", "", "acme", nil, nil, nil)
+	if p.RoutingHost != "hello-origin.staging.acme.com" {
+		t.Errorf("routed-away staging RoutingHost = %q, want hello-origin.staging.acme.com", p.RoutingHost)
+	}
+	if p.EnvType != "staging" {
+		t.Errorf("EnvType = %q, want staging", p.EnvType)
+	}
+}
+
+func TestMapPlatformValuesForEnv_RoutedPreviewTakesStableHost(t *testing.T) {
+	app := routedApp("hello", webComponent("web"))
+	p := MapPlatformValuesForEnv(app, "pr-42", domain.AppEnvPreview,
+		"acme.com", "hello-pr-42", "", "acme", nil, nil, nil)
+	if p.RoutingHost != "hello.staging.acme.com" {
+		t.Errorf("routed preview RoutingHost = %q, want hello.staging.acme.com", p.RoutingHost)
+	}
+	if p.EnvType != "preview" {
+		t.Errorf("EnvType = %q, want preview (only the host swaps)", p.EnvType)
+	}
+	// A sibling preview that is NOT routed keeps its own host.
+	other := MapPlatformValuesForEnv(app, "pr-7", domain.AppEnvPreview,
+		"acme.com", "hello-pr-7", "", "acme", nil, nil, nil)
+	if other.RoutingHost != "pr-7.hello.preview.acme.com" {
+		t.Errorf("unrouted preview RoutingHost = %q, want pr-7.hello.preview.acme.com", other.RoutingHost)
+	}
+}
+
+func TestMapPlatformValuesForEnv_RoutingSwapLeavesOtherEnvsAlone(t *testing.T) {
+	app := routedApp("hello", webComponent("web"))
+	prod := MapPlatformValuesForEnv(app, "prod", domain.AppEnvProd,
+		"acme.com", "hello-prod", "", "acme", nil, nil, nil)
+	if prod.RoutingHost != "hello.prod.acme.com" {
+		t.Errorf("prod RoutingHost = %q, want hello.prod.acme.com", prod.RoutingHost)
+	}
+	plain := webApp("hello", webComponent("web"))
+	staging := MapPlatformValuesForEnv(plain, "staging", domain.AppEnvStaging,
+		"acme.com", "hello-staging", "", "acme", nil, nil, nil)
+	if staging.RoutingHost != "hello.staging.acme.com" {
+		t.Errorf("unrouted staging RoutingHost = %q, want hello.staging.acme.com", staging.RoutingHost)
+	}
+}
+
+func TestMapComponentPlatformValuesForEnv_RoutingSwap(t *testing.T) {
+	api := webComponent("api")
+	app := routedApp("bigly", api, webComponent("frontend"))
+
+	staging := MapComponentPlatformValuesForEnv(app, api, "staging", domain.AppEnvStaging,
+		"acme.com", "bigly-staging", "", "acme", nil, nil, nil)
+	if staging.RoutingHost != "bigly-api-origin.staging.acme.com" {
+		t.Errorf("routed-away component host = %q, want bigly-api-origin.staging.acme.com", staging.RoutingHost)
+	}
+	preview := MapComponentPlatformValuesForEnv(app, api, "pr-42", domain.AppEnvPreview,
+		"acme.com", "bigly-pr-42", "", "acme", nil, nil, nil)
+	if preview.RoutingHost != "bigly-api.staging.acme.com" {
+		t.Errorf("routed preview component host = %q, want bigly-api.staging.acme.com", preview.RoutingHost)
+	}
+	if preview.Component != "api" {
+		t.Errorf("Component = %q, want api", preview.Component)
+	}
+}

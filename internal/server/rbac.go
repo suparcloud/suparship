@@ -367,6 +367,10 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 			// pin routes (manageProject).
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/pin", manageProject(rh.handlePinStack))
 			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/pin", manageProject(rh.handleUnpinStack))
+			// Route a stable env's hostname to a stack preview / restore across
+			// members — matching the per-app route routes (devProject).
+			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/route", devProject(rh.handleRouteStack))
+			mux.HandleFunc("DELETE /api/v1/projects/{project}/stacks/{stack}/route", devProject(rh.handleUnrouteStack))
 			// Set per-env target clusters across the stack (same privilege as the
 			// per-app PATCH that carries targetClusters).
 			mux.HandleFunc("POST /api/v1/projects/{project}/stacks/{stack}/target-clusters", manageProject(rh.handleSetStackTargetClusters))
@@ -405,6 +409,11 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/undeploy", manageProject(rh.appHandler.handleUndeployAppEnv))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handlePinAppEnv))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/pin", manageProject(rh.appHandler.handleUnpinAppEnv))
+		// Route a stable env's hostname to a preview / restore it (the host swap).
+		// Developer-triggerable like previews: no image changes hands and CD is
+		// untouched, so it carries no more risk than launching the preview.
+		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/route", devProject(rh.appHandler.handleRouteAppEnv))
+		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/route", devProject(rh.appHandler.handleUnrouteAppEnv))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}/rollback-candidates", viewProject(rh.appHandler.handleGetAppEnvRollbackCandidates))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/rollback", manageProject(rh.appHandler.handleRollbackAppEnv))
 		// Poll the result of an async (Prefer: respond-async) pin/unpin/preview.

@@ -332,7 +332,14 @@ func (rh *rbacHandler) handleDeleteStackPreview(w http.ResponseWriter, r *http.R
 	// the caller opts into async so tearing down a large stack preview can't 504.
 	op := func(ctx context.Context) (int, any, error) {
 		results := make([]stackOpResult, 0, len(members))
+		// Members whose stable env hostname this preview serves hand it back
+		// first (one batched republish), so the envs never go dark. A failed
+		// restore keeps those members' swap + preview for a retry.
+		restoreFailed := rh.restoreRoutingForDeletedStackPreview(ctx, members, preview, &results)
 		for _, a := range members {
+			if restoreFailed[a.Name] {
+				continue
+			}
 			env, err := rh.appHandler.appStore.GetAppEnvironment(ctx, project, a.Name, preview)
 			if err != nil || env.EnvType != domain.AppEnvPreview {
 				continue // app has no such preview — skip silently

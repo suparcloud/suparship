@@ -1353,6 +1353,16 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 		if ov := app.Spec.EnvironmentDefaults[envName]; ov.Suspend != nil && *ov.Suspend {
 			dto.Suspended = true
 		}
+		// Host-swap state: a stable env routed to a preview, or a preview serving
+		// a stable env's hostname (the routed host is the preview's stored URL).
+		if env.EnvType == domain.AppEnvPreview {
+			dto.RoutedFromEnv = app.Spec.EnvRoutedToPreview(envName)
+		} else if p := app.Spec.EnvironmentDefaults[envName].RoutedToPreview; p != "" {
+			dto.RoutedToPreview = p
+			if pe, perr := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, p); perr == nil && len(pe.URLs) > 0 {
+				dto.RoutedHost = pe.URLs[0]
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, AppEnvironmentResponse{
@@ -1437,6 +1447,11 @@ func (ah *appHandler) prepAppPreview(ctx context.Context, a *domain.App, preview
 	inst = previewResult.Instance
 	if namespaceOverride != "" {
 		inst.Namespace = namespaceOverride // co-locate stack-preview members
+	}
+	// A preview that currently serves a stable env's hostname (host swap) keeps
+	// that URL across a CI re-launch — the mapper renders it on the donor host.
+	if inst.URL != "" {
+		inst.URL = previewURLFor(a, previewName, baseDomain, secure)
 	}
 	imageTag = strings.TrimSpace(imageTag)
 
@@ -1629,6 +1644,15 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 	// orphaning a running Application with no store entry. The gitops prune
 	// clones/commits/pushes, so it's deferred when the caller opts into async.
 	op := func(ctx context.Context) (int, any, error) {
+		// A preview serving a stable env's hostname hands it back first, so the
+		// env never goes dark: the swap is cleared and the env republished
+		// before the preview's files are pruned. A restore failure keeps both
+		// the swap and the preview so the delete can be retried.
+		if app, gerr := ah.appStore.GetApp(ctx, projectName, appName); gerr == nil {
+			if err := ah.restoreRoutingForDeletedPreview(ctx, app, previewName); err != nil {
+				return http.StatusInternalServerError, nil, err
+			}
+		}
 		if d, ok := ah.gitOpsPublisher.(AppPreviewDeleter); ok {
 			if err := d.DeleteAppPreview(ctx, projectName, previewName, appName, env.BaseEnv); err != nil {
 				return http.StatusInternalServerError, nil, fmt.Errorf("failed to remove preview from gitops")
@@ -2888,6 +2912,15 @@ func (ah *appHandler) handleUndeployAppEnv(w http.ResponseWriter, r *http.Reques
 	if base := ah.baseStableEnvName(r.Context(), app); base != "" && envName == base {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
 			Error: "cannot remove the base environment \"" + envName + "\"; it is the pipeline source",
+		})
+		return
+	}
+	// An env whose hostname is routed to a preview must be restored first —
+	// otherwise the preview keeps serving the hostname of an env that no
+	// longer exists, with nothing left to hand it back to.
+	if p := app.Spec.EnvironmentDefaults[envName].RoutedToPreview; p != "" {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: "environment \"" + envName + "\" has its hostname routed to preview \"" + p + "\"; restore routing first",
 		})
 		return
 	}
@@ -4653,7 +4686,44 @@ func buildEnvSummaryDTOs(app *domain.App, envs []*domain.AppEnvironment) []AppEn
 			envDTOs[i].Suspended = true
 		}
 	}
+	applyRoutingState(app, envDTOs)
 	return envDTOs
+}
+
+// applyRoutingState marks host-swap state on env DTOs: a stable env routed to a
+// preview (RoutedToPreview + the routed host, i.e. the preview's stored URL) and
+// the preview serving that env's hostname (RoutedFromEnv). One pass, no I/O.
+func applyRoutingState(app *domain.App, dtos []AppEnvironmentSummaryDTO) {
+	donorOf := map[string]string{} // preview → stable env routing to it
+	for envName, ov := range app.Spec.EnvironmentDefaults {
+		if envName != domain.PreviewOverrideKey && ov.RoutedToPreview != "" {
+			donorOf[ov.RoutedToPreview] = envName
+		}
+	}
+	if len(donorOf) == 0 {
+		return
+	}
+	previewURL := map[string]string{}
+	for i := range dtos {
+		if dtos[i].EnvType != string(domain.AppEnvPreview) {
+			continue
+		}
+		if donor := donorOf[dtos[i].EnvName]; donor != "" {
+			dtos[i].RoutedFromEnv = donor
+			if len(dtos[i].URLs) > 0 {
+				previewURL[dtos[i].EnvName] = dtos[i].URLs[0]
+			}
+		}
+	}
+	for i := range dtos {
+		if dtos[i].EnvType == string(domain.AppEnvPreview) {
+			continue
+		}
+		if p := app.Spec.EnvironmentDefaults[dtos[i].EnvName].RoutedToPreview; p != "" {
+			dtos[i].RoutedToPreview = p
+			dtos[i].RoutedHost = previewURL[p]
+		}
+	}
 }
 
 // summaryPhase aggregates per-env status into a single phase for list views,

@@ -108,7 +108,7 @@ for the full catalog):
 | Token | Resolves to |
 | --- | --- |
 | `((platform.configMapName))` / `((platform.secretName))` | the platform-managed env ConfigMap / Secret for this app instance (preview-suffixed in previews) |
-| `((platform.routingHost))` | the resolved external host for this env, e.g. `myapp.staging.acme.com` |
+| `((platform.routingHost))` | the resolved external host for this env, e.g. `myapp.staging.acme.com`. While the env's hostname is [routed to a preview](previews.md#route-send-a-stable-hostname-to-a-preview), the preview gets this host and the env gets `myapp-origin.staging.acme.com` |
 | `((platform.ingressClassName))` / `((platform.clusterIssuer))` | the routing profile's IngressClass / cert-manager issuer |
 | `((platform.externalGatewayName/Namespace/SectionName))` (+ `internal…`) | the Gateway API parentRef of the resolved routing profile |
 | `((platform.env))` / `((platform.envType))` | environment name / classification (`staging`, `prod`, `preview`) |

@@ -177,6 +177,15 @@ type AppEnvironmentSummaryDTO struct {
 	// Suspended reports that this env's workload is scaled down via the suspend
 	// op (env stays published; resume brings it back). Absent when running.
 	Suspended bool `json:"suspended,omitempty"`
+	// RoutedToPreview (stable envs) names the preview currently serving this
+	// env's hostname (the host swap); RoutedHost is that hostname's URL. The env
+	// itself is reachable on its "-origin" alternate host (see URLs). Absent
+	// when the env serves its own hostname.
+	RoutedToPreview string `json:"routedToPreview,omitempty"`
+	RoutedHost      string `json:"routedHost,omitempty"`
+	// RoutedFromEnv (previews) names the stable env whose hostname this preview
+	// is serving. Absent for a preview on its own URL.
+	RoutedFromEnv string `json:"routedFromEnv,omitempty"`
 }
 
 // --- App summary (list view) ---

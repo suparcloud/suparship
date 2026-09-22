@@ -112,6 +112,16 @@ error}` rows) so partial failures are visible.
   pauses its own stage; **direct-delivery** members and members lacking that
   preview are **skipped**. Unpin runs each member's freight-restore. Reuses the
   per-app `pinAppEnv`/`unpinAppEnv` cores (extracted like `promoteAppEnv`).
+- `POST .../stacks/{stack}/route {fromPreview, targetEnv, apps?}` /
+  `DELETE .../stacks/{stack}/route {targetEnv, apps?}` — route a stable env's
+  hostname to a PR preview group across the stack (the host swap; see
+  [previews.md](previews.md#route-send-a-stable-hostname-to-a-preview)),
+  then restore. Per member, the preview serves `{app}.{env}.{domain}` and the env
+  moves to `{app}-origin.{env}.{domain}`; the image pipeline is untouched. Members
+  lacking the preview or exposing no HTTP route are **skipped**; `targetEnv` may
+  not be prod. Two-phase like pin: concurrent spec prep, then ONE batched preview
+  publish and ONE batched app publish. **Developer-callable**. Deleting the stack
+  preview restores every routed member first.
 - `POST .../stacks/{stack}/suspend {targetEnv, apps?}` /
   `POST .../stacks/{stack}/resume {targetEnv, apps?}` — suspend (scale down) or
   resume an env across member apps. **Developer-triggerable** and API-first (a CI

@@ -151,6 +151,9 @@ clusters and backward-compatible with older suparship installations.
 ### What namespace patterns do NOT affect
 
 - **Ingress hostnames** — always derived from `baseDomain`: `{app}.{baseDomain}`
+  (the one exception is an env whose hostname is routed to a preview, which
+  renders on `{app}-origin.{baseDomain}` until restored — see
+  [previews.md](previews.md#route-send-a-stable-hostname-to-a-preview))
 - **Helm release name** — always `{app}` (Helm releases are namespace-scoped;
   no env suffix is needed even on a shared cluster)
 - **Preview namespaces** — always `{app}-{previewName}` (the preview name provides

@@ -351,3 +351,31 @@ func TestEffectiveComponents(t *testing.T) {
 		t.Errorf("no template + no components → nil, got %+v", got)
 	}
 }
+
+func TestAppSpec_EnvRoutedToPreview(t *testing.T) {
+	var nilSpec *AppSpec
+	if got := nilSpec.EnvRoutedToPreview("pr-1"); got != "" {
+		t.Errorf("nil spec: got %q, want empty", got)
+	}
+	spec := &AppSpec{EnvironmentDefaults: map[string]EnvironmentOverride{
+		PreviewOverrideKey: {RoutedToPreview: "pr-1"}, // reserved band is never a donor
+		"zeta":             {RoutedToPreview: "pr-1"},
+		"alpha":            {RoutedToPreview: "pr-1"},
+		"staging":          {RoutedToPreview: "pr-2"},
+		"prod":             {},
+	}}
+	if got := spec.EnvRoutedToPreview(""); got != "" {
+		t.Errorf("empty preview: got %q, want empty", got)
+	}
+	if got := spec.EnvRoutedToPreview("pr-9"); got != "" {
+		t.Errorf("unrouted preview: got %q, want empty", got)
+	}
+	if got := spec.EnvRoutedToPreview("pr-2"); got != "staging" {
+		t.Errorf("pr-2 donor = %q, want staging", got)
+	}
+	for range 20 { // deterministic under map iteration
+		if got := spec.EnvRoutedToPreview("pr-1"); got != "alpha" {
+			t.Fatalf("pr-1 donor = %q, want alpha (sorted first, preview band skipped)", got)
+		}
+	}
+}

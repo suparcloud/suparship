@@ -575,6 +575,12 @@ type recordingPublisher struct {
 	// publishAppCalls counts full-app PublishApp invocations, so a test can
 	// assert the pipeline undeploy path republishes to rebuild the Kargo chain.
 	publishAppCalls int
+	// previewInsts records the instance passed to each PublishAppPreview call;
+	// log records every publish in call order ("preview:<name>", "apps:<n>",
+	// "app", "env:<name>") so a test can assert interleaving — the host swap
+	// publishes the preview before the env on route and the reverse on restore.
+	previewInsts []*domain.EnvironmentInstance
+	log          []string
 }
 
 // PublishPreviews makes recordingPublisher a BatchPreviewPublisher so tests can
@@ -601,20 +607,25 @@ func (r *recordingPublisher) PublishAppsEnv(_ context.Context, targets []AppEnvT
 func (r *recordingPublisher) PublishApps(_ context.Context, targets []AppPublishTarget) error {
 	r.batchAppCalls++
 	r.batchAppTargets = append(r.batchAppTargets, len(targets))
+	r.log = append(r.log, fmt.Sprintf("apps:%d", len(targets)))
 	return nil
 }
 
 func (r *recordingPublisher) PublishApp(_ context.Context, _ *domain.App, _ []*domain.AppEnvironment) error {
 	r.publishAppCalls++
+	r.log = append(r.log, "app")
 	return nil
 }
 func (r *recordingPublisher) PublishAppEnv(_ context.Context, app *domain.App, env *domain.AppEnvironment) error {
 	r.publishedEnvs = append(r.publishedEnvs, env.EnvName)
 	r.publishedEnvApps = append(r.publishedEnvApps, app)
+	r.log = append(r.log, "env:"+env.EnvName)
 	return nil
 }
-func (r *recordingPublisher) PublishAppPreview(_ context.Context, _ *domain.App, _ *domain.EnvironmentInstance, _, _ string) error {
+func (r *recordingPublisher) PublishAppPreview(_ context.Context, _ *domain.App, inst *domain.EnvironmentInstance, _, _ string) error {
 	r.previewCalls++
+	r.previewInsts = append(r.previewInsts, inst)
+	r.log = append(r.log, "preview:"+inst.EnvName)
 	return nil
 }
 func (r *recordingPublisher) UnpublishApp(_ context.Context, _, _ string) error { return nil }

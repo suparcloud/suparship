@@ -183,6 +183,95 @@ To give a specific PR its own secrets, write the `<app>-env-preview-pr-<name>`
 item into the base env vault before (or after) creating the preview; the
 ExternalSecret references it automatically when present.
 
+## Route: send a stable hostname to a preview
+
+External services — a partner's webhook, a mobile build, a shared QA harness —
+often know one URL: `https://myapp.staging.acme.com`. **Route** lets a PR answer
+at that URL without touching staging's image or its delivery pipeline.
+
+> **Route sends staging's hostname to the preview; pin sends the preview's image
+> to staging.** Route when you need the stable URL. Pin when you need the image
+> deployed there (a rollback hold, or a deliberate unmerged deploy).
+
+```http
+POST   /api/v1/projects/{project}/apps/{app}/environments/{env}/route   {"fromPreview": "pr-42"}
+DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/route
+```
+
+While routed:
+
+| who | serves | notes |
+|---|---|---|
+| preview `pr-42` | `myapp.staging.acme.com` | staging's normal host; the preview's own `pr-42.myapp.preview.…` host is not served |
+| env `staging` | `myapp-origin.staging.acme.com` | the alternate host, one label deep so a wildcard cert still covers it |
+
+Composed apps route per component: `myapp-api.staging.…` → the preview,
+`myapp-api-origin.staging.…` → the env.
+
+Nothing changes in the image pipeline. Staging keeps receiving mainline freight,
+Kargo auto-promotion keeps flowing to prod, and manual promotion works as usual.
+Mechanically it is a host swap: only `((platform.routingHost))` changes on both
+sides — the same token every chart already wires (see
+[byo-charts.md](byo-charts.md)) — so it works for any chart and any app that
+exposes an HTTP route, direct-delivery apps included.
+
+Guardrails:
+
+- **Prod is never routed.** `env` must be a non-prod stable env, and the preview
+  must be based on it (`baseEnv`), since it reuses that env's cluster and vault.
+- **One preview per env.** Routing a second preview replaces the first, which
+  goes back to its own host in the same operation.
+- **Deleting the preview restores the env** before the preview's files are
+  pruned, so the hostname never goes dark. Undeploying a routed env is refused
+  until it is restored.
+- **A PR push keeps the route.** Re-POSTing the preview with a new image tag
+  re-renders it on the routed host; nothing in the workflow changes.
+- **Developer-callable**, the same role as launching the preview. Stacks fan it
+  out across members: see [stacks.md](stacks.md).
+
+Two things to know about the edge:
+
+- **The switch is two GitOps commits** (preview first, then the env). Between
+  them both objects briefly claim the host; ingress-nginx keeps the older
+  claimant until the env's update syncs, so the handover has no 404 window.
+  Restore runs in the opposite order.
+- **Certificates.** If your chart issues a per-release certificate (the example
+  `web` chart uses one `<release>-tls` secret covering its hosts), each route or
+  restore triggers a re-issue for the new host set and a brief TLS gap. A
+  wildcard certificate on the env's domain — what the example `gateway` chart
+  sets up — makes the switch instant and avoids ACME rate limits.
+
+The UI shows a 🔀 badge on both envs. The env's page shows where its traffic
+goes and its alternate host; both pages offer **Restore**.
+
+### From CI (route on a label)
+
+CI only has to say *when* to route: the route survives PR pushes, and closing
+the PR restores staging through the preview delete. A PR label models that state
+well — visible in the PR, gated by repo write access, handled by the
+`labeled`/`unlabeled` events. The preview token's developer role is enough.
+
+```bash
+# on label "route-staging" added
+curl -fsS -X POST "$SUPARSHIP_API/projects/$PROJECT/apps/$APP/environments/staging/route" \
+  -H "Authorization: Bearer $SUPARSHIP_TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"fromPreview\":\"pr-${PR_NUMBER}\"}"
+
+# on label removed — restore while the PR stays open
+curl -fsS -X DELETE "$SUPARSHIP_API/projects/$PROJECT/apps/$APP/environments/staging/route" \
+  -H "Authorization: Bearer $SUPARSHIP_TOKEN"
+```
+
+Both example workflows carry a working version:
+[`examples/preview-from-pr.yml`](../examples/preview-from-pr.yml) (per app) and
+[`examples/stack-preview-from-pr.yml`](../examples/stack-preview-from-pr.yml)
+(`route-<env>` labels beside `pin-<env>`, one call for the whole stack). Two
+details they handle: the label may arrive before the preview exists (the route
+returns 404 — the job re-applies the label's route once the preview is created),
+and a second PR taking the same label replaces the first (the first PR's preview
+quietly returns to its own URL; check the env's `routedToPreview` first if you
+want to refuse that).
+
 ## Stack previews (preview a whole collection in one call)
 
 When your service is a [stack](stacks.md) of apps, you can preview **every member
@@ -226,6 +315,9 @@ to GitOps: a values file, the `<app>-config` ConfigMap, and an ExternalSecret
 that merges `base-env → preview band → per-PR` items, all reading the **base
 env's** store. ArgoCD then reconciles the preview namespace. Promotion is
 one-directional — a preview can be promoted *to* a stable env, never the reverse.
+A preview that is routed a stable env's hostname is rendered on that host (and
+the env on its `-origin` host) by the same values mapper, so every republish of
+either side preserves the swap until it is restored.
 
 ## See also
 

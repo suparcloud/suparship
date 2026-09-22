@@ -19,11 +19,13 @@ import {
   pinStack,
   promoteStack,
   resumeStack,
+  routeStack,
   setAppStack,
   setStackTargetClusters,
   suspendStack,
   syncStack,
   unpinStack,
+  unrouteStack,
   updateStack,
 } from "../lib/stacks";
 import type { Stack, StackBatchResponse, StackOpResult } from "../lib/stacks";
@@ -354,6 +356,43 @@ export function StackDetail() {
     }
   }
 
+  // doRoute routes a stable env's hostname to this PR preview group across the
+  // stack (the host swap): each member's preview serves the member's stable URL
+  // while the image pipeline keeps flowing. Members without the preview or
+  // without an HTTP route are skipped.
+  async function doRoute(previewName: string, targetEnv: string) {
+    if (!targetEnv) return;
+    setBusy(`route:${previewName}`);
+    try {
+      summarize(
+        `Route ${targetEnv} → ${previewName}`,
+        await routeStack(project!, stackName!, { fromPreview: previewName, targetEnv }),
+      );
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to route hostname");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // doUnroute restores the stack's stable env hostnames (previews go back to
+  // their preview URLs).
+  async function doUnroute(previewName: string, targetEnv: string) {
+    setBusy(`unroute:${previewName}`);
+    try {
+      summarize(
+        `Restore ${targetEnv} hostname`,
+        await unrouteStack(project!, stackName!, targetEnv),
+      );
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Failed to restore hostname");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   // doUnpin clears the stack's pin on a stable env (restores each member's
   // pre-pin image).
   async function doUnpin(previewName: string, targetEnv: string) {
@@ -642,13 +681,35 @@ export function StackDetail() {
                 const target = pinTargets[g.name] ?? envs[0]?.name ?? "";
                 const pinning = busy === `pin:${g.name}`;
                 const unpinning = busy === `unpin:${g.name}`;
+                const routing = busy === `route:${g.name}`;
+                const unrouting = busy === `unroute:${g.name}`;
+                // Prod hostnames are never routed to a preview.
+                const routeBlocked = target === "prod" || target === "production";
                 return (
                   <div key={`${g.project}/${g.name}`} className="space-y-2">
                     <PreviewGroupCard group={g} onAppDeleted={loadPreviews} />
-                    {/* Pin this PR's build to a stable env across the stack.
-                        Each pipeline member pins its own image; direct members
-                        and members without this preview are skipped. */}
+                    {/* Route the chosen env's hostname to this PR across the
+                        stack (the host swap — image pipeline untouched), or
+                        pin this PR's build to the env. Each pipeline member
+                        pins its own image; direct members and members without
+                        this preview are skipped. */}
                     <div className="flex flex-wrap items-center gap-2 pl-1 text-xs text-gray-500">
+                      <button
+                        onClick={() => doRoute(g.name, target)}
+                        disabled={busy !== null || !target || routeBlocked}
+                        title={routeBlocked ? "Production hostnames are never routed to a preview" : `Serve ${target}'s hostname from ${g.name}; ${target} moves to its -origin host`}
+                        className={btnSecondary}
+                      >
+                        {routing ? "Routing…" : `🔀 Route ${target || "env"} here`}
+                      </button>
+                      <button
+                        onClick={() => doUnroute(g.name, target)}
+                        disabled={busy !== null || !target}
+                        className="text-xs text-gray-400 underline hover:text-gray-600"
+                      >
+                        {unrouting ? "Restoring…" : "Restore hostname"}
+                      </button>
+                      <span className="text-gray-300">|</span>
                       <span>Pin {g.name} to</span>
                       <select
                         value={target}

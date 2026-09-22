@@ -1,16 +1,28 @@
-# Example GitHub Actions workflow — suparship STACK previews + label-driven pinning.
+# Example GitHub Actions workflow — suparship STACK previews + label-driven
+# routing and pinning.
 #
 # What it does, per pull request:
 #   • Preview (automatic): opens/updates a preview of the WHOLE stack in one call
 #     on every push, and tears it down when the PR closes. The server resolves
 #     the member apps, so adding/removing an app needs no workflow edit. Members
 #     with previews disabled are skipped server-side (not failed).
+#   • Route (opt-in, label-driven): add a "route-<env>" label (e.g. route-staging)
+#     to serve that env's hostname from this PR's preview across the stack, so
+#     external services that only know the staging URL exercise the PR. The env
+#     keeps its image and its delivery pipeline and stays reachable on its
+#     "-origin" host. Remove the label to restore; closing the PR restores
+#     automatically (the preview delete hands the hostname back). The route
+#     survives pushes, so nothing is re-applied per push. Prod is never routed.
 #   • Pin (opt-in, label-driven): add a "pin-<env>" label (e.g. pin-staging) to
 #     deploy this PR's preview image to a STABLE env without merging. Remove the
 #     label — or close the PR — to restore that env to normal delivery. While the
 #     label is on, each new push re-pins so the env tracks the latest PR image.
 #   • Status comment: upserts one sticky PR comment with each member's preview
 #     URL and health, pulled from the preview-groups API.
+#
+# Route vs pin: route sends staging's hostname to the preview; pin sends the
+# preview's image to staging. Route when you need the stable URL; pin when you
+# need the image deployed there. See docs/previews.md#route-send-a-stable-hostname-to-a-preview.
 #
 # Why labels (not "/pin" comments): a pin is a STATE ("this PR owns staging"),
 # and a label models state — visible in the PR UI, gated by repo write access,
@@ -19,8 +31,8 @@
 # separate state tracking. Labels keep it simple.
 #
 # See docs/previews.md#stack-previews and docs/stacks.md. Repo secrets/vars:
-#   secrets.SUPARSHIP_TOKEN  — project API token. Preview needs the DEVELOPER
-#                              role; PIN/UNPIN need the MANAGE role. If you use
+#   secrets.SUPARSHIP_TOKEN  — project API token. Preview and ROUTE need the
+#                              DEVELOPER role; PIN/UNPIN need the MANAGE role. If you use
 #                              pinning, mint one manage-role token (simplest) or
 #                              split it into SUPARSHIP_PIN_TOKEN. See
 #                              docs/api-tokens.md.
@@ -38,7 +50,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, closed, labeled, unlabeled]
 
-# One in-flight run per PR; a newer push supersedes an older create/pin.
+# One in-flight run per PR; a newer push supersedes an older create/route/pin.
 concurrency:
   group: suparship-stack-preview-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -114,17 +126,21 @@ jobs:
             gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@/tmp/body.md >/dev/null
           fi
 
-  # 2) Pin lifecycle — label-driven, plus a re-pin on each push so a pinned env
-  #    tracks the latest PR image. needs:[preview] so a push updates the preview
-  #    before we re-pin; always() lets the label paths run when preview is skipped.
+  # 2) Route + pin lifecycle — label-driven. Pins are re-applied on each push so
+  #    a pinned env tracks the latest PR image; routes survive pushes and are
+  #    only re-applied when the preview is (re)created (opened/reopened with the
+  #    label already present — routing needs the preview to exist). needs:
+  #    [preview] so a push updates the preview first; always() lets the label
+  #    paths run when preview is skipped.
   pin:
     needs: [preview]
     if: >
       always() &&
       (
-        (github.event.action == 'labeled'   && startsWith(github.event.label.name, 'pin-')) ||
-        (github.event.action == 'unlabeled' && startsWith(github.event.label.name, 'pin-')) ||
-        (github.event.action == 'synchronize' && needs.preview.result == 'success')
+        (github.event.action == 'labeled'   && (startsWith(github.event.label.name, 'pin-') || startsWith(github.event.label.name, 'route-'))) ||
+        (github.event.action == 'unlabeled' && (startsWith(github.event.label.name, 'pin-') || startsWith(github.event.label.name, 'route-'))) ||
+        ((github.event.action == 'synchronize' || github.event.action == 'opened' || github.event.action == 'reopened') &&
+          needs.preview.result == 'success')
       )
     runs-on: ubuntu-latest
     env:
@@ -135,9 +151,36 @@ jobs:
       LABEL: ${{ github.event.label.name }}
       LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
     steps:
-      - name: Apply pin / unpin
+      - name: Apply route / pin / unroute / unpin
         run: |
           set -euo pipefail
+
+          # Route the env's hostname to the stack's PR preview: each member's
+          # preview serves that member's stable URL. Members without the preview
+          # or without an HTTP route are skipped server-side. Routing over another
+          # PR's route replaces it (that PR's preview returns to its own URL); to
+          # refuse a takeover, GET .../apps/{app} and check .environments[]
+          # .routedToPreview first. Prod is refused (422).
+          do_route() {
+            env="$1"
+            echo "==> route $env hostname → $STACK preview '$NAME'"
+            code=$(curl -sS -o /tmp/route -w '%{http_code}' \
+              -X POST "$API/projects/$PROJECT/stacks/$STACK/route" \
+              -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+              -d "{\"fromPreview\":\"$NAME\",\"targetEnv\":\"$env\"}")
+            echo "HTTP $code"; jq . /tmp/route 2>/dev/null || cat /tmp/route
+            [ "$code" = "200" ] || { echo "route failed"; exit 1; }
+          }
+          do_unroute() {
+            env="$1"
+            echo "==> restore $STACK $env hostname"
+            code=$(curl -sS -o /tmp/route -w '%{http_code}' \
+              -X DELETE "$API/projects/$PROJECT/stacks/$STACK/route" \
+              -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+              -d "{\"targetEnv\":\"$env\"}")
+            echo "HTTP $code"; jq . /tmp/route 2>/dev/null || cat /tmp/route
+            [ "$code" = "200" ] || { echo "unroute failed"; exit 1; }
+          }
 
           # Pin the stack's PR preview to a stable env. Each pipeline member
           # resolves its own image tag from its preview; non-previewable / not-
@@ -168,20 +211,38 @@ jobs:
           }
 
           case "$ACTION" in
-            labeled)   do_pin   "${LABEL#pin-}" ;;
-            unlabeled) do_unpin "${LABEL#pin-}" ;;
+            labeled)
+              case "$LABEL" in
+                pin-*)   do_pin   "${LABEL#pin-}" ;;
+                route-*) do_route "${LABEL#route-}" ;;
+              esac ;;
+            unlabeled)
+              case "$LABEL" in
+                pin-*)   do_unpin   "${LABEL#pin-}" ;;
+                route-*) do_unroute "${LABEL#route-}" ;;
+              esac ;;
             synchronize)
               # Re-pin every pin-<env> label currently on the PR so the pinned
-              # env(s) advance to this push's image. Read from the label list
-              # (process substitution keeps do_pin's exit in this shell).
+              # env(s) advance to this push's image. Routes survive the push —
+              # the re-published preview renders on the routed host — so they
+              # are not re-applied. (Process substitution keeps do_pin's exit in
+              # this shell.)
               while IFS= read -r l; do
                 case "$l" in pin-*) do_pin "${l#pin-}" ;; esac
+              done < <(printf '%s' "$LABELS_JSON" | jq -r '.[]')
+              ;;
+            opened|reopened)
+              # The preview was just created: apply any route-<env> label that
+              # was already on the PR (a route needs the preview to exist).
+              while IFS= read -r l; do
+                case "$l" in route-*) do_route "${l#route-}" ;; esac
               done < <(printf '%s' "$LABELS_JSON" | jq -r '.[]')
               ;;
           esac
 
   # 3) Cleanup on PR close (merged or not): unpin every pinnable env (idempotent
-  #    — a no-op when not pinned) THEN tear down the stack preview.
+  #    — a no-op when not pinned) THEN tear down the stack preview. Routes need
+  #    no step here: deleting the preview restores every routed env first.
   cleanup:
     if: github.event.action == 'closed'
     runs-on: ubuntu-latest
