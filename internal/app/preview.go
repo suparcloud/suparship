@@ -93,6 +93,9 @@ func CreatePreview(req PreviewRequest) (*PreviewResult, error) {
 	if !req.App.Spec.PreviewsEnabled {
 		return nil, fmt.Errorf("app %q has previews disabled", req.App.Name)
 	}
+	if err := ValidatePreviewRoutingLabels(req.App, req.PreviewName); err != nil {
+		return nil, err
+	}
 
 	ns := domain.GeneratePreviewNamespaceFromPattern(req.App.Name, req.PreviewName, req.App.ProjectName, req.NamespacePattern)
 
@@ -125,4 +128,31 @@ func CreatePreview(req PreviewRequest) (*PreviewResult, error) {
 		Instance: inst,
 		ArgoApp:  argoApp,
 	}, nil
+}
+
+// maxDNSLabel is the RFC 1035 limit on one hostname label.
+const maxDNSLabel = 63
+
+// ValidatePreviewRoutingLabels refuses a preview whose platform routing name
+// ((platform.appRoutingName) "{app}-{preview}", or per exposed component
+// ((platform.appComponentRoutingName)) "{app}-{component}-{preview}") would not
+// fit in one DNS label. A chart composing its host from those tokens would
+// otherwise render an Ingress the API server rejects, long after the preview
+// was accepted. Only exposed components count: an unexposed one has no host.
+func ValidatePreviewRoutingLabels(app *domain.App, previewName string) error {
+	if app == nil || !AppHasIngressRoute(app) {
+		return nil
+	}
+	if n := len(app.Name) + 1 + len(previewName); n > maxDNSLabel {
+		return fmt.Errorf("preview name %q is too long: %q-%q is %d characters, a hostname label allows %d", previewName, app.Name, previewName, n, maxDNSLabel)
+	}
+	for _, c := range app.Spec.Components {
+		if c.ExposeMode != domain.ExposeExternal && c.ExposeMode != domain.ExposeInternal {
+			continue
+		}
+		if n := len(app.Name) + 1 + len(c.Name) + 1 + len(previewName); n > maxDNSLabel {
+			return fmt.Errorf("preview name %q is too long for component %q: %q-%q-%q is %d characters, a hostname label allows %d", previewName, c.Name, app.Name, c.Name, previewName, n, maxDNSLabel)
+		}
+	}
+	return nil
 }

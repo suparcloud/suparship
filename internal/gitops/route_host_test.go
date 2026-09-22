@@ -14,6 +14,12 @@ import (
 // readIngressHost returns ingress.host from a rendered values.yaml.
 func readIngressHost(t *testing.T, path string) string {
 	t.Helper()
+	return readIngressKey(t, path, "host")
+}
+
+// readIngressKey returns ingress.<key> from a rendered values.yaml.
+func readIngressKey(t *testing.T, path, key string) string {
+	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
@@ -23,8 +29,8 @@ func readIngressHost(t *testing.T, path string) string {
 		t.Fatalf("unmarshal %s: %v", path, err)
 	}
 	ing, _ := m["ingress"].(map[string]any)
-	host, _ := ing["host"].(string)
-	return host
+	v, _ := ing[key].(string)
+	return v
 }
 
 // routedHostApp wires ((platform.routingHost)) into ingress.host — the chart
@@ -36,7 +42,12 @@ func routedHostApp() *domain.App {
 		Spec: domain.AppSpec{
 			Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"},
 			RawValues: map[string]any{
-				"ingress": map[string]any{"host": "((platform.routingHost))"},
+				"ingress": map[string]any{
+					"host": "((platform.routingHost))",
+					// The composed form: platform-owned name label + a domain
+					// the values author chose. Same swap, no env-type segment.
+					"bareHost": "((platform.appRoutingName)).((platform.baseDomain))",
+				},
 			},
 			EnvironmentDefaults: map[string]domain.EnvironmentOverride{
 				"staging": {RoutedToPreview: "pr-42"},
@@ -64,13 +75,19 @@ func TestPublish_RoutedHostSwapReachesValues(t *testing.T) {
 	if got := readIngressHost(t, valuesPath(dir, "staging")); got != "hello-origin.staging.acme.com" {
 		t.Errorf("routed-away staging ingress.host = %q, want hello-origin.staging.acme.com", got)
 	}
+	if got := readIngressKey(t, valuesPath(dir, "staging"), "bareHost"); got != "hello-origin.acme.com" {
+		t.Errorf("routed-away staging bareHost = %q, want hello-origin.acme.com", got)
+	}
 	if got := readIngressHost(t, valuesPath(dir, "prod")); got != "hello.prod.acme.com" {
 		t.Errorf("prod ingress.host = %q, want hello.prod.acme.com (never swapped)", got)
 	}
+	if got := readIngressKey(t, valuesPath(dir, "prod"), "bareHost"); got != "hello.acme.com" {
+		t.Errorf("prod bareHost = %q, want hello.acme.com", got)
+	}
 
-	for _, pv := range []struct{ name, want string }{
-		{"pr-42", "hello.staging.acme.com"},     // routed: takes staging's host
-		{"pr-7", "pr-7.hello.preview.acme.com"}, // sibling preview: its own host
+	for _, pv := range []struct{ name, want, wantBare string }{
+		{"pr-42", "hello.staging.acme.com", "hello.acme.com"},          // routed: takes staging's host
+		{"pr-7", "pr-7.hello.preview.acme.com", "hello-pr-7.acme.com"}, // sibling preview: its own host
 	} {
 		spec := gitops.PreviewPublishSpec{
 			PreviewName:   pv.name,
@@ -87,6 +104,9 @@ func TestPublish_RoutedHostSwapReachesValues(t *testing.T) {
 		if got := readIngressHost(t, path); got != pv.want {
 			t.Errorf("preview %s ingress.host = %q, want %q", pv.name, got, pv.want)
 		}
+		if got := readIngressKey(t, path, "bareHost"); got != pv.wantBare {
+			t.Errorf("preview %s bareHost = %q, want %q", pv.name, got, pv.wantBare)
+		}
 	}
 
 	// Restore: clearing the field puts both back on their own hosts.
@@ -96,6 +116,9 @@ func TestPublish_RoutedHostSwapReachesValues(t *testing.T) {
 	}
 	if got := readIngressHost(t, valuesPath(dir, "staging")); got != "hello.staging.acme.com" {
 		t.Errorf("restored staging ingress.host = %q, want hello.staging.acme.com", got)
+	}
+	if got := readIngressKey(t, valuesPath(dir, "staging"), "bareHost"); got != "hello.acme.com" {
+		t.Errorf("restored staging bareHost = %q, want hello.acme.com", got)
 	}
 	spec := gitops.PreviewPublishSpec{
 		PreviewName: "pr-42", BaseEnv: "staging", ClusterServer: "https://kubernetes.default.svc",

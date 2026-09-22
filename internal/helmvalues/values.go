@@ -40,6 +40,31 @@ type PlatformValues struct {
 	// RoutingHost is the resolved external host (no scheme), e.g.
 	// "hello.staging.acme.com".
 	RoutingHost string `json:"routingHost" yaml:"routingHost"`
+	// AppRoutingName / AppComponentRoutingName are the platform-owned NAME part
+	// of a hostname — the app ("hello") or the "{app}-{component}" instance
+	// ("hello-api") — with preview-ness and route state folded in, so a values
+	// author composes the host shape they want and the platform still moves it:
+	//
+	//	stable env            hello        hello-api
+	//	preview pr-42         hello-pr-42  hello-api-pr-42
+	//	env routed to preview hello-origin hello-api-origin
+	//	preview serving env   hello        hello-api
+	//
+	// Always a single DNS label (hyphen-joined), so `((platform.appRoutingName)).
+	// ((platform.externalBaseDomain))` stays under a one-level wildcard cert.
+	// RoutingHost keeps its legacy shape ("{name}.{envType}.{domain}", previews
+	// "{preview}.{app}.preview.{domain}") for charts that already use it.
+	AppRoutingName          string `json:"appRoutingName" yaml:"appRoutingName"`
+	AppComponentRoutingName string `json:"appComponentRoutingName" yaml:"appComponentRoutingName"`
+	// ExternalRoutingHost / InternalRoutingHost are complete, swappable hosts
+	// per tier: the instance's routing name (AppRoutingName for a
+	// single-component app, AppComponentRoutingName per component of a
+	// composed app — the same choice RoutingHost makes) under that tier's
+	// resolved base domain, e.g. "hello-api.staging.acme.com". No env-type
+	// segment: point the tier's base domain at the env. Empty when the tier
+	// has no routing profile.
+	ExternalRoutingHost string `json:"externalRoutingHost,omitempty" yaml:"externalRoutingHost,omitempty"`
+	InternalRoutingHost string `json:"internalRoutingHost,omitempty" yaml:"internalRoutingHost,omitempty"`
 	// IngressClassName is the resolved IngressClass for the routing component.
 	// Empty when routing is disabled / no profile resolved.
 	IngressClassName string `json:"ingressClassName,omitempty" yaml:"ingressClassName,omitempty"`

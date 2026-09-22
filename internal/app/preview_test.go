@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -359,5 +360,31 @@ func TestCreatePreview_PreviewNameVariants(t *testing.T) {
 				t.Errorf("URL = %q, want %q", result.Instance.URL, tc.wantURLPrefix)
 			}
 		})
+	}
+}
+
+func TestValidatePreviewRoutingLabels(t *testing.T) {
+	long := strings.Repeat("a", 40)
+	exposed := &domain.App{Name: long, Spec: domain.AppSpec{PreviewsEnabled: true, Components: []domain.ComponentSpec{
+		{Name: "frontend-service", Type: domain.ComponentWeb, Enabled: true, ExposeMode: domain.ExposeExternal},
+	}}}
+	// 40 + 1 + 16 + 1 + 5 = 63 fits; one more character does not.
+	if err := ValidatePreviewRoutingLabels(exposed, "pr-42"); err != nil {
+		t.Errorf("63-char component label should pass: %v", err)
+	}
+	if err := ValidatePreviewRoutingLabels(exposed, "pr-420"); err == nil || !strings.Contains(err.Error(), "frontend-service") {
+		t.Errorf("64-char component label should fail naming the component, got %v", err)
+	}
+	// An app with nothing exposed has no hostname to fit — never rejected.
+	worker := &domain.App{Name: long, Spec: domain.AppSpec{PreviewsEnabled: true, Components: []domain.ComponentSpec{
+		{Name: strings.Repeat("w", 30), Type: domain.ComponentWorker, Enabled: true},
+	}}}
+	if err := ValidatePreviewRoutingLabels(worker, "pr-420"); err != nil {
+		t.Errorf("unexposed app should pass: %v", err)
+	}
+	// CreatePreview applies it.
+	_, err := CreatePreview(PreviewRequest{App: exposed, PreviewName: "pr-420"})
+	if err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Errorf("CreatePreview should refuse an over-long routing label, got %v", err)
 	}
 }

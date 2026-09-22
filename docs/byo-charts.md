@@ -90,6 +90,37 @@ ingress:
     clusterIssuer: ((platform.clusterIssuer))
 ```
 
+`((platform.routingHost))` is a complete host in the platform's default shape
+(`{app}.{envType}.{domain}`, previews `{preview}.{app}.preview.{domain}`).
+When you want a different shape — `myapp.acme.com`, `api.myapp.acme.com`,
+`myapp-api.staging.acme.com` — compose the host yourself from the
+platform-owned **name** token and a domain. The platform still owns the part
+that has to move: the name folds in the preview id and the
+[route](previews.md#route-send-a-stable-hostname-to-a-preview) state.
+
+```yaml
+# frontend: the bare app name on the external tier's domain
+ingress:
+  host: ((platform.appRoutingName)).((platform.externalBaseDomain))     # myapp.acme.com
+# api: component-qualified, or a subdomain of the app
+ingress:
+  host: ((platform.appComponentRoutingName)).((platform.externalBaseDomain))  # myapp-api.acme.com
+  # or: api.((platform.appRoutingName)).((platform.externalBaseDomain))       # api.myapp.acme.com
+# or let the platform compose it per tier (routing name + tier base domain)
+ingress:
+  host: ((platform.externalRoutingHost))
+```
+
+| | stable env | preview `pr-42` | env routed to preview | preview serving the env |
+|---|---|---|---|---|
+| `appRoutingName` | `myapp` | `myapp-pr-42` | `myapp-origin` | `myapp` |
+| `appComponentRoutingName` | `myapp-api` | `myapp-api-pr-42` | `myapp-api-origin` | `myapp-api` |
+
+The names are always one hyphen-joined DNS label, so a one-level wildcard
+certificate covers every variant. A literal host in your values is left alone
+by the platform, which also means route cannot move it — route refuses such a
+component with a 422 that names it.
+
 Or Gateway API instead of Ingress:
 
 ```yaml
@@ -108,7 +139,9 @@ for the full catalog):
 | Token | Resolves to |
 | --- | --- |
 | `((platform.configMapName))` / `((platform.secretName))` | the platform-managed env ConfigMap / Secret for this app instance (preview-suffixed in previews) |
-| `((platform.routingHost))` | the resolved external host for this env, e.g. `myapp.staging.acme.com`. While the env's hostname is [routed to a preview](previews.md#route-send-a-stable-hostname-to-a-preview), the preview gets this host and the env gets `myapp-origin.staging.acme.com` |
+| `((platform.routingHost))` | the resolved external host for this env in the default shape, e.g. `myapp.staging.acme.com`. While the env's hostname is [routed to a preview](previews.md#route-send-a-stable-hostname-to-a-preview), the preview gets this host and the env gets `myapp-origin.staging.acme.com` |
+| `((platform.appRoutingName))` / `((platform.appComponentRoutingName))` | the platform-owned hostname **label** — `myapp` / `myapp-api` — with the preview id (`myapp-pr-42`) and route state (`myapp-origin`) folded in; compose with a domain to pick your own host shape (see above) |
+| `((platform.externalRoutingHost))` / `((platform.internalRoutingHost))` | the routing name under that tier's base domain, e.g. `myapp-api.staging.acme.com` — a complete swappable host with no env-type segment; empty when the tier has no profile |
 | `((platform.ingressClassName))` / `((platform.clusterIssuer))` | the routing profile's IngressClass / cert-manager issuer |
 | `((platform.externalGatewayName/Namespace/SectionName))` (+ `internal…`) | the Gateway API parentRef of the resolved routing profile |
 | `((platform.env))` / `((platform.envType))` | environment name / classification (`staging`, `prod`, `preview`) |

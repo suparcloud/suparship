@@ -343,3 +343,61 @@ func TestInterpolateTree(t *testing.T) {
 		t.Errorf("non-string leaf changed: %v", got["replicas"])
 	}
 }
+
+// The routing-name tokens compose with a base domain: the platform owns the
+// name label (with preview-ness and route state folded in), the values author
+// owns the domain shape.
+func TestInterpolate_RoutingNameTokens(t *testing.T) {
+	ctx := Context{Platform: helmvalues.PlatformValues{
+		AppRoutingName:          "hello-pr-42",
+		AppComponentRoutingName: "hello-api-pr-42",
+		ExternalBaseDomain:      "acme.com",
+	}}
+	got := ctx.Interpolate("((platform.appRoutingName)).((platform.externalBaseDomain))")
+	if got != "hello-pr-42.acme.com" {
+		t.Errorf("appRoutingName host = %q, want hello-pr-42.acme.com", got)
+	}
+	got = ctx.Interpolate("api.((platform.appRoutingName)).((platform.externalBaseDomain))")
+	if got != "api.hello-pr-42.acme.com" {
+		t.Errorf("subdomain form = %q, want api.hello-pr-42.acme.com", got)
+	}
+	got = ctx.Interpolate("[[platform.appComponentRoutingName]].acme.com")
+	if got != "hello-api-pr-42.acme.com" {
+		t.Errorf("legacy delimiter = %q, want hello-api-pr-42.acme.com", got)
+	}
+	for _, want := range []string{"((platform.appRoutingName))", "((platform.appComponentRoutingName))"} {
+		found := false
+		for _, ti := range PlatformTokens() {
+			if ti.Token == want && ti.Group == "Routing" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("PlatformTokens() should list %s in the Routing group", want)
+		}
+	}
+}
+
+func TestInterpolate_TierRoutingHostTokens(t *testing.T) {
+	ctx := Context{Platform: helmvalues.PlatformValues{
+		ExternalRoutingHost: "hello-api.staging.acme.com",
+		InternalRoutingHost: "hello-api.staging.internal.acme",
+	}}
+	if got := ctx.Interpolate("((platform.externalRoutingHost))"); got != "hello-api.staging.acme.com" {
+		t.Errorf("externalRoutingHost = %q", got)
+	}
+	if got := ctx.Interpolate("((platform.internalRoutingHost))"); got != "hello-api.staging.internal.acme" {
+		t.Errorf("internalRoutingHost = %q", got)
+	}
+	for _, want := range []string{"((platform.externalRoutingHost))", "((platform.internalRoutingHost))"} {
+		found := false
+		for _, ti := range PlatformTokens() {
+			if ti.Token == want && ti.Group == "Routing" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("PlatformTokens() should list %s", want)
+		}
+	}
+}

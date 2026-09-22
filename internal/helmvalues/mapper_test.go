@@ -333,3 +333,91 @@ func TestMapComponentPlatformValuesForEnv_RoutingSwap(t *testing.T) {
 		t.Errorf("Component = %q, want api", preview.Component)
 	}
 }
+
+// ── routing names (((platform.appRoutingName)) / ((platform.appComponentRoutingName))) ──
+
+func TestRoutingNames_StablePreviewAndSwap(t *testing.T) {
+	api := webComponent("api")
+	app := routedApp("bigly", api, webComponent("frontend")) // staging routed to pr-42
+
+	cases := []struct {
+		name            string
+		env             string
+		envType         domain.AppEnvironmentType
+		wantApp, wantCo string
+	}{
+		{"routed-away staging", "staging", domain.AppEnvStaging, "bigly-origin", "bigly-api-origin"},
+		{"prod untouched", "prod", domain.AppEnvProd, "bigly", "bigly-api"},
+		{"preview serving staging", "pr-42", domain.AppEnvPreview, "bigly", "bigly-api"},
+		{"sibling preview", "pr-7", domain.AppEnvPreview, "bigly-pr-7", "bigly-api-pr-7"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := MapComponentPlatformValuesForEnv(app, api, tc.env, tc.envType,
+				"acme.com", "ns", "", "acme", nil, nil, nil)
+			if p.AppRoutingName != tc.wantApp || p.AppComponentRoutingName != tc.wantCo {
+				t.Errorf("names = (%q, %q), want (%q, %q)", p.AppRoutingName, p.AppComponentRoutingName, tc.wantApp, tc.wantCo)
+			}
+			// Always a single DNS label.
+			if strings.Contains(p.AppRoutingName, ".") || strings.Contains(p.AppComponentRoutingName, ".") {
+				t.Errorf("routing names must be single labels: %q %q", p.AppRoutingName, p.AppComponentRoutingName)
+			}
+		})
+	}
+}
+
+func TestRoutingNames_UnroutedAppAndSingleComponent(t *testing.T) {
+	plain := webApp("hello", webComponent("web"))
+	stable := MapPlatformValuesForEnv(plain, "staging", domain.AppEnvStaging, "acme.com", "ns", "", "acme", nil, nil, nil)
+	if stable.AppRoutingName != "hello" || stable.AppComponentRoutingName != "hello-web" {
+		t.Errorf("single-component stable names = (%q, %q), want (hello, hello-web)", stable.AppRoutingName, stable.AppComponentRoutingName)
+	}
+	preview := MapPlatformValuesForEnv(plain, "pr-42", domain.AppEnvPreview, "acme.com", "ns", "", "acme", nil, nil, nil)
+	if preview.AppRoutingName != "hello-pr-42" || preview.AppComponentRoutingName != "hello-web-pr-42" {
+		t.Errorf("single-component preview names = (%q, %q), want (hello-pr-42, hello-web-pr-42)", preview.AppRoutingName, preview.AppComponentRoutingName)
+	}
+	// RoutingHost keeps its legacy shape regardless of the new names.
+	if preview.RoutingHost != "pr-42.hello.preview.acme.com" {
+		t.Errorf("legacy RoutingHost = %q, want pr-42.hello.preview.acme.com", preview.RoutingHost)
+	}
+	// The app-level map of a composed app has no single component: the component
+	// name equals the app name there (the composed path sets it per component).
+	composed := webApp("bigly", webComponent("api"), webComponent("frontend"))
+	appLevel := MapPlatformValuesForEnv(composed, "staging", domain.AppEnvStaging, "acme.com", "ns", "", "acme", nil, nil, nil)
+	if appLevel.AppComponentRoutingName != "bigly" {
+		t.Errorf("composed app-level component routing name = %q, want bigly", appLevel.AppComponentRoutingName)
+	}
+}
+
+func TestTierRoutingHosts_ComposeNameAndTierDomain(t *testing.T) {
+	org := domain.RoutingProfiles{
+		"external": {IngressClassName: "nginx", BaseDomain: "staging.acme.com"},
+		"internal": {IngressClassName: "nginx-internal", BaseDomain: "staging.internal.acme"},
+	}
+	api := webComponent("api")
+	app := routedApp("bigly", api, webComponent("frontend")) // staging routed to pr-42
+
+	stable := MapComponentPlatformValuesForEnv(app, api, "staging", domain.AppEnvStaging, "acme.com", "ns", "", "acme", org, nil, nil)
+	if stable.ExternalRoutingHost != "bigly-api-origin.staging.acme.com" || stable.InternalRoutingHost != "bigly-api-origin.staging.internal.acme" {
+		t.Errorf("routed-away tier hosts = (%q, %q)", stable.ExternalRoutingHost, stable.InternalRoutingHost)
+	}
+	preview := MapComponentPlatformValuesForEnv(app, api, "pr-42", domain.AppEnvPreview, "acme.com", "ns", "", "acme", org, nil, nil)
+	if preview.ExternalRoutingHost != "bigly-api.staging.acme.com" {
+		t.Errorf("preview serving staging external host = %q, want bigly-api.staging.acme.com", preview.ExternalRoutingHost)
+	}
+	other := MapComponentPlatformValuesForEnv(app, api, "pr-7", domain.AppEnvPreview, "acme.com", "ns", "", "acme", org, nil, nil)
+	if other.ExternalRoutingHost != "bigly-api-pr-7.staging.acme.com" {
+		t.Errorf("sibling preview external host = %q, want bigly-api-pr-7.staging.acme.com", other.ExternalRoutingHost)
+	}
+	// Single-component app: the tier host uses the app name, like RoutingHost.
+	single := MapPlatformValuesForEnv(webApp("hello", webComponent("web")), "staging", domain.AppEnvStaging, "acme.com", "ns", "", "acme", org, nil, nil)
+	if single.ExternalRoutingHost != "hello.staging.acme.com" {
+		t.Errorf("single-component external host = %q, want hello.staging.acme.com", single.ExternalRoutingHost)
+	}
+	// No profile for a tier → no host for it.
+	extOnly := MapPlatformValuesForEnv(webApp("hello", webComponent("web")), "staging", domain.AppEnvStaging, "acme.com", "ns", "", "acme",
+		domain.RoutingProfiles{"external": {IngressClassName: "nginx"}}, nil, nil)
+	if extOnly.ExternalRoutingHost != "hello.acme.com" || extOnly.InternalRoutingHost != "" {
+		t.Errorf("external-only tier hosts = (%q, %q), want (hello.acme.com, \"\")", extOnly.ExternalRoutingHost, extOnly.InternalRoutingHost)
+	}
+}

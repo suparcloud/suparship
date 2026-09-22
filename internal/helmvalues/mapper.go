@@ -54,6 +54,14 @@ func MapPlatformValuesForEnv(
 		break
 	}
 	routingHost := routingHostFor(app, app.Name, envName, envType, effectiveBase)
+	appRoutingName := routingNameFor(app, app.Name, envName, envType)
+	// A single-component app IS its component: its component routing name is
+	// "{app}-{component}" too, so both tokens behave the same for it as they do
+	// per component of a composed app.
+	appComponentRoutingName := appRoutingName
+	if len(app.Spec.Components) == 1 {
+		appComponentRoutingName = routingNameFor(app, app.Name+"-"+app.Spec.Components[0].Name, envName, envType)
+	}
 
 	platform := PlatformValues{
 		Org:        orgName,
@@ -69,9 +77,11 @@ func MapPlatformValuesForEnv(
 		// renders the objects behind them. The publisher overrides these per
 		// component for a curated / opt-out component (its own projection / ""
 		// for no secrets) and per preview (name suffixing).
-		RoutingHost:   routingHost,
-		ConfigMapName: secrets.AppConfigMapName(app.Name),
-		SecretName:    secrets.AppSecretName(app.Name),
+		RoutingHost:             routingHost,
+		AppRoutingName:          appRoutingName,
+		AppComponentRoutingName: appComponentRoutingName,
+		ConfigMapName:           secrets.AppConfigMapName(app.Name),
+		SecretName:              secrets.AppSecretName(app.Name),
 	}
 	// A single-component app IS its component, so ((platform.component)) resolves to
 	// that component's name — in its values AND its env vars (this app-level map backs
@@ -113,8 +123,21 @@ func MapPlatformValuesForEnv(
 		platform.InternalGatewayName, platform.InternalGatewayNamespace, platform.InternalGatewaySectionName = resolveTier(domain.ExposeInternal)
 	platform.ExternalBaseDomain, platform.ExternalIngressClassName, platform.ExternalClusterIssuer,
 		platform.ExternalGatewayName, platform.ExternalGatewayNamespace, platform.ExternalGatewaySectionName = resolveTier(domain.ExposeExternal)
+	platform.ExternalRoutingHost, platform.InternalRoutingHost = tierRoutingHosts(appRoutingName, platform.ExternalBaseDomain, platform.InternalBaseDomain)
 
 	return platform
+}
+
+// tierRoutingHosts composes the per-tier full hosts from a routing name; a
+// tier without a base domain (no profile) yields "".
+func tierRoutingHosts(name, externalBase, internalBase string) (external, internal string) {
+	if externalBase != "" {
+		external = name + "." + externalBase
+	}
+	if internalBase != "" {
+		internal = name + "." + internalBase
+	}
+	return external, internal
 }
 
 // MapComponentPlatformValuesForEnv builds the platform context for a SINGLE
@@ -150,8 +173,28 @@ func MapComponentPlatformValuesForEnv(
 	// keeps the context self-consistent.
 	instanceName := app.Name + "-" + comp.Name
 	platform.RoutingHost = routingHostFor(app, instanceName, envName, envType, platform.BaseDomain)
+	platform.AppComponentRoutingName = routingNameFor(app, instanceName, envName, envType)
+	platform.ExternalRoutingHost, platform.InternalRoutingHost = tierRoutingHosts(platform.AppComponentRoutingName, platform.ExternalBaseDomain, platform.InternalBaseDomain)
 	platform.Component = comp.Name
 	return platform
+}
+
+// routingNameFor derives the platform-owned name label for an instance ("{app}"
+// or "{app}-{component}") in one environment — see PlatformValues.AppRoutingName:
+// a preview appends its name ("hello-pr-42") unless it is serving a stable
+// env's hostname (then the plain name); a stable env whose hostname is routed
+// to a preview takes the "-origin" alternate; otherwise the plain name.
+func routingNameFor(app *domain.App, instanceName, envName string, envType domain.AppEnvironmentType) string {
+	if envType == domain.AppEnvPreview {
+		if app.Spec.EnvRoutedToPreview(envName) != "" {
+			return instanceName
+		}
+		return instanceName + "-" + envName
+	}
+	if app.Spec.EnvironmentDefaults[envName].RoutedToPreview != "" {
+		return instanceName + domain.RoutedAwayHostSuffix
+	}
+	return instanceName
 }
 
 // routingHostFor derives the bare host an instance ("{app}" or

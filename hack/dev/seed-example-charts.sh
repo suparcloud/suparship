@@ -190,7 +190,7 @@ patch_dev_values web '{"developerValues":[
   {"path":"ingress.enabled","title":"Expose an HTTP endpoint","type":"boolean","default":false,
    "description":"Publish this component on a URL. The platform picks the ingress class and a host per environment."},
   {"path":"ingress.host","title":"Custom domain","type":"string",
-   "description":"Optional. Leave untouched for the platform host (<app>-<component>.<env>.<base domain>); set a hostname to serve on your own domain."},
+   "description":"Optional. Leave untouched for the platform host (<app>-<component>.<env>.<base domain>). To use your own shape, compose it from a platform name token so previews and routing still work, e.g. ((platform.appRoutingName)).acme.com — a literal hostname cannot be routed to a preview."},
   {"path":"env","title":"Environment variables",
    "description":"Plain key/value env for the container (secrets belong in App → Settings → Variables & secrets)."}
 ]}'
