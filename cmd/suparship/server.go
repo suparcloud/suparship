@@ -1942,6 +1942,9 @@ func (a *gitOpsPublisherAdapter) buildAppEnvPub(ctx context.Context, app *domain
 	}
 	pub.RoutingProfiles = lookupOrgEnvRoutingProfiles(org, env.EnvName)
 	if org != nil {
+		// The org-level map as of THIS publish: the publisher's startup snapshot
+		// goes stale the moment an org routing profile is edited.
+		pub.OrgRoutingProfiles = org.RoutingProfiles
 		a.enrichPubEnvWithSecrets(ctx, org, app, env.EnvName, &pub)
 	}
 	pub.EnvVars = a.mergeAllEnvVars(ctx, app, env.EnvName, pub.ClusterRef, org)
@@ -2188,6 +2191,17 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 		ComponentPlatformValues: basePub.ComponentPlatformValues,
 		Routes:                  a.previewRouteInputs(ctx, app, preview, baseEnv),
 		ScopeSecretKeys:         secretKeys,
+		RoutingProfiles:         lookupOrgEnvRoutingProfiles(org, baseEnv),
+	}
+	if org != nil {
+		spec.OrgRoutingProfiles = org.RoutingProfiles
+	}
+	// The base env's active cluster override, so the preview resolves its
+	// routing tiers exactly like the env it clones.
+	for _, t := range a.appClusterTargets(app, baseEnv, res) {
+		if t.Name == clusterRef {
+			spec.ClusterRoutingProfiles = t.RoutingProfiles
+		}
 	}
 	return spec, nil
 }

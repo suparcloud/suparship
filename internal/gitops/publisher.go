@@ -200,6 +200,18 @@ func (p *Publisher) SetOrgConfig(orgName string, naming secrets.ResourceNaming, 
 	p.cfg.RoutingProfiles = routingProfiles
 }
 
+// orgRoutingProfiles returns the org-level routing profiles for one publish:
+// the copy the adapter loaded with this request when present, else the
+// startup snapshot in PublisherConfig. The snapshot is only refreshed by
+// SetOrgConfig, so an org profile edit (a routeKind flip, a new gateway) would
+// otherwise not be seen until the server restarts.
+func (p *Publisher) orgRoutingProfiles(fresh domain.RoutingProfiles) domain.RoutingProfiles {
+	if fresh != nil {
+		return fresh
+	}
+	return p.cfg.RoutingProfiles
+}
+
 // externalSecretRefreshInterval is the org-configured ExternalSecret refresh
 // interval (secrets.DefaultRefreshInterval when unset / no backend config).
 func (p *Publisher) externalSecretRefreshInterval() string {
@@ -1171,7 +1183,7 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			componentValues := make(map[string]string, len(app.Spec.Components))
 			for _, c := range app.Spec.ComposedComponents() {
 				pv := helmvalues.MapComponentPlatformValuesForEnv(app, c, env.EnvName, env.EnvType, baseDomain, ns, target.Name, orgName,
-					p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
+					p.orgRoutingProfiles(env.OrgRoutingProfiles), env.RoutingProfiles, target.RoutingProfiles)
 				// Curated component: point the two platform names at the env-level
 				// projection objects rendered above. The chart just envFroms them.
 				if proj, ok := projections[c.Name]; ok {
@@ -1559,7 +1571,7 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			if c.BaseDomain != "" {
 				baseDomain = c.BaseDomain
 			}
-			pv := helmvalues.MapPlatformValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, c.RoutingProfiles)
+			pv := helmvalues.MapPlatformValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, c.Name, orgName, p.orgRoutingProfiles(env.OrgRoutingProfiles), env.RoutingProfiles, c.RoutingProfiles)
 			// Per-component env scoping: a single-component app with its own
 			// projection points platform.configMapName at it (written below) —
 			// same as the composed path.
@@ -1840,7 +1852,7 @@ func (p *Publisher) platformVarsContext(app *domain.App, env AppPublishEnv, orgN
 	if target.BaseDomain != "" {
 		baseDomain = target.BaseDomain
 	}
-	pv := helmvalues.MapPlatformValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, target.Name, orgName, p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
+	pv := helmvalues.MapPlatformValuesForEnv(app, env.EnvName, env.EnvType, baseDomain, env.Namespace, target.Name, orgName, p.orgRoutingProfiles(env.OrgRoutingProfiles), env.RoutingProfiles, target.RoutingProfiles)
 	return platform.Context{Platform: pv, Vars: env.EnvVars}
 }
 
@@ -2674,6 +2686,10 @@ type AppPublishEnv struct {
 	// same name; absent names inherit the org default. Populated by the
 	// publish adapter from rbac.OrgEnvironment.RoutingProfiles when present.
 	RoutingProfiles domain.RoutingProfiles
+	// OrgRoutingProfiles is the org-level map as loaded for THIS publish. When
+	// set it replaces the startup snapshot in PublisherConfig.RoutingProfiles,
+	// so org profile edits take effect on the next publish without a restart.
+	OrgRoutingProfiles domain.RoutingProfiles
 	// Clusters is the env's fan-out target set (deployMode "all"). When it has
 	// more than one entry the publisher writes a per-cluster values.yaml under
 	// envs/{env}/_clusters/{cluster}/... (each merged with that cluster's
@@ -2863,7 +2879,7 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 	// CD-bound images deploy the PR build even when the app's values carry a
 	// literal tag — see the same step in publishComposedPreviewFiles.
 	overlay = applyPreviewImageTag(overlay, appImageTagKeys(app.Spec.Images), preview.ImageTag)
-	pv := helmvalues.MapPlatformValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.cfg.RoutingProfiles, nil, nil)
+	pv := helmvalues.MapPlatformValuesForEnv(app, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, preview.Namespace, "", previewOrgName, p.orgRoutingProfiles(preview.OrgRoutingProfiles), preview.RoutingProfiles, preview.ClusterRoutingProfiles)
 	// Expose the per-PR tag as ((platform.imageTag)) for overlay/raw-values token
 	// interpolation, independent of the chart's image-mapping shape.
 	if preview.ImageTag != "" {
@@ -3008,7 +3024,7 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 	var appPlatform helmvalues.PlatformValues
 	for i, c := range included {
 		pv := helmvalues.MapComponentPlatformValuesForEnv(app, c, preview.PreviewName, domain.AppEnvPreview, preview.BaseDomain, ns, "", previewOrgName,
-			p.cfg.RoutingProfiles, nil, nil)
+			p.orgRoutingProfiles(preview.OrgRoutingProfiles), preview.RoutingProfiles, preview.ClusterRoutingProfiles)
 		pv.PreviewName = preview.PreviewName
 		pv.ConfigMapName = configMapName
 		pv.SecretName = secretName
@@ -3217,6 +3233,14 @@ type PreviewPublishSpec struct {
 	// Cluster is the base env's active cluster ref, selecting which
 	// PlatformClusterValues block applies.
 	Cluster string
+	// OrgRoutingProfiles / RoutingProfiles / ClusterRoutingProfiles resolve the
+	// preview's routing tiers exactly like its base env (org → env override →
+	// active cluster override), so a preview renders the same edge kind, base
+	// domain and gateway as the env it clones. Nil falls back to the org
+	// snapshot alone.
+	OrgRoutingProfiles     domain.RoutingProfiles
+	RoutingProfiles        domain.RoutingProfiles
+	ClusterRoutingProfiles domain.RoutingProfiles
 	// PlatformDefaultValues / PlatformEnvValues are the PE-authored template/org
 	// value overrides (all envs, then the base env).
 	PlatformDefaultValues map[string]any

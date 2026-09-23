@@ -383,3 +383,74 @@ func TestPublish_ExplicitIngressKindBesideGateway(t *testing.T) {
 		t.Errorf("expected no HTTPRoute with routeKind=ingress, got %v", m)
 	}
 }
+
+// TestPublish_FreshOrgProfilesBeatStartupSnapshot proves an org routing
+// profile edit takes effect on the next publish: the publisher's startup
+// snapshot is ingress-only, the org map loaded with the publish names a
+// Gateway with routeKind httproute, and the env renders an HTTPRoute.
+func TestPublish_FreshOrgProfilesBeatStartupSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+	p.SetRoutingProfilesForTest(domain.RoutingProfiles{"external": {IngressClassName: "nginx", BaseDomain: "localhost"}})
+	fresh := domain.RoutingProfiles{"external": {
+		IngressClassName: "nginx", BaseDomain: "localhost",
+		Gateway:   &domain.GatewayRef{Name: "edge", Namespace: "gateways"},
+		RouteKind: domain.RouteKindHTTPRoute,
+	}}
+	app := &domain.App{Name: "sh", ProjectName: "demo", Spec: domain.AppSpec{Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"}}}
+	env := gitops.AppPublishEnv{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost",
+		Namespace: "demo-sh-staging", OrgRoutingProfiles: fresh,
+		Routes: gitops.RouteInputs{
+			Routes:            domain.ExpandStackRoutes(stackRoutes(), "sh"),
+			PlatformRouted:    true,
+			BackendNamespaces: map[string]string{"sh": "demo-sh-staging"},
+		},
+	}
+	if err := p.PublishAppFilesForTest(dir, app, []gitops.AppPublishEnv{env}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	resDir := filepath.Join(dir, "_app-resources", "staging", "demo", "sh")
+	if r := readYAML(t, filepath.Join(resDir, "route-sh-web.yaml")); r["kind"] != "HTTPRoute" {
+		t.Errorf("kind = %v, want HTTPRoute from the fresh org profile", r["kind"])
+	}
+	if m, _ := filepath.Glob(filepath.Join(resDir, "ingress-*.yaml")); len(m) != 0 {
+		t.Errorf("stale snapshot still rendered Ingresses: %v", m)
+	}
+}
+
+// TestPublish_PreviewResolvesTiersLikeBaseEnv proves a preview honours the
+// base env's cluster override (cluster → env → org), so it never lands on a
+// different edge than the env it clones: org says Gateway, the cluster
+// override is ingress-only, and the preview renders an Ingress.
+func TestPublish_PreviewResolvesTiersLikeBaseEnv(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+	org := domain.RoutingProfiles{"external": {IngressClassName: "nginx", BaseDomain: "localhost", Gateway: &domain.GatewayRef{Name: "edge", Namespace: "gateways"}}}
+	p.SetRoutingProfilesForTest(org)
+	app := &domain.App{Name: "sh", ProjectName: "demo", Spec: domain.AppSpec{Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"}}}
+	spec := gitops.PreviewPublishSpec{
+		PreviewName: "pr-42", BaseEnv: "staging", ClusterServer: "https://kubernetes.default.svc",
+		Namespace: "demo-sh-preview-pr-42", BaseDomain: "localhost", ImageTag: "pr-42-abc",
+		OrgRoutingProfiles:     org,
+		ClusterRoutingProfiles: domain.RoutingProfiles{"external": {IngressClassName: "nginx-external", BaseDomain: "localhost"}},
+		Routes: gitops.RouteInputs{
+			Routes:         domain.ExpandStackRoutes(stackRoutes(), "sh"),
+			PlatformRouted: true,
+		},
+	}
+	if err := p.PublishPreviewForTest(dir, app, spec); err != nil {
+		t.Fatalf("publish preview: %v", err)
+	}
+	pDir := filepath.Join(dir, "_app-resources", "previews", "staging", "demo", "pr-42", "sh")
+	ing := readYAML(t, filepath.Join(pDir, "ingress-sh-web.yaml"))
+	if ing["kind"] != "Ingress" {
+		t.Errorf("kind = %v, want Ingress from the cluster override", ing["kind"])
+	}
+	if ispec, _ := ing["spec"].(map[string]any); ispec["ingressClassName"] != "nginx-external" {
+		t.Errorf("ingressClassName = %v, want the cluster override's class", ispec["ingressClassName"])
+	}
+	if m, _ := filepath.Glob(filepath.Join(pDir, "route-*.yaml")); len(m) != 0 {
+		t.Errorf("preview ignored the cluster override and rendered HTTPRoutes: %v", m)
+	}
+}

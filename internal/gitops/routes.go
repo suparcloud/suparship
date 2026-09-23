@@ -568,7 +568,7 @@ func (p *Publisher) routeFilesForEnv(app *domain.App, env AppPublishEnv, namespa
 	}
 	target := activeTarget(env)
 	ctx := p.platformVarsContext(withoutHostSwap(app), env, orgName)
-	gws, ings := routeTiers(p.cfg.RoutingProfiles, env.RoutingProfiles, target.RoutingProfiles)
+	gws, ings := routeTiers(p.orgRoutingProfiles(env.OrgRoutingProfiles), env.RoutingProfiles, target.RoutingProfiles)
 	objs, err := BuildRoutes(RouteRenderInput{
 		Owner:        app.Name,
 		Routes:       in.Routes,
@@ -608,11 +608,14 @@ func (p *Publisher) routeFilesForPreview(app *domain.App, preview PreviewPublish
 	if orgName == "" {
 		orgName = "default"
 	}
+	orgProfiles := p.orgRoutingProfiles(preview.OrgRoutingProfiles)
 	pv := helmvalues.MapPlatformValuesForEnv(withoutHostSwap(app), preview.PreviewName, domain.AppEnvPreview,
-		preview.BaseDomain, namespace, "", orgName, p.cfg.RoutingProfiles, nil, nil)
+		preview.BaseDomain, namespace, "", orgName, orgProfiles, preview.RoutingProfiles, preview.ClusterRoutingProfiles)
 	ctx := platform.Context{Platform: pv, Vars: preview.EnvVars}
 	backendNS := backendNSFunc(in.BackendNamespaces)
-	gws, ings := routeTiers(p.cfg.RoutingProfiles, nil, nil)
+	// Same org → env → cluster resolution as the base env, so a preview never
+	// lands on a different edge than the env it clones.
+	gws, ings := routeTiers(orgProfiles, preview.RoutingProfiles, preview.ClusterRoutingProfiles)
 	objs, err := BuildRoutes(RouteRenderInput{
 		Owner:        app.Name,
 		Routes:       in.Routes,
