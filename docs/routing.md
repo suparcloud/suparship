@@ -17,11 +17,19 @@ When you don't: a single app whose chart already renders its own Ingress or
 HTTPRoute from `((platform.routingHost))` works as before, including the
 [host swap](previews.md#route-send-a-stable-hostname-to-a-preview).
 
-Either edge works. A tier whose [routing profile](multi-cluster.md) carries a
-`gateway` renders **HTTPRoutes** attached to it; a tier with only an
+Either edge works, and the choice is made per **tier** by its
+[routing profile](multi-cluster.md), resolved cluster → environment → org, not
+per route. By default (`routeKind` empty, "Auto") a profile that carries a
+`gateway` renders **HTTPRoutes** attached to it and a profile with only an
 `ingressClassName` renders **Ingresses** (with a cert-manager issuer annotation
-and TLS block when the profile sets `clusterIssuer`). The dev cluster's
-ingress-nginx works out of the box.
+and TLS block when the profile sets `clusterIssuer`). When a cluster has both,
+set the profile's `routeKind` explicitly — `httproute` or `ingress` — under
+Org settings → Routing, on an environment override, or on a cluster. `ingress`
+keeps the Gateway on the profile for charts that author their own HTTPRoutes
+from the `((platform.<tier>Gateway*))` tokens while platform routes stay on the
+IngressClass; `httproute` is refused without a Gateway. Changing it takes
+effect on each app's next publish (the platform dir is rewritten, so the old
+kind is pruned). The dev cluster's ingress-nginx works out of the box.
 
 ## Declaring routes
 

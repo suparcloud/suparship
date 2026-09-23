@@ -30,6 +30,7 @@ type RoutingProfileDTO struct {
 	ClusterIssuer    string             `json:"clusterIssuer,omitempty"`
 	BaseDomain       string             `json:"baseDomain,omitempty"`
 	Gateway          *domain.GatewayRef `json:"gateway,omitempty"`
+	RouteKind        domain.RouteKind   `json:"routeKind,omitempty"`
 }
 
 // GET /api/v1/org/routing-profiles — returns the org-level map only.
@@ -48,6 +49,7 @@ func (rh *rbacHandler) handleListOrgRoutingProfiles(w http.ResponseWriter, r *ht
 			ClusterIssuer:    p.ClusterIssuer,
 			BaseDomain:       p.BaseDomain,
 			Gateway:          p.Gateway,
+			RouteKind:        p.RouteKind,
 		})
 	}
 	// Stable order: profiles render as a list in the UI.
@@ -65,6 +67,8 @@ type upsertRoutingProfileRequest struct {
 	ClusterIssuer    string             `json:"clusterIssuer,omitempty"`
 	BaseDomain       string             `json:"baseDomain,omitempty"`
 	Gateway          *domain.GatewayRef `json:"gateway,omitempty"`
+	// RouteKind: "httproute" | "ingress" | "" (auto — HTTPRoute iff gateway set).
+	RouteKind domain.RouteKind `json:"routeKind,omitempty"`
 }
 
 // PUT /api/v1/org/routing-profiles/{name} — upsert a single profile by
@@ -100,12 +104,18 @@ func (rh *rbacHandler) handlePutOrgRoutingProfile(w http.ResponseWriter, r *http
 		org.RoutingProfiles = domain.RoutingProfiles{}
 	}
 	gw := normalizeGatewayRef(req.Gateway)
-	org.RoutingProfiles[name] = domain.RoutingProfile{
+	profile := domain.RoutingProfile{
 		IngressClassName: req.IngressClassName,
 		ClusterIssuer:    req.ClusterIssuer,
 		BaseDomain:       req.BaseDomain,
 		Gateway:          gw,
+		RouteKind:        req.RouteKind,
 	}
+	if _, err := domain.ResolveRoutingProfile(domain.RoutingProfiles{name: profile}, nil, nil, mode); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	org.RoutingProfiles[name] = profile
 
 	if err := rh.orgStore.SaveOrg(r.Context(), org); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save org: " + err.Error()})
@@ -118,6 +128,7 @@ func (rh *rbacHandler) handlePutOrgRoutingProfile(w http.ResponseWriter, r *http
 		ClusterIssuer:    req.ClusterIssuer,
 		BaseDomain:       req.BaseDomain,
 		Gateway:          gw,
+		RouteKind:        req.RouteKind,
 	})
 }
 

@@ -33,7 +33,8 @@ func DefaultRoutingProfiles() RoutingProfiles {
 //     an error so app save and gitops publish fail loud rather than silently
 //     dropping the ingress.
 //  4. The resolved profile must have a non-empty IngressClassName; an empty
-//     class is a configuration error.
+//     class is a configuration error. routeKind must be known, and
+//     "httproute" needs a gateway.
 //
 // Callers pass the org's full RoutingProfiles map, the (optionally nil)
 // environment override map, and the (optionally nil) per-cluster override map.
@@ -64,6 +65,12 @@ func ResolveRoutingProfile(orgProfiles, envProfiles, clusterProfiles RoutingProf
 func validateProfile(p RoutingProfile, mode ExposeMode) (RoutingProfile, error) {
 	if p.IngressClassName == "" {
 		return RoutingProfile{}, fmt.Errorf("resolve routing profile: profile %q has empty ingressClassName", mode)
+	}
+	if !p.RouteKind.Valid() {
+		return RoutingProfile{}, fmt.Errorf("resolve routing profile: profile %q has unknown routeKind %q (use \"httproute\", \"ingress\" or leave empty for auto)", mode, p.RouteKind)
+	}
+	if p.RouteKind == RouteKindHTTPRoute && !p.HasGateway() {
+		return RoutingProfile{}, fmt.Errorf("resolve routing profile: profile %q asks for HTTPRoutes but names no gateway", mode)
 	}
 	return p, nil
 }

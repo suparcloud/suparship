@@ -1,4 +1,5 @@
 import { api } from "./api";
+import type { RouteKind } from "./settings";
 
 // GatewayRef mirrors the backend Gateway API reference for a routing tier.
 export interface GatewayRef {
@@ -13,6 +14,8 @@ export interface RoutingProfile {
   clusterIssuer?: string;
   baseDomain?: string;
   gateway?: GatewayRef;
+  /** "httproute" | "ingress" | "" (auto). See settings.ts RouteKind. */
+  routeKind?: RouteKind;
 }
 
 // RoutingProfiles is keyed by ExposeMode ("internal" | "external").

@@ -165,3 +165,37 @@ func TestDefaultRoutingProfiles_HasInternalOnly(t *testing.T) {
 		t.Errorf("default internal should have no TLS, got issuer %q", got)
 	}
 }
+
+func TestResolveRoutingProfile_RouteKind(t *testing.T) {
+	gw := &GatewayRef{Name: "edge", Namespace: "gateways"}
+	cases := []struct {
+		name    string
+		profile RoutingProfile
+		wantErr string
+		want    RouteKind
+	}{
+		{"auto without gateway is ingress", RoutingProfile{IngressClassName: "nginx"}, "", RouteKindIngress},
+		{"auto with gateway is httproute", RoutingProfile{IngressClassName: "eg", Gateway: gw}, "", RouteKindHTTPRoute},
+		{"explicit ingress beside a gateway", RoutingProfile{IngressClassName: "nginx", Gateway: gw, RouteKind: RouteKindIngress}, "", RouteKindIngress},
+		{"explicit httproute", RoutingProfile{IngressClassName: "eg", Gateway: gw, RouteKind: RouteKindHTTPRoute}, "", RouteKindHTTPRoute},
+		{"httproute needs a gateway", RoutingProfile{IngressClassName: "nginx", RouteKind: RouteKindHTTPRoute}, "names no gateway", ""},
+		{"unknown kind", RoutingProfile{IngressClassName: "nginx", RouteKind: "istio"}, "unknown routeKind", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveRoutingProfile(RoutingProfiles{"external": tc.profile}, nil, nil, ExposeExternal)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if k := got.EffectiveRouteKind(); k != tc.want {
+				t.Errorf("EffectiveRouteKind = %q, want %q", k, tc.want)
+			}
+		})
+	}
+}

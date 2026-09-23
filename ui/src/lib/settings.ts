@@ -214,7 +214,18 @@ export interface RoutingProfile {
   clusterIssuer?: string;
   baseDomain?: string;
   gateway?: GatewayRef;
+  /** Edge for platform-owned routes: "httproute" | "ingress" | "" (auto:
+   *  HTTPRoute when a gateway is set, else Ingress). */
+  routeKind?: RouteKind;
 }
+
+export type RouteKind = "" | "httproute" | "ingress";
+
+export const routeKindOptions: { value: RouteKind; label: string }[] = [
+  { value: "", label: "Auto (HTTPRoute if a Gateway is set, else Ingress)" },
+  { value: "httproute", label: "HTTPRoute (Gateway API)" },
+  { value: "ingress", label: "Ingress" },
+];
 
 export interface RoutingProfilesResponse {
   routingProfiles: RoutingProfile[];

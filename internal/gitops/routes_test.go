@@ -349,3 +349,37 @@ func TestPublish_IngressTierWritesIngressAndShimsNoGrants(t *testing.T) {
 		t.Errorf("no HTTPRoute on an ingress edge, found %v", m)
 	}
 }
+
+// TestPublish_ExplicitIngressKindBesideGateway proves routeKind: ingress wins
+// over a configured Gateway — the profile keeps the Gateway (charts' own
+// HTTPRoutes still read the tokens) while platform routes render as Ingresses.
+func TestPublish_ExplicitIngressKindBesideGateway(t *testing.T) {
+	dir := t.TempDir()
+	p := newTestPublisher(t)
+	profiles := domain.RoutingProfiles{"external": {
+		IngressClassName: "nginx", BaseDomain: "localhost",
+		Gateway:   &domain.GatewayRef{Name: "edge", Namespace: "gateways"},
+		RouteKind: domain.RouteKindIngress,
+	}}
+	p.SetRoutingProfilesForTest(profiles)
+	app := &domain.App{Name: "sh", ProjectName: "demo", Spec: domain.AppSpec{Template: domain.AppTemplateRef{Name: "voiceai-livekit-agent"}}}
+	env := gitops.AppPublishEnv{
+		EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true, BaseDomain: "localhost",
+		Namespace: "demo-sh-staging", RoutingProfiles: profiles,
+		Routes: gitops.RouteInputs{
+			Routes:            domain.ExpandStackRoutes(stackRoutes(), "sh"),
+			PlatformRouted:    true,
+			BackendNamespaces: map[string]string{"sh": "demo-sh-staging"},
+		},
+	}
+	if err := p.PublishAppFilesForTest(dir, app, []gitops.AppPublishEnv{env}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	resDir := filepath.Join(dir, "_app-resources", "staging", "demo", "sh")
+	if ing := readYAML(t, filepath.Join(resDir, "ingress-sh-web.yaml")); ing["kind"] != "Ingress" {
+		t.Errorf("kind = %v, want Ingress", ing["kind"])
+	}
+	if m, _ := filepath.Glob(filepath.Join(resDir, "route-*.yaml")); len(m) != 0 {
+		t.Errorf("expected no HTTPRoute with routeKind=ingress, got %v", m)
+	}
+}

@@ -156,6 +156,10 @@ func (rh *rbacHandler) handleCreateOrgEnvironment(w http.ResponseWriter, r *http
 		newEnv.NamespacePattern = *req.NamespacePattern
 	}
 	if req.RoutingProfiles != nil {
+		if err := validateClusterRoutingProfiles(*req.RoutingProfiles); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
 		newEnv.RoutingProfiles = *req.RoutingProfiles
 	}
 	if err := validateActiveInRefs(newEnv); err != nil {
@@ -250,6 +254,10 @@ func (rh *rbacHandler) handleUpdateOrgEnvironment(w http.ResponseWriter, r *http
 			}
 			// RoutingProfiles is a pointer: nil = don't touch, {} = clear.
 			if req.RoutingProfiles != nil {
+				if err := validateClusterRoutingProfiles(*req.RoutingProfiles); err != nil {
+					writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+					return
+				}
 				org.Environments[i].RoutingProfiles = *req.RoutingProfiles
 			}
 			if req.Order > 0 {

@@ -125,7 +125,9 @@ type createClusterRequest struct {
 }
 
 // validateClusterRoutingProfiles checks each present profile resolves (valid
-// mode name + non-empty ingressClassName), reusing domain.ResolveRoutingProfile.
+// mode name, non-empty ingressClassName, known routeKind with a gateway when
+// it asks for HTTPRoutes), reusing domain.ResolveRoutingProfile. Shared by
+// the cluster and org-environment override maps.
 func validateClusterRoutingProfiles(profiles domain.RoutingProfiles) error {
 	for mode := range profiles {
 		if _, err := domain.ResolveRoutingProfile(nil, nil, profiles, domain.ExposeMode(mode)); err != nil {

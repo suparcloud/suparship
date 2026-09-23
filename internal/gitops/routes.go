@@ -526,9 +526,9 @@ func (p *Publisher) routeLabels(app *domain.App, env string) map[string]string {
 }
 
 // routeTiers resolves each tier's rendering context from the org → env →
-// cluster routing profiles: a Gateway parentRef when the profile has one
-// (HTTPRoute), else its IngressClass (Ingress). Tiers without a profile are
-// absent from both.
+// cluster routing profiles: a Gateway parentRef when the profile's effective
+// routeKind is httproute (explicit, or auto with a Gateway), else its
+// IngressClass (Ingress). Tiers without a profile are absent from both.
 func routeTiers(orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles) (map[domain.ExposeMode]domain.GatewayRef, map[domain.ExposeMode]IngressTierRef) {
 	gws := map[domain.ExposeMode]domain.GatewayRef{}
 	ings := map[domain.ExposeMode]IngressTierRef{}
@@ -537,7 +537,7 @@ func routeTiers(orgProfiles, envProfiles, clusterProfiles domain.RoutingProfiles
 		if err != nil {
 			continue
 		}
-		if prof.Gateway != nil && prof.Gateway.Name != "" {
+		if prof.EffectiveRouteKind() == domain.RouteKindHTTPRoute && prof.HasGateway() {
 			gws[tier] = *prof.Gateway
 			continue
 		}

@@ -16,11 +16,13 @@ import {
   listOrgRoutingProfiles,
   upsertOrgRoutingProfile,
   deleteOrgRoutingProfile,
+  routeKindOptions,
 } from "../lib/settings";
 import type {
   OrgNaming,
   OrgEndpoints,
   RoutingProfile,
+  RouteKind,
   ExposeMode,
 } from "../lib/settings";
 import {
@@ -1138,6 +1140,7 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
   const [gatewayName, setGatewayName] = useState(profile?.gateway?.name ?? "");
   const [gatewayNamespace, setGatewayNamespace] = useState(profile?.gateway?.namespace ?? "");
   const [gatewaySectionName, setGatewaySectionName] = useState(profile?.gateway?.sectionName ?? "");
+  const [routeKind, setRouteKind] = useState<RouteKind>(profile?.routeKind ?? "");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1152,11 +1155,16 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
     setGatewayName(profile?.gateway?.name ?? "");
     setGatewayNamespace(profile?.gateway?.namespace ?? "");
     setGatewaySectionName(profile?.gateway?.sectionName ?? "");
+    setRouteKind(profile?.routeKind ?? "");
   }, [profile]);
 
   async function handleSave() {
     if (!ingressClassName.trim()) {
       setSaveError("ingressClassName is required");
+      return;
+    }
+    if (routeKind === "httproute" && !gatewayName.trim()) {
+      setSaveError("HTTPRoute needs a Gateway name");
       return;
     }
     setSaving(true);
@@ -1175,6 +1183,7 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
               sectionName: gatewaySectionName.trim() || undefined,
             }
           : undefined,
+        routeKind: routeKind || undefined,
       });
       onSaved(updated);
       setSaved(true);
@@ -1282,6 +1291,25 @@ function RoutingProfileEditor({ tier, profile, onSaved, onCleared }: RoutingProf
               onChange={(e) => setGatewaySectionName(e.target.value)}
             />
           </div>
+        </div>
+        <div className="sm:col-span-2">
+          <label className="block text-xs font-medium text-gray-700">
+            Platform routes render as
+          </label>
+          <p className="mt-0.5 text-xs text-gray-400">
+            The edge object suparship writes for app routes on this tier. Auto picks
+            HTTPRoute when a Gateway is set. Choose Ingress to keep the Gateway for
+            charts' own HTTPRoutes while platform routes stay on the IngressClass.
+          </p>
+          <select
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            value={routeKind}
+            onChange={(e) => setRouteKind(e.target.value as RouteKind)}
+          >
+            {routeKindOptions.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
         </div>
       </div>
 

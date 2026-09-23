@@ -283,6 +283,51 @@ type RoutingProfile struct {
 	// rest of the profile, so a per-cluster gateway (e.g. a different Envoy
 	// install per cloud) overrides the env/org default.
 	Gateway *GatewayRef `json:"gateway,omitempty" yaml:"gateway,omitempty"`
+	// RouteKind picks the edge object platform-owned routes render to when
+	// the tier could use either: "httproute" (needs Gateway) or "ingress"
+	// (uses IngressClassName even though a Gateway is configured, e.g. while
+	// migrating, or when the Gateway exists only for charts' own HTTPRoutes).
+	// Empty means auto: HTTPRoute when a Gateway is set, else Ingress.
+	RouteKind RouteKind `json:"routeKind,omitempty" yaml:"routeKind,omitempty"`
+}
+
+// RouteKind is the edge object a routing tier renders platform routes to.
+type RouteKind string
+
+const (
+	// RouteKindAuto (the zero value): HTTPRoute when the profile has a
+	// Gateway, else Ingress.
+	RouteKindAuto RouteKind = ""
+	// RouteKindHTTPRoute renders Gateway API HTTPRoutes (requires Gateway).
+	RouteKindHTTPRoute RouteKind = "httproute"
+	// RouteKindIngress renders Ingresses on IngressClassName.
+	RouteKindIngress RouteKind = "ingress"
+)
+
+// Valid reports whether k is a known RouteKind (auto included).
+func (k RouteKind) Valid() bool {
+	switch k {
+	case RouteKindAuto, RouteKindHTTPRoute, RouteKindIngress:
+		return true
+	}
+	return false
+}
+
+// HasGateway reports whether the profile names a Gateway.
+func (p RoutingProfile) HasGateway() bool {
+	return p.Gateway != nil && p.Gateway.Name != ""
+}
+
+// EffectiveRouteKind resolves RouteKind for rendering: the explicit choice,
+// else HTTPRoute when a Gateway is configured, else Ingress.
+func (p RoutingProfile) EffectiveRouteKind() RouteKind {
+	if p.RouteKind != RouteKindAuto {
+		return p.RouteKind
+	}
+	if p.HasGateway() {
+		return RouteKindHTTPRoute
+	}
+	return RouteKindIngress
 }
 
 // GatewayRef identifies a Gateway API Gateway for a routing tier. It is exposed
@@ -306,4 +351,3 @@ type GatewayRef struct {
 // individual entries by name (sparse — unspecified names inherit the org
 // value).
 type RoutingProfiles map[string]RoutingProfile
-

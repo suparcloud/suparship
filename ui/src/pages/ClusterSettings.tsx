@@ -25,8 +25,8 @@ import {
   listSharedClusterSecretKeys,
   upsertSharedClusterSecrets,
 } from "../lib/secrets";
-import { listOrgEnvironments } from "../lib/settings";
-import type { OrgEnvironment } from "../lib/settings";
+import { listOrgEnvironments, routeKindOptions } from "../lib/settings";
+import type { OrgEnvironment, RouteKind } from "../lib/settings";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
 
@@ -413,6 +413,7 @@ type RoutingDraft = Record<
     gatewayName: string;
     gatewayNamespace: string;
     gatewaySectionName: string;
+    routeKind: RouteKind;
   }
 >;
 
@@ -434,6 +435,7 @@ function ClusterRoutingSection({
         gatewayName: p?.gateway?.name ?? "",
         gatewayNamespace: p?.gateway?.namespace ?? "",
         gatewaySectionName: p?.gateway?.sectionName ?? "",
+        routeKind: p?.routeKind ?? "",
       };
     }
     return d;
@@ -466,6 +468,7 @@ function ClusterRoutingSection({
                   sectionName: p.gatewaySectionName.trim() || undefined,
                 }
               : undefined,
+            routeKind: p.routeKind || undefined,
           };
         }
       }
@@ -512,6 +515,7 @@ function ClusterRoutingSection({
             gatewayName: "",
             gatewayNamespace: "",
             gatewaySectionName: "",
+            routeKind: "",
           };
           const set = (patch: Partial<RoutingDraft[string]>) =>
             setDraft((d) => ({ ...d, [m]: { ...(d[m] ?? p), ...patch } }));
@@ -553,6 +557,15 @@ function ClusterRoutingSection({
                   <span className="text-xs text-gray-500">Listener section</span>
                   <input className={inputCls} value={p.gatewaySectionName}
                     placeholder="https" onChange={(e) => set({ gatewaySectionName: e.target.value })} />
+                </label>
+                <label className="mt-2 block">
+                  <span className="text-xs text-gray-500">Platform routes render as</span>
+                  <select className={inputCls} value={p.routeKind}
+                    onChange={(e) => set({ routeKind: e.target.value as RouteKind })}>
+                    {routeKindOptions.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
                 </label>
               </div>
             </div>
