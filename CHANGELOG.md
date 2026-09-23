@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.2.0](https://github.com/suparcloud/suparship/compare/v0.1.0...v0.2.0) (2026-09-23)
+
+
+### Features
+
+* **apps:** component variable overrides are scoped to the selected environment ([c9dd986](https://github.com/suparcloud/suparship/commit/c9dd98616db0f1e31bd121d7a1346165cdcf474a))
+* **apps:** diagnose a composed app whose components run different image tags ([5507a4d](https://github.com/suparcloud/suparship/commit/5507a4decd42ea0722072430fff0194934dc5447))
+* **apps:** gitops drift detection and forced re-publish from the upgrade dialog ([e27ad16](https://github.com/suparcloud/suparship/commit/e27ad16fe81922ea17897cc4aa1c07cfde14ded1))
+* **apps:** show a split release as "mixed" with per-component tags ([3d93e05](https://github.com/suparcloud/suparship/commit/3d93e05ce9a21fefd1e6ffb7660a2ba80b2e3437))
+* **dev:** curate the web template as a platform engineer would ([fd0bf58](https://github.com/suparcloud/suparship/commit/fd0bf58cdc5b7b77c0e35a44d2c0e48701969a3a))
+* **dev:** task suspend / task resume freeze the dev cluster in place ([ce24d8a](https://github.com/suparcloud/suparship/commit/ce24d8a2e486702cf72b5544252b48a2ed24e976))
+* **license:** relicense suparship from AGPL-3.0 to Apache-2.0 ([299cac0](https://github.com/suparcloud/suparship/commit/299cac034579a9f2d265bb95dcf1baaac8247e06))
+* **previews:** project component variables inside previews ([01cabec](https://github.com/suparcloud/suparship/commit/01cabeccf9c418df4ac14fb7ad3fd61b4354e7d7))
+* **templates:** mirror the template registry and overrides into the GitOps repo ([d20900f](https://github.com/suparcloud/suparship/commit/d20900f853dd020487eab254353f816b578772e9))
+* **templates:** namespace templates by source and migrate components across templates ([8538c1f](https://github.com/suparcloud/suparship/commit/8538c1f62a6d620f22493e1eb2dfe6072624eb30))
+
+
+### Bug Fixes
+
+* **apps:** env-scoped template upgrade no longer moves other environments ([10ae6b7](https://github.com/suparcloud/suparship/commit/10ae6b74582176d8e99a39b8368163e007e99370))
+* **apps:** upgrade badges follow the selected environment's effective version ([7654525](https://github.com/suparcloud/suparship/commit/76545251cd4868298b5355a1f2d2af8c173217bc))
+* **chart:** make `helm install` succeed on a fresh cluster ([e262a8a](https://github.com/suparcloud/suparship/commit/e262a8ad3dfbac666a9c7121089b8d37458e3e53))
+* **previews:** CD-bound images deploy the PR tag over a literal base-env tag ([7790b30](https://github.com/suparcloud/suparship/commit/7790b306f3879e60b0a8ce047f2aa213ad6edb65))
+* **previews:** composed preview components inherit the base env's component values ([b7cd17e](https://github.com/suparcloud/suparship/commit/b7cd17e5c23d7710c975dc6b743c5792f8881f6e))
+* **previews:** template preview values sit below the app's env values ([e38fd07](https://github.com/suparcloud/suparship/commit/e38fd07fcea62064b4e90499902f40b986b6e1f2))
+* **runtime:** a rolling update is progressing, not degraded ([3a61cef](https://github.com/suparcloud/suparship/commit/3a61cef9a7c59865fa035a62e13d5cb0a213dddd))
+* **secrets:** give k8s-backend ClusterSecretStores an explicit server block ([01e9bf8](https://github.com/suparcloud/suparship/commit/01e9bf8222ce4f991b801b0c758d34b4e350d763))
+* **secrets:** one unified store per physical cluster, and let sealed-secrets adopt the dev token ([77f541c](https://github.com/suparcloud/suparship/commit/77f541ca45e773ccec6320f7ca826569e8d2ad30))
+* **templates:** stop deleted sources from owning template names forever ([987d2d6](https://github.com/suparcloud/suparship/commit/987d2d60682b58bfd96601f0f995a01f0b012ee0))
+
+
+### Documentation
+
+* **install:** ArgoCD install path, hook logs, binding name, export caveats ([51baf45](https://github.com/suparcloud/suparship/commit/51baf45f847801efd11d397f3c4dc6c7929b6c00))
+
 ## 0.1.0 (2026-09-06)
 
 
