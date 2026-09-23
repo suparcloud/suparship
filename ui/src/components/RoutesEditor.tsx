@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { ValuesEditor } from "./ValuesEditor";
@@ -156,18 +156,11 @@ export function RoutesEditor({
                 </div>
                 <div>
                   <label className={label}>Hostnames (comma-separated)</label>
-                  <input
+                  <HostnamesInput
                     className={input}
-                    value={(r.hostnames ?? []).join(", ")}
+                    value={r.hostnames ?? []}
                     placeholder={defaultHost}
-                    onChange={(e) =>
-                      updateRoute(i, {
-                        hostnames: e.target.value
-                          .split(",")
-                          .map((h) => h.trim())
-                          .filter(Boolean),
-                      })
-                    }
+                    onChange={(hostnames) => updateRoute(i, { hostnames })}
                   />
                 </div>
                 <div>
@@ -293,5 +286,50 @@ export function RoutesEditor({
         )}
       </div>
     </div>
+  );
+}
+
+function parseHostnames(text: string): string[] {
+  return text
+    .split(",")
+    .map((h) => h.trim())
+    .filter(Boolean);
+}
+
+/**
+ * HostnamesInput edits a comma-separated list while keeping the raw text the
+ * user typed: a controlled input re-rendered from the parsed list would drop
+ * the comma (and the space after it) on every keystroke, so a second hostname
+ * could never be typed. The text is re-seeded only when the list changes from
+ * outside (Discard, YAML → form) and tidied to "a, b" on blur.
+ */
+function HostnamesInput({
+  value,
+  placeholder,
+  className,
+  onChange,
+}: {
+  value: string[];
+  placeholder: string;
+  className: string;
+  onChange: (hostnames: string[]) => void;
+}) {
+  const joined = value.join(", ");
+  const [text, setText] = useState(joined);
+  useEffect(() => {
+    if (parseHostnames(text).join(", ") !== joined) setText(joined);
+    // Only an outside change of the list re-seeds the text.
+  }, [joined]);
+  return (
+    <input
+      className={className}
+      value={text}
+      placeholder={placeholder}
+      onChange={(e) => {
+        setText(e.target.value);
+        onChange(parseHostnames(e.target.value));
+      }}
+      onBlur={() => setText(parseHostnames(text).join(", "))}
+    />
   );
 }
