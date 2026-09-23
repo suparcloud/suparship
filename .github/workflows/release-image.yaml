@@ -2,7 +2,10 @@ name: release-image
 
 on:
   push:
-    branches: [main]
+    # main → edge + main-<sha>; develop → develop + develop-<sha> (the
+    # integration branch: experimental work is tested from this image before
+    # its history is tidied and rebased onto main).
+    branches: [main, develop]
     tags: ['v*']
   pull_request:
   # Escape hatch: when release-please pushes the tag with GITHUB_TOKEN rather
@@ -93,6 +96,10 @@ jobs:
             # main branch → edge + main-<short-sha>
             type=raw,value=edge,enable={{is_default_branch}}
             type=sha,prefix=main-,enable={{is_default_branch}}
+            # develop branch → develop (moving, latest develop commit) +
+            # develop-<short-sha> (pin a specific experimental build)
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=sha,prefix=develop-,enable=${{ github.ref == 'refs/heads/develop' }}
             # Pull requests → pr-<n> (default behaviour of type=ref,event=pr)
             type=ref,event=pr
 

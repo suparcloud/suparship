@@ -282,6 +282,17 @@ of history. Tidy your branch before it lands — reorder, reword and squash fixu
 freely while it is still a topic branch — because once it is on `main` it stays
 as written.
 
+### The `develop` branch
+
+`develop` is the integration branch for experimental work that needs a real
+deployment to evaluate before it is ready for `main`. Every push to it runs CI
+and publishes `ghcr.io/suparcloud/suparship:develop` (moving, the latest
+develop commit) and `:develop-<sha>` (pin one build). Its history is
+disposable: it is rebased, reworded and squashed as needed before the tidied
+commits are merged to `main`, and force-pushes to `develop` are expected.
+`main` is never rewritten. Stale `develop-<sha>` images are pruned weekly;
+`develop` itself is not.
+
 ### Sign-off (Optional)
 
 We appreciate (but don't require) a Developer Certificate of Origin sign-off:
