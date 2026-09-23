@@ -28,9 +28,9 @@ func (f *fakeTemplateMirror) MirrorTemplateConfig(context.Context) error {
 // A registry update mirrors once; a sync does not (rows only); a mirror
 // failure never fails the request.
 func TestTemplateRegistryHandler_MirrorsOnDesiredStateChangesOnly(t *testing.T) {
-	mux, ah, client := newTemplateRegistryMuxWithClient(t)
+	_, ah, client := newTemplateRegistryMuxWithClient(t)
 	mirror := &fakeTemplateMirror{}
-	mux = http.NewServeMux()
+	mux := http.NewServeMux()
 	ah.registerRoutes(mux)
 	trh := &templateRegistryHandler{store: tpl.NewRegistryStore(client), auth: ah, kubeClient: client, mirror: mirror, logger: slog.Default()}
 	trh.registerRoutes(mux)
