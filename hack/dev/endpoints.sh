@@ -30,7 +30,7 @@ if [ "${SUPARSHIP_VAULT:-1}" != "0" ]; then
   row "Vault"         "http://localhost:8200"      "token: admin123"
 fi
 if [ "${SUPARSHIP_INGRESS:-1}" != "0" ]; then
-  row "App URLs"      "http://<app>.<env>.localhost"  "e.g. http://shipnotes-frontend.staging.localhost after \`task demo:shipnotes\`"
+  row "App URLs"      "http://<app>.<env>.localhost"  "e.g. http://shipnotes.staging.localhost after \`task demo:shipnotes\`"
   # *.localhost must resolve to loopback for app URLs to work in a browser.
   # curl exit 6 = could-not-resolve (anything else, incl. connection refused,
   # means DNS is fine). macOS: one-time dnsmasq setup; Linux: docs/local-dns.md.

@@ -120,6 +120,8 @@ func (c Context) replacer() *strings.Replacer {
 		"platform.appComponentRoutingName", p.AppComponentRoutingName,
 		"platform.externalRoutingHost", p.ExternalRoutingHost,
 		"platform.internalRoutingHost", p.InternalRoutingHost,
+		"platform.stack", p.Stack,
+		"platform.previewSuffix", p.PreviewSuffix,
 		"platform.ingressClassName", p.IngressClassName,
 		"platform.clusterIssuer", p.ClusterIssuer,
 		// Per-tier routing (internal/external), resolved cluster→env→org.
@@ -220,6 +222,8 @@ func PlatformTokens() []TokenInfo {
 		{Token: "((platform.appComponentRoutingName))", Label: "Component routing name", Group: "Routing", Description: "the component's hostname label — \"app-component\" with the same preview/route variants; compose with a base domain"},
 		{Token: "((platform.externalRoutingHost))", Label: "External routing host", Group: "Routing", Description: "complete host on the external tier: routing name + external base domain, no env-type segment; empty without an external profile"},
 		{Token: "((platform.internalRoutingHost))", Label: "Internal routing host", Group: "Routing", Description: "complete host on the internal tier: routing name + internal base domain; empty without an internal profile"},
+		{Token: "((platform.previewSuffix))", Label: "Preview suffix", Group: "Routing", Description: "\"\" in stable envs, \"-pr-42\" in previews — append to a shared literal hostname label so each preview gets its own host"},
+		{Token: "((platform.stack))", Label: "Stack", Group: "Identity", Description: "the app's stack (group) name; empty when not in a stack"},
 		{Token: "((platform.ingressClassName))", Label: "Ingress class", Group: "Routing"},
 		{Token: "((platform.clusterIssuer))", Label: "Cluster issuer", Group: "Routing"},
 		{Token: "((platform.internalBaseDomain))", Label: "Internal base domain", Group: "Routing", Description: "internal tier, resolved cluster→env→org"},

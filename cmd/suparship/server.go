@@ -17,7 +17,6 @@ import (
 
 	"github.com/suparcloud/suparship/internal/audit"
 	"github.com/suparcloud/suparship/internal/auth"
-	"github.com/suparcloud/suparship/internal/localuser"
 	"github.com/suparcloud/suparship/internal/bootstrap"
 	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/config"
@@ -29,6 +28,7 @@ import (
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/license"
+	"github.com/suparcloud/suparship/internal/localuser"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -463,6 +463,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				logger.Warn("gitops publisher disabled", "reason", err.Error())
 			} else {
 				initialAdapter := &gitOpsPublisherAdapter{
+					appStore:        appStore,
 					inner:           pub,
 					orgProvider:     orgProvider,
 					clusterStore:    clusterStore,
@@ -623,6 +624,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 			// 4. Hot-swap the live publisher so new app creates/promotes use it.
 			adapter := &gitOpsPublisherAdapter{
+				appStore:        appStore,
 				inner:           pub,
 				orgProvider:     orgProvider,
 				clusterStore:    clusterStore,
@@ -776,6 +778,11 @@ type gitOpsPublisherAdapter struct {
 	// override layer (env vars + raw values) that sits between project and app.
 	// Optional: nil → no stack layer.
 	stackStore domain.StackStore
+	// appStore resolves the OTHER apps a platform route touches — backend apps'
+	// namespaces per env, siblings sharing a hostname, their previews — so the
+	// publisher can render HTTPRoutes and ReferenceGrants without store access.
+	// Optional: nil → routes render with self-only backends.
+	appStore domain.AppStore
 	// envConfigReader reads the cluster-scope env-var ConfigMap from
 	// suparship-system. Optional: when nil, the cluster layer contributes no
 	// vars.
@@ -1448,6 +1455,7 @@ func (a *gitOpsPublisherAdapter) buildAppBundle(ctx context.Context, app *domain
 			pub.SuspendKey = tmpl.Spec.SuspendKey()
 		}
 		a.setStackOverlays(ctx, &pub, app, env.EnvName)
+		a.setRouteInputs(ctx, &pub, app, env)
 
 		pubEnvs = append(pubEnvs, pub)
 	}
@@ -1944,6 +1952,7 @@ func (a *gitOpsPublisherAdapter) buildAppEnvPub(ctx context.Context, app *domain
 		pub.SuspendKey = tmpl.Spec.SuspendKey()
 	}
 	a.setStackOverlays(ctx, &pub, app, env.EnvName)
+	a.setRouteInputs(ctx, &pub, app, env)
 	return pub, nil
 }
 
@@ -2177,6 +2186,7 @@ func (a *gitOpsPublisherAdapter) buildPreviewSpec(ctx context.Context, app *doma
 		StackEnvRawValues:       basePub.StackEnvRawValues,
 		TemplatePreviewValues:   templatePreviewValues,
 		ComponentPlatformValues: basePub.ComponentPlatformValues,
+		Routes:                  a.previewRouteInputs(ctx, app, preview, baseEnv),
 		ScopeSecretKeys:         secretKeys,
 	}
 	return spec, nil
@@ -3043,4 +3053,232 @@ func publisherTemplateLoader(templates []*tpl.Template, client kubernetes.Interf
 		}
 	}
 	return &diskFirstTemplateLoader{disk: disk, next: next}
+}
+
+// ── platform-owned routing inputs ────────────────────────────────────────────
+//
+// Routes are app-owned (a stack's routes are sugar, expanded per member). The
+// adapter resolves everything the publisher needs — which other apps a route
+// touches and where their Services live — so the publisher stays store-free.
+
+// effectiveRoutes returns an app's own routes plus its stack's routes expanded
+// to it (only the rules whose backend is this app).
+func (a *gitOpsPublisherAdapter) effectiveRoutes(ctx context.Context, app *domain.App) []domain.RouteSpec {
+	routes := append([]domain.RouteSpec(nil), app.Spec.Routes...)
+	if app.Spec.Stack != "" && a.stackStore != nil {
+		if st, err := a.stackStore.GetStack(ctx, app.ProjectName, app.Spec.Stack); err == nil && st != nil {
+			routes = append(routes, domain.ExpandStackRoutes(st.Spec.Routes, app.Name)...)
+		}
+	}
+	return routes
+}
+
+// routeHostSet returns the hostname EXPRESSIONS a route set uses (defaults
+// applied), so two apps declaring the same shared host are recognised before
+// interpolation (the stack default expands to the same string for every member).
+func routeHostSet(routes []domain.RouteSpec) map[string]bool {
+	out := map[string]bool{}
+	for _, r := range routes {
+		for _, h := range r.EffectiveHostnames(domain.DefaultAppRouteHostname) {
+			out[h] = true
+		}
+	}
+	return out
+}
+
+func sharesHost(a, b map[string]bool) bool {
+	for h := range a {
+		if b[h] {
+			return true
+		}
+	}
+	return false
+}
+
+// projectApps lists the other apps of a project (best-effort; nil without a
+// store).
+func (a *gitOpsPublisherAdapter) projectApps(ctx context.Context, app *domain.App) []*domain.App {
+	if a.appStore == nil {
+		return nil
+	}
+	apps, err := a.appStore.ListApps(ctx, app.ProjectName)
+	if err != nil {
+		return nil
+	}
+	out := apps[:0:0]
+	for _, o := range apps {
+		if o.Name != app.Name {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// stableNamespace returns an app's namespace in a stable env when it is
+// deployed there ("" otherwise).
+func (a *gitOpsPublisherAdapter) stableNamespace(ctx context.Context, app *domain.App, envName string) string {
+	if a.appStore == nil {
+		return ""
+	}
+	if ov := app.Spec.EnvironmentDefaults[envName]; ov.Deploy != nil && !*ov.Deploy {
+		return ""
+	}
+	env, err := a.appStore.GetAppEnvironment(ctx, app.ProjectName, app.Name, envName)
+	if err != nil || env == nil || env.EnvType == domain.AppEnvPreview {
+		return ""
+	}
+	return env.Namespace
+}
+
+// previewNamespace returns an app's preview namespace when it has a preview of
+// that name ("" otherwise).
+func (a *gitOpsPublisherAdapter) previewNamespace(ctx context.Context, app *domain.App, previewName string) string {
+	if a.appStore == nil || previewName == "" {
+		return ""
+	}
+	env, err := a.appStore.GetAppEnvironment(ctx, app.ProjectName, app.Name, previewName)
+	if err != nil || env == nil || env.EnvType != domain.AppEnvPreview {
+		return ""
+	}
+	return env.Namespace
+}
+
+// setRouteInputs fills AppPublishEnv.Routes for a stable env: the app's
+// effective routes, each backend app's namespace (the owner's own becomes the
+// routed preview's during a backend switch), and the namespaces whose
+// HTTPRoutes may target this app's Services — other apps' routes that name
+// this app as a backend, and composite previews of apps sharing a hostname.
+func (a *gitOpsPublisherAdapter) setRouteInputs(ctx context.Context, pub *gitops.AppPublishEnv, app *domain.App, env *domain.AppEnvironment) {
+	routes := a.effectiveRoutes(ctx, app)
+	others := a.projectApps(ctx, app)
+	in := gitops.RouteInputs{Routes: routes}
+
+	// Am I fronted by platform routes at all (mine, or another app's rule)?
+	platformRouted := len(routes) > 0
+	otherRoutes := map[string][]domain.RouteSpec{}
+	for _, o := range others {
+		r := a.effectiveRoutes(ctx, o)
+		if len(r) == 0 {
+			continue
+		}
+		otherRoutes[o.Name] = r
+		if domain.RoutesCoverApp(r, o.Name, app.Name) {
+			platformRouted = true
+		}
+	}
+	in.PlatformRouted = platformRouted
+	if !platformRouted {
+		pub.Routes = in
+		return
+	}
+
+	// Backend namespaces for my rules.
+	in.BackendNamespaces = map[string]string{}
+	selfNS := env.Namespace
+	if routed := app.Spec.EnvironmentDefaults[env.EnvName].RoutedToPreview; routed != "" {
+		if ns := a.previewNamespace(ctx, app, routed); ns != "" {
+			selfNS = ns // the backend switch
+		}
+	}
+	in.BackendNamespaces[app.Name] = selfNS
+	byName := map[string]*domain.App{}
+	for _, o := range others {
+		byName[o.Name] = o
+	}
+	for _, b := range domain.RouteBackendApps(routes, app.Name) {
+		if b == app.Name {
+			continue
+		}
+		if o := byName[b]; o != nil {
+			if ns := a.stableNamespace(ctx, o, env.EnvName); ns != "" {
+				in.BackendNamespaces[b] = ns
+			}
+		}
+	}
+
+	// Who may target my Services from another namespace?
+	mine := routeHostSet(routes)
+	var grants []string
+	for name, r := range otherRoutes {
+		o := byName[name]
+		// Another app's stable HTTPRoute naming me as a backend.
+		if domain.RoutesCoverApp(r, name, app.Name) {
+			if ns := a.stableNamespace(ctx, o, env.EnvName); ns != "" && ns != env.Namespace {
+				grants = append(grants, ns)
+			}
+		}
+		// A composite preview of an app sharing my hostname forwards my paths
+		// to my base-env Services from the preview namespace.
+		if sharesHost(mine, routeHostSet(r)) {
+			previews, _ := a.appStore.ListAppPreviews(ctx, app.ProjectName, name)
+			for _, pv := range previews {
+				if pv.BaseEnv == env.EnvName && pv.Namespace != "" && pv.Namespace != env.Namespace {
+					grants = append(grants, pv.Namespace)
+				}
+			}
+		}
+	}
+	in.GrantFromNamespaces = grants
+	pub.Routes = in
+}
+
+// previewRouteInputs fills PreviewPublishSpec.Routes: the composite preview
+// (own rules local, sibling apps sharing the hostname forwarded to their
+// base-env Services unless they have a same-named preview) and the
+// backend-switch grant for the base env when this preview is its routed target.
+func (a *gitOpsPublisherAdapter) previewRouteInputs(ctx context.Context, app *domain.App, preview *domain.EnvironmentInstance, baseEnv string) gitops.RouteInputs {
+	routes := a.effectiveRoutes(ctx, app)
+	others := a.projectApps(ctx, app)
+	in := gitops.RouteInputs{Routes: routes}
+	platformRouted := len(routes) > 0
+	mine := routeHostSet(routes)
+	in.BackendNamespaces = map[string]string{}
+	byName := map[string]*domain.App{}
+	for _, o := range others {
+		byName[o.Name] = o
+		r := a.effectiveRoutes(ctx, o)
+		if len(r) == 0 {
+			continue
+		}
+		if domain.RoutesCoverApp(r, o.Name, app.Name) {
+			platformRouted = true
+		}
+		if !sharesHost(mine, routeHostSet(r)) {
+			continue
+		}
+		if a.previewNamespace(ctx, o, preview.EnvName) != "" {
+			continue // co-located/same-named preview renders its own rules
+		}
+		ns := a.stableNamespace(ctx, o, baseEnv)
+		if ns == "" {
+			continue
+		}
+		in.Siblings = append(in.Siblings, gitops.SiblingRoutes{App: o.Name, Namespace: ns, Routes: r})
+	}
+	in.PlatformRouted = platformRouted
+	if !platformRouted {
+		return in
+	}
+	// Cross-app backends of my own rules and of sibling rules resolve to the
+	// base env (the builder maps a sibling's own backends to sib.Namespace).
+	backends := domain.RouteBackendApps(routes, app.Name)
+	for _, s := range in.Siblings {
+		backends = append(backends, domain.RouteBackendApps(s.Routes, s.App)...)
+	}
+	for _, b := range backends {
+		if b == app.Name {
+			continue
+		}
+		if o := byName[b]; o != nil {
+			if ns := a.stableNamespace(ctx, o, baseEnv); ns != "" {
+				in.BackendNamespaces[b] = ns
+			}
+		}
+	}
+	if app.Spec.EnvironmentDefaults[baseEnv].RoutedToPreview == preview.EnvName {
+		if ns := a.stableNamespace(ctx, app, baseEnv); ns != "" {
+			in.GrantFromNamespaces = []string{ns}
+		}
+	}
+	return in
 }

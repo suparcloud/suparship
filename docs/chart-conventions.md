@@ -50,6 +50,13 @@ ingress:
 Everything else — replicas, resources, autoscaling, probes, commands — is
 ordinary chart values, set through the same overlay.
 
+## Service naming
+
+Platform-owned [routes](routing.md) forward to a Service named
+`{app}-{component}` (or `{app}` for a single-chart app) on the declared port —
+what the example charts render from their release name. A chart that names its
+Service differently sets `backend.service` on the route.
+
 ## Suspend
 
 The platform's suspend/resume ops (per env, and stack-wide via fan-out) work

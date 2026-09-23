@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../lib/api";
+import { servicePortFromValues } from "../lib/routes";
 import { createApp } from "../lib/apps";
 import { setAppStack } from "../lib/stacks";
 import { listConfigVariables } from "../lib/configVars";
@@ -39,6 +40,7 @@ import {
   toComponentCreate,
 } from "../components/ComposeComponents";
 import type {
+  RouteSpec,
   TemplateSummary,
   TemplateDetail,
   TemplateSecretInput,
@@ -377,6 +379,7 @@ function ConfigureStep({
   // An app is uniformly a list of components. A picked template seeds the first
   // component; a blank app starts empty. The user can add more (each its own
   // template → multi-source). A single-component app renders single-source.
+  const [platformRouting, setPlatformRouting] = useState(true);
   const [components, setComponents] = useState<ComponentDraft[]>(() =>
     template
       ? [
@@ -668,6 +671,11 @@ function ConfigureStep({
         ? imageRulesToAppImages(discoveredImages, imageRules)
         : [];
     const templateName = components[0]?.template ?? template?.name ?? "";
+    // Platform-managed routing: one route per tier, a rule per exposed web
+    // component (the first gets "/", the rest "/<component>"), on the app's
+    // routing name under that tier's base domain. The chart's own ingress
+    // stays off; route-to-preview is then a backend switch.
+    const seededRoutes = platformRouting ? seedRoutes(componentsPayload, envsShareDomain(orgEnvs)) : undefined;
 
     // Non-secret env vars ride along in the create request (committed to Git in
     // the same publish). Only include non-empty scopes so the payload stays lean.
@@ -685,6 +693,7 @@ function ConfigureStep({
       await createApp(project, {
         name: appName,
         template: templateName,
+        routes: seededRoutes && seededRoutes.length > 0 ? seededRoutes : undefined,
         components: componentsPayload,
         values: {},
         images: appImages.length > 0 ? appImages : undefined,
@@ -832,6 +841,23 @@ function ConfigureStep({
           configVars={configVars}
           environments={baseEnv ? [baseEnv] : []}
         />
+        {components.some((c) => c.type === "web" && c.exposeMode !== "disabled") && (
+          <label className="mt-3 flex items-start gap-2 text-xs text-gray-600">
+            <input
+              type="checkbox"
+              checked={platformRouting}
+              onChange={(e) => setPlatformRouting(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="font-medium text-gray-800">Platform-managed routing</span>{" "}
+              (recommended) — suparship renders the route for each exposed component on{" "}
+              <code className="font-mono">{"<app>.<domain>"}</code> and keeps the chart's own
+              ingress off. Uncheck to let the chart's ingress or HTTPRoute handle it.
+              Routes are editable later under Settings → Routes.
+            </span>
+          </label>
+        )}
       </FormSection>
 
       {/* Namespace settings */}
@@ -1436,3 +1462,47 @@ function buildDefaultSecretRefs(
   return refs;
 }
 
+// seedRoutes builds the platform routes for a new app: one route per routing
+// tier ("external"/"internal"), a rule per exposed web component. Ports come
+// from the component's values (service.port, then containerPort, else 80).
+// envsShareDomain: two envs with the same base domain (or none, i.e. the
+// default) would render the same hostname on a shared cluster, which the
+// ingress admission webhook refuses — so seed an env-typed host then.
+function envsShareDomain(envs: { baseDomain?: string }[]): boolean {
+  const seen = new Set<string>();
+  for (const e of envs) {
+    const d = e.baseDomain || "";
+    if (seen.has(d)) return true;
+    seen.add(d);
+  }
+  return false;
+}
+
+function seedRoutes(components: ComponentCreate[], envTyped: boolean): RouteSpec[] {
+  const byTier = new Map<"external" | "internal", RouteSpec>();
+  for (const c of components) {
+    if (c.type !== "web") continue;
+    const tier = c.exposeMode === "internal" ? "internal" : c.exposeMode === "external" ? "external" : null;
+    if (!tier) continue;
+    const port = servicePortFromValues(c.values) ?? 80;
+    let route = byTier.get(tier);
+    if (!route) {
+      route = {
+        name: tier,
+        tier,
+        hostnames: [
+          envTyped
+            ? `((platform.appRoutingName)).((platform.envType)).((platform.${tier}BaseDomain))`
+            : `((platform.appRoutingName)).((platform.${tier}BaseDomain))`,
+        ],
+        rules: [],
+      };
+      byTier.set(tier, route);
+    }
+    route.rules.push({
+      pathPrefix: route.rules.length === 0 ? "/" : `/${c.name}`,
+      backend: { component: c.name, port },
+    });
+  }
+  return [...byTier.values()];
+}

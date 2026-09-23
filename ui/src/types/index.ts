@@ -726,7 +726,10 @@ export interface AppEnvironmentSummary {
    *  alternate host (see urls). Absent when the env serves its own hostname. */
   routedToPreview?: string;
   routedHost?: string;
-  /** Host swap (previews): the stable env whose hostname this preview serves. */
+  /** "swap" (chart ingress: hostname moved, env on -origin) or "switch"
+   *  (platform routes: the env's route forwards to the preview). */
+  routedMode?: "swap" | "switch";
+  /** The stable env whose hostname / route this preview serves. */
   routedFromEnv?: string;
 }
 
@@ -780,6 +783,12 @@ export interface AppDetail {
   deliveryMode?: string;
   // Whether this app supports preview (ephemeral PR) environments. Default true.
   previewsEnabled: boolean;
+  /** Platform-owned HTTP surfaces (suparship renders the Gateway API objects).
+   *  Empty when the chart owns its own ingress. */
+  routes: RouteSpec[];
+  /** Platform-owned routes front this app (its own, its stack's or another
+   *  app's): route-to-preview is a backend switch, not a hostname swap. */
+  platformRouted?: boolean;
   // Newest archived version of the app's PRIMARY template. Empty when that
   // template isn't version-managed (a built-in with no archives).
   templateLatestVersion?: string;
@@ -1038,6 +1047,9 @@ export interface CreateAppRequest {
   displayName?: string;
   description?: string;
   template: string;
+  /** Platform-owned HTTP surfaces (suparship renders the routes). The New
+   *  App form seeds one per exposed component; omit to let the chart own it. */
+  routes?: RouteSpec[];
   /** Components of a composed app, each with its own template + config. When set
    *  (every component carries a template), the app renders as one multi-source
    *  Application. Omit for a single-template app. */
@@ -1149,4 +1161,30 @@ export interface CreatedToken extends ApiToken {
 
 export interface TokensResponse {
   tokens: ApiToken[];
+}
+
+// ── Platform-owned routing ────────────────────────────────────────────────────
+
+/** A rule's target Service. app defaults to the declaring app; the Service
+ *  name defaults to "{app}-{component}" (or "{app}"). */
+export interface RouteBackend {
+  app?: string;
+  component?: string;
+  service?: string;
+  port: number;
+}
+
+export interface RouteRule {
+  pathPrefix: string;
+  backend: RouteBackend;
+}
+
+/** One declared HTTP surface: hostnames (tokens allowed) on a routing tier,
+ *  forwarding path prefixes to Services. Rendered by suparship as HTTPRoutes;
+ *  route-to-preview switches the backend, the hostname never changes. */
+export interface RouteSpec {
+  name?: string;
+  hostnames?: string[];
+  tier?: "external" | "internal";
+  rules: RouteRule[];
 }

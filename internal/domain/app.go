@@ -567,7 +567,21 @@ type EnvironmentOverride struct {
 	// or promotion being paused. One preview per env at a time. Cleared by the
 	// unroute op or when the routed preview is deleted. Prod is never routed.
 	RoutedToPreview string `json:"routedToPreview,omitempty" yaml:"routedToPreview,omitempty"`
+	// RoutedHost is the URL whose traffic RoutedToPreview receives (this env's
+	// hostname), recorded when the route was made so the UI reports a fact,
+	// not a guess. RoutedMode says how: "swap" (chart-owned ingress — the
+	// preview took the hostname and this env moved to -origin) or "switch"
+	// (platform-owned routes — this env's route forwards to the preview; no
+	// hostname changed hands). Both empty when not routed.
+	RoutedHost string `json:"routedHost,omitempty" yaml:"routedHost,omitempty"`
+	RoutedMode string `json:"routedMode,omitempty" yaml:"routedMode,omitempty"`
 }
+
+// RoutedMode values.
+const (
+	RouteModeSwap   = "swap"
+	RouteModeSwitch = "switch"
+)
 
 // RoutedAwayHostSuffix is appended to an app (or "{app}-{component}") instance
 // name to form the alternate host a stable env serves while its normal host is
@@ -724,6 +738,10 @@ type AppSpec struct {
 	// actions. Membership is just this label — the app keeps its own identity,
 	// ArgoCD Application, and Kargo pipeline.
 	Stack string `json:"stack,omitempty" yaml:"stack,omitempty"`
+	// Routes are the app's platform-owned HTTP surfaces (see RouteSpec):
+	// suparship renders their Gateway API objects; the chart keeps its own
+	// ingress disabled. A stack's routes may additionally forward to this app.
+	Routes []RouteSpec `json:"routes,omitempty" yaml:"routes,omitempty"`
 	// CD holds continuous-delivery settings for this app.
 	CD CDConfig `json:"cd,omitempty" yaml:"cd,omitempty"`
 	// Images is the set of chart images this app has selected for external CD

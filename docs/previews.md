@@ -193,6 +193,12 @@ at that URL without touching staging's image or its delivery pipeline.
 > to staging.** Route when you need the stable URL. Pin when you need the image
 > deployed there (a rollback hold, or a deliberate unmerged deploy).
 
+Two mechanisms, same command. An app with [platform-owned routes](routing.md)
+is routed by a **backend switch**: staging's HTTPRoute keeps its hostname and
+its backend now names the preview's Service — one publish per side, seconds,
+no ArgoCD wait. An app whose chart owns its ingress is routed by the **host
+swap** described below.
+
 ```http
 POST   /api/v1/projects/{project}/apps/{app}/environments/{env}/route   {"fromPreview": "pr-42"}
 DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/route

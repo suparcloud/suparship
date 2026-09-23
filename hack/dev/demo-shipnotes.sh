@@ -167,10 +167,11 @@ def web(name, repo, port, health, expose):
                     "repository": full, "tagPattern": "^main-"}],
     }
 frontend = web("frontend", "demo/shipnotes-frontend", 80, "/", "external")
-# The developer's routing decision: expose it. Host, class and TLS come from
-# the template's platform override; set ingress.host here to use a custom
-# domain instead of the platform one.
-frontend["values"]["ingress"] = {"enabled": True}
+# Routing is platform-owned (docs/routing.md): the app declares a route below
+# (step 6b) and suparship renders the Ingress/HTTPRoute itself, so the chart's
+# own ingress stays off. Route-to-preview then switches the backend — the
+# hostname never changes hands.
+frontend["values"]["ingress"] = {"enabled": False}
 # The frontend nginx proxies /api to this env var; shipnotes-api is the api
 # component's Service (fullnameOverride above).
 frontend["values"]["env"] = {"API_UPSTREAM": "http://shipnotes-api:8000"}
@@ -211,11 +212,27 @@ db = {
         },
     },
 }
+# Platform-defined routing (docs/routing.md): the app declares its HTTP
+# surface and suparship renders the Ingress/HTTPRoute — the same thing the
+# New App form seeds when "Platform-managed routing" is ticked. One hostname,
+# "/" → the frontend Service ({app}-{component} = shipnotes-frontend); the
+# frontend's nginx proxies /api to the api itself. The env-type segment keeps
+# staging and prod apart on the shared dev cluster; ((platform.previewSuffix))
+# gives every preview its own host:
+#   staging  shipnotes.staging.localhost
+#   preview  shipnotes-pr-<n>.preview.localhost
+#   prod     shipnotes.prod.localhost
+routes = [{
+    "name": "web",
+    "hostnames": ["shipnotes((platform.previewSuffix)).((platform.envType)).((platform.externalBaseDomain))"],
+    "rules": [{"pathPrefix": "/", "backend": {"component": "frontend", "port": 80}}],
+}]
 print(json.dumps({
     "name": "shipnotes",
     "displayName": "Shipnotes",
     "description": "Demo: React + FastAPI + Postgres through the whole golden path",
     "components": [frontend, api, db],
+    "routes": routes,
     "cd": {"managed": True, "autoPromote": False},
 }))
 PY
@@ -225,6 +242,20 @@ PY
   [ "$create_code" = "201" ] || die "app create failed (HTTP $create_code): $(cat "$tmp/create-resp.json")"
   ok "app $APP created (staging deploys via GitOps now)"
 fi
+
+# ── 6b. Converge the platform route on re-runs ─────────────────────────────
+# New apps get the route from the create payload above; an app created by an
+# older run of this script (chart-owned ingress) picks it up here. Same body
+# as the create's "routes", PATCHed idempotently. Settings → Routes edits it;
+# the Traffic tab shows what is rendered per env.
+routes_code="$(curl -sS -b "$cookies" -o "$tmp/routes-resp.json" -w '%{http_code}' \
+  -X PATCH "$API/projects/$PROJECT/apps/$APP" \
+  -H 'Content-Type: application/json' \
+  -d '{"routes":[{"name":"web","hostnames":["shipnotes((platform.previewSuffix)).((platform.envType)).((platform.externalBaseDomain))"],"rules":[{"pathPrefix":"/","backend":{"component":"frontend","port":80}}]}]}')"
+case "$routes_code" in
+  200|202) ok "platform route: shipnotes.<env>.localhost → frontend" ;;
+  *) die "setting the app route failed (HTTP $routes_code): $(cat "$tmp/routes-resp.json")" ;;
+esac
 
 # ── 7. Variables & secrets showcase (vault-backed; idempotent upserts) ─────
 # The db credentials live in the PLATFORM, not in chart values in git:
@@ -254,7 +285,8 @@ curl -sS -b "$cookies" -o /dev/null -X POST "$API/projects/$PROJECT/apps/$APP/sy
 # ── 8. The tour ────────────────────────────────────────────────────────────
 printf '\n'
 ok "shipnotes demo is wired. The tour:"
-info "app (staging):    http://shipnotes-frontend.staging.localhost   (ArgoCD sync takes a minute or two)"
+info "app (staging):    http://shipnotes.staging.localhost   (ArgoCD sync takes a minute or two)"
+info "routing:          platform-defined — Settings → Routes to edit, Traffic tab to see what each env renders"
 info "suparship UI:     http://localhost:5173  →  demo / shipnotes   (admin@local / admin123)"
 info "the code:         $GITEA/$GITEA_USER/$REPO_NAME   (gitops / gitops-dev-only)"
 info "CI runs:          $GITEA/$GITEA_USER/$REPO_NAME/actions"
@@ -276,10 +308,12 @@ info "  the db card → Variables); nothing sensitive lives in chart values."
 info ""
 info "try the loop:"
 info "  1. edit something, push a branch, open a PR in Gitea → CI builds pr-<n>-<sha>"
-info "     and a preview appears at http://pr-<n>.shipnotes-frontend.preview.localhost"
+info "     and a preview appears at http://shipnotes-pr-<n>.preview.localhost"
+info "     comment /route on the PR (or click Route staging here) and staging's route"
+info "     forwards to that preview — the hostname never changes; /unroute restores it"
 info "  2. merge → main build → staging follows the new tag (CD managed)"
 info "  3. promote: suparship UI → shipnotes → Promote (or:"
 info "     POST $API/projects/$PROJECT/apps/$APP/promote {\"targetEnvironment\":\"prod\"})"
-info "     → http://shipnotes-frontend.prod.localhost serves the same immutable tag"
+info "     → http://shipnotes.prod.localhost serves the same immutable tag"
 info ""
 info "If *.localhost doesn't resolve: run \`task dev:dns\` once (macOS) or see docs/local-dns.md."

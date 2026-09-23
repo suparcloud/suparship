@@ -61,7 +61,7 @@ done.
 
 ## The tour
 
-1. **Browse it** — <http://shipnotes-frontend.staging.localhost>. The footer
+1. **Browse it** — <http://shipnotes.staging.localhost>. The footer
    shows the exact CI-built tag that's running; notes you add round-trip
    through the api into Postgres, with `DATABASE_URL` delivered from Vault
    through the platform's secret contract — the app itself has zero
@@ -79,12 +79,20 @@ done.
    (<http://localhost:3000/gitops/suparship-demo>, `gitops` /
    `gitops-dev-only`): edit any file on a branch → open the PR → CI builds
    both images at `pr-<n>-<7sha>` and a preview appears at
-   `http://pr-<n>.shipnotes-frontend.preview.localhost`. Every push re-points
+   `http://shipnotes-pr-<n>.preview.localhost`. Every push re-points
    it; closing the PR tears it down.
+   - **Route staging to it** — on the preview, click **Route staging here**
+     (or comment `/route` on the PR if the workflow carries it). Shipnotes
+     declares a platform-defined route, so this is a backend switch: staging's
+     Ingress keeps `shipnotes.staging.localhost` and forwards to the preview's
+     Service; the image pipeline is untouched. The **Traffic** tab shows the
+     forwarded rule; **Restore routing** (or `/unroute`) puts it back, and
+     closing the PR restores it automatically. Edit the route itself under
+     **Settings → Routes**.
 5. **Staging follows main** — merge the PR: CI builds `main-<7sha>`, the
    app's Warehouse discovers the tag, and staging rolls to it (CD managed).
 6. **Promote to prod** — in the app UI hit **Promote** (staging → prod).
-   <http://shipnotes-frontend.prod.localhost> then serves the *same immutable
+   <http://shipnotes.prod.localhost> then serves the *same immutable
    tag* — promotion moves the artifact, it never rebuilds.
 7. **Keep going** — per-component values and variables (the component cards),
    rollback (re-promote a previous freight from the deployment history), the

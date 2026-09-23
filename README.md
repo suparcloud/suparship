@@ -191,7 +191,7 @@ plus a **working demo app** to poke at? (macOS and Linux)
 task dev:dns          # once per machine: *.localhost → 127.0.0.1 (no-op if it already resolves)
 task up               # full dev cluster (Tilt) — ingress, Vault, CI runner
 task demo:shipnotes   # second terminal: deploys the shipnotes demo end-to-end
-# → http://shipnotes-frontend.staging.localhost  (PR → preview, promote → prod)
+# → http://shipnotes.staging.localhost  (PR → preview, promote → prod)
 ```
 
 The guided tour lives in [**docs/try-suparship.md**](docs/try-suparship.md).
@@ -731,6 +731,7 @@ Significant design decisions are recorded as Architecture Decision Records (ADRs
 | [`docs/templates-components.md`](docs/templates-components.md) | App components: composed apps, per-component values and env vars |
 | [`docs/try-suparship.md`](docs/try-suparship.md) | First-time tour: local cluster + the shipnotes demo end-to-end (macOS + Linux) |
 | [`docs/byo-charts.md`](docs/byo-charts.md) | Bring your own Helm charts — chart sources, `((platform.*))` tokens, UI-mapped developer values (+ [`examples/charts/`](examples/charts/)) |
+| [`docs/routing.md`](docs/routing.md) | Platform-owned routing — declare routes, suparship renders the Gateway API HTTPRoutes; shared hostnames across apps; route-to-preview as a backend switch |
 | [`docs/templates.md`](docs/templates.md) | Full template authoring reference |
 | [`docs/migration-app-model.md`](docs/migration-app-model.md) | Service → app migration guide |
 

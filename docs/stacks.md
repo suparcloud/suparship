@@ -112,6 +112,9 @@ error}` rows) so partial failures are visible.
   pauses its own stage; **direct-delivery** members and members lacking that
   preview are **skipped**. Unpin runs each member's freight-restore. Reuses the
   per-app `pinAppEnv`/`unpinAppEnv` cores (extracted like `promoteAppEnv`).
+- `StackSpec.Routes` (Routes tab) — centralized [platform-owned routing](routing.md)
+  for the stack: rules whose backends are member apps, expanded into each member's
+  own routes at publish (moving them to the apps later renders the same objects).
 - `POST .../stacks/{stack}/route {fromPreview, targetEnv, apps?}` /
   `DELETE .../stacks/{stack}/route {targetEnv, apps?}` — route a stable env's
   hostname to a PR preview group across the stack (the host swap; see
@@ -166,6 +169,6 @@ voiceai → livekit-cloud vs voiceai → self-hosted.
 - Reusable **stack blueprint/template** — a versioned, parameterised multi-app
   definition you instantiate many times (a product phase 2, after the instance
   primitive matures).
-- **Project/stack-scope gateway routing** and **cross-app canary / traffic
+- **Stack routes** (built): `StackSpec.Routes` declares one hostname fanning out to member apps by path; it is expanded into each member's own platform-owned routes at publish time — see [routing.md](routing.md). Cross-app canary / traffic splitting is still out of scope.
   splitting** — both depend on the Gateway API work (Envoy Gateway + HTTPRoute)
   tracked in ROADMAP.md; intentionally decoupled from stacks.

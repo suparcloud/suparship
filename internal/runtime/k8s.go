@@ -128,7 +128,25 @@ func (p *K8sProvider) GetServiceRuntime(ctx context.Context, namespace, serviceN
 // falls back to the name-based GetServiceRuntime(namespace, fallbackName) so
 // apps published before instance labels keep working.
 func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fallbackName string) (*RuntimeInfo, error) {
+	return p.GetAppRuntimeFor(ctx, namespace, instance, fallbackName, "")
+}
+
+// routeOwnerLabel marks platform-rendered HTTPRoutes with the app that owns
+// them. ArgoCD's label tracking overwrites app.kubernetes.io/instance on
+// everything it syncs (with the platform Application's name), so platform
+// routes are found by this label instead.
+const routeOwnerLabel = "suparship.io/app"
+
+// GetAppRuntimeFor is GetAppRuntime that also attributes the platform-rendered
+// HTTPRoutes owned by routeOwner (the app name; "" = none) to the instance —
+// a composed component's instance is "{app}-{component}", but the app's
+// platform routes are labelled with the app.
+func (p *K8sProvider) GetAppRuntimeFor(ctx context.Context, namespace, instance, fallbackName, routeOwner string) (*RuntimeInfo, error) {
 	selector := instanceLabel + "=" + instance
+	ownerSelector := ""
+	if routeOwner != "" {
+		ownerSelector = routeOwnerLabel + "=" + routeOwner
+	}
 
 	// Workload and routing discovery are independent reads; run them concurrently
 	// (and each fans out its own LISTs in parallel) so one app-env's live status
@@ -148,7 +166,7 @@ func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fa
 	}()
 	go func() {
 		defer wg.Done()
-		routeURLs, hasRouting, rErr = p.labelledRoutes(ctx, namespace, selector)
+		routeURLs, hasRouting, rErr = p.labelledRoutes(ctx, namespace, selector, ownerSelector)
 	}()
 	wg.Wait()
 	if wErr != nil {
@@ -207,7 +225,7 @@ func (p *K8sProvider) GetAppRuntime(ctx context.Context, namespace, instance, fa
 // HTTPRoutes carrying the given label selector, plus whether any such routing
 // resource exists (used to recognize a workload-less app as deployed). HTTPRoute
 // discovery degrades gracefully (see listHTTPRoutes).
-func (p *K8sProvider) labelledRoutes(ctx context.Context, namespace, selector string) (urls []string, found bool, err error) {
+func (p *K8sProvider) labelledRoutes(ctx context.Context, namespace, selector, ownerSelector string) (urls []string, found bool, err error) {
 	// Ingresses (typed) and HTTPRoutes (dynamic) are independent; list them
 	// concurrently and combine in a fixed order (ingress URLs first) so output
 	// stays deterministic.
@@ -220,21 +238,33 @@ func (p *K8sProvider) labelledRoutes(ctx context.Context, namespace, selector st
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		ingList, ierr := p.client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-		if ierr != nil && !apierrors.IsNotFound(ierr) && !apierrors.IsForbidden(ierr) {
-			ingErr = fmt.Errorf("listing ingresses in %s: %w", namespace, ierr)
-			return
+		selectors := []string{selector}
+		if ownerSelector != "" {
+			selectors = append(selectors, ownerSelector) // platform-rendered Ingresses
 		}
-		if ingList != nil {
-			for i := range ingList.Items {
-				ingFound = true
-				ingURLs = append(ingURLs, ingressHostURLs(&ingList.Items[i], p.secureEndpoints())...)
+		for _, sel := range selectors {
+			ingList, ierr := p.client.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
+			if ierr != nil && !apierrors.IsNotFound(ierr) && !apierrors.IsForbidden(ierr) {
+				ingErr = fmt.Errorf("listing ingresses in %s: %w", namespace, ierr)
+				return
+			}
+			if ingList != nil {
+				for i := range ingList.Items {
+					ingFound = true
+					ingURLs = append(ingURLs, ingressHostURLs(&ingList.Items[i], p.secureEndpoints())...)
+				}
 			}
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if routes := p.listHTTPRoutes(ctx, namespace, selector); len(routes) > 0 {
+		routes := p.listHTTPRoutes(ctx, namespace, selector)
+		if ownerSelector != "" {
+			// Platform-rendered routes (suparship.io/app=<owner>): ArgoCD
+			// relabels their instance, so match them by owner.
+			routes = append(routes, p.listHTTPRoutes(ctx, namespace, ownerSelector)...)
+		}
+		if len(routes) > 0 {
 			rtFound = true
 			for _, rt := range routes {
 				rtURLs = append(rtURLs, httpRouteHostURLs(rt, p.secureEndpoints())...)

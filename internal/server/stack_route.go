@@ -101,8 +101,18 @@ func (rh *rbacHandler) routeStackExec(ctx context.Context, project, name string,
 		err       error
 	}
 	prepStart := time.Now()
+	// Routability reads every app in the project; decide it once, before the
+	// concurrent prep mutates members.
+	platformRouted := map[string]bool{}
+	for _, a := range members {
+		platformRouted[a.Name] = ah.platformRouted(ctx, a)
+	}
 	preps := prepMembers(members, func(a *domain.App) routePrep {
-		app, targetEnv, preview, prev, err := ah.routeAppEnvSpec(ctx, project, a.Name, req.TargetEnv, req.FromPreview)
+		app, err := ah.appStore.GetApp(ctx, project, a.Name)
+		if err != nil {
+			return routePrep{err: fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, a.Name, project)}
+		}
+		app, targetEnv, preview, prev, err := ah.routeAppEnvSpecFor(ctx, app, req.TargetEnv, req.FromPreview, platformRouted[a.Name])
 		return routePrep{app: app, targetEnv: targetEnv, preview: preview, prev: prev, err: err}
 	})
 	prepDur := time.Since(prepStart)
@@ -129,12 +139,18 @@ func (rh *rbacHandler) routeStackExec(ctx context.Context, project, name string,
 				if old, gerr := ah.appStore.GetAppEnvironment(ctx, project, a.Name, p.prev); gerr == nil && old.EnvType == domain.AppEnvPreview {
 					item.prevPreview = old
 					releasePreviews = append(releasePreviews, ah.previewPublishTarget(ctx, p.app, old))
-					releaseRefs = append(releaseRefs, envRef{project, a.Name, p.prev})
+					if !platformRouted[a.Name] {
+						releaseRefs = append(releaseRefs, envRef{project, a.Name, p.prev})
+					}
 				}
 			case p.prev == "":
-				// Fresh route: the env releases the hostname by moving to -origin.
+				// Fresh route: the env releases the hostname by moving to -origin
+				// (chart-routed) or switches its HTTPRoute backend (platform-routed
+				// — nothing to wait for).
 				releaseEnvs = append(releaseEnvs, appFocusPublish{app: p.app, focusEnv: p.targetEnv})
-				releaseRefs = append(releaseRefs, envRef{project, a.Name, req.TargetEnv})
+				if !platformRouted[a.Name] {
+					releaseRefs = append(releaseRefs, envRef{project, a.Name, req.TargetEnv})
+				}
 			}
 			claimPreviews = append(claimPreviews, ah.previewPublishTarget(ctx, p.app, p.preview))
 			pending = append(pending, item)
@@ -166,12 +182,25 @@ func (rh *rbacHandler) routeStackExec(ctx context.Context, project, name string,
 			}
 		} else {
 			for _, it := range pending {
-				if it.prevPreview != nil {
-					ah.savePreviewURL(ctx, it.prep.app, it.prevPreview, previewURLFor(it.prep.app, it.prevPreview.EnvName, baseDomain, secure))
+				a := it.prep.app
+				if platformRouted[a.Name] {
+					// Backend switch: previews keep their own URLs; record the
+					// forwarded host.
+					url := ah.routeHostURL(ctx, a, req.TargetEnv, it.prep.targetEnv.EnvType, req.TargetEnv, baseDomain, secure)
+					if url == "" {
+						url = domain.GenerateURLWithDomain(a.Name, req.TargetEnv, it.prep.targetEnv.EnvType, baseDomain, secure)
+					}
+					ah.setRoutedHost(ctx, a, req.TargetEnv, url, domain.RouteModeSwitch)
+					results = append(results, okResult(a.Name, "routed "+hostOf(url)+" → "+req.FromPreview))
+					continue
 				}
-				url := previewURLFor(it.prep.app, req.FromPreview, baseDomain, secure)
-				ah.savePreviewURL(ctx, it.prep.app, it.prep.preview, url)
-				results = append(results, okResult(it.prep.app.Name, "routed "+hostOf(url)+" → "+req.FromPreview))
+				if it.prevPreview != nil {
+					ah.savePreviewURL(ctx, a, it.prevPreview, previewURLFor(a, it.prevPreview.EnvName, baseDomain, secure))
+				}
+				url := previewURLFor(a, req.FromPreview, baseDomain, secure)
+				ah.savePreviewURL(ctx, a, it.prep.preview, url)
+				ah.setRoutedHost(ctx, a, req.TargetEnv, url, domain.RouteModeSwap)
+				results = append(results, okResult(a.Name, "routed "+hostOf(url)+" → "+req.FromPreview))
 			}
 		}
 	}
@@ -280,7 +309,9 @@ func (rh *rbacHandler) unrouteStackExec(ctx context.Context, project, name strin
 		}
 		previewOf[p.app.Name] = pe
 		previewTargets = append(previewTargets, ah.previewPublishTarget(ctx, p.app, pe))
-		releaseRefs = append(releaseRefs, envRef{project, p.app.Name, p.preview})
+		if !ah.platformRouted(ctx, p.app) {
+			releaseRefs = append(releaseRefs, envRef{project, p.app.Name, p.preview})
+		}
 	}
 	releaseStart := time.Now()
 	reportProgress(ctx, "release", fmt.Sprintf("publishing %d preview(s) back to their own hosts", len(previewTargets)))
@@ -289,7 +320,7 @@ func (rh *rbacHandler) unrouteStackExec(ctx context.Context, project, name strin
 	}
 	for _, p := range pending {
 		if pe := previewOf[p.app.Name]; pe != nil {
-			ah.savePreviewURL(ctx, p.app, pe, previewURLFor(p.app, p.preview, baseDomain, secure))
+			ah.savePreviewURL(ctx, p.app, pe, ah.previewOwnURL(ctx, p.app, p.preview, req.TargetEnv, baseDomain, secure))
 		}
 	}
 	ah.waitForEnvsSettled(ctx, releaseRefs, releaseStart)

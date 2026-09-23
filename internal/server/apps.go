@@ -183,6 +183,10 @@ type AppEnvironmentSummaryDTO struct {
 	// when the env serves its own hostname.
 	RoutedToPreview string `json:"routedToPreview,omitempty"`
 	RoutedHost      string `json:"routedHost,omitempty"`
+	// RoutedMode is how: "swap" (chart ingress — hostname moved to the
+	// preview, env on -origin) or "switch" (platform routes — the env's
+	// route forwards to the preview; no hostname changed).
+	RoutedMode string `json:"routedMode,omitempty"`
 	// RoutedFromEnv (previews) names the stable env whose hostname this preview
 	// is serving. Absent for a preview on its own URL.
 	RoutedFromEnv string `json:"routedFromEnv,omitempty"`
@@ -264,6 +268,13 @@ type AppDetailDTO struct {
 	// PreviewsEnabled reports whether this app supports preview (ephemeral PR)
 	// environments. Defaults to true on create; editable via the update endpoint.
 	PreviewsEnabled bool `json:"previewsEnabled"`
+	// Routes are the app's platform-owned HTTP surfaces (suparship renders the
+	// Gateway API objects). Empty when the chart owns its own ingress.
+	Routes []domain.RouteSpec `json:"routes"`
+	// PlatformRouted reports that platform-owned routes front this app (its
+	// own, its stack's, or another app's) — route-to-preview is then a
+	// backend switch. Set on the detail read.
+	PlatformRouted bool `json:"platformRouted,omitempty"`
 	// TemplateLatestVersion is the newest archived version of the app's PRIMARY
 	// template. Empty when that template isn't version-managed.
 	TemplateLatestVersion string `json:"templateLatestVersion,omitempty"`
@@ -456,6 +467,9 @@ type createAppRequest struct {
 	// templates that declare a spec.components section. When absent, the
 	// handler initialises components from the template via ComponentToggles.
 	Components []ComponentCreateDTO `json:"components,omitempty"`
+	// Routes are the app's platform-owned HTTP surfaces (docs/routing.md). The
+	// UI seeds one per exposed component; empty means the chart owns routing.
+	Routes []domain.RouteSpec `json:"routes,omitempty"`
 	// NamespaceScope controls whether this app deploys into a dedicated
 	// namespace ("app", default) or the shared project namespace ("project").
 	NamespaceScope string `json:"namespaceScope,omitempty"`
@@ -590,6 +604,9 @@ type updateAppRequest struct {
 	// PreviewsEnabled, when non-nil, toggles whether this app supports preview
 	// (ephemeral PR) environments. Omit to leave unchanged.
 	PreviewsEnabled *bool `json:"previewsEnabled,omitempty"`
+	// Routes replaces the app's platform-owned routes (nil = unchanged, empty
+	// = clear). Validated against the project's apps and routing profiles.
+	Routes *[]domain.RouteSpec `json:"routes,omitempty"`
 }
 
 // updateAppResponse mirrors createAppResponse for the edit endpoint.

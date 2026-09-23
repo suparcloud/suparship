@@ -107,3 +107,7 @@ func EnabledDeployEnvsForTest(app *domain.App, envs []AppPublishEnv) []AppPublis
 // path helpers to white-box tests.
 func ChartVersionDirForTest(version string) string     { return chartVersionDir(version) }
 func ChartPathForTest(template, version string) string { return chartPathFor(template, version) }
+
+// SetRoutingProfilesForTest sets the org-level routing profiles (previews
+// resolve their Gateway from these; stable envs may override per env).
+func (p *Publisher) SetRoutingProfilesForTest(rp domain.RoutingProfiles) { p.cfg.RoutingProfiles = rp }

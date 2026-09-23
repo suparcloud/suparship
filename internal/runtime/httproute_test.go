@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -143,7 +144,6 @@ func TestGetServiceRuntime_NilDynamicNoHTTPRoute(t *testing.T) {
 	}
 }
 
-
 // The HTTPRoute URL scheme follows the org's secure-endpoints setting: nil
 // getter (never wired) keeps the https default; a false getter yields http.
 func TestHTTPRouteURLScheme_FollowsSecureEndpoints(t *testing.T) {
@@ -165,5 +165,65 @@ func TestHTTPRouteURLScheme_FollowsSecureEndpoints(t *testing.T) {
 	}
 	if !hasURL(info.IngressURLs, "http://web.example.com") {
 		t.Fatalf("secure=false should yield http, got %v", info.IngressURLs)
+	}
+}
+
+// Platform-rendered HTTPRoutes are labelled suparship.io/app=<owner> (ArgoCD's
+// label tracking overwrites the instance label with its Application name), so
+// GetAppRuntimeFor attributes them to the app by owner — also for a composed
+// component whose instance is "{app}-{component}".
+func TestGetAppRuntimeFor_PlatformRouteByOwnerLabel(t *testing.T) {
+	reps := int32(1)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "hello-web", Namespace: "ns", Labels: map[string]string{instanceLabel: "hello-web"}},
+		Spec:       appsv1.DeploymentSpec{Replicas: &reps},
+		Status:     appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
+	}
+	rt := httpRouteObj("ns", "hello-web-route", map[string]string{
+		instanceLabel:   "demo-hello-staging-platform", // what ArgoCD stamps
+		routeOwnerLabel: "hello",
+	}, []string{"hello.example.com"}, "/", "hello-web")
+	p := NewK8sProvider(fake.NewSimpleClientset(dep), newDynFake(rt))
+
+	info, err := p.GetAppRuntimeFor(context.Background(), "ns", "hello-web", "hello-web", "hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hasURL(info.IngressURLs, "https://hello.example.com") {
+		t.Fatalf("platform route should be attributed by owner label, got %v", info.IngressURLs)
+	}
+	// Without the owner hint the relabelled route is invisible to the instance.
+	plain, err := p.GetAppRuntime(context.Background(), "ns", "hello-web", "hello-web")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hasURL(plain.IngressURLs, "https://hello.example.com") {
+		t.Fatalf("instance-only lookup should not see the relabelled route, got %v", plain.IngressURLs)
+	}
+}
+
+// Platform-rendered Ingresses carry the same owner label and are attributed
+// the same way.
+func TestGetAppRuntimeFor_PlatformIngressByOwnerLabel(t *testing.T) {
+	reps := int32(1)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "hello-web", Namespace: "ns", Labels: map[string]string{instanceLabel: "hello-web"}},
+		Spec:       appsv1.DeploymentSpec{Replicas: &reps},
+		Status:     appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
+	}
+	ing := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: "hello-web", Namespace: "ns", Labels: map[string]string{
+			instanceLabel:   "demo-hello-staging-platform",
+			routeOwnerLabel: "hello",
+		}},
+		Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{Host: "hello.example.com"}}},
+	}
+	p := NewK8sProvider(fake.NewSimpleClientset(dep, ing), newDynFake())
+	info, err := p.GetAppRuntimeFor(context.Background(), "ns", "hello-web", "hello-web", "hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hasURL(info.IngressURLs, "https://hello.example.com") {
+		t.Fatalf("platform ingress should be attributed by owner label, got %v", info.IngressURLs)
 	}
 }

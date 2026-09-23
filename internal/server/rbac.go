@@ -179,7 +179,6 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/org/routing-profiles/{name}", requireOrgAdmin(rh.requireOrgAdmin(rh.handlePutOrgRoutingProfile)))
 	mux.HandleFunc("DELETE /api/v1/org/routing-profiles/{name}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteOrgRoutingProfile)))
 
-
 	// Project-scoped endpoints — role-based access.
 	mux.HandleFunc("GET /api/v1/projects/{project}", viewProject(rh.handleGetProject))
 	mux.HandleFunc("GET /api/v1/projects/{project}/rbac", viewProject(rh.handleGetProjectRBAC))
@@ -412,6 +411,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		// Route a stable env's hostname to a preview / restore it (the host swap).
 		// Developer-triggerable like previews: no image changes hands and CD is
 		// untouched, so it carries no more risk than launching the preview.
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/routes", viewProject(rh.appHandler.handleGetAppRoutes))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/route", devProject(rh.appHandler.handleRouteAppEnv))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/environments/{env}/route", devProject(rh.appHandler.handleUnrouteAppEnv))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}/rollback-candidates", viewProject(rh.appHandler.handleGetAppEnvRollbackCandidates))

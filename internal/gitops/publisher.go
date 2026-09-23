@@ -2026,7 +2026,11 @@ func (p *Publisher) writeAppPlatformResources(
 		RefreshInterval: p.externalSecretRefreshInterval(),
 	})
 	meta := PlatformAppMeta{Name: app.Name, Project: app.ProjectName, Namespace: namespace}
-	if err := p.writePlatformDir(resDir, secrets.AppConfigMapName(app.Name), namespace, envVars, esCfg, meta); err != nil {
+	routes, err := p.routeFilesForEnv(app, env, namespace)
+	if err != nil {
+		return fmt.Errorf("rendering platform routes for %s/%s: %w", app.Name, env.EnvName, err)
+	}
+	if err := p.writePlatformDir(resDir, secrets.AppConfigMapName(app.Name), namespace, envVars, esCfg, meta, routes); err != nil {
 		return err
 	}
 	// Migration: remove platform manifests that older publishers wrote into the
@@ -2035,8 +2039,10 @@ func (p *Publisher) writeAppPlatformResources(
 }
 
 // writePlatformDir writes meta.yaml + the <app>-config ConfigMap + the
-// <app>-secrets ExternalSecret (esCfg may be nil → pruned) into resDir.
-func (p *Publisher) writePlatformDir(resDir, configMapName, namespace string, envVars map[string]string, esCfg *ESOExternalSecretConfig, meta PlatformAppMeta) error {
+// <app>-secrets ExternalSecret (esCfg may be nil → pruned) + the platform-owned
+// routing objects (route-*.yaml / referencegrant-*.yaml; empty → pruned) into
+// resDir.
+func (p *Publisher) writePlatformDir(resDir, configMapName, namespace string, envVars map[string]string, esCfg *ESOExternalSecretConfig, meta PlatformAppMeta, routes RoutePlatformFiles) error {
 	metaBytes, err := yaml.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("marshal platform meta: %w", err)
@@ -2047,7 +2053,10 @@ func (p *Publisher) writePlatformDir(resDir, configMapName, namespace string, en
 	if err := p.WriteAppConfigMap(resDir, configMapName, namespace, envVars); err != nil {
 		return fmt.Errorf("writing app ConfigMap: %w", err)
 	}
-	return p.WriteAppExternalSecret(resDir, esCfg)
+	if err := p.WriteAppExternalSecret(resDir, esCfg); err != nil {
+		return err
+	}
+	return p.writePlatformRoutes(resDir, routes)
 }
 
 // pruneLegacyPlatformFiles removes platform manifests that earlier publishers
@@ -2718,6 +2727,37 @@ type AppPublishEnv struct {
 	// `true` here so the chart scales the workload down; resume writes nothing
 	// (the overlay is rebuilt each publish, so the flag simply disappears).
 	SuspendKey string
+	// Routes carries the platform-owned routing inputs for this env (nil
+	// Routes → no route objects, and any earlier ones are pruned). Populated
+	// by the publish adapter; see RouteInputs.
+	Routes RouteInputs
+}
+
+// RouteInputs is everything the publisher needs to render an app's
+// platform-owned routes into one env or preview, resolved by the adapter so
+// the publisher stays store-free. See domain.RouteSpec and routes.go.
+type RouteInputs struct {
+	// Routes are the app's EFFECTIVE routes: its own plus its stack's routes
+	// expanded to this app (domain.ExpandStackRoutes).
+	Routes []domain.RouteSpec
+	// PlatformRouted is true when this app is fronted by platform routes (its
+	// own or a stack's). Then a route-to-preview is a backend switch, so the
+	// values/env-var routing names must NOT flip to "-origin": the publisher
+	// renders values from a copy of the app with the host swap cleared.
+	PlatformRouted bool
+	// BackendNamespaces maps every backend app of Routes (and of Siblings) to
+	// the namespace its Service lives in for THIS render. Absent = not
+	// deployed here → the rule is dropped. For the backend switch the owner's
+	// own entry is the routed preview's namespace.
+	BackendNamespaces map[string]string
+	// Siblings are other apps' routes merged cross-namespace into a PREVIEW's
+	// route set (the composite preview). Unused for stable envs.
+	Siblings []SiblingRoutes
+	// GrantFromNamespaces are the namespaces whose HTTPRoutes may target
+	// Services here: for a stable env, sibling single-app previews (composite)
+	// or nothing; for a preview, its base env when this preview is the routed
+	// target (backend switch).
+	GrantFromNamespaces []string
 }
 
 // PublishPreview writes a preview app.yaml and values.yaml so ArgoCD
@@ -2900,7 +2940,11 @@ func (p *Publisher) publishPreviewFiles(repoDir string, app *domain.App, preview
 		Namespace:     preview.Namespace,
 		ClusterServer: preview.ClusterServer,
 	}
-	if err := p.writePlatformDir(resDir, secrets.AppConfigMapName(resBase), preview.Namespace, previewEnvVars, esCfg, meta); err != nil {
+	routes, err := p.routeFilesForPreview(app, preview, preview.Namespace)
+	if err != nil {
+		return fmt.Errorf("rendering platform routes for preview %s/%s: %w", app.Name, preview.PreviewName, err)
+	}
+	if err := p.writePlatformDir(resDir, secrets.AppConfigMapName(resBase), preview.Namespace, previewEnvVars, esCfg, meta, routes); err != nil {
 		return fmt.Errorf("writing preview platform resources: %w", err)
 	}
 	if err := p.pruneLegacyPlatformFiles(previewDir); err != nil {
@@ -3101,7 +3145,11 @@ func (p *Publisher) publishComposedPreviewFiles(ctx context.Context, repoDir str
 		Namespace:     ns,
 		ClusterServer: preview.ClusterServer,
 	}
-	if err := p.writePlatformDir(resDir, configMapName, ns, previewEnvVars, esCfg, meta); err != nil {
+	routes, err := p.routeFilesForPreview(app, preview, ns)
+	if err != nil {
+		return fmt.Errorf("rendering platform routes for composed preview %s/%s: %w", app.Name, preview.PreviewName, err)
+	}
+	if err := p.writePlatformDir(resDir, configMapName, ns, previewEnvVars, esCfg, meta, routes); err != nil {
 		return fmt.Errorf("writing composed preview platform resources: %w", err)
 	}
 
@@ -3194,6 +3242,9 @@ type PreviewPublishSpec struct {
 	// projected inside the preview. Populated only when the app curates
 	// secrets (the same gating as AppPublishEnv.ScopeSecretKeys).
 	ScopeSecretKeys ScopeSecretKeys
+	// Routes carries the platform-owned routing inputs for this preview (the
+	// composite preview + the backend-switch ReferenceGrant). See RouteInputs.
+	Routes RouteInputs
 }
 
 // previewComponentProjection is the pair of platform names a preview

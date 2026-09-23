@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -20,8 +21,10 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/envconfig"
 	"github.com/suparcloud/suparship/internal/gitops"
+	"github.com/suparcloud/suparship/internal/helmvalues"
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
+	"github.com/suparcloud/suparship/internal/platform"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/registry"
@@ -469,6 +472,16 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		result.App.Spec.EnvironmentDefaults = ed
 	}
 
+	// Platform-owned routes, validated like a PATCH (backends must be this app
+	// or a project sibling; every tier must resolve to a routing profile).
+	if len(req.Routes) > 0 {
+		if err := ah.validateAppRoutes(r.Context(), projectName, result.App.Name, req.Routes); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		result.App.Spec.Routes = req.Routes
+	}
+
 	// Verify at least one environment is registered in the org before creating
 	// the app. Deploying to unregistered environments silently would produce
 	// orphaned GitOps manifests pointing at clusters that don't exist.
@@ -604,6 +617,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	prevComponents := append([]domain.ComponentSpec(nil), app.Spec.Components...)
 	prevCD := app.Spec.CD
 	prevPreviewsEnabled := app.Spec.PreviewsEnabled
+	prevRoutes := app.Spec.Routes
 
 	if req.Values != nil {
 		newValues := *req.Values
@@ -820,6 +834,13 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if req.PreviewsEnabled != nil {
 		app.Spec.PreviewsEnabled = *req.PreviewsEnabled
 	}
+	if req.Routes != nil {
+		if err := ah.validateAppRoutes(r.Context(), projectName, appName, *req.Routes); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		app.Spec.Routes = *req.Routes
+	}
 	// Set of valid component names, used to reject unknown names in the
 	// per-component values updates below.
 	compNames := make(map[string]bool, len(app.Spec.Components))
@@ -929,12 +950,16 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 				app.Spec.Components = prevComponents
 				app.Spec.CD = prevCD
 				app.Spec.PreviewsEnabled = prevPreviewsEnabled
+				app.Spec.Routes = prevRoutes
 				_ = ah.appStore.SaveApp(ctx, projectName, app)
 				slog.Error("update-app: publish failed; rolled back config change",
 					"project", projectName, "app", appName, "err", err)
 				return http.StatusInternalServerError, nil, fmt.Errorf("publish failed; config change rolled back: %w", err)
 			}
 			ah.ensureKargoProjectCreds(ctx, projectName)
+			if req.Routes != nil && !routesEqual(prevRoutes, app.Spec.Routes) {
+				ah.republishPreviewsForRoutes(ctx, app, allEnvs)
+			}
 		}
 
 		saved, _ := ah.appStore.GetApp(ctx, projectName, appName)
@@ -942,6 +967,53 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		return http.StatusOK, updateAppResponse{App: appToDetailDTO(saved, savedEnvs)}, nil
 	}
 	dispatchOp(w, r, ah.async, "update-app", projectName, op)
+}
+
+// routesEqual reports whether two route lists render the same (JSON shape).
+func routesEqual(a, b []domain.RouteSpec) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	aj, _ := json.Marshal(a)
+	bj, _ := json.Marshal(b)
+	return string(aj) == string(bj)
+}
+
+// republishPreviewsForRoutes re-renders this app's existing previews after a
+// routes change: each preview dir carries its own Ingress/HTTPRoute (and the
+// composite of sibling rules), so a stale copy would keep serving the old
+// hostnames and backends until the preview's next publish. Siblings sharing a
+// hostname are refreshed too (their ReferenceGrants/composites follow this
+// app's hostnames). Stored preview URLs follow the first hostname. Best-effort:
+// the stable envs are already published; a failure here is logged.
+func (ah *appHandler) republishPreviewsForRoutes(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) {
+	var targets []PreviewPublishTarget
+	baseEnvs := map[string]bool{}
+	for _, env := range envs {
+		if env.EnvType != domain.AppEnvPreview {
+			continue
+		}
+		t := ah.previewPublishTarget(ctx, app, env)
+		targets = append(targets, t)
+		baseEnvs[t.BaseEnv] = true
+		if len(env.URLs) > 0 {
+			baseDomain, secure := ah.previewRoutingForEnv(ctx, t.BaseEnv)
+			if u := ah.previewOwnURL(ctx, app, env.EnvName, t.BaseEnv, baseDomain, secure); u != "" && u != env.URLs[0] {
+				ah.savePreviewURL(ctx, app, env, u)
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+	if err := ah.publishPreviewsBatch(ctx, targets); err != nil {
+		slog.Warn("update-app: failed to republish previews after routes change",
+			"project", app.ProjectName, "app", app.Name, "err", err)
+		return
+	}
+	for baseEnv := range baseEnvs {
+		ah.republishRouteSiblings(ctx, app, baseEnv)
+	}
 }
 
 // handleDeleteApp handles DELETE /api/v1/projects/{project}/apps/{app}.
@@ -1281,6 +1353,7 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	})
 
 	detail := appToDetailDTO(app, envs)
+	detail.PlatformRouted = ah.platformRouted(r.Context(), app)
 	// Upgrade hints are detail-only: the picker needs each component's own
 	// template's archived versions, which the list view can't afford to fan out.
 	ah.decorateTemplateUpgrades(ctx, &detail)
@@ -1357,10 +1430,13 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 		// a stable env's hostname (the routed host is the preview's stored URL).
 		if env.EnvType == domain.AppEnvPreview {
 			dto.RoutedFromEnv = app.Spec.EnvRoutedToPreview(envName)
-		} else if p := app.Spec.EnvironmentDefaults[envName].RoutedToPreview; p != "" {
-			dto.RoutedToPreview = p
-			if pe, perr := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, p); perr == nil && len(pe.URLs) > 0 {
-				dto.RoutedHost = pe.URLs[0]
+		} else if ov := app.Spec.EnvironmentDefaults[envName]; ov.RoutedToPreview != "" {
+			dto.RoutedToPreview = ov.RoutedToPreview
+			dto.RoutedHost, dto.RoutedMode = ov.RoutedHost, ov.RoutedMode
+			if dto.RoutedHost == "" {
+				if pe, perr := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, ov.RoutedToPreview); perr == nil && len(pe.URLs) > 0 {
+					dto.RoutedHost = pe.URLs[0]
+				}
 			}
 		}
 	}
@@ -1452,6 +1528,11 @@ func (ah *appHandler) prepAppPreview(ctx context.Context, a *domain.App, preview
 	// that URL across a CI re-launch — the mapper renders it on the donor host.
 	if inst.URL != "" {
 		inst.URL = previewURLFor(a, previewName, baseDomain, secure)
+	}
+	// A platform-routed app's preview serves the route hostname in preview
+	// form (its chart renders no ingress), whatever AppHasIngressRoute says.
+	if u := ah.routeHostURL(ctx, a, baseEnv, domain.AppEnvPreview, previewName, baseDomain, secure); u != "" {
+		inst.URL = u
 	}
 	imageTag = strings.TrimSpace(imageTag)
 
@@ -1611,6 +1692,11 @@ func (ah *appHandler) handleCreateAppPreview(w http.ResponseWriter, r *http.Requ
 		if existed {
 			status = http.StatusOK
 		}
+		// Apps sharing a platform-routed hostname carry a ReferenceGrant for
+		// this preview's namespace (the composite preview forwards their paths).
+		if !existed {
+			ah.republishRouteSiblings(ctx, a, baseEnv)
+		}
 		return status, appPreviewToDTO(env), nil
 	}
 	dispatchOp(w, r, ah.async, "preview-app", projectName, op)
@@ -1670,6 +1756,11 @@ func (ah *appHandler) handleDeleteAppPreview(w http.ResponseWriter, r *http.Requ
 		}
 		if err := ah.appStore.DeleteAppEnvironment(ctx, projectName, appName, previewName); err != nil {
 			return http.StatusInternalServerError, nil, fmt.Errorf("failed to delete preview")
+		}
+		// Sibling apps sharing a platform-routed hostname drop their
+		// ReferenceGrant for this preview's namespace.
+		if app, gerr := ah.appStore.GetApp(ctx, projectName, appName); gerr == nil {
+			ah.republishRouteSiblings(ctx, app, env.BaseEnv)
 		}
 		// 204 No Content: nil result → dispatchOp writes just the status, no body.
 		return http.StatusNoContent, nil, nil
@@ -4247,7 +4338,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 		// Prefer label-based app-native discovery when the provider is a real
 		// K8s provider; fakes/tests only implement the name-based interface.
 		if kp, ok := ah.runtimeProvider.(*runtime.K8sProvider); ok {
-			ah.applyComponentRuntimes(env, instances, runtimeByComponent(ctx, kp, env.Namespace, instances))
+			ah.applyComponentRuntimes(env, instances, runtimeByComponent(ctx, kp, env.Namespace, env.AppName, instances, ah.routeBackendComponents(ctx, env.ProjectName, env.AppName)))
 			return
 		}
 		if info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName); err == nil {
@@ -4274,6 +4365,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 	// serializes one full read per cluster); each returns per-component infos we
 	// then merge across clusters in cluster order so the worst-of phase, summed
 	// replicas, and per-cluster diagnostics are deterministic.
+	routeComps := ah.routeBackendComponents(ctx, env.ProjectName, env.AppName)
 	perCluster := make([]map[string]*runtime.RuntimeInfo, len(clients))
 	runBounded(len(clients), appEnrichConcurrency, func(i int) {
 		nc := clients[i]
@@ -4287,7 +4379,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 				return org.EffectiveSecureEndpoints()
 			})
 		}
-		perCluster[i] = runtimeByComponent(ctx, prov, env.Namespace, instances)
+		perCluster[i] = runtimeByComponent(ctx, prov, env.Namespace, env.AppName, instances, routeComps)
 	})
 
 	// compAgg: component name → RuntimeInfo aggregated across all reachable clusters.
@@ -4368,13 +4460,20 @@ func (ah *appHandler) appStatefulComponents(ctx context.Context, project, appNam
 // undeployed. Omitting them keeps them out of the aggregate and the per-component
 // list, so the UI renders their row at the app's phase with "—" replicas. A
 // failed migration still surfaces via the app's ArgoCD sync diagnostics.
-func runtimeByComponent(ctx context.Context, kp *runtime.K8sProvider, namespace string, instances []domain.WorkloadInstance) map[string]*runtime.RuntimeInfo {
+func runtimeByComponent(ctx context.Context, kp *runtime.K8sProvider, namespace, appName string, instances []domain.WorkloadInstance, routed map[string]bool) map[string]*runtime.RuntimeInfo {
 	out := make(map[string]*runtime.RuntimeInfo, len(instances))
 	for _, wi := range instances {
 		if wi.OneShot {
 			continue
 		}
-		if info, err := kp.GetAppRuntime(ctx, namespace, wi.Instance, wi.Instance); err == nil {
+		// Platform-rendered routes are labelled with the app, not the component
+		// instance; attribute them to the components they forward to (routed;
+		// nil = none, "*" = every component).
+		owner := ""
+		if routed[wi.Component] || routed["*"] {
+			owner = appName
+		}
+		if info, err := kp.GetAppRuntimeFor(ctx, namespace, wi.Instance, wi.Instance, owner); err == nil {
 			out[wi.Component] = info
 		}
 	}
@@ -4398,7 +4497,12 @@ func mergeRuntime(dst, src *runtime.RuntimeInfo) {
 	if dst.Image == "" {
 		dst.Image = src.Image
 	}
-	dst.IngressURLs = append(dst.IngressURLs, src.IngressURLs...)
+	// Components sharing a platform route report the same URL; keep one.
+	for _, u := range src.IngressURLs {
+		if !slices.Contains(dst.IngressURLs, u) {
+			dst.IngressURLs = append(dst.IngressURLs, u)
+		}
+	}
 }
 
 // applyComponentRuntimes aggregates per-component infos into the env-level status
@@ -4729,9 +4833,14 @@ func applyRoutingState(app *domain.App, dtos []AppEnvironmentSummaryDTO) {
 		if dtos[i].EnvType == string(domain.AppEnvPreview) {
 			continue
 		}
-		if p := app.Spec.EnvironmentDefaults[dtos[i].EnvName].RoutedToPreview; p != "" {
-			dtos[i].RoutedToPreview = p
-			dtos[i].RoutedHost = previewURL[p]
+		if ov := app.Spec.EnvironmentDefaults[dtos[i].EnvName]; ov.RoutedToPreview != "" {
+			dtos[i].RoutedToPreview = ov.RoutedToPreview
+			dtos[i].RoutedMode = ov.RoutedMode
+			// Recorded at route time; older routes fall back to the preview's URL.
+			dtos[i].RoutedHost = ov.RoutedHost
+			if dtos[i].RoutedHost == "" {
+				dtos[i].RoutedHost = previewURL[ov.RoutedToPreview]
+			}
 		}
 	}
 }
@@ -4960,6 +5069,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		Images:              appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:        string(app.Spec.DeliveryMode),
 		PreviewsEnabled:     app.Spec.PreviewsEnabled,
+		Routes:              routesOrEmpty(app.Spec.Routes),
 	}
 }
 
@@ -5786,4 +5896,144 @@ func (ah *appHandler) handleGetAppDeploymentHistory(w http.ResponseWriter, r *ht
 		Environment: envName,
 		History:     dtos,
 	})
+}
+
+// routesOrEmpty marshals a nil route list as [] so the UI can map over it.
+func routesOrEmpty(r []domain.RouteSpec) []domain.RouteSpec {
+	if r == nil {
+		return []domain.RouteSpec{}
+	}
+	return r
+}
+
+// validateAppRoutes checks an app's platform routes against the project's
+// other apps (allowed backends) and the org/env routing profiles (every tier
+// must have a Gateway), mirroring the ExposeMode validation on create.
+func (ah *appHandler) validateAppRoutes(ctx context.Context, projectName, appName string, routes []domain.RouteSpec) error {
+	var others []string
+	if apps, err := ah.appStore.ListApps(ctx, projectName); err == nil {
+		for _, a := range apps {
+			if a.Name != appName {
+				others = append(others, a.Name)
+			}
+		}
+	}
+	return ah.validateRoutesAgainstOrg(ctx, routes, appName, others)
+}
+
+// validateRoutesAgainstOrg runs ValidateRoutes once per routing-profile layer
+// (org, then each env with its own profiles), like ValidateExposeModes on
+// create. Without an org provider only the structural checks run.
+func (ah *appHandler) validateRoutesAgainstOrg(ctx context.Context, routes []domain.RouteSpec, selfApp string, allowed []string) error {
+	if ah.orgProvider == nil {
+		return domain.ValidateRoutes(routes, selfApp, allowed, nil, nil)
+	}
+	org, err := ah.orgProvider.GetOrg(ctx)
+	if err != nil || org == nil {
+		return domain.ValidateRoutes(routes, selfApp, allowed, nil, nil)
+	}
+	if err := domain.ValidateRoutes(routes, selfApp, allowed, org.RoutingProfiles, nil); err != nil {
+		return err
+	}
+	for _, e := range org.Environments {
+		if len(e.RoutingProfiles) == 0 {
+			continue
+		}
+		if err := domain.ValidateRoutes(routes, selfApp, allowed, org.RoutingProfiles, e.RoutingProfiles); err != nil {
+			return fmt.Errorf("environment %s: %w", e.Name, err)
+		}
+	}
+	return validateRouteHostsDistinctAcrossEnvs(routes, selfApp, org)
+}
+
+// validateRouteHostsDistinctAcrossEnvs refuses a route whose hostname renders
+// identically in two stable envs — e.g. "((platform.appRoutingName)).
+// ((platform.externalBaseDomain))" when staging and prod share a base domain.
+// DNS can only point one hostname at one environment, and on a shared cluster
+// the ingress admission webhook rejects the second env's object outright (the
+// user would only find out from ArgoCD). Cluster names are not compared: the
+// dev loop registers one kind cluster under two names. The fix is an
+// env-distinguishing token such as ((platform.envType)), or per-env base
+// domains.
+func validateRouteHostsDistinctAcrossEnvs(routes []domain.RouteSpec, selfApp string, org *rbac.Org) error {
+	if org == nil || len(org.Environments) < 2 {
+		return nil
+	}
+	appName := selfApp
+	if appName == "" {
+		appName = "app"
+	}
+	probe := &domain.App{Name: appName, Spec: domain.AppSpec{Routes: routes}}
+	seen := map[string]string{} // resolved host → first env rendering it
+	for _, e := range org.Environments {
+		envType := domain.AppEnvStaging
+		if e.Name == "prod" || e.Name == "production" {
+			envType = domain.AppEnvProd
+		}
+		pv := helmvalues.MapPlatformValuesForEnv(probe, e.Name, envType, e.BaseDomain, "", "", org.Name, org.RoutingProfiles, e.RoutingProfiles, nil)
+		if selfApp == "" {
+			pv.Stack = "stack"
+		}
+		ctx := platform.Context{Platform: pv}
+		for i, r := range routes {
+			defaultHost := domain.DefaultAppRouteHostname
+			if selfApp == "" {
+				defaultHost = domain.DefaultStackRouteHostname
+			}
+			for _, h := range r.EffectiveHostnames(defaultHost) {
+				resolved := ctx.Interpolate(h)
+				// Unresolved (no profile / no base domain) hosts can't collide
+				// here; the publisher reports them.
+				if resolved == "" || strings.Contains(resolved, "((") || strings.HasSuffix(resolved, ".") {
+					continue
+				}
+				if prev, dup := seen[resolved]; dup && prev != e.Name {
+					return fmt.Errorf("route %q: hostname %q renders as %q for both %s and %s; add ((platform.envType)) or ((platform.env)) to the hostname, or give the environments different base domains",
+						r.EffectiveName(i), h, resolved, prev, e.Name)
+				}
+				if _, dup := seen[resolved]; !dup {
+					seen[resolved] = e.Name
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// routeBackendComponents returns the components of an app that its platform
+// routes forward to (nil when the app has no platform routes; "*" when a rule
+// names the app without a component), so live route URLs are attributed to
+// those components only — not to a database or worker that shares the app.
+func (ah *appHandler) routeBackendComponents(ctx context.Context, projectName, appName string) map[string]bool {
+	app, err := ah.appStore.GetApp(ctx, projectName, appName)
+	if err != nil {
+		return nil
+	}
+	var out map[string]bool
+	add := func(routes []domain.RouteSpec, self string) {
+		for _, r := range routes {
+			for _, rule := range r.Rules {
+				if rule.Backend.AppName(self) != appName {
+					continue
+				}
+				if out == nil {
+					out = map[string]bool{}
+				}
+				if rule.Backend.Component == "" {
+					out["*"] = true
+				} else {
+					out[rule.Backend.Component] = true
+				}
+			}
+		}
+	}
+	add(ah.effectiveRoutes(ctx, app), app.Name)
+	if apps, aerr := ah.appStore.ListApps(ctx, projectName); aerr == nil {
+		for _, o := range apps {
+			if o.Name != app.Name {
+				add(ah.effectiveRoutes(ctx, o), o.Name)
+			}
+		}
+	}
+	return out
 }

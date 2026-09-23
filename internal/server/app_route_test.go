@@ -796,3 +796,314 @@ func TestRouteAppEnv_RefusesLiteralHost(t *testing.T) {
 		}
 	})
 }
+
+// --- platform-owned routes: backend switch ---
+
+// platformRoutedApp declares its own platform route (no exposed component: the
+// chart owns no ingress), so route-to-preview is a backend switch.
+func platformRoutedApp(project string) *domain.App {
+	app := previewTestAppForProject(project)
+	app.Spec.Routes = []domain.RouteSpec{{
+		Name:      "web",
+		Hostnames: []string{"my-app((platform.previewSuffix)).acme.com"},
+		Rules:     []domain.RouteRule{{PathPrefix: "/", Backend: domain.RouteBackend{Component: "web", Port: 80}}},
+	}}
+	return app
+}
+
+func TestRouteAppEnv_PlatformRoutedIsABackendSwitch(t *testing.T) {
+	routeSettlePoll = time.Millisecond
+	pub := &recordingPublisher{}
+	mux, ah, store, _, appH := newTestStackMuxPub(testProject, pub)
+	gate := &settleGate{settleAfter: 5}
+	appH.argoAppGate = gate
+	appH.argoChainNudger = gate
+	store.addApp(platformRoutedApp(testProject))
+	seedRouteEnvs(store, testProject)
+	dev := sessionCookieFor(ah, "bob", "developer")
+
+	// No exposed component and a tokenless chart host would refuse a chart
+	// route; a platform-routed app skips those guards.
+	rec := routeAppEnvReq(mux, dev, testProject, "my-app", "staging", "pr-42")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("route: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := routedTo(t, store, testProject, "my-app", "staging"); got != "pr-42" {
+		t.Errorf("RoutedToPreview = %q, want pr-42", got)
+	}
+	// Env published (switched backends) then the preview (grant); no ArgoCD wait.
+	if want := "apps:1,preview:pr-42"; strings.Join(pub.log, ",") != want {
+		t.Errorf("publish order = %v, want %s", pub.log, want)
+	}
+	if gate.settleReads != 0 {
+		t.Errorf("backend switch must not wait on ArgoCD, got %d settle reads", gate.settleReads)
+	}
+	var resp map[string]string
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["host"] != "my-app.acme.com" {
+		t.Errorf("host = %q, want the stable route hostname my-app.acme.com", resp["host"])
+	}
+	// A switch never touches the preview's own URL, and records what was
+	// forwarded so the UI reports a fact.
+	if urls := previewURLs(t, store, testProject, "my-app", "pr-42"); len(urls) != 1 || urls[0] != "https://pr-42.my-app.preview.localhost" {
+		t.Errorf("preview URL must be untouched by a backend switch, got %v", urls)
+	}
+	a, _ := store.GetApp(context.Background(), testProject, "my-app")
+	if ov := a.Spec.EnvironmentDefaults["staging"]; ov.RoutedHost != "https://my-app.acme.com" || ov.RoutedMode != domain.RouteModeSwitch {
+		t.Errorf("recorded route = %+v, want host https://my-app.acme.com mode switch", ov)
+	}
+	dtos := buildEnvSummaryDTOs(a, func() []*domain.AppEnvironment {
+		e, _ := store.ListAppEnvironments(context.Background(), testProject, "my-app")
+		return e
+	}())
+	for _, d := range dtos {
+		if d.EnvName == "staging" && (d.RoutedMode != "switch" || d.RoutedHost != "https://my-app.acme.com") {
+			t.Errorf("staging DTO = %+v, want switch / https://my-app.acme.com", d)
+		}
+	}
+
+	pub.log = nil
+	if rec := unrouteAppEnvReq(mux, dev, testProject, "my-app", "staging"); rec.Code != http.StatusOK {
+		t.Fatalf("unroute: %d %s", rec.Code, rec.Body.String())
+	}
+	a, _ = store.GetApp(context.Background(), testProject, "my-app")
+	if ov := a.Spec.EnvironmentDefaults["staging"]; ov.RoutedHost != "" || ov.RoutedMode != "" {
+		t.Errorf("restore should clear the recorded route, got %+v", ov)
+	}
+	if want := "apps:1,preview:pr-42"; strings.Join(pub.log, ",") != want {
+		t.Errorf("unroute publish order = %v, want %s", pub.log, want)
+	}
+	if gate.settleReads != 0 || gate.goneReads != 0 {
+		t.Errorf("unroute must not wait: settle=%d gone=%d", gate.settleReads, gate.goneReads)
+	}
+}
+
+func TestDeleteAppPreview_PlatformRoutedRestoresWithoutWait(t *testing.T) {
+	pub := &previewDeleterPublisher{}
+	mux, ah, store, _, appH := newTestStackMuxPub(testProject, pub)
+	gate := &settleGate{goneAfter: 5}
+	appH.argoAppGate = gate
+	appH.argoChainNudger = gate
+	store.addApp(platformRoutedApp(testProject))
+	seedRouteEnvs(store, testProject)
+	dev := sessionCookieFor(ah, "bob", "developer")
+	if rec := routeAppEnvReq(mux, dev, testProject, "my-app", "staging", "pr-42"); rec.Code != http.StatusOK {
+		t.Fatalf("route: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := deleteAppPreview(mux, dev, testProject, "my-app", "pr-42"); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	if gate.goneReads != 0 {
+		t.Errorf("platform-routed delete must not poll for the preview Application, got %d", gate.goneReads)
+	}
+	if got := routedTo(t, store, testProject, "my-app", "staging"); got != "" {
+		t.Errorf("swap should be cleared, got %q", got)
+	}
+}
+
+func TestUpdateApp_RoutesValidatedAndExposed(t *testing.T) {
+	mux, ah, store, _, _ := newTestStackMuxPub(testProject, &recordingPublisher{})
+	store.addApp(routedTestApp(testProject))
+	seedRouteEnvs(store, testProject)
+	admin := sessionCookieFor(ah, "alice", "org_admin")
+	patch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+testProject+"/apps/my-app", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(admin)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	// A backend outside the project is refused.
+	if rec := patch(`{"routes":[{"rules":[{"pathPrefix":"/","backend":{"app":"telephony","port":80}}]}]}`); rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("foreign backend: %d %s", rec.Code, rec.Body.String())
+	}
+	// The test org runs staging and prod on one cluster, so a literal host
+	// needs an env segment.
+	if rec := patch(`{"routes":[{"name":"web","hostnames":["my-app.((platform.envType)).acme.com"],"rules":[{"pathPrefix":"/","backend":{"port":80}}]}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("valid routes: %d %s", rec.Code, rec.Body.String())
+	}
+	a, _ := store.GetApp(context.Background(), testProject, "my-app")
+	if len(a.Spec.Routes) != 1 || a.Spec.Routes[0].Name != "web" {
+		t.Errorf("saved routes = %+v", a.Spec.Routes)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+testProject+"/apps/my-app", nil)
+	req.AddCookie(admin)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"routes":[{"name":"web"`) {
+		t.Errorf("app detail should expose routes: %s", rec.Body.String())
+	}
+	// Clearing with [] works.
+	if rec := patch(`{"routes":[]}`); rec.Code != http.StatusOK {
+		t.Fatalf("clear routes: %d %s", rec.Code, rec.Body.String())
+	}
+	a, _ = store.GetApp(context.Background(), testProject, "my-app")
+	if len(a.Spec.Routes) != 0 {
+		t.Errorf("routes should be cleared, got %+v", a.Spec.Routes)
+	}
+}
+
+// A platform-routed app's preview stores the route hostname in preview form —
+// what the platform's Ingress/HTTPRoute will carry — not the legacy shape.
+func TestCreateAppPreview_PlatformRoutedURL(t *testing.T) {
+	pub := &recordingPublisher{}
+	mux, ah, store, _, appH := newTestStackMuxPub(testProject, pub)
+	org := testRBACOrg()
+	org.RoutingProfiles = domain.RoutingProfiles{"external": {IngressClassName: "nginx", BaseDomain: "acme.com"}}
+	appH.orgProvider = &staticOrgProvider{org: org}
+	app := platformRoutedApp(testProject)
+	app.Spec.Routes[0].Hostnames = []string{"my-app((platform.previewSuffix)).((platform.envType)).((platform.externalBaseDomain))"}
+	store.addApp(app)
+	seedRouteEnvs(store, testProject)
+	rec := postAppPreviewJSON(mux, sessionCookieFor(ah, "bob", "developer"), testProject, "my-app", CreateAppPreviewRequest{Name: "pr-9", ImageTag: "pr-9-abc"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create preview: %d %s", rec.Code, rec.Body.String())
+	}
+	if urls := previewURLs(t, store, testProject, "my-app", "pr-9"); len(urls) != 1 || urls[0] != "https://my-app-pr-9.preview.acme.com" {
+		t.Errorf("preview URL = %v, want https://my-app-pr-9.preview.acme.com", urls)
+	}
+	// The detail read reports the app as platform-routed for the UI.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+testProject+"/apps/my-app", nil)
+	req.AddCookie(sessionCookieFor(ah, "bob", "developer"))
+	drec := httptest.NewRecorder()
+	mux.ServeHTTP(drec, req)
+	if !strings.Contains(drec.Body.String(), `"platformRouted":true`) {
+		t.Errorf("app detail should report platformRouted: %s", drec.Body.String())
+	}
+}
+
+// Create accepts platform routes (validated like a PATCH) and persists them.
+func TestCreateApp_WithRoutes(t *testing.T) {
+	mux, ah, appStore := newAppCreateMuxWith([]*tpl.Template{appCreateTestTemplate()}, nil)
+	admin := sessionCookieFor(ah, "alice", "org_admin")
+	bad := postCreateAppJSON(mux, admin, "demo", createAppRequest{
+		Name: "routed-bad", Template: "web-service", Values: map[string]any{"image": "ghcr.io/org/app:v1"},
+		Routes: []domain.RouteSpec{{Rules: []domain.RouteRule{{PathPrefix: "/", Backend: domain.RouteBackend{App: "elsewhere", Port: 80}}}}},
+	})
+	if bad.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("foreign backend on create: %d %s", bad.Code, bad.Body.String())
+	}
+	rec := postCreateAppJSON(mux, admin, "demo", createAppRequest{
+		Name: "routed", Template: "web-service", Values: map[string]any{"image": "ghcr.io/org/app:v1"},
+		Routes: []domain.RouteSpec{{Name: "external", Rules: []domain.RouteRule{{PathPrefix: "/", Backend: domain.RouteBackend{Component: "web", Port: 80}}}}},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create with routes: %d %s", rec.Code, rec.Body.String())
+	}
+	a, err := appStore.GetApp(context.Background(), "demo", "routed")
+	if err != nil || len(a.Spec.Routes) != 1 || a.Spec.Routes[0].Name != "external" {
+		t.Fatalf("persisted routes = %+v (err %v)", a, err)
+	}
+}
+
+// The live view resolves hostnames per env/preview and reports a backend
+// switch as the rule's forwarded target.
+func TestGetAppRoutes_LiveView(t *testing.T) {
+	pub := &recordingPublisher{}
+	mux, ah, store, _, appH := newTestStackMuxPub(testProject, pub)
+	org := testRBACOrg()
+	org.RoutingProfiles = domain.RoutingProfiles{"external": {IngressClassName: "nginx", BaseDomain: "acme.com"}}
+	appH.orgProvider = &staticOrgProvider{org: org}
+	app := platformRoutedApp(testProject)
+	app.Spec.Routes[0].Hostnames = []string{"my-app((platform.previewSuffix)).((platform.envType)).((platform.externalBaseDomain))"}
+	store.addApp(app)
+	seedRouteEnvs(store, testProject)
+	dev := sessionCookieFor(ah, "bob", "developer")
+	if rec := routeAppEnvReq(mux, dev, testProject, "my-app", "staging", "pr-42"); rec.Code != http.StatusOK {
+		t.Fatalf("route: %d %s", rec.Code, rec.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+testProject+"/apps/my-app/routes", nil)
+	req.AddCookie(dev)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("routes: %d %s", rec.Code, rec.Body.String())
+	}
+	var st AppRoutesStatusDTO
+	_ = json.NewDecoder(rec.Body).Decode(&st)
+	if !st.PlatformRouted || st.Edge != "ingress" {
+		t.Errorf("status = platformRouted %v edge %q, want true / ingress", st.PlatformRouted, st.Edge)
+	}
+	by := map[string]EnvRoutesStatusDTO{}
+	for _, e := range st.Envs {
+		by[e.EnvName] = e
+	}
+	staging := by["staging"]
+	if len(staging.Routes) != 1 || staging.Routes[0].Hostnames[0] != "my-app.staging.acme.com" {
+		t.Fatalf("staging routes = %+v", staging.Routes)
+	}
+	rule := staging.Routes[0].Rules[0]
+	if rule.Service != "my-app-web" || rule.Port != 80 || rule.ForwardedTo != "pr-42" || rule.Namespace != testProject+"-my-app-preview-pr-42" {
+		t.Errorf("switched rule = %+v", rule)
+	}
+	if prod := by["prod"]; len(prod.Routes) != 1 || prod.Routes[0].Rules[0].ForwardedTo != "" || prod.Routes[0].Hostnames[0] != "my-app.prod.acme.com" {
+		t.Errorf("prod routes = %+v", prod.Routes)
+	}
+	if pv := by["pr-42"]; len(pv.Routes) != 1 || pv.Routes[0].Hostnames[0] != "my-app-pr-42.preview.acme.com" || pv.Routes[0].Rules[0].Namespace != "" {
+		t.Errorf("preview routes = %+v", pv.Routes)
+	}
+}
+
+// A hostname that renders identically in two stable envs (shared base domain,
+// no env segment) is refused at save time — the ingress webhook would reject
+// the second env's object otherwise.
+func TestUpdateApp_RoutesMustDifferAcrossEnvs(t *testing.T) {
+	mux, ah, store, _, appH := newTestStackMuxPub(testProject, &recordingPublisher{})
+	org := testRBACOrg()
+	org.RoutingProfiles = domain.RoutingProfiles{"external": {IngressClassName: "nginx"}}
+	for i := range org.Environments {
+		org.Environments[i].BaseDomain = "localhost" // staging and prod share it
+	}
+	appH.orgProvider = &staticOrgProvider{org: org}
+	store.addApp(routedTestApp(testProject))
+	seedRouteEnvs(store, testProject)
+	admin := sessionCookieFor(ah, "alice", "org_admin")
+	patch := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+testProject+"/apps/my-app", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(admin)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	rec := patch(`{"routes":[{"rules":[{"pathPrefix":"/","backend":{"port":80}}]}]}`) // default host, no env segment
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "renders as") {
+		t.Fatalf("shared-domain default host: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = patch(`{"routes":[{"hostnames":["((platform.appRoutingName)).((platform.envType)).((platform.externalBaseDomain))"],"rules":[{"pathPrefix":"/","backend":{"port":80}}]}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("env-typed host: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Live route URLs are attributed only to the components a platform route
+// forwards to: a rule naming a component marks that component; a rule with
+// no component marks the whole app; another app's route to us counts too;
+// no routes → nil.
+func TestRouteBackendComponents(t *testing.T) {
+	mux, _, store, _, appH := newTestStackMuxPub(testProject, &recordingPublisher{})
+	_ = mux
+	ctx := context.Background()
+	if got := appH.routeBackendComponents(ctx, testProject, "missing"); got != nil {
+		t.Errorf("unknown app should yield nil, got %v", got)
+	}
+	app := previewTestAppForProject(testProject) // components web + worker, no routes
+	store.addApp(app)
+	if got := appH.routeBackendComponents(ctx, testProject, "my-app"); got != nil {
+		t.Errorf("no routes should yield nil, got %v", got)
+	}
+	app.Spec.Routes = []domain.RouteSpec{{Rules: []domain.RouteRule{{PathPrefix: "/", Backend: domain.RouteBackend{Component: "web", Port: 80}}}}}
+	_ = store.SaveApp(ctx, testProject, app)
+	if got := appH.routeBackendComponents(ctx, testProject, "my-app"); !got["web"] || got["worker"] || got["*"] {
+		t.Errorf("component rule should mark web only, got %v", got)
+	}
+	other := &domain.App{Name: "edge", ProjectName: testProject, Spec: domain.AppSpec{
+		Template: domain.AppTemplateRef{Name: "web-service"},
+		Routes:   []domain.RouteSpec{{Rules: []domain.RouteRule{{PathPrefix: "/api", Backend: domain.RouteBackend{App: "my-app", Port: 80}}}}},
+	}}
+	store.addApp(other)
+	if got := appH.routeBackendComponents(ctx, testProject, "my-app"); !got["*"] || !got["web"] {
+		t.Errorf("a sibling's component-less rule marks the whole app, got %v", got)
+	}
+}

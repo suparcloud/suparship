@@ -65,6 +65,12 @@ type PlatformValues struct {
 	// has no routing profile.
 	ExternalRoutingHost string `json:"externalRoutingHost,omitempty" yaml:"externalRoutingHost,omitempty"`
 	InternalRoutingHost string `json:"internalRoutingHost,omitempty" yaml:"internalRoutingHost,omitempty"`
+	// Stack is the app's stack (group) name, empty when the app is not in one.
+	Stack string `json:"stack,omitempty" yaml:"stack,omitempty"`
+	// PreviewSuffix is "" in stable envs and "-{preview}" in previews, so a
+	// literal shared hostname stays unique per preview:
+	// "myhost((platform.previewSuffix)).((platform.externalBaseDomain))".
+	PreviewSuffix string `json:"previewSuffix,omitempty" yaml:"previewSuffix,omitempty"`
 	// IngressClassName is the resolved IngressClass for the routing component.
 	// Empty when routing is disabled / no profile resolved.
 	IngressClassName string `json:"ingressClassName,omitempty" yaml:"ingressClassName,omitempty"`

@@ -421,3 +421,19 @@ func TestTierRoutingHosts_ComposeNameAndTierDomain(t *testing.T) {
 		t.Errorf("external-only tier hosts = (%q, %q), want (hello.acme.com, \"\")", extOnly.ExternalRoutingHost, extOnly.InternalRoutingHost)
 	}
 }
+
+func TestStackAndPreviewSuffixValues(t *testing.T) {
+	app := webApp("hello", webComponent("web"))
+	app.Spec.Stack = "voiceai-livekit"
+	stable := MapPlatformValuesForEnv(app, "staging", domain.AppEnvStaging, "acme.com", "ns", "", "acme", nil, nil, nil)
+	if stable.Stack != "voiceai-livekit" || stable.PreviewSuffix != "" {
+		t.Errorf("stable = (%q, %q), want (voiceai-livekit, \"\")", stable.Stack, stable.PreviewSuffix)
+	}
+	preview := MapPlatformValuesForEnv(app, "pr-42", domain.AppEnvPreview, "acme.com", "ns", "", "acme", nil, nil, nil)
+	if preview.PreviewSuffix != "-pr-42" {
+		t.Errorf("preview suffix = %q, want -pr-42", preview.PreviewSuffix)
+	}
+	if none := MapPlatformValuesForEnv(webApp("solo", webComponent("web")), "staging", domain.AppEnvStaging, "acme.com", "ns", "", "acme", nil, nil, nil); none.Stack != "" {
+		t.Errorf("no-stack app Stack = %q, want empty", none.Stack)
+	}
+}

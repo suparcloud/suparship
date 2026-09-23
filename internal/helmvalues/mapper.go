@@ -80,6 +80,8 @@ func MapPlatformValuesForEnv(
 		RoutingHost:             routingHost,
 		AppRoutingName:          appRoutingName,
 		AppComponentRoutingName: appComponentRoutingName,
+		Stack:                   app.Spec.Stack,
+		PreviewSuffix:           previewSuffixFor(envName, envType),
 		ConfigMapName:           secrets.AppConfigMapName(app.Name),
 		SecretName:              secrets.AppSecretName(app.Name),
 	}
@@ -177,6 +179,14 @@ func MapComponentPlatformValuesForEnv(
 	platform.ExternalRoutingHost, platform.InternalRoutingHost = tierRoutingHosts(platform.AppComponentRoutingName, platform.ExternalBaseDomain, platform.InternalBaseDomain)
 	platform.Component = comp.Name
 	return platform
+}
+
+// previewSuffixFor is "-{preview}" for a preview env and "" otherwise.
+func previewSuffixFor(envName string, envType domain.AppEnvironmentType) string {
+	if envType == domain.AppEnvPreview {
+		return "-" + envName
+	}
+	return ""
 }
 
 // routingNameFor derives the platform-owned name label for an instance ("{app}"

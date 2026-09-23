@@ -1,6 +1,7 @@
 import { isAcceptedTask, pollTask } from "./apps";
 import type { AcceptedTask, TaskProgress } from "./apps";
 import { api } from "./api";
+import type { RouteSpec } from "../types";
 import type { EnvConfig } from "./envconfig";
 
 // A stack groups tightly-coupled apps inside a project with a shared override
@@ -13,6 +14,8 @@ export interface Stack {
   sharedNamespace?: boolean;
   namespacePattern?: string;
   autoPromote?: boolean;
+  /** Platform-owned HTTP surfaces fanning out to member apps (expanded per member). */
+  routes?: RouteSpec[];
   rawValues?: Record<string, unknown>;
   envRawValues?: Record<string, Record<string, unknown>>;
   envConfig?: EnvConfig;
@@ -39,6 +42,8 @@ export interface UpdateStackRequest {
   sharedNamespace?: boolean;
   namespacePattern?: string;
   autoPromote?: boolean;
+  /** Replaces the stack's routes ([] clears them). */
+  routes?: RouteSpec[];
   rawValues?: Record<string, unknown>;
   envRawValues?: Record<string, Record<string, unknown>>;
   envConfig?: EnvConfig;

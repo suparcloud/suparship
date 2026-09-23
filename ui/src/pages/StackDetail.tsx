@@ -42,12 +42,14 @@ import {
 } from "../lib/secrets";
 import { EnvConfigEditor } from "../components/EnvConfigEditor";
 import { SecretEditor } from "../components/SecretEditor";
+import { RoutesEditor } from "../components/RoutesEditor";
 
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "previews", label: "Previews" },
   { id: "variables", label: "Variables" },
   { id: "secrets", label: "Secrets" },
+  { id: "routes", label: "Routes" },
   { id: "settings", label: "Settings" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
@@ -820,6 +822,33 @@ export function StackDetail() {
                 deleteFn={(k) => deleteStackEnvSecretKey(project, stackName, env.name, k)}
               />
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Routes — one hostname fanning out to member apps by path; rendered
+          per backend member into that member's platform resources. Optional
+          sugar over app-owned routes: moving the rules to the apps loses nothing. */}
+      {activeTab === "routes" && stack && (
+        <div className="rounded-xl border border-gray-200 bg-white">
+          <div className="border-b border-gray-100 px-6 py-4">
+            <h2 className="text-base font-medium text-gray-900">Routes</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Centralized routing for the stack: each rule's backend names a member app. The
+              default hostname is the stack name under the external base domain.
+            </p>
+          </div>
+          <div className="p-6">
+            <RoutesEditor
+              routes={stack.routes ?? []}
+              defaultHost="((platform.stack))((platform.previewSuffix)).((platform.externalBaseDomain))"
+              ownerKind="stack"
+              backendApps={stack.apps}
+              onSave={async (routes) => {
+                await updateStack(project!, stackName!, { routes });
+                await reload();
+              }}
+            />
           </div>
         </div>
       )}

@@ -57,6 +57,10 @@ type StackSpec struct {
 	// to prod (see CDConfig.AutoPromote). nil = inherit each app's own setting;
 	// the effective per-app value is `app.CD.AutoPromote || *stack.AutoPromote`.
 	AutoPromote *bool `json:"autoPromote,omitempty" yaml:"autoPromote,omitempty"`
+	// Routes are the stack's platform-owned HTTP surfaces (see RouteSpec): one
+	// hostname fanning out to member apps by path. Rendered per backend member
+	// into that member's platform resources.
+	Routes []RouteSpec `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
 // StackStore persists stacks. Implementations live in internal/kube.

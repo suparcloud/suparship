@@ -2,12 +2,15 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, routeAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, unrouteAppEnv, updateApp, upgradeAppComponents, retemplateAppComponents, getAppGitopsDrift } from "../lib/apps";
+import { fetchAppLogs, getApp, getAppDeploymentHistory, getAppEnvironment, getKargoAppPipeline, getKargoPromotionStatus, getRollbackCandidates, previewAppValues, pinAppEnv, promoteApp, resumeAppEnv, rollbackAppEnv, routeAppEnv, suspendAppEnv, syncApp, deleteApp, renameApp, undeployAppEnv, unpinAppEnv, unrouteAppEnv, updateApp, upgradeAppComponents, retemplateAppComponents, getAppGitopsDrift, getAppRoutes } from "../lib/apps";
+import type { AppRoutesStatus } from "../lib/apps";
 import type { RetemplateWarning, AppGitopsDrift } from "../lib/apps";
 import type { ClusterValueOverride, RollbackCandidate, RollbackCandidatesResponse, UpdateAppRequest } from "../lib/apps";
 import { listConfigVariables } from "../lib/configVars";
 import type { ConfigVariables } from "../lib/configVars";
 import { deepEqual, diffOverlay, mergeOverlay, parseYamlOverlay, stringifyOverlay } from "../lib/yamlDoc";
+import { RoutesEditor } from "../components/RoutesEditor";
+import { servicePortFromValues } from "../lib/routes";
 import { useAuth } from "../lib/AuthContext";
 
 // CodeMirror is heavy; only the values editor needs it.
@@ -2318,7 +2321,14 @@ export function AppDetail() {
           environments={data.environments}
         />
       )}
-      {activeTab === "traffic" && <TrafficTab />}
+      {activeTab === "traffic" && (
+        <TrafficTab
+          project={project ?? ""}
+          app={data.name}
+          hasRoutes={(data.routes?.length ?? 0) > 0}
+          envName={currentEnv?.envName ?? null}
+        />
+      )}
     </div>
   );
 }
@@ -3857,6 +3867,7 @@ function PinControls({
   environments,
   isDirect,
   hasIngress,
+  platformRouted,
   onChanged,
 }: {
   project: string;
@@ -3866,6 +3877,8 @@ function PinControls({
   isDirect: boolean;
   /** Whether any component exposes an HTTP route — routing needs a hostname. */
   hasIngress: boolean;
+  /** Platform-owned routes front this app: route is a backend switch. */
+  platformRouted: boolean;
   onChanged: () => Promise<void>;
 }) {
   const stableEnvs = environments.filter((e) => e.envType !== "preview");
@@ -3884,7 +3897,9 @@ function PinControls({
   const pinnedFrom = enriched?.pinnedFrom ?? currentEnv.pinnedFrom;
   const routedToPreview = enriched?.routedToPreview ?? currentEnv.routedToPreview;
   const routedHost = enriched?.routedHost ?? currentEnv.routedHost;
+  const routedMode = enriched?.routedMode ?? currentEnv.routedMode;
   const routedFromEnv = enriched?.routedFromEnv ?? currentEnv.routedFromEnv;
+  const isSwitch = routedMode === "switch";
   const liveUrl = (enriched?.urls ?? currentEnv.urls ?? [])[0];
 
   // Route/restore run as a server task (they wait on ArgoCD between the two
@@ -3915,16 +3930,24 @@ function PinControls({
         <span className="text-sm text-indigo-900">
           🔀 Traffic for{" "}
           <code className="font-mono text-xs">{routedHost ? routedHost.replace(/^https?:\/\//, "") : "this env's hostname"}</code>{" "}
-          is served by preview <span className="font-medium">{routedToPreview}</span>.
-          {liveUrl && (
+          {isSwitch ? "is forwarded to" : "is served by"} preview <span className="font-medium">{routedToPreview}</span>.
+          {isSwitch ? (
             <>
               {" "}
-              This env is reachable at{" "}
-              <a href={liveUrl} target="_blank" rel="noreferrer" className="font-mono text-xs underline">
-                {liveUrl.replace(/^https?:\/\//, "")}
-              </a>
-              .
+              This env's route points at the preview; its own workload keeps running but
+              isn't reachable at that hostname until restored.
             </>
+          ) : (
+            liveUrl && (
+              <>
+                {" "}
+                This env is reachable at{" "}
+                <a href={liveUrl} target="_blank" rel="noreferrer" className="font-mono text-xs underline">
+                  {liveUrl.replace(/^https?:\/\//, "")}
+                </a>
+                .
+              </>
+            )
           )}{" "}
           Delivery is unaffected: new images still deploy here.
         </span>
@@ -3945,15 +3968,32 @@ function PinControls({
     return (
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2.5">
         <span className="text-sm text-indigo-900">
-          🔀 Serving <span className="font-medium">{routedFromEnv}</span>'s hostname
-          {liveUrl && (
-            <>
-              {" "}
-              (<code className="font-mono text-xs">{liveUrl.replace(/^https?:\/\//, "")}</code>)
-            </>
-          )}
-          . External callers hitting {routedFromEnv} reach this preview. Deleting the
-          preview restores it automatically.
+          🔀 {environments.find((e) => e.envName === routedFromEnv)?.routedMode === "switch"
+            ? (
+              <>
+                Receiving <span className="font-medium">{routedFromEnv}</span>'s traffic: that env's
+                route forwards here. This preview also keeps its own URL
+                {liveUrl && (
+                  <>
+                    {" "}
+                    (<code className="font-mono text-xs">{liveUrl.replace(/^https?:\/\//, "")}</code>)
+                  </>
+                )}
+                .
+              </>
+            ) : (
+              <>
+                Serving <span className="font-medium">{routedFromEnv}</span>'s hostname
+                {liveUrl && (
+                  <>
+                    {" "}
+                    (<code className="font-mono text-xs">{liveUrl.replace(/^https?:\/\//, "")}</code>)
+                  </>
+                )}
+                . External callers hitting {routedFromEnv} reach this preview.
+              </>
+            )}{" "}
+          Deleting the preview restores it automatically.
         </span>
         <button
           onClick={() => unroute(routedFromEnv!, routedFromEnv!)}
@@ -4029,7 +4069,7 @@ function PinControls({
     // Only the env this preview clones can donate its hostname, and never prod.
     const routeTarget = stableEnvs.find((e) => e.envName === (baseEnv || stableEnvs[0]?.envName));
     const routeTargetName = routeTarget?.envName ?? "";
-    const routeBlocked = !hasIngress
+    const routeBlocked = !hasIngress && !platformRouted
       ? "This app exposes no HTTP route — there is no hostname to route"
       : !routeTarget
         ? "No stable env to route from"
@@ -4038,7 +4078,7 @@ function PinControls({
           : routeTarget.routedToPreview && routeTarget.routedToPreview !== currentEnv.envName
             ? `${routeTargetName} is already routed to ${routeTarget.routedToPreview}; routing here replaces that`
             : "";
-    const routeDisabled = !hasIngress || !routeTarget || routeTarget.envType === "prod";
+    const routeDisabled = (!hasIngress && !platformRouted) || !routeTarget || routeTarget.envType === "prod";
     async function route() {
       if (!routeTargetName) return;
       setBusy(true);
@@ -4071,10 +4111,21 @@ function PinControls({
       <div className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2.5">
           <span className="text-sm text-gray-600">
-            Route <span className="font-medium">{routeTargetName || "the base env"}</span>'s
-            hostname here so external services test this PR at the stable URL. The
-            image pipeline keeps flowing; {routeTargetName || "the env"} stays reachable
-            on its <code className="font-mono text-xs">-origin</code> host.
+            {platformRouted ? (
+              <>
+                Forward <span className="font-medium">{routeTargetName || "the base env"}</span>'s
+                route here so external services test this PR at the stable URL. The
+                hostname doesn't change and the image pipeline keeps flowing; this preview
+                keeps its own URL too.
+              </>
+            ) : (
+              <>
+                Route <span className="font-medium">{routeTargetName || "the base env"}</span>'s
+                hostname here so external services test this PR at the stable URL. The
+                image pipeline keeps flowing; {routeTargetName || "the env"} stays reachable
+                on its <code className="font-mono text-xs">-origin</code> host.
+              </>
+            )}
           </span>
           <button
             onClick={route}
@@ -4238,6 +4289,7 @@ function OverviewTab({
         environments={data.environments}
         isDirect={data.deliveryMode === "direct"}
         hasIngress={data.components.some((c) => c.exposeMode === "external" || c.exposeMode === "internal")}
+        platformRouted={!!data.platformRouted || (data.routes?.length ?? 0) > 0}
         onChanged={onSaved}
       />
 
@@ -4372,7 +4424,7 @@ function SettingsTab({
   // Settings is the configuration home (the GitHub/Vercel model): General for
   // delivery/CD/clusters, Variables & secrets for runtime env config. Both are
   // app-owned — the env widget above renders env-unscoped here.
-  const [section, setSection] = useState<"general" | "variables">("general");
+  const [section, setSection] = useState<"general" | "variables" | "routes">("general");
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -4385,6 +4437,7 @@ function SettingsTab({
             [
               ["general", "General"],
               ["variables", "Variables & secrets"],
+              ["routes", "Routes"],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -4458,6 +4511,20 @@ function SettingsTab({
             </div>
           </div>
         </>
+      ) : section === "routes" ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-6">
+          <h3 className="mb-3 text-sm font-medium text-gray-900">Routes</h3>
+          <RoutesEditor
+            routes={data.routes ?? []}
+            defaultHost="((platform.appRoutingName)).((platform.externalBaseDomain))"
+            ownerKind="app"
+            components={data.components.map((c) => ({ name: c.name, port: servicePortFromValues(c.values) }))}
+            onSave={async (routes) => {
+              await updateApp(project, data.name, { routes });
+              await onSaved();
+            }}
+          />
+        </div>
       ) : (
         <EnvVarsTab
           project={project}
@@ -5189,15 +5256,104 @@ function LogsTabSkeleton() {
 // Tab: Traffic (placeholder)
 // ---------------------------------------------------------------------------
 
-function TrafficTab() {
+function TrafficTab({
+  project,
+  app,
+  hasRoutes,
+  envName,
+}: {
+  project: string;
+  app: string;
+  hasRoutes: boolean;
+  /** The env selected in the widget above; the tab scopes to it like the other runtime tabs. */
+  envName: string | null;
+}) {
+  const [status, setStatus] = useState<AppRoutesStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    getAppRoutes(project, app)
+      .then((s) => alive && setStatus(s))
+      .catch((err) => alive && setError(err instanceof Error ? err.message : "Failed to load routes"));
+    return () => {
+      alive = false;
+    };
+  }, [project, app]);
+
+  if (error) return <p className="text-sm text-red-600">{error}</p>;
+  if (!status) return <p className="text-sm text-gray-400">Loading routes…</p>;
+  const envs = envName ? status.envs.filter((e) => e.envName === envName) : status.envs;
+  if (!status.platformRouted || envs.every((e) => e.routes.length === 0)) {
+    return (
+      <div className="rounded-xl border border-dashed border-gray-200 bg-white px-6 py-12 text-center">
+        <p className="text-sm font-medium text-gray-500">
+          {hasRoutes ? "No routes rendered yet" : "This app's chart owns its routing"}
+        </p>
+        <p className="mt-1 text-xs text-gray-400">
+          Declare platform-owned routes under Settings → Routes to see, per environment, which
+          hostname forwards each path to which Service — and where a preview is switched in.
+        </p>
+      </div>
+    );
+  }
   return (
-    <div className="rounded-xl border border-dashed border-gray-200 bg-white px-6 py-12 text-center">
-      <p className="text-sm font-medium text-gray-500">
-        Traffic management coming soon
+    <div className="space-y-4">
+      <p className="text-xs text-gray-500">
+        Rendered by suparship as {status.edge === "gateway" ? "Gateway API HTTPRoutes" : "Ingresses"}.
+        Route or restore a preview from the env's Overview.
       </p>
-      <p className="mt-1 text-xs text-gray-400">
-        Canary and blue/green traffic controls will appear here.
-      </p>
+      {envs.map((env) => (
+        <div key={env.envName} className="rounded-xl border border-gray-200 bg-white">
+          <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 px-4 py-2.5">
+            <span className="text-sm font-medium text-gray-900">{env.envName}</span>
+            <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">{env.envType}</span>
+            {env.baseEnv && <span className="text-[11px] text-gray-400">clones {env.baseEnv}</span>}
+          </div>
+          <div className="divide-y divide-gray-100">
+            {env.routes.map((r) => (
+              <div key={r.name} className="px-4 py-3">
+                <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
+                  <span className="font-medium text-gray-800">{r.name}</span>
+                  <span className="text-[10px] uppercase tracking-wide text-gray-400">{r.tier}</span>
+                  {r.composite && (
+                    <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700" title="Single-app preview of a shared hostname: other apps' paths forward to the base env">
+                      composite
+                    </span>
+                  )}
+                  {r.hostnames.map((h) => (
+                    <code key={h} className="font-mono text-xs text-gray-700">{h}</code>
+                  ))}
+                </div>
+                <table className="w-full text-xs">
+                  <tbody>
+                    {r.rules.map((rule, i) => (
+                      <tr key={i} className={rule.deployed ? "" : "text-gray-400"}>
+                        <td className="w-32 py-1 font-mono">{rule.pathPrefix}</td>
+                        <td className="py-1 text-gray-400">→</td>
+                        <td className="py-1 font-mono">
+                          {rule.service}:{rule.port}
+                          {rule.namespace && <span className="text-gray-400"> in {rule.namespace}</span>}
+                        </td>
+                        <td className="py-1 text-right">
+                          {rule.forwardedTo ? (
+                            <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
+                              🔀 forwarded to {rule.forwardedTo}
+                            </span>
+                          ) : !rule.deployed ? (
+                            <span className="text-[10px]">{rule.app} not deployed here</span>
+                          ) : rule.app !== app ? (
+                            <span className="text-[10px] text-gray-400">{rule.app}</span>
+                          ) : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

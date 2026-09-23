@@ -121,6 +121,12 @@ certificate covers every variant. A literal host in your values is left alone
 by the platform, which also means route cannot move it — route refuses such a
 component with a 422 that names it.
 
+Or skip chart ingress entirely and let the platform render the routes: declare
+them on the app (Settings → Routes) and set `ingress.enabled: false` /
+`httpRoute.enabled: false`. See [routing.md](routing.md) — this is the model for
+one hostname shared by several apps, and route-to-preview then switches the
+backend instead of the hostname.
+
 Or Gateway API instead of Ingress:
 
 ```yaml
@@ -142,6 +148,8 @@ for the full catalog):
 | `((platform.routingHost))` | the resolved external host for this env in the default shape, e.g. `myapp.staging.acme.com`. While the env's hostname is [routed to a preview](previews.md#route-send-a-stable-hostname-to-a-preview), the preview gets this host and the env gets `myapp-origin.staging.acme.com` |
 | `((platform.appRoutingName))` / `((platform.appComponentRoutingName))` | the platform-owned hostname **label** — `myapp` / `myapp-api` — with the preview id (`myapp-pr-42`) and route state (`myapp-origin`) folded in; compose with a domain to pick your own host shape (see above) |
 | `((platform.externalRoutingHost))` / `((platform.internalRoutingHost))` | the routing name under that tier's base domain, e.g. `myapp-api.staging.acme.com` — a complete swappable host with no env-type segment; empty when the tier has no profile |
+| `((platform.previewSuffix))` | `""` in stable envs, `-pr-42` in previews — append to a shared literal hostname label so each preview gets its own host |
+| `((platform.stack))` | the app's stack (group) name; empty when not in a stack |
 | `((platform.ingressClassName))` / `((platform.clusterIssuer))` | the routing profile's IngressClass / cert-manager issuer |
 | `((platform.externalGatewayName/Namespace/SectionName))` (+ `internal…`) | the Gateway API parentRef of the resolved routing profile |
 | `((platform.env))` / `((platform.envType))` | environment name / classification (`staging`, `prod`, `preview`) |

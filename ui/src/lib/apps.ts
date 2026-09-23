@@ -18,6 +18,7 @@ import type {
   KargoPromotionStatus,
   PromoteRequest,
   PromoteResponse,
+  RouteSpec,
 } from "../types";
 
 // listApps returns a project's apps with live per-env status. Pass opts.stack to
@@ -146,6 +147,8 @@ export interface UpdateAppRequest {
   // name → deploy. Opting out leaves a running env in place (use undeployAppEnv to
   // remove it). Omit to leave unchanged.
   deployEnvs?: Record<string, boolean>;
+  // routes replaces the app's platform-owned routes ([] clears them).
+  routes?: RouteSpec[];
   // previewsEnabled toggles whether this app supports preview environments.
   // Omit to leave unchanged.
   previewsEnabled?: boolean;
@@ -353,6 +356,46 @@ export function unpinAppEnv(
 ): Promise<void> {
   return api.del(
     `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/environments/${encodeURIComponent(env)}/pin`,
+  );
+}
+
+export interface RouteRuleStatus {
+  pathPrefix: string;
+  app: string;
+  component?: string;
+  service: string;
+  port: number;
+  namespace?: string;
+  forwardedTo?: string;
+  deployed: boolean;
+}
+
+export interface RouteStatus {
+  name: string;
+  tier: string;
+  hostnames: string[];
+  rules: RouteRuleStatus[];
+  composite?: boolean;
+}
+
+export interface EnvRoutesStatus {
+  envName: string;
+  envType: string;
+  baseEnv?: string;
+  routes: RouteStatus[];
+}
+
+export interface AppRoutesStatus {
+  platformRouted: boolean;
+  edge?: "gateway" | "ingress" | "";
+  envs: EnvRoutesStatus[];
+}
+
+// getAppRoutes returns the app's platform routes as rendered per env and
+// preview: resolved hostnames, each rule's current backend, any backend switch.
+export function getAppRoutes(project: string, app: string): Promise<AppRoutesStatus> {
+  return api.get<AppRoutesStatus>(
+    `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/routes`,
   );
 }
 

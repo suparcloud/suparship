@@ -14,17 +14,19 @@ import (
 // the names of its member apps. Secrets are managed via the stack secret routes,
 // not here.
 type StackDTO struct {
-	Name             string                    `json:"name"`
-	Project          string                    `json:"project"`
-	DisplayName      string                    `json:"displayName,omitempty"`
-	Description      string                    `json:"description,omitempty"`
-	SharedNamespace  bool                      `json:"sharedNamespace,omitempty"`
-	NamespacePattern string                    `json:"namespacePattern,omitempty"`
-	AutoPromote      *bool                     `json:"autoPromote,omitempty"`
-	RawValues        map[string]any            `json:"rawValues,omitempty"`
-	EnvRawValues     map[string]map[string]any `json:"envRawValues,omitempty"`
-	EnvConfig        EnvConfigDTO              `json:"envConfig,omitempty"`
-	EnvConfigByEnv   map[string]EnvConfigDTO   `json:"envConfigByEnv,omitempty"`
+	Name             string `json:"name"`
+	Project          string `json:"project"`
+	DisplayName      string `json:"displayName,omitempty"`
+	Description      string `json:"description,omitempty"`
+	SharedNamespace  bool   `json:"sharedNamespace,omitempty"`
+	NamespacePattern string `json:"namespacePattern,omitempty"`
+	AutoPromote      *bool  `json:"autoPromote,omitempty"`
+	// Routes are the stack's platform-owned HTTP surfaces, expanded per member.
+	Routes         []domain.RouteSpec        `json:"routes"`
+	RawValues      map[string]any            `json:"rawValues,omitempty"`
+	EnvRawValues   map[string]map[string]any `json:"envRawValues,omitempty"`
+	EnvConfig      EnvConfigDTO              `json:"envConfig,omitempty"`
+	EnvConfigByEnv map[string]EnvConfigDTO   `json:"envConfigByEnv,omitempty"`
 	// Apps are the member app names (apps whose Spec.Stack == this stack).
 	Apps []string `json:"apps"`
 }
@@ -36,6 +38,7 @@ type createStackRequest struct {
 	DisplayName      string                    `json:"displayName,omitempty"`
 	Description      string                    `json:"description,omitempty"`
 	SharedNamespace  bool                      `json:"sharedNamespace,omitempty"`
+	Routes           []domain.RouteSpec        `json:"routes,omitempty"`
 	NamespacePattern string                    `json:"namespacePattern,omitempty"`
 	RawValues        map[string]any            `json:"rawValues,omitempty"`
 	EnvRawValues     map[string]map[string]any `json:"envRawValues,omitempty"`
@@ -44,15 +47,17 @@ type createStackRequest struct {
 }
 
 type patchStackRequest struct {
-	DisplayName      *string                   `json:"displayName,omitempty"`
-	Description      *string                   `json:"description,omitempty"`
-	SharedNamespace  *bool                     `json:"sharedNamespace,omitempty"`
-	NamespacePattern *string                   `json:"namespacePattern,omitempty"`
-	AutoPromote      *bool                     `json:"autoPromote,omitempty"`
-	RawValues        map[string]any            `json:"rawValues,omitempty"`
-	EnvRawValues     map[string]map[string]any `json:"envRawValues,omitempty"`
-	EnvConfig        *EnvConfigDTO             `json:"envConfig,omitempty"`
-	EnvConfigByEnv   map[string]EnvConfigDTO   `json:"envConfigByEnv,omitempty"`
+	DisplayName      *string `json:"displayName,omitempty"`
+	Description      *string `json:"description,omitempty"`
+	SharedNamespace  *bool   `json:"sharedNamespace,omitempty"`
+	NamespacePattern *string `json:"namespacePattern,omitempty"`
+	AutoPromote      *bool   `json:"autoPromote,omitempty"`
+	// Routes replaces the stack's routes (nil = unchanged, empty = clear).
+	Routes         *[]domain.RouteSpec       `json:"routes,omitempty"`
+	RawValues      map[string]any            `json:"rawValues,omitempty"`
+	EnvRawValues   map[string]map[string]any `json:"envRawValues,omitempty"`
+	EnvConfig      *EnvConfigDTO             `json:"envConfig,omitempty"`
+	EnvConfigByEnv map[string]EnvConfigDTO   `json:"envConfigByEnv,omitempty"`
 }
 
 type setAppStackRequest struct {
@@ -97,6 +102,7 @@ func stackToDTO(s *domain.Stack, appNames []string) StackDTO {
 		SharedNamespace:  s.Spec.SharedNamespace,
 		NamespacePattern: s.Spec.NamespacePattern,
 		AutoPromote:      s.Spec.AutoPromote,
+		Routes:           routesOrEmpty(s.Spec.Routes),
 		RawValues:        s.Spec.RawValues,
 		EnvRawValues:     s.Spec.EnvRawValues,
 		EnvConfig:        toEnvConfigDTO(s.Spec.EnvConfig),
@@ -170,6 +176,10 @@ func (rh *rbacHandler) handleCreateStack(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "invalid stack name: " + err.Error()})
 		return
 	}
+	if err := rh.validateStackRoutes(r.Context(), project, req.Name, req.Routes); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
 	if _, err := rh.stackStore.GetStack(r.Context(), project, req.Name); err == nil {
 		writeJSON(w, http.StatusConflict, errorResponse{Error: "stack \"" + req.Name + "\" already exists in project \"" + project + "\""})
 		return
@@ -186,6 +196,7 @@ func (rh *rbacHandler) handleCreateStack(w http.ResponseWriter, r *http.Request)
 			Description:      req.Description,
 			SharedNamespace:  req.SharedNamespace,
 			NamespacePattern: req.NamespacePattern,
+			Routes:           req.Routes,
 			RawValues:        req.RawValues,
 			EnvRawValues:     req.EnvRawValues,
 			EnvConfig:        ec,
@@ -226,6 +237,13 @@ func (rh *rbacHandler) handlePatchStack(w http.ResponseWriter, r *http.Request) 
 	}
 	if req.AutoPromote != nil {
 		s.Spec.AutoPromote = req.AutoPromote
+	}
+	if req.Routes != nil {
+		if err := rh.validateStackRoutes(r.Context(), project, name, *req.Routes); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+			return
+		}
+		s.Spec.Routes = *req.Routes
 	}
 	if req.RawValues != nil {
 		s.Spec.RawValues = req.RawValues
@@ -375,4 +393,17 @@ func (rh *rbacHandler) republishStackMembers(ctx context.Context, project, stack
 			_ = rh.appHandler.relocateApp(ctx, a)
 		}
 	}
+}
+
+// validateStackRoutes checks a stack's routes: backends must be members of the
+// stack (apps with Spec.Stack == name) and every tier must have a Gateway.
+func (rh *rbacHandler) validateStackRoutes(ctx context.Context, project, name string, routes []domain.RouteSpec) error {
+	if len(routes) == 0 || rh.appHandler == nil {
+		return domain.ValidateRoutes(routes, "", nil, nil, nil)
+	}
+	var members []string
+	for _, a := range rh.stackMemberApps(ctx, project, name) {
+		members = append(members, a.Name)
+	}
+	return rh.appHandler.validateRoutesAgainstOrg(ctx, routes, "", members)
 }

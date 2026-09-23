@@ -401,3 +401,14 @@ func TestInterpolate_TierRoutingHostTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestInterpolate_StackAndPreviewSuffixTokens(t *testing.T) {
+	stable := Context{Platform: helmvalues.PlatformValues{Stack: "voiceai-livekit", ExternalBaseDomain: "acme.com"}}
+	if got := stable.Interpolate("((platform.stack))((platform.previewSuffix)).((platform.externalBaseDomain))"); got != "voiceai-livekit.acme.com" {
+		t.Errorf("stable shared host = %q", got)
+	}
+	preview := Context{Platform: helmvalues.PlatformValues{Stack: "voiceai-livekit", PreviewSuffix: "-pr-42", ExternalBaseDomain: "acme.com"}}
+	if got := preview.Interpolate("voiceai-livekit((platform.previewSuffix)).((platform.externalBaseDomain))"); got != "voiceai-livekit-pr-42.acme.com" {
+		t.Errorf("preview shared host = %q", got)
+	}
+}

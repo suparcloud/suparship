@@ -648,7 +648,7 @@ type PlatformAppMeta struct {
 // without it those files sit in git unapplied and a curated component's
 // envFrom references dangle (CreateContainerConfigError). meta.yaml stays
 // excluded on purpose: it's AppSet generator data, not a K8s object.
-const platformResourcesInclude = "{env-configmap.yaml,external-secret.yaml,component-*.yaml}"
+const platformResourcesInclude = "{env-configmap.yaml,external-secret.yaml,component-*.yaml,route-*.yaml,referencegrant-*.yaml,ingress-*.yaml,service-*.yaml}"
 
 func platformSyncPolicy(opts AppSetOptions) *SyncPolicy {
 	if opts.SyncAutomated {
