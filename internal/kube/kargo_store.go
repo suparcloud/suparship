@@ -252,9 +252,18 @@ func (s *KargoStore) submitPromotion(ctx context.Context, ns, projectName, appNa
 		return nil, fmt.Errorf("target stage %q defines no promotion steps (spec.promotionTemplate.spec.steps is empty) — re-publish the app's Kargo CRs", qualifiedToStage)
 	}
 
-	promotionName := fmt.Sprintf("%s-%s-%d", appName, envName, time.Now().UnixNano())
+	var promotionName string
 	if len(names) > 0 {
 		promotionName = names[0]
+	} else {
+		name, active, err := s.verifiedPromotionAttempt(ctx, ns, qualifiedToStage, freight)
+		if err != nil {
+			return nil, err
+		}
+		if active != nil {
+			return active, nil
+		}
+		promotionName = name
 	}
 
 	slog.Debug("kargo create promotion: submitting Promotion CR",
@@ -288,7 +297,7 @@ func (s *KargoStore) submitPromotion(ctx context.Context, ns, projectName, appNa
 	}
 
 	created, err := s.dynamic.Resource(kargoPromotionGVR).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{})
-	if apierrors.IsAlreadyExists(err) && len(names) > 0 {
+	if apierrors.IsAlreadyExists(err) {
 		existing, readErr := s.dynamic.Resource(kargoPromotionGVR).Namespace(ns).Get(ctx, promotionName, metav1.GetOptions{})
 		if readErr != nil {
 			return nil, readErr

@@ -2,13 +2,10 @@ package kube
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -240,9 +237,6 @@ func (s *KargoStore) verifiedPromotionAttempt(ctx context.Context, ns, stage, fr
 	if err != nil {
 		return "", nil, fmt.Errorf("read active promotions: %w", err)
 	}
-	prefix := fmt.Sprintf("verified-%x-", sha256.Sum256([]byte(stage)))
-	prefix = prefix[:25] + "-"
-	attempt := 0
 	latestAttemptName := ""
 	var active *KargoPromotionInfo
 	successes := map[string]*KargoPromotionInfo{}
@@ -251,12 +245,8 @@ func (s *KargoStore) verifiedPromotionAttempt(ctx context.Context, ns, stage, fr
 		if target != stage {
 			continue
 		}
-		if strings.HasPrefix(item.GetName(), prefix) {
-			n, _ := strconv.Atoi(strings.TrimPrefix(strings.TrimPrefix(item.GetName(), prefix), "r"))
-			if n > attempt {
-				attempt = n
-				latestAttemptName = item.GetName()
-			}
+		if item.GetName() > latestAttemptName {
+			latestAttemptName = item.GetName()
 		}
 		phase, _, _ := unstructured.NestedString(item.Object, "status", "phase")
 		switch phase {
@@ -297,11 +287,6 @@ func (s *KargoStore) verifiedPromotionAttempt(ctx context.Context, ns, stage, fr
 			}
 		}
 	}
-	return verifiedAttemptName(prefix, attempt+1), nil, nil
-}
-
-// Kargo orders Promotion names lexically. Fixed-width attempts preserve that
-// order across 9 -> 10; r also sorts after the earlier experimental numeric names.
-func verifiedAttemptName(prefix string, attempt int) string {
-	return fmt.Sprintf("%sr%020d", prefix, attempt)
+	name, err := s.reservePromotionName(ctx, ns, stage, freight, latestAttemptName)
+	return name, nil, err
 }

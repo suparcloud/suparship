@@ -49,7 +49,7 @@ func TestVerifiedReleasePolicy(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 			for _, action := range dyn.Actions() {
-				if action.GetVerb() == "patch" || action.GetVerb() == "update" {
+				if action.GetVerb() == "patch" || (action.GetVerb() == "update" && action.GetResource() != kargoStageGVR) {
 					t.Fatalf("unexpected mutation: %v", action)
 				}
 				if tc.wantError && action.GetVerb() == "create" {
@@ -195,11 +195,5 @@ func TestAutoPromotionRepairsFailedWriteOfCurrentRelease(t *testing.T) {
 	selected, err := store.NextVerifiedRelease(context.Background(), "voiceai", "web", "staging", "prod")
 	if err != nil || selected != "current" {
 		t.Fatalf("failed deployment cannot recover: %q %v", selected, err)
-	}
-}
-
-func TestPromotionAttemptNamesPreserveKargoOrdering(t *testing.T) {
-	if verifiedAttemptName("verified-stage-", 9) >= verifiedAttemptName("verified-stage-", 10) {
-		t.Fatal("tenth promotion sorts before ninth")
 	}
 }
