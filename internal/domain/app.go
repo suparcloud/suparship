@@ -894,26 +894,16 @@ type AppImageBinding struct {
 // via AppSpec.Images. Not
 // configured here, so a chart with one or many services is handled uniformly.
 type CDConfig struct {
+	// ReleaseValidationEnvironment opts into a persistent, independent validation root.
+	ReleaseValidationEnvironment string `json:"releaseValidationEnvironment,omitempty" yaml:"releaseValidationEnvironment,omitempty"`
 	// Verification maps environment names to AnalysisTemplates in the Kargo project namespace.
 	Verification map[string][]string `json:"verification,omitempty" yaml:"verification,omitempty"`
 
 	// Managed enables external-CD tag ownership (see CDConfig docs). Default
 	// false preserves the legacy behaviour where the platform writes the tag.
 	Managed bool `json:"managed,omitempty" yaml:"managed,omitempty"`
-	// AutoPromote opts this pipeline app into automatic promotion to prod: once
-	// the same image is promoted to (and healthy in) the first stage (staging),
-	// Kargo auto-promotes it down the chain to prod without a manual click.
-	// Only meaningful for pipeline delivery; ignored for direct apps (no Kargo).
-	//
-	// The FIRST promotion to each higher env must still be manual: an env's
-	// gitops files are only written by an explicit promotion (see
-	// firstDeployEnvs / PublishAppEnv), and until they exist there is no
-	// ArgoCD Application for Kargo's auto-created Promotion to update — it
-	// would promote into the void. The manual promotion establishes the files
-	// and the Application (the promote endpoint gates on both); auto-promote
-	// takes over from then on. Publishing every env's files at creation
-	// instead would deploy prod BEFORE staging ever verified, defeating the
-	// pipeline — so this ordering is deliberate, not a gap.
+	// AutoPromote enables Suparship downstream scheduling after source verification.
+	// First deployments are prepared inactive before promotion.
 	AutoPromote bool `json:"autoPromote,omitempty" yaml:"autoPromote,omitempty"`
 	// ImagesConfigured records that the user has explicitly reviewed and saved the
 	// CD image selection (the Images panel). Once true, an EMPTY image selection —

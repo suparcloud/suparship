@@ -95,6 +95,15 @@ func (ah *appHandler) autoPromoteApp(ctx context.Context, app *domain.App) {
 	}
 	sort.Slice(stable, func(i, j int) bool { return stable[i].Order < stable[j].Order })
 
+	sources, err := domain.ReleasePipeline(app, stable)
+	if err != nil {
+		return
+	}
+	byName := map[string]*domain.AppEnvironment{}
+	for _, env := range stable {
+		byName[env.EnvName] = env
+	}
+
 	stages, err := ah.kargoPipelineReader.ListAppStageStatuses(ctx, app.ProjectName, app.Name)
 	if err != nil {
 		slog.Debug("auto-promote: stage status read failed",
@@ -106,8 +115,11 @@ func (ah *appHandler) autoPromoteApp(ctx context.Context, app *domain.App) {
 		byEnv[s.EnvName] = s
 	}
 
-	for i := 1; i < len(stable); i++ {
-		source, target := stable[i-1], stable[i]
+	for _, target := range stable {
+		source := byName[sources[target.EnvName]]
+		if source == nil {
+			continue
+		}
 
 		tov := app.Spec.EnvironmentDefaults[target.EnvName]
 		if tov.PinnedFrom != "" || (tov.Deploy != nil && !*tov.Deploy) {

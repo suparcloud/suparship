@@ -678,7 +678,10 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 	// materialized keeps receiving republishes so config edits reach it.
 	// Direct apps have no promotion, so every bound stable env deploys from
 	// its own values immediately.
-	deployEnvs := firstDeployEnvs(envs)
+	deployEnvs, err := releaseRootDeployEnvs(app, envs)
+	if err != nil {
+		return err
+	}
 	if app.Spec.IsDirect() {
 		deployEnvs = enabledDeployEnvs(app, envs)
 	} else {
@@ -736,7 +739,10 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 // composed App-of-Apps. MVP scope: single target cluster, all-inline component
 // charts, no previews, no Kargo / addon wiring (later phases).
 func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
-	deployEnvs := firstDeployEnvs(envs)
+	deployEnvs, err := releaseRootDeployEnvs(app, envs)
+	if err != nil {
+		return err
+	}
 	if app.Spec.IsDirect() {
 		deployEnvs = enabledDeployEnvs(app, envs)
 	} else {
@@ -2392,6 +2398,15 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		return stableEnvs[i].EnvName < stableEnvs[j].EnvName
 	})
 
+	domainEnvs := make([]*domain.AppEnvironment, 0, len(stableEnvs))
+	for _, e := range stableEnvs {
+		domainEnvs = append(domainEnvs, &domain.AppEnvironment{EnvName: e.EnvName, EnvType: e.EnvType, Order: e.Order})
+	}
+	sources, err := domain.ReleasePipeline(app, domainEnvs)
+	if err != nil {
+		return err
+	}
+
 	// ── Per-project Project + ProjectConfig CRs (Kargo v1.x) ───────────────────
 	// Each suparship project owns one Kargo Project in its own kargo-{project}
 	// namespace (Kargo binds a Project 1:1 to a namespace). The Project CR (no spec
@@ -2411,11 +2426,11 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	slog.Debug("gitops: wrote kargo project", "namespace", projectNS)
 
 	var projectEnvs []KargoProjectEnv
-	for i, env := range stableEnvs {
+	for _, env := range stableEnvs {
 		projectEnvs = append(projectEnvs, KargoProjectEnv{
 			AppName:      app.Name,
 			EnvName:      env.EnvName,
-			IsFirstStage: i == 0,
+			IsFirstStage: sources[env.EnvName] == "",
 			AutoPromote:  env.AutoPromote,
 			// Only a real, user-facing pin (PinnedFrom set) pauses Kargo. A
 			// transient unpin-restore writes PinnedImageTag with PinnedFrom empty
@@ -2496,10 +2511,10 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	// ── Stages ─────────────────────────────────────────────────────────────────
 	// Build a linear chain: stableEnvs[0] pulls from Warehouse, each subsequent
 	// stage gates on the previous stage by name.
-	for i, env := range stableEnvs {
+	for _, env := range stableEnvs {
 		var upstreams []string
-		if i > 0 {
-			upstreams = []string{stableEnvs[i-1].EnvName}
+		if source := sources[env.EnvName]; source != "" {
+			upstreams = []string{source}
 		}
 
 		appEnv := domain.AppEnvironment{

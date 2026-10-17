@@ -514,6 +514,10 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	// Falls back to the hardcoded defaults when no org provider is configured.
 	result.Environments = ah.stableEnvsFromOrg(r.Context(), result.App)
 
+	if err := ah.validateReleaseValidation(r.Context(), result.App, result.Environments); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
 	if err := ah.appStore.SaveApp(r.Context(), projectName, result.App); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to save app"})
 		return
@@ -594,6 +598,10 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	// CD validation must not mutate a store-owned app before persistence.
+	appCopy := *app
+	app = &appCopy
 
 	if req.Template != "" && req.Template != app.Spec.Template.Name {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
@@ -786,6 +794,9 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cd := cdConfigFromDTO(req.CD)
+		if req.CD.ReleaseValidationEnvironment == nil {
+			cd.ReleaseValidationEnvironment = app.Spec.CD.ReleaseValidationEnvironment
+		}
 		if req.CD.Verification == nil {
 			cd.Verification = app.Spec.CD.Verification
 		}
@@ -905,6 +916,47 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		app.Spec.EnvironmentDefaults = ed
 	}
 
+	validationEnvs, err := ah.appStore.ListAppEnvironments(r.Context(), projectName, appName)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "could not read deployment environments"})
+		return
+	}
+	var addedValidationEnv *domain.AppEnvironment
+	if name := app.Spec.CD.ReleaseValidationEnvironment; name != "" {
+		found := false
+		for _, env := range validationEnvs {
+			if env.EnvName == name {
+				found = true
+			}
+		}
+		if !found {
+			for _, env := range ah.stableEnvsFromOrg(r.Context(), app) {
+				if env.EnvName == name {
+					addedValidationEnv = env
+					validationEnvs = append(validationEnvs, env)
+					break
+				}
+			}
+		}
+	}
+	if err := ah.validateReleaseValidation(r.Context(), app, validationEnvs); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+	if prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment && ah.kargoPipelineReader != nil {
+		stages, err := ah.kargoPipelineReader.ListAppStageStatuses(r.Context(), projectName, appName)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "could not verify pipeline is idle"})
+			return
+		}
+		for _, stage := range stages {
+			if stage.Phase == "Promoting" || stage.Phase == "Verifying" {
+				writeJSON(w, http.StatusConflict, errorResponse{Error: "wait for active promotions and verification to finish before changing the validation environment"})
+				return
+			}
+		}
+	}
+
 	// The slow half — persist + full gitops publish — runs through dispatchOp so
 	// a caller can opt into async (Prefer: respond-async / ?async=1) and poll
 	// .../tasks/{id} for the result instead of holding the request open through
@@ -912,7 +964,19 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	// render per env + Kargo CRs) routinely outlives gateway timeouts. All
 	// request validation already ran synchronously above, so bad input still
 	// fails fast even in async mode.
-	op := func(ctx context.Context) (int, any, error) {
+	op := func(ctx context.Context) (status int, result any, opErr error) {
+		if addedValidationEnv != nil {
+			if err := ah.appStore.SaveAppEnvironment(ctx, projectName, addedValidationEnv); err != nil {
+				return http.StatusInternalServerError, nil, fmt.Errorf("save validation environment: %w", err)
+			}
+			defer func() {
+				if opErr != nil {
+					_ = ah.appStore.DeleteAppEnvironment(ctx, projectName, appName, addedValidationEnv.EnvName)
+					app.Spec.CD = prevCD
+					_ = ah.appStore.SaveApp(ctx, projectName, app)
+				}
+			}()
+		}
 		if err := ah.appStore.SaveApp(ctx, projectName, app); err != nil {
 			return http.StatusInternalServerError, nil, errors.New("failed to save app")
 		}
@@ -2894,6 +2958,10 @@ func (ah *appHandler) handleUndeployAppEnv(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if envName == app.Spec.CD.ReleaseValidationEnvironment {
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "choose another validation environment or disable separate release validation before removing this environment"})
+		return
+	}
 	// The base env (lowest Order) is the pipeline's warehouse source and the
 	// previews' clone target — removing it would break both. Only envs above the
 	// base can be decommissioned.
@@ -4093,30 +4161,22 @@ func (ah *appHandler) findPromotionSource(ctx context.Context, projectName, appN
 		return nil, fmt.Errorf("failed to list app environments")
 	}
 
-	// Stable candidates only (non-preview, Order < target.Order).
-	var stableCandidates []*domain.AppEnvironment
+	app, err := ah.appStore.GetApp(ctx, projectName, appName)
+	if err != nil {
+		return nil, err
+	}
+	sources, err := domain.ReleasePipeline(app, envs)
+	if err != nil {
+		return nil, err
+	}
+	source := sources[target.EnvName]
 	for _, env := range envs {
-		if env.EnvName == target.EnvName || env.EnvType == domain.AppEnvPreview {
-			continue
-		}
-		if env.Order < target.Order {
-			stableCandidates = append(stableCandidates, env)
+		if source != "" && env.EnvName == source {
+			return env, nil
 		}
 	}
+	return nil, fmt.Errorf("%q has no upstream stage to promote from; it receives merged builds directly", target.EnvName)
 
-	if len(stableCandidates) == 0 {
-		return nil, fmt.Errorf("%q has no upstream stage to promote from — it deploys merged builds automatically (merge the PR), or pin a preview to deploy without merging", target.EnvName)
-	}
-
-	// Pick the stable env with the highest Order (closest predecessor);
-	// tie-break lexicographically for determinism.
-	sort.Slice(stableCandidates, func(i, j int) bool {
-		if stableCandidates[i].Order != stableCandidates[j].Order {
-			return stableCandidates[i].Order > stableCandidates[j].Order
-		}
-		return stableCandidates[i].EnvName < stableCandidates[j].EnvName
-	})
-	return stableCandidates[0], nil
 }
 
 // workloadClusterClient resolves the cluster an environment's workloads run on
@@ -4806,7 +4866,11 @@ func cdConfigFromDTO(dto *CDConfigDTO) domain.CDConfig {
 	if dto == nil {
 		return domain.CDConfig{}
 	}
-	return domain.CDConfig{Managed: dto.Managed, AutoPromote: dto.AutoPromote, Verification: dto.Verification}
+	cd := domain.CDConfig{Managed: dto.Managed, AutoPromote: dto.AutoPromote, Verification: dto.Verification}
+	if dto.ReleaseValidationEnvironment != nil {
+		cd.ReleaseValidationEnvironment = *dto.ReleaseValidationEnvironment
+	}
+	return cd
 }
 
 // appImageBindingsFromDTO converts wire image selections into domain selections.
@@ -4908,6 +4972,7 @@ func (ah *appHandler) validateCDImageSource(ctx context.Context, app *domain.App
 }
 
 func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO {
+	promotionSources, _ := domain.ReleasePipeline(app, envs)
 	secretRefs := make([]AppSecretRefDTO, 0, len(app.Spec.SecretRefs))
 	for _, ref := range app.Spec.SecretRefs {
 		secretRefs = append(secretRefs, AppSecretRefDTO{
@@ -4943,7 +5008,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		RawValues:           app.Spec.RawValues,
 		EnvRawValues:        envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		EnvTemplateVersions: envTemplateVersionsDTO(app.Spec.EnvironmentDefaults),
-		CD:                  CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured, Verification: app.Spec.CD.Verification},
+		CD:                  CDConfigDTO{PromotionSources: promotionSources, ReleaseValidationEnvironment: &app.Spec.CD.ReleaseValidationEnvironment, Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured, Verification: app.Spec.CD.Verification},
 		Images:              appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:        string(app.Spec.DeliveryMode),
 		PreviewsEnabled:     app.Spec.PreviewsEnabled,
