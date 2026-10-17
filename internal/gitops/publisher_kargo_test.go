@@ -1,6 +1,7 @@
 package gitops_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,7 +174,7 @@ func TestPublishKargoCRs_TemplateImageMappingRoundTrip(t *testing.T) {
 	}
 	var yu *gitops.PromotionStep
 	for i := range stage.Spec.PromotionTemplate.Spec.Steps {
-		if stage.Spec.PromotionTemplate.Spec.Steps[i].Uses == "yaml-update" {
+		if stage.Spec.PromotionTemplate.Spec.Steps[i].Uses == "yaml-update" && strings.HasSuffix(fmt.Sprint(stage.Spec.PromotionTemplate.Spec.Steps[i].Config["path"]), "/values.yaml") {
 			yu = &stage.Spec.PromotionTemplate.Spec.Steps[i]
 		}
 	}
@@ -295,8 +296,8 @@ func TestPublishKargoCRs_AutoPromoteProdPolicy(t *testing.T) {
 		t.Errorf("opted out: want staging auto + prod manual, got %+v", off)
 	}
 	on := policyFor(true)
-	if !on["web-staging"] || !on["web-prod"] {
-		t.Errorf("opted in: want staging + prod auto, got %+v", on)
+	if !on["web-staging"] || on["web-prod"] {
+		t.Errorf("opted in: want only staging scheduled by Kargo, got %+v", on)
 	}
 }
 

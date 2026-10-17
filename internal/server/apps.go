@@ -277,7 +277,8 @@ type AppDetailDTO struct {
 // declared by the template's image slots; the repository each slot watches is
 // bound per-app via the Images field, not here.
 type CDConfigDTO struct {
-	Managed bool `json:"managed"`
+	Verification map[string][]string `json:"verification,omitempty"`
+	Managed      bool                `json:"managed"`
 	// AutoPromote opts a pipeline app into automatic promotion to prod once
 	// staging is healthy (see domain.CDConfig.AutoPromote).
 	AutoPromote bool `json:"autoPromote"`
@@ -645,6 +646,8 @@ type CreateAppPreviewRequest struct {
 // TargetEnvironment must be the logical name of an environment that exists in
 // the project and is higher in the promotion order than the current one.
 type AppPromoteRequest struct {
+	// Freight selects an immutable release already verified upstream.
+	Freight           string `json:"freight,omitempty"`
 	TargetEnvironment string `json:"targetEnvironment"`
 }
 

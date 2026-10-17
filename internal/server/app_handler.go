@@ -204,6 +204,11 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := validateVerificationConfig(req.CD); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
 	if err := domain.ValidateAppName(req.Name); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
@@ -776,7 +781,14 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		app.Spec.EnvironmentDefaults = ed
 	}
 	if req.CD != nil {
+		if err := validateVerificationConfig(req.CD); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
 		cd := cdConfigFromDTO(req.CD)
+		if req.CD.Verification == nil {
+			cd.Verification = app.Spec.CD.Verification
+		}
 		// Preserve the image-config intent across a CD-only edit (managed/autoPromote
 		// toggle) — the DTO doesn't carry it, so a bare replacement would silently
 		// reset it and re-enable template auto-bind.
@@ -3728,7 +3740,7 @@ func (ah *appHandler) handlePromoteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := ah.promoteAppEnv(r.Context(), projectName, appName, req.TargetEnvironment)
+	resp, err := ah.promoteAppEnv(r.Context(), projectName, appName, req.TargetEnvironment, req.Freight)
 	if err != nil {
 		writeJSON(w, statusForPromoteErr(err), errorResponse{Error: err.Error()})
 		return
@@ -3758,7 +3770,7 @@ func statusForPromoteErr(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, errPromoteBadRequest), errors.Is(err, domainapp.ErrNoRelease):
 		return http.StatusBadRequest
-	case errors.Is(err, errPromoteTargetNotReady):
+	case errors.Is(err, errPromoteTargetNotReady), errors.Is(err, kube.ErrPromotionBusy):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
@@ -3768,8 +3780,7 @@ func statusForPromoteErr(err error) int {
 // waitForTargetArgoApp polls the ArgoCD Application gate until the target
 // env's generated Application exists, the timeout lapses, or ctx is done.
 //
-// Fail-open on gate ERRORS (a broken dynamic client must not freeze every
-// promotion — log and proceed) but fail-closed on definitive absence. Nil gate
+// Fail closed when the target cannot be read or is absent. Nil gate
 // (fake mode, no dynamic client) means no check, preserving prior behavior.
 func (ah *appHandler) waitForTargetArgoApp(ctx context.Context, projectName, appName, envName string) error {
 	if ah.argoAppGate == nil {
@@ -3791,15 +3802,15 @@ func (ah *appHandler) waitForTargetArgoApp(ctx context.Context, projectName, app
 			if err := ah.argoChainNudger.RefreshAppsByName(ctx, []string{"suparship-apps", envName + "-composed"}); err != nil {
 				slog.Debug("promote: argocd chain nudge (apps) failed", "env", envName, "err", err)
 			}
-			if err := ah.argoChainNudger.RefreshAppSets(ctx, []string{envName, envName + "-platform"}); err != nil {
+			if err := ah.argoChainNudger.RefreshAppSets(ctx, []string{envName, envName + "-platform", envName + "-external"}); err != nil {
 				slog.Debug("promote: argocd chain nudge (appsets) failed", "env", envName, "err", err)
 			}
 		}
 		exists, err := ah.argoAppGate.HasAppForEnv(ctx, projectName, appName, envName)
 		if err != nil {
-			slog.Warn("promote: ArgoCD application check failed — proceeding without the gate",
+			slog.Warn("promote: ArgoCD application check failed — refusing promotion",
 				"project", projectName, "app", appName, "env", envName, "err", err)
-			return nil
+			return fmt.Errorf("read target application: %w", err)
 		}
 		if exists {
 			return nil
@@ -3821,7 +3832,7 @@ func (ah *appHandler) waitForTargetArgoApp(ctx context.Context, projectName, app
 // creates a Kargo Promotion CR (when Kargo is wired) or copies the release
 // bundle in the local store. It is the shared core of the per-app promote
 // handler and the stack batch promote. Returns the populated response.
-func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, targetEnvName string) (*AppPromoteResponse, error) {
+func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, targetEnvName string, selectedFreight ...string) (*AppPromoteResponse, error) {
 	app, err := ah.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
 		return nil, fmt.Errorf("%w: app %q not found in project %q", errPromoteAppNotFound, appName, projectName)
@@ -3854,6 +3865,62 @@ func (ah *appHandler) promoteAppEnv(ctx context.Context, projectName, appName, t
 	sourceEnv, err := ah.findPromotionSource(ctx, projectName, appName, targetEnv)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", errPromoteBadRequest, err.Error())
+	}
+
+	freight := ""
+	if len(selectedFreight) > 0 {
+		freight = selectedFreight[0]
+	}
+	promoter, supportsVerified := ah.kargoPromoter.(verifiedReleasePromoter)
+	if supportsVerified || freight != "" {
+		if !supportsVerified {
+			return nil, fmt.Errorf("%w: verified release promotion requires Kargo", errPromoteBadRequest)
+		}
+
+		if ah.argoAppGate != nil {
+			exists, err := ah.argoAppGate.HasAppForEnv(ctx, projectName, appName, targetEnvName)
+			if err != nil {
+				return nil, fmt.Errorf("read target application: %w", err)
+			}
+			if !exists {
+				preparer, canPrepare := ah.gitOpsPublisher.(interface {
+					PrepareAppEnv(context.Context, *domain.App, *domain.AppEnvironment) error
+				})
+				resolver, canResolve := ah.kargoPromoter.(interface {
+					ResolveVerifiedRelease(context.Context, string, string, string, string, string) (string, error)
+				})
+				if !canPrepare || !canResolve {
+					return nil, fmt.Errorf("%w: target preparation is unavailable", errPromoteTargetNotReady)
+				}
+				freight, err = resolver.ResolveVerifiedRelease(ctx, projectName, appName, sourceEnv.EnvName, targetEnvName, freight)
+				if err != nil {
+					if errors.Is(err, kube.ErrReleaseNotVerified) || errors.Is(err, kube.ErrKargoNoFreight) {
+						return nil, fmt.Errorf("%w: %v", errPromoteBadRequest, err)
+					}
+					return nil, fmt.Errorf("read release evidence before preparation: %w", err)
+				}
+				if err = preparer.PrepareAppEnv(ctx, app, targetEnv); err != nil {
+					return nil, fmt.Errorf("prepare target: %w", err)
+				}
+				if err = ah.waitForTargetArgoApp(ctx, projectName, appName, targetEnvName); err != nil {
+					return nil, err
+				}
+			}
+		}
+		result, err := promoter.PromoteVerifiedRelease(ctx, projectName, appName, sourceEnv.EnvName, targetEnvName, freight)
+		if err != nil {
+			if errors.Is(err, kube.ErrReleaseNotVerified) || errors.Is(err, kube.ErrKargoNoFreight) {
+				return nil, fmt.Errorf("%w: %v", errPromoteBadRequest, err)
+			}
+			return nil, fmt.Errorf("queue verified release: %w", err)
+		}
+		return &AppPromoteResponse{Project: projectName, App: appName, Source: sourceEnv.EnvName,
+			Destination: targetEnvName, Namespace: targetEnv.Namespace, Mechanism: "kargo",
+			Message:        "Verified release promotion queued; the source environment is unchanged",
+			KargoPromotion: &KargoPromotionDTO{Name: result.Name, Stage: result.Stage, Freight: result.Freight, Phase: result.Phase}}, nil
+	}
+	if app.Spec.EnvironmentDefaults[sourceEnv.EnvName].PinnedFrom != "" {
+		return nil, fmt.Errorf("%w: source is pinned; select a previously verified release or unpin it", errPromoteBadRequest)
 	}
 
 	// Write GitOps files for the target environment before triggering the
@@ -4739,7 +4806,7 @@ func cdConfigFromDTO(dto *CDConfigDTO) domain.CDConfig {
 	if dto == nil {
 		return domain.CDConfig{}
 	}
-	return domain.CDConfig{Managed: dto.Managed, AutoPromote: dto.AutoPromote}
+	return domain.CDConfig{Managed: dto.Managed, AutoPromote: dto.AutoPromote, Verification: dto.Verification}
 }
 
 // appImageBindingsFromDTO converts wire image selections into domain selections.
@@ -4876,7 +4943,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		RawValues:           app.Spec.RawValues,
 		EnvRawValues:        envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		EnvTemplateVersions: envTemplateVersionsDTO(app.Spec.EnvironmentDefaults),
-		CD:                  CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured},
+		CD:                  CDConfigDTO{Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured, Verification: app.Spec.CD.Verification},
 		Images:              appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:        string(app.Spec.DeliveryMode),
 		PreviewsEnabled:     app.Spec.PreviewsEnabled,

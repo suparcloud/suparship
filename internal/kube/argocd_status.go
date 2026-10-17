@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -176,7 +178,6 @@ func argoCDPhase(sync, health string) string {
 		return domain.StatusUnknown
 	}
 }
-
 
 // NewArgoCDStatusReaderFromDynamic creates an ArgoCDStatusReader directly
 // from a pre-built dynamic.Interface. This is the preferred constructor when
@@ -355,4 +356,37 @@ func jsonNum(v any) int32 {
 		return int32(n)
 	}
 	return 0
+}
+
+// PreparedApplicationSetReady prevents preparation during a partially applied
+// generator migration: an old auto-sync template would deploy the seed image.
+func (r *ArgoCDStatusReader) PreparedApplicationSetReady(ctx context.Context, env string) error {
+	for _, name := range []string{env, env + "-external"} {
+		appset, err := r.dynamic.Resource(argoCDAppSetGVR).Namespace(r.namespace).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) && name == env+"-external" {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read prepared application generator %s: %w", name, err)
+		}
+		if _, found, _ := unstructured.NestedMap(appset.Object, "spec", "template", "spec", "syncPolicy", "automated"); found {
+			return fmt.Errorf("application generator %s is still migrating; retry shortly", name)
+		}
+		gens, _, _ := unstructured.NestedSlice(appset.Object, "spec", "generators")
+		ready := false
+		for _, raw := range gens {
+			g, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			v, _, _ := unstructured.NestedString(g, "selector", "matchLabels", "promotionPending")
+			if v == "true" {
+				ready = true
+			}
+		}
+		if !ready {
+			return fmt.Errorf("application generator %s does not support prepared releases yet", name)
+		}
+	}
+	return nil
 }

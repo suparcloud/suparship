@@ -2,6 +2,7 @@ package gitops_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1632,7 +1633,7 @@ func TestComposedPromotionTemplatePerComponentFiles(t *testing.T) {
 	// Collect yaml-update step paths.
 	paths := map[string]bool{}
 	for _, step := range stage.Spec.PromotionTemplate.Spec.Steps {
-		if step.Uses != "yaml-update" {
+		if step.Uses != "yaml-update" || !strings.HasSuffix(fmt.Sprint(step.Config["path"]), "/values.yaml") {
 			continue
 		}
 		if p, ok := step.Config["path"].(string); ok {
@@ -1642,7 +1643,7 @@ func TestComposedPromotionTemplatePerComponentFiles(t *testing.T) {
 	// Each per-component tag value must be quote()-wrapped so a numeric-looking
 	// tag is written as a string, not an int/float (akuity/kargo #3743).
 	for _, step := range stage.Spec.PromotionTemplate.Spec.Steps {
-		if step.Uses != "yaml-update" {
+		if step.Uses != "yaml-update" || !strings.HasSuffix(fmt.Sprint(step.Config["path"]), "/values.yaml") {
 			continue
 		}
 		ups, _ := step.Config["updates"].([]map[string]any)
@@ -1696,7 +1697,7 @@ func TestComposedPromotionTemplateFanOut(t *testing.T) {
 	}
 	paths := map[string]bool{}
 	for _, step := range stage.Spec.PromotionTemplate.Spec.Steps {
-		if step.Uses != "yaml-update" {
+		if step.Uses != "yaml-update" || !strings.HasSuffix(fmt.Sprint(step.Config["path"]), "/values.yaml") {
 			continue
 		}
 		if p, ok := step.Config["path"].(string); ok {

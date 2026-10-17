@@ -1001,6 +1001,10 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		// template versions (chart source paths in the Application), so an
 		// upgraded staging runs the new chart while production keeps its own.
 		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		pending, err := p.promotionPending(repoDir, app, env)
+		if err != nil {
+			return err
+		}
 
 		ns := env.Namespace
 		if ns == "" {
@@ -1260,6 +1264,12 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			// it when the app is all-stateful (it would carry only the $appvalues ref
 			// source, no chart sources).
 			if manifest := BuildComposedApplication(app, composedOpts); len(manifest.Spec.Sources) > 1 {
+				if err := p.saveActiveApplication(repoDir, app, env, targetName+"-application.yaml", manifest); err != nil {
+					return err
+				}
+				if pending {
+					disablePreparedSync(manifest)
+				}
 				manifestBytes, err := yaml.Marshal(manifest)
 				if err != nil {
 					return fmt.Errorf("marshal Application for env %s cluster %s: %w", env.EnvName, targetName, err)
@@ -1273,6 +1283,12 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			// by the recurse composed root app. Written alongside the main manifest.
 			for _, c := range app.Spec.StatefulComponents() {
 				compManifest := BuildComponentApplication(app, c, composedOpts)
+				if err := p.saveActiveApplication(repoDir, app, env, targetName+"-"+c.Name+"-application.yaml", compManifest); err != nil {
+					return err
+				}
+				if pending {
+					disablePreparedSync(compManifest)
+				}
 				compBytes, err := yaml.Marshal(compManifest)
 				if err != nil {
 					return fmt.Errorf("marshal stateful component Application %s env %s: %w", c.Name, env.EnvName, err)
@@ -1465,6 +1481,10 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// Env-scoped template pins: app.yaml's ChartPath below must point at THIS
 		// env's effective template version.
 		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		pending, err := p.promotionPending(repoDir, app, env)
+		if err != nil {
+			return err
+		}
 
 		// Resolve the namespace: use the pre-computed value from the caller
 		// when set; fall back to the legacy "{app}-{env}" default.
@@ -1477,11 +1497,12 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// per-(app,cluster) fields (AppName/ClusterName/ClusterServer/ValuesPath)
 		// are filled per target inside the write loop below.
 		baseMeta := AppMetadata{
-			Name:      app.Name,
-			Project:   app.ProjectName,
-			Template:  app.Spec.Template.Name,
-			ChartPath: chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
-			Namespace: ns,
+			PromotionPending: fmt.Sprint(pending),
+			Name:             app.Name,
+			Project:          app.ProjectName,
+			Template:         app.Spec.Template.Name,
+			ChartPath:        chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
+			Namespace:        ns,
 		}
 		// External-mode apps carry the chart locator in app.yaml so
 		// BuildArgoExternalAppSet's generator can render
@@ -2497,6 +2518,9 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			ArgoAppNamePattern:    p.cfg.ResourceNaming.EffectiveArgoAppName(),
 			Clusters:              env.Clusters,
 			Composed:              composed,
+			SyncAutomated:         p.cfg.SyncAutomated,
+			ArgoCDRepoURL:         p.cfg.ArgoCDRepoURL,
+			ChartMode:             func() AppMetadataChartType { m, _ := p.resolveTemplateChartMode(app.Spec.Template.Name); return m }(),
 		}
 		stage := BuildKargoStage(app, appEnv, upstreams, stageOpts)
 		stageBytes, err := yaml.Marshal(stage)
@@ -2614,6 +2638,7 @@ type ComponentPlatformValues struct {
 
 // AppPublishEnv carries per-environment publish context for PublishApp.
 type AppPublishEnv struct {
+	PrepareOnly bool
 	// AutoPromote opts this app's pipeline into auto-promotion to prod (the
 	// effective value of CDConfig.AutoPromote ORed with its stack's setting).
 	// App-wide, carried on every env; the Kargo policy builder enables auto

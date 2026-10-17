@@ -17,7 +17,6 @@ import (
 
 	"github.com/suparcloud/suparship/internal/audit"
 	"github.com/suparcloud/suparship/internal/auth"
-	"github.com/suparcloud/suparship/internal/localuser"
 	"github.com/suparcloud/suparship/internal/bootstrap"
 	"github.com/suparcloud/suparship/internal/branding"
 	"github.com/suparcloud/suparship/internal/config"
@@ -29,6 +28,7 @@ import (
 	"github.com/suparcloud/suparship/internal/k8s"
 	"github.com/suparcloud/suparship/internal/kube"
 	"github.com/suparcloud/suparship/internal/license"
+	"github.com/suparcloud/suparship/internal/localuser"
 	"github.com/suparcloud/suparship/internal/preview"
 	"github.com/suparcloud/suparship/internal/project"
 	"github.com/suparcloud/suparship/internal/rbac"
@@ -3043,4 +3043,51 @@ func publisherTemplateLoader(templates []*tpl.Template, client kubernetes.Interf
 		}
 	}
 	return &diskFirstTemplateLoader{disk: disk, next: next}
+}
+
+func (a *kargoPromoterAdapter) PromoteVerifiedRelease(ctx context.Context, project, app, source, target, freight string) (server.KargoPromotionResult, error) {
+	info, err := a.store.PromoteVerifiedRelease(ctx, project, app, source, target, freight)
+	if err != nil {
+		return server.KargoPromotionResult{}, err
+	}
+	return server.KargoPromotionResult{Name: info.Name, Stage: info.Stage, Freight: info.Freight, Phase: info.Phase}, nil
+}
+
+func (a *kargoPromoterAdapter) VerifiedReleaseCandidates(ctx context.Context, project, app, source, target string) ([]string, error) {
+	return a.store.VerifiedReleaseCandidates(ctx, project, app, source, target)
+}
+
+func (a *kargoPromoterAdapter) VerifiedReleaseDetails(ctx context.Context, project, app, source, target string) ([]kube.VerifiedReleaseCandidate, error) {
+	return a.store.VerifiedReleaseDetails(ctx, project, app, source, target)
+}
+
+func (a *kargoPromoterAdapter) NextVerifiedRelease(ctx context.Context, project, app, source, target string) (string, error) {
+	return a.store.NextVerifiedRelease(ctx, project, app, source, target)
+}
+
+func (a *gitOpsPublisherAdapter) PrepareAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error {
+	if !app.Spec.IsComposed() {
+		gate, ok := a.argoRefresher.(interface {
+			PreparedApplicationSetReady(context.Context, string) error
+		})
+		if !ok {
+			return fmt.Errorf("prepared application gate is unavailable")
+		}
+		if err := gate.PreparedApplicationSetReady(ctx, env.EnvName); err != nil {
+			return err
+		}
+	}
+
+	pub, err := a.buildAppEnvPub(ctx, app, env)
+	if err != nil {
+		return err
+	}
+	if err = a.inner.PrepareAppEnv(ctx, app, pub); err != nil {
+		return err
+	}
+	a.refreshApps(ctx, app.ProjectName, app.Name)
+	return nil
+}
+func (a *kargoPromoterAdapter) ResolveVerifiedRelease(ctx context.Context, project, app, source, target, freight string) (string, error) {
+	return a.store.ResolveVerifiedRelease(ctx, project, app, source, target, freight)
 }

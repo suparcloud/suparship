@@ -894,6 +894,9 @@ type AppImageBinding struct {
 // via AppSpec.Images. Not
 // configured here, so a chart with one or many services is handled uniformly.
 type CDConfig struct {
+	// Verification maps environment names to AnalysisTemplates in the Kargo project namespace.
+	Verification map[string][]string `json:"verification,omitempty" yaml:"verification,omitempty"`
+
 	// Managed enables external-CD tag ownership (see CDConfig docs). Default
 	// false preserves the legacy behaviour where the platform writes the tag.
 	Managed bool `json:"managed,omitempty" yaml:"managed,omitempty"`

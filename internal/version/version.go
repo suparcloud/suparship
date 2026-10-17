@@ -34,5 +34,6 @@ const (
 	// ({project}-{app}-{scope}); the boot-time copy migration renames legacy
 	// items and this bump forces the fleet republish that flips every
 	// ExternalSecret's dataFrom to the new names.
-	Generator = "v0.3.0"
+	// v0.4.0: prepared release targets, Stage health checks, single downstream scheduler.
+	Generator = "v0.4.0"
 )

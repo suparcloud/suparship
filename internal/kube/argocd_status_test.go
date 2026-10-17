@@ -61,3 +61,23 @@ func TestGetAppDeploymentHistory_ByLabelsSkipsPlatform(t *testing.T) {
 		t.Errorf("env=prod should not match the staging app, got %d entries", len(none))
 	}
 }
+
+func TestPreparedApplicationSetGateRejectsLegacyAutoSync(t *testing.T) {
+	for _, legacy := range []bool{true, false} {
+		appset := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationSet", "metadata": map[string]any{"name": "prod", "namespace": "argocd"},
+			"spec": map[string]any{"generators": []any{map[string]any{"selector": map[string]any{"matchLabels": map[string]any{"promotionPending": "true"}}}}, "template": map[string]any{"spec": map[string]any{"syncPolicy": map[string]any{}}}},
+		}}
+		if legacy {
+			_ = unstructured.SetNestedMap(appset.Object, map[string]any{"prune": true}, "spec", "template", "spec", "syncPolicy", "automated")
+		}
+		reader := newStuckReader(t, appset)
+		err := reader.PreparedApplicationSetReady(context.Background(), "prod")
+		if legacy && err == nil {
+			t.Fatal("legacy auto-sync would deploy the seed image")
+		}
+		if !legacy && err != nil {
+			t.Fatal(err)
+		}
+	}
+}

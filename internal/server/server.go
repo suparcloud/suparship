@@ -1245,3 +1245,23 @@ func (s *Server) waitBackground(timeout time.Duration) {
 		s.bgCancel()
 	}
 }
+
+// verifiedReleasePromoter submits a selected release without publishing or approving it.
+type verifiedReleasePromoter interface {
+	PromoteVerifiedRelease(context.Context, string, string, string, string, string) (KargoPromotionResult, error)
+}
+
+// Preparation must fail closed when an older publisher is installed; unlike
+// ordinary publishing, a no-op here cannot safely authorize a promotion.
+func (h *PublisherHolder) PrepareAppEnv(ctx context.Context, app *domain.App, env *domain.AppEnvironment) error {
+	h.mu.RLock()
+	p := h.p
+	h.mu.RUnlock()
+	preparer, ok := p.(interface {
+		PrepareAppEnv(context.Context, *domain.App, *domain.AppEnvironment) error
+	})
+	if !ok {
+		return fmt.Errorf("publisher does not support prepared releases")
+	}
+	return preparer.PrepareAppEnv(ctx, app, env)
+}

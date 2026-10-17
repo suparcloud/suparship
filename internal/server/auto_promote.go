@@ -10,26 +10,13 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 )
 
-// The CD auto-promotion reconciler: each tick it promotes apps that opted in
-// (cd.autoPromote, or their stack's flag) one step down their pipeline whenever
-// an upstream env runs newer freight than its successor.
-//
-// Why server-side, when Kargo has autoPromotionEnabled: Kargo only
-// auto-promotes freight that is AVAILABLE to a stage — verified in an upstream
-// stage or explicitly approved for it. suparship models no Stage verification,
-// and in practice freight doesn't reliably reach verifiedIn — the same reason
-// manual promotion approves freight explicitly (see KargoStore.CreatePromotion).
-// So the policy flag alone leaves prod waiting on availability that never
-// comes: staging keeps auto-promoting (its freight comes DIRECT from the
-// Warehouse) while prod never follows. Driving the promotion through
-// promoteAppEnv reuses the manual path end to end: freight approval, the
-// ArgoCD-Application gate, and first-promotion env materialization — so
-// auto-promote also handles an env that was never manually promoted.
-//
-// The gate for "staging is good" stays the staging promotion's argocd-update
-// health-wait: a stage's CurrentFreight only advances when its promotion
-// (including that wait) succeeded, and we additionally require the source
-// stage to be Healthy and not mid-promotion at reconcile time.
+// Suparship owns downstream automatic promotion, including first-deployment
+// preparation. Kargo owns Warehouse-to-first-stage delivery and executes all
+// promotions and verification. Release selection uses upstream evidence, not
+// the source's current occupant; a pin only freezes its own target.
+type verifiedAutoPromoter interface {
+	NextVerifiedRelease(context.Context, string, string, string, string) (string, error)
+}
 
 // autoPromoteRetryCooldown bounds how often a FAILING promotion is retried for
 // the same freight — without it, a persistently failing target would get a new
@@ -117,47 +104,69 @@ func (ah *appHandler) autoPromoteApp(ctx context.Context, app *domain.App) {
 
 	for i := 1; i < len(stable); i++ {
 		source, target := stable[i-1], stable[i]
-		// A held (pinned/rolled-back) SOURCE must not fan its frozen image
-		// downstream; a held or decommissioned TARGET is frozen by definition
-		// (promoteAppEnv would refuse both — skip quietly to keep logs sane).
-		if app.Spec.EnvironmentDefaults[source.EnvName].PinnedFrom != "" {
-			continue
-		}
+
 		tov := app.Spec.EnvironmentDefaults[target.EnvName]
 		if tov.PinnedFrom != "" || (tov.Deploy != nil && !*tov.Deploy) {
 			continue
 		}
-		src, ok := byEnv[source.EnvName]
-		if !ok || src.CurrentFreight == "" || src.Health != "Healthy" || src.Phase == "Promoting" {
+		tgt := byEnv[target.EnvName]
+		if tgt.Phase == "Promoting" || tgt.Phase == "Verifying" {
 			continue
 		}
-		// tgt may be missing entirely (stage not yet materialized — first
-		// promotion); the zero value's empty CurrentFreight handles that.
-		tgt := byEnv[target.EnvName]
-		if tgt.Phase == "Promoting" || tgt.CurrentFreight == src.CurrentFreight {
-			continue
+		freight := ""
+		if selector, ok := ah.kargoPromoter.(verifiedAutoPromoter); ok {
+			var err error
+			freight, err = selector.NextVerifiedRelease(ctx, app.ProjectName, app.Name, source.EnvName, target.EnvName)
+			if err != nil {
+				slog.Warn("auto-promote: release eligibility unavailable", "app", app.Name, "env", target.EnvName, "err", err)
+				continue
+			}
+			if freight == "" {
+				continue
+			}
+		} else {
+			// Compatibility for local/fake providers without verified freight.
+			if app.Spec.EnvironmentDefaults[source.EnvName].PinnedFrom != "" {
+				continue
+			}
+			src, ok := byEnv[source.EnvName]
+			if !ok || src.CurrentFreight == "" || src.Health != "Healthy" || src.Phase == "Promoting" {
+				continue
+			}
+			freight = src.CurrentFreight
+		}
+		if tgt.CurrentFreight == freight {
+			// The verified selector may deliberately return the current Freight
+			// to repair a failed promotion that changed Git before failing.
+			if _, verified := ah.kargoPromoter.(verifiedAutoPromoter); !verified {
+				continue
+			}
 		}
 
 		key := app.ProjectName + "/" + app.Name + "/" + target.EnvName
 		ah.autoPromoteMu.Lock()
 		if a, ok := ah.autoPromoteAttempts[key]; ok &&
-			a.freight == src.CurrentFreight && time.Since(a.at) < autoPromoteRetryCooldown {
+			a.freight == freight && time.Since(a.at) < autoPromoteRetryCooldown {
 			ah.autoPromoteMu.Unlock()
 			continue
 		}
-		ah.autoPromoteAttempts[key] = autoPromoteAttempt{freight: src.CurrentFreight, at: time.Now()}
+		ah.autoPromoteAttempts[key] = autoPromoteAttempt{freight: freight, at: time.Now()}
 		ah.autoPromoteMu.Unlock()
 
-		resp, err := ah.promoteAppEnv(ctx, app.ProjectName, app.Name, target.EnvName)
+		var selection []string
+		if _, ok := ah.kargoPromoter.(verifiedAutoPromoter); ok {
+			selection = []string{freight}
+		}
+		resp, err := ah.promoteAppEnv(ctx, app.ProjectName, app.Name, target.EnvName, selection...)
 		switch {
 		case errors.Is(err, errPromoteTargetNotReady):
-			// Manifests published, Application not generated yet — normal on a
-			// first promotion; the next tick (after cooldown reset below) retries.
+			// Target provisioning is incomplete. Retry readiness without approving
+			// freight or publishing a potentially unverified seed image.
 			slog.Info("auto-promote: target not ready yet — will retry",
 				"project", app.ProjectName, "app", app.Name, "env", target.EnvName)
 			// Retry sooner than the failure cooldown: readiness is expected.
 			ah.autoPromoteMu.Lock()
-			ah.autoPromoteAttempts[key] = autoPromoteAttempt{freight: src.CurrentFreight, at: time.Now().Add(-autoPromoteRetryCooldown + 2*time.Minute)}
+			ah.autoPromoteAttempts[key] = autoPromoteAttempt{freight: freight, at: time.Now().Add(-autoPromoteRetryCooldown + 2*time.Minute)}
 			ah.autoPromoteMu.Unlock()
 		case err != nil:
 			slog.Warn("auto-promote: promotion failed",
@@ -170,7 +179,7 @@ func (ah *appHandler) autoPromoteApp(ctx context.Context, app *domain.App) {
 			slog.Info("auto-promote: promoted",
 				"project", app.ProjectName, "app", app.Name,
 				"from", source.EnvName, "to", target.EnvName,
-				"freight", src.CurrentFreight, "promotion", promotion)
+				"freight", freight, "promotion", promotion)
 		}
 	}
 }
