@@ -26,5 +26,14 @@ func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain
 	if len(ah.appDeployClusterRefs(ctx, app.ProjectName, app.Name, name)) == 0 {
 		return fmt.Errorf("bind validation environment %q to a cluster in Settings > Environments before enabling release validation", name)
 	}
+	seen := map[string]string{}
+	for env := range sources {
+		for _, target := range ah.argoAppNamesForEnv(ctx, app.ProjectName, app.Name, env) {
+			if previous, ok := seen[target.name]; ok && previous != env {
+				return fmt.Errorf("environments %q and %q resolve to the same Argo CD Application %q; use distinct cluster registrations or an application naming pattern containing {env} before enabling release validation", previous, env, target.name)
+			}
+			seen[target.name] = env
+		}
+	}
 	return nil
 }

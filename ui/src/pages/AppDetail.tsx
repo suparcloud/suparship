@@ -3583,7 +3583,7 @@ function AppValuesEditor({
                 )}
                 <p className="mt-3 text-sm font-medium text-gray-700">Acceptance checks</p>
                 <p className="mt-1 text-xs text-gray-500">Enter existing AnalysisTemplate names, separated by commas. Templates must exist in the project's Kargo namespace. Empty means rollout health checks only.</p>
-                {envs.filter(env => env !== PREVIEW_SCOPE).map(env => (
+                {Array.from(new Set([...envs, ...(separateValidation && validationEnvironment ? [validationEnvironment] : [])])).filter(env => env !== PREVIEW_SCOPE).map(env => (
                   <label key={env} className="mt-2 block text-xs text-gray-600">
                     {env}
                     <input className="mt-1 block w-full rounded border border-gray-300 px-2 py-1" value={verification[env] ?? ""} placeholder="smoke-tests, integration-tests" onChange={event => setVerification(previous => ({ ...previous, [env]: event.target.value }))} />

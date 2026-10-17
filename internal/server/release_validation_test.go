@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/rbac"
+	"github.com/suparcloud/suparship/internal/secrets"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -64,7 +65,7 @@ func TestValidationSettingLifecycle(t *testing.T) {
 			app := storedApp(t, store)
 			app.Spec.Images = []domain.AppImageBinding{{Name: "main", TagKey: "image.tag"}}
 			store.addApp(app)
-			ah.orgProvider = &countingOrgProvider{org: &rbac.Org{Name: "test", Environments: []rbac.OrgEnvironment{
+			ah.orgProvider = &countingOrgProvider{org: &rbac.Org{Name: "test", ResourceNaming: secrets.ResourceNaming{ArgoAppName: "{project}-{app}-{env}-{cluster}"}, Environments: []rbac.OrgEnvironment{
 				{Name: "staging", Order: 1, ClusterRefs: []string{"local"}},
 				{Name: "prod", Order: 2, ClusterRefs: []string{"local"}},
 				{Name: "validation", Order: 3, ClusterRefs: []string{"local"}},
@@ -141,5 +142,23 @@ func TestValidationCannotSilentlyDropAcceptanceChecks(t *testing.T) {
 	err := ah.validateReleaseValidation(context.Background(), app, envs)
 	if err == nil || !strings.Contains(err.Error(), "acceptance checks") {
 		t.Fatalf("lost acceptance gate: %v", err)
+	}
+}
+
+func TestReleaseValidationRejectsApplicationNameCollision(t *testing.T) {
+	ah, store, _, _ := autoPromoteFixture(t, true)
+	app := storedApp(t, store)
+	app.Spec.CD.Managed = true
+	app.Spec.CD.ReleaseValidationEnvironment = "validation"
+	envs, _ := store.ListAppEnvironments(context.Background(), app.ProjectName, app.Name)
+	envs = append(envs, &domain.AppEnvironment{EnvName: "validation", Order: 3})
+	ah.orgProvider = &countingOrgProvider{org: &rbac.Org{Name: "test", Environments: []rbac.OrgEnvironment{
+		{Name: "staging", Order: 1, ClusterRefs: []string{"local"}},
+		{Name: "prod", Order: 2, ClusterRefs: []string{"production"}},
+		{Name: "validation", Order: 3, ClusterRefs: []string{"local"}},
+	}}}
+	err := ah.validateReleaseValidation(context.Background(), app, envs)
+	if err == nil || !strings.Contains(err.Error(), "same Argo CD Application") {
+		t.Fatalf("expected collision guard, got %v", err)
 	}
 }
