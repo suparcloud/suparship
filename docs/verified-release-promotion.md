@@ -8,6 +8,9 @@ next environment. The selected Kargo Freight is promoted without unpinning or
 republishing staging. Production still takes time to reconcile and roll out;
 this avoids the extra staging restore and rollout before production submission.
 
+See the [architecture decision](adr/0005-verified-release-promotion.md) and
+[upgrade runbook](verified-release-upgrade.md) for implementation and rollout details.
+
 ## API
 
 List matching releases, newest discovery first. The response includes release IDs

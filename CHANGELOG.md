@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Verified-release promotion
+
+- Promote a previously verified release while staging remains pinned to a preview.
+  New unverified builds still require staging verification.
+- Select releases in the UI or API, configure existing acceptance templates, and
+  prepare first-deployment targets without automatically deploying a seed image.
+- Use Kargo-compatible release/rollback names and shared duplicate protection.
+- Wait for the live, acknowledged Kargo scheduler handoff before downstream
+  auto-promotion; add ProjectConfig read permission to the chart.
+- Distinguish applied promotions from ready deployments and refresh status while
+  preserving configuration edits.
+
+See the [workflow guide](docs/verified-release-promotion.md),
+[upgrade runbook](docs/verified-release-upgrade.md), and
+[validation limits](docs/verified-release-e2e.md). These changes are unreleased.
+
 ## 0.1.0 (2026-09-06)
 
 

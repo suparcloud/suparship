@@ -2,7 +2,7 @@
 
 > Historical proposal: the implementation direction is now [verified release promotion](verified-release-promotion.md). Separate integration reservations are not being implemented. This document is retained as design history, not the current rollout plan.
 
-**Status:** Proposed implementation plan; no runtime migration has been performed.
+**Status:** Superseded by the [verified-release upgrade runbook](verified-release-upgrade.md). No separate integration reservation migration was implemented.
 **Architecture:** [ADR-0004](adr/0004-release-pipeline-and-integration-reservations.md).
 
 ## Target behavior

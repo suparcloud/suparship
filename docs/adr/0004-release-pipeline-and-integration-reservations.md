@@ -2,7 +2,7 @@
 
 > Historical proposal: the implementation direction is now [verified release promotion](../verified-release-promotion.md). Separate integration reservations are not being implemented. This document is retained as design history, not the current rollout plan.
 
-**Status:** Proposed
+**Status:** Superseded by [ADR-0005](0005-verified-release-promotion.md)
 **Date:** 2026-09-24
 **Deciders:** suparCloud maintainers
 
