@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/suparcloud/suparship/internal/domain"
 	"log/slog"
 	"slices"
 	"sort"
@@ -806,6 +807,20 @@ func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 	}
 
 	s.Issue = unreadyConditionMessage(statusRaw)
+	var run domain.ValidationRun
+	if raw := obj.GetAnnotations()[validationRunAnnotation]; raw != "" && json.Unmarshal([]byte(raw), &run) == nil {
+		switch run.Phase {
+		case "idle":
+			s.Phase = "Idle"
+			s.Issue = ""
+		case "cleaning", "deleting":
+			s.Phase = "Cleaning"
+			s.Issue = ""
+		case "provisioning", "waiting":
+			s.Phase = "Preparing"
+			s.Issue = ""
+		}
+	}
 
 	return s
 }

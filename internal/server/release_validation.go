@@ -7,7 +7,20 @@ import (
 )
 
 func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
+	mode := app.Spec.CD.ReleaseValidationMode
+	if mode != "" && mode != "persistent" && mode != "ephemeral" {
+		return fmt.Errorf("release validation mode must be persistent or ephemeral")
+	}
 	name := app.Spec.CD.ReleaseValidationEnvironment
+	if mode == "ephemeral" && name == "" {
+		return fmt.Errorf("select a release validation environment before enabling ephemeral mode")
+	}
+	if app.Spec.CD.EphemeralValidation() && len(app.Spec.StatefulComponents()) > 0 {
+		return fmt.Errorf("ephemeral validation requires external persistent data; remove stateful components or use persistent validation")
+	}
+	if app.Spec.CD.EphemeralValidation() && app.Spec.EnvironmentDefaults[name].PinnedFrom != "" {
+		return fmt.Errorf("unpin the validation environment before enabling ephemeral mode")
+	}
 	if name == "" {
 		return nil
 	}

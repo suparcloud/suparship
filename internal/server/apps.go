@@ -279,6 +279,7 @@ type AppDetailDTO struct {
 type CDConfigDTO struct {
 	// PromotionSources is a read-only resolved target-to-source map; empty values are Warehouse roots.
 	PromotionSources             map[string]string   `json:"promotionSources,omitempty"`
+	ReleaseValidationMode        *string             `json:"releaseValidationMode,omitempty"`
 	ReleaseValidationEnvironment *string             `json:"releaseValidationEnvironment,omitempty"`
 	Verification                 map[string][]string `json:"verification,omitempty"`
 	Managed                      bool                `json:"managed"`

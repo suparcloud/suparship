@@ -894,8 +894,10 @@ type AppImageBinding struct {
 // via AppSpec.Images. Not
 // configured here, so a chart with one or many services is handled uniformly.
 type CDConfig struct {
-	// ReleaseValidationEnvironment opts into a persistent, independent validation root.
+	// ReleaseValidationEnvironment opts into an independent validation root.
 	ReleaseValidationEnvironment string `json:"releaseValidationEnvironment,omitempty" yaml:"releaseValidationEnvironment,omitempty"`
+	// Empty or persistent retains workloads; ephemeral removes them between runs.
+	ReleaseValidationMode string `json:"releaseValidationMode,omitempty" yaml:"releaseValidationMode,omitempty"`
 	// Verification maps environment names to AnalysisTemplates in the Kargo project namespace.
 	Verification map[string][]string `json:"verification,omitempty" yaml:"verification,omitempty"`
 

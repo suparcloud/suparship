@@ -794,6 +794,9 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cd := cdConfigFromDTO(req.CD)
+		if req.CD.ReleaseValidationMode == nil {
+			cd.ReleaseValidationMode = app.Spec.CD.ReleaseValidationMode
+		}
 		if req.CD.ReleaseValidationEnvironment == nil {
 			cd.ReleaseValidationEnvironment = app.Spec.CD.ReleaseValidationEnvironment
 		}
@@ -943,7 +946,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
 	}
-	if prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment && ah.kargoPipelineReader != nil {
+	if (prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment || prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode) && ah.kargoPipelineReader != nil {
 		stages, err := ah.kargoPipelineReader.ListAppStageStatuses(r.Context(), projectName, appName)
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "could not verify pipeline is idle"})
@@ -1016,6 +1019,30 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		saved, _ := ah.appStore.GetApp(ctx, projectName, appName)
 		savedEnvs, _ := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
 		return http.StatusOK, updateAppResponse{App: appToDetailDTO(saved, savedEnvs)}, nil
+	}
+	if prevCD.EphemeralValidation() {
+		original := op
+		op = func(ctx context.Context) (int, any, error) {
+			controller, ok := ah.kargoPromoter.(validationRunController)
+			if !ok {
+				return http.StatusServiceUnavailable, nil, fmt.Errorf("validation lifecycle controller unavailable")
+			}
+			status := http.StatusConflict
+			var result any
+			err := controller.WithValidationLease(ctx, projectName, appName, prevCD.ReleaseValidationEnvironment, func(ctx context.Context, run *domain.ValidationRun) error {
+				changed := prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode || prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment
+				if changed && run.Phase != "idle" {
+					return fmt.Errorf("wait for validation cleanup to finish before changing lifecycle or validation environment")
+				}
+				var err error
+				status, result, err = original(ctx)
+				if err == nil && changed {
+					*run = domain.ValidationRun{}
+				}
+				return err
+			})
+			return status, result, err
+		}
 	}
 	dispatchOp(w, r, ah.async, "update-app", projectName, op)
 }
@@ -3072,16 +3099,20 @@ const rollbackPinnedFrom = "rollback"
 // to status codes, and let the stack batch path classify a failure as
 // "skip this member" (not applicable) vs a real error.
 var (
-	errPinAppNotFound     = errors.New("app not found")
-	errPinNotPipeline     = errors.New("pinning applies to pipeline-delivery apps only")
-	errPinTargetNotFound  = errors.New("target environment not found")
-	errPinTargetIsPreview = errors.New("cannot pin a preview environment")
-	errPinPreviewNotFound = errors.New("source preview not found")
-	errPinNoTag           = errors.New("source preview has no image tag")
+	errPinAppNotFound       = errors.New("app not found")
+	errPinNotPipeline       = errors.New("pinning applies to pipeline-delivery apps only")
+	errPinTargetNotFound    = errors.New("target environment not found")
+	errPinTargetIsPreview   = errors.New("cannot pin a preview environment")
+	errPinPreviewNotFound   = errors.New("source preview not found")
+	errPinNoTag             = errors.New("source preview has no image tag")
+	errValidationControlled = errors.New("ephemeral validation is controller-managed; use persistent mode for pins or rollbacks")
 )
 
 // statusForPinErr maps a pinAppEnv/unpinAppEnv error to an HTTP status.
 func statusForPinErr(err error) int {
+	if errors.Is(err, errValidationControlled) {
+		return http.StatusConflict
+	}
 	switch {
 	case errors.Is(err, errPinAppNotFound), errors.Is(err, errPinTargetNotFound), errors.Is(err, errPinPreviewNotFound):
 		return http.StatusNotFound
@@ -3176,6 +3207,10 @@ func (ah *appHandler) pinAppEnvSpec(ctx context.Context, projectName, appName, e
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
 	}
+	if app.Spec.CD.EphemeralValidation() && envName == app.Spec.CD.ReleaseValidationEnvironment {
+		return nil, nil, "", errValidationControlled
+	}
+
 	if app.Spec.IsDirect() {
 		return nil, nil, "", errPinNotPipeline
 	}
@@ -3334,6 +3369,11 @@ func (ah *appHandler) handlePinAppEnv(w http.ResponseWriter, r *http.Request) {
 	appName := r.PathValue("app")
 	envName := r.PathValue("env")
 
+	if app, err := ah.appStore.GetApp(r.Context(), projectName, appName); err == nil && app.Spec.CD.EphemeralValidation() && app.Spec.CD.ReleaseValidationEnvironment == envName {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: "ephemeral validation is controller-managed; use a persistent environment for pins or rollbacks"})
+		return
+	}
+
 	var req pinAppEnvRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
@@ -3395,6 +3435,9 @@ var (
 )
 
 func statusForRollbackErr(err error) int {
+	if errors.Is(err, errValidationControlled) {
+		return http.StatusConflict
+	}
 	switch {
 	case errors.Is(err, errRollbackUnavailable):
 		return http.StatusServiceUnavailable
@@ -3425,6 +3468,10 @@ func (ah *appHandler) rollbackAppEnvSpec(ctx context.Context, projectName, appNa
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: app %q in project %q", errPinAppNotFound, appName, projectName)
 	}
+	if app.Spec.CD.EphemeralValidation() && envName == app.Spec.CD.ReleaseValidationEnvironment {
+		return nil, nil, nil, errValidationControlled
+	}
+
 	if app.Spec.IsDirect() {
 		return nil, nil, nil, errPinNotPipeline
 	}
@@ -3535,6 +3582,11 @@ func (ah *appHandler) handleRollbackAppEnv(w http.ResponseWriter, r *http.Reques
 	projectName := r.PathValue("project")
 	appName := r.PathValue("app")
 	envName := r.PathValue("env")
+
+	if app, err := ah.appStore.GetApp(r.Context(), projectName, appName); err == nil && app.Spec.CD.EphemeralValidation() && app.Spec.CD.ReleaseValidationEnvironment == envName {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: "ephemeral validation is controller-managed; use a persistent environment for pins or rollbacks"})
+		return
+	}
 
 	var req rollbackAppEnvRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -4867,6 +4919,9 @@ func cdConfigFromDTO(dto *CDConfigDTO) domain.CDConfig {
 		return domain.CDConfig{}
 	}
 	cd := domain.CDConfig{Managed: dto.Managed, AutoPromote: dto.AutoPromote, Verification: dto.Verification}
+	if dto.ReleaseValidationMode != nil {
+		cd.ReleaseValidationMode = *dto.ReleaseValidationMode
+	}
 	if dto.ReleaseValidationEnvironment != nil {
 		cd.ReleaseValidationEnvironment = *dto.ReleaseValidationEnvironment
 	}
@@ -5008,7 +5063,7 @@ func appToDetailDTO(app *domain.App, envs []*domain.AppEnvironment) AppDetailDTO
 		RawValues:           app.Spec.RawValues,
 		EnvRawValues:        envRawValuesDTO(app.Spec.EnvironmentDefaults),
 		EnvTemplateVersions: envTemplateVersionsDTO(app.Spec.EnvironmentDefaults),
-		CD:                  CDConfigDTO{PromotionSources: promotionSources, ReleaseValidationEnvironment: &app.Spec.CD.ReleaseValidationEnvironment, Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured, Verification: app.Spec.CD.Verification},
+		CD:                  CDConfigDTO{ReleaseValidationMode: &app.Spec.CD.ReleaseValidationMode, PromotionSources: promotionSources, ReleaseValidationEnvironment: &app.Spec.CD.ReleaseValidationEnvironment, Managed: app.Spec.CD.Managed, AutoPromote: app.Spec.CD.AutoPromote, ImagesConfigured: app.Spec.CD.ImagesConfigured, Verification: app.Spec.CD.Verification},
 		Images:              appImageBindingsToDTO(app.Spec.Images),
 		DeliveryMode:        string(app.Spec.DeliveryMode),
 		PreviewsEnabled:     app.Spec.PreviewsEnabled,

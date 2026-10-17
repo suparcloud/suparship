@@ -1007,6 +1007,16 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		// template versions (chart source paths in the Application), so an
 		// upgraded staging runs the new chart while production keeps its own.
 		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		dormant, err := p.validationDormant(repoDir, app, env)
+		if err != nil {
+			return err
+		}
+		if dormant {
+			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
+				return err
+			}
+			continue
+		}
 		pending, err := p.promotionPending(repoDir, app, env)
 		if err != nil {
 			return err
@@ -1487,6 +1497,16 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// Env-scoped template pins: app.yaml's ChartPath below must point at THIS
 		// env's effective template version.
 		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		dormant, err := p.validationDormant(repoDir, app, env)
+		if err != nil {
+			return err
+		}
+		if dormant {
+			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
+				return err
+			}
+			continue
+		}
 		pending, err := p.promotionPending(repoDir, app, env)
 		if err != nil {
 			return err
@@ -2430,7 +2450,7 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		projectEnvs = append(projectEnvs, KargoProjectEnv{
 			AppName:      app.Name,
 			EnvName:      env.EnvName,
-			IsFirstStage: sources[env.EnvName] == "",
+			IsFirstStage: sources[env.EnvName] == "" && !(app.Spec.CD.EphemeralValidation() && env.EnvName == app.Spec.CD.ReleaseValidationEnvironment),
 			AutoPromote:  env.AutoPromote,
 			// Only a real, user-facing pin (PinnedFrom set) pauses Kargo. A
 			// transient unpin-restore writes PinnedImageTag with PinnedFrom empty

@@ -3095,3 +3095,41 @@ func (a *kargoPromoterAdapter) ResolveVerifiedRelease(ctx context.Context, proje
 func (a *kargoPromoterAdapter) DownstreamSchedulerReady(ctx context.Context, project, app, target string) (bool, error) {
 	return a.store.DownstreamSchedulerReady(ctx, project, app, target)
 }
+
+func (a *kargoPromoterAdapter) WithValidationLease(ctx context.Context, project, app, env string, fn func(context.Context, *domain.ValidationRun) error) error {
+	return a.store.WithValidationLease(ctx, project, app, env, fn)
+}
+func (a *kargoPromoterAdapter) NextValidationFreight(ctx context.Context, project, app string, cursor time.Time) (string, time.Time, error) {
+	return a.store.NextValidationFreight(ctx, project, app, cursor)
+}
+func (a *kargoPromoterAdapter) ObserveValidation(ctx context.Context, project, app, env, freight string) (domain.ValidationObservation, error) {
+	return a.store.ObserveValidation(ctx, project, app, env, freight)
+}
+func (a *kargoPromoterAdapter) PromoteValidationFreight(ctx context.Context, project, app, env, freight string) error {
+	return a.store.PromoteValidationFreight(ctx, project, app, env, freight)
+}
+func (a *kargoPromoterAdapter) ValidationApplicationsReady(ctx context.Context, names []string, present bool) (bool, error) {
+	return a.store.ValidationApplicationsReady(ctx, names, present)
+}
+func (a *gitOpsPublisherAdapter) SetValidationWorkloads(ctx context.Context, app *domain.App, env *domain.AppEnvironment, active bool) error {
+	if active && !app.Spec.IsComposed() {
+		gate, ok := a.argoRefresher.(interface {
+			PreparedApplicationSetReady(context.Context, string) error
+		})
+		if !ok {
+			return fmt.Errorf("prepared application gate unavailable")
+		}
+		if err := gate.PreparedApplicationSetReady(ctx, env.EnvName); err != nil {
+			return err
+		}
+	}
+	pub, err := a.buildAppEnvPub(ctx, app, env)
+	if err != nil {
+		return err
+	}
+	if err = a.inner.SetValidationWorkloads(ctx, app, pub, active); err != nil {
+		return err
+	}
+	a.refreshApps(ctx, app.ProjectName, app.Name)
+	return nil
+}
