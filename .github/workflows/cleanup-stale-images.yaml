@@ -1,10 +1,14 @@
 name: cleanup-stale-images
 
-# Weekly safety net for PR images: prunes pr-<n> tags whose last push was
-# more than MAX_AGE_DAYS ago. The cleanup-pr-image workflow already deletes
-# pr-<n> on PR close — this catches anything that slipped through (closed
-# event missed, repo renamed, etc.). GHCR exposes only `updated_at` (last
-# push), not last-pull, so "no usage" is approximated by "no rebuild".
+# Weekly safety net for throwaway images: prunes pr-<n> and develop-<sha>
+# tags whose last push was more than MAX_AGE_DAYS ago. The cleanup-pr-image
+# workflow already deletes pr-<n> on PR close — this catches anything that
+# slipped through (closed event missed, repo renamed, etc.) and the
+# per-commit develop builds, which nothing else retires. The moving `develop`
+# tag shares its digest with the newest develop-<sha>, and a version is only
+# deleted when EVERY tag on it is throwaway, so it is never touched. GHCR
+# exposes only `updated_at` (last push), not last-pull, so "no usage" is
+# approximated by "no rebuild".
 
 on:
   schedule:
@@ -17,7 +21,7 @@ permissions:
 
 jobs:
   prune:
-    name: Prune stale pr-* images
+    name: Prune stale pr-* and develop-<sha> images
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -47,10 +51,12 @@ jobs:
               UPDATED=$(jq -r '.updated_at' <<<"$row")
               TAGS_JSON=$(jq -c '.tags' <<<"$row")
 
-              # Require at least one pr-<digits> tag, and reject if any tag is
-              # NOT a pr-<digits> tag (so we never nuke a digest shared with main/latest).
-              HAS_PR=$(jq -r 'any(.[]; test("^pr-[0-9]+$"))' <<<"$TAGS_JSON")
-              ALL_PR=$(jq -r 'all(.[]; test("^pr-[0-9]+$"))' <<<"$TAGS_JSON")
+              # Require at least one throwaway tag (pr-<digits> or
+              # develop-<sha>), and reject if any tag is NOT throwaway (so we
+              # never nuke a digest shared with main/latest/develop).
+              THROWAWAY='^(pr-[0-9]+|develop-[0-9a-f]{7,40})$'
+              HAS_PR=$(jq -r --arg re "$THROWAWAY" 'any(.[]; test($re))' <<<"$TAGS_JSON")
+              ALL_PR=$(jq -r --arg re "$THROWAWAY" 'all(.[]; test($re))' <<<"$TAGS_JSON")
               if [ "$HAS_PR" != "true" ] || [ "$ALL_PR" != "true" ]; then
                 continue
               fi

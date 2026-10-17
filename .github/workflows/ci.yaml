@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
 
 # Cancel in-progress runs for the same branch/PR to save CI minutes.
