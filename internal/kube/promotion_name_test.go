@@ -2,6 +2,11 @@ package kube
 
 import (
 	"context"
+	"encoding/json"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	clienttesting "k8s.io/client-go/testing"
 	"strings"
 	"testing"
 
@@ -120,5 +125,29 @@ func TestIncompatibleExperimentalHistoryFailsBeforeSubmission(t *testing.T) {
 		if a.GetVerb() == "create" {
 			t.Fatal("created unsafe promotion")
 		}
+	}
+}
+
+func TestPromotionReservationRetriesResourceVersionConflict(t *testing.T) {
+	ctx := context.Background()
+	store, dyn := newKargoStore(t, stageCR("web-prod", testKargoNS, "", sampleSteps()))
+	winner := nativePromotionName("web-prod", "release-a")
+	conflicted := false
+	dyn.PrependReactor("update", "stages", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if conflicted {
+			return false, nil, nil
+		}
+		conflicted = true
+		obj := action.(clienttesting.UpdateAction).GetObject().(*unstructured.Unstructured).DeepCopy()
+		raw, _ := json.Marshal(promotionReservation{Name: winner})
+		obj.SetAnnotations(map[string]string{promotionReservationAnnotation: string(raw)})
+		if err := dyn.Tracker().Update(kargoStageGVR, obj, testKargoNS); err != nil {
+			t.Fatal(err)
+		}
+		return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "kargo.akuity.io", Resource: "stages"}, "web-prod", nil)
+	})
+	name, _, err := store.verifiedPromotionAttempt(ctx, testKargoNS, "web-prod", "release-a")
+	if err != nil || name != winner || !conflicted {
+		t.Fatalf("lost concurrent reservation: %s %v", name, err)
 	}
 }
