@@ -816,6 +816,9 @@ func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 		case "cleaning", "deleting":
 			s.Phase = "Cleaning"
 			s.Issue = ""
+		case "failed":
+			s.Phase = "Failed"
+			s.Issue = "Validation failed; temporary workloads are retained for one hour for debugging before cleanup."
 		case "provisioning", "waiting":
 			s.Phase = "Preparing"
 			s.Issue = ""

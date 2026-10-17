@@ -90,7 +90,7 @@ func TestFailedValidationRetentionAndCleanupRetry(t *testing.T) {
 		if err := advanceValidationRun(context.Background(), &run, obs, now.Add(elapsed), actions); err != nil {
 			t.Fatal(err)
 		}
-		if run.Phase != "running" {
+		if run.Phase != "failed" {
 			t.Fatal("failed run removed before debug retention expired")
 		}
 	}
@@ -114,5 +114,22 @@ func TestValidationAdoptsExistingDeployment(t *testing.T) {
 	}
 	if run.Phase != "running" || run.Freight != "old" || !run.Cursor.Equal(obs.CurrentCreatedAt) {
 		t.Fatalf("unsafe adoption: %+v", run)
+	}
+}
+
+func TestValidationPreparationTimeoutRetainsThenCleans(t *testing.T) {
+	now := time.Now()
+	run := domain.ValidationRun{Phase: "waiting", Freight: "pending", StartedAt: now.Add(-30 * time.Minute)}
+	if err := advanceValidationRun(context.Background(), &run, domain.ValidationObservation{}, now, validationRunActions{}); err != nil {
+		t.Fatal(err)
+	}
+	if run.Phase != "failed" || !run.FailedAt.Equal(now) {
+		t.Fatalf("unbounded preparation: %+v", run)
+	}
+	if err := advanceValidationRun(context.Background(), &run, domain.ValidationObservation{}, now.Add(time.Hour), validationRunActions{}); err != nil {
+		t.Fatal(err)
+	}
+	if run.Phase != "cleaning" {
+		t.Fatal("timed out preparation never cleaned up")
 	}
 }

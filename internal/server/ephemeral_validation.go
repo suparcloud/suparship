@@ -99,6 +99,11 @@ func advanceValidationRun(ctx context.Context, run *domain.ValidationRun, obs do
 	if obs.Active {
 		return nil
 	}
+	if (run.Phase == "provisioning" || run.Phase == "waiting") && !run.StartedAt.IsZero() && !now.Before(run.StartedAt.Add(30*time.Minute)) {
+		run.Phase = "failed"
+		run.FailedAt = now
+		return nil
+	}
 	switch run.Phase {
 	case "":
 		if obs.CurrentFreight != "" {
@@ -148,12 +153,12 @@ func advanceValidationRun(ctx context.Context, run *domain.ValidationRun, obs do
 			return nil
 		}
 		if obs.Failed {
-			if run.FailedAt.IsZero() {
-				run.FailedAt = now
-			}
-			if !now.Before(run.FailedAt.Add(failedValidationRetention)) {
-				run.Phase = "cleaning"
-			}
+			run.FailedAt = now
+			run.Phase = "failed"
+		}
+	case "failed":
+		if !now.Before(run.FailedAt.Add(failedValidationRetention)) {
+			run.Phase = "cleaning"
 		}
 	case "cleaning":
 		if err := a.workloads(false); err != nil {
