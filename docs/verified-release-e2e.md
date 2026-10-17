@@ -193,3 +193,44 @@ wiring. The UI production build and whitespace checks passed. The UI shows the
 configured promotion sources; browser automation could inspect the overview but
 could not activate the settings tab reliably, so settings save was exercised through
 the API rather than claimed as a completed browser interaction test.
+
+## Ephemeral validation lifecycle
+
+Tested on 2026-10-17 UTC in `kind-suparship-dev`, using the existing
+`release-order-probe` fixture and its independent validation namespace:
+
+| Event | Evidence |
+| --- | --- |
+| Opt-in and safe handoff | Enabled ephemeral mode; existing validation was preserved until Kargo's disabled auto-scheduler policy was acknowledged. |
+| Initial cleanup | Controller reached Idle at 20:28:46 UTC; validation had zero pods. Staging and production remained deployed. |
+| Fresh discovery | Published fixture tag `ephemeral-check-1792268926`, Freight `50b5519877e2ac2bf190251c0b119afb9bcc5728`. This reuses an existing image digest, not a new CI build. |
+| Provisioning | Observed provisioning → waiting → running, with Kargo activation of the selected Freight. |
+| Verification | Kargo verified the Freight in release validation at 20:30:28 UTC. No staging verification entry existed. |
+| Restart recovery | Development server restarted at 20:30:28 UTC during the run; lifecycle resumed from the durable Stage record. |
+| Cleanup | Observed cleaning → deleting → Idle by 20:31:15 UTC; the validation namespace had zero pods. |
+| Promotion after cleanup | Automatic production promotion `release-order-probe-prod.01m55s01zx8hrrvkjd3rhygtpz.50b5519` submitted at 20:31:33 UTC and succeeded. Production reached two updated, ready replicas of the new image tag. |
+| Staging reservation | Staging retained `pr-2-5574c7d`, pinned to `pr-validation-hold`. |
+| UI | Overview displayed Healthy production, the staging pin, and Idle validation, without a false deploying banner. |
+
+Local evidence: `tmp/release-demo/evidence/ephemeral-validation.json` and
+`tmp/release-demo/screenshots/14-ephemeral-validation-idle.jpg`.
+
+Backend tests passed for domain, publisher, Kubernetes adapters, server, and command
+wiring; the UI production build passed. Focused tests cover competing lifecycle
+leases, lost-owner protection, persisted progress after an error/restart, cleanup
+retry, failed-run retention, preparation timeout, shared-namespace rejection, and
+preventing idle workload resurrection on republish.
+
+The one-hour failure-retention boundary was tested with a controlled clock in unit
+tests, not by waiting an hour in the cluster. This live run used rollout health,
+not a new custom acceptance template. Separate physical clusters, external-chart
+cleanup, lease-holder death during a Git push, and multi-replica live contention
+remain unrehearsed. Settings were exercised through the API; browser automation
+could inspect the overview but could not reliably activate the settings tab.
+Root refresh was used for configuration discovery; workload activation and cleanup
+then reconciled through the generated ApplicationSet and Argo CD.
+
+Raw Kargo Stage health reports the deleted validator Application as unhealthy after
+cleanup; Suparship exposes the durable Idle lifecycle separately. Direct Kargo
+monitoring must account for that lifecycle. Failed runs occupy the single validation
+slot during their one-hour retention, so newer builds wait until cleanup.

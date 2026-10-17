@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Optional ephemeral release validation
+
+- Keep persistent validation as the default; opt into disposable validation workloads.
+- Prepare and verify one release at a time, remove successful workloads through GitOps,
+  and retain failed runs for one hour. Preserve verification history for promotion.
+- Persist lifecycle progress and serialize workers; show idle/preparing/cleanup states.
+- Keep persistent data outside ephemeral validation and reject declared stateful components.
+
 ### Optional separate release validation
 
 - Select a persistent validation environment per app so new builds can be verified
