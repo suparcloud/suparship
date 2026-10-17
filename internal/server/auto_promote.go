@@ -18,6 +18,10 @@ type verifiedAutoPromoter interface {
 	NextVerifiedRelease(context.Context, string, string, string, string) (string, error)
 }
 
+type downstreamSchedulerGate interface {
+	DownstreamSchedulerReady(context.Context, string, string, string) (bool, error)
+}
+
 // autoPromoteRetryCooldown bounds how often a FAILING promotion is retried for
 // the same freight — without it, a persistently failing target would get a new
 // Promotion CR every tick. A new freight resets the cooldown immediately.
@@ -115,10 +119,19 @@ func (ah *appHandler) autoPromoteApp(ctx context.Context, app *domain.App) {
 		}
 		freight := ""
 		if selector, ok := ah.kargoPromoter.(verifiedAutoPromoter); ok {
-			var err error
-			freight, err = selector.NextVerifiedRelease(ctx, app.ProjectName, app.Name, source.EnvName, target.EnvName)
-			if err != nil {
-				slog.Warn("auto-promote: release eligibility unavailable", "app", app.Name, "env", target.EnvName, "err", err)
+			gate, ok := ah.kargoPromoter.(downstreamSchedulerGate)
+			if !ok {
+				continue
+			}
+			ready, err := gate.DownstreamSchedulerReady(ctx, app.ProjectName, app.Name, target.EnvName)
+			if err != nil || !ready {
+				slog.Debug("auto-promote: waiting for Kargo scheduler handoff", "app", app.Name, "env", target.EnvName, "err", err)
+				continue
+			}
+			var errSelection error
+			freight, errSelection = selector.NextVerifiedRelease(ctx, app.ProjectName, app.Name, source.EnvName, target.EnvName)
+			if errSelection != nil {
+				slog.Warn("auto-promote: release eligibility unavailable", "app", app.Name, "env", target.EnvName, "err", errSelection)
 				continue
 			}
 			if freight == "" {

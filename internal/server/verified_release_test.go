@@ -13,8 +13,10 @@ import (
 
 type selectedReleasePromoter struct {
 	recordingPromoter
-	selected string
-	reject   bool
+	selected       string
+	reject         bool
+	handoffBlocked bool
+	handoffErr     error
 }
 
 func (p *selectedReleasePromoter) PromoteVerifiedRelease(_ context.Context, _, _, _, _, freight string) (KargoPromotionResult, error) {
@@ -194,5 +196,32 @@ func TestVerifiedFirstDeploymentThroughPublisherHolder(t *testing.T) {
 		if len(pub.publishedEnvs) != 0 {
 			t.Fatal("used active seed publication")
 		}
+	}
+}
+
+func (p *selectedReleasePromoter) DownstreamSchedulerReady(context.Context, string, string, string) (bool, error) {
+	return !p.handoffBlocked, p.handoffErr
+}
+
+func TestAutoPromotionWaitsForSchedulerHandoff(t *testing.T) {
+	ah, store, _, _ := autoPromoteFixture(t, true)
+	app := storedApp(t, store)
+	promoter := &selectedReleasePromoter{handoffBlocked: true}
+	ah.kargoPromoter = promoter
+	ah.argoAppGate = &fakeArgoAppGate{exists: true}
+	ah.autoPromoteApp(context.Background(), app)
+	if promoter.selected != "" || len(ah.autoPromoteAttempts) != 0 {
+		t.Fatal("promoted or consumed cooldown before handoff")
+	}
+	promoter.handoffBlocked = false
+	promoter.handoffErr = errors.New("unavailable")
+	ah.autoPromoteApp(context.Background(), app)
+	if promoter.selected != "" {
+		t.Fatal("promoted on read failure")
+	}
+	promoter.handoffErr = nil
+	ah.autoPromoteApp(context.Background(), app)
+	if promoter.selected != "verified-old" {
+		t.Fatal("did not automatically resume after handoff")
 	}
 }

@@ -3091,3 +3091,7 @@ func (a *gitOpsPublisherAdapter) PrepareAppEnv(ctx context.Context, app *domain.
 func (a *kargoPromoterAdapter) ResolveVerifiedRelease(ctx context.Context, project, app, source, target, freight string) (string, error) {
 	return a.store.ResolveVerifiedRelease(ctx, project, app, source, target, freight)
 }
+
+func (a *kargoPromoterAdapter) DownstreamSchedulerReady(ctx context.Context, project, app, target string) (bool, error) {
+	return a.store.DownstreamSchedulerReady(ctx, project, app, target)
+}
