@@ -27,6 +27,22 @@ func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain
 	if !app.Spec.CD.Managed {
 		return fmt.Errorf("release validation requires image tags managed by Kargo")
 	}
+	if app.Spec.CD.EphemeralValidation() {
+		var namespace string
+		for _, env := range envs {
+			if env.EnvName == name {
+				namespace = env.Namespace
+			}
+		}
+		if namespace == "" {
+			return fmt.Errorf("ephemeral validation requires a dedicated namespace")
+		}
+		for _, env := range envs {
+			if env.EnvName != name && env.Namespace == namespace {
+				return fmt.Errorf("ephemeral validation cannot share namespace %q with %q", namespace, env.EnvName)
+			}
+		}
+	}
 	sources, err := domain.ReleasePipeline(app, envs)
 	if err != nil {
 		return err

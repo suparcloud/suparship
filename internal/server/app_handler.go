@@ -5783,6 +5783,15 @@ func summarizeCDPipeline(wh *KargoWarehouseDTO, stages []KargoStageStatusDTO) *K
 	// been assessed yet (ArgoCD still syncing), is progress — celebrate it,
 	// don't alarm the user.
 	for _, st := range stages {
+		if st.Phase == "Idle" {
+			continue
+		}
+		if st.Phase == "Cleaning" {
+			return &KargoCDSummaryDTO{State: "active", Message: "Validation completed — cleaning up temporary workloads."}
+		}
+		if st.Phase == "Preparing" {
+			return &KargoCDSummaryDTO{State: "deploying", Message: "Preparing temporary validation workloads for the next release."}
+		}
 		if st.Phase == "Promoting" || (st.CurrentFreight != "" && st.Health != "Healthy" && st.Health != "Unhealthy") {
 			return &KargoCDSummaryDTO{State: "deploying", Message: "Deploying your release — waiting for it to report healthy. This can take a few minutes."}
 		}

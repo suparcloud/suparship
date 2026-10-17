@@ -162,3 +162,19 @@ func TestReleaseValidationRejectsApplicationNameCollision(t *testing.T) {
 		t.Fatalf("expected collision guard, got %v", err)
 	}
 }
+
+func TestEphemeralValidationRejectsSharedNamespaceAndInvalidMode(t *testing.T) {
+	ah, store, _, _ := autoPromoteFixture(t, true)
+	app := storedApp(t, store)
+	app.Spec.CD.Managed = true
+	app.Spec.CD.ReleaseValidationEnvironment = "validation"
+	app.Spec.CD.ReleaseValidationMode = "ephemeral"
+	envs := []*domain.AppEnvironment{{EnvName: "staging", Namespace: "shared", Order: 1}, {EnvName: "prod", Namespace: "production", Order: 2}, {EnvName: "validation", Namespace: "shared", Order: 3}}
+	if err := ah.validateReleaseValidation(context.Background(), app, envs); err == nil || !strings.Contains(err.Error(), "cannot share namespace") {
+		t.Fatalf("shared namespace accepted: %v", err)
+	}
+	app.Spec.CD.ReleaseValidationMode = "unexpected"
+	if err := ah.validateReleaseValidation(context.Background(), app, envs); err == nil || !strings.Contains(err.Error(), "mode must be") {
+		t.Fatalf("unknown mode accepted: %v", err)
+	}
+}
