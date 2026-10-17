@@ -793,6 +793,7 @@ export interface AppDetail {
 // repository each slot watches is bound per-app via AppImageBinding.
 export interface CDConfig {
   releaseValidationEnvironment?: string;
+  releaseValidationMode?: "persistent" | "ephemeral" | "";
   /** Read-only target-to-source edges. Empty sources receive main builds. */
   promotionSources?: Record<string, string>;
   verification?: Record<string, string[]>;

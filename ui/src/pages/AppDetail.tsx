@@ -763,7 +763,7 @@ function EnvPipelineBar({
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                       </svg>
                     )}
-                    {runtimeCfg.label}
+                    {stage?.phase === "Idle" ? "Idle" : stage?.phase === "Cleaning" ? "Cleaning up" : stage?.phase === "Preparing" ? "Preparing" : runtimeCfg.label}
                   </span>
 
                   {/* Kargo phase badge (when data available) */}
@@ -2645,6 +2645,7 @@ function AppValuesEditor({
   const [cdManaged, setCdManaged] = useState(false);
   const [autoPromote, setAutoPromote] = useState(false);
   const [validationEnvironment, setValidationEnvironment] = useState("");
+  const [validationMode, setValidationMode] = useState<"persistent" | "ephemeral">("persistent");
   const [separateValidation, setSeparateValidation] = useState(false);
   const [verification, setVerification] = useState<Record<string, string>>({});
   const [cdSaving, setCdSaving] = useState(false);
@@ -2729,6 +2730,7 @@ function AppValuesEditor({
     setCdManaged(data.cd?.managed ?? false);
     setAutoPromote(data.cd?.autoPromote ?? false);
     setValidationEnvironment(data.cd?.releaseValidationEnvironment ?? "");
+    setValidationMode(data.cd?.releaseValidationMode === "ephemeral" ? "ephemeral" : "persistent");
     setSeparateValidation(Boolean(data.cd?.releaseValidationEnvironment));
     setVerification(Object.fromEntries(Object.entries(data.cd?.verification ?? {}).map(([env, names]) => [env, names.join(", ")])));
     setPreviewsEnabled(data.previewsEnabled ?? true);
@@ -2891,6 +2893,7 @@ function AppValuesEditor({
     cdManaged !== (data.cd?.managed ?? false) ||
     autoPromote !== (data.cd?.autoPromote ?? false) ||
     (separateValidation ? validationEnvironment : "") !== (data.cd?.releaseValidationEnvironment ?? "") ||
+    (separateValidation ? validationMode : "persistent") !== (data.cd?.releaseValidationMode || "persistent") ||
     JSON.stringify(verification) !== JSON.stringify(Object.fromEntries(Object.entries(data.cd?.verification ?? {}).map(([env, names]) => [env, names.join(", ")])));
   // Direct-delivery apps deploy each env from values — no Kargo, so the CD +
   // image-selection sections don't apply. Derived from the live selector so the
@@ -3071,7 +3074,7 @@ function AppValuesEditor({
     setCdSaving(true);
     const progress = toast.loading("Saving CD settings — publishing to GitOps…");
     try {
-      await updateApp(project, data.name, { cd: { managed: cdManaged, autoPromote, releaseValidationEnvironment: separateValidation ? validationEnvironment : "", verification: Object.fromEntries(Object.entries(verification).map(([env, names]) => [env, names.split(",").map(name => name.trim()).filter(Boolean)])) } });
+      await updateApp(project, data.name, { cd: { managed: cdManaged, autoPromote, releaseValidationEnvironment: separateValidation ? validationEnvironment : "", releaseValidationMode: separateValidation ? validationMode : "persistent", verification: Object.fromEntries(Object.entries(verification).map(([env, names]) => [env, names.split(",").map(name => name.trim()).filter(Boolean)])) } });
       toast.success("CD settings saved and published to GitOps.", { id: progress });
       await onSaved();
     } catch (err) {
@@ -3566,7 +3569,7 @@ function AppValuesEditor({
                   <input type="checkbox" checked={separateValidation} onChange={event => { setSeparateValidation(event.target.checked); if (event.target.checked) setCdManaged(true); }} />
                   Use a separate release validation environment
                 </label>
-                <p className="mt-1 text-xs text-gray-500">Optional. Keep new releases moving while staging is pinned. Validation workloads and dependencies remain running and incur ongoing resource costs.</p>
+                <p className="mt-1 text-xs text-gray-500">Optional. Keep new releases moving while staging is pinned. Choose whether validation workloads stay running between releases.</p>
                 {separateValidation && (
                   <div className="mt-2 space-y-2">
                     <label className="block text-xs font-medium text-gray-700">
@@ -3576,9 +3579,17 @@ function AppValuesEditor({
                         {orgEnvs.filter(env => env.name !== "prod" && env.name !== "production" && env.name !== data.environments.find(e => e.isBase)?.envName && (env.clusterRefs?.length ?? 0) > 0).map(env => <option key={env.name} value={env.name}>{env.displayName || env.name}</option>)}
                       </select>
                     </label>
+                    <label className="block text-xs font-medium text-gray-700">
+                      Validation lifecycle
+                      <select className="mt-1 block w-full rounded border border-gray-300 px-2 py-1" value={validationMode} onChange={event => setValidationMode(event.target.value as "persistent" | "ephemeral")}>
+                        <option value="persistent">Persistent (default)</option>
+                        <option value="ephemeral">Ephemeral — create for each release</option>
+                      </select>
+                    </label>
+                    <p className="text-xs text-gray-500">{validationMode === "ephemeral" ? "Creates workloads for validation, then deletes them after checks pass. Failed runs remain for one hour for debugging. All chart-managed resources are disposable; keep databases and other persistent data outside this environment. Namespace and platform configuration remain. One run at a time; newer queued builds are combined into the latest release." : "Workloads stay running between releases and consume resources continuously. Use this for stable endpoints or stateful dependencies."}</p>
                     <p className="text-xs text-gray-500">Create and bind a separate environment in Settings → Environments first. Configure its databases, queues, secrets and external-service test accounts independently. Existing pins stay in place.</p>
                     {validationEnvironment && <p className="text-xs text-gray-700">Main builds → {validationEnvironment} → downstream release environments. The base staging environment receives main builds independently when unpinned. Configure acceptance checks for {validationEnvironment} below; checks are not copied from staging.</p>}
-                    <p className="text-xs text-gray-500">Disabling this option restores the ordered environment pipeline. It does not delete validation workloads or data. Pinning or suspending validation pauses new release verification.</p>
+                    <p className="text-xs text-gray-500">Disabling restores the ordered pipeline. For ephemeral validation, wait until cleanup finishes before changing lifecycle or environment. Pins and rollbacks require persistent mode; suspension pauses new runs.</p>
                   </div>
                 )}
                 <p className="mt-3 text-sm font-medium text-gray-700">Acceptance checks</p>
