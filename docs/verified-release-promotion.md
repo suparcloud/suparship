@@ -56,17 +56,25 @@ with automatic sync disabled before the Promotion is submitted.
   the test templates. With no templates configured, rollout health is the gate.
 - Suparship schedules downstream automatic promotions; generated Kargo policy
   only schedules the first Stage. Generator contract v0.4.0 triggers
-  the existing startup republish mechanism. Before rollout, verify that Argo CD
-  has applied the generated ProjectConfig; Git publication alone does not prove
-  that the old downstream scheduler is disabled.
+  the existing startup republish mechanism. Automatic promotion waits until the
+  live ProjectConfig explicitly disables the destination's Kargo policy and
+  Kargo acknowledges a refresh tied to that configuration version. Missing or
+  unreadable configuration pauses scheduling without consuming retry cooldown.
+  The chart grants read access to ProjectConfig. Custom label/pattern selectors
+  must follow an exact disabled destination policy; ambiguous ownership pauses
+  scheduling. Git publication alone does not open the gate.
 - Automatic selection uses verified history even when the source is pinned or
   unhealthy. It only advances beyond the destination's current Freight discovery
   timestamp. Discovery order is not Git ancestry: restrict Warehouse discovery to
   immutable main-branch build tags, and do not backfill older builds into that
   stream. Manual release selection and rollback remain explicit operations.
 - Active verified requests are reused. Competing submissions contend on a
-  Stage-wide attempt name; failed attempts can be retried. This does not serialize
-  external Kargo clients or legacy rollback submissions. A completed request
+  Stage annotation reservation protected by Kubernetes resourceVersion; failed
+  attempts can be retried. Releases and rollbacks use Kargo's native
+  `stage.ULID.freight` naming scheme. A reservation survives restarts and shares
+  one name across simultaneous Suparship requests. External Kargo clients use
+  the same name format but do not participate in Suparship's reservation; Kargo
+  queues those operations. A completed request
   reuses its successful Promotion while that Freight is still the destination's
   current release; it does not suppress an explicit redeployment after rollback.
 - New releases that have never passed required verification remain blocked.
@@ -108,3 +116,20 @@ and external-chart path generation have regression coverage, but were not tested
 against multiple live clusters. Acceptance-policy changes do not retroactively
 revoke old Kargo verification; reverify or remove obsolete evidence as part of
 changing a release policy. Soak-time enforcement remains Kargo's responsibility.
+
+## Compatibility with existing promotion history
+
+Released Suparship's `stage-UnixNano` names sort before the new `stage.ULID`
+names, so normal upgrades retain their history. Stage status is consulted even
+when older Promotion objects have been garbage-collected.
+
+The unreleased development implementation used `verified-*` names. Those can
+sort after native names for some Stages. Suparship detects this condition and
+rejects a new submission instead of reporting a deployment Kargo would ignore.
+Do not use that experimental build for a production rollout. Preserve its test
+records and use a fresh test application for validation; arbitrary renaming or
+editing Kargo status is not an automatic migration. A future-dated native name
+also pauses submission until clock ordering is safe.
+
+Naming follows the [Kargo v1.9.5 promotion builder](https://github.com/akuity/kargo/blob/v1.9.5/pkg/kargo/promotion_builder.go)
+and [promotion comparison](https://github.com/akuity/kargo/blob/v1.9.5/pkg/api/promotion.go).

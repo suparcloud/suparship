@@ -75,22 +75,80 @@ health policy (`verified-c4f0a05b5c498851-2`).
 The composed-app failure exposed missing Kargo authorization on stateful
 Applications; generated manifests now include it while retaining `prune: false`.
 Retries no longer reuse an older success after a newer partial failure.
-Attempt names now use a fixed-width sortable suffix so attempt 10 sorts after 9.
+That checkpoint used a fixed-width attempt suffix. The subsequent ordering fix
+below replaces it with Kargo-compatible ULID names.
 
 Validation: `go test ./internal/gitops ./internal/server ./internal/kube
 ./cmd/suparship`, the UI production build, and `git diff --check` passed.
 The live run used one local cluster; multi-cluster/external-chart generation is
 covered by unit tests, not a multi-cluster deployment rehearsal.
 
-## Open release blockers
+## Release-blocker fixes (October 18 local time)
 
-- Verified Promotion names sort correctly within their own attempt sequence,
-  but use a different prefix from rollback and native Kargo submissions. A newer
-  operation can therefore fail to replace an older operation in Stage status.
-  Compatible ordering and a release → rollback → release regression test are
-  required before release.
-- Startup republishes scheduler configuration without waiting for the live
-  ProjectConfig to disable Kargo's previous downstream auto-promotion. Gate the
-  new scheduler on that applied configuration and rehearse an unattended upgrade.
+The ordering implementation now uses Kargo's `stage.ULID.freight` format for
+verified releases and rollbacks. A Stage annotation reserved with Kubernetes
+resourceVersion keeps simultaneous Suparship requests on the same operation.
+Regression coverage includes verified release → rollback → native-format
+promotion → verified release, duplicate requests, resourceVersion conflicts,
+restart recovery, failed retries, released legacy timestamp names, and
+Promotion garbage collection with retained Stage status.
 
-The passing checks above do not constitute public release approval.
+Automatic promotion now checks the live ProjectConfig before selecting a
+release. It requests a Kargo refresh tied to that configuration's version and
+waits for the Stage's acknowledgement. It fails closed on missing configuration,
+read failures, ambiguous policies, or an enabled Kargo downstream scheduler.
+The chart includes the required ProjectConfig read permission.
+
+### Live handoff validation
+
+An isolated `kargo-handoff-validation` project exercised the actual Kargo v1.9.5
+controller with the new gate:
+
+| State | Gate result |
+| --- | --- |
+| Legacy downstream automatic promotion enabled | Closed |
+| Disabled policy applied, acknowledgement pending | Closed |
+| Kargo acknowledged that configuration | Open |
+
+No manual Stage refresh or status editing was used; the gate requested its own
+refresh. The fixture had no Freight, so it tested ownership acknowledgement,
+not a deployment race under load. Server regression tests separately prove that
+no promotion or retry cooldown is created while the gate is closed, and that
+automatic promotion resumes when it opens. The isolated project was removed.
+
+### Live release ordering validation
+
+A fresh `release-order-probe` app used two actual registry images and normal
+upstream Kargo verification. Production operations were:
+
+| Operation | Promotion name | Freight |
+| --- | --- | --- |
+| Initial production deployment | `release-order-probe-prod.01m55np7zy5nxcc9g3zha1fk4w.8d9bf27` | `8d9bf272d82d0dbd7e6b8f25cc8b367e1f6a4876` |
+| Second verified release | `release-order-probe-prod.01m55nsb030yvhv76rkw6qvadt.d9808c2` | `d9808c203193115c64db156f18b53542e82f0079` |
+| Rollback | `release-order-probe-prod.01m55nt3g66gwkc2nnzjh4mkew.8d9bf27` | `8d9bf272d82d0dbd7e6b8f25cc8b367e1f6a4876` |
+| Re-promotion | `release-order-probe-prod.01m55ntw2m7v1057a5s1qwkap3.d9808c2` | `d9808c203193115c64db156f18b53542e82f0079` |
+
+All four operations succeeded. Each operation was checked against the Stage's
+lastPromotion, current Freight, and rollout health before continuing. The first
+submission used the HTTP API, including first-target preparation; subsequent
+operations exercised the shared KargoStore release and rollback primitives.
+This was not a browser-level rollback/Resume CD test.
+
+### Remaining validation limits
+
+- Root Application hard refreshes were needed to load the new fixture's Git
+  revisions. Periodic reconciliation had continued to report the older revision.
+  This run does not prove a fully unattended upgrade of an existing installation.
+- The fixture inherited references to an empty Secret that ESO did not create.
+  Empty Secrets were supplied in its staging and production namespaces to let
+  the test workload start. No verification evidence or Stage status was fabricated.
+- Earlier `verified-*` development records were preserved on the original demos.
+  Those experimental names may sort after native names; submission now rejects
+  that incompatible history rather than silently accepting an ignored operation.
+  Released `stage-UnixNano` history is covered by the upgrade regression test.
+- Multi-cluster and external-chart paths still require a live rehearsal.
+
+The Go package checks and `git diff --check` passed. Structured local evidence is
+in `tmp/release-demo/evidence/scheduler-handoff-live.json` and
+`tmp/release-demo/evidence/release-ordering-live.json`. These checks validate the
+two code fixes but are not blanket public release approval.
