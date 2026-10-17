@@ -78,3 +78,9 @@ chart, pause downstream auto-promotion through the installation's app/stack
 settings, let active operations finish, and review the GitOps revision and live
 ProjectConfig together. Restoring the previous binary alone does not restore
 its generated policies. Do not leave both schedulers managing the same target.
+
+## Optional independent validation
+
+Upgrades do not enable separate validation automatically. Existing apps keep their
+ordered promotion route. See [setup and lifecycle](release-validation.md) before
+selecting a persistent validation environment; disabling retains its resources.

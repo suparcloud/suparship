@@ -1,5 +1,7 @@
 # Promote a verified release
 
+For new builds while staging is pinned, opt into [separate persistent release validation](release-validation.md). The default workflow described below continues to use staging.
+
 An environment pin holds that environment's deployment. It does not invalidate
 verification evidence for releases that already passed its checks.
 

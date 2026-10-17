@@ -2,10 +2,19 @@
 
 ## Unreleased
 
+### Optional separate release validation
+
+- Select a persistent validation environment per app so new builds can be verified
+  and promoted while staging remains pinned. Existing apps retain their ordered flow.
+- Show resolved promotion sources and validate bindings, acceptance checks, and
+  Application-name uniqueness before enabling. Resources remain running between releases.
+
+See the [release validation guide](docs/release-validation.md).
+
 ### Verified-release promotion
 
 - Promote a previously verified release while staging remains pinned to a preview.
-  New unverified builds still require staging verification.
+  New unverified builds require staging verification unless separate release validation is configured.
 - Select releases in the UI or API, configure existing acceptance templates, and
   prepare first-deployment targets without automatically deploying a seed image.
 - Use Kargo-compatible release/rollback names and shared duplicate protection.

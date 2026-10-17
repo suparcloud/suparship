@@ -152,3 +152,43 @@ The Go package checks and `git diff --check` passed. Structured local evidence i
 in `tmp/release-demo/evidence/scheduler-handoff-live.json` and
 `tmp/release-demo/evidence/release-ordering-live.json`. These checks validate the
 two code fixes but are not blanket public release approval.
+
+## Optional persistent validation while staging is pinned
+
+Tested on 2026-10-17 UTC in `kind-suparship-dev` with `release-order-probe`:
+
+- Staging was pinned to `pr-validation-hold`, image `pr-2-5574c7d`.
+- Selected `release-validation`, bound to the local `validation-cluster` registration,
+  with managed delivery and automatic promotion enabled.
+- Published fixture tag `validation-check-1792267491`. This is a fresh registry tag
+  referencing an existing image digest, not a new CI build or main-merge rehearsal.
+- Production promotion before verification returned HTTP 400: the release had not
+  been verified in `release-order-probe-release-validation`.
+- Freight `cfcfbdb25b6caa59823aa1a9e69931c16594dd8c` was then verified in validation,
+  with no staging verification entry.
+- At 20:07:48 UTC, Suparship automatically submitted
+  `release-order-probe-prod.01m55qmj0dqdq8khvezjn3a9qj.cfcfbdb` from validation to prod.
+  The Promotion succeeded. Both validation and production Deployments reached
+  two updated, ready replicas using the new tag. Staging retained two ready
+  replicas running its preview tag.
+
+Local evidence is saved at `tmp/release-demo/evidence/separate-validation.json`.
+The test used rollout-health verification, not a new custom acceptance AnalysisRun.
+Existing acceptance-template execution is covered by the earlier Shipnotes run;
+route selection and checked-source guards have unit coverage.
+
+The first setup attempt exposed an Application naming collision when staging and
+validation shared a cluster registration with the default naming pattern. The API
+now rejects that configuration before saving, with a regression test. The live
+fixture uses a distinct logical cluster registration targeting the same local kind
+cluster; it does not demonstrate separate physical clusters. Its initial host-only
+API address was corrected to the in-cluster address. Root/ApplicationSet refreshes
+and empty fixture Secrets were needed during setup. No verification status was
+fabricated. This run does not prove unattended upgrades, external-chart delivery,
+or ephemeral resource lifecycle behavior.
+
+Backend tests passed for domain, GitOps, server, Kubernetes adapters, and command
+wiring. The UI production build and whitespace checks passed. The UI shows the
+configured promotion sources; browser automation could inspect the overview but
+could not activate the settings tab reliably, so settings save was exercised through
+the API rather than claimed as a completed browser interaction test.
