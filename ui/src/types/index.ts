@@ -792,6 +792,7 @@ export interface AppDetail {
 // tag-keys Kargo manages are declared by the template's image slots; the
 // repository each slot watches is bound per-app via AppImageBinding.
 export interface CDConfig {
+  verification?: Record<string, string[]>;
   managed?: boolean;
   /** Auto-promote this pipeline app to prod once staging is healthy. */
   autoPromote?: boolean;
@@ -852,6 +853,7 @@ export interface AppEnvironmentResponse {
 // --- Promotion types ---
 
 export interface PromoteRequest {
+  freight?: string;
   targetEnvironment: string;
 }
 
