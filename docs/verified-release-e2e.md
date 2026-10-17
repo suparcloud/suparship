@@ -182,7 +182,8 @@ validation shared a cluster registration with the default naming pattern. The AP
 now rejects that configuration before saving, with a regression test. The live
 fixture uses a distinct logical cluster registration targeting the same local kind
 cluster; it does not demonstrate separate physical clusters. Its initial host-only
-API address was corrected to the in-cluster address. Root/ApplicationSet refreshes
+API address and kubeconfig were corrected to the in-cluster address; the local
+server was restarted to clear its cached cluster client. Root/ApplicationSet refreshes
 and empty fixture Secrets were needed during setup. No verification status was
 fabricated. This run does not prove unattended upgrades, external-chart delivery,
 or ephemeral resource lifecycle behavior.
