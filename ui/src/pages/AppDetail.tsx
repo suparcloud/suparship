@@ -144,8 +144,13 @@ function formatTime(iso?: string): string {
 function getPromoteTarget(
   currentEnv: AppEnvironmentSummary | null,
   environments: AppEnvironmentSummary[],
+  sources?: Record<string, string>,
 ): { source: string; target: string } | null {
   if (!currentEnv) return null;
+  if (sources) {
+    const target = environments.find(env => sources[env.envName] === currentEnv.envName);
+    return target ? { source: currentEnv.envName, target: target.envName } : null;
+  }
   // Promotion advances freight between Kargo Stages (stable→stable only).
   // Previews have no Stage: their build reaches staging by merging the PR
   // (auto-promotes) or via Pin (deploy without merging) — not by promotion.
@@ -550,6 +555,7 @@ function EnvPipelineBar({
   project,
   appName,
   nonPreviewEnvs,
+  promotionSources,
   previewEnvs,
   selectedEnvName,
   onSelect,
@@ -560,6 +566,7 @@ function EnvPipelineBar({
   project: string;
   appName: string;
   nonPreviewEnvs: AppEnvironmentSummary[];
+  promotionSources?: Record<string, string>;
   previewEnvs: AppEnvironmentSummary[];
   selectedEnvName: string | null;
   onSelect: (envName: string) => void;
@@ -692,7 +699,7 @@ function EnvPipelineBar({
       )}
       {/* Pipeline row: stable envs connected by promotion arrows; each env
           carries its previews stacked beneath it. */}
-      <div className="flex flex-wrap items-start gap-0">
+      <div className="flex flex-wrap items-start gap-2">
         {nonPreviewEnvs.map((env, i) => {
           const stage = stageMap[env.envName];
           const isSelected = selectedEnvName === env.envName;
@@ -735,6 +742,11 @@ function EnvPipelineBar({
                   </span>
                 </div>
 
+                {promotionSources && Object.prototype.hasOwnProperty.call(promotionSources, env.envName) && (
+                  <span className={`text-[10px] ${isSelected ? "text-white/70" : "text-gray-500"}`}>
+                    {promotionSources[env.envName] ? `Verified in ${promotionSources[env.envName]}` : "Receives main builds"}
+                  </span>
+                )}
                 {/* Row 2: Kargo phase badge + ArgoCD runtime label — always shown */}
                 <div className="flex flex-wrap items-center gap-1">
                   {/* ArgoCD runtime status */}
@@ -819,7 +831,7 @@ function EnvPipelineBar({
               </button>
 
               {/* Promotion arrow between nodes */}
-              {i < nonPreviewEnvs.length - 1 && (
+              {i < nonPreviewEnvs.length - 1 && (!promotionSources || promotionSources[nonPreviewEnvs[i + 1]?.envName ?? ""] === env.envName) && (
                 <svg
                   className="mx-1 h-3.5 w-3.5 flex-shrink-0 text-gray-300"
                   fill="none"
@@ -1448,7 +1460,7 @@ export function AppDetail() {
           {(() => {
             // Direct-delivery apps have no promotion — each env deploys from values.
             if (data.deliveryMode === "direct") return null;
-            const promotion = getPromoteTarget(currentEnv, data.environments);
+            const promotion = getPromoteTarget(currentEnv, data.environments, data.cd?.promotionSources ?? (data.cd?.releaseValidationEnvironment ? {} : undefined));
             if (!promotion) return null;
             // Nothing deployed in the source env yet — there's nothing to
             // promote and the endpoint would refuse; don't invite the click.
@@ -2285,6 +2297,7 @@ export function AppDetail() {
           project={project ?? ""}
           appName={appName ?? ""}
           nonPreviewEnvs={nonPreviewEnvs}
+          promotionSources={data.cd?.promotionSources}
           previewEnvs={previewEnvs}
           selectedEnvName={selectedEnvName}
           onSelect={setSelectedEnvName}
@@ -2631,6 +2644,8 @@ function AppValuesEditor({
   const [templateLayer, setTemplateLayer] = useState<string>("");
   const [cdManaged, setCdManaged] = useState(false);
   const [autoPromote, setAutoPromote] = useState(false);
+  const [validationEnvironment, setValidationEnvironment] = useState("");
+  const [separateValidation, setSeparateValidation] = useState(false);
   const [verification, setVerification] = useState<Record<string, string>>({});
   const [cdSaving, setCdSaving] = useState(false);
   const [previewsEnabled, setPreviewsEnabled] = useState(true);
@@ -2699,7 +2714,9 @@ function AppValuesEditor({
   const baselineReposRef = useRef<ReadonlySet<string> | null>(null);
   const [imagesSaving, setImagesSaving] = useState(false);
 
-  // Seed editors from the persisted overlays whenever the app data changes.
+  const environmentConfigKey = JSON.stringify((data.environments ?? []).map(env => [env.envName, env.deploy]));
+  // Health-only updates must not reset unsaved settings.
+
   useEffect(() => {
     setBaseText(stringifyOverlay(data.rawValues));
     const next: Record<string, string> = {};
@@ -2711,6 +2728,8 @@ function AppValuesEditor({
     setEnvTexts(next);
     setCdManaged(data.cd?.managed ?? false);
     setAutoPromote(data.cd?.autoPromote ?? false);
+    setValidationEnvironment(data.cd?.releaseValidationEnvironment ?? "");
+    setSeparateValidation(Boolean(data.cd?.releaseValidationEnvironment));
     setVerification(Object.fromEntries(Object.entries(data.cd?.verification ?? {}).map(([env, names]) => [env, names.join(", ")])));
     setPreviewsEnabled(data.previewsEnabled ?? true);
     setDeliveryMode(data.deliveryMode === "direct" ? "direct" : "pipeline");
@@ -2720,7 +2739,7 @@ function AppValuesEditor({
     }
     setDeployEnvs(de);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data]);
+  }, [data.rawValues, data.envRawValues, data.cd, data.previewsEnabled, data.deliveryMode, environmentConfigKey]);
 
   // Seed the per-unique-image CD rules from the app's saved bindings (or
   // inherit-from-template declared defaults when none), grouped by repository. On a
@@ -2871,6 +2890,7 @@ function AppValuesEditor({
   const cdDirty =
     cdManaged !== (data.cd?.managed ?? false) ||
     autoPromote !== (data.cd?.autoPromote ?? false) ||
+    (separateValidation ? validationEnvironment : "") !== (data.cd?.releaseValidationEnvironment ?? "") ||
     JSON.stringify(verification) !== JSON.stringify(Object.fromEntries(Object.entries(data.cd?.verification ?? {}).map(([env, names]) => [env, names.join(", ")])));
   // Direct-delivery apps deploy each env from values — no Kargo, so the CD +
   // image-selection sections don't apply. Derived from the live selector so the
@@ -3051,7 +3071,7 @@ function AppValuesEditor({
     setCdSaving(true);
     const progress = toast.loading("Saving CD settings — publishing to GitOps…");
     try {
-      await updateApp(project, data.name, { cd: { managed: cdManaged, autoPromote, verification: Object.fromEntries(Object.entries(verification).map(([env, names]) => [env, names.split(",").map(name => name.trim()).filter(Boolean)])) } });
+      await updateApp(project, data.name, { cd: { managed: cdManaged, autoPromote, releaseValidationEnvironment: separateValidation ? validationEnvironment : "", verification: Object.fromEntries(Object.entries(verification).map(([env, names]) => [env, names.split(",").map(name => name.trim()).filter(Boolean)])) } });
       toast.success("CD settings saved and published to GitOps.", { id: progress });
       await onSaved();
     } catch (err) {
@@ -3542,6 +3562,25 @@ function AppValuesEditor({
                 <p className="mt-1 text-xs text-gray-400">
                   Promotes a verified release automatically after the upstream rollout and configured checks pass. A pinned source does not block releases already verified.
                 </p>
+                <label className="mt-4 flex items-center gap-2 text-sm font-medium text-gray-700">
+                  <input type="checkbox" checked={separateValidation} onChange={event => { setSeparateValidation(event.target.checked); if (event.target.checked) setCdManaged(true); }} />
+                  Use a separate release validation environment
+                </label>
+                <p className="mt-1 text-xs text-gray-500">Optional. Keep new releases moving while staging is pinned. Validation workloads and dependencies remain running and incur ongoing resource costs.</p>
+                {separateValidation && (
+                  <div className="mt-2 space-y-2">
+                    <label className="block text-xs font-medium text-gray-700">
+                      Validation environment
+                      <select className="mt-1 block w-full rounded border border-gray-300 px-2 py-1" value={validationEnvironment} onChange={event => setValidationEnvironment(event.target.value)}>
+                        <option value="">Choose an environment</option>
+                        {orgEnvs.filter(env => env.name !== "prod" && env.name !== "production" && env.name !== data.environments.find(e => e.isBase)?.envName && (env.clusterRefs?.length ?? 0) > 0).map(env => <option key={env.name} value={env.name}>{env.displayName || env.name}</option>)}
+                      </select>
+                    </label>
+                    <p className="text-xs text-gray-500">Create and bind a separate environment in Settings → Environments first. Configure its databases, queues, secrets and external-service test accounts independently. Existing pins stay in place.</p>
+                    {validationEnvironment && <p className="text-xs text-gray-700">Main builds → {validationEnvironment} → downstream release environments. The base staging environment receives main builds independently when unpinned. Configure acceptance checks for {validationEnvironment} below; checks are not copied from staging.</p>}
+                    <p className="text-xs text-gray-500">Disabling this option restores the ordered environment pipeline. It does not delete validation workloads or data. Pinning or suspending validation pauses new release verification.</p>
+                  </div>
+                )}
                 <p className="mt-3 text-sm font-medium text-gray-700">Acceptance checks</p>
                 <p className="mt-1 text-xs text-gray-500">Enter existing AnalysisTemplate names, separated by commas. Templates must exist in the project's Kargo namespace. Empty means rollout health checks only.</p>
                 {envs.filter(env => env !== PREVIEW_SCOPE).map(env => (
@@ -3553,7 +3592,7 @@ function AppValuesEditor({
               </div>
               <button
                 onClick={saveCD}
-                disabled={cdSaving || !cdDirty}
+                disabled={cdSaving || !cdDirty || (separateValidation && !validationEnvironment)}
                 className="shrink-0 rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-50"
               >
                 {cdSaving ? "Saving…" : "Save CD"}
