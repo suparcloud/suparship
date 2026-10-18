@@ -792,6 +792,7 @@ export interface AppDetail {
 // tag-keys Kargo manages are declared by the template's image slots; the
 // repository each slot watches is bound per-app via AppImageBinding.
 export interface CDConfig {
+  releaseValidationManaged?: boolean;
   releaseValidationEnvironment?: string;
   releaseValidationMode?: "persistent" | "ephemeral" | "";
   /** Read-only target-to-source edges. Empty sources receive main builds. */
