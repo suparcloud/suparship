@@ -15,6 +15,13 @@
   [read-model operations](docs/read-model.md).
   API consumers must handle cold-read `503`/`Retry-After` responses.
 
+### Managed release validation
+
+- Add preview-style managed release validation: reuse base cluster and configuration
+  in a dedicated namespace, with independent secret overrides, validation hostnames,
+  ephemeral workloads, and no separate environment or cluster registration.
+
+
 ### Optional ephemeral release validation
 
 - Keep persistent validation as the default; opt into disposable validation workloads.

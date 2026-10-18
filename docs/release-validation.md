@@ -28,7 +28,54 @@ A failed check blocks that release. Pinning or suspending validation prevents ne
 builds from being validated; previously verified releases remain eligible under
 the normal promotion rules.
 
-## Setup
+## Managed validation (recommended)
+
+Enable **Use a separate release validation environment** in the app's delivery
+settings. New configurations use an app-owned validation instance; no organization
+environment or duplicate cluster registration is needed. Its default lifecycle is
+**Ephemeral**. Existing registered-environment configurations retain their previous
+routing and persistent default.
+
+The instance inherits the base environment's deployment targets, routing profiles,
+template and stack overlays, app values, configuration variables and secret scopes.
+`environmentDefaults.release-validation` adds validation-specific Helm values and
+variables; the app's release-validation secret scope adds secret overrides in the
+base environment's backend vault. Preview overrides are not included. This is live
+inheritance at publication time, not a frozen copy: the next run picks up source
+configuration changes. Base pins, image tags and suspension controls are not copied;
+Kargo chooses the release candidate's image.
+
+Its namespace is `{projectApp}-release-validation`, with an existing project prefix
+folded into the app name: project `voiceai`, app `voiceai-lk-sh` produces
+`voiceai-lk-sh-release-validation`. Long namespace identities receive a stable hash.
+Application names include validation and the destination cluster, preserving the
+identities of existing staging and production Applications. Namespaced chart
+resources can retain their normal short names because the namespace isolates them.
+
+Charts that expose HTTP should enable their HTTPRoute using the inherited Gateway
+parent and `((platform.routingHost))` hostname, rather than a literal staging host.
+The validation hostname includes the deduplicated project/app identity and
+`release-validation`; component routes also include their component identity.
+HTTPRoutes and Services belong to the disposable chart Application. Cleanup removes
+them with workloads, while the namespace, platform ConfigMaps, ExternalSecrets,
+backend override item and verification history remain. The platform does not invent
+service names or rewrite arbitrary third-party chart route schemas.
+
+The ExternalSecret reads base scope items plus the validation override item and
+materializes a separate Kubernetes Secret in the validation namespace. Source items
+are never modified or deleted by validation. Shared credentials still reach the same
+external databases, queues and accounts; supply isolated credentials when needed.
+Known stateful components remain incompatible with ephemeral mode. Configure checks
+for the validation source explicitly; staging checks are not silently copied.
+
+API example:
+
+```json
+{"cd":{"managed":true,"autoPromote":true,"releaseValidationManaged":true,"releaseValidationMode":"ephemeral"}}
+```
+
+## Registered environment setup (legacy / advanced)
+
 
 1. Create a non-production environment in Settings → Environments and bind it to
    a registered cluster. Keep staging first in the configured order and retain a
