@@ -15,6 +15,9 @@ server:
 ingress:
   enabled: false
   className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
   host: suparship.localhost
 
 # Dev admin Secret is created by hack/dev/admin-secret.sh (login admin@local / admin123).

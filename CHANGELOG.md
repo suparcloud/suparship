@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Background UI reads (beta)
+
+- Serve dashboard, app, environment, history, configuration and cluster views
+  from bounded background projections, with explicit cold/stale states.
+- Refresh runtime views through authorized SSE notifications without replacing
+  editor drafts; invalidate observations after writes and rebuild on restart.
+- Reserve Kubernetes authorization capacity independently of background reads,
+  grant StatefulSet/DaemonSet discovery permissions, and preserve native empty
+  app/source-failure/deletion semantics through legacy compatibility reads.
+- Add latency/recovery fixtures, a real Tilt rehearsal script, and
+  [read-model operations](docs/read-model.md).
+  API consumers must handle cold-read `503`/`Retry-After` responses.
+
 ### Optional ephemeral release validation
 
 - Keep persistent validation as the default; opt into disposable validation workloads.

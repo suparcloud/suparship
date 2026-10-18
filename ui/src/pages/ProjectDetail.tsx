@@ -1,3 +1,4 @@
+import { useReadView } from "../lib/readViews";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -30,26 +31,12 @@ export function ProjectDetail() {
       .catch(() => setStacks([]));
   }, [project]);
 
-  // Two-phase load: the brief list (store reads only) paints every app name,
-  // link, and env column immediately so the user can navigate; the enriched
-  // list (live per-env status — the slow call) replaces it when it lands,
-  // with status cells pulsing in between.
+  // A single shared projection provides names and observed runtime state.
   const [statusPending, setStatusPending] = useState(true);
 
   useEffect(() => {
     if (!project) return;
     let cancelled = false;
-
-    listApps(project, { brief: true })
-      .then((data) => {
-        if (cancelled) return;
-        // Don't clobber the enriched result if it somehow won the race.
-        setApps((prev) => (prev.length > 0 ? prev : data.apps));
-        setAppsLoading(false);
-      })
-      .catch(() => {
-        /* the enriched fetch below is the fallback error path */
-      });
 
     listApps(project)
       .then((data) => {
@@ -70,6 +57,15 @@ export function ProjectDetail() {
       cancelled = true;
     };
   }, [project]);
+
+  useReadView(project ? `/projects/${encodeURIComponent(project)}/apps` : undefined, async (isCurrent) => {
+    if (!project) return;
+    const result = await listApps(project);
+    if (!isCurrent()) return;
+    setApps(result.apps);
+    setAppsLoading(false);
+    setStatusPending(false);
+  });
 
   const healthyCt = apps.filter((a) => a.status.phase === "healthy").length;
   const totalCt = apps.length;

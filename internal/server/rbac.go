@@ -26,6 +26,7 @@ func ProjectFromPathValue(param string) ProjectExtractor {
 // It composes authentication (via authHandler) with authorization
 // (via rbac.OrgStore).
 type rbacHandler struct {
+	reads            *readProjection
 	auth             *authHandler
 	orgStore         rbac.OrgStore
 	projectStore     project.Store     // optional: merges project store into project listing
@@ -121,7 +122,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	requireOrgAdmin := rh.auth.requireAuth // further RBAC check inside handler
 
 	// Org-level read endpoints — authenticated users only.
-	mux.HandleFunc("GET /api/v1/org", rh.auth.requireAuth(rh.handleGetOrg))
+	mux.HandleFunc("GET /api/v1/org", rh.auth.requireAuth(rh.reads.wrap(rh.handleGetOrg)))
 	// Local users (basic-auth escape hatch, invite-provisioned) — org_admin only.
 	mux.HandleFunc("GET /api/v1/org/users", requireOrgAdmin(rh.requireOrgAdmin(rh.handleListLocalUsers)))
 	mux.HandleFunc("POST /api/v1/org/users", requireOrgAdmin(rh.requireOrgAdmin(rh.handleCreateLocalUser)))
@@ -129,7 +130,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/org/users/{username}", requireOrgAdmin(rh.requireOrgAdmin(rh.handleDeleteLocalUser)))
 
 	mux.HandleFunc("GET /api/v1/teams", requireOrgAdmin(rh.requireOrgAdmin(rh.handleGetTeams)))
-	mux.HandleFunc("GET /api/v1/projects", rh.auth.requireAuth(rh.handleGetProjects))
+	mux.HandleFunc("GET /api/v1/projects", rh.auth.requireAuth(rh.reads.wrap(rh.handleGetProjects)))
 
 	// Team management — reads open to all authenticated users; writes org_admin.
 	mux.HandleFunc("POST /api/v1/teams", requireOrgAdmin(rh.requireOrgAdmin(rh.handleCreateTeam)))
@@ -215,7 +216,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/services", devProject(legacyServiceRoute(rh.serviceHandler.handleCreateService)))
 	}
 	if rh.inventoryHandler != nil {
-		mux.HandleFunc("GET /api/v1/environments", rh.auth.requireAuth(legacyServiceRoute(rh.inventoryHandler.handleListEnvironments)))
+		mux.HandleFunc("GET /api/v1/environments", rh.auth.requireAuth(legacyServiceRoute(rh.reads.wrap(rh.inventoryHandler.handleListEnvironments))))
 		mux.HandleFunc("GET /api/v1/projects/{project}/services", viewProject(legacyServiceRoute(rh.inventoryHandler.handleListServices)))
 		mux.HandleFunc("GET /api/v1/projects/{project}/services/{service}", viewProject(legacyServiceRoute(rh.inventoryHandler.handleGetService)))
 	}
@@ -242,34 +243,34 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	if rh.envConfigHandler != nil {
 		ec := rh.envConfigHandler
 		// Org and Environment levels — org_admin writes, any-auth reads.
-		mux.HandleFunc("GET /api/v1/org/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handleGetOrgEnvConfig)))
+		mux.HandleFunc("GET /api/v1/org/envconfig", requireOrgAdmin(rh.requireOrgAdmin(rh.reads.wrap(ec.handleGetOrgEnvConfig))))
 		mux.HandleFunc("PUT /api/v1/org/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutOrgEnvConfig)))
-		mux.HandleFunc("GET /api/v1/org/envconfig/{envtype}", requireOrgAdmin(rh.requireOrgAdmin(ec.handleGetEnvTypeEnvConfig)))
+		mux.HandleFunc("GET /api/v1/org/envconfig/{envtype}", requireOrgAdmin(rh.requireOrgAdmin(rh.reads.wrap(ec.handleGetEnvTypeEnvConfig))))
 		mux.HandleFunc("PUT /api/v1/org/envconfig/{envtype}", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutEnvTypeEnvConfig)))
 		// Project level — project_admin writes, viewer reads.
-		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig", viewProject(ec.handleGetProjectEnvConfig))
+		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig", viewProject(rh.reads.wrap(ec.handleGetProjectEnvConfig)))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/envconfig", manageProject(ec.handlePutProjectEnvConfig))
-		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig/env/{env}", viewProject(ec.handleGetProjectEnvEnvConfig))
+		mux.HandleFunc("GET /api/v1/projects/{project}/envconfig/env/{env}", viewProject(rh.reads.wrap(ec.handleGetProjectEnvEnvConfig)))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/envconfig/env/{env}", manageProject(ec.handlePutProjectEnvEnvConfig))
 		// Cluster level — org_admin writes, any-auth reads. Platform escape hatch.
-		mux.HandleFunc("GET /api/v1/clusters/{cluster}/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handleGetClusterEnvConfig)))
+		mux.HandleFunc("GET /api/v1/clusters/{cluster}/envconfig", requireOrgAdmin(rh.requireOrgAdmin(rh.reads.wrap(ec.handleGetClusterEnvConfig))))
 		mux.HandleFunc("PUT /api/v1/clusters/{cluster}/envconfig", requireOrgAdmin(rh.requireOrgAdmin(ec.handlePutClusterEnvConfig)))
 		// App level — developer writes (202 async), viewer reads.
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envconfig", viewProject(ec.handleGetAppEnvConfig))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envconfig", viewProject(rh.reads.wrap(ec.handleGetAppEnvConfig)))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envconfig", devProject(ec.handlePutAppEnvConfig))
 		// App-Environment level — developer writes (202 async), viewer reads.
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig", viewProject(ec.handleGetAppEnvEnvConfig))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig", viewProject(rh.reads.wrap(ec.handleGetAppEnvEnvConfig)))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig", devProject(ec.handlePutAppEnvEnvConfig))
 		// Per-base-env preview band: env vars for previews whose base env is {env}.
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/preview-envconfig", viewProject(ec.handleGetAppPreviewEnvConfig))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/preview-envconfig", viewProject(rh.reads.wrap(ec.handleGetAppPreviewEnvConfig)))
 		mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/envs/{env}/preview-envconfig", devProject(ec.handlePutAppPreviewEnvConfig))
 		// Resolved view — any viewer.
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig/resolved", viewProject(ec.handleGetResolvedEnvConfig))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/envs/{env}/envconfig/resolved", viewProject(rh.reads.wrap(ec.handleGetResolvedEnvConfig)))
 		// Variable catalog for the UI picker — any viewer.
-		mux.HandleFunc("GET /api/v1/projects/{project}/config-variables", viewProject(ec.handleGetConfigVariables))
+		mux.HandleFunc("GET /api/v1/projects/{project}/config-variables", viewProject(rh.reads.wrap(ec.handleGetConfigVariables)))
 		// Project-agnostic catalog (platform tokens + org/env/cluster vars) for the
 		// template-level platform-overrides editor, which has no project context.
-		mux.HandleFunc("GET /api/v1/platform/config-variables", rh.auth.requireAuth(ec.handleGetPlatformConfigVariables))
+		mux.HandleFunc("GET /api/v1/platform/config-variables", rh.auth.requireAuth(rh.reads.wrap(ec.handleGetPlatformConfigVariables)))
 	}
 
 	if rh.secretsHandler != nil {
@@ -387,16 +388,16 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 	}
 
 	if rh.appHandler != nil {
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps", viewProject(rh.appHandler.handleListApps))
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}", viewProject(rh.appHandler.handleGetApp))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps", viewProject(rh.reads.wrap(rh.appHandler.handleListApps)))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}", viewProject(rh.reads.wrap(rh.appHandler.handleGetApp)))
 		mux.HandleFunc("PATCH /api/v1/projects/{project}/apps/{app}", manageProject(rh.appHandler.handleUpdateApp))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}", manageProject(rh.appHandler.handleDeleteApp))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/rename", manageProject(rh.appHandler.handleRenameApp))
 		if rh.stackStore != nil {
 			mux.HandleFunc("PUT /api/v1/projects/{project}/apps/{app}/stack", manageProject(rh.handleSetAppStack))
 		}
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments", viewProject(rh.appHandler.handleListAppEnvironments))
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}", viewProject(rh.appHandler.handleGetAppEnvironment))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments", viewProject(rh.reads.wrap(rh.appHandler.handleListAppEnvironments)))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}", viewProject(rh.reads.wrap(rh.appHandler.handleGetAppEnvironment)))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/previews", viewProject(rh.appHandler.handleListAppPreviews))
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/previews", devProject(rh.appHandler.handleCreateAppPreview))
 		mux.HandleFunc("DELETE /api/v1/projects/{project}/apps/{app}/previews/{name}", devProject(rh.appHandler.handleDeleteAppPreview))
@@ -417,7 +418,7 @@ func (rh *rbacHandler) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/environments/{env}/resume", devProject(rh.appHandler.handleResumeAppEnv))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/promotions/{name}", viewProject(rh.appHandler.handleGetKargoPromotion))
 		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/kargo/stages", viewProject(rh.appHandler.handleGetKargoStages))
-		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}/history", viewProject(rh.appHandler.handleGetAppDeploymentHistory))
+		mux.HandleFunc("GET /api/v1/projects/{project}/apps/{app}/environments/{env}/history", viewProject(rh.reads.wrap(rh.appHandler.handleGetAppDeploymentHistory)))
 		// Read-only effective-values preview for the values editor (computes the
 		// merged chart⊕platform⊕overrides document for an env; never mutates).
 		mux.HandleFunc("POST /api/v1/projects/{project}/apps/{app}/envs/{env}/values/preview", viewProject(rh.appHandler.handleAppValuesPreview))

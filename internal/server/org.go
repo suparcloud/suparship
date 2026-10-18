@@ -125,6 +125,9 @@ func (rh *rbacHandler) handleGetProjects(w http.ResponseWriter, r *http.Request)
 	stored := make(map[string]*project.Project)
 	if rh.projectStore != nil {
 		list, err := rh.projectStore.List(r.Context())
+		if err != nil {
+			markProjectionFailure(r.Context())
+		}
 		if err == nil {
 			for _, p := range list {
 				seen[p.Metadata.Name] = true

@@ -36,6 +36,14 @@ server:
   logLevel: info
   # -- Set Secure flag on session cookies (enable behind HTTPS)
   cookieSecure: false
+  # -- Per-client, per-replica budgets; authorization has an independent client.
+  # Tune against API-server capacity and replica count. Remote workload clients
+  # retain their existing limits. All values must be positive.
+  kubernetes:
+    qps: 50
+    burst: 100
+    authorizationQps: 100
+    authorizationBurst: 200
 
 service:
   type: ClusterIP

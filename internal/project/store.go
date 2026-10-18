@@ -9,6 +9,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/suparcloud/suparship/internal/domain"
 )
 
 // Store defines CRUD operations for projects.
@@ -63,7 +65,7 @@ func (s *K8sStore) Get(ctx context.Context, name string) (*Project, error) {
 	cmName := ConfigMapPrefix + name
 	cm, err := s.client.CoreV1().ConfigMaps(Namespace).Get(ctx, cmName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("project %q not found", name)
+		return nil, domain.NotFoundf("project %q not found", name)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading configmap %s/%s: %w", Namespace, cmName, err)
@@ -127,7 +129,7 @@ func (s *K8sStore) Delete(ctx context.Context, name string) error {
 	cmName := ConfigMapPrefix + name
 	err := s.client.CoreV1().ConfigMaps(Namespace).Delete(ctx, cmName, metav1.DeleteOptions{})
 	if apierrors.IsNotFound(err) {
-		return fmt.Errorf("project %q not found", name)
+		return domain.NotFoundf("project %q not found", name)
 	}
 	if err != nil {
 		return fmt.Errorf("deleting configmap %s/%s: %w", Namespace, cmName, err)

@@ -325,3 +325,53 @@ for this cluster's sealed-secrets controller, so the file is safe to commit.
 | Template registry + overrides (config-as-code mirror) | `_platform/template-registry.yaml`, `_platform/template-overrides/{name}.yaml` in the GitOps repo (cluster ConfigMaps stay authoritative) |
 | Per-cluster sealed token + store | `_secret-stores/{cluster}/` |
 | Connect-token stash (recovery) | Secrets in `suparship-system` |
+
+### Background UI reads and proxy configuration
+
+The chart configures independent Kubernetes request budgets for background data
+reads and live role checks. Override them in your values file when tuning for
+API-server capacity; budgets apply per client and per server replica:
+
+```yaml
+server:
+  kubernetes:
+    qps: 50
+    burst: 100
+    authorizationQps: 100
+    authorizationBurst: 200
+```
+
+All limits must be positive; burst values must be integers. The chart validates
+these values before deployment. Authorization is still checked against current
+Kubernetes data on each protected request. Use the matching application image
+when deploying this chart from a feature branch: older images do not recognize
+the new flags. Release automation updates chart and application versions together.
+
+The UI uses Server-Sent Events on existing `/api/v1/...` routes with `?watch=1`.
+Configure your ingress/proxy to stream responses without buffering or caching,
+preserve cookies and query parameters, and allow streams for at least 15 seconds
+(a 60-second read timeout provides headroom). Reconnects are intentional and
+recheck authorization. The application sets `X-Accel-Buffering: no`; ensure your
+proxy honors it or explicitly disables buffering for the API. For an existing
+NGINX ingress controller, the chart's annotations can be set as follows; use the
+equivalent settings for your controller:
+
+```yaml
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+```
+
+Do not cache cold `503` responses or substitute a proxy error page for their JSON
+body and `Retry-After` header. Health probes remain `/healthz` and `/readyz`;
+individual views warming up must not cause pod restarts. Each replica rebuilds
+its disposable views after restart and retains up to 64 MiB of projection payloads
+in addition to normal application memory. More than one replica still requires
+a shared session store; read projections do not provide one.
+
+After upgrading, confirm the service account can get/list/watch Deployments,
+StatefulSets, DaemonSets and ReplicaSets. The bundled ClusterRole includes these
+permissions. For a reproducible local rehearsal and measured limits, see
+[Fast UI read model](read-model.md). Run `bash hack/test-helm.sh` to validate the
+default chart, Tilt overlay, custom budgets, invalid inputs and packaging.

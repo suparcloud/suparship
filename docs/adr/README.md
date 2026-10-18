@@ -18,6 +18,8 @@ ADRs document significant decisions that shaped the system's design, API surface
 
 | [ADR-0007](0007-ephemeral-release-validation.md) | Optional ephemeral release validation workloads | Accepted |
 
+| [ADR-0008](0008-shared-read-projections.md) | Shared background UI read projections | Accepted |
+
 ## Related docs
 
 - [docs/templates.md](../templates.md) — Template authoring guide: app-first model, component topology, environment overrides, secrets.

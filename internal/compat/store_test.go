@@ -2,6 +2,7 @@ package compat_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -18,11 +19,11 @@ import (
 type stubEmptyAppStore struct{}
 
 func (s *stubEmptyAppStore) ListApps(_ context.Context, _ string) ([]*domain.App, error) {
-	return nil, fmt.Errorf("no native apps")
+	return nil, nil
 }
 
 func (s *stubEmptyAppStore) GetApp(_ context.Context, _, _ string) (*domain.App, error) {
-	return nil, fmt.Errorf("app not found")
+	return nil, domain.NotFoundf("app not found")
 }
 
 func (s *stubEmptyAppStore) ListAppEnvironments(_ context.Context, _, _ string) ([]*domain.AppEnvironment, error) {
@@ -30,7 +31,7 @@ func (s *stubEmptyAppStore) ListAppEnvironments(_ context.Context, _, _ string) 
 }
 
 func (s *stubEmptyAppStore) GetAppEnvironment(_ context.Context, _, _, _ string) (*domain.AppEnvironment, error) {
-	return nil, fmt.Errorf("env not found")
+	return nil, domain.NotFoundf("env not found")
 }
 
 func (s *stubEmptyAppStore) ListAppPreviews(_ context.Context, _, _ string) ([]*domain.AppEnvironment, error) {
@@ -373,4 +374,57 @@ func sliceHas(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// Native failures must not be replaced by legacy data or treated as deletion.
+type unavailableNativeStore struct {
+	domain.AppStore
+	err error
+}
+
+func (s unavailableNativeStore) GetApp(context.Context, string, string) (*domain.App, error) {
+	return nil, s.err
+}
+func (s unavailableNativeStore) ListApps(context.Context, string) ([]*domain.App, error) {
+	return nil, s.err
+}
+func (s unavailableNativeStore) ListAppEnvironments(context.Context, string, string) ([]*domain.AppEnvironment, error) {
+	return nil, s.err
+}
+
+func TestNativeReadFailureDoesNotFallBack(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	failure := errors.New("source unavailable")
+	store := compat.NewServiceBackedAppStore(unavailableNativeStore{AppStore: r, err: failure}, r, r, r, r, nil)
+	if _, err := store.GetApp(storeCtx, "demo", "notes-web"); !errors.Is(err, failure) {
+		t.Fatalf("GetApp: %v", err)
+	}
+	if _, err := store.ListApps(storeCtx, "demo"); !errors.Is(err, failure) {
+		t.Fatalf("ListApps: %v", err)
+	}
+	if _, err := store.ListAppEnvironments(storeCtx, "demo", "notes-web"); !errors.Is(err, failure) {
+		t.Fatalf("ListAppEnvironments: %v", err)
+	}
+}
+
+func TestNativeEmptyAppAndDeletion(t *testing.T) {
+	r := fake.NewSeededDevRuntime()
+	store := compat.NewServiceBackedAppStore(r, r, r, r, r, nil)
+	if err := r.SaveApp(storeCtx, "demo", &domain.App{Name: "empty-probe", ProjectName: "demo"}); err != nil {
+		t.Fatal(err)
+	}
+	if envs, err := store.ListAppEnvironments(storeCtx, "demo", "empty-probe"); err != nil || len(envs) != 0 {
+		t.Fatalf("empty native app: %v %v", envs, err)
+	}
+	if previews, err := store.ListAppPreviews(storeCtx, "demo", "empty-probe"); err != nil || len(previews) != 0 {
+		t.Fatalf("empty native previews: %v %v", previews, err)
+	}
+	if err := r.DeleteApp(storeCtx, "demo", "empty-probe"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.GetApp(storeCtx, "demo", "empty-probe")
+	var missing *domain.NotFoundError
+	if !errors.As(err, &missing) {
+		t.Fatalf("deletion lost typed absence: %v", err)
+	}
 }

@@ -93,6 +93,10 @@ func init() {
 	serverCmd.Flags().String("cors-origins", envOr("SUPARSHIP_CORS_ORIGINS", ""), "comma-separated allowed CORS origins")
 	serverCmd.Flags().Bool("cookie-secure", envOr("SUPARSHIP_COOKIE_SECURE", "false") == "true", "set Secure flag on session cookies (enable behind HTTPS)")
 	serverCmd.Flags().String("log-level", envOr("SUPARSHIP_LOG_LEVEL", "info"), "log verbosity: debug, info, warn, error")
+	serverCmd.Flags().Float32("kube-qps", 50, "Kubernetes requests/second per data client")
+	serverCmd.Flags().Int("kube-burst", 100, "Kubernetes request burst per data client")
+	serverCmd.Flags().Float32("auth-kube-qps", 100, "Kubernetes requests/second reserved for authorization")
+	serverCmd.Flags().Int("auth-kube-burst", 200, "Kubernetes request burst reserved for authorization")
 	rootCmd.AddCommand(serverCmd)
 }
 
@@ -102,6 +106,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	corsRaw, _ := cmd.Flags().GetString("cors-origins")
 	cookieSecure, _ := cmd.Flags().GetBool("cookie-secure")
 	logLevelStr, _ := cmd.Flags().GetString("log-level")
+	kubeQPS, _ := cmd.Flags().GetFloat32("kube-qps")
+	kubeBurst, _ := cmd.Flags().GetInt("kube-burst")
+	authQPS, _ := cmd.Flags().GetFloat32("auth-kube-qps")
+	authBurst, _ := cmd.Flags().GetInt("auth-kube-burst")
+	if kubeQPS <= 0 || kubeBurst <= 0 || authQPS <= 0 || authBurst <= 0 {
+		return fmt.Errorf("Kubernetes QPS and burst limits must be positive")
+	}
 	kubeconfig, _ := cmd.Root().PersistentFlags().GetString("kubeconfig")
 	kubecontext, _ := cmd.Root().PersistentFlags().GetString("context")
 
@@ -154,6 +165,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		argoRefresh             argoRefresher // triggers ArgoCD refresh after publish
 		argoChainNudger         server.ArgoChainNudger
 
+		authorizationProvider rbac.OrgProvider
 		kubeClient            kubernetes.Interface
 		dynClient             dynamic.Interface
 		gitopsConfigStore     *gitops.ConfigStore
@@ -209,7 +221,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			"context", contextDesc,
 		)
 
-		client, err := k8s.NewClientset(kubeconfig, kubecontext)
+		client, err := k8s.NewClientset(kubeconfig, kubecontext, k8s.WithRateLimit(kubeQPS, kubeBurst))
 		if err != nil {
 			return fmt.Errorf(
 				"runtime mode is %q but no Kubernetes cluster is reachable: %w\n\n"+
@@ -225,7 +237,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 		// Build dynamic client for CRD interactions (ArgoCD, Kargo).
 		var dynErr error
-		dynClient, dynErr = k8s.NewDynamicClient(kubeconfig, kubecontext)
+		dynClient, dynErr = k8s.NewDynamicClient(kubeconfig, kubecontext, k8s.WithRateLimit(kubeQPS, kubeBurst))
 		if dynErr != nil {
 			logger.Warn("dynamic client unavailable — ArgoCD/Kargo features disabled", "error", dynErr)
 		} else {
@@ -291,6 +303,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 		fallbackOrg := rbac.NewDefaultOrg("default", "Default Organization", adminUser)
 		orgProvider = rbac.NewK8sOrgProvider(client, fallbackOrg)
+		// Keep authorization authoritative, but isolate its request budget from
+		// background projection refreshes and runtime enrichment fan-out.
+		authClient, err := k8s.NewClientset(kubeconfig, kubecontext, k8s.WithRateLimit(authQPS, authBurst))
+		if err != nil {
+			return fmt.Errorf("creating authorization client: %w", err)
+		}
+		authorizationProvider = rbac.NewK8sOrgProvider(authClient, fallbackOrg)
 
 		// Wire all Kubernetes-backed store and runtime implementations
 		// through the consolidated kube.ServerDeps bundle.
@@ -651,6 +670,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	if authorizationProvider == nil {
+		authorizationProvider = orgProvider
+	}
 	srv := server.New(server.Config{
 		Addr:                  addr,
 		UIDir:                 uiDir,
@@ -698,9 +720,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		StuckAppManager:         stuckAppManager,
 		ReadinessProbers:        readinessProbers,
 		CookieSecure:            cookieSecure,
-		License:                 license.Community{},                // open-source core; enterprise builds override
-		Auditor:                 audit.NewSlogAuditor(logger),       // enterprise builds can supply a SIEM sink
-		Authorizer:              rbac.NewOrgAuthorizer(orgProvider), // enterprise builds can supply custom-role/ABAC policy
+		License:                 license.Community{},                          // open-source core; enterprise builds override
+		Auditor:                 audit.NewSlogAuditor(logger),                 // enterprise builds can supply a SIEM sink
+		Authorizer:              rbac.NewOrgAuthorizer(authorizationProvider), // enterprise builds can supply custom-role/ABAC policy
 		Logger:                  logger,
 		KubeClient:              kubeClient,
 		DynClient:               dynClient,

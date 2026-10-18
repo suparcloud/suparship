@@ -1,3 +1,4 @@
+import { useReadView } from "../lib/readViews";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
@@ -234,6 +235,22 @@ export function Dashboard() {
     };
   }, [load]);
 
+  useReadView("/org", async (isCurrent) => {
+    const org = await fetchOrg();
+    if (!isCurrent()) return;
+    setBase(previous => previous ? { ...previous, org } : previous);
+  }, true);
+  useReadView("/projects", async (isCurrent) => {
+    const result = await fetchProjects();
+    if (!isCurrent()) return;
+    setBase(previous => previous ? { ...previous, projects: result.projects } : previous);
+  }, true);
+  useReadView("/environments", async (isCurrent) => {
+    const result = await fetchEnvironments();
+    if (!isCurrent()) return;
+    setBase(previous => previous ? { ...previous, environments: result.environments } : previous);
+  }, true);
+
   // Skeleton only until the fast base reads land; per-project health then streams
   // in without blocking the frame.
   if (!base && !error) return <DashboardSkeleton />;
@@ -241,6 +258,7 @@ export function Dashboard() {
   if (error) {
     return (
       <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+
         <p className="text-sm text-red-700">
           Failed to load dashboard: {error}
         </p>
@@ -266,6 +284,7 @@ export function Dashboard() {
 
   return (
     <>
+      {base?.projects.map(p => <ProjectReadUpdates key={p.name} project={p.name} onUpdate={apps => setAppsByProject(previous => new Map(previous).set(p.name, apps))} />)}
     {showNewProject && (
       <NewProjectModal
         onClose={() => {
@@ -683,4 +702,13 @@ function DashboardSkeleton() {
       </div>
     </div>
   );
+}
+
+function ProjectReadUpdates({ project, onUpdate }: { project: string; onUpdate: (apps: AppSummary[]) => void }) {
+  useReadView(`/projects/${encodeURIComponent(project)}/apps`, async (isCurrent) => {
+    const result = await listApps(project);
+    if (!isCurrent()) return;
+    onUpdate(result.apps);
+  });
+  return null;
 }

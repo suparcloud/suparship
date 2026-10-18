@@ -1,3 +1,6 @@
+import { recordReadState } from "./readViews";
+
+let lastMutation = 0;
 const BASE_URL = "/api/v1";
 
 // __VITE_DEBUG__ is injected at build time by vite.config.ts.
@@ -16,7 +19,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function request<T>(path: string, options?: RequestInit, attempt = 0): Promise<T> {
   const method = options?.method ?? "GET";
   const url = `${BASE_URL}${path}`;
 
@@ -43,6 +46,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
     headers,
   });
+  recordReadState(path, res.headers);
+  const readState = res.headers.get("X-Read-State");
+  // Cold views never trigger remote reads inline. Bounded retry keeps the page
+  // loading while workers synchronize; after our writes also wait for freshness.
+  if (method === "GET" && attempt < 30 &&
+      ((res.status === 503 && readState === "synchronizing") ||
+       (res.ok && readState === "stale" && Date.now() - lastMutation < 15000))) {
+    await res.body?.cancel();
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    return request<T>(path, options, attempt + 1);
+  }
+  if (method !== "GET" && res.ok) lastMutation = Date.now();
   const elapsed = Math.round(performance.now() - start);
 
   if (DEBUG) {

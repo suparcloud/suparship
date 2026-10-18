@@ -417,7 +417,7 @@ func (h *envConfigHandler) handleGetProjectEnvConfig(w http.ResponseWriter, r *h
 
 	proj, err := h.projectStore.Get(r.Context(), projectName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "project not found: " + projectName})
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{Error: "project not found: " + projectName})
 		return
 	}
 
@@ -472,7 +472,7 @@ func (h *envConfigHandler) handleGetProjectEnvEnvConfig(w http.ResponseWriter, r
 
 	proj, err := h.projectStore.Get(r.Context(), projectName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "project not found: " + projectName})
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{Error: "project not found: " + projectName})
 		return
 	}
 	writeJSON(w, http.StatusOK, toEnvConfigDTO(proj.Spec.EnvConfigByEnv[envName]))
@@ -524,7 +524,7 @@ func (h *envConfigHandler) handleGetAppEnvConfig(w http.ResponseWriter, r *http.
 
 	app, err := h.appStore.GetApp(r.Context(), projectName, appName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app not found: " + appName})
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{Error: "app not found: " + appName})
 		return
 	}
 
@@ -579,7 +579,7 @@ func (h *envConfigHandler) handleGetAppEnvEnvConfig(w http.ResponseWriter, r *ht
 
 	app, err := h.appStore.GetApp(r.Context(), projectName, appName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app not found: " + appName})
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{Error: "app not found: " + appName})
 		return
 	}
 
@@ -643,7 +643,7 @@ func (h *envConfigHandler) handleGetAppPreviewEnvConfig(w http.ResponseWriter, r
 
 	app, err := h.appStore.GetApp(r.Context(), projectName, appName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app not found: " + appName})
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{Error: "app not found: " + appName})
 		return
 	}
 	writeJSON(w, http.StatusOK, toEnvConfigDTO(app.Spec.EnvironmentDefaults[envName].PreviewEnvConfig))
@@ -716,7 +716,7 @@ func (h *envConfigHandler) handleGetResolvedEnvConfig(w http.ResponseWriter, r *
 
 	proj, err := h.projectStore.Get(ctx, projectName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "project not found: " + projectName})
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{Error: "project not found: " + projectName})
 		return
 	}
 	projectCfg := proj.Spec.EnvConfig
@@ -724,7 +724,7 @@ func (h *envConfigHandler) handleGetResolvedEnvConfig(w http.ResponseWriter, r *
 
 	app, err := h.appStore.GetApp(ctx, projectName, appName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "app not found: " + appName})
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{Error: "app not found: " + appName})
 		return
 	}
 	appCfg := app.Spec.EnvConfig
