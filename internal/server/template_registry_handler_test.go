@@ -284,12 +284,12 @@ func gitChartRepo(t *testing.T, charts ...string) string {
 // carries org overrides over, rewrites app pins through the repinner and
 // removes the bare-named template entries — in that order.
 func TestTemplateRegistryHandler_NamespaceSource(t *testing.T) {
-	mux, ah, client := newTemplateRegistryMuxWithClient(t)
+	_, ah, client := newTemplateRegistryMuxWithClient(t)
 	repo := gitChartRepo(t, "web")
 	rep := &fakeRepinner{}
 	// Reach into the handler registered by the harness: rebuild the mux with
 	// an engine + repinner wired in.
-	mux = http.NewServeMux()
+	mux := http.NewServeMux()
 	ah.registerRoutes(mux)
 	trh := &templateRegistryHandler{
 		store:      tpl.NewRegistryStore(client),

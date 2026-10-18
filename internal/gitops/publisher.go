@@ -678,7 +678,10 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 	// materialized keeps receiving republishes so config edits reach it.
 	// Direct apps have no promotion, so every bound stable env deploys from
 	// its own values immediately.
-	deployEnvs := firstDeployEnvs(envs)
+	deployEnvs, err := releaseRootDeployEnvs(app, envs)
+	if err != nil {
+		return err
+	}
 	if app.Spec.IsDirect() {
 		deployEnvs = enabledDeployEnvs(app, envs)
 	} else {
@@ -736,7 +739,10 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 // composed App-of-Apps. MVP scope: single target cluster, all-inline component
 // charts, no previews, no Kargo / addon wiring (later phases).
 func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
-	deployEnvs := firstDeployEnvs(envs)
+	deployEnvs, err := releaseRootDeployEnvs(app, envs)
+	if err != nil {
+		return err
+	}
 	if app.Spec.IsDirect() {
 		deployEnvs = enabledDeployEnvs(app, envs)
 	} else {
@@ -1001,6 +1007,20 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		// template versions (chart source paths in the Application), so an
 		// upgraded staging runs the new chart while production keeps its own.
 		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		dormant, err := p.validationDormant(repoDir, app, env)
+		if err != nil {
+			return err
+		}
+		if dormant {
+			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
+				return err
+			}
+			continue
+		}
+		pending, err := p.promotionPending(repoDir, app, env)
+		if err != nil {
+			return err
+		}
 
 		ns := env.Namespace
 		if ns == "" {
@@ -1260,6 +1280,12 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			// it when the app is all-stateful (it would carry only the $appvalues ref
 			// source, no chart sources).
 			if manifest := BuildComposedApplication(app, composedOpts); len(manifest.Spec.Sources) > 1 {
+				if err := p.saveActiveApplication(repoDir, app, env, targetName+"-application.yaml", manifest); err != nil {
+					return err
+				}
+				if pending {
+					disablePreparedSync(manifest)
+				}
 				manifestBytes, err := yaml.Marshal(manifest)
 				if err != nil {
 					return fmt.Errorf("marshal Application for env %s cluster %s: %w", env.EnvName, targetName, err)
@@ -1273,6 +1299,12 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			// by the recurse composed root app. Written alongside the main manifest.
 			for _, c := range app.Spec.StatefulComponents() {
 				compManifest := BuildComponentApplication(app, c, composedOpts)
+				if err := p.saveActiveApplication(repoDir, app, env, targetName+"-"+c.Name+"-application.yaml", compManifest); err != nil {
+					return err
+				}
+				if pending {
+					disablePreparedSync(compManifest)
+				}
 				compBytes, err := yaml.Marshal(compManifest)
 				if err != nil {
 					return fmt.Errorf("marshal stateful component Application %s env %s: %w", c.Name, env.EnvName, err)
@@ -1465,6 +1497,20 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// Env-scoped template pins: app.yaml's ChartPath below must point at THIS
 		// env's effective template version.
 		app := domain.AppForEnvTemplateVersions(app, env.EnvName)
+		dormant, err := p.validationDormant(repoDir, app, env)
+		if err != nil {
+			return err
+		}
+		if dormant {
+			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
+				return err
+			}
+			continue
+		}
+		pending, err := p.promotionPending(repoDir, app, env)
+		if err != nil {
+			return err
+		}
 
 		// Resolve the namespace: use the pre-computed value from the caller
 		// when set; fall back to the legacy "{app}-{env}" default.
@@ -1477,11 +1523,12 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		// per-(app,cluster) fields (AppName/ClusterName/ClusterServer/ValuesPath)
 		// are filled per target inside the write loop below.
 		baseMeta := AppMetadata{
-			Name:      app.Name,
-			Project:   app.ProjectName,
-			Template:  app.Spec.Template.Name,
-			ChartPath: chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
-			Namespace: ns,
+			PromotionPending: fmt.Sprint(pending),
+			Name:             app.Name,
+			Project:          app.ProjectName,
+			Template:         app.Spec.Template.Name,
+			ChartPath:        chartPathFor(app.Spec.Template.Name, app.Spec.Template.Version),
+			Namespace:        ns,
 		}
 		// External-mode apps carry the chart locator in app.yaml so
 		// BuildArgoExternalAppSet's generator can render
@@ -2371,6 +2418,15 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 		return stableEnvs[i].EnvName < stableEnvs[j].EnvName
 	})
 
+	domainEnvs := make([]*domain.AppEnvironment, 0, len(stableEnvs))
+	for _, e := range stableEnvs {
+		domainEnvs = append(domainEnvs, &domain.AppEnvironment{EnvName: e.EnvName, EnvType: e.EnvType, Order: e.Order})
+	}
+	sources, err := domain.ReleasePipeline(app, domainEnvs)
+	if err != nil {
+		return err
+	}
+
 	// ── Per-project Project + ProjectConfig CRs (Kargo v1.x) ───────────────────
 	// Each suparship project owns one Kargo Project in its own kargo-{project}
 	// namespace (Kargo binds a Project 1:1 to a namespace). The Project CR (no spec
@@ -2390,11 +2446,11 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	slog.Debug("gitops: wrote kargo project", "namespace", projectNS)
 
 	var projectEnvs []KargoProjectEnv
-	for i, env := range stableEnvs {
+	for _, env := range stableEnvs {
 		projectEnvs = append(projectEnvs, KargoProjectEnv{
 			AppName:      app.Name,
 			EnvName:      env.EnvName,
-			IsFirstStage: i == 0,
+			IsFirstStage: sources[env.EnvName] == "" && !(app.Spec.CD.EphemeralValidation() && env.EnvName == app.Spec.CD.ReleaseValidationEnvironment),
 			AutoPromote:  env.AutoPromote,
 			// Only a real, user-facing pin (PinnedFrom set) pauses Kargo. A
 			// transient unpin-restore writes PinnedImageTag with PinnedFrom empty
@@ -2475,10 +2531,10 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 	// ── Stages ─────────────────────────────────────────────────────────────────
 	// Build a linear chain: stableEnvs[0] pulls from Warehouse, each subsequent
 	// stage gates on the previous stage by name.
-	for i, env := range stableEnvs {
+	for _, env := range stableEnvs {
 		var upstreams []string
-		if i > 0 {
-			upstreams = []string{stableEnvs[i-1].EnvName}
+		if source := sources[env.EnvName]; source != "" {
+			upstreams = []string{source}
 		}
 
 		appEnv := domain.AppEnvironment{
@@ -2497,6 +2553,9 @@ func (p *Publisher) publishKargoCRs(repoDir string, app *domain.App, envs []AppP
 			ArgoAppNamePattern:    p.cfg.ResourceNaming.EffectiveArgoAppName(),
 			Clusters:              env.Clusters,
 			Composed:              composed,
+			SyncAutomated:         p.cfg.SyncAutomated,
+			ArgoCDRepoURL:         p.cfg.ArgoCDRepoURL,
+			ChartMode:             func() AppMetadataChartType { m, _ := p.resolveTemplateChartMode(app.Spec.Template.Name); return m }(),
 		}
 		stage := BuildKargoStage(app, appEnv, upstreams, stageOpts)
 		stageBytes, err := yaml.Marshal(stage)
@@ -2614,6 +2673,7 @@ type ComponentPlatformValues struct {
 
 // AppPublishEnv carries per-environment publish context for PublishApp.
 type AppPublishEnv struct {
+	PrepareOnly bool
 	// AutoPromote opts this app's pipeline into auto-promotion to prod (the
 	// effective value of CDConfig.AutoPromote ORed with its stack's setting).
 	// App-wide, carried on every env; the Kargo policy builder enables auto

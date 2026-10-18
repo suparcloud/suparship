@@ -114,6 +114,7 @@ type ApplicationSetSpec struct {
 // envs use a bare Git File generator; multi-cluster envs use a Matrix of the
 // Git File generator × a List of clusters.
 type ApplicationSetGenerator struct {
+	Selector map[string]any `yaml:"selector,omitempty"`
 	// Git is the Git File generator configuration.
 	Git *GitFileGenerator `yaml:"git,omitempty"`
 	// Matrix combines child generators (git-files × clusters) — one Application
@@ -140,6 +141,7 @@ type ListGenerator struct {
 // which is used in Application source specs). Using the wrong field name causes
 // ArgoCD to reject the ApplicationSet with "revision: Required value".
 type GitFileGenerator struct {
+	Template map[string]any    `yaml:"template,omitempty"`
 	RepoURL  string            `yaml:"repoURL"`
 	Revision string            `yaml:"revision"`
 	Files    []GitFilePathSpec `yaml:"files"`
@@ -266,7 +268,7 @@ func BuildArgoAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) *Applica
 			},
 		},
 		Spec: ApplicationSetSpec{
-			Generators: generators,
+			Generators: withPreparedApplications(generators, syncPolicy),
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
 					// Single-cluster name MUST mirror gitops.ApplicationName —
@@ -399,7 +401,7 @@ func BuildArgoExternalAppSet(env AppSetEnv, repoURL string, opts AppSetOptions) 
 			},
 		},
 		Spec: ApplicationSetSpec{
-			Generators: generators,
+			Generators: withPreparedApplications(generators, syncPolicy),
 			Template: ApplicationSetTemplate{
 				Metadata: ObjectMeta{
 					Name:      appName,
@@ -542,9 +544,10 @@ func BuildArgoPreviewAppSet(repoURL string, opts AppSetOptions) *ApplicationSet 
 // Each ApplicationSet's generator filters on chartType so an app's
 // app.yaml is consumed by exactly one AppSet.
 type AppMetadata struct {
-	Name     string `yaml:"name"`
-	Project  string `yaml:"project"`
-	Template string `yaml:"template"`
+	PromotionPending string `yaml:"promotionPending,omitempty"`
+	Name             string `yaml:"name"`
+	Project          string `yaml:"project"`
+	Template         string `yaml:"template"`
 	// ChartPath is the gitops chart directory for this app relative to charts/,
 	// i.e. "{template}/{versionDir}". The inline ApplicationSet substitutes it
 	// into the chart source path ({{chartPath}}) so apps pinning different
@@ -785,4 +788,25 @@ func BuildPreviewPlatformAppSet(repoURL string, opts AppSetOptions) *Application
 			},
 		},
 	}
+}
+
+// Prepared applications exist for Kargo's explicit sync but cannot auto-deploy
+// the placeholder values. Promotion clears the flag in the same commit as tags.
+func withPreparedApplications(gens []ApplicationSetGenerator, policy *SyncPolicy) []ApplicationSetGenerator {
+	if len(gens) != 1 || gens[0].Git == nil {
+		return gens
+	}
+	active := gens[0]
+	active.Selector = map[string]any{"matchExpressions": []map[string]any{{"key": "promotionPending", "operator": "NotIn", "values": []string{"true"}}}}
+	pending := gens[0]
+	git := *pending.Git
+	pending.Git = &git
+	pending.Selector = map[string]any{"matchLabels": map[string]string{"promotionPending": "true"}}
+	if policy.Automated != nil {
+		activeGit := *active.Git
+		active.Git = &activeGit
+		active.Git.Template = map[string]any{"metadata": map[string]any{}, "spec": map[string]any{"project": "", "destination": map[string]any{}, "syncPolicy": map[string]any{"automated": policy.Automated}}}
+		policy.Automated = nil
+	}
+	return []ApplicationSetGenerator{active, pending}
 }

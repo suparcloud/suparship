@@ -39,6 +39,9 @@ rules:
   - apiGroups: ["kargo.akuity.io"]
     resources: ["stages", "freights", "warehouses", "promotions", "projects"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["kargo.akuity.io"]
+    resources: ["projectconfigs"]
+    verbs: ["get"]
   # Kargo v1.x authorizes Promotion creation via a SubjectAccessReview for the
   # virtual "promote" verb on the target Stage. This is NOT covered by the
   # standard verbs above, so without it the promotion admission webhook denies

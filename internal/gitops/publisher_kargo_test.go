@@ -1,6 +1,7 @@
 package gitops_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,7 +174,7 @@ func TestPublishKargoCRs_TemplateImageMappingRoundTrip(t *testing.T) {
 	}
 	var yu *gitops.PromotionStep
 	for i := range stage.Spec.PromotionTemplate.Spec.Steps {
-		if stage.Spec.PromotionTemplate.Spec.Steps[i].Uses == "yaml-update" {
+		if stage.Spec.PromotionTemplate.Spec.Steps[i].Uses == "yaml-update" && strings.HasSuffix(fmt.Sprint(stage.Spec.PromotionTemplate.Spec.Steps[i].Config["path"]), "/values.yaml") {
 			yu = &stage.Spec.PromotionTemplate.Spec.Steps[i]
 		}
 	}
@@ -295,8 +296,8 @@ func TestPublishKargoCRs_AutoPromoteProdPolicy(t *testing.T) {
 		t.Errorf("opted out: want staging auto + prod manual, got %+v", off)
 	}
 	on := policyFor(true)
-	if !on["web-staging"] || !on["web-prod"] {
-		t.Errorf("opted in: want staging + prod auto, got %+v", on)
+	if !on["web-staging"] || on["web-prod"] {
+		t.Errorf("opted in: want only staging scheduled by Kargo, got %+v", on)
 	}
 }
 
@@ -604,6 +605,47 @@ func TestPublishKargoCRs_AllUnboundProducesWarehouseOnly(t *testing.T) {
 		stageFile := filepath.Join(kargoDir, "kargo-demo-hello-"+envName+"-stage.yaml")
 		if _, err := os.Stat(stageFile); !os.IsNotExist(err) {
 			t.Errorf("unbound env %q should not produce a Stage file", envName)
+		}
+	}
+}
+
+func TestPublishSeparateValidationWithPinnedStaging(t *testing.T) {
+	dir := t.TempDir()
+	app := &domain.App{Name: "hello", ProjectName: "demo"}
+	app.Spec.CD.ReleaseValidationEnvironment = "validation"
+	app.Spec.EnvironmentDefaults = map[string]domain.EnvironmentOverride{"staging": {PinnedFrom: "pr-1"}}
+	envs := []gitops.AppPublishEnv{
+		{EnvName: "staging", EnvType: domain.AppEnvStaging, Order: 1, Bound: true},
+		{EnvName: "prod", EnvType: domain.AppEnvProd, Order: 2, Bound: true},
+		{EnvName: "validation", EnvType: domain.AppEnvStaging, Order: 3, Bound: true},
+	}
+	if err := newTestPublisher(t).PublishKargoCRsForTest(dir, app, envs); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(dir, "_infra", "kargo")
+	read := func(name string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(base, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	prod := read("kargo-demo-hello-prod-stage.yaml")
+	if !strings.Contains(prod, "hello-validation") || strings.Contains(prod, "hello-staging") {
+		t.Fatal(prod)
+	}
+	validation := read("kargo-demo-hello-validation-stage.yaml")
+	if !strings.Contains(validation, "direct: true") {
+		t.Fatal(validation)
+	}
+	var cfg gitops.KargoProjectConfig
+	if err := yaml.Unmarshal([]byte(read("kargo-demo-projectconfig.yaml")), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range cfg.Spec.PromotionPolicies {
+		if p.AutoPromotionEnabled != (p.Stage == "hello-validation") {
+			t.Fatalf("incorrect automatic policy: %+v", p)
 		}
 	}
 }

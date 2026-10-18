@@ -624,3 +624,7 @@ export function renameApp(
     { newName },
   );
 }
+
+export function getPromotionCandidates(project: string, app: string, target: string): Promise<{available: boolean; releases: string[]; details?: {name: string; createdAt: string; images: {RepoURL: string; Tag: string}[]}[]}> {
+ return api.get(`/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(app)}/promotion-candidates?targetEnvironment=${encodeURIComponent(target)}`);
+}

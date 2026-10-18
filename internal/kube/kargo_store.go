@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/suparcloud/suparship/internal/domain"
 	"log/slog"
 	"slices"
 	"sort"
@@ -225,33 +226,18 @@ func (s *KargoStore) CreatePromotion(ctx context.Context, projectName, appName, 
 		"freight", freight,
 	)
 
+	if err := s.approveFreightForStage(ctx, ns, freight, qualifiedToStage); err != nil {
+		slog.Debug("legacy freight approval failed", "err", err)
+	}
 	return s.submitPromotion(ctx, ns, projectName, appName, toStage, qualifiedToStage, freight)
 }
 
 // submitPromotion creates a Promotion CR deploying the given Freight to the
-// (already-qualified) target Stage: approve the Freight for the Stage, embed the
+// (already-qualified) target Stage: embed the
 // Stage's promotion steps (the k8s API does no defaulting), create the CR.
 // Shared by CreatePromotion (current freight of an upstream stage) and
 // PromoteFreight (a specific historical freight — rollback).
-func (s *KargoStore) submitPromotion(ctx context.Context, ns, projectName, appName, envName, qualifiedToStage, freight string) (*KargoPromotionInfo, error) {
-	// Approve the Freight for the target Stage so Kargo allows the Promotion even
-	// when staging verification is absent (the case with pure argoCDAppUpdates).
-	if approveErr := s.approveFreightForStage(ctx, ns, freight, qualifiedToStage); approveErr != nil {
-		// Non-fatal: log and continue. If the Freight is already approved or
-		// the Stage accepts it from an upstream, this succeeds anyway.
-		slog.Debug("kargo freight approval failed (non-fatal, continuing)",
-			"namespace", ns,
-			"freight", freight,
-			"stage", qualifiedToStage,
-			"error", approveErr,
-		)
-	} else {
-		slog.Debug("kargo freight approved for target stage",
-			"namespace", ns,
-			"freight", freight,
-			"stage", qualifiedToStage,
-		)
-	}
+func (s *KargoStore) submitPromotion(ctx context.Context, ns, projectName, appName, envName, qualifiedToStage, freight string, names ...string) (*KargoPromotionInfo, error) {
 
 	// Kargo v1.x requires every Promotion to carry its own spec.steps. The Kargo
 	// API server copies them from the target Stage's promotionTemplate when
@@ -267,7 +253,19 @@ func (s *KargoStore) submitPromotion(ctx context.Context, ns, projectName, appNa
 		return nil, fmt.Errorf("target stage %q defines no promotion steps (spec.promotionTemplate.spec.steps is empty) — re-publish the app's Kargo CRs", qualifiedToStage)
 	}
 
-	promotionName := fmt.Sprintf("%s-%s-%d", appName, envName, time.Now().Unix())
+	var promotionName string
+	if len(names) > 0 {
+		promotionName = names[0]
+	} else {
+		name, active, err := s.verifiedPromotionAttempt(ctx, ns, qualifiedToStage, freight)
+		if err != nil {
+			return nil, err
+		}
+		if active != nil {
+			return active, nil
+		}
+		promotionName = name
+	}
 
 	slog.Debug("kargo create promotion: submitting Promotion CR",
 		"namespace", ns,
@@ -300,6 +298,20 @@ func (s *KargoStore) submitPromotion(ctx context.Context, ns, projectName, appNa
 	}
 
 	created, err := s.dynamic.Resource(kargoPromotionGVR).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		existing, readErr := s.dynamic.Resource(kargoPromotionGVR).Namespace(ns).Get(ctx, promotionName, metav1.GetOptions{})
+		if readErr != nil {
+			return nil, readErr
+		}
+		existingStage, _, _ := unstructured.NestedString(existing.Object, "spec", "stage")
+		existingFreight, _, _ := unstructured.NestedString(existing.Object, "spec", "freight")
+		phase, _, _ := unstructured.NestedString(existing.Object, "status", "phase")
+		if existingStage != qualifiedToStage || existingFreight != freight || phase == "Failed" || phase == "Errored" || phase == "Aborted" {
+			return nil, ErrPromotionBusy
+		}
+		created, err = existing, nil
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("create kargo promotion %q: %w", promotionName, err)
 	}
@@ -401,6 +413,9 @@ func (s *KargoStore) PromoteFreight(ctx context.Context, projectName, appName, e
 	statusRaw, _ := obj.Object["status"].(map[string]any)
 	if !slices.Contains(freightNamesFromHistory(statusRaw), freightName) {
 		return nil, fmt.Errorf("freight %q was never deployed to stage %q", freightName, stageName)
+	}
+	if err := s.approveFreightForStage(ctx, ns, freightName, stageName); err != nil {
+		slog.Debug("rollback freight approval failed", "err", err)
 	}
 	return s.submitPromotion(ctx, ns, projectName, appName, envName, stageName, freightName)
 }
@@ -647,7 +662,6 @@ func imageTagFromImages(images []any, repoSubstr string) string {
 	return first
 }
 
-
 // stagePromotionSteps returns the promotion steps defined on the target Stage's
 // spec.promotionTemplate.spec.steps (Kargo v1.x). These must be embedded in the
 // Promotion CR we create directly via the Kubernetes API, because — unlike the
@@ -793,6 +807,23 @@ func parseKargoStageStatus(obj *unstructured.Unstructured) *KargoStageStatus {
 	}
 
 	s.Issue = unreadyConditionMessage(statusRaw)
+	var run domain.ValidationRun
+	if raw := obj.GetAnnotations()[validationRunAnnotation]; raw != "" && json.Unmarshal([]byte(raw), &run) == nil {
+		switch run.Phase {
+		case "idle":
+			s.Phase = "Idle"
+			s.Issue = ""
+		case "cleaning", "deleting":
+			s.Phase = "Cleaning"
+			s.Issue = ""
+		case "failed":
+			s.Phase = "Failed"
+			s.Issue = "Validation failed; temporary workloads are retained for one hour for debugging before cleanup."
+		case "provisioning", "waiting":
+			s.Phase = "Preparing"
+			s.Issue = ""
+		}
+	}
 
 	return s
 }

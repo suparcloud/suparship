@@ -160,7 +160,8 @@ func BuildComposedApplication(app *domain.App, opts ComposedBuildOptions) *Appli
 // sources (the $appvalues ref + the component's own chart source, with the same
 // release name and value file it would get inside the composed app) and prune
 // DISABLED, so a shared auto-sync can never prune the DB's resources on drift. No
-// Kargo annotation — stateful components carry no Images, so they're pinned/direct.
+// Stateful image versions remain direct, but Kargo is authorized to include the
+// component in release sync and health verification.
 // (Data survival on component REMOVAL still requires the chart to mark its PVC
 // helm.sh/resource-policy: keep.) Pure function — identical inputs, identical output.
 func BuildComponentApplication(app *domain.App, c domain.ComponentSpec, opts ComposedBuildOptions) *Application {
@@ -202,12 +203,18 @@ func BuildComponentApplication(app *domain.App, c domain.ComponentSpec, opts Com
 		syncPolicy = &SyncPolicy{SyncOptions: []string{"CreateNamespace=true"}}
 	}
 
+	var annotations map[string]string
+	if opts.KargoStage != "" {
+		annotations = map[string]string{"kargo.akuity.io/authorized-stage": opts.KargoStage}
+	}
+
 	return &Application{
 		APIVersion: argoAPIVersion,
 		Kind:       argoKind,
 		Metadata: ObjectMeta{
-			Name:      opts.AppName + "-" + c.Name,
-			Namespace: argoNS,
+			Name:        opts.AppName + "-" + c.Name,
+			Annotations: annotations,
+			Namespace:   argoNS,
 			Labels: map[string]string{
 				labelApp:     app.Name,
 				labelProject: app.ProjectName,

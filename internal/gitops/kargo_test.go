@@ -407,10 +407,10 @@ func TestBuildKargoPromotionPolicies_AutoPromote(t *testing.T) {
 		t.Fatalf("opted out: want staging auto + prod manual, got %+v", off)
 	}
 
-	// Opted in: prod auto-promotes too, staging still auto.
+	// Suparship schedules downstream auto-promotion; Kargo only schedules staging.
 	on := gitops.BuildKargoPromotionPolicies(stagingProd(true))
-	if !on[0].AutoPromotionEnabled || !on[1].AutoPromotionEnabled {
-		t.Fatalf("opted in: want staging+prod auto, got %+v", on)
+	if !on[0].AutoPromotionEnabled || on[1].AutoPromotionEnabled {
+		t.Fatalf("opted in: want only staging scheduled by Kargo, got %+v", on)
 	}
 	if on[1].Stage != gitops.KargoStageName("web", "prod") {
 		t.Errorf("prod policy stage = %q", on[1].Stage)
@@ -428,5 +428,18 @@ func TestBuildKargoPromotionPolicies_PinnedDisablesAuto(t *testing.T) {
 		if p.AutoPromotionEnabled {
 			t.Errorf("pinned stage %q must have autoPromotionEnabled=false", p.Stage)
 		}
+	}
+}
+
+func TestBuildKargoStageAcceptanceVerification(t *testing.T) {
+	app := &domain.App{Name: "web", ProjectName: "demo"}
+	app.Spec.CD.Verification = map[string][]string{"staging": {"smoke-tests", "integration-tests"}}
+	stage := gitops.BuildKargoStage(app, domain.AppEnvironment{EnvName: "staging"}, nil, gitops.KargoBuildOptions{})
+	if stage.Spec.Verification == nil || len(stage.Spec.Verification.AnalysisTemplates) != 2 || stage.Spec.Verification.AnalysisTemplates[1].Name != "integration-tests" {
+		t.Fatalf("verification = %+v", stage.Spec.Verification)
+	}
+	prod := gitops.BuildKargoStage(app, domain.AppEnvironment{EnvName: "prod"}, []string{"staging"}, gitops.KargoBuildOptions{})
+	if prod.Spec.Verification != nil {
+		t.Fatal("staging checks leaked into prod")
 	}
 }

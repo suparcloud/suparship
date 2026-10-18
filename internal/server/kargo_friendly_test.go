@@ -107,3 +107,13 @@ func TestSummarizeCDPipeline(t *testing.T) {
 		t.Errorf("freight present, health not yet assessed: want deploying, got %+v", got)
 	}
 }
+
+func TestIdleValidationIsNotReportedAsDeploying(t *testing.T) {
+	summary := summarizeCDPipeline(&KargoWarehouseDTO{Exists: true}, []KargoStageStatusDTO{
+		{EnvName: "validation", Phase: "Idle", Health: "Unknown", CurrentFreight: "verified"},
+		{EnvName: "prod", Health: "Healthy", CurrentFreight: "verified"},
+	})
+	if summary.State != "active" {
+		t.Fatalf("idle validation appeared broken: %+v", summary)
+	}
+}
