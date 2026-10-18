@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Refresh delivery diagnostics independently of workload reads so resolved Argo CD
+  failures disappear even while runtime status is stale. Read composed component
+  runtime status with bounded concurrency and reuse app lookups.
+
 - Show saved app configuration, including preview pins and unpins, when runtime
   refreshes fail. Retain the previous runtime observation and mark it stale.
 

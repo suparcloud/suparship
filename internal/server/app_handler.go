@@ -1453,10 +1453,21 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	if projected, ok := w.(*projectionResponse); ok && envErr == nil {
 		projected.configuration, _ = json.Marshal(AppDetailResponse{App: appToDetailDTO(app, envs)})
 	}
+	diagnosticEnvs := cloneReadEnvironments(envs)
 	envs = cloneReadEnvironments(envs)
-	runBounded(len(envs), appEnrichConcurrency, func(i int) {
-		ah.enrichAndCache(ctx, projectName, appName, envs[i])
+	var freshDiagnostics map[string][]DiagnosticDTO
+	runBounded(2, 2, func(branch int) {
+		if branch == 0 {
+			runBounded(len(envs), appEnrichConcurrency, func(i int) {
+				ah.enrichAndCache(ctx, projectName, appName, envs[i])
+			})
+		} else if _, projected := w.(*projectionResponse); projected {
+			freshDiagnostics = ah.readIndependentDiagnostics(ctx, appName, diagnosticEnvs)
+		}
 	})
+	if projected, ok := w.(*projectionResponse); ok {
+		projected.diagnostics = freshDiagnostics
+	}
 
 	detail := appToDetailDTO(app, envs)
 	// Upgrade hints are detail-only: the picker needs each component's own
@@ -4557,7 +4568,7 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 // read (so status still degrades gracefully to the pre-composed behaviour).
 func (ah *appHandler) appWorkloadInstances(ctx context.Context, project, appName string) []domain.WorkloadInstance {
 	if ah.appStore != nil {
-		if app, err := ah.appStore.GetApp(ctx, project, appName); err == nil && app != nil {
+		if app, err := ah.appOnce(ctx, project, appName); err == nil && app != nil {
 			if wis := app.WorkloadInstances(); len(wis) > 0 {
 				return wis
 			}
@@ -4573,7 +4584,7 @@ func (ah *appHandler) appStatefulComponents(ctx context.Context, project, appNam
 	if ah.appStore == nil {
 		return nil
 	}
-	app, err := ah.appStore.GetApp(ctx, project, appName)
+	app, err := ah.appOnce(ctx, project, appName)
 	if err != nil || app == nil || !app.Spec.IsComposed() {
 		return nil
 	}
@@ -4596,17 +4607,26 @@ func (ah *appHandler) appStatefulComponents(ctx context.Context, project, appNam
 // list, so the UI renders their row at the app's phase with "—" replicas. A
 // failed migration still surfaces via the app's ArgoCD sync diagnostics.
 func runtimeByComponent(ctx context.Context, kp *runtime.K8sProvider, namespace string, instances []domain.WorkloadInstance) map[string]*runtime.RuntimeInfo {
-	out := make(map[string]*runtime.RuntimeInfo, len(instances))
-	for _, wi := range instances {
+	infos := make([]*runtime.RuntimeInfo, len(instances))
+	runBounded(len(instances), 4, func(i int) {
+		wi := instances[i]
 		if wi.OneShot {
-			continue
+			return
 		}
-		if info, err := kp.GetAppRuntime(ctx, namespace, wi.Instance, wi.Instance); err == nil {
-			out[wi.Component] = info
-		} else {
+		info, err := kp.GetAppRuntime(ctx, namespace, wi.Instance, wi.Instance)
+		if err != nil {
 			markProjectionFailure(ctx, err)
+			return
+		}
+		infos[i] = info
+	})
+	out := make(map[string]*runtime.RuntimeInfo, len(instances))
+	for i, info := range infos {
+		if info != nil {
+			out[instances[i].Component] = info
 		}
 	}
+
 	return out
 }
 

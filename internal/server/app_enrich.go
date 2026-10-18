@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/suparcloud/suparship/internal/domain"
@@ -337,5 +338,35 @@ func cloneReadEnvironments(envs []*domain.AppEnvironment) []*domain.AppEnvironme
 		snapshotEnv(env).applyTo(&copy)
 		out[i] = &copy
 	}
+	return out
+}
+
+// Delivery diagnostics use an independent budget so slow workload clusters do
+// not prevent resolved Argo CD errors from disappearing from the app page.
+func (ah *appHandler) readIndependentDiagnostics(ctx context.Context, appName string, envs []*domain.AppEnvironment) map[string][]DiagnosticDTO {
+	out := map[string][]DiagnosticDTO{}
+	if ah.diagnosticsReader == nil {
+		return out
+	}
+	var mu sync.Mutex
+	runBounded(len(envs), appEnrichConcurrency, func(i int) {
+		env := envs[i]
+		if env.ProjectName == "" {
+			return
+		}
+		bounded, cancel := context.WithTimeout(ctx, liveReadTimeout)
+		defer cancel()
+		failed := &atomic.Bool{}
+		bounded = context.WithValue(bounded, projectionFailureKey{}, failed)
+		env.Status.Diagnostics = nil
+		ah.enrichEnvWithDiagnostics(bounded, appName, env)
+		if bounded.Err() != nil || failed.Load() {
+			return
+		}
+		diagnostics := appEnvToDTO(env).Status.Diagnostics
+		mu.Lock()
+		out[env.EnvName] = diagnostics
+		mu.Unlock()
+	})
 	return out
 }

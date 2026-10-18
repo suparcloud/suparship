@@ -434,3 +434,38 @@ func TestReadProjectionPinConfigurationSurvivesRuntimeFailure(t *testing.T) {
 		t.Fatal("unpin hidden by failed runtime read")
 	}
 }
+
+func TestFreshDeliveryDiagnosticsReplaceStaleErrorsDuringRuntimeOutage(t *testing.T) {
+	current := AppDetailResponse{App: AppDetailDTO{Environments: []AppEnvironmentSummaryDTO{{EnvName: "staging"}}}}
+	old := current
+	old.App.Environments = []AppEnvironmentSummaryDTO{{EnvName: "staging", Status: AppStatusSummaryDTO{Available: 3, Diagnostics: []DiagnosticDTO{{Source: "argocd", Title: "SyncError"}, {Source: "runtime", Title: "Cluster unavailable"}}}}}
+	configuration, _ := json.Marshal(current)
+	previous, _ := json.Marshal(old)
+	for _, tc := range []struct {
+		name        string
+		diagnostics map[string][]DiagnosticDTO
+		want        int
+	}{
+		{"failed diagnostic read retains old error", nil, 2},
+		{"successful empty diagnostic read clears resolved error", map[string][]DiagnosticDTO{"staging": nil}, 1},
+		{"new error replaces previous error", map[string][]DiagnosticDTO{"staging": {{Source: "argocd", Title: "New failure"}}}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got AppDetailResponse
+			if err := json.Unmarshal(appConfigurationWithPreviousRuntime(configuration, previous, tc.diagnostics), &got); err != nil {
+				t.Fatal(err)
+			}
+			status := got.App.Environments[0].Status
+			if status.Available != 3 || len(status.Diagnostics) != tc.want {
+				t.Fatalf("incorrect merged runtime: %+v", status)
+			}
+			if _, fresh := tc.diagnostics["staging"]; fresh {
+				for _, d := range status.Diagnostics {
+					if d.Title == "SyncError" {
+						t.Fatal("resolved error retained")
+					}
+				}
+			}
+		})
+	}
+}
