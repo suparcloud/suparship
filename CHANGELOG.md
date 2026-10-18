@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Show saved app configuration, including preview pins and unpins, when runtime
+  refreshes fail. Retain the previous runtime observation and mark it stale.
+
 ### Temporary data in release validation
 
 - Allow explicit per-component temporary data policies only in ephemeral release

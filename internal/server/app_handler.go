@@ -1448,6 +1448,11 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	if envErr != nil {
 		markProjectionFailure(ctx, envErr)
 	}
+	// Capture configuration before optional live reads. A failed environment list
+	// must never publish a partial authoritative configuration snapshot.
+	if projected, ok := w.(*projectionResponse); ok && envErr == nil {
+		projected.configuration, _ = json.Marshal(AppDetailResponse{App: appToDetailDTO(app, envs)})
+	}
 	envs = cloneReadEnvironments(envs)
 	runBounded(len(envs), appEnrichConcurrency, func(i int) {
 		ah.enrichAndCache(ctx, projectName, appName, envs[i])

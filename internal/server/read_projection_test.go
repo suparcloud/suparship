@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -381,5 +382,55 @@ func TestReadProjectionPeriodicObservationAndRestart(t *testing.T) {
 	refreshView(rebuilt, "/a")
 	if got := projectionGet(next, "/a"); got.Body.String() != `{"value":1}` {
 		t.Fatal("restart rebuild lost source state")
+	}
+}
+
+func TestReadProjectionPinConfigurationSurvivesRuntimeFailure(t *testing.T) {
+	p := manualProjection()
+	pinned, unavailable := false, false
+	h := p.wrap(func(w http.ResponseWriter, r *http.Request) {
+		detail := AppDetailResponse{App: AppDetailDTO{Name: "app", Environments: []AppEnvironmentSummaryDTO{{EnvName: "staging"}}}}
+		if pinned {
+			detail.App.Environments[0].PinnedFrom = "pr-42"
+			detail.App.Environments[0].PinnedTag = "preview-build"
+		}
+		configuration, _ := json.Marshal(detail)
+		w.(*projectionResponse).configuration = configuration
+		if unavailable {
+			markProjectionFailure(r.Context(), context.DeadlineExceeded)
+		} else {
+			detail.App.Environments[0].Status = AppStatusSummaryDTO{Phase: "running", Available: 2}
+			detail.App.Environments[0].Release = &AppReleaseRefDTO{Tag: "main-build"}
+		}
+		writeJSON(w, http.StatusOK, detail)
+	})
+	projectionGet(h, "/app")
+	refreshView(p, "/app")
+	observed := p.entries["/app"].observed
+	pinned, unavailable = true, true
+	p.invalidate()
+	refreshView(p, "/app")
+	got := projectionGet(h, "/app")
+	var detail AppDetailResponse
+	if err := json.Unmarshal(got.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	env := detail.App.Environments[0]
+	if env.PinnedFrom != "pr-42" || env.PinnedTag != "preview-build" {
+		t.Fatalf("saved pin hidden: %+v", env)
+	}
+	if env.Status.Available != 2 || env.Release.Tag != "main-build" {
+		t.Fatalf("previous runtime observation lost: %+v", env)
+	}
+	if got.Header().Get("X-Read-State") != "stale" || !p.entries["/app"].observed.Equal(observed) {
+		t.Fatal("stale runtime presented as fresh")
+	}
+	// Unpin must also become visible during the same outage.
+	pinned = false
+	p.invalidate()
+	refreshView(p, "/app")
+	got = projectionGet(h, "/app")
+	if strings.Contains(got.Body.String(), "pinnedFrom") {
+		t.Fatal("unpin hidden by failed runtime read")
 	}
 }
