@@ -3423,7 +3423,7 @@ function AppValuesEditor({
                         </span>
                       )}
                     </span>
-                    {!e.isBase &&
+                    {data.cd?.releaseValidationManaged && e.envName === "release-validation" ? <span className="text-xs text-gray-500">Managed by delivery settings</span> : !e.isBase &&
                       (e.deploy ? (
                         <button
                           onClick={() => removeFromCluster(e.envName)}
@@ -3587,8 +3587,8 @@ function AppValuesEditor({
                     <label className="block text-xs font-medium text-gray-700">
                       Validation lifecycle
                       <select className="mt-1 block w-full rounded border border-gray-300 px-2 py-1" value={validationMode} onChange={event => setValidationMode(event.target.value as "persistent" | "ephemeral")}>
-                        <option value="persistent">Persistent (default)</option>
-                        <option value="ephemeral">Ephemeral — create for each release</option>
+                        <option value="persistent">{data.cd?.releaseValidationEnvironment && !data.cd?.releaseValidationManaged ? "Persistent (default)" : "Persistent"}</option>
+                        <option value="ephemeral">{data.cd?.releaseValidationEnvironment && !data.cd?.releaseValidationManaged ? "Ephemeral — create for each release" : "Ephemeral (default) — create for each release"}</option>
                       </select>
                     </label>
                     <p className="text-xs text-gray-500">{validationMode === "ephemeral" ? "Creates workloads for validation, then deletes them after checks pass. Failed runs remain for one hour for debugging. All chart-managed resources are disposable; keep databases and other persistent data outside this environment. Namespace and platform configuration remain. One run at a time; newer queued builds are combined into the latest release." : "Workloads stay running between releases and consume resources continuously. Use this for stable endpoints or stateful dependencies."}</p>
