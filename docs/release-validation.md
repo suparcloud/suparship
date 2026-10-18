@@ -65,7 +65,10 @@ The ExternalSecret reads base scope items plus the validation override item and
 materializes a separate Kubernetes Secret in the validation namespace. Source items
 are never modified or deleted by validation. Shared credentials still reach the same
 external databases, queues and accounts; supply isolated credentials when needed.
-Known stateful components remain incompatible with ephemeral mode. Configure checks
+Stateful components retain their data policy by default. Explicitly allow temporary
+data only in ephemeral release validation and supply validation-only values that
+disable persistent storage. Staging, production and persistent validation retain
+their existing values and storage protection. Configure checks
 for the validation source explicitly; staging checks are not silently copied.
 
 API example:
@@ -183,9 +186,11 @@ The lifecycle is:
 - The validator must have a distinct namespace from the app’s other environments.
 - All chart-managed resources in this environment must be disposable. Keep
   databases, queues with durable state, and other persistent data outside it.
-  Apps with declared stateful components are rejected; use persistent mode for
-  those apps. Arbitrary external charts can contain additional stateful resources,
-  so they must be configured appropriately before opting in.
+  Each declared stateful component requires `releaseValidationDataPolicy: disposable`
+  and validation-only values using temporary storage such as `emptyDir`. The actual
+  rendered chart is checked before publication: PVCs, volume claim templates and
+  external storage mounts are rejected. Use persistent validation for durable data.
+  This policy never changes pruning or values in stable environments.
 - The environment uses its own values and secrets, as in persistent mode. Staging
   overrides are not inherited. External-service registrations and state are not
   automatically created or cleaned up.
@@ -213,3 +218,18 @@ check references. Alerts that read Kargo directly should account for the durable
 `suparship.io/validation-run` lifecycle annotation; idle capacity is not a failed
 release. Verification evidence remains in Freight status and is not fabricated or
 cleared to conceal the missing workload.
+
+### Temporary Redis during validation
+
+Keep the component marked `stateful: true`. In delivery settings, select
+**Dispose of redis data only in ephemeral release validation** and provide the
+chart's validation-only persistence overrides, for example `persistence.enabled:
+false` when supported by that chart. Charts using explicit volumes can instead
+mount an `emptyDir`. Stable environment values remain unchanged.
+
+The component policy is stored as `releaseValidationDataPolicy: disposable`; it
+has effect only when the selected environment uses ephemeral validation. It is
+not a general disposable flag. Persistent validation and stable environments keep
+stateful Application pruning disabled. Each ephemeral run receives fresh temporary
+data; successful checks remove its workloads and failed runs retain them for one
+hour. The policy does not clean external database contents or shared credentials.

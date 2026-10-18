@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Temporary data in release validation
+
+- Allow explicit per-component temporary data policies only in ephemeral release
+  validation, with validation-only chart values and rendered storage checks.
+- Keep staging, production and persistent validation storage protection unchanged.
+- Wait for stateful child Applications to disappear before reusing validation capacity.
+
 ### Background UI reads (beta)
 
 - Serve dashboard, app, environment, history, configuration and cluster views
