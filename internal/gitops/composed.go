@@ -196,7 +196,7 @@ func BuildComponentApplication(app *domain.App, c domain.ComponentSpec, opts Com
 		// Prune disabled: never remove the DB's resources on drift/sync. SelfHeal
 		// stays on so config drift is still corrected.
 		syncPolicy = &SyncPolicy{
-			Automated:   &AutomatedSyncPolicy{Prune: false, SelfHeal: true},
+			Automated:   &AutomatedSyncPolicy{Prune: c.DisposableInValidation(app.Spec.CD, opts.EnvName), SelfHeal: true},
 			SyncOptions: []string{"CreateNamespace=true"},
 		}
 	} else {

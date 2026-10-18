@@ -65,8 +65,16 @@ func (ah *appHandler) reconcileEphemeralValidation(ctx context.Context, app *dom
 		}
 		names := []string{}
 		for _, a := range ah.argoAppNamesForEnv(ctx, app.ProjectName, app.Name, envName) {
-			names = append(names, a.name)
+			if !app.Spec.IsComposed() || len(app.Spec.ComposedComponents()) > len(app.Spec.StatefulComponents()) {
+				names = append(names, a.name)
+			}
+			if app.Spec.IsComposed() {
+				for _, c := range app.Spec.StatefulComponents() {
+					names = append(names, a.name+"-"+c.Name)
+				}
+			}
 		}
+
 		return advanceValidationRun(ctx, run, observation, time.Now(), validationRunActions{
 			paused: app.Spec.EnvironmentDefaults[envName].PinnedFrom != "" || (app.Spec.EnvironmentDefaults[envName].Suspend != nil && *app.Spec.EnvironmentDefaults[envName].Suspend),
 			next: func() (string, time.Time, error) {

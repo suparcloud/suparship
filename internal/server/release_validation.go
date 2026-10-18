@@ -18,8 +18,16 @@ func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain
 	if mode == "ephemeral" && name == "" {
 		return fmt.Errorf("select a release validation environment before enabling ephemeral mode")
 	}
-	if app.Spec.CD.EphemeralValidation() && len(app.Spec.StatefulComponents()) > 0 {
-		return fmt.Errorf("ephemeral validation requires external persistent data; remove stateful components or use persistent validation")
+	for _, c := range app.Spec.Components {
+		if c.ReleaseValidationDataPolicy != "" && c.ReleaseValidationDataPolicy != "retain" && c.ReleaseValidationDataPolicy != "disposable" {
+			return fmt.Errorf("component %q: validation data policy must be retain or disposable", c.Name)
+		}
+		if c.ReleaseValidationDataPolicy == "disposable" && !c.Stateful {
+			return fmt.Errorf("component %q: disposable validation data policy is only for stateful components", c.Name)
+		}
+		if app.Spec.CD.EphemeralValidation() && c.Stateful && c.ReleaseValidationDataPolicy != "disposable" {
+			return fmt.Errorf("component %q retains state by default; mark it disposable during release validation and disable persistence in its validation values, or use persistent validation", c.Name)
+		}
 	}
 	if app.Spec.CD.EphemeralValidation() && app.Spec.EnvironmentDefaults[name].PinnedFrom != "" {
 		return fmt.Errorf("unpin the validation environment before enabling ephemeral mode")

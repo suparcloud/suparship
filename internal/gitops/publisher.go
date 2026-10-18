@@ -698,10 +698,6 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 	} else {
 		deployEnvs = p.promotedDeployEnvs(repoDir, app, envs, deployEnvs)
 	}
-	if err := p.publishAppFiles(repoDir, app, deployEnvs); err != nil {
-		return err
-	}
-
 	// External-mode templates have no local chart bytes — Argo's
 	// repo-server pulls fresh from the Helm registry. Skip the
 	// gitops-repo chart copy so we don't bloat history with bytes
@@ -728,6 +724,10 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 				}
 			}
 		}
+	}
+
+	if err := p.publishAppFiles(ctx, repoDir, app, deployEnvs); err != nil {
+		return err
 	}
 
 	// Write Kargo Warehouse + Stage CRs for all bound stable envs so the
@@ -783,7 +783,7 @@ func (p *Publisher) writeComposedAppTree(ctx context.Context, repoDir string, ap
 		}
 	}
 
-	if err := p.publishComposedAppFiles(repoDir, app, deployEnvs); err != nil {
+	if err := p.publishComposedAppFiles(ctx, repoDir, app, deployEnvs); err != nil {
 		return err
 	}
 
@@ -996,7 +996,7 @@ func (p *Publisher) pruneComponentProjections(repoDir string, env AppPublishEnv,
 	return nil
 }
 
-func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv) error {
+func (p *Publisher) publishComposedAppFiles(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	orgName := p.cfg.OrgName
 	if orgName == "" {
 		orgName = "default"
@@ -1024,12 +1024,15 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 		if err != nil {
 			return err
 		}
-		if dormant {
+		// Even while idle, render disposable stateful components for preflight.
+		// Their Application inputs are removed again before this transaction commits.
+		if dormant && len(app.Spec.StatefulComponents()) == 0 {
 			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
 				return err
 			}
 			continue
 		}
+
 		pending, err := p.promotionPending(repoDir, app, env)
 		if err != nil {
 			return err
@@ -1274,6 +1277,9 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 				if err := p.writeFile(valuesAbs, hvBytes); err != nil {
 					return err
 				}
+				if err := p.checkDisposableValidation(ctx, repoDir, app, env, c, valuesAbs); err != nil {
+					return err
+				}
 				componentValues[c.Name] = p.envAppRelPath(AppMetadataChartTypeInline, env, compValueParts(target.Name, c.Name)...)
 			}
 
@@ -1338,6 +1344,11 @@ func (p *Publisher) publishComposedAppFiles(repoDir string, app *domain.App, env
 			return fmt.Errorf("writing platform resources for env %s: %w", env.EnvName, err)
 		}
 
+		if dormant {
+			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
+				return err
+			}
+		}
 		touchedEnvs[env.EnvName] = true
 		slog.Debug("gitops: wrote composed app files", "env", env.EnvName, "app", app.Name,
 			"components", len(app.Spec.ComposedComponents()), "clusters", len(targets))
@@ -1396,7 +1407,7 @@ func (p *Publisher) publishComposedAppEnv(ctx context.Context, repoDir string, a
 			return fmt.Errorf("sync chart for component %s (%s@%s): %w", c.Name, c.Template.Name, c.Template.Version, err)
 		}
 	}
-	return p.publishComposedAppFiles(repoDir, app, []AppPublishEnv{env})
+	return p.publishComposedAppFiles(ctx, repoDir, app, []AppPublishEnv{env})
 }
 
 // publishEnvFiles writes ONE env's tree for an app into an already-cloned repo,
@@ -1410,7 +1421,7 @@ func (p *Publisher) publishEnvFiles(ctx context.Context, repoDir string, app *do
 	if app.Spec.IsComposed() {
 		return p.publishComposedAppEnv(ctx, repoDir, app, env)
 	}
-	return p.publishAppFiles(repoDir, app, []AppPublishEnv{env})
+	return p.publishAppFiles(ctx, repoDir, app, []AppPublishEnv{env})
 }
 
 // AppEnvPublish pairs an app with one resolved env to publish. It is the unit of
@@ -1489,7 +1500,7 @@ func (p *Publisher) PublishApps(ctx context.Context, bundles []AppPublishBundle)
 // env carries a StoreName (1Password-backed envs).
 // Unbound environments are skipped with a warning log.
 // This is the inner loop extracted from PublishApp for testability.
-func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppPublishEnv) error {
+func (p *Publisher) publishAppFiles(ctx context.Context, repoDir string, app *domain.App, envs []AppPublishEnv) error {
 	orgName := p.cfg.OrgName
 	if orgName == "" {
 		orgName = "default"
@@ -1514,12 +1525,13 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 		if err != nil {
 			return err
 		}
-		if dormant {
+		if dormant && !hasDisposableValidation(app, env.EnvName) {
 			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
 				return err
 			}
 			continue
 		}
+
 		pending, err := p.promotionPending(repoDir, app, env)
 		if err != nil {
 			return err
@@ -1737,6 +1749,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 					return err
 				}
 
+				for _, component := range app.Spec.Components {
+					if err := p.checkDisposableValidation(ctx, repoDir, app, env, component, valuesAbs); err != nil {
+						return err
+					}
+				}
 				// app.yaml for this (app, cluster): fully-rendered Application name
 				// so existing names are unchanged, plus destination + values path.
 				meta := baseMeta
@@ -1796,6 +1813,11 @@ func (p *Publisher) publishAppFiles(repoDir string, app *domain.App, envs []AppP
 			}
 		}
 
+		if dormant {
+			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
+				return err
+			}
+		}
 		slog.Debug("gitops: wrote app files", "env", env.EnvName, "app", app.Name)
 	}
 	return nil

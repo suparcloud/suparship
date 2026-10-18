@@ -33,7 +33,7 @@ func (p *Publisher) PublishKargoCRsForTest(repoDir string, app *domain.App, envs
 // PublishAppFilesForTest exposes the per-env file writing loop of PublishApp
 // for white-box unit testing without git operations.
 func (p *Publisher) PublishAppFilesForTest(repoDir string, app *domain.App, envs []AppPublishEnv) error {
-	return p.publishAppFiles(repoDir, app, envs)
+	return p.publishAppFiles(context.Background(), repoDir, app, envs)
 }
 
 // WriteComposedAppTreeForTest exposes writeComposedAppTree — the composed-app
@@ -77,7 +77,7 @@ func (p *Publisher) WriteAppTreeForTest(ctx context.Context, repoDir string, app
 // PublishAppEnvForTest exposes PublishAppEnv's inner publishAppFiles call for
 // white-box unit testing without git operations.
 func (p *Publisher) PublishAppEnvForTest(repoDir string, app *domain.App, env AppPublishEnv) error {
-	return p.publishAppFiles(repoDir, app, []AppPublishEnv{env})
+	return p.publishAppFiles(context.Background(), repoDir, app, []AppPublishEnv{env})
 }
 
 // PublishPreviewForTest exposes PublishPreview's inner file generation for

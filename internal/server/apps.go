@@ -73,7 +73,8 @@ type ComponentSummaryDTO struct {
 	Images []ComponentImageDTO `json:"images,omitempty"`
 	// Stateful reports whether this component renders as its own prune-disabled
 	// Application (a database/cache).
-	Stateful bool `json:"stateful,omitempty"`
+	Stateful                    bool   `json:"stateful,omitempty"`
+	ReleaseValidationDataPolicy string `json:"releaseValidationDataPolicy,omitempty"`
 	// EnabledInPreview reports the EFFECTIVE preview inclusion for this component
 	// (explicit PreviewEnabled, else the type default). The detail page shows a
 	// "no preview" badge when false. PreviewEnabled carries the raw stored override
@@ -374,7 +375,8 @@ type ComponentCreateDTO struct {
 	Images []ComponentImageDTO `json:"images,omitempty"`
 	// Stateful marks a database/cache component: it renders as its own prune-
 	// disabled ArgoCD Application (lifecycle decoupled from the app's auto-sync).
-	Stateful bool `json:"stateful,omitempty"`
+	Stateful                    bool   `json:"stateful,omitempty"`
+	ReleaseValidationDataPolicy string `json:"releaseValidationDataPolicy,omitempty"`
 	// PreviewEnabled overrides whether this component is included in preview envs.
 	// Omit (nil) for the type default (web/worker on; stateful + job/cron off).
 	PreviewEnabled *bool `json:"previewEnabled,omitempty"`
@@ -513,9 +515,10 @@ type createAppResponse struct {
 // template name is immutable and the version is changed via the dedicated
 // upgrade-template endpoint. Components/addons/namespace are not yet editable.
 type updateAppRequest struct {
-	DisplayName *string         `json:"displayName,omitempty"`
-	Description *string         `json:"description,omitempty"`
-	Values      *map[string]any `json:"values,omitempty"`
+	ComponentValidationPolicies map[string]string `json:"componentValidationPolicies,omitempty"`
+	DisplayName                 *string           `json:"displayName,omitempty"`
+	Description                 *string           `json:"description,omitempty"`
+	Values                      *map[string]any   `json:"values,omitempty"`
 	// Template, when set, must equal the current template name — editing the
 	// template here is rejected (use upgrade-template for the version).
 	Template string `json:"template,omitempty"`

@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,7 +40,7 @@ func TestEphemeralDormancySurvivesRepublish(t *testing.T) {
 	if err := p.writeFile(filepath.Join(root, validationStatePath("", "demo", "web", "validation")), []byte("dormant: true\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.publishAppFiles(root, app, []AppPublishEnv{env}); err != nil {
+	if err := p.publishAppFiles(context.Background(), root, app, []AppPublishEnv{env}); err != nil {
 		t.Fatal(err)
 	}
 	for _, tree := range []string{"envs", "envs-external", composedAppsDir} {

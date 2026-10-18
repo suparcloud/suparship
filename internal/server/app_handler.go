@@ -267,15 +267,16 @@ func (ah *appHandler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cs := domain.ComponentSpec{
-			Name:           c.Name,
-			Type:           ct,
-			Enabled:        c.Enabled,
-			ExposeMode:     mode,
-			Values:         c.Values,
-			InheritAppVars: c.InheritAppVars,
-			Images:         componentImagesFromDTO(c.Images),
-			Stateful:       c.Stateful,
-			PreviewEnabled: c.PreviewEnabled,
+			Name:                        c.Name,
+			Type:                        ct,
+			Enabled:                     c.Enabled,
+			ExposeMode:                  mode,
+			Values:                      c.Values,
+			InheritAppVars:              c.InheritAppVars,
+			Images:                      componentImagesFromDTO(c.Images),
+			Stateful:                    c.Stateful,
+			ReleaseValidationDataPolicy: c.ReleaseValidationDataPolicy,
+			PreviewEnabled:              c.PreviewEnabled,
 		}
 		for _, e := range c.EnvVars {
 			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
@@ -787,6 +788,24 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		app.Spec.EnvironmentDefaults = ed
+	}
+	if req.ComponentValidationPolicies != nil {
+		components := append([]domain.ComponentSpec(nil), app.Spec.Components...)
+		for name, policy := range req.ComponentValidationPolicies {
+			found := false
+			for i := range components {
+				if components[i].Name == name {
+					found = true
+					components[i].ReleaseValidationDataPolicy = policy
+					break
+				}
+			}
+			if !found {
+				writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: "unknown component: " + name})
+				return
+			}
+		}
+		app.Spec.Components = components
 	}
 	if req.CD != nil {
 		if err := validateVerificationConfig(req.CD); err != nil {
@@ -5360,15 +5379,16 @@ func (ah *appHandler) resolveComponentSpecs(ctx context.Context, dtos []Componen
 			return nil, nil, fmt.Errorf("components[%d]: %w", i, err)
 		}
 		cs := domain.ComponentSpec{
-			Name:           c.Name,
-			Type:           ct,
-			Enabled:        c.Enabled,
-			ExposeMode:     mode,
-			Values:         c.Values,
-			InheritAppVars: c.InheritAppVars,
-			Images:         componentImagesFromDTO(c.Images),
-			Stateful:       c.Stateful,
-			PreviewEnabled: c.PreviewEnabled,
+			Name:                        c.Name,
+			Type:                        ct,
+			Enabled:                     c.Enabled,
+			ExposeMode:                  mode,
+			Values:                      c.Values,
+			InheritAppVars:              c.InheritAppVars,
+			Images:                      componentImagesFromDTO(c.Images),
+			Stateful:                    c.Stateful,
+			ReleaseValidationDataPolicy: c.ReleaseValidationDataPolicy,
+			PreviewEnabled:              c.PreviewEnabled,
 		}
 		for _, e := range c.EnvVars {
 			cs.EnvVars = append(cs.EnvVars, domain.ComponentEnvVar{
@@ -5605,17 +5625,18 @@ func componentDTOs(components []domain.ComponentSpec, envDefaults map[string]dom
 	dtos := make([]ComponentSummaryDTO, 0, len(components))
 	for _, c := range components {
 		dto := ComponentSummaryDTO{
-			Name:             c.Name,
-			Type:             string(c.Type),
-			Enabled:          c.Enabled,
-			ExposeMode:       string(c.ExposeMode),
-			Values:           c.Values,
-			EnvValues:        envValsByComp[c.Name],
-			EnvEnvVars:       envVarsByComp[c.Name],
-			InheritAppVars:   c.InheritAppVars,
-			Stateful:         c.Stateful,
-			EnabledInPreview: c.EnabledInPreview(),
-			PreviewEnabled:   c.PreviewEnabled,
+			Name:                        c.Name,
+			Type:                        string(c.Type),
+			Enabled:                     c.Enabled,
+			ExposeMode:                  string(c.ExposeMode),
+			Values:                      c.Values,
+			EnvValues:                   envValsByComp[c.Name],
+			EnvEnvVars:                  envVarsByComp[c.Name],
+			InheritAppVars:              c.InheritAppVars,
+			Stateful:                    c.Stateful,
+			ReleaseValidationDataPolicy: c.ReleaseValidationDataPolicy,
+			EnabledInPreview:            c.EnabledInPreview(),
+			PreviewEnabled:              c.PreviewEnabled,
 		}
 		if c.Template != nil {
 			dto.Template = c.Template.Name

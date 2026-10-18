@@ -228,6 +228,9 @@ type ComponentSpec struct {
 	// them helm.sh/resource-policy: keep. Typically paired with InheritAppVars:false
 	// and no Images (so it deploys pinned/direct, not Kargo-promoted).
 	Stateful bool `json:"stateful,omitempty" yaml:"stateful,omitempty"`
+	// ReleaseValidationDataPolicy is retain (default) or disposable. Disposable
+	// validation components must render without persistent storage.
+	ReleaseValidationDataPolicy string `json:"releaseValidationDataPolicy,omitempty" yaml:"releaseValidationDataPolicy,omitempty"`
 	// PreviewEnabled controls whether this component is included when a preview
 	// (ephemeral PR) environment is created for the app. nil = the type default
 	// (see EnabledInPreview): web/worker preview by default; stateful (DB/cache)
@@ -1129,4 +1132,9 @@ type AppEnvironment struct {
 	URLs []string `json:"urls,omitempty"`
 	// Status is the live runtime health summary observed from the cluster.
 	Status AppRuntimeStatus `json:"status"`
+}
+
+// DisposableInValidation applies only to the selected ephemeral validator.
+func (c ComponentSpec) DisposableInValidation(cd CDConfig, env string) bool {
+	return c.Stateful && c.ReleaseValidationDataPolicy == "disposable" && cd.EphemeralValidation() && env == cd.ReleaseValidationEnvironment
 }
