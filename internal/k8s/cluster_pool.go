@@ -29,6 +29,7 @@ type ClusterClientPool struct {
 	clients    map[string]kubernetes.Interface
 	dynClients map[string]dynamic.Interface
 	getter     KubeconfigGetter
+	options    []ClientOption
 
 	// Local fallback (optional): when a cluster has NO stored kubeconfig but
 	// isLocal reports it is the cluster suparship itself runs in (its record's
@@ -43,11 +44,12 @@ type ClusterClientPool struct {
 
 // NewClusterClientPool returns a ClusterClientPool backed by getter for
 // kubeconfig retrieval.
-func NewClusterClientPool(getter KubeconfigGetter) *ClusterClientPool {
+func NewClusterClientPool(getter KubeconfigGetter, options ...ClientOption) *ClusterClientPool {
 	return &ClusterClientPool{
 		clients:    make(map[string]kubernetes.Interface),
 		dynClients: make(map[string]dynamic.Interface),
 		getter:     getter,
+		options:    options,
 	}
 }
 
@@ -97,6 +99,9 @@ func (p *ClusterClientPool) Get(ctx context.Context, clusterName string) (kubern
 		return nil, fmt.Errorf("cluster %q: building REST config: %w", clusterName, err)
 	}
 
+	for _, option := range p.options {
+		option(cfg)
+	}
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("cluster %q: creating kubernetes client: %w", clusterName, err)
@@ -134,6 +139,9 @@ func (p *ClusterClientPool) GetDynamic(ctx context.Context, clusterName string) 
 	cfg, err := clientcmd.RESTConfigFromKubeConfig(kc)
 	if err != nil {
 		return nil, fmt.Errorf("cluster %q: building REST config: %w", clusterName, err)
+	}
+	for _, option := range p.options {
+		option(cfg)
 	}
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {

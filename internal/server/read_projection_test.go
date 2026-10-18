@@ -469,3 +469,29 @@ func TestFreshDeliveryDiagnosticsReplaceStaleErrorsDuringRuntimeOutage(t *testin
 		})
 	}
 }
+
+func TestColdAppFailureDoesNotPublishPartialRuntimeAsHealthy(t *testing.T) {
+	p := manualProjection()
+	h := p.wrap(func(w http.ResponseWriter, r *http.Request) {
+		config := AppDetailResponse{App: AppDetailDTO{Environments: []AppEnvironmentSummaryDTO{{EnvName: "staging", PinnedFrom: "pr-42"}}}}
+		w.(*projectionResponse).configuration, _ = json.Marshal(config)
+		config.App.Environments[0].Status = AppStatusSummaryDTO{Phase: "running", Available: 1}
+		config.App.Environments[0].Release = &AppReleaseRefDTO{Tag: "9.0.2"}
+		markProjectionFailure(r.Context(), context.DeadlineExceeded)
+		writeJSON(w, http.StatusOK, config)
+	})
+	projectionGet(h, "/app")
+	refreshView(p, "/app")
+	got := projectionGet(h, "/app")
+	var detail AppDetailResponse
+	if err := json.Unmarshal(got.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	env := detail.App.Environments[0]
+	if env.Status.Phase != "unknown" || env.Release != nil || env.PinnedFrom != "pr-42" {
+		t.Fatalf("misleading partial runtime: %+v", env)
+	}
+	if got.Header().Get("X-Read-State") != "stale" {
+		t.Fatal("partial read marked fresh")
+	}
+}

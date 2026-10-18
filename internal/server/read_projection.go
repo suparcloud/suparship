@@ -146,7 +146,7 @@ func (p *readProjection) refresh(parent context.Context, v *readView, generation
 		v.attempted = time.Time{}
 		return
 	}
-	if p.bytes-len(v.body)+w.body.Len() > projectionMemoryBudget || (failure.Load() && v.status != 0) || ctx.Err() != nil || w.overflow || (w.status != http.StatusOK && w.status != http.StatusNotFound) {
+	if p.bytes-len(v.body)+w.body.Len() > projectionMemoryBudget || (failure.Load() && (v.status != 0 || len(w.configuration) > 0)) || ctx.Err() != nil || w.overflow || (w.status != http.StatusOK && w.status != http.StatusNotFound) {
 		v.failed = true
 		// Runtime outages must not hide successfully persisted pins/settings.
 		// Keep the last observed runtime fields and their timestamp, but advance
@@ -362,6 +362,12 @@ func appConfigurationWithPreviousRuntime(configuration, previous []byte, diagnos
 	var current, old AppDetailResponse
 	if json.Unmarshal(configuration, &current) != nil {
 		return configuration
+	}
+	// Stored desired state is not a runtime observation. Until a complete read
+	// succeeds, avoid presenting partial replicas or a dependency's tag as a release.
+	for i := range current.App.Environments {
+		current.App.Environments[i].Status = AppStatusSummaryDTO{Phase: "unknown"}
+		current.App.Environments[i].Release = nil
 	}
 	if json.Unmarshal(previous, &old) == nil {
 		for i := range current.App.Environments {

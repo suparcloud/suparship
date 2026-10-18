@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Apply the configured Kubernetes read budget to remote workload clients, avoiding
+  default client throttling that prevents composed app status from refreshing.
+- Show unknown runtime status after an incomplete initial app read, instead of
+  reporting missing workloads or a dependency image as the app release.
+
 - Refresh delivery diagnostics independently of workload reads so resolved Argo CD
   failures disappear even while runtime status is stale. Read composed component
   runtime status with bounded concurrency and reuse app lookups.

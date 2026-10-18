@@ -371,7 +371,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		registryStore = registry.NewStore(client)
 		// Build the per-cluster client pool so sealing certs can be fetched
 		// directly from each registered cluster's kubeseal controller.
-		clusterPool = k8s.NewClusterClientPool(kubeDeps.ClusterStore)
+		clusterPool = k8s.NewClusterClientPool(kubeDeps.ClusterStore, k8s.WithRateLimit(kubeQPS, kubeBurst))
 		// A registered cluster whose API server is the in-cluster URL IS the
 		// cluster suparship runs in (the dev-loop seed registers staging/prod
 		// this way, with no kubeconfig Secret) — serve it with our own clients
