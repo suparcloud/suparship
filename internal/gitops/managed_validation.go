@@ -4,7 +4,9 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/helmvalues"
 	"gopkg.in/yaml.v3"
+	"os"
 	"path/filepath"
+	"strings"
 )
 
 const ValidationNamePattern = "{projectApp}-{env}-{cluster}"
@@ -89,6 +91,39 @@ func (p *Publisher) writeValidationPlatformApplications(repo string, app *domain
 			return err
 		}
 		if err := p.writeFile(filepath.Join(p.outputDir(repo, "_infra"), name+".yaml"), data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// App/project deletion removes the retained platform Application too. Normal
+// release cleanup intentionally leaves this separate ownership boundary intact.
+func (p *Publisher) removeManagedPlatformApplications(repo, project, app string, u *unpublishHelper) error {
+	entries, err := os.ReadDir(p.outputDir(repo, "_infra"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := p.outputDir(repo, "_infra", entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var manifest Application
+		if yaml.Unmarshal(data, &manifest) != nil || manifest.Kind != "Application" || !strings.Contains(manifest.Spec.Source.Path, "_validation-resources/") {
+			continue
+		}
+		if manifest.Metadata.Labels[labelProject] != project || (app != "" && manifest.Metadata.Labels[labelApp] != app) {
+			continue
+		}
+		if err := u.rm(path); err != nil {
 			return err
 		}
 	}

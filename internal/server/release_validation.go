@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/gitops"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain.App, envs []*domain.AppEnvironment) error {
@@ -61,6 +63,38 @@ func (ah *appHandler) validateReleaseValidation(ctx context.Context, app *domain
 	}
 	if len(ah.appDeployClusterRefs(ctx, app.ProjectName, app.Name, boundEnv)) == 0 {
 		return fmt.Errorf("bind validation environment %q to a cluster in Settings > Environments before enabling release validation", name)
+	}
+	if app.Spec.CD.ManagedValidation() {
+		namespace := domain.ValidationIdentity(app.ProjectName, app.Name)
+		for _, ref := range ah.appDeployClusterRefs(ctx, app.ProjectName, app.Name, boundEnv) {
+			client := ah.kubeClient
+			if ah.clusterPool != nil {
+				var err error
+				client, err = ah.clusterPool.Get(ctx, ref)
+				if err != nil {
+					return fmt.Errorf("verify validation namespace on %q: %w", ref, err)
+				}
+			}
+			if client == nil {
+				continue
+			}
+			existing, err := client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("verify validation namespace: %w", err)
+			}
+			key := "suparship.io/project"
+			if ah.orgProvider != nil {
+				if org, err := ah.orgOnce(ctx); err == nil && org != nil {
+					key = org.Branding.LabelKey("project")
+				}
+			}
+			if existing.Labels[key] != app.ProjectName {
+				return fmt.Errorf("validation namespace %q already exists without ownership by project %q; choose a non-colliding app identity", namespace, app.ProjectName)
+			}
+		}
 	}
 	seen := map[string]string{}
 	for env := range sources {

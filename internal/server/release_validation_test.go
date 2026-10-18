@@ -6,6 +6,9 @@ import (
 	"github.com/suparcloud/suparship/internal/domain"
 	"github.com/suparcloud/suparship/internal/rbac"
 	"github.com/suparcloud/suparship/internal/secrets"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -206,5 +209,51 @@ func TestManagedValidationNeedsNoOrgEnvironment(t *testing.T) {
 	}
 	if refs := ah.appDeployClusterRefs(req.Context(), testProject, app.Name, env.EnvName); len(refs) != 1 || refs[0] != "local" {
 		t.Fatalf("wrong cluster: %v", refs)
+	}
+	ah.kubeClient = fake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: env.Namespace, Labels: map[string]string{"suparship.io/project": "other-project"}}})
+	envs, _ := store.ListAppEnvironments(req.Context(), testProject, app.Name)
+	if err := ah.validateReleaseValidation(req.Context(), saved, envs); err == nil {
+		t.Fatal("adopted another project's validation namespace")
+	}
+}
+
+type idleValidationPromoter struct {
+	recordingPromoter
+	validationRunController
+}
+
+func (p *idleValidationPromoter) WithValidationLease(ctx context.Context, _, _, _ string, fn func(context.Context, *domain.ValidationRun) error) error {
+	return fn(ctx, &domain.ValidationRun{Phase: "idle"})
+}
+func TestDisableManagedValidationRemovesSyntheticInstance(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmtBool(fail), func(t *testing.T) {
+			ah, store, _, _ := autoPromoteFixture(t, true)
+			app := storedApp(t, store)
+			app.Spec.Images = []domain.AppImageBinding{{Name: "main", TagKey: "image.tag"}}
+			app.Spec.CD = domain.CDConfig{Managed: true, ReleaseValidationManaged: true, ReleaseValidationEnvironment: domain.ManagedValidationEnv, ReleaseValidationMode: "ephemeral"}
+			store.addApp(app)
+			store.addEnv(&domain.AppEnvironment{AppName: app.Name, ProjectName: testProject, EnvName: domain.ManagedValidationEnv, BaseEnv: "staging", EnvType: domain.AppEnvStaging, Order: 3, Namespace: domain.ValidationIdentity(testProject, app.Name)})
+			ah.kargoPromoter = &idleValidationPromoter{}
+			if fail {
+				ah.gitOpsPublisher = &failedValidationPublisher{}
+			} else {
+				ah.gitOpsPublisher = &recordingPublisher{}
+			}
+			req := httptest.NewRequest("PATCH", "/", strings.NewReader(`{"cd":{"managed":true,"releaseValidationManaged":false,"releaseValidationEnvironment":"","releaseValidationMode":"persistent"}}`))
+			req.SetPathValue("project", testProject)
+			req.SetPathValue("app", app.Name)
+			w := httptest.NewRecorder()
+			ah.handleUpdateApp(w, req)
+			saved, _ := store.GetApp(req.Context(), testProject, app.Name)
+			env, err := store.GetAppEnvironment(req.Context(), testProject, app.Name, domain.ManagedValidationEnv)
+			if fail {
+				if w.Code != 500 || !saved.Spec.CD.ManagedValidation() || err != nil || env == nil || saved.Spec.EnvironmentDefaults[domain.ManagedValidationEnv].Deploy != nil {
+					t.Fatalf("rollback failed: %d %+v %v", w.Code, saved.Spec.CD, err)
+				}
+			} else if w.Code != 200 || saved.Spec.CD.ManagedValidation() || (err == nil && env != nil) {
+				t.Fatalf("disable failed: %d %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }

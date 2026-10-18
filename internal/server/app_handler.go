@@ -928,6 +928,13 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		app.Spec.EnvironmentDefaults = ed
 	}
 
+	if prevCD.ManagedValidation() || app.Spec.CD.ManagedValidation() {
+		defaults := make(map[string]domain.EnvironmentOverride, len(app.Spec.EnvironmentDefaults))
+		for k, v := range app.Spec.EnvironmentDefaults {
+			defaults[k] = v
+		}
+		app.Spec.EnvironmentDefaults = defaults
+	}
 	if prevCD.ManagedValidation() && !app.Spec.CD.ManagedValidation() {
 		ov := app.Spec.EnvironmentDefaults[domain.ManagedValidationEnv]
 		disabled := false
@@ -976,7 +983,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 		return
 	}
-	if (prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment || prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode) && ah.kargoPipelineReader != nil {
+	if (prevCD.ReleaseValidationManaged != app.Spec.CD.ReleaseValidationManaged || prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment || prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode) && ah.kargoPipelineReader != nil {
 		stages, err := ah.kargoPipelineReader.ListAppStageStatuses(r.Context(), projectName, appName)
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "could not verify pipeline is idle"})
@@ -1046,6 +1053,11 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			ah.ensureKargoProjectCreds(ctx, projectName)
 		}
 
+		if prevCD.ManagedValidation() && !app.Spec.CD.ManagedValidation() {
+			if err := ah.appStore.DeleteAppEnvironment(ctx, projectName, appName, domain.ManagedValidationEnv); err != nil {
+				return http.StatusInternalServerError, nil, fmt.Errorf("remove disabled validation instance: %w", err)
+			}
+		}
 		saved, _ := ah.appStore.GetApp(ctx, projectName, appName)
 		savedEnvs, _ := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
 		return http.StatusOK, updateAppResponse{App: appToDetailDTO(saved, savedEnvs)}, nil
@@ -1060,7 +1072,7 @@ func (ah *appHandler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			status := http.StatusConflict
 			var result any
 			err := controller.WithValidationLease(ctx, projectName, appName, prevCD.ReleaseValidationEnvironment, func(ctx context.Context, run *domain.ValidationRun) error {
-				changed := prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode || prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment
+				changed := prevCD.ReleaseValidationManaged != app.Spec.CD.ReleaseValidationManaged || prevCD.ReleaseValidationMode != app.Spec.CD.ReleaseValidationMode || prevCD.ReleaseValidationEnvironment != app.Spec.CD.ReleaseValidationEnvironment
 				if changed && run.Phase != "idle" {
 					return fmt.Errorf("wait for validation cleanup to finish before changing lifecycle or validation environment")
 				}

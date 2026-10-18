@@ -661,10 +661,6 @@ func (p *Publisher) writeAppTree(ctx context.Context, repoDir string, app *domai
 			if err := p.removeValidationWorkloads(repoDir, app, env); err != nil {
 				return err
 			}
-			stage := p.outputDir(repoDir, "_infra", "kargo", KargoNamespaceForProject(app.ProjectName)+"-"+app.Name+"-"+env.EnvName+"-stage.yaml")
-			if err := os.Remove(stage); err != nil && !os.IsNotExist(err) {
-				return err
-			}
 		}
 	}
 
@@ -3446,9 +3442,12 @@ func (p *Publisher) UnpublishApp(ctx context.Context, projectName, appName strin
 // for white-box testing without git.
 func (p *Publisher) unpublishAppFiles(repoDir, projectName, appName string) (bool, error) {
 	var u unpublishHelper
+	if err := p.removeManagedPlatformApplications(repoDir, projectName, appName, &u); err != nil {
+		return u.removed, err
+	}
 
 	// envs/{env}/{project}/{app} and _app-resources/{env}/{project}/{app}.
-	for _, base := range []string{"envs", "_app-resources"} {
+	for _, base := range []string{"envs", "_app-resources", "_validation-resources"} {
 		baseDir := p.outputDir(repoDir, base)
 		entries, err := os.ReadDir(baseDir)
 		if err != nil {
@@ -3585,7 +3584,7 @@ func (p *Publisher) RemoveAppEnv(ctx context.Context, projectName, appName, envN
 // No git ops — the caller commits. Other envs and other apps are untouched.
 func (p *Publisher) removeAppEnvFiles(repoDir, projectName, appName, envName string) (bool, error) {
 	var u unpublishHelper
-	for _, base := range []string{"envs", "_app-resources"} {
+	for _, base := range []string{"envs", "_app-resources", "_validation-resources"} {
 		if err := u.rm(p.outputDir(repoDir, base, envName, projectName, appName)); err != nil {
 			return false, err
 		}
@@ -3640,7 +3639,7 @@ func kargoManifestLabel(path, key string) string {
 // platform-owned tree rather than a legacy env directory.
 func isReservedTopLevelDir(name string) bool {
 	switch name {
-	case "previews", "envs", "charts", "_infra", "_app-resources", "_secret-stores", "_platform":
+	case "previews", "envs", "charts", "_infra", "_app-resources", "_validation-resources", "_secret-stores", "_platform":
 		return true
 	}
 	return false
@@ -3661,11 +3660,14 @@ func isReservedTopLevelDir(name string) bool {
 func (p *Publisher) UnpublishProjectApps(ctx context.Context, projectName string) error {
 	return p.withClonedRepo(ctx, func(repoDir string) error {
 		var u unpublishHelper
+		if err := p.removeManagedPlatformApplications(repoDir, projectName, "", &u); err != nil {
+			return err
+		}
 
 		// envs/{env}/{project} and _app-resources/{env}/{project} — for
 		// _app-resources the "previews" entry also nests by project, so it is
 		// intentionally NOT skipped here.
-		for _, base := range []string{"envs", "_app-resources"} {
+		for _, base := range []string{"envs", "_app-resources", "_validation-resources"} {
 			baseDir := p.outputDir(repoDir, base)
 			entries, err := os.ReadDir(baseDir)
 			if err != nil {
