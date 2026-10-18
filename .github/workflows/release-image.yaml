@@ -2,7 +2,7 @@ name: release-image
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
     tags: ['v*']
   pull_request:
   # Escape hatch: when release-please pushes the tag with GITHUB_TOKEN rather
@@ -47,11 +47,12 @@ jobs:
   build:
     name: Build and push
     needs: changes
-    # Tag pushes always build — releases must be cut even when the tag
+    # Manual dispatch and tag pushes always build. Releases must be cut even when the tag
     # points at an already-pushed commit (zero changed files in the push
     # event). Branch and PR builds only run when an image input actually
     # changed.
     if: |
+      github.event_name == 'workflow_dispatch' ||
       startsWith(github.ref, 'refs/tags/v') ||
       needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
@@ -93,6 +94,9 @@ jobs:
             # main branch → edge + main-<short-sha>
             type=raw,value=edge,enable={{is_default_branch}}
             type=sha,prefix=main-,enable={{is_default_branch}}
+            # develop branch → develop + develop-<short-sha>
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=sha,prefix=develop-,enable=${{ github.ref == 'refs/heads/develop' }}
             # Pull requests → pr-<n> (default behaviour of type=ref,event=pr)
             type=ref,event=pr
 
@@ -107,7 +111,7 @@ jobs:
           file: Dockerfile
           # Multi-arch on push events; PRs build amd64-only to save CI minutes.
           platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
-          # Push on main/tags, and on same-repo PRs. Fork PRs build only.
+          # Push on main/develop/tags, and on same-repo PRs. Fork PRs build only.
           push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
