@@ -76,7 +76,7 @@ func (s *K8sClusterStore) GetCluster(ctx context.Context, name string) (*domain.
 	cm, err := s.client.CoreV1().ConfigMaps(suparshipSystemNS).Get(ctx, clusterConfigMapPrefix+name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("cluster %q not found", name)
+			return nil, domain.NotFoundf("cluster %q not found", name)
 		}
 		return nil, fmt.Errorf("getting cluster %q: %w", name, err)
 	}
@@ -91,7 +91,7 @@ func (s *K8sClusterStore) UpdateClusterMetadata(ctx context.Context, name string
 	cm, err := s.client.CoreV1().ConfigMaps(suparshipSystemNS).Get(ctx, clusterConfigMapPrefix+name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("cluster %q not found", name)
+			return nil, domain.NotFoundf("cluster %q not found", name)
 		}
 		return nil, fmt.Errorf("getting cluster %q: %w", name, err)
 	}
@@ -268,7 +268,7 @@ func (s *K8sClusterStore) DeleteCluster(ctx context.Context, name string) error 
 	// Remove metadata ConfigMap.
 	if err := s.client.CoreV1().ConfigMaps(suparshipSystemNS).Delete(ctx, clusterConfigMapPrefix+name, metav1.DeleteOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("cluster %q not found", name)
+			return domain.NotFoundf("cluster %q not found", name)
 		}
 		return fmt.Errorf("deleting cluster configmap: %w", err)
 	}
@@ -282,7 +282,7 @@ func (s *K8sClusterStore) GetKubeconfig(ctx context.Context, clusterName string)
 	secret, err := s.client.CoreV1().Secrets(suparshipSystemNS).Get(ctx, clusterKubeconfigPrefix+clusterName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("kubeconfig for cluster %q not found", clusterName)
+			return nil, domain.NotFoundf("kubeconfig for cluster %q not found", clusterName)
 		}
 		return nil, fmt.Errorf("getting kubeconfig secret: %w", err)
 	}
@@ -444,7 +444,7 @@ func (s *K8sClusterStore) ImportArgoCDCluster(ctx context.Context, name string) 
 		return nil, err
 	}
 	if !found {
-		return nil, fmt.Errorf("argocd cluster %q not found", name)
+		return nil, domain.NotFoundf("argocd cluster %q not found", name)
 	}
 
 	cand := classifyArgoCDCluster(name, server, configRaw)

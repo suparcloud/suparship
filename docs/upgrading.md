@@ -203,3 +203,18 @@ vaults) instead of a sealed token per vault.
 failure reasons; cluster API server / Connect URL / registry URL are validated
 at save time; project deletion is two-phase (no more stuck-Terminating apps
 from the delete path), and stuck apps can be unstuck from the dashboard.
+
+## 0.2 beta: background UI reads
+
+Ordinary UI reads now use disposable background projections. No database or
+configuration schema migration is required. After a server restart or the first
+access to a view, API clients must handle `503` with `Retry-After` while the view
+synchronizes. Existing successful JSON response shapes are unchanged; clients
+should inspect the `X-Read-State` and `X-Read-Observed-At` headers before treating
+health as current. The bundled UI handles these states automatically.
+
+Reverse proxies should allow `text/event-stream` and disable buffering for
+projected `GET ...?watch=1` requests. Streams reconnect at least every 15 seconds
+and recheck authorization. There is no persistence to migrate or restore for
+these views; restart rebuilds them. See [read-model operations and performance
+results](read-model.md) for limits, retry behavior and the benchmark fixture.

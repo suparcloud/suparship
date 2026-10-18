@@ -23,7 +23,7 @@ rules:
     resources: ["sealedsecrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "ingressclasses"]

@@ -40,12 +40,12 @@ type DevRuntime struct {
 	mu        sync.RWMutex
 	org       *domain.Org
 	projects  map[string]*domain.Project
-	services  map[string]map[string]*domain.Service // projectName → serviceName → Service
-	apps      map[string]map[string]*domain.App     // projectName → appName → App
+	services  map[string]map[string]*domain.Service                   // projectName → serviceName → Service
+	apps      map[string]map[string]*domain.App                       // projectName → appName → App
 	appEnvs   map[string]map[string]map[string]*domain.AppEnvironment // projectName → appName → envName → AppEnvironment
 	templates map[string]*domain.Template
 	previews  map[string]*domain.Preview
-	clusters  map[string]*domain.Cluster // clusterName → Cluster
+	clusters  map[string]*domain.Cluster       // clusterName → Cluster
 	statuses  map[string]*domain.ServiceStatus // "project/service/env" → status
 	logLines  []domain.LogLine                 // shared fixture lines returned for any service
 }
@@ -92,7 +92,7 @@ func (r *DevRuntime) GetProject(_ context.Context, name string) (*domain.Project
 	defer r.mu.RUnlock()
 	p, ok := r.projects[name]
 	if !ok {
-		return nil, fmt.Errorf("project %q not found", name)
+		return nil, domain.NotFoundf("project %q not found", name)
 	}
 	return p, nil
 }
@@ -111,7 +111,7 @@ func (r *DevRuntime) DeleteProject(_ context.Context, name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.projects[name]; !ok {
-		return fmt.Errorf("project %q not found", name)
+		return domain.NotFoundf("project %q not found", name)
 	}
 	delete(r.projects, name)
 	delete(r.services, name)
@@ -125,7 +125,7 @@ func (r *DevRuntime) ListServices(_ context.Context, projectName string) ([]*dom
 	defer r.mu.RUnlock()
 	svcMap, ok := r.services[projectName]
 	if !ok {
-		return nil, fmt.Errorf("project %q not found", projectName)
+		return nil, domain.NotFoundf("project %q not found", projectName)
 	}
 	out := make([]*domain.Service, 0, len(svcMap))
 	for _, s := range svcMap {
@@ -139,11 +139,11 @@ func (r *DevRuntime) GetService(_ context.Context, projectName, serviceName stri
 	defer r.mu.RUnlock()
 	svcMap, ok := r.services[projectName]
 	if !ok {
-		return nil, fmt.Errorf("project %q not found", projectName)
+		return nil, domain.NotFoundf("project %q not found", projectName)
 	}
 	svc, ok := svcMap[serviceName]
 	if !ok {
-		return nil, fmt.Errorf("service %q not found in project %q", serviceName, projectName)
+		return nil, domain.NotFoundf("service %q not found in project %q", serviceName, projectName)
 	}
 	return svc, nil
 }
@@ -164,10 +164,10 @@ func (r *DevRuntime) DeleteService(_ context.Context, projectName, serviceName s
 	defer r.mu.Unlock()
 	svcMap, ok := r.services[projectName]
 	if !ok {
-		return fmt.Errorf("project %q not found", projectName)
+		return domain.NotFoundf("project %q not found", projectName)
 	}
 	if _, ok := svcMap[serviceName]; !ok {
-		return fmt.Errorf("service %q not found in project %q", serviceName, projectName)
+		return domain.NotFoundf("service %q not found in project %q", serviceName, projectName)
 	}
 	delete(svcMap, serviceName)
 	return nil
@@ -190,7 +190,7 @@ func (r *DevRuntime) GetTemplate(_ context.Context, name string) (*domain.Templa
 	defer r.mu.RUnlock()
 	t, ok := r.templates[name]
 	if !ok {
-		return nil, fmt.Errorf("template %q not found", name)
+		return nil, domain.NotFoundf("template %q not found", name)
 	}
 	return t, nil
 }
@@ -212,7 +212,7 @@ func (r *DevRuntime) GetPreview(_ context.Context, name string) (*domain.Preview
 	defer r.mu.RUnlock()
 	p, ok := r.previews[name]
 	if !ok {
-		return nil, fmt.Errorf("preview %q not found", name)
+		return nil, domain.NotFoundf("preview %q not found", name)
 	}
 	return p, nil
 }
@@ -231,7 +231,7 @@ func (r *DevRuntime) DeletePreview(_ context.Context, name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.previews[name]; !ok {
-		return fmt.Errorf("preview %q not found", name)
+		return domain.NotFoundf("preview %q not found", name)
 	}
 	delete(r.previews, name)
 	return nil
@@ -244,7 +244,7 @@ func (r *DevRuntime) ListApps(_ context.Context, projectName string) ([]*domain.
 	defer r.mu.RUnlock()
 	appMap, ok := r.apps[projectName]
 	if !ok {
-		return nil, fmt.Errorf("project %q not found", projectName)
+		return nil, domain.NotFoundf("project %q not found", projectName)
 	}
 	out := make([]*domain.App, 0, len(appMap))
 	for _, a := range appMap {
@@ -259,11 +259,11 @@ func (r *DevRuntime) GetApp(_ context.Context, projectName, appName string) (*do
 	defer r.mu.RUnlock()
 	appMap, ok := r.apps[projectName]
 	if !ok {
-		return nil, fmt.Errorf("project %q not found", projectName)
+		return nil, domain.NotFoundf("project %q not found", projectName)
 	}
 	a, ok := appMap[appName]
 	if !ok {
-		return nil, fmt.Errorf("app %q not found in project %q", appName, projectName)
+		return nil, domain.NotFoundf("app %q not found in project %q", appName, projectName)
 	}
 	return a, nil
 }
@@ -292,15 +292,15 @@ func (r *DevRuntime) GetAppEnvironment(_ context.Context, projectName, appName, 
 	defer r.mu.RUnlock()
 	projectEnvs, ok := r.appEnvs[projectName]
 	if !ok {
-		return nil, fmt.Errorf("app environment %q not found for app %q in project %q", envName, appName, projectName)
+		return nil, domain.NotFoundf("app environment %q not found for app %q in project %q", envName, appName, projectName)
 	}
 	envMap, ok := projectEnvs[appName]
 	if !ok {
-		return nil, fmt.Errorf("app environment %q not found for app %q in project %q", envName, appName, projectName)
+		return nil, domain.NotFoundf("app environment %q not found for app %q in project %q", envName, appName, projectName)
 	}
 	env, ok := envMap[envName]
 	if !ok {
-		return nil, fmt.Errorf("app environment %q not found for app %q in project %q", envName, appName, projectName)
+		return nil, domain.NotFoundf("app environment %q not found for app %q in project %q", envName, appName, projectName)
 	}
 	return env, nil
 }
@@ -344,7 +344,7 @@ func (r *DevRuntime) SaveApp(_ context.Context, projectName string, app *domain.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.projects[projectName]; !ok {
-		return fmt.Errorf("project %q not found", projectName)
+		return domain.NotFoundf("project %q not found", projectName)
 	}
 	if r.apps[projectName] == nil {
 		r.apps[projectName] = make(map[string]*domain.App)
@@ -373,14 +373,14 @@ func (r *DevRuntime) DeleteAppEnvironment(_ context.Context, projectName, appNam
 	defer r.mu.Unlock()
 	projectEnvs, ok := r.appEnvs[projectName]
 	if !ok {
-		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+		return domain.NotFoundf("environment %q not found for app %q in project %q", envName, appName, projectName)
 	}
 	envMap, ok := projectEnvs[appName]
 	if !ok {
-		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+		return domain.NotFoundf("environment %q not found for app %q in project %q", envName, appName, projectName)
 	}
 	if _, ok := envMap[envName]; !ok {
-		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+		return domain.NotFoundf("environment %q not found for app %q in project %q", envName, appName, projectName)
 	}
 	delete(envMap, envName)
 	return nil
@@ -391,10 +391,10 @@ func (r *DevRuntime) DeleteApp(_ context.Context, projectName, appName string) e
 	defer r.mu.Unlock()
 	projectApps, ok := r.apps[projectName]
 	if !ok {
-		return fmt.Errorf("app %q not found in project %q", appName, projectName)
+		return domain.NotFoundf("app %q not found in project %q", appName, projectName)
 	}
 	if _, ok := projectApps[appName]; !ok {
-		return fmt.Errorf("app %q not found in project %q", appName, projectName)
+		return domain.NotFoundf("app %q not found in project %q", appName, projectName)
 	}
 	delete(projectApps, appName)
 	// Remove all environment instances for this app.
@@ -421,7 +421,7 @@ func (r *DevRuntime) GetCluster(_ context.Context, name string) (*domain.Cluster
 	defer r.mu.RUnlock()
 	c, ok := r.clusters[name]
 	if !ok {
-		return nil, fmt.Errorf("cluster %q not found", name)
+		return nil, domain.NotFoundf("cluster %q not found", name)
 	}
 	return c, nil
 }
@@ -443,7 +443,7 @@ func (r *DevRuntime) DeleteCluster(_ context.Context, name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.clusters[name]; !ok {
-		return fmt.Errorf("cluster %q not found", name)
+		return domain.NotFoundf("cluster %q not found", name)
 	}
 	delete(r.clusters, name)
 	return nil

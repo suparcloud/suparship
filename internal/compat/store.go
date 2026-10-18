@@ -2,6 +2,7 @@ package compat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -21,7 +22,7 @@ type OrgEnvsReader interface {
 // to legacy service-oriented stores when native app data is absent.
 //
 // On every read operation the primary AppStore is consulted first.  When the
-// primary returns an error or an empty result, the fallback path synthesises an
+// primary returns a typed absence or an empty result, the fallback path synthesises an
 // equivalent response from legacy service, project, status, and preview stores
 // using the pure mapping functions in mapper.go.
 //
@@ -83,23 +84,30 @@ func NewServiceBackedAppStore(
 }
 
 // ListApps returns apps for a project.  The primary AppStore is consulted
-// first; when it returns an error or an empty list, legacy services are mapped
+// first; when it returns an empty list, legacy services are mapped
 // to apps via the fallback path.
 func (s *ServiceBackedAppStore) ListApps(ctx context.Context, projectName string) ([]*domain.App, error) {
 	apps, err := s.primary.ListApps(ctx, projectName)
-	if err == nil && len(apps) > 0 {
+	if err != nil {
+		return nil, err
+	}
+	if len(apps) > 0 {
 		return apps, nil
 	}
 	return s.listAppsFromServices(ctx, projectName)
 }
 
 // GetApp returns a single app by name.  The primary AppStore is consulted
-// first; when it returns an error the matching legacy service is mapped to an
+// first; when it returns a typed absence the matching legacy service is mapped to an
 // app via the fallback path.
 func (s *ServiceBackedAppStore) GetApp(ctx context.Context, projectName, appName string) (*domain.App, error) {
 	app, err := s.primary.GetApp(ctx, projectName, appName)
 	if err == nil {
 		return app, nil
+	}
+	var missing *domain.NotFoundError
+	if !errors.As(err, &missing) {
+		return nil, err
 	}
 	return s.getAppFromService(ctx, projectName, appName)
 }
@@ -109,8 +117,20 @@ func (s *ServiceBackedAppStore) GetApp(ctx context.Context, projectName, appName
 // list, the fallback builds environments from runtime status and previews.
 func (s *ServiceBackedAppStore) ListAppEnvironments(ctx context.Context, projectName, appName string) ([]*domain.AppEnvironment, error) {
 	envs, err := s.primary.ListAppEnvironments(ctx, projectName, appName)
-	if err == nil && len(envs) > 0 {
+	if err != nil {
+		return nil, err
+	}
+	if len(envs) > 0 {
 		return envs, nil
+	}
+	// An existing native app with no environment records is legitimately empty.
+	if _, nativeErr := s.primary.GetApp(ctx, projectName, appName); nativeErr == nil {
+		return envs, nil
+	} else {
+		var missing *domain.NotFoundError
+		if !errors.As(nativeErr, &missing) {
+			return nil, nativeErr
+		}
 	}
 	return s.listEnvsFromService(ctx, projectName, appName)
 }
@@ -124,6 +144,15 @@ func (s *ServiceBackedAppStore) GetAppEnvironment(ctx context.Context, projectNa
 	if err == nil {
 		return env, nil
 	}
+	var missing *domain.NotFoundError
+	if !errors.As(err, &missing) {
+		return nil, err
+	}
+	if _, nativeErr := s.primary.GetApp(ctx, projectName, appName); nativeErr == nil {
+		return nil, err
+	} else if !errors.As(nativeErr, &missing) {
+		return nil, nativeErr
+	}
 	return s.getEnvFromService(ctx, projectName, appName, envName)
 }
 
@@ -132,8 +161,19 @@ func (s *ServiceBackedAppStore) GetAppEnvironment(ctx context.Context, projectNa
 // fallback builds previews from the legacy PreviewStore.
 func (s *ServiceBackedAppStore) ListAppPreviews(ctx context.Context, projectName, appName string) ([]*domain.AppEnvironment, error) {
 	previews, err := s.primary.ListAppPreviews(ctx, projectName, appName)
-	if err == nil && len(previews) > 0 {
+	if err != nil {
+		return nil, err
+	}
+	if len(previews) > 0 {
 		return previews, nil
+	}
+	if _, nativeErr := s.primary.GetApp(ctx, projectName, appName); nativeErr == nil {
+		return previews, nil
+	} else {
+		var missing *domain.NotFoundError
+		if !errors.As(nativeErr, &missing) {
+			return nil, nativeErr
+		}
 	}
 	return s.listPreviewsFromLegacy(ctx, projectName, appName)
 }
@@ -178,7 +218,7 @@ func (s *ServiceBackedAppStore) listAppsFromServices(ctx context.Context, projec
 func (s *ServiceBackedAppStore) getAppFromService(ctx context.Context, projectName, appName string) (*domain.App, error) {
 	svc, err := s.services.GetService(ctx, projectName, appName)
 	if err != nil {
-		return nil, fmt.Errorf("app %q not found in project %q", appName, projectName)
+		return nil, fmt.Errorf("reading app %q in project %q: %w", appName, projectName, err)
 	}
 	return MapServiceToApp(svc), nil
 }
@@ -186,7 +226,7 @@ func (s *ServiceBackedAppStore) getAppFromService(ctx context.Context, projectNa
 func (s *ServiceBackedAppStore) listEnvsFromService(ctx context.Context, projectName, appName string) ([]*domain.AppEnvironment, error) {
 	svc, err := s.services.GetService(ctx, projectName, appName)
 	if err != nil {
-		return nil, fmt.Errorf("app %q not found in project %q", appName, projectName)
+		return nil, fmt.Errorf("reading app %q in project %q: %w", appName, projectName, err)
 	}
 
 	proj, err := s.projects.GetProject(ctx, projectName)
@@ -230,7 +270,7 @@ func (s *ServiceBackedAppStore) listEnvsFromService(ctx context.Context, project
 func (s *ServiceBackedAppStore) getEnvFromService(ctx context.Context, projectName, appName, envName string) (*domain.AppEnvironment, error) {
 	svc, err := s.services.GetService(ctx, projectName, appName)
 	if err != nil {
-		return nil, fmt.Errorf("app %q not found in project %q", appName, projectName)
+		return nil, fmt.Errorf("reading app %q in project %q: %w", appName, projectName, err)
 	}
 
 	// Try as a preview first: preview names are exact (e.g. "pr-42") and
@@ -245,7 +285,7 @@ func (s *ServiceBackedAppStore) getEnvFromService(ctx context.Context, projectNa
 	// we always get a valid AppEnvironment when the service exists.
 	status, statusErr := s.statuses.GetServiceStatus(ctx, projectName, svc.Name, envName)
 	if statusErr != nil {
-		return nil, fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+		return nil, fmt.Errorf("reading environment %q for app %q in project %q: %w", envName, appName, projectName, statusErr)
 	}
 	return MapServiceStatusToAppEnvironment(svc, envName, status), nil
 }

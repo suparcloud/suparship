@@ -424,15 +424,9 @@ docker_build_with_restart(
     'suparship-dev',
     context='.',
     dockerfile='Dockerfile.dev',
-    # restart_process wraps this as `sh -c "<entrypoint>"`, which swallows the
-    # chart's container args as sh positional params — so the full command must
-    # live here. The rest is covered by env (SUPARSHIP_CLUSTER_MODE=kubernetes
-    # from the chart; SUPARSHIP_ADDR/SUPARSHIP_UI_DIR from Dockerfile.dev) and
-    # flag defaults (admin-secret-* default to the chart's values).
-    # There are no built-in templates: the server starts with zero and serves
-    # cluster templates live; the `seed-templates` resource registers the
-    # example-charts registry source so the catalog exists out of the box.
-    entrypoint='/usr/local/bin/suparship server --log-level=debug',
+    # Use exec-form so restart_process preserves the Helm container args,
+    # including request budgets and admin-secret overrides, on every restart.
+    entrypoint=['/usr/local/bin/suparship'],
     only=['go.mod', 'go.sum', 'cmd', 'internal', 'ui/dist'],
     live_update=[
         fall_back_on(['go.mod', 'go.sum']),   # dep change -> full image rebuild

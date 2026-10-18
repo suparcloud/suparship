@@ -20,19 +20,14 @@ import type {
   PromoteResponse,
 } from "../types";
 
-// listApps returns a project's apps with live per-env status. Pass opts.stack to
-// scope live-status enrichment to that stack's members: non-member apps are still
-// returned (names, for pickers) but without the per-env cluster reads, so a stack
-// detail view doesn't pay to enrich apps it won't show status for.
+// listApps reads the shared project projection. Legacy brief/stack hints are
+// accepted for compatibility; projected reads share the full project view.
 export function listApps(
   project: string,
   opts?: { stack?: string; brief?: boolean },
 ): Promise<AppListResponse> {
   const params = new URLSearchParams();
   if (opts?.stack) params.set("stack", opts.stack);
-  // brief=1 skips live status enrichment server-side: names/templates/env
-  // columns from the store only. Used for the instant first paint; a full
-  // (enriched) fetch follows to fill statuses in.
   if (opts?.brief) params.set("brief", "1");
   const qs = params.toString();
   return api.get<AppListResponse>(

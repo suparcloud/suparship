@@ -63,7 +63,7 @@ func (a *k8sServiceAdapter) GetService(ctx context.Context, projectName, service
 			return projectServiceToDomain(projectName, s), nil
 		}
 	}
-	return nil, fmt.Errorf("service %q not found in project %q", serviceName, projectName)
+	return nil, domain.NotFoundf("service %q not found in project %q", serviceName, projectName)
 }
 
 // SaveService is not implemented for K8s-backed services in MVP; mutations

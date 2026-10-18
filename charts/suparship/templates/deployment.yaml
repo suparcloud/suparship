@@ -41,6 +41,10 @@ spec:
             - --addr=:8080
             - --ui-dir=/app/ui
             - --log-level={{ .Values.server.logLevel }}
+            - --kube-qps={{ .Values.server.kubernetes.qps }}
+            - --kube-burst={{ .Values.server.kubernetes.burst }}
+            - --auth-kube-qps={{ .Values.server.kubernetes.authorizationQps }}
+            - --auth-kube-burst={{ .Values.server.kubernetes.authorizationBurst }}
             {{- if .Values.server.cookieSecure }}
             - --cookie-secure
             {{- end }}

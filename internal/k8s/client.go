@@ -15,6 +15,17 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// ClientOption configures a Kubernetes client's transport budget.
+type ClientOption func(*rest.Config)
+
+// WithRateLimit gives a client its own bounded request budget. Callers must use
+// positive values; a nil limiter lets client-go construct an independent bucket.
+func WithRateLimit(qps float32, burst int) ClientOption {
+	return func(cfg *rest.Config) {
+		cfg.QPS, cfg.Burst, cfg.RateLimiter = qps, burst, nil
+	}
+}
+
 // NewClientset builds a Kubernetes clientset using the following resolution
 // order:
 //
@@ -25,7 +36,7 @@ import (
 //
 // An error is returned only when all three paths fail, and the message
 // describes what was tried so the caller can produce an actionable log.
-func NewClientset(kubeconfig, kubecontext string) (kubernetes.Interface, error) {
+func NewClientset(kubeconfig, kubecontext string, options ...ClientOption) (kubernetes.Interface, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfig != "" {
 		rules.ExplicitPath = kubeconfig
@@ -58,6 +69,9 @@ func NewClientset(kubeconfig, kubecontext string) (kubernetes.Interface, error) 
 		}
 	}
 
+	for _, option := range options {
+		option(restConfig)
+	}
 	cs, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("creating kubernetes client: %w", err)
@@ -103,10 +117,13 @@ func NewRestConfig(kubeconfig, kubecontext string) (*rest.Config, error) {
 // NewDynamicClient builds a dynamic.Interface from the given kubeconfig path
 // and context. The dynamic client is required for interacting with CRDs such
 // as ArgoCD Application and Kargo Stage/Promotion.
-func NewDynamicClient(kubeconfig, kubecontext string) (dynamic.Interface, error) {
+func NewDynamicClient(kubeconfig, kubecontext string, options ...ClientOption) (dynamic.Interface, error) {
 	cfg, err := NewRestConfig(kubeconfig, kubecontext)
 	if err != nil {
 		return nil, err
+	}
+	for _, option := range options {
+		option(cfg)
 	}
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {

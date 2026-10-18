@@ -111,7 +111,7 @@ func (s *K8sAppStore) GetApp(ctx context.Context, projectName, appName string) (
 	cmName := appConfigMapName(projectName, appName)
 	cm, err := s.client.CoreV1().ConfigMaps(project.Namespace).Get(ctx, cmName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("app %q not found in project %q", appName, projectName)
+		return nil, domain.NotFoundf("app %q not found in project %q", appName, projectName)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading app configmap %s: %w", cmName, err)
@@ -194,7 +194,7 @@ func (s *K8sAppStore) GetAppEnvironment(ctx context.Context, projectName, appNam
 	cmName := appEnvConfigMapName(projectName, appName, envName)
 	cm, err := s.client.CoreV1().ConfigMaps(project.Namespace).Get(ctx, cmName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+		return nil, domain.NotFoundf("environment %q not found for app %q in project %q", envName, appName, projectName)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading app-environment configmap %s: %w", cmName, err)
@@ -246,7 +246,7 @@ func (s *K8sAppStore) DeleteApp(ctx context.Context, projectName, appName string
 	cmName := appConfigMapName(projectName, appName)
 	if _, err := s.client.CoreV1().ConfigMaps(project.Namespace).Get(ctx, cmName, metav1.GetOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("app %q not found in project %q", appName, projectName)
+			return domain.NotFoundf("app %q not found in project %q", appName, projectName)
 		}
 		return fmt.Errorf("checking app configmap %s: %w", cmName, err)
 	}
@@ -276,7 +276,7 @@ func (s *K8sAppStore) DeleteAppEnvironment(ctx context.Context, projectName, app
 	cmName := appEnvConfigMapName(projectName, appName, envName)
 	err := s.client.CoreV1().ConfigMaps(project.Namespace).Delete(ctx, cmName, metav1.DeleteOptions{})
 	if apierrors.IsNotFound(err) {
-		return fmt.Errorf("environment %q not found for app %q in project %q", envName, appName, projectName)
+		return domain.NotFoundf("environment %q not found for app %q in project %q", envName, appName, projectName)
 	}
 	if err != nil {
 		return fmt.Errorf("deleting app-environment configmap %s: %w", cmName, err)

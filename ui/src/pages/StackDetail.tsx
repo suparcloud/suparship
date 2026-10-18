@@ -1,3 +1,4 @@
+import { useReadView } from "../lib/readViews";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -156,8 +157,7 @@ export function StackDetail() {
   // getStack is cheap and gates the page; the status-enriched listApps (member
   // summaries) streams into the members table under its own flag.
   const [appsLoading, setAppsLoading] = useState(true);
-  // True while the status-enriched member list is still in flight (the brief
-  // list paints names/links first).
+  // True while the initial project read projection is synchronizing.
   const [statusPending, setStatusPending] = useState(true);
   const [addApp, setAddApp] = useState("");
   const [activeTab, setActiveTab] = useState<TabId>("overview");
@@ -177,6 +177,15 @@ export function StackDetail() {
   // env absent here defaults to its DeployMode default; see stackClustersForEnv
   // for the wire mapping. Only meaningful for envs with more than one cluster.
   const [targetSel, setTargetSel] = useState<Record<string, string[]>>({});
+
+  useReadView(project ? `/projects/${encodeURIComponent(project)}/apps` : undefined, async (isCurrent) => {
+    if (!project) return;
+    const result = await listApps(project);
+    if (!isCurrent()) return;
+    setAllApps(result.apps);
+    setAppsLoading(false);
+    setStatusPending(false);
+  });
 
   const loadPreviews = useCallback(() => {
     if (!project) return;
@@ -198,19 +207,7 @@ export function StackDetail() {
       .catch((err) =>
         setError(err instanceof Error ? err.message : "Failed to load stack"),
       );
-    // Two-phase member list: the brief list (store reads only) paints every
-    // member name/link immediately; the enriched list (live member status)
-    // replaces it, with status cells pulsing in between.
-    listApps(project, { stack: stackName, brief: true })
-      .then((apps) => {
-        setAllApps((prev) => (prev.length > 0 ? prev : apps.apps));
-        setAppsLoading(false);
-      })
-      .catch(() => {
-        /* the enriched fetch below is the error path */
-      });
-    // Only the stack's members need live status here; non-members come back as
-    // names for the "add app" picker without paying the enrichment cost.
+    // Members and picker names share the project read projection.
     const p2 = listApps(project, { stack: stackName })
       .then((apps) => setAllApps(apps.apps))
       .catch(() => setAllApps([]))

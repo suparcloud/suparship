@@ -86,6 +86,9 @@ func (ah *appHandler) orgOnce(ctx context.Context) (*rbac.Org, error) {
 		rc, cancel := context.WithTimeout(m.base, liveReadTimeout)
 		defer cancel()
 		m.org, m.err = ah.orgProvider.GetOrg(rc)
+		if m.err != nil {
+			markProjectionFailure(ctx, m.err)
+		}
 	})
 	return m.org, m.err
 }
@@ -296,6 +299,9 @@ func (ah *appHandler) enrichEnvBounded(ctx context.Context, appName string, env 
 	tctx, cancel := context.WithTimeout(ctx, liveReadTimeout)
 	defer cancel()
 	ah.enrichEnvWithLiveStatus(tctx, appName, env)
+	if tctx.Err() != nil {
+		markProjectionFailure(ctx, tctx.Err())
+	}
 }
 
 // enrichAndCache enriches live and refreshes the cache entry. Used by the
@@ -310,6 +316,10 @@ func (ah *appHandler) enrichAndCache(ctx context.Context, project, appName strin
 // live and caches the result. Used by the list path (dashboard/project/stack),
 // where ≤statusCacheTTL staleness on rows is acceptable for the speedup.
 func (ah *appHandler) enrichCachedOrLive(ctx context.Context, project, appName string, env *domain.AppEnvironment) {
+	if ctx.Value(projectionFailureKey{}) != nil {
+		ah.enrichEnvBounded(ctx, appName, env)
+		return
+	}
 	key := statusCacheKey(project, appName, env.EnvName)
 	if snap, ok := ah.statusCache.get(key); ok {
 		snap.applyTo(env)
@@ -317,4 +327,15 @@ func (ah *appHandler) enrichCachedOrLive(ctx context.Context, project, appName s
 	}
 	ah.enrichEnvBounded(ctx, appName, env)
 	ah.statusCache.put(key, snapshotEnv(env))
+}
+
+// Stores may return shared in-memory objects. Enrichment owns a private copy.
+func cloneReadEnvironments(envs []*domain.AppEnvironment) []*domain.AppEnvironment {
+	out := make([]*domain.AppEnvironment, len(envs))
+	for i, env := range envs {
+		copy := *env
+		snapshotEnv(env).applyTo(&copy)
+		out[i] = &copy
+	}
+	return out
 }

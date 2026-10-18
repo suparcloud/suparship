@@ -22,6 +22,7 @@ import (
 // All write operations (POST, DELETE) require org_admin role (validated by
 // the session middleware). Read operations (GET) require any authenticated user.
 type clusterHandler struct {
+	reads     *readProjection
 	store     domain.ClusterStore
 	auth      *authHandler
 	certCache seal.CertCache
@@ -46,10 +47,10 @@ type clusterHandler struct {
 // writes require org_admin — a developer/viewer has no business listing or
 // mutating the workload-cluster registry.
 func (ch *clusterHandler) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/clusters", ch.requireOrgAdmin(ch.handleList))
+	mux.HandleFunc("GET /api/v1/clusters", ch.requireOrgAdmin(ch.reads.wrap(ch.handleList)))
 	mux.HandleFunc("GET /api/v1/clusters/argocd", ch.requireOrgAdmin(ch.handleListArgoCD))
 	mux.HandleFunc("POST /api/v1/clusters/import", ch.requireOrgAdmin(ch.handleImport))
-	mux.HandleFunc("GET /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleGet))
+	mux.HandleFunc("GET /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.reads.wrap(ch.handleGet)))
 	mux.HandleFunc("POST /api/v1/clusters", ch.requireOrgAdmin(ch.handleCreate))
 	mux.HandleFunc("PUT /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleUpdateMetadata))
 	mux.HandleFunc("DELETE /api/v1/clusters/{name}", ch.requireOrgAdmin(ch.handleDelete))
@@ -95,7 +96,7 @@ func (ch *clusterHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	cluster, err := ch.store.GetCluster(r.Context(), name)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "cluster not found"})
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{Error: "cluster not found"})
 		return
 	}
 	writeJSON(w, http.StatusOK, cluster)

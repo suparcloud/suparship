@@ -1287,7 +1287,7 @@ func (ah *appHandler) handleListApps(w http.ResponseWriter, r *http.Request) {
 
 	apps, err := ah.appStore.ListApps(r.Context(), projectName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{
 			Error: "project \"" + projectName + "\" not found",
 		})
 		return
@@ -1327,7 +1327,12 @@ func (ah *appHandler) handleListApps(w http.ResponseWriter, r *http.Request) {
 	// short-TTL status cache; DTOs are assembled in app order afterwards.
 	envsByApp := make([][]*domain.AppEnvironment, len(apps))
 	for i, app := range apps {
-		envsByApp[i], _ = ah.appStore.ListAppEnvironments(ctx, projectName, app.Name)
+		var envErr error
+		envsByApp[i], envErr = ah.appStore.ListAppEnvironments(ctx, projectName, app.Name)
+		if envErr != nil {
+			markProjectionFailure(ctx, envErr)
+		}
+		envsByApp[i] = cloneReadEnvironments(envsByApp[i])
 	}
 
 	type enrichTask struct {
@@ -1367,7 +1372,7 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 
 	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{
 			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
 		})
 		return
@@ -1378,7 +1383,11 @@ func (ah *appHandler) handleGetApp(w http.ResponseWriter, r *http.Request) {
 	// per-env fan-out doesn't re-read them.
 	ctx := withEnrichMemos(r.Context())
 	appMemoFrom(ctx).seed(projectName, app)
-	envs, _ := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
+	envs, envErr := ah.appStore.ListAppEnvironments(ctx, projectName, appName)
+	if envErr != nil {
+		markProjectionFailure(ctx, envErr)
+	}
+	envs = cloneReadEnvironments(envs)
 	runBounded(len(envs), appEnrichConcurrency, func(i int) {
 		ah.enrichAndCache(ctx, projectName, appName, envs[i])
 	})
@@ -1398,7 +1407,7 @@ func (ah *appHandler) handleListAppEnvironments(w http.ResponseWriter, r *http.R
 
 	app, err := ah.appStore.GetApp(r.Context(), projectName, appName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{
 			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
 		})
 		return
@@ -1412,6 +1421,7 @@ func (ah *appHandler) handleListAppEnvironments(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	envs = cloneReadEnvironments(envs)
 	runBounded(len(envs), appEnrichConcurrency, func(i int) {
 		ah.enrichAndCache(ctx, projectName, appName, envs[i])
 	})
@@ -1437,12 +1447,13 @@ func (ah *appHandler) handleGetAppEnvironment(w http.ResponseWriter, r *http.Req
 
 	env, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, envName)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{
 			Error: "environment \"" + envName + "\" not found for app \"" + appName + "\" in project \"" + projectName + "\"",
 		})
 		return
 	}
 
+	env = cloneReadEnvironments([]*domain.AppEnvironment{env})[0]
 	ah.enrichAndCache(withEnrichMemos(r.Context()), projectName, appName, env)
 
 	dto := appEnvToDTO(env)
@@ -4326,6 +4337,7 @@ func (ah *appHandler) workloadClustersForEnv(ctx context.Context, projectName, a
 	for _, ref := range targets {
 		c, err := ah.clusterPool.Get(ctx, ref)
 		if err != nil {
+			markProjectionFailure(ctx, err)
 			unreachable = append(unreachable, ref)
 			continue
 		}
@@ -4388,6 +4400,8 @@ func (ah *appHandler) enrichEnvWithLiveStatus(ctx context.Context, appName strin
 		}
 		if info, err := ah.runtimeProvider.GetServiceRuntime(ctx, env.Namespace, appName); err == nil {
 			ah.applyRuntimeInfo(env, info)
+		} else {
+			markProjectionFailure(ctx, err)
 		}
 		return
 	}
@@ -4512,6 +4526,8 @@ func runtimeByComponent(ctx context.Context, kp *runtime.K8sProvider, namespace 
 		}
 		if info, err := kp.GetAppRuntime(ctx, namespace, wi.Instance, wi.Instance); err == nil {
 			out[wi.Component] = info
+		} else {
+			markProjectionFailure(ctx, err)
 		}
 	}
 	return out
@@ -4757,6 +4773,7 @@ func (ah *appHandler) enrichEnvWithDiagnostics(ctx context.Context, appName stri
 				var err error
 				diags, err = ah.diagnosticsReader.GetAppDiagnostics(ctx, t.app, t.source)
 				if err != nil {
+					markProjectionFailure(ctx, err)
 					// Don't silently drop a read failure (RBAC, throttling, API down) —
 					// that would falsely present a broken env as having no problems.
 					// Surface it as a warning so the operator knows status is unknown.
@@ -5861,13 +5878,13 @@ func (ah *appHandler) handleGetAppDeploymentHistory(w http.ResponseWriter, r *ht
 
 	// Verify the app and environment exist before querying ArgoCD.
 	if _, err := ah.appStore.GetApp(r.Context(), projectName, appName); err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{
 			Error: "app \"" + appName + "\" not found in project \"" + projectName + "\"",
 		})
 		return
 	}
 	if _, err := ah.appStore.GetAppEnvironment(r.Context(), projectName, appName, envName); err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse{
+		writeJSON(w, projectionNotFoundStatus(r.Context(), err), errorResponse{
 			Error: "environment \"" + envName + "\" not found for app \"" + appName + "\"",
 		})
 		return

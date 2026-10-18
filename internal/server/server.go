@@ -731,6 +731,7 @@ type Server struct {
 	// appHandler backs background reconcilers (StartAutoPromoteLoop). Nil when
 	// no AppStore was configured.
 	appHandler *appHandler
+	reads      *readProjection
 }
 
 // StartAutoPromoteLoop runs the CD auto-promotion reconciler on a ticker until
@@ -783,6 +784,7 @@ func New(cfg Config) *Server {
 	// drain it. bgCancel is invoked after the drain deadline.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	var bgWG sync.WaitGroup
+	reads := newReadProjection()
 	asyncRunner := newAsyncRunner(bgCtx, &bgWG)
 
 	var ah *authHandler
@@ -828,6 +830,7 @@ func New(cfg Config) *Server {
 	var appH *appHandler
 	if cfg.OrgProvider != nil && ah != nil {
 		rh := &rbacHandler{
+			reads:        reads,
 			auth:         ah,
 			orgStore:     cfg.OrgProvider,
 			projectStore: cfg.ProjectStore,
@@ -1004,6 +1007,7 @@ func New(cfg Config) *Server {
 
 	if cfg.ClusterStore != nil && ah != nil {
 		ch := &clusterHandler{
+			reads:     reads,
 			store:     cfg.ClusterStore,
 			auth:      ah,
 			certCache: seal.NewK8sCertCache(cfg.KubeClient),
@@ -1133,7 +1137,7 @@ func New(cfg Config) *Server {
 		cfg.Logger.Info("serving frontend", "dir", cfg.UIDir)
 	}
 
-	var handler http.Handler = mux
+	var handler http.Handler = reads.mutations(mux)
 	if len(cfg.CORSOrigins) > 0 {
 		handler = corsMiddleware(cfg.CORSOrigins, handler)
 		cfg.Logger.Info("CORS enabled", "origins", cfg.CORSOrigins)
@@ -1155,6 +1159,7 @@ func New(cfg Config) *Server {
 		bg:         &bgWG,
 		bgCancel:   bgCancel,
 		appHandler: appH,
+		reads:      reads,
 	}
 }
 
@@ -1198,6 +1203,9 @@ func (rr *responseRecorder) WriteHeader(code int) {
 // Run starts the server and blocks until ctx is cancelled, then shuts down
 // gracefully.
 func (s *Server) Run(ctx context.Context) error {
+	readCtx, stopReads := context.WithCancel(ctx)
+	defer stopReads()
+	s.StartReadModel(readCtx)
 	ln, err := net.Listen("tcp", s.httpServer.Addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.httpServer.Addr, err)
@@ -1288,3 +1296,10 @@ func (h *PublisherHolder) SetValidationWorkloads(ctx context.Context, app *domai
 	}
 	return publisher.SetValidationWorkloads(ctx, app, env, active)
 }
+
+// StartReadModel starts disposable background views. Run calls this automatically;
+// embedded Handler users must supply their own lifecycle context.
+func (s *Server) StartReadModel(ctx context.Context) { s.reads.start(ctx) }
+
+func (rr *responseRecorder) Unwrap() http.ResponseWriter { return rr.ResponseWriter }
+func (rr *responseRecorder) Flush()                      { _ = http.NewResponseController(rr.ResponseWriter).Flush() }

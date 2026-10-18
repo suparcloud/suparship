@@ -1,3 +1,5 @@
+import { ApiError } from "../lib/api";
+import { useReadView } from "../lib/readViews";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -1035,25 +1037,28 @@ export function AppDetail() {
     };
   }, [project, appName]);
 
-  useEffect(() => {
+  useReadView(project && appName ? `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(appName)}` : undefined, async (isCurrent) => {
     if (!project || !appName) return;
-    let cancelled = false;
-    let inFlight = false;
-    const timer = setInterval(async () => {
-      if (inFlight || document.hidden) return;
-      inFlight = true;
-      try {
-        const res = await getApp(project, appName);
-        if (!cancelled) setData((previous) => previous ? { ...previous, environments: res.app.environments } : res.app);
-        if (selectedEnvName) {
-          const detail = await getAppEnvironment(project, appName, selectedEnvName);
-          if (!cancelled) setSelectedEnvDetail(detail.environment);
-        }
-      } catch { /* Keep the last known state during transient failures. */ }
-      finally { inFlight = false; }
-    }, 5000);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [project, appName, selectedEnvName]);
+    const res = await getApp(project, appName).catch(error => {
+      if (isCurrent() && error instanceof ApiError && (error.status === 404 || error.status === 403)) {
+        setData(null);
+        setError(error.status === 404 ? "This app no longer exists." : "You no longer have access to this app.");
+      }
+      throw error;
+    });
+    if (!isCurrent()) return;
+    // Refresh runtime observations without replacing editable configuration.
+    setData(previous => previous ? { ...previous, environments: res.app.environments } : res.app);
+  });
+  useReadView(project && appName && selectedEnvName ? `/projects/${encodeURIComponent(project)}/apps/${encodeURIComponent(appName)}/environments/${encodeURIComponent(selectedEnvName)}` : undefined, async (isCurrent) => {
+    if (!project || !appName || !selectedEnvName) return;
+    const result = await getAppEnvironment(project, appName, selectedEnvName).catch(error => {
+      if (isCurrent() && error instanceof ApiError && error.status === 404) setSelectedEnvDetail(null);
+      throw error;
+    });
+    if (!isCurrent()) return;
+    setSelectedEnvDetail(result.environment);
+  });
 
   // Upgrade rows: one per component whose template is version-managed. The
   // versions come from the app detail response (server-side, one pass over the
